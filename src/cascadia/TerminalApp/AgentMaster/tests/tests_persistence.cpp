@@ -22,6 +22,9 @@
 #include "m5_tests.h"
 
 #include "../Engine.h" // the window-lifecycle `...In` seams (TestEngineWindowLifecycle)
+#include "../LaunchPresets.h" // PERSISTENCE.md §17: launch-presets.json's consumed migration key (TestStateCompat)
+#include "../StateBackups.h" // PERSISTENCE.md §17: the snapshots, the shadow paths, the version-change check (TestStateCompat)
+#include "../StateCompat.h" // PERSISTENCE.md §17: the residue, the lookups, the writer stamp, the older-writer repair (TestStateCompat)
 
 #include <algorithm> // TestUnreadableStateFiles: the kept copies in name (= creation) order
 #include <fstream> // TestUnreadableStateFiles: raw bytes planted / read back (a BOM, NULs, a torn write)
@@ -2678,15 +2681,16 @@ void TestStateFileOverrides()
         const std::wstring rec1 = store + L"\\" + sid1 + L".json";
         writeBytes(rec1, foreign);
         CHECK(SetSessionStoreFieldIn(store, sid1, kSessionStoreTitleKey, L""), "store: clearing the record's last string key goes through");
-        CHECK(!std::filesystem::exists(std::filesystem::path{ rec1 }), "store: ...and deletes the emptied record (the sparse store)");
-        const auto copies1 = keptCopies(store, sid1 + L".json");
-        CHECK(copies1.size() == 1 && readBytes(copies1[0]) == foreign,
-              "store: ...after the record, which held a member this version cannot carry, was kept aside (the delete used to skip the guard)");
+        // PERSISTENCE.md §17: the member this version cannot carry is written back IN PLACE (it used to be dropped, with only a
+        // kept copy left), so the record is not empty and is never deleted.
+        CHECK(std::filesystem::exists(std::filesystem::path{ rec1 }) && readBytes(rec1) == "{\"future\":{\"x\":1}}",
+              "store: ...and the record, which still holds a member this version cannot carry, is rewritten with it - not deleted");
+        CHECK(keptCopies(store, sid1 + L".json").empty(), "store: ...so no copy is kept aside (nothing was dropped)");
         const std::wstring sid2 = L"5e55a0a0-0000-4000-8000-0000000000c2";
         writeBytes(store + L"\\" + sid2 + L".json", foreign);
         CHECK(SetSessionStoreFieldIn(store, sid2, kSessionStoreFavoriteKey, L"1"), "store: a write into such a record goes through");
-        const auto copies2 = keptCopies(store, sid2 + L".json");
-        CHECK(copies2.size() == 1 && readBytes(copies2[0]) == foreign, "store: ...after it was kept aside (the write drops the member it cannot carry)");
+        CHECK(keptCopies(store, sid2 + L".json").empty() && readBytes(store + L"\\" + sid2 + L".json").find("\"future\":{\"x\":1}") != std::string::npos,
+              "store: ...and keeps the member in the record itself");
         CHECK(GetSessionStoreFieldIn(store, sid2, kSessionStoreTitleKey) == L"T", "store: ...and the record keeps its string keys");
         // A record that cannot be read is never deleted (its read-modify-write refuses before the delete is reached).
         const std::wstring sid3 = L"5e55a0a0-0000-4000-8000-0000000000c3";
@@ -2698,4 +2702,449 @@ void TestStateFileOverrides()
         CHECK(std::filesystem::exists(std::filesystem::path{ rec3 }) && GetSessionStoreFieldIn(store, sid3, kSessionStoreTitleKey) == L"Only",
               "store: ...and the record is still there, title and all");
     }
+}
+
+// ============================================================================================================================
+// PERSISTENCE.md §17 (the owner's task of 2026-10-28: "making sure that any case will always migrate successfully without
+// hurting the existing files and their data"): state files across versions — the residue a save keeps (StateCompat.h), the
+// writer stamp, the shadows and the older-writer repair (Persistence.cpp), the snapshots (StateBackups.h).
+// ============================================================================================================================
+void TestStateCompat()
+{
+    std::wprintf(L"State files across versions (PERSISTENCE.md 17: the residue, the writer stamp, the shadows, the older-writer repair, the snapshots):\n");
+    namespace SC = Agentmaster::StateCompat;
+    namespace SB = Agentmaster::StateBackups;
+    // Parse a literal document (an empty value when it does not parse, which every check below would then fail).
+    const auto P = [](std::wstring_view text) {
+        auto v = json::Parse(text);
+        return v ? *v : json::Value{};
+    };
+    const auto writeText = [](const std::wstring& path, const std::wstring& text) {
+        std::filesystem::create_directories(std::filesystem::path{ path }.parent_path());
+        const std::string bytes = Profiles::detail::WideToUtf8(text);
+        std::ofstream f(std::filesystem::path{ path }, std::ios::binary | std::ios::trunc);
+        f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    };
+    const auto readText = [](const std::wstring& path) {
+        std::ifstream f(std::filesystem::path{ path }, std::ios::binary);
+        const std::string bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        return Profiles::detail::Utf8ToWide(bytes);
+    };
+    const auto readDoc = [&](const std::wstring& path) {
+        auto v = json::Parse(readText(path));
+        return v ? *v : json::Value{};
+    };
+    // Move a file's last-write time `secondsBack` seconds into the past (an older shadow, a file put back from a backup).
+    const auto ageFile = [](const std::wstring& path, int secondsBack) {
+        FILETIME now{};
+        ::GetSystemTimeAsFileTime(&now);
+        ULARGE_INTEGER t{};
+        t.LowPart = now.dwLowDateTime;
+        t.HighPart = now.dwHighDateTime;
+        t.QuadPart -= static_cast<ULONGLONG>(secondsBack) * 10'000'000ull;
+        FILETIME back{ t.LowPart, t.HighPart };
+        const HANDLE h = ::CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+        const bool ok = h != INVALID_HANDLE_VALUE && ::SetFileTime(h, nullptr, nullptr, &back);
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            ::CloseHandle(h);
+        }
+        return ok;
+    };
+    const auto lastWrite = [](const std::wstring& path) {
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (!::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+        {
+            return int64_t{ 0 };
+        }
+        return static_cast<int64_t>((static_cast<uint64_t>(fad.ftLastWriteTime.dwHighDateTime) << 32) | fad.ftLastWriteTime.dwLowDateTime);
+    };
+    // A scratch PROFILE for one block (the `...In` seams take it; AgentmasterStateDir() is never redirected). The guard's and
+    // the compatibility layer's memories are reset on entry and exit — each block plays a fresh process start.
+    struct ScratchProfile
+    {
+        std::wstring dir;
+        explicit ScratchProfile(const wchar_t* tag)
+        {
+            wchar_t tmp[MAX_PATH]{};
+            ::GetTempPathW(MAX_PATH, tmp);
+            dir = std::wstring{ tmp } + tag + NewSessionId();
+            std::filesystem::create_directories(std::filesystem::path{ dir });
+            ResetStateFileGuardForTests();
+            ResetStateDocumentsForTests();
+        }
+        ~ScratchProfile()
+        {
+            ResetStateFileGuardForTests();
+            ResetStateDocumentsForTests();
+            std::error_code ec;
+            std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
+        }
+    };
+    SetStateRepairSnapshotsInBackground(false); // the repair's snapshot is read at once below
+
+    // ---- 1. the residue (pure): what this build does not write is kept; what it writes and changed wins ----
+    {
+        const json::Value disk = P(LR"j({"version":1,"writer":{"app":"Agentmaster","version":"9.9.9.9","install":"release"},"a":1,"future":{"x":[1,2]},"mode":"Hyper"})j");
+        const json::Value rt = P(LR"j({"version":1,"a":1,"mode":"Off"})j");
+        const auto residue = SC::ExtractResidue(disk, rt);
+        CHECK(SC::CountResidue(residue) == 2, "residue: a member the round trip does not write and a value it writes differently are residue - the root's version and writer never are");
+        json::Value fresh = P(LR"j({"version":1,"a":2,"mode":"Off"})j");
+        const auto carried = SC::ApplyResidue(fresh, residue);
+        CHECK(fresh.NumAt(L"a") == 2, "residue: a member this build writes keeps this build's value");
+        CHECK(fresh.Find(L"future") && SC::Equal(*fresh.Find(L"future"), *disk.Find(L"future")), "residue: the newer build's member is put back whole");
+        CHECK(fresh.StrAt(L"mode") == L"Hyper", "residue: a value this build cannot represent is restored while this build holds what it read it as");
+        CHECK(SC::CountResidue(carried) == 2, "residue: both entries took effect (the carried residue the written file holds)");
+        json::Value changed = P(LR"j({"version":1,"a":2,"mode":"Full"})j");
+        const auto carried2 = SC::ApplyResidue(changed, residue);
+        CHECK(changed.StrAt(L"mode") == L"Full" && SC::CountResidue(carried2) == 1, "residue: a value this build CHANGED wins, and its entry is spent");
+        json::Value back = P(LR"j({"version":1,"a":2,"mode":"Off"})j");
+        SC::ApplyResidue(back, carried2);
+        CHECK(back.StrAt(L"mode") == L"Off", "residue: once spent, a change back to the old value is the user's - never mistaken for 'unchanged'");
+        CHECK(!SC::FormatIsNewer(disk, fresh) && SC::FormatIsNewer(P(LR"j({"version":3})j"), fresh), "format: a file whose root version is newer than the build's is recognized");
+        CHECK(SC::Equal(P(LR"j({"a":1,"b":[1,{"c":2}]})j"), P(LR"j({"b":[1,{"c":2}],"a":1})j")) && !SC::Equal(P(L"[1,2]"), P(L"[2,1]")),
+              "equal: objects compare as maps, arrays in order");
+    }
+
+    // ---- 2. lookups (pure): a member the loader asked for is understood — a consumed migration key is not kept ----
+    {
+        const json::Value disk = P(LR"j({"version":1,"seeded":["x"],"unknown":5,"keep":1})j");
+        SC::LookedKeys looked;
+        json::Value rt = json::Value::MkObj();
+        {
+            SC::ObserveLookups observe{ looked };
+            // A loader that reads "seeded" only to run a one-time cleanup, reads "keep", and never looks at "unknown".
+            CHECK(disk.Find(L"seeded") != nullptr, "lookups: (setup) the loader reads its migration key");
+            rt.Set(L"version", json::Value::MkNum(1));
+            rt.Set(L"keep", json::Value::MkNum(disk.NumAt(L"keep")));
+        }
+        CHECK(json::detail::t_findObserver == nullptr, "lookups: the observer is removed when its scope ends");
+        CHECK(looked.Complete() && looked.Looked(disk, L"seeded") && !looked.Looked(disk, L"unknown"), "lookups: what the loader asked for is recorded, per object");
+        json::Value fresh = rt;
+        SC::ApplyResidue(fresh, SC::ExtractResidue(disk, rt, true, &looked));
+        CHECK(!fresh.Find(L"seeded"), "lookups: a consumed migration key (read, not written) is NOT kept - it would re-run its migration at every load");
+        CHECK(fresh.NumAt(L"unknown") == 5, "lookups: a member the loader never looked at is kept");
+        CHECK(SC::CountResidue(SC::ExtractResidue(disk, rt)) == 2, "lookups: (control) without the evidence both would be kept");
+    }
+
+    // ---- 3. records (pure): identity-matched arrays ----
+    {
+        const json::Value disk = P(LR"j({"version":1,"sessions":[{"id":"a","t":"A","new":1},{"id":"b","t":"B","new":2},{"id":"z","t":"Z","alien":true}]})j");
+        // The round trip writes a and b without "new", and drops z (a record it cannot represent).
+        const json::Value rt = P(LR"j({"version":1,"sessions":[{"id":"a","t":"A"},{"id":"b","t":"B"}]})j");
+        const auto residue = SC::ExtractResidue(disk, rt);
+        // Since the file was read: a was renamed, b closed (removed), c created.
+        json::Value fresh = P(LR"j({"version":1,"sessions":[{"id":"a","t":"A2"},{"id":"c","t":"C"}]})j");
+        SC::ApplyResidue(fresh, residue);
+        const auto* arr = fresh.Find(L"sessions");
+        CHECK(arr && arr->arr.size() == 3, "records: a, c and the dropped z - b's removal stands (never resurrected)");
+        CHECK(arr && arr->arr.size() == 3 && arr->arr[0].StrAt(L"t") == L"A2" && arr->arr[0].NumAt(L"new") == 1, "records: a keeps this build's rename AND its newer member");
+        CHECK(arr && arr->arr.size() == 3 && !arr->arr[1].Find(L"new") && arr->arr[2].StrAt(L"id") == L"z" && arr->arr[2].BoolAt(L"alien"),
+              "records: c gets nothing, and z (a record this build could not read) is appended back as it was");
+        json::Value noDropped = P(LR"j({"version":1,"sessions":[{"id":"a","t":"A"}]})j");
+        SC::ApplyResidue(noDropped, SC::ExtractResidue(disk, rt, false));
+        CHECK(noDropped.Find(L"sessions")->arr.size() == 1 && noDropped.Find(L"sessions")->arr[0].NumAt(L"new") == 1,
+              "records: keepDropped false - a dropped record stays dropped (a deliberate migration), members of kept ones are still kept");
+        // A whole-compared array (duplicate ids) in a keepDropped=false file is never restored: it would bring the dropped back.
+        const json::Value dupDisk = P(LR"j({"version":1,"presets":[{"id":"p"},{"id":"p"},{"id":"q"}]})j");
+        const json::Value dupRt = P(LR"j({"version":1,"presets":[{"id":"p"},{"id":"q"}]})j");
+        json::Value dupFresh = dupRt;
+        SC::ApplyResidue(dupFresh, SC::ExtractResidue(dupDisk, dupRt, false));
+        CHECK(dupFresh.Find(L"presets")->arr.size() == 2, "records: keepDropped false never restores a whole array either");
+    }
+
+    // ---- 4. the writer stamp (pure) ----
+    {
+        json::Value doc = P(LR"j({"version":1,"a":1})j");
+        SC::SetWriterStamp(doc, SC::WriterStamp(L"1.2.3.4", L"dev"));
+        const std::wstring text = json::Dump(doc);
+        CHECK(text.rfind(L"{\"writer\":", 0) == 0 && SC::TextStartsWithWriterStamp(text) && SC::HasWriterStamp(doc),
+              "stamp: written as the FIRST member, so the file's first characters tell a stamped file");
+        SC::SetWriterStamp(doc, SC::WriterStamp(L"1.2.3.5", L"dev"));
+        CHECK(doc.members.size() == 3 && doc.Find(L"writer")->StrAt(L"version") == L"1.2.3.5", "stamp: a second stamp replaces the first (never two)");
+        CHECK(SC::TextStartsWithWriterStamp(L"\xFEFF \r\n{ \"writer\" : {}}") && !SC::TextStartsWithWriterStamp(L"{\"version\":1,\"writer\":{}}") &&
+                  !SC::TextStartsWithWriterStamp(L"") && !SC::TextStartsWithWriterStamp(L"[\"writer\"]"),
+              "stamp: the text check skips a BOM and blanks, and proves nothing for a stamp elsewhere (parse then)");
+    }
+
+    // ---- 5. the older-writer repair (pure) ----
+    {
+        const json::Value shadow = P(LR"j({"writer":{"app":"Agentmaster"},"version":1,"settings":{"a":1,"newer":"N","alsoNew":false},
+            "sessions":[{"id":"s1","t":"T","created":5,"draft":"d","q":[{"id":"p1","x":1,"stamp":9}]},{"id":"s2","t":"U","created":6},{"id":"s3","t":"gone","created":7}]})j");
+        // The older writer: knew settings.a and the sessions' t and q (with x), not "newer", "alsoNew", "created", "stamp";
+        // it closed s3 and made s4.
+        json::Value main = P(LR"j({"version":1,"settings":{"a":2},"sessions":[{"id":"s1","t":"T2","q":[{"id":"p1","x":2}]},{"id":"s2","t":"U"},{"id":"s4","t":"new"}]})j");
+        const json::Value templ = P(LR"j({"version":1,"settings":{"a":0,"newer":"","alsoNew":true},"sessions":[]})j");
+        const std::set<std::wstring, std::less<>> never = { L"sessions[].draft" };
+        std::vector<std::wstring> paths;
+        const size_t n = SC::RestoreKeysDroppedByOlderWriter(main, shadow, templ, &never, paths);
+        const auto* settings = main.Find(L"settings");
+        const auto* sessions = main.Find(L"sessions");
+        CHECK(n == 5, "repair: newer + alsoNew (settings), created on s1 and s2, and the queue's stamp - nothing else");
+        CHECK(settings && settings->NumAt(L"a") == 2 && settings->StrAt(L"newer") == L"N" && settings->Find(L"alsoNew") && !settings->BoolAt(L"alsoNew", true),
+              "repair: a singleton gets back the members this build always writes; the older writer's value of a member it knew stands");
+        CHECK(sessions && sessions->arr.size() == 3 && sessions->arr[0].NumAt(L"created") == 5 && sessions->arr[1].NumAt(L"created") == 6 &&
+                  sessions->arr[0].StrAt(L"t") == L"T2",
+              "repair: a column no record of the collection has is put back per record, matched by id; values it wrote stand");
+        CHECK(sessions && !sessions->arr[0].Find(L"draft"), "repair: a VOLATILE member is never put back (a cleared draft would be typed into the box again)");
+        CHECK(sessions && sessions->arr[0].Find(L"q") && sessions->arr[0].Find(L"q")->arr[0].NumAt(L"stamp") == 9 && sessions->arr[0].Find(L"q")->arr[0].NumAt(L"x") == 2,
+              "repair: nested collections too (a session's queue)");
+        CHECK(sessions && sessions->arr[2].StrAt(L"id") == L"s4" && !sessions->arr[2].Find(L"created"), "repair: a record the older writer made keeps what it has; s3 stays closed");
+        // The column rule: one record that HAS the member proves the writer knew it — the others' absence is then its own.
+        json::Value knew = P(LR"j({"version":1,"sessions":[{"id":"s1","t":"T"},{"id":"s2","t":"U","created":0}]})j");
+        std::vector<std::wstring> paths2;
+        SC::RestoreKeysDroppedByOlderWriter(knew, shadow, P(LR"j({"version":1,"sessions":[]})j"), nullptr, paths2);
+        CHECK(!knew.Find(L"sessions")->arr[0].Find(L"created"), "repair: a member one record carries is known to the writer - not put back on the others");
+    }
+
+    // ---- 6. a save keeps a newer build's members, stamps the file and writes its shadow ----
+    {
+        ScratchProfile sp(L"am-compat-save-");
+        const std::wstring path = sp.dir + L"\\sessions.json";
+        SessionInfo s1;
+        s1.id = L"aaaaaaaa-0000-4000-8000-000000000001";
+        s1.title = L"one";
+        s1.workingDir = L"C:\\w";
+        SessionInfo s2 = s1;
+        s2.id = L"aaaaaaaa-0000-4000-8000-000000000002";
+        s2.title = L"two";
+        // The file a NEWER build wrote: a member per session, a root member, and one record kind this build drops? (none here:
+        // SessionFromJson reads any object) — and its own stamp.
+        json::Value newer = P(SerializeSessions({ s1, s2 }));
+        newer.Set(L"fleetNote", json::Value::MkStr(L"kept"));
+        for (auto& e : newer.members[1].second.arr)
+        {
+            e.Set(L"futureMember", json::Value::MkStr(L"F-" + e.StrAt(L"id")));
+        }
+        SC::SetWriterStamp(newer, SC::WriterStamp(L"9.9.9.9", L"release"));
+        writeText(path, json::Dump(newer));
+        // The engine judges sessions.json ahead of its first save (on a background thread): that must write nothing.
+        const std::wstring beforePrime = readText(path);
+        PrimeStateDocument(path, &SessionsRoundTrip);
+        CHECK(readText(path) == beforePrime && !std::filesystem::exists(std::filesystem::path{ sp.dir + L"\\shadow\\sessions.json" }),
+              "prime: judging the file ahead of its first save writes nothing (neither the file nor a shadow)");
+        s1.title = L"one renamed"; // this build's own change
+        CHECK(WriteStateDocumentIn(sp.dir, path, P(SerializeSessions({ s1, s2 })), &SessionsRoundTrip), "save: the save goes through");
+        const json::Value after = readDoc(path);
+        const auto* arr = after.Find(L"sessions");
+        CHECK(arr && arr->arr.size() == 2 && arr->arr[0].StrAt(L"futureMember") == L"F-aaaaaaaa-0000-4000-8000-000000000001" && arr->arr[1].Find(L"futureMember"),
+              "save: every session keeps the newer build's member");
+        CHECK(arr && arr->arr.size() == 2 && arr->arr[0].StrAt(L"title") == L"one renamed", "save: ...and this build's change is saved");
+        CHECK(after.StrAt(L"fleetNote") == L"kept", "save: a root member of the newer build is kept");
+        const std::wstring text = readText(path);
+        CHECK(SC::TextStartsWithWriterStamp(text) && after.Find(L"writer")->StrAt(L"version") != L"9.9.9.9", "save: the file now carries THIS build's stamp, first");
+        const std::wstring shadow = sp.dir + L"\\shadow\\sessions.json";
+        CHECK(std::filesystem::exists(std::filesystem::path{ shadow }) && readText(shadow) == text, "save: the run's first write of the file writes its shadow at once, byte for byte");
+        // A second save inside the throttle: the file changes, the shadow waits; the flush brings it up to date.
+        s2.title = L"two renamed";
+        CHECK(WriteStateDocumentIn(sp.dir, path, P(SerializeSessions({ s1, s2 })), &SessionsRoundTrip), "save: a second save goes through");
+        const json::Value second = readDoc(path);
+        CHECK(second.Find(L"sessions")->arr[1].StrAt(L"futureMember").size() > 0 && second.Find(L"sessions")->arr[1].StrAt(L"title") == L"two renamed",
+              "save: the cached residue keeps the newer members at the next save (no re-read of the file)");
+        CHECK(readText(shadow) == text, "save: the shadow is throttled (still the first write)");
+        FlushStateShadows();
+        CHECK(readText(shadow) == readText(path), "save: FlushStateShadows brings it up to the last write");
+    }
+
+    // ---- 7. the format guard: a newer FORMAT is never written ----
+    {
+        ScratchProfile sp(L"am-compat-format-");
+        const std::wstring path = sp.dir + L"\\dir-colors.json";
+        const std::wstring v3 = LR"j({"version":3,"colors":{"k:\\w":{"hue":12}}})j";
+        writeText(path, v3);
+        CHECK(!WriteStateDocumentIn(sp.dir, path, P(SerializeDirColors({ { L"k:\\w", L"#FF0000" } })), &DirColorsRoundTrip), "format: a save over a newer format is refused");
+        CHECK(readText(path) == v3, "format: ...and the file keeps every byte (the newer build finds it as it left it)");
+    }
+
+    // ---- 8. launch-presets.json: the consumed "seededTemplates" key is not kept, the user's presets are ----
+    {
+        ScratchProfile sp(L"am-compat-presets-");
+        const std::wstring path = sp.dir + L"\\launch-presets.json";
+        writeText(path, LR"j({"version":1,"seededTemplates":["never-there"],"providers":[],"presets":[{"id":"mine","fields":{"model":"x"},"newerFlag":true}],"newerRoot":7})j");
+        LaunchPresetsConfig cfg = LaunchPresetsConfigFromJson(readText(path));
+        CHECK(cfg.presets.size() == 1, "presets: (setup) the user's preset loads");
+        CHECK(WriteStateDocumentIn(sp.dir, path, P(LaunchPresetsConfigToJson(cfg)), &LaunchPresetsRoundTrip, false), "presets: the save goes through");
+        const json::Value after = readDoc(path);
+        CHECK(!after.Find(L"seededTemplates"), "presets: the consumed migration list is NOT written back (it would prune at every load)");
+        CHECK(after.NumAt(L"newerRoot") == 7 && after.Find(L"presets")->arr.size() == 1 && after.Find(L"presets")->arr[0].BoolAt(L"newerFlag"),
+              "presets: a newer build's members are kept");
+    }
+
+    // ---- 9. settings.json: a value this build cannot represent survives until the user changes it, and then never returns ----
+    {
+        ScratchProfile sp(L"am-compat-settings-");
+        const std::wstring path = sp.dir + L"\\settings.json";
+        json::Value newer = P(SerializeAppSettings(AppSettings{}));
+        for (auto& [k, v] : newer.members)
+        {
+            if (k == L"settings")
+            {
+                for (auto& [sk, sv] : v.members)
+                {
+                    if (sk == L"defaultAutorunnerMode")
+                    {
+                        sv = json::Value::MkStr(L"Hyper"); // a mode word from a newer build: this one reads it as Off
+                    }
+                }
+                v.Set(L"newerSetting", json::Value::MkNum(42));
+            }
+        }
+        writeText(path, json::Dump(newer));
+        AppSettings loaded = DeserializeAppSettings(readText(path));
+        CHECK(loaded.defaultAutorunnerMode == AutorunnerMode::Off, "settings: (setup) the newer word reads as Off here");
+        CHECK(WriteStateDocumentIn(sp.dir, path, P(SerializeAppSettings(loaded)), &AppSettingsRoundTrip), "settings: a save of the untouched setting");
+        CHECK(readDoc(path).Find(L"settings")->StrAt(L"defaultAutorunnerMode") == L"Hyper" && readDoc(path).Find(L"settings")->NumAt(L"newerSetting") == 42,
+              "settings: ...keeps the newer word and the newer setting");
+        loaded.defaultAutorunnerMode = AutorunnerMode::Full;
+        CHECK(WriteStateDocumentIn(sp.dir, path, P(SerializeAppSettings(loaded)), &AppSettingsRoundTrip) &&
+                  readDoc(path).Find(L"settings")->StrAt(L"defaultAutorunnerMode") == L"Full",
+              "settings: the user's change in this build is saved");
+        loaded.defaultAutorunnerMode = AutorunnerMode::Off;
+        CHECK(WriteStateDocumentIn(sp.dir, path, P(SerializeAppSettings(loaded)), &AppSettingsRoundTrip) &&
+                  readDoc(path).Find(L"settings")->StrAt(L"defaultAutorunnerMode") == L"Off",
+              "settings: ...and a later change back to Off is the user's Off (the newer word does not come back)");
+        CHECK(readDoc(path).Find(L"settings")->NumAt(L"newerSetting") == 42, "settings: the newer setting is still there after all of it");
+    }
+
+    // ---- 10. the older-writer repair, end to end ----
+    {
+        ScratchProfile sp(L"am-compat-repair-");
+        const std::wstring path = sp.dir + L"\\settings.json";
+        AppSettings s;
+        s.voiceWorkerCommand = L"python worker.py";
+        s.model = L"opus";
+        CHECK(WriteStateDocumentIn(sp.dir, path, P(SerializeAppSettings(s)), &AppSettingsRoundTrip), "repair: (setup) this build saves settings.json (stamped, shadowed)");
+        const std::wstring shadow = sp.dir + L"\\shadow\\settings.json";
+        CHECK(std::filesystem::exists(std::filesystem::path{ shadow }), "repair: (setup) the shadow exists");
+        // An OLDER build saves the file: no stamp, no voiceWorkerCommand (it does not know it), its own model change.
+        json::Value older = readDoc(path);
+        older.members.erase(older.members.begin()); // the stamp (the first member)
+        for (auto& [k, v] : older.members)
+        {
+            if (k == L"settings")
+            {
+                v.members.erase(std::remove_if(v.members.begin(), v.members.end(), [](const auto& m) { return m.first == L"voiceWorkerCommand"; }), v.members.end());
+                for (auto& [sk, sv] : v.members)
+                {
+                    if (sk == L"model")
+                    {
+                        sv = json::Value::MkStr(L"sonnet");
+                    }
+                }
+            }
+        }
+        writeText(path, json::Dump(older));
+        CHECK(ageFile(shadow, 3600), "repair: (setup) the shadow is older than the older build's save");
+        ResetStateDocumentsForTests(); // a new start
+        const size_t restored = RepairStateFilesWrittenByOlderBuilds(sp.dir);
+        const json::Value repaired = readDoc(path);
+        CHECK(restored == 1 && repaired.Find(L"settings")->StrAt(L"voiceWorkerCommand") == L"python worker.py",
+              "repair: the member the older build dropped is back from the shadow");
+        CHECK(repaired.Find(L"settings")->StrAt(L"model") == L"sonnet", "repair: ...and the older build's own change to a member it knew stands");
+        CHECK(SC::TextStartsWithWriterStamp(readText(path)), "repair: the repaired file is stamped (the next start does not repair it again)");
+        // The snapshot before the repair holds the file as the older build left it.
+        size_t snapshots = 0;
+        std::wstring snapshotCopy;
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator{ std::filesystem::path{ sp.dir + L"\\backups" }, ec })
+        {
+            ++snapshots;
+            snapshotCopy = readText(e.path().wstring() + L"\\settings.json");
+            CHECK(readText(e.path().wstring() + L"\\README.txt").rfind(std::wstring{ SB::kSnapshotMarker }, 0) == 0, "repair: the snapshot's README starts with the marker (pruning finds it)");
+        }
+        CHECK(snapshots == 1 && snapshotCopy == json::Dump(older), "repair: one snapshot, taken BEFORE the repair, holds the older build's file byte for byte");
+        CHECK(RepairStateFilesWrittenByOlderBuilds(sp.dir) == 0, "repair: a second start finds nothing to repair");
+        // A file put back by hand from a backup is OLDER than its shadow: the user's restore stands.
+        writeText(path, json::Dump(older));
+        CHECK(ageFile(path, 7200), "repair: (setup) the restored file keeps its old time (a copy does)");
+        ResetStateDocumentsForTests();
+        CHECK(RepairStateFilesWrittenByOlderBuilds(sp.dir) == 0 && !readDoc(path).Find(L"settings")->Find(L"voiceWorkerCommand"),
+              "repair: a file restored from a backup (older than the shadow) is left as the user put it");
+        // No shadow at all (the first run of a build with §17): nothing to repair, nothing written.
+        const std::wstring layout = sp.dir + L"\\layout.json";
+        writeText(layout, LR"j({"version":1,"boardFraction":0.5,"treeFraction":0.4})j");
+        const int64_t before = lastWrite(layout);
+        CHECK(RepairStateFilesWrittenByOlderBuilds(sp.dir) == 0 && lastWrite(layout) == before, "repair: a file without a shadow is not touched");
+    }
+
+    // ---- 11. the snapshots and the version-change check ----
+    {
+        ScratchProfile sp(L"am-compat-snap-");
+        writeText(sp.dir + L"\\sessions.json", L"{\"version\":1,\"sessions\":[]}");
+        writeText(sp.dir + L"\\session-store\\abc.json", L"{\"title\":\"T\"}");
+        writeText(sp.dir + L"\\windows\\w1.json", L"{\"version\":1,\"window\":{}}");
+        CHECK(ageFile(sp.dir + L"\\sessions.json", 600), "snapshot: (setup) an old file time");
+        std::wstring summary;
+        const std::wstring snap = SB::SnapshotProfileState(sp.dir, L"a test", L"t1", summary, false);
+        CHECK(!snap.empty() && readText(snap + L"\\sessions.json") == L"{\"version\":1,\"sessions\":[]}" && readText(snap + L"\\session-store\\abc.json") == L"{\"title\":\"T\"}" &&
+                  readText(snap + L"\\windows\\w1.json").size() > 0,
+              "snapshot: the state files, the window records and the session store are copied");
+        CHECK(lastWrite(snap + L"\\sessions.json") == lastWrite(sp.dir + L"\\sessions.json"), "snapshot: a copy keeps the file's time (a restore must look older than its shadow)");
+        CHECK(summary.rfind(L"3 file(s)", 0) == 0, "snapshot: the summary counts the copies");
+        CHECK(SB::ShadowPathFor(sp.dir, sp.dir + L"\\windows\\w1.json") == sp.dir + L"\\shadow\\windows\\w1.json" && SB::ShadowPathFor(sp.dir, L"C:\\elsewhere\\x.json").empty() &&
+                  SB::ShadowPathFor(sp.dir, sp.dir + L"\\shadow\\x.json").empty() && SB::ShadowPathFor(sp.dir, sp.dir + L"\\backups\\x.json").empty(),
+              "shadow path: inside the profile only, never a shadow of a shadow or of a backup");
+        // Pruning: only OUR snapshots count (a folder without the marker README is never removed).
+        std::filesystem::create_directories(std::filesystem::path{ sp.dir + L"\\backups\\00000000-000000 not ours" });
+        std::wstring s2, s3;
+        ::Sleep(1100); // one second apart: the folder names carry the time
+        SB::SnapshotProfileState(sp.dir, L"a test", L"t2", s2, false);
+        ::Sleep(1100);
+        SB::SnapshotProfileState(sp.dir, L"a test", L"t3", s3, false);
+        CHECK(SB::PruneSnapshots(sp.dir, 2) == 1 && !std::filesystem::exists(std::filesystem::path{ snap }) &&
+                  std::filesystem::exists(std::filesystem::path{ sp.dir + L"\\backups\\00000000-000000 not ours" }),
+              "prune: the oldest of OUR snapshots goes; a folder that is not ours stays");
+        // The version-change check: a first run snapshots and records the build; the same build again does nothing.
+        const std::wstring first = SB::SnapshotOnVersionChange(sp.dir, false);
+        CHECK(first.rfind(L"[migrate] ", 0) == 0 && std::filesystem::exists(std::filesystem::path{ sp.dir + L"\\last-run.json" }),
+              "version change: the first start of a build with the check snapshots and records the build");
+        CHECK(SB::SnapshotOnVersionChange(sp.dir, false).empty(), "version change: the same build again takes no snapshot");
+        writeText(sp.dir + L"\\last-run.json", L"{\"writer\":\"0.1.0.0 release\"}");
+        const std::wstring changed = SB::SnapshotOnVersionChange(sp.dir, false);
+        CHECK(changed.find(L"0.1.0.0 release to ") != std::wstring::npos, "version change: another build ran last - a snapshot, named from-to");
+    }
+
+    // ---- 12. the tag files keep what this version cannot read, and refuse a format they do not know ----
+    {
+        ScratchProfile sp(L"am-compat-tags-");
+        writeText(sp.dir + L"\\tags.json", LR"j(["alpha",{"name":"future","color":"#123"},"beta"])j");
+        CHECK(RegisterKnownTagIn(sp.dir, L"gamma"), "tags: an add into a registry with a newer entry goes through");
+        const json::Value tags = readDoc(sp.dir + L"\\tags.json");
+        CHECK(tags.type == json::Value::Type::Arr && tags.arr.size() == 4 && tags.arr[3].type == json::Value::Type::Obj && tags.arr[3].StrAt(L"name") == L"future",
+              "tags: ...and the entry this version cannot read is written back");
+        writeText(sp.dir + L"\\tags.json", LR"j({"version":2,"tags":["x"]})j");
+        CHECK(!RegisterKnownTagIn(sp.dir, L"gamma") && readText(sp.dir + L"\\tags.json") == LR"j({"version":2,"tags":["x"]})j",
+              "tags: a registry in a format this version does not know is not rewritten");
+        writeText(sp.dir + L"\\tag-colors.json", LR"j({"alpha":"#FF112233","future":{"gradient":["#1","#2"]}})j");
+        CHECK(SetTagColorIn(sp.dir, L"beta", L"#FF445566"), "colors: a pick into a file with a newer entry goes through");
+        const json::Value colors = readDoc(sp.dir + L"\\tag-colors.json");
+        CHECK(colors.StrAt(L"alpha") == L"#FF112233" && colors.StrAt(L"beta") == L"#FF445566" && colors.Find(L"future") && colors.Find(L"future")->type == json::Value::Type::Obj,
+              "colors: ...and the entry this version cannot read is written back");
+        writeText(sp.dir + L"\\tag-colors.json", L"[\"x\"]");
+        CHECK(!SetTagColorIn(sp.dir, L"beta", L"#FF445566") && readText(sp.dir + L"\\tag-colors.json") == L"[\"x\"]",
+              "colors: a file in a format this version does not know is not rewritten");
+    }
+
+    // ---- 13. the session store keeps a member it cannot carry IN PLACE ----
+    {
+        ScratchProfile sp(L"am-compat-store-");
+        const std::wstring store = sp.dir + L"\\session-store";
+        const std::wstring sid = L"5e55a0a0-0000-4000-8000-0000000000d1";
+        writeText(store + L"\\" + sid + L".json", LR"j({"title":"T","future":{"x":1}})j");
+        CHECK(SetSessionStoreFieldIn(store, sid, kSessionStoreFavoriteKey, L"1"), "store: a write into a record with a newer member goes through");
+        const json::Value rec = readDoc(store + L"\\" + sid + L".json");
+        CHECK(rec.StrAt(L"title") == L"T" && rec.StrAt(kSessionStoreFavoriteKey) == L"1" && rec.Find(L"future") && rec.Find(L"future")->NumAt(L"x") == 1,
+              "store: ...and the record keeps the member (in place, not only in a kept copy)");
+        CHECK(SetSessionStoreFieldIn(store, sid, kSessionStoreTitleKey, L"") && SetSessionStoreFieldIn(store, sid, kSessionStoreFavoriteKey, L""),
+              "store: clearing every string key goes through");
+        CHECK(std::filesystem::exists(std::filesystem::path{ store + L"\\" + sid + L".json" }) && readDoc(store + L"\\" + sid + L".json").Find(L"future"),
+              "store: ...and the record is NOT deleted - it still holds the newer member");
+        writeText(store + L"\\" + sid + L".json", LR"j({"tags":["a"],"other":[1]})j");
+        CHECK(SetSessionStoreFieldIn(store, sid, kSessionStoreTagsKey, L"x,y"), "store: this version writing a key a newer build stored as a non-string");
+        const std::wstring text = readText(store + L"\\" + sid + L".json");
+        CHECK(text.find(L"\"tags\":\"x,y\"") != std::wstring::npos && text.find(L"[\"a\"]") == std::wstring::npos && text.find(L"\"other\":[1]") != std::wstring::npos,
+              "store: ...writes its own value once (no duplicate key), and keeps the other member");
+    }
+
+    SetStateRepairSnapshotsInBackground(true);
 }

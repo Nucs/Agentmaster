@@ -16,11 +16,42 @@
 #include <cwctype>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace Agentmaster::json
 {
+    struct Value;
+
+    namespace detail
+    {
+        /// <summary>
+        /// Agentmaster (PERSISTENCE.md §17, "what a build understands"): an observer of member lookups. While one is
+        /// installed on a thread (StateCompat.h ObserveLookups), every Value::Find on that thread — and so every StrAt /
+        /// NumAt / BoolAt / I64At / U32At — reports the object it was called on and the key it was asked for. The state-file
+        /// residue installs one around a loader's run over a file: a member the loader LOOKED AT is one this build
+        /// understands, even when it then leaves it out of what it writes (a consumed migration key, whose presence would
+        /// re-run its migration at every load), so only the members it never asked for are kept for a newer build.
+        /// </summary>
+        /// <remarks>Lookups made by iterating `members` directly are not reported: such a loader reads the whole map, and
+        /// what it then does not write is treated as unknown (kept).</remarks>
+        struct FindObserver
+        {
+            /// <summary>Called by Value::Find on the observing thread, before the lookup.</summary>
+            /// <param name="object">The value Find was called on (normally an object of the document being read).</param>
+            /// <param name="key">The key it was asked for (valid only during the call: copy it to keep it).</param>
+            virtual void OnFind(const Value& object, std::wstring_view key) noexcept = 0;
+
+        protected:
+            ~FindObserver() = default;
+        };
+
+        /// <summary>The thread's installed lookup observer; null (the normal state) outside an observed loader run, so
+        /// the cost of a Find is one thread-local load.</summary>
+        inline thread_local FindObserver* t_findObserver = nullptr;
+    }
+
     struct Value
     {
         enum class Type
@@ -79,6 +110,11 @@ namespace Agentmaster::json
 
         const Value* Find(std::wstring_view key) const
         {
+            // Agentmaster (PERSISTENCE.md §17): an observed loader run records what it asked for (detail::FindObserver).
+            if (auto* const observer = detail::t_findObserver)
+            {
+                observer->OnFind(*this, key);
+            }
             for (const auto& [k, v] : members)
             {
                 if (k == key)

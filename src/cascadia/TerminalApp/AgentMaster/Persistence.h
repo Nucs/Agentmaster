@@ -10,7 +10,9 @@
 #pragma once
 
 #include <cstdint>
+#include <memory> // PreparedStateDocument::carried (PERSISTENCE.md §17)
 #include <optional>
+#include <set> // RepairStateFileWrittenByOlderBuild's volatile members (PERSISTENCE.md §17)
 #include <string>
 #include <string_view>
 #include <unordered_map> // DirColorIndex (the batch color lookup)
@@ -21,6 +23,13 @@
 #include "Json.h"
 #include "SessionModels.h"
 #include "StateFileGuard.h" // StateFileStatus (FleetLoad) + the guard every state write goes through
+
+namespace Agentmaster::StateCompat
+{
+    // StateCompat.h (PERSISTENCE.md §17): the residue a prepared state document carries. Only Persistence.cpp and the
+    // writers that include StateCompat.h look inside; everyone else passes the pointer through.
+    struct ResidueNode;
+}
 
 namespace Agentmaster
 {
@@ -220,6 +229,149 @@ namespace Agentmaster
     //   returns    - as PreserveWorkspaceForRecovery.
     // Never throws.
     std::wstring PreserveWorkspaceForRecoveryIn(const std::wstring& profileDir, std::wstring_view reason) noexcept;
+
+    // ---- version compatibility of the state documents (PERSISTENCE.md §17; StateCompat.h + StateBackups.h) ----
+
+    // A file type's ROUND TRIP: what this build makes of a parsed file — its serialization of what its loader reads from
+    // the document, Document(FromDocument(disk)). What the file holds that the round trip does not reproduce is what this
+    // build would lose by saving (the residue). The loader's lookups during the call are observed (StateCompat.h
+    // LookedKeys), so the round trip must read `disk` itself — the very object passed in — and nothing else.
+    //   disk    - the parsed file (any JSON value; a type that is not the expected object reads as nothing saved).
+    //   returns - the round trip's document.
+    // May throw std::bad_alloc.
+    using StateRoundTrip = json::Value (*)(const json::Value& disk);
+
+    // A state document ready to be written: its text, and the residue that text carries (StateCompat.h ApplyResidue), which
+    // becomes the file's residue once the text is on disk (NoteStateDocumentWritten).
+    struct PreparedStateDocument
+    {
+        std::wstring text; // what to write: the fresh document, the file's residue put back, this build's writer stamp first
+        std::shared_ptr<const StateCompat::ResidueNode> carried; // the residue the text carries; null = none
+    };
+
+    // Build the text to write for a state document, keeping what the file holds and this build does not understand
+    // (StateCompat.h ExtractResidue / ApplyResidue): the file's members a newer build added, values this build cannot
+    // represent (while this build has not changed them), and — with `keepDroppedElements` — array elements it cannot
+    // parse. Stamps the document with this build's writer stamp (its first member). The residue is cached by the file's
+    // size and time: it costs one read and parse of the file per process, and again only after someone else changed it.
+    //   path                - the state file about to be replaced.
+    //   fresh               - this build's serialization of its current data, as a document (consumed). It must be this
+    //                         build's OWN serialization (see ApplyResidue's carried residue).
+    //   roundTrip           - the file type's round trip.
+    //   keepDroppedElements - false for a type whose loader drops array elements on purpose (launch-presets.json).
+    //   returns             - the document to write; nullopt when the file must NOT be written: its root "version" is
+    //                         NEWER than the one this build writes (a format this build may not represent — logged once
+    //                         per file as "[persist-guard] ... NOT written: its format is newer ...").
+    // Throws std::bad_alloc only (a file that cannot be read or parsed has no residue; the state-file guard judges it at
+    // the write).
+    std::optional<PreparedStateDocument> PrepareStateDocument(const std::wstring& path, json::Value fresh, StateRoundTrip roundTrip, bool keepDroppedElements = true);
+
+    // Judge a state file ahead of its first save, off the saving thread: what PrepareStateDocument would otherwise compute at
+    // that save (a read, a parse and the round trip — a few hundred ms for a long-lived 10 MB sessions.json), cached the same
+    // way. The engine primes sessions.json on a background thread at its start, so a first save made on the UI thread (a
+    // bind seam) finds the judgment ready. A save that judged the file first, or wrote it meanwhile, wins.
+    //   path                - the state file.
+    //   roundTrip           - its type's round trip.
+    //   keepDroppedElements - as PrepareStateDocument.
+    // Never throws (a failure is logged; the first save then judges the file itself).
+    void PrimeStateDocument(const std::wstring& path, StateRoundTrip roundTrip, bool keepDroppedElements = true) noexcept;
+
+    // After a prepared state document was written: record the file's new size and time with the residue its text carries
+    // (so the next save is one stat), and keep the SHADOW — <profile>\shadow\<relative path>, the copy the next start
+    // repairs an older build's save from (RepairStateFilesWrittenByOlderBuilds). The shadow is written at the first write
+    // of a run, then at most once a minute per file (every 5 minutes for a document over 256 KB); FlushStateShadows writes
+    // what is pending. Call it only after the text is on disk.
+    //   path    - the state file just written (inside AgentmasterStateDir(); a file elsewhere gets no shadow).
+    //   written - what was written (PrepareStateDocument's result).
+    // Never throws (a failed shadow write is logged once per file and retried after the throttle).
+    void NoteStateDocumentWritten(const std::wstring& path, const PreparedStateDocument& written) noexcept;
+    // NoteStateDocumentWritten with an explicit profile folder (the shadow lives under it) — the harness's seam and the
+    // repair's (AgentmasterStateDir() is resolved once per process).
+    //   profileDir - the profile folder that holds `path`.
+    //   path, written - as NoteStateDocumentWritten.
+    // Never throws.
+    void NoteStateDocumentWrittenIn(const std::wstring& profileDir, const std::wstring& path, const PreparedStateDocument& written) noexcept;
+
+    // PrepareStateDocument + WriteAllUtf8 (the guarded atomic write) + NoteStateDocumentWritten, one save of a file at a
+    // time: the save every state document of the profile goes through.
+    //   path, fresh, roundTrip, keepDroppedElements - as PrepareStateDocument.
+    //   returns - true when the file now holds the document; false when the format guard or the state-file guard refused,
+    //             or the write failed (each logged where it happened; the file keeps its bytes).
+    // Throws std::bad_alloc only.
+    bool WriteStateDocument(const std::wstring& path, json::Value fresh, StateRoundTrip roundTrip, bool keepDroppedElements = true);
+    // WriteStateDocument with an explicit profile folder for the shadow (see NoteStateDocumentWrittenIn).
+    //   profileDir - the profile folder that holds `path`.
+    //   path, fresh, roundTrip, keepDroppedElements - as WriteStateDocument.
+    //   returns - as WriteStateDocument.
+    // Throws std::bad_alloc only.
+    bool WriteStateDocumentIn(const std::wstring& profileDir, const std::wstring& path, json::Value fresh, StateRoundTrip roundTrip, bool keepDroppedElements = true);
+
+    // Bring every shadow that is behind its state file up to the file's current bytes (the app's last window is closing,
+    // or the engine is told the run ends): a shadow is then as new as the last save of the run, not the last throttled
+    // one. Only a file whose size and time are still what this process last wrote is copied (another process's write is
+    // not ours to shadow).
+    // Never throws.
+    void FlushStateShadows() noexcept;
+
+    // Forget what the residue cache knows about a state file, so its next save reads and judges it again. Called after a
+    // write of a document that is NOT this build's own serialization (the repair's), and when a file is deleted (its
+    // shadow goes with it: DeleteWindowRecord).
+    //   path - the state file.
+    // Never throws.
+    void ForgetStateDocument(const std::wstring& path) noexcept;
+    // Forget every state file and every pending shadow, and which profiles had their repair snapshot — the harness's reset
+    // between tests (each test plays a new process start).
+    // Never throws.
+    void ResetStateDocumentsForTests() noexcept;
+    // Whether the repair's snapshot copies the session store on a background thread (true, the app's setting: thousands of
+    // small files must not hold up the start) or before it returns (false: the harness, which reads the snapshot at once).
+    //   inBackground - the setting, for the rest of the process.
+    // Never throws.
+    void SetStateRepairSnapshotsInBackground(bool inBackground) noexcept;
+
+    // The OLDER-WRITER REPAIR, once per process at the start of the engine, BEFORE anything of the run writes a state file:
+    // a state document of the profile (sessions.json, settings.json, layout.json, open-windows.json, templates.json,
+    // recent-dirs.json, model-list.json, dir-colors.json, dir-env.json, launch-presets.json, every windows\*.json) whose
+    // text has no writer stamp, though its shadow has one and is OLDER than the file, was rewritten since by a build that
+    // drops unknown fields (a release before PERSISTENCE.md §17). The members that build provably did not know are put
+    // back from the shadow (StateCompat.h RestoreKeysDroppedByOlderWriter, volatile members excepted) and the repaired
+    // document is saved, stamped. The first repair of a run takes a state snapshot first (StateBackups.h). A file restored
+    // by hand from a backup is older than its shadow and is left as it is. Logs "[migrate] ..." per repaired file.
+    //   profileDir - the profile folder.
+    //   returns    - the number of members restored, across every file.
+    // Never throws: a failure is logged (Rule #18) and leaves that file as it was.
+    size_t RepairStateFilesWrittenByOlderBuilds(const std::wstring& profileDir) noexcept;
+    // The older-writer repair of ONE state document — RepairStateFilesWrittenByOlderBuilds's step — for a state file another
+    // module writes (the Telegram bot's state.json, repaired by its own load before its first save). Shares the run's one
+    // repair snapshot per profile with RepairStateFilesWrittenByOlderBuilds.
+    //   profileDir   - the profile folder (the shadow lives under it).
+    //   path         - the state file.
+    //   rel          - its path relative to the profile, for the log line.
+    //   roundTrip    - its type's round trip (the repair's template is the round trip of an empty object).
+    //   keepDropped  - see PrepareStateDocument.
+    //   neverRestore - its volatile member paths (StateCompat.h RestoreKeysDroppedByOlderWriter), or nullptr.
+    //   returns      - the number of members restored and written (0: nothing to repair, or the repair could not be written).
+    // Never throws: a failure is logged (Rule #18) and leaves the file as it was.
+    size_t RepairStateFileWrittenByOlderBuild(const std::wstring& profileDir, const std::wstring& path, const std::wstring& rel, StateRoundTrip roundTrip, bool keepDropped,
+                                             const std::set<std::wstring, std::less<>>* neverRestore) noexcept;
+
+    // The round trips of the state documents this file serializes (StateRoundTrip): each is its type's Document(
+    // FromDocument(disk)), the very pair its saver and its loader use. Exposed for the harness (tests_persistence.cpp)
+    // and for other writers of the profile.
+    //   disk    - the parsed file.
+    //   returns - this build's round trip of it.
+    // May throw std::bad_alloc.
+    json::Value SessionsRoundTrip(const json::Value& disk);
+    json::Value TemplatesRoundTrip(const json::Value& disk);
+    json::Value RecentDirsRoundTrip(const json::Value& disk);
+    json::Value ModelListRoundTrip(const json::Value& disk);
+    json::Value OpenWindowsRoundTrip(const json::Value& disk);
+    json::Value LayoutRoundTrip(const json::Value& disk);
+    json::Value AppSettingsRoundTrip(const json::Value& disk);
+    json::Value WindowRecordRoundTrip(const json::Value& disk);
+    json::Value DirColorsRoundTrip(const json::Value& disk);
+    json::Value DirEnvRoundTrip(const json::Value& disk);
+    json::Value LaunchPresetsRoundTrip(const json::Value& disk);
 
     void SaveTemplates(const std::vector<PlanTemplate>& templates);
     std::vector<PlanTemplate> LoadTemplates();

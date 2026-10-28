@@ -196,6 +196,27 @@ namespace Agentmaster::Msg
     /// <remarks>The reads use the startup retry budget (seconds): it runs once per bot start, off the UI thread.</remarks>
     MessagingStateFileLoad LoadMessagingStateFile(const std::wstring& stateFile);
 
+    /// <summary>
+    /// <see cref="LoadMessagingStateFile"/> with an explicit profile folder — the harness's seam (AgentmasterStateDir() is resolved
+    /// once per process). Before the read it runs the older-writer repair of the file (PERSISTENCE.md §17,
+    /// RepairStateFileWrittenByOlderBuild): a state.json an older Agentmaster saved without members it does not know gets them
+    /// back from its shadow (&lt;profile&gt;\shadow\messaging\telegram\state.json), volatile ones excepted.
+    /// </summary>
+    /// <param name="profileDir">The profile folder that holds <paramref name="stateFile"/> (its shadow lives under it).</param>
+    /// <param name="stateFile">The state file's full path.</param>
+    /// <returns>As <see cref="LoadMessagingStateFile"/>.</returns>
+    /// <exception cref="std::bad_alloc">The state could not be built.</exception>
+    MessagingStateFileLoad LoadMessagingStateFileIn(const std::wstring& profileDir, const std::wstring& stateFile);
+
+    /// <summary>
+    /// The round trip of the bot's state document (PERSISTENCE.md §17, StateRoundTrip): StateToJson(StateFromJson(disk)) — what
+    /// this build makes of a state.json, which tells its save what the file holds that this build would lose.
+    /// </summary>
+    /// <param name="disk">The parsed file.</param>
+    /// <returns>This build's round trip of it (an empty object for a document that is not a state object).</returns>
+    /// <exception cref="std::bad_alloc">The document could not be built.</exception>
+    json::Value MessagingStateRoundTrip(const json::Value& disk);
+
     // ===== what the service needs from the app ================================================
 
     // Each member may be empty (the test harness): the service then answers "not available".

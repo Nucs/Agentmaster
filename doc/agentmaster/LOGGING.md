@@ -36,7 +36,7 @@ with a local-time `[HH:MM:SS.mmm]` stamp (only at a line boundary, so a partial 
    `[restore->refork]`, `[rehome]`, `[spawn]`, `[launch-fail]`, `[launch-blocked]`, `[archive]`,
    `[teardown-archive]`, `[codex-*]`, `[adopt-*]`, `[pending]`, `[notify]`, `[update]`, `[trust]`,
    `[transcript]`, `[cmd]`, `[cmd-fire]`, `[cmd-expire]`, `[persist-fail]`, `[persist-read-fail]`, `[persist-guard]`,
-   `[observer]`, `[activity]`,
+   `[persist-shadow]`, `[migrate]`, `[observer]`, `[activity]`,
    `[orphan]`, `[orphan-reap]`, `[close-successor]`, `[unread]`, `[taskbar-badge]`, `[tags]`, `[harness]`,
    `[ai-search]`, `[sessdb]`, `[msg]`, `[render]`, `[tab-size]`, `[strip]`, `[deactivate]`,
    `[retired-host]`, `[restore-wake]`, `[api-error-rewind]`, `[interrupt-rewind]`, `[fork-stop]`;
@@ -129,6 +129,25 @@ with a local-time `[HH:MM:SS.mmm]` stamp (only at a line boundary, so a partial 
   before it is next written`, or `… and no previous copy could be read: starting with no topic map; …`. Its WINDOW HOLD
   logs `[msg] window hold: N topic(s) kept because a window holds their session's saved tab, which its restore could not
   make (PERSISTENCE.md 16)` whenever N changes.
+- State files across versions (PERSISTENCE.md §17):
+  - **The version-change snapshot**, written by WindowEmperor through `Startup::Note`, with a `version-change state
+    snapshot` phase line: `[migrate] Agentmaster changed from <a> to <b> at this start. The state files were copied into
+    <profile>\backups\<stamp> <a> to <b> first (N file(s), the session store copying in the background)`, or `[migrate] This
+    was the first start of an Agentmaster build that keeps state backups …`, or `… The state snapshot FAILED: <why>`.
+  - **The older-writer repair:**
+    - `[migrate] state files copied into <folder> before the repair (…)`, once per run;
+    - per repaired file: `[migrate] <file>: an older Agentmaster saved it without N member(s) it does not know; put back
+      from <shadow> (<path> ×<count>, …)`;
+    - a repair that could not be written: `[migrate] <file>: an older Agentmaster dropped N member(s) this build can put
+      back, but the repaired file could not be written …`.
+  - **A newer format, never written:** `[persist-guard] <file> NOT written: its format (version N) is newer than the one
+    this build writes (version M), so a newer Agentmaster wrote it; …` (once per file per process), and for the tag files
+    `[persist-guard] <file> NOT written: it holds JSON that is not this version's tag list / color map (a newer Agentmaster's
+    format?) …`.
+  - **A shadow that could not be written:** `[persist-shadow] could not write <shadow> (error …): an older Agentmaster's
+    save of <file> could not be repaired from it; …` (once per file per process).
+  - **The updater's refusal of a locked `settings.json`** (an `[update]` line in hooks.log): `settings-write REFUSED (settings.json exists but
+    could not be read — choice not persisted; the file keeps every setting)`.
 - A profile map (`~\.agentmaster.profiles`) that exists but cannot be read at startup logs `[profile] <map> could not be
   read (Windows error N): this run opens the default profile <dir>; no saved profile choice was changed` — written by
   WindowEmperor from `Profiles::StartupProfileNote()`, since the bootstrap runs before the profile (the log's home) exists.

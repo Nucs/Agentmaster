@@ -935,8 +935,9 @@ the install scripts and Windows Terminal's own settings code.
 - **An older Agentmaster on this profile.** This happens when a second install is left beside the new one: the zip's
   take-over box is unticked by default while the package is running. When the older version runs, it saves
   `sessions.json`, `settings.json` and the window records without the fields it does not know. Builds before c50fb6468
-  also still fail open (§15). Nothing in this build can change an older build's code. A forward-compatible save (unknown
-  members kept on every round trip) plus a "written by a newer version" marker would cover the next downgrade.
+  also still fail open (§15). Nothing in this build can change an older build's code. **Covered by §17:** every save keeps
+  what it does not understand, a newer format is never written, and the next start of a §17 build puts back from its
+  shadows what an older build dropped (after a snapshot).
 - **Two instances on one profile.** The second start asks "profile in use — Continue anyway?" (default No). Answering Yes,
   or a headless `-Embedding` start (which never asks), runs both, and each saves its own fleet and window records over the
   other's.
@@ -967,3 +968,186 @@ anyway), which is why the race checks exist.
 The `TerminalPage` glue (restore, capture, Manager-only, restore-fresh, the Telegram resume's `fresh` flag) is checked with
 `cl /Zs` against the Debug PCH. It is not built and not run. The change adds data members to `TerminalPage`, `Engine` and
 `MessagingService`, so the next build must purge.
+
+## 17. State files across versions: every migration keeps the files and their data (2026-10-28)
+
+**The task.** §16 left one case open: an older Agentmaster on the same profile drops the fields it does not know when it
+saves. The owner's answer: "You are tasked with making sure that any case will always migrate successfully without hurting
+the existing files and their data." This section is how every case does now.
+
+**The cases.**
+
+| Case | Before | Now |
+|---|---|---|
+| An upgrade (a new build opens an older build's files). | Fine for the fields the new build reads; a migration bug had no way back. | The first start of a build that differs from the last one copies every state file into `<profile>\backups\` first (the VERSION-CHANGE SNAPSHOT). |
+| A downgrade to a build with §17 (any build after this one, run after a newer one). | The older build rewrote every file from its own model: every field, value and record it does not know was gone. | Its saves keep them (THE RESIDUE). A file in a NEWER FORMAT (a greater root `version`) is not written at all (THE FORMAT GUARD). |
+| A downgrade to a build released before §17, then back. | The fields were gone for good. | The older build still drops them (its code cannot change). This build's next start puts them back from the SHADOW of what it last wrote (THE OLDER-WRITER REPAIR), after a snapshot. |
+| Switching installs on one profile (the package, a portable copy, dev pointed at the release profile). | Each is just another build: one of the cases above. | The same: each is stamped as `<version> <release / dev / portable / unpackaged>`, and the version-change snapshot runs at each switch. |
+| A bug in a new build's migration. | Nothing kept a copy. | The version-change snapshot holds the files as they were before that build's first start wrote anything; its README says how to put them back. |
+
+**1. The residue (forward compatibility; `StateCompat.h`).** Before a save, Persistence.cpp compares the file on disk with
+what THIS build makes of it: its round trip, `Document(FromDocument(disk))`, the very pair its saver and its loader use
+(`SessionsRoundTrip`, `AppSettingsRoundTrip`, … — Serialize / Deserialize are those two around Dump / Parse). What the round
+trip loses is the residue (`ExtractResidue`), and the save puts it back into the fresh document (`ApplyResidue`):
+- **A member this build never looks at** (a newer build's) is kept whole, wherever it sits: at the root, in the settings, in
+  a session, in a queued prompt, in a tab.
+- **A member this build looks at but does not write is understood**, not unknown: the loader's lookups are recorded while the
+  round trip runs (`json::detail::FindObserver` in `Json.h`, `StateCompat::LookedKeys`). This is what drops a CONSUMED
+  migration key like `launch-presets.json`'s `seededTemplates`: kept, it would re-run its cleanup at every load and delete a
+  template preset the user added back.
+- **A value this build cannot represent** (a newer mode word read as its default, a number out of its band) is restored
+  while the fresh value still equals what this build read it as. Once this build CHANGES the value, its value wins, and the
+  entry is spent: a later change back to the old value is the user's, never mistaken for "unchanged".
+- **Records** (arrays whose elements have an id: `id`, `sessionId`, `windowId`, `dir`, `name`, `actionsJson`) are matched by
+  id. A record this build removed since stays removed. A record this build could not read at all is appended back unless
+  one with its id exists now. `launch-presets.json` passes `keepDropped` false: its loader drops 0.6.8.18's untouched template
+  presets on purpose, so dropped records stay dropped there, and an array it compares whole is never restored.
+- **Cost:** the residue is cached by the file's size and time. A file costs one read and parse per process (the first save),
+  and again only after someone else changed it. Our own write records the residue its text carries.
+
+**2. The writer stamp.** Every state document is written with `"writer":{"app":"Agentmaster","version":…,"install":…}` as its
+FIRST member (`StateCompat::SetWriterStamp`), so the first characters of a 10 MB `sessions.json` tell whether it is stamped
+(`TextStartsWithWriterStamp`). A stamp-less file was last written by a build before §17 (or by hand).
+
+**3. The format guard.** A file whose root `version` is greater than the one this build writes is not written at all
+(`[persist-guard] <file> NOT written: its format (version N) is newer …`, once per file per process). The newer build finds the
+file as it left it; this build's changes to that file are not saved.
+
+**4. The shadows and the older-writer repair.**
+- **The shadow** is `<profile>\shadow\<the file's relative path>`: the document as a §17 build last wrote it. It is written at the
+  first write of a file in a run, then at most once a minute (every 5 minutes for a document over 256 K characters).
+  `FlushStateShadows` brings every pending one up to the run's last save when the app's last window closes. A deleted window
+  record takes its shadow with it.
+- **The repair** (`RepairStateFilesWrittenByOlderBuilds`, at the start of the engine, before anything of the run writes a state
+  file; the Telegram bot's `state.json` at its own load, `RepairStateFileWrittenByOlderBuild`) looks at every state document
+  that has a shadow. It repairs a file only when all of these hold: the file is not stamped, its shadow is stamped, and the
+  file is NEWER than its shadow. A file put back by hand from a backup keeps its old time, so the user's restore stands.
+- **What is put back** — only members the older writer provably did not know (`StateCompat::RestoreKeysDroppedByOlderWriter`):
+  - inside a collection (the sessions, a session's queue, the tabs, the bot's topics), a member that NO record of that
+    collection in the file carries;
+  - outside one, a member this build writes unconditionally (it is in the type's template, the round trip of an empty object);
+  - never a VOLATILE member, one the app clears once it acted on it: a session's unsent draft (`pendingInput`,
+    `pendingInputUnixMs`, `pendingPasteRefs`), its question guard (`lastMessageWasQuestion`), the "Fork interrupted" stop
+    (`stopForkedTurn`), a never-messaged fork's source (`forkParentId`), and the bot's held change line and history-replay
+    prompt (`changeLineHeld`, `changeLineFromTitle`, `changeLineFromSquare`, `historyPromptMessageId`). "Absent on every record"
+    cannot tell "cleared by a writer that knew it" from "never known", and bringing such a member back would act again.
+  Records are matched by id: a record the older writer added keeps what it has; one it removed stays removed; a value it
+  wrote stands.
+- **Before the first repaired write of a run** the profile's state files are snapshotted (`… before repair by <build>`), so even
+  the repair can be undone.
+
+**5. The version-change snapshot (`StateBackups.h`).** In `WindowEmperor`, right after the profile is resolved and before the
+update prompt, Windows Terminal's settings load, the engine and every window: when the build that ran last
+(`<profile>\last-run.json`) is not this one, or none is recorded, every state file is copied into
+`<profile>\backups\<yyyyMMdd-HHmmss> <from> to <to>\` with a `README.txt` (when, why, how to put the files back). The files:
+`sessions.json`, `settings.json`, `layout.json`, `open-windows.json`, `templates.json`, `recent-dirs.json`, `model-list.json`,
+`dir-colors.json`, `dir-env.json`, `launch-presets.json`, `tags.json`, `tag-colors.json`, the bot's `state.json`,
+`state.json.prev` and `filelinks.json`, Windows Terminal's `terminal\settings.json`, `state.json` and `elevated-state.json`, every
+`windows\*.json`, and every `session-store\*.json`.
+- Copies keep each file's time.
+- The session store (one small file per session: ~2,700 files, 2.5 s, measured on the release profile) is copied by a
+  background thread at background priority. Its reads share delete, so the app's own atomic writes go through; the README
+  says the copy is in progress until it ends.
+- The newest 12 snapshots stay (~16 MB each on that profile). Pruning removes only a folder whose README starts with
+  "Agentmaster state snapshot".
+- It runs outside the startup watchdog's window, so a slow disk cannot turn it into a kill.
+- A failed snapshot still records the build, so a start that cannot copy does not retry at every start.
+
+**6. The other writers.**
+- **The session store** (`session-store\<sid>.json`): a member that is not a string (a newer build's) is written back IN PLACE
+  by every write (`ReadRecordForUpdate`'s `foreign`, `WriteRecord`). This build's own value wins for a key it writes. A record
+  that still holds such a member is never deleted as empty. This replaces §16's kept copy.
+- **`tags.json` / `tag-colors.json`:** an entry this version cannot read (not a name, not a `#AARRGGBB` color) is written back
+  as it was. A file of another JSON shape (an object for the tag list, an array for the colors) is a format this version does
+  not know: refused and logged, never rewritten.
+- **The updater's `settings.json` read-modify-write** (`Updater::WriteUpdateState`, the Skip / Postpone choice): it read a
+  file it could not open as "" and wrote an update-keys-only skeleton over every setting. A handle held through the call
+  also stopped that write's rename, so the skeleton landed only when the holder let go between the read and the write, or
+  when the read failed for a reason a rename ignores (an ACL that denies reading the data). It now tells unreadable from
+  missing (`ReadFileWideForUpdate`, with retries) and refuses.
+- **`model-list.json`'s read-modify-writes** write nothing when the file cannot be read.
+- **The bot's `state.json`:** its save goes through `PrepareStateDocument` (residue, stamp, format guard) and
+  `NoteStateDocumentWritten` (the shadow); its load runs the repair first.
+- **A state file that is valid JSON but no document of ours** (an array, a number) is marked for the state-file guard, which
+  keeps a copy before replacing it (§15 only caught text that does not parse).
+
+**Log lines.**
+- `[migrate] Agentmaster changed from <a> to <b> at this start. The state files were copied into <folder> first (N file(s), the session store copying in the background)`, or `[migrate] This was the first start of an Agentmaster build that keeps state backups …`;
+- `[migrate] state files copied into <folder> before the repair (…)`;
+- `[migrate] <file>: an older Agentmaster saved it without N member(s) it does not know; put back from <shadow> (<path> ×<count>, …)`;
+- `[persist-guard] <file> NOT written: its format (version N) is newer than the one this build writes (version M) …`;
+- `[persist-guard] <tags.json / tag-colors.json> NOT written: it holds JSON that is not this version's …`;
+- `[persist-shadow] could not write <shadow> (error …)`, once per file per process;
+- updater: `settings-write REFUSED (settings.json exists but could not be read — choice not persisted; the file keeps every setting)`.
+
+**What is still not covered.**
+- **A build before §17** still drops what it does not know, and still fails open (§15). Everything it drops is put back at
+  this build's next start, except:
+  - a member in a singleton document that this build writes only conditionally (a window record's side-panel layout,
+    `model-list.json`'s `last`): it is not in the template, so the repair cannot prove the older writer did not know it;
+  - a volatile member (by design);
+  - what changed in the up to 5 minutes between the shadow's last refresh and a crash.
+- **A member a newer build RETYPED** (a string turned into an object) is looked at by this build, read as its default, and
+  dropped by this build's save. A newer build adds a new key instead.
+- **The column rule's ambiguity for a rare, non-volatile member.** An older writer that knew a member like `pinned` and
+  cleared it on EVERY record (the user unpinned the only pinned session) gets it back from the shadow.
+- **A value this build reads as its default** is kept while this build holds that default. A user who explicitly picks the
+  default cannot be told from one who never changed it: the newer word stays in the file. This build keeps reading it as its
+  default; the newer build reads the newer word.
+- **Not in the snapshot:** generated or rebuilt files (`hooks-settings.json`, `launch-settings\`, `sessions-index\`, `sessiondb\`,
+  `harness\`) and Claude's own files.
+- **Two instances on one profile** (§16) are still unsupported.
+
+**Tests (m5).**
+- `TestStateCompat` (tests_persistence.cpp) covers:
+  - the residue rules, pure;
+  - the lookup evidence;
+  - records;
+  - the stamp;
+  - the repair rules, pure;
+  - a save that keeps a newer build's members, stamps the file, and writes and flushes the shadow;
+  - the format guard;
+  - the presets' consumed key;
+  - a value that survives until the user changes it, and never comes back after;
+  - the repair end to end: the snapshot before it, a second start that does nothing, a restored backup left alone, a file
+    with no shadow untouched;
+  - the snapshots, their times, pruning, and the version-change check;
+  - the tag files;
+  - the session store's members kept in place.
+- `TestMessagingStateFileLoad` covers the bot's state across versions: a save keeps a topic's newer member, and the load
+  repairs it after an older build's save, its volatile held change line excepted.
+- `TestUpdaterVersionLogic` covers the locked `settings.json` refusal.
+- `TestStateFileOverrides` expects the store's new behavior.
+
+**Negative controls (m5).** Each piece was undone in an isolated copy, and its check had to fail. The 19 pieces:
+- the lookup evidence;
+- the spent entries;
+- the bot's volatile list;
+- the store's foreign members, and its "not empty";
+- the tag list's and the tag colors' unread entries, and the tag list's foreign-shape refusal;
+- the updater's read;
+- the format guard;
+- the keepDropped whole-array rule;
+- the flush;
+- the snapshot's file times;
+- pruning's marker;
+- the stamp's position;
+- the first write's immediate shadow;
+- the column rule;
+- the repair's file-time rule;
+- the Missing residue.
+
+They ran in four rounds, because a control such as a stamp that is no longer first hides the evidence of others.
+
+**The updater's control first went undetected.** The test held `settings.json` open with a handle. Any open handle also
+stops a rename onto the file (the name stays while a handle is open), so the old read failed AND the skeleton's rename
+failed, and the check passed with the old code too. The old skeleton could land in only two cases: in the microseconds
+between its read and its write, or when the read fails for a reason that does not stop a rename. The test now uses an ACL
+that denies reading the file's data and allows everything else, and the control catches the old read.
+
+**Checked, not built.** cl /Zs passes on every TerminalApp unit (the Debug PCH), on `WindowEmperor.cpp` (its recorded line), on
+the CLI's units at /W4 /WX and on the session database service's units. Nothing is built or run in the app. The next build must
+purge (§16's data members). Live checks owed after it:
+- the first start of the new build logs `[migrate] … first start …` and leaves a `backups\` folder with a README;
+- `shadow\` fills as the run saves;
+- `sessions.json`, `settings.json` and a window record start with `{"writer":`.

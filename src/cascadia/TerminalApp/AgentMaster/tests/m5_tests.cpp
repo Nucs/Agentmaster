@@ -120,6 +120,7 @@ int wmain()
     TestUiStallEscalation();
     TestUnreadableStateFiles(); // PERSISTENCE.md "Unreadable state files": a state file that cannot be read is never replaced without its bytes kept (tests_persistence.cpp)
     TestStateFileOverrides(); // PERSISTENCE.md §16: a failed read marks its file; the tag files' update read; the store's guarded delete (tests_persistence.cpp)
+    TestStateCompat(); // PERSISTENCE.md §17: state files across versions - nothing a newer or an older build wrote is lost (tests_persistence.cpp)
     TestProcessInspectTree();
     TestOrphanConsoleReaper();
     TestProcessInspectParse();
