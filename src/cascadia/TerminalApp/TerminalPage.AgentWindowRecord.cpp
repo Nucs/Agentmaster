@@ -342,6 +342,38 @@ namespace winrt::TerminalApp::implementation
             rec.tabs.push_back(std::move(entry));
         }
 
+        // Agentmaster (PERSISTENCE.md §16 — HELD TAB REFS): the saved tabs this window's restore could NOT bring back go back
+        // into the record, each at about its old place: the strip above holds only the tabs that exist, and a save of it alone
+        // would delete the others from the workspace (a start without Claude Code would have saved every window empty). A held
+        // ref whose session has a tab again — in this window (a Resume here) or in another one (live) — is let go for good: the
+        // tab that exists is now the record of it. A shell ref has no session, so only the user's close of the window ends it.
+        if (!_heldTabRefs.empty())
+        {
+            const bool heldChanged = ::Agentmaster::MergeHeldTabRefs(
+                rec.tabs,
+                _heldTabRefs,
+                [this](const ::Agentmaster::TabEntry& t) {
+                    if ((t.kind != ::Agentmaster::TabKind::Claude && t.kind != ::Agentmaster::TabKind::Codex) || t.sessionId.empty())
+                    {
+                        return false;
+                    }
+                    if (_claudeTabs.find(t.sessionId) != _claudeTabs.end())
+                    {
+                        return true; // this window hosts the session again
+                    }
+                    // Another window hosts it (live), so that window's record holds the tab. The lean read: no queue copy.
+                    const auto s = _sessionRegistry ? _sessionRegistry->GetWithoutQueue(t.sessionId) : std::nullopt;
+                    return s && s->live;
+                },
+                rec.selectedTabIndex);
+            if (heldChanged)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[rehome] window " + _windowId + L" let go of held tab ref(s) whose session has a tab again; " +
+                                                                std::to_wstring(_heldTabRefs.size()) + L" still held\n");
+                _PublishHeldTabRefs();
+            }
+        }
+
         // (--- The retired Manager tab's per-window color ---: nothing to capture — the Agent Manager is a
         // page behind the Home button now and wears no tab color. rec.managerTabColor is whatever the
         // claimed record carried — rec is a copy of _windowRecord — so an older record round-trips
@@ -481,14 +513,37 @@ namespace winrt::TerminalApp::implementation
     // content. A window WITHOUT a Manager page (the page failed to build) is never Manager-only here — an
     // empty page-less window already took upstream's close path instead (_RemoveTab /
     // _CompleteInitialization). Returns: that predicate. Never throws.
+    // Agentmaster (PERSISTENCE.md §16): a window that HOLDS saved tab refs its restore could not bring back (Claude Code not
+    // found at this start, ...) is NOT Manager-only, however empty its strip looks: its record still names those tabs, and
+    // treating it as content-free would self-close it and delete that record — the whole workspace, when no Claude tab could
+    // be made. It stays open, keeps saving its record with the held refs, and the next start brings the tabs back.
     bool TerminalPage::_IsManagerOnlyWindow() const
     {
-        return static_cast<bool>(_managerPage) && _tabs.Size() == 0;
+        return static_cast<bool>(_managerPage) && _tabs.Size() == 0 && _heldTabRefs.empty();
+    }
+
+    // Agentmaster (PERSISTENCE.md §16): tell the engine which sessions this window holds saved tabs of (HeldSessionIds of
+    // _heldTabRefs, replacing what it published before; an empty set clears it). The Telegram bot asks the engine before it
+    // deletes a topic as "closed" (Engine::IsSessionHeldByAWindow), so a held session keeps its topic and history. Called
+    // after the restore holds refs and whenever a capture lets one go. Never throws: a failure is logged (Rule #18) and the
+    // engine keeps the previous set — which only keeps a topic longer, never deletes one.
+    void TerminalPage::_PublishHeldTabRefs() noexcept
+    {
+        try
+        {
+            ::Agentmaster::NoteWindowHeldSessions(_windowId, ::Agentmaster::HeldSessionIds(_heldTabRefs));
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_PublishHeldTabRefs");
+        }
     }
 
     // Agentmaster (discard Manager-only windows): the debounced decision. A window that ends up holding
     // no tab — only its Agent Manager page — by closing/tearing-out its last tab, or by reopening from
-    // an empty/failed record, must not linger as a restorable, content-less window. Unless it is the
+    // an empty record, must not linger as a restorable, content-less window. (A FAILED restore is not
+    // content-less: the refs it could not bring back are HELD — PERSISTENCE.md §16 — and a window holding
+    // any is never Manager-only, see _IsManagerOnlyWindow.) Unless it is the
     // LAST Agentmaster window it self-closes SILENTLY (there is nothing to confirm or lose); the last
     // window stays open (the app needs one) but discards its record so it isn't restored as Manager-only
     // next launch. Re-validates everything itself (it is reached via a debounce, so the state may have
@@ -647,9 +702,28 @@ namespace winrt::TerminalApp::implementation
                                               L" |" + refList + L"\n");
         }
 
-        // Pass 1 — managed sessions (Claude + Codex), synchronously, in record order.
-        for (const auto& entry : tabs)
+        // Agentmaster (PERSISTENCE.md §16 — HELD TAB REFS): whether this start could use sessions.json. When it could not, a
+        // ref to a session the registry does not know is unknown because the fleet did not load — so it is HELD below, not
+        // dropped (ShouldHoldRestoreRef). Set by the one-time fleet load, which every window's restore runs after.
+        const bool fleetLoadUsable = ::Agentmaster::SharedEngine().startupFleetLoadUsable.load();
+        // A fresh restore starts with nothing held (the vector is this window's own, and a restore runs once per window).
+        _heldTabRefs.clear();
+        // Hold one ref the restore could not bring back when ShouldHoldRestoreRef says so: it then rides every save of the
+        // record (_CaptureWindowRecord) until its tab exists again. Returns whether it was held, for the log line.
+        const auto holdIfDue = [this, fleetLoadUsable](size_t recordIndex, const ::Agentmaster::TabEntry& entry, ::Agentmaster::RestoreRefOutcome why) {
+            if (!::Agentmaster::ShouldHoldRestoreRef(why, fleetLoadUsable))
+            {
+                return false;
+            }
+            _heldTabRefs.push_back(::Agentmaster::HeldTabRef{ recordIndex, entry, why });
+            return true;
+        };
+
+        // Pass 1 — managed sessions (Claude + Codex), synchronously, in record order. Indexed, so a ref the restore holds
+        // keeps its place in the record (HeldTabRef::recordIndex).
+        for (size_t i = 0; i < tabs.size(); ++i)
         {
+            const auto& entry = tabs[i];
             const bool isCodex = entry.kind == ::Agentmaster::TabKind::Codex;
             if ((entry.kind != ::Agentmaster::TabKind::Claude && !isCodex) || entry.sessionId.empty())
             {
@@ -662,9 +736,13 @@ namespace winrt::TerminalApp::implementation
             const auto info = _sessionRegistry->Get(entry.sessionId);
             if (!info || info->live)
             {
+                // Unknown: held when the fleet did not load (then "unknown" says nothing about the session); a session
+                // another window hosts is that window's tab — never held here.
+                const bool held = holdIfDue(i, entry, info ? ::Agentmaster::RestoreRefOutcome::LiveElsewhere : ::Agentmaster::RestoreRefOutcome::UnknownSession);
                 ::Agentmaster::AppendStateLog(L"hooks.log",
                                               L"[rehome] window " + _windowId + L" skip " + ::Agentmaster::ShortId(entry.sessionId) +
-                                                  (info ? std::wstring{ L" (already live elsewhere)" } : std::wstring{ L" (unknown \x2014 fleet not loaded / pruned)" }) + L"\n");
+                                                  (info ? std::wstring{ L" (already live elsewhere)" } : std::wstring{ L" (unknown \x2014 fleet not loaded / pruned)" }) +
+                                                  (held ? std::wstring{ L" \x2014 HELD in the record: sessions.json could not be used at this start" } : std::wstring{}) + L"\n");
                 ++skipped; // unknown (fleet not loaded yet / pruned) or already open elsewhere
                 continue;
             }
@@ -680,8 +758,16 @@ namespace winrt::TerminalApp::implementation
                 : _LaunchClaudeSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
             if (!homed)
             {
+                // The launch made no tab. Its own line just above says why ([launch-blocked]: Claude Code not found, or a
+                // preset that cannot launch; [launch-fail]: the pane could not be built; [restore-dedup]: a duplicate ref,
+                // which the _claudeTabs check above already turns away). None of these is the user closing the tab, and
+                // the first can pass by itself (Claude Code installed or updated) — so the ref is HELD, never dropped
+                // (PERSISTENCE.md §16): without the hold, the window's next save wrote its record without the tab, and a
+                // start without Claude Code wrote every window's record empty and deleted every Manager-only one.
+                holdIfDue(i, entry, ::Agentmaster::RestoreRefOutcome::LaunchRefused);
                 ::Agentmaster::AppendStateLog(L"hooks.log",
-                                              L"[rehome] window " + _windowId + L" skip " + ::Agentmaster::ShortId(entry.sessionId) + L" (dedup: conversation already hosted by an earlier ref)\n");
+                                              L"[rehome] window " + _windowId + L" skip " + ::Agentmaster::ShortId(entry.sessionId) +
+                                                  L" (the launch made no tab \x2014 see the line above) \x2014 HELD in the record; the next start tries it again\n");
                 ++skipped;
                 continue;
             }
@@ -691,8 +777,9 @@ namespace winrt::TerminalApp::implementation
             }
             // Agentmaster (the RESTORE WAKE): remember a tab whose session was in the middle of something when Agentmaster
             // went down. Read AFTER the launch, whose Upsert holds the normalized state + SessionInfo::midTurnAtRestore: a
-            // restore-FRESH (the transcript was gone) removed the old id, which then reads as nothing to wake — a brand-new
-            // conversation has no turn to continue. The lean read: the queue is never looked at.
+            // restore-FRESH (the transcript was gone) keeps the id but starts Idle with no turn in flight (PERSISTENCE.md
+            // §16), so it reads as nothing to wake — a brand-new conversation has no turn to continue. The lean read: the
+            // queue is never looked at.
             if (const auto rec = _sessionRegistry->GetWithoutQueue(entry.sessionId); rec && ::Agentmaster::RestoreWakeWantsSession(*rec))
             {
                 wakeCandidates.push_back(entry.sessionId);
@@ -712,8 +799,9 @@ namespace winrt::TerminalApp::implementation
             const auto& entry = tabs[i];
             if (entry.kind != ::Agentmaster::TabKind::Other || entry.actionsJson.empty())
             {
-                continue;
+                continue; // a shell saved with no actions (ShellEmpty) holds nothing to rebuild or keep
             }
+            bool unreadable = false; // PERSISTENCE.md §16: its saved actions threw while parsing — held, not dropped
             try
             {
                 const auto layout = WindowLayout::FromJson(winrt::hstring{ entry.actionsJson });
@@ -733,7 +821,19 @@ namespace winrt::TerminalApp::implementation
                     }
                 }
             }
-            CATCH_LOG();
+            catch (...)
+            {
+                // What CATCH_LOG() did here (the wil failure log), plus the flag: the shell's saved blob is the only copy of
+                // that tab (title, color, folder), so one this build cannot read is kept for a later one, not dropped.
+                LOG_CAUGHT_EXCEPTION();
+                unreadable = true;
+            }
+            if (unreadable && holdIfDue(i, entry, ::Agentmaster::RestoreRefOutcome::ShellUnreadable))
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[rehome] window " + _windowId + L" skip shell #" + std::to_wstring(i) +
+                                                                L" (its saved actions could not be read) \x2014 HELD in the record\n");
+                ++skipped;
+            }
         }
 
         // Re-select the focused tab. With shells (created ASYNC by ProcessStartupActions) we append a
@@ -774,17 +874,30 @@ namespace winrt::TerminalApp::implementation
             _ShowManagerPage(L"reopened on the Manager");
         }
 
+        // Agentmaster (PERSISTENCE.md §16): the held refs in RECORD order (pass 1 held managed refs, pass 2 shells), which is
+        // the order MergeHeldTabRefs needs to put each back at its place; then tell the engine, so the Telegram bot keeps the
+        // held sessions' topics. Before the summary line, so the line's held= count is the final one.
+        std::stable_sort(_heldTabRefs.begin(), _heldTabRefs.end(), [](const ::Agentmaster::HeldTabRef& a, const ::Agentmaster::HeldTabRef& b) {
+            return a.recordIndex < b.recordIndex;
+        });
+        if (!_heldTabRefs.empty())
+        {
+            _PublishHeldTabRefs();
+        }
+
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       L"[rehome] window " + _windowId + L" resumed=" + std::to_wstring(resumed) +
                                           L" shells=" + std::to_wstring(shells) + L" skipped=" + std::to_wstring(skipped) +
+                                          L" held=" + std::to_wstring(_heldTabRefs.size()) +
                                           L" select=" + (wantManager ? std::wstring{ L"manager-page" } : std::to_wstring(targetAbs)) +
                                           L" of " + std::to_wstring(tabs.size()) + L" refs\n");
 
         // Agentmaster (the RESTORE WAKE): join the wake barrier — even with no candidate, because the tab this window opens
         // to still holds back every OTHER window's wakes until it launched — and start the wait. The focus the gate waits
-        // for is the managed session the restore selected, while this window hosts it under that id (a restore-FRESH
-        // re-keyed it, and the gate then watches the current foreground instead); "" for a shell, the Agent Manager page,
-        // or a focus that could not be restored.
+        // for is the managed session the restore selected, while this window hosts it under that id (a restore-FRESH used
+        // to re-key it, and the gate then watched the current foreground instead; it keeps the id since PERSISTENCE.md
+        // §16, so only a path that re-keys falls back to the foreground now); "" for a shell, the Agent Manager page, or a
+        // focus that could not be restored (a selected tab whose ref was HELD included).
         const std::wstring focusSessionId = (!selSessionId.empty() && targetAbs >= 0 && _claudeTabs.find(selSessionId) != _claudeTabs.end()) ? selSessionId : std::wstring{};
         restoreWakeBegun = true;
         _BeginRestoreWake(std::move(wakeCandidates), focusSessionId);

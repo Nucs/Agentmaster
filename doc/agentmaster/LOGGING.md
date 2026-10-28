@@ -47,8 +47,15 @@ with a local-time `[HH:MM:SS.mmm]` stamp (only at a line boundary, so a partial 
      no advance handler: never the app);
    - **the window-restore story**, one trace per `windowId`: `[window-claim]` / `[window-fresh]` →
      `[rehome-begin]` (every tab ref by session id + the focus target) → per tab `[rehome] window <id>
-     resume|skip <sid>` (a skip carries its reason) → `[rehome] window <id> resumed=N shells=M skipped=K`;
+     resume|skip <sid>` (a skip carries its reason) → `[rehome] window <id> resumed=N shells=M skipped=K held=H`;
      `[window-save]` is the change-gated saved tab set and `[reopen]` the "Reopen Windows (N)" dispatch.
+     PERSISTENCE.md §16 (HELD TAB REFS): a skip the restore keeps in the record ends in `— HELD in the record`.
+     The causes are `(the launch made no tab — see the line above)`, whose line above is the `[launch-blocked]` or
+     `[launch-fail]` that says why; `(unknown — fleet not loaded / pruned) — HELD … sessions.json could not be used at
+     this start`; and `skip shell #<n> (its saved actions could not be read)`. `held=H` counts them, and
+     `[rehome] window <id> let go of held tab ref(s) whose session has a tab again; N still held` marks one that came
+     back. A restore without a transcript logs `[restore-fresh] <sid> … (no transcript: a fresh conversation under the
+     session's own id)`: the id is kept.
 3. **`[nav]`, the user-navigation audit trail** (`LogNav(msg)` writes `[nav] <msg>`; `ShortId(id)` is the
    8-character id). `grep '\[nav\]' hooks.log` reconstructs the user's journey.
 
@@ -116,6 +123,12 @@ with a local-time `[HH:MM:SS.mmm]` stamp (only at a line boundary, so a partial 
   <name>.could-not-read-<stamp> (<reason>)`), a replace refused (`<path> NOT replaced: …`, once per 30 s), and the
   startup snapshot when `sessions.json` could not be used (`… the workspace as it was is kept in <profile>\recovery\
   <stamp> …`). PERSISTENCE.md §15.
+  Since PERSISTENCE.md §16 a `[persist-read-fail]` also marks its file, so the save that follows the lock's end logs the
+  `kept a copy` line with the reason "Agentmaster could not use it when it started". The Telegram bot's state file logs
+  `[msg] state.json could not be used (<why>); the previous copy (state.json.prev) was used, and state.json is kept aside
+  before it is next written`, or `… and no previous copy could be read: starting with no topic map; …`. Its WINDOW HOLD
+  logs `[msg] window hold: N topic(s) kept because a window holds their session's saved tab, which its restore could not
+  make (PERSISTENCE.md 16)` whenever N changes.
 - A profile map (`~\.agentmaster.profiles`) that exists but cannot be read at startup logs `[profile] <map> could not be
   read (Windows error N): this run opens the default profile <dir>; no saved profile choice was changed` — written by
   WindowEmperor from `Profiles::StartupProfileNote()`, since the bootstrap runs before the profile (the log's home) exists.

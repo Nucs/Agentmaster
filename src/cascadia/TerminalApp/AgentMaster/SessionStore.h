@@ -287,10 +287,12 @@ namespace Agentmaster
     // REGAINS its color (the documented tag-colors feature).
     // LoadKnownTagsIn is CACHED like LoadAllTagColorsIn (one stat per read, a re-parse only after the
     // file's stamp moved; Register / Unregister write through and read the file itself for their
-    // read-modify-write).
+    // read-modify-write). PERSISTENCE.md §16: that read tells a registry that cannot be read (a lock past the
+    // state-file reader's retries) from a missing one, and Register / Unregister then return false and write
+    // NOTHING — a write would replace every kept tag with the one being added or removed.
     std::vector<std::wstring> LoadKnownTagsIn(const std::wstring& stateDir); // display-cased, CI-deduped, registration order
-    bool RegisterKnownTagIn(const std::wstring& stateDir, const std::wstring& tag); // add (no-op success when already known); false on bad input / write error
-    bool UnregisterKnownTagIn(const std::wstring& stateDir, const std::wstring& tag); // the explicit ✕ (CI; no-op success when absent)
+    bool RegisterKnownTagIn(const std::wstring& stateDir, const std::wstring& tag); // add (no-op success when already known); false on bad input / an unreadable tags.json / write error
+    bool UnregisterKnownTagIn(const std::wstring& stateDir, const std::wstring& tag); // the explicit ✕ (CI; no-op success when absent); false on an unreadable tags.json / write error
 
     // ---- live wrappers (resolve AgentmasterStateDir()) ----
     std::vector<std::wstring> LoadKnownTags();
@@ -337,7 +339,7 @@ namespace Agentmaster
     // so it must stay this cheap: never add a per-call file read back.
     std::map<std::wstring, std::wstring> LoadAllTagColorsIn(const std::wstring& stateDir); // folded name -> "#AARRGGBB"
     std::wstring GetTagColorIn(const std::wstring& stateDir, const std::wstring& tag); // "" when unset (use the hash fallback)
-    bool SetTagColorIn(const std::wstring& stateDir, const std::wstring& tag, const std::wstring& hexOrEmpty); // "" removes; invalid hex/tag -> false, no write
+    bool SetTagColorIn(const std::wstring& stateDir, const std::wstring& tag, const std::wstring& hexOrEmpty); // "" removes; invalid hex/tag -> false, no write; tag-colors.json unreadable -> false, no write (PERSISTENCE.md §16: a write would replace every picked color)
 
     // ---- live wrappers (resolve AgentmasterStateDir() — the file sits at the profile root) ----
     std::map<std::wstring, std::wstring> LoadAllTagColors();

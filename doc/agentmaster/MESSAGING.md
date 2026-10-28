@@ -973,7 +973,7 @@ queued message's status; `disable_notification` on everything but a turn's final
 | 429 | wait `retry_after`; the pacing lowers its rate *(as built: a wait of up to 60 s is slept through and the call made once more; a longer one parks only the refused method, §21.14.3; the history replay pauses 5 min, §21.9)* |
 | "message thread not found" (a deleted topic) | the topic is created again *(as built: only the 🔎 Search topic, at the bot's next start — §5.1, §21.18, dev only; a session's topic is never made again — a known bug, §21.21)* |
 | No answer at all (DNS, network: WinHTTP 12002 / 12007) | *(as built: the send loop does not retry it; a message whose caller does not send it again — a final reply, a prompt line, a remark — is lost: a known bug, §21.21)* |
-| The topic map lost | the old topics are orphans the bot cannot find; new ones are created; the previous copy of `state.json` is tried first |
+| The topic map lost | the old topics are orphans the bot cannot find; new ones are created; the previous copy of `state.json` is tried first — for a LOCKED, torn or unrecognized `state.json` alike, which is also kept aside before the first save replaces it (`LoadMessagingStateFile`, PERSISTENCE.md §16; NOT BUILT) |
 
 ## 11. Microsoft Teams
 
@@ -1336,6 +1336,18 @@ transport's failures and slow calls.
     `start-up hold ended 121 s after the start (every window restored)` at 19:30:55.233 — 0.1 s after that
     window's `[rehome] … resumed=55` line (`restore-sessions 52 s` + `restore-window-tabs 69 s`) — and not one
     `topic deleted`.
+  - **The WINDOW HOLD (PERSISTENCE.md §16, 2026-10-28; NOT BUILT).** A window whose restore could NOT make a saved tab
+    (Claude Code not found at that start, a preset whose key is missing, a pane that failed) HOLDS the tab's ref in its
+    record, and the session reads `live=false` after the start-up hold ended, as if the user had closed it. Before this,
+    the sync then deleted every such topic as "closed", and with it the topic's whole history: a start without Claude
+    Code deleted every tab's topic. Now each window publishes its held sessions (`Engine::NoteWindowHeldSessions`), the
+    service asks `ServiceHooks::sessionHeld` (`Engine::IsSessionHeldByAWindow`) before a "closed" delete, and keeps the
+    topic for as long as a window holds the ref (`_sessionHeldByAWindow`; a hook that throws reads as "held"). It has no
+    time limit. The ref, and with it the hold, ends when the tab exists again (the plan then stops asking) or when its
+    window is closed (the window's set goes with it, and the next tick deletes the topic as for any closed tab). It is
+    logged when the count changes: `[msg] window hold: N topic(s) kept because a window holds their session's saved tab,
+    which its restore could not make`. Tested: `TestEngineHeldSessions` (the engine's set); the service half is one
+    condition in `_syncTopics`.
   - **Telegram's 429 — and its real cause, the card.** At 19:24:34 an `editMessageText` answered `429` with
     `retry_after 1526` (`messaging.log`); the 19:28 run's first `sendMessage` got the remainder, `1265 s`
     (`[msg] pacing: 429 on sendMessage, waiting 1265 s` — the send loop waits it out, as Telegram requires: a
@@ -5183,6 +5195,16 @@ fix 5 of [`UI_THREAD.md`](UI_THREAD.md) §13g.
   (`StatePrevCopyDue`, `kStatePrevCopyGapMs`). It is never refreshed from a state.json this run could not read
   (`_stateFileReadable`). Before, the first save after a start that found state.json torn copied the torn file over the
   only readable version.
+- **The load and the save go through the state-file guard** (PERSISTENCE.md §16, 2026-10-28; NOT BUILT).
+  - `LoadMessagingStateFile` reads `state.json` with the state-file reader (the startup retry budget), so a LOCKED file
+    is no longer "no topics". That used to orphan every topic, and the first save wrote the empty map over the file.
+  - An unreadable, torn, or JSON-but-not-a-state file falls back to `state.json.prev` (the backup was tried only for a
+    torn one), and the file is marked keep-before-replace.
+  - The reader has no 16 MiB cap any more: a larger `state.json` read as empty.
+  - Every save calls `PrepareStateFileReplace` first. It refuses while the file cannot be read (the state stays dirty, and
+    the next tick retries), and keeps a `state.json.could-not-read-<stamp>` copy of a marked or unparseable file before
+    the replace.
+  - Tested: `TestMessagingStateFileLoad`.
 - **A normal quit loses nothing.** The app ends with TerminateProcess, so Stop never saves. `NoteAppClosing` (the app's last
   window, Engine.cpp) now also flushes the state, forced, after its run.closed stamp. It runs under the engine's window
   mutex, so it waits at most `kAppCloseSaveLockWaitMs` (250 ms) for each of the save lock and `_mtx`, and logs

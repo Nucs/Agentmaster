@@ -24,6 +24,10 @@
 
 #include "m5_tests.h"
 
+#include "../HeldTabRefs.h" // TestHeldTabRefs: PERSISTENCE.md §16 — the saved tabs a restore could not bring back
+// (Engine.h stays out of this unit: its `Agentmaster::Msg` namespace collides with the harness's `Msg` hook-message builder
+// used above. The engine's held-session set is tested beside the other engine seams: tests_persistence.cpp,
+// TestEngineHeldSessions.)
 #include "../RestoreWake.h"
 
 namespace
@@ -412,4 +416,118 @@ void TestRestoreWake()
     TestRestoreWakeWakeDecision();
     TestRestoreWakeBarrier();
     TestRestoreWakePacer();
+}
+
+// ===== HELD TAB REFS (PERSISTENCE.md §16) ===============================================================================
+//
+// The owner's question of 2026-10-28 ("is there ANY other chance we will EVER override accidentally those files") found that
+// a window record is rebuilt from the live strip at every save, so a saved tab a reopened window could not bring back —
+// Claude Code not found at that start, a preset whose key is missing, a pane that failed — vanished from the workspace at the
+// next save, a window that brought back nothing deleted its record as "Manager-only", and the Telegram bot deleted those
+// sessions' topics. These checks pin the pure half (HeldTabRefs.h) and the engine's held set the bot reads.
+
+void TestHeldTabRefs()
+{
+    std::wprintf(L"Held tab refs (PERSISTENCE.md 16: a saved tab a restore could not bring back stays in the record):\n");
+    using Agentmaster::HeldTabRef;
+    using Agentmaster::RestoreRefOutcome;
+    using Agentmaster::TabEntry;
+    using Agentmaster::TabKind;
+
+    // ---- which refs a restore holds ----
+    {
+        using Agentmaster::ShouldHoldRestoreRef;
+        CHECK(ShouldHoldRestoreRef(RestoreRefOutcome::LaunchRefused, true) && ShouldHoldRestoreRef(RestoreRefOutcome::LaunchRefused, false),
+              "hold: a launch that made no tab (Claude Code not found, a preset that cannot launch, a pane failure) is held, fleet loaded or not");
+        CHECK(ShouldHoldRestoreRef(RestoreRefOutcome::ShellUnreadable, true), "hold: a shell tab whose saved actions do not parse is held");
+        CHECK(ShouldHoldRestoreRef(RestoreRefOutcome::UnknownSession, false), "hold: an unknown session is held when sessions.json could not be used at this start");
+        CHECK(!ShouldHoldRestoreRef(RestoreRefOutcome::UnknownSession, true), "hold: ...and let go when it could (then the session is really gone)");
+        CHECK(!ShouldHoldRestoreRef(RestoreRefOutcome::Restored, false) && !ShouldHoldRestoreRef(RestoreRefOutcome::HostedHere, false) &&
+                  !ShouldHoldRestoreRef(RestoreRefOutcome::LiveElsewhere, false) && !ShouldHoldRestoreRef(RestoreRefOutcome::ShellEmpty, false),
+              "hold: a restored tab, a duplicate ref, a session another window hosts and an empty shell ref are never held");
+        bool words = true;
+        for (const auto o : { RestoreRefOutcome::Restored, RestoreRefOutcome::HostedHere, RestoreRefOutcome::LiveElsewhere, RestoreRefOutcome::UnknownSession,
+                              RestoreRefOutcome::LaunchRefused, RestoreRefOutcome::ShellUnreadable, RestoreRefOutcome::ShellEmpty })
+        {
+            const wchar_t* w = Agentmaster::RestoreRefOutcomeWord(o);
+            words = words && w && *w;
+        }
+        CHECK(words, "hold: every outcome has a log word");
+    }
+
+    // The tab refs the cases below build: a Claude tab, a Codex tab, a shell tab (its actions stand for its blob).
+    const auto claude = [](const wchar_t* id) {
+        TabEntry t;
+        t.kind = TabKind::Claude;
+        t.sessionId = id;
+        return t;
+    };
+    const auto codex = [](const wchar_t* id) {
+        TabEntry t;
+        t.kind = TabKind::Codex;
+        t.sessionId = id;
+        return t;
+    };
+    const auto shell = [](const wchar_t* actions) {
+        TabEntry t;
+        t.kind = TabKind::Other;
+        t.actionsJson = actions;
+        return t;
+    };
+    // A record's tabs as one line: "A,B,sh:S1," — the order the next start re-homes them in.
+    const auto line = [](const std::vector<TabEntry>& tabs) {
+        std::wstring s;
+        for (const auto& t : tabs)
+        {
+            s += (t.kind == TabKind::Other ? (L"sh:" + t.actionsJson) : t.sessionId) + L",";
+        }
+        return s;
+    };
+
+    // ---- a save puts the held refs back ----
+    {
+        // The record was [A, B, S1, C, D]. The restore made A and C, replayed S1 (shells land after the managed tabs) and held
+        // B (record index 1) and D (index 4).
+        std::vector<HeldTabRef> held{ HeldTabRef{ 1, claude(L"B"), RestoreRefOutcome::LaunchRefused }, HeldTabRef{ 4, codex(L"D"), RestoreRefOutcome::LaunchRefused } };
+        std::vector<TabEntry> captured{ claude(L"A"), claude(L"C"), shell(L"S1") };
+        int selected = 2; // the focused shell, S1
+        const bool changed = Agentmaster::MergeHeldTabRefs(captured, held, {}, selected);
+        CHECK(!changed && held.size() == 2, "merge: nothing resolved -> the held set is unchanged (nothing to re-publish)");
+        CHECK(line(captured) == L"A,B,C,sh:S1,D,", "merge: each held ref goes back at its old index, clamped to the strip's end");
+        CHECK(selected == 3 && captured[3].actionsJson == L"S1", "merge: the focused shell's index follows the refs inserted before it");
+        // The next save rebuilds the capture from the strip again: the held refs ride EVERY save, not just the first.
+        std::vector<TabEntry> next{ claude(L"A"), claude(L"C"), shell(L"S1") };
+        int unset = -1;
+        Agentmaster::MergeHeldTabRefs(next, held, {}, unset);
+        CHECK(line(next) == L"A,B,C,sh:S1,D," && unset == -1, "merge: every save puts them back; an unset focus stays unset");
+    }
+    {
+        // B came back (resumed here, or another window hosts it now): it is let go for good; D and the unreadable shell stay.
+        std::vector<HeldTabRef> held{ HeldTabRef{ 1, claude(L"B"), RestoreRefOutcome::LaunchRefused }, HeldTabRef{ 4, codex(L"D"), RestoreRefOutcome::LaunchRefused },
+                                      HeldTabRef{ 5, shell(L"S2"), RestoreRefOutcome::ShellUnreadable } };
+        std::vector<TabEntry> captured{ claude(L"A"), claude(L"B"), claude(L"C") };
+        int selected = -1;
+        const bool changed = Agentmaster::MergeHeldTabRefs(captured, held, [](const TabEntry& t) { return t.sessionId == L"B"; }, selected);
+        CHECK(changed && held.size() == 2 && held[0].entry.sessionId == L"D" && held[1].entry.actionsJson == L"S2",
+              "merge: a held ref whose tab exists again leaves the held set (reported, so the engine is told)");
+        CHECK(line(captured) == L"A,B,C,D,sh:S2,", "merge: ...and is not inserted a second time beside its live tab; the others still are");
+    }
+    {
+        // A start without Claude Code: no Claude tab could be made, so the strip is empty and the record IS the held refs.
+        std::vector<HeldTabRef> held{ HeldTabRef{ 0, claude(L"A"), RestoreRefOutcome::LaunchRefused }, HeldTabRef{ 1, claude(L"B"), RestoreRefOutcome::LaunchRefused },
+                                      HeldTabRef{ 2, codex(L"C"), RestoreRefOutcome::LaunchRefused } };
+        std::vector<TabEntry> captured;
+        int selected = -1;
+        Agentmaster::MergeHeldTabRefs(captured, held, {}, selected);
+        CHECK(line(captured) == L"A,B,C,", "merge: a window whose restore made no tab saves every held ref, in record order - never an empty record");
+    }
+
+    // ---- the session ids the engine publishes for the bot ----
+    {
+        const std::vector<HeldTabRef> held{ HeldTabRef{ 0, claude(L"A"), RestoreRefOutcome::LaunchRefused }, HeldTabRef{ 1, shell(L"S"), RestoreRefOutcome::ShellUnreadable },
+                                            HeldTabRef{ 2, codex(L"D"), RestoreRefOutcome::LaunchRefused }, HeldTabRef{ 3, claude(L"A"), RestoreRefOutcome::LaunchRefused },
+                                            HeldTabRef{ 4, claude(L""), RestoreRefOutcome::LaunchRefused } };
+        CHECK((Agentmaster::HeldSessionIds(held) == std::vector<std::wstring>{ L"A", L"D" }),
+              "ids: the Claude and Codex sessions, each once, in hold order; shells and empty ids left out");
+    }
 }

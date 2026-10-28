@@ -856,13 +856,14 @@ line of its own there.
 
 - No on-screen notice: a run that started without its sessions says so in `hooks.log` and in the recovery folder's README,
   but the window only looks empty.
-- The tag registries' read-modify-write (`tags.json`, `tag-colors.json`) still reads a locked file as "no registry"; the
-  guard refuses the write while the lock lasts, but a lock that ends between that read and the write lets the registry be
-  rewritten from the partial read (a window of milliseconds).
+- ~~The tag registries' read-modify-write (`tags.json`, `tag-colors.json`) still reads a locked file as "no registry"~~ —
+  closed by §16 (#4): their update reads refuse a file they cannot read.
 - Other loaders (window records, `open-windows.json`, `dir-colors.json`, `templates.json`, …) still read an unreadable file
-  as empty; the guard covers their writes. An unparseable window record is skipped by the reopen and never rewritten.
-- Writers outside the two chokepoints are not guarded: the Telegram bot's `messaging\telegram\state.json`, the sessions
-  index sidecars, the AI search's `harness\` files, the hook files (regenerated at every start).
+  as empty; the guard covers their writes, and since §16 (#3) every such read marks the file, so the save after the lock
+  ended keeps a copy. An unparseable window record is skipped by the reopen and never rewritten.
+- Writers outside the two chokepoints are not guarded: the sessions index sidecars and the AI search's `harness\` files
+  (both regenerated from the transcripts), the hook files (regenerated at every start). The Telegram bot's
+  `messaging\telegram\state.json` goes through the guard since §16 (#5).
 - The display read of a session-store record still caps at 1 MiB: a record above it shows no title or tags until it
   shrinks (nothing is lost — the setters read it whole).
 
@@ -871,3 +872,98 @@ retried, refused and ridden out / the quiet window), the guard's table on a scra
 torn `settings.json`, the startup fleet read (fresh / good / BOM / empty list / no list / NUL-filled / locked through its
 3 s budget) with the snapshot and the first save after it, and the store's setters (a record over 1 MiB keeps every key; a
 torn record is kept aside; a locked record is not rewritten).
+
+## 16. Every other way state could be overwritten: held tab refs, restore-fresh under the same id, the last unguarded writers (2026-10-28)
+
+**The question.** A production swap asked whether to add the 34 files only MSIX packaging adds to a loose layout. That made
+the owner ask: "Check if MSI installing overrides or deletes, check if there's ANY other chance we will EVER override
+accidentally those files". This section is the answer. It covers every file write and delete in the engine, the UI layer,
+the install scripts and Windows Terminal's own settings code.
+
+**Installing (MSI / MSIX) writes no state file.**
+- No MSI exists: every release from v0.1.0 to v0.8.0 ships an `.msixbundle`, `Agentmaster.cer` and `.zip` files only.
+- An MSIX package runs no install code. `Add-AppxPackage` (a double-click, `Install-Agentmaster.ps1`, `am-update.ps1`) writes
+  the package folder under `WindowsApps` and creates the package's own (empty) storage.
+- The install scripts write only these:
+  - the install folder's pointers: `install.path`, and `profile.path` only when there is none;
+  - a NEW `<profile>\package-data\<family>-<stamp>\` before a package removal;
+  - copy-if-absent seeds of `<profile>\terminal\`.
+- So the risk is in the app: at the first launch after an install, and in every run after it.
+
+**What could still overwrite state, and what does now:**
+
+| # | Where | What happened | Now |
+|---|---|---|---|
+| 1 | A reopened window's restore could not make a saved tab. Causes: Claude Code not found at that start, a preset whose key is missing from Credential Manager, a pane that failed to build, or a session unknown because `sessions.json` did not load. | A window record is rebuilt from the live strip at every save (`_CaptureWindowRecord`), so the tab left the workspace at the next save. A window that made no tab counted as "Manager-only" and DELETED its record (`_CloseWindowIfManagerOnly`). After the start-up hold, the Telegram bot deleted those sessions' topics as "closed", and `deleteForumTopic` deletes the topic's history with it. A start without Claude Code did this to every window. | **Held tab refs** (`HeldTabRefs.h`; see below). |
+| 2 | A restored tab whose transcript was not found (`ClaudeConversationExists`). | Restore-fresh minted a NEW id and removed the old record (`_LaunchClaudeSession`). The tags, the favorite and the Telegram topic stayed on the old id. The lookup runs for every reopened tab at startup, so an unlistable Claude config folder (an unmounted drive, a `CLAUDE_CONFIG_DIR` this process does not see) re-keyed every tab. So did a transcript path past MAX_PATH (a deep working folder's project name), which the plain probe reported missing. | Restore-fresh keeps the record's id (`claude --session-id <id>`, as "Restart session" already did, `BuildClaudeRelaunch`). Claude refuses an id whose transcript exists, so a lookup that missed one fails in the tab instead of replacing anything. The record starts as a fresh session: `Idle`, no turn in flight, no pending question. The lookup probes a long path in the extended-length form (`ResolveClaudeTranscriptPath`). |
+| 3 | A loader whose read failed (a lock past the reader's 400 ms: an antivirus scan, a sync client, a backup) built its defaults, and the lock ended before the caller's save. | The guard (§15) found a readable, valid file and replaced it with no copy. | Every Unreadable read through `ReadStateFileUtf8` marks its file keep-before-replace, so the first replace after it keeps a `.could-not-read-<stamp>` copy. |
+| 4 | `tags.json` and `tag-colors.json` read-modify-writes. | They read through the display read, which reads a locked file as empty. A lock that ended before the write replaced the registry with one tag, or every picked color with one. | Their update reads (`ReadKnownTagsFileForUpdate`, `ReadTagColorsFileForUpdate`) tell unreadable from missing, and `RegisterKnownTagIn`, `UnregisterKnownTagIn` and `SetTagColorIn` return false and write nothing. |
+| 5 | The Telegram bot's `messaging\telegram\state.json`, the only record of which topic belongs to which session. | Its reader answered "" for a locked file too, so the start had no topics, and the first save wrote the empty map over the file. JSON that was not a state object did the same without trying the backup. A file over 16 MiB also read as empty. | `LoadMessagingStateFile` tells the cases apart and falls back to `state.json.prev` for an unreadable, torn or unrecognized file. It marks the file, so its first save keeps a copy, and every save goes through `PrepareStateFileReplace`. |
+| 6 | The session store's records (`session-store\<sid>.json`). | A record that EMPTIED was deleted without the guard. A member this version's string store cannot carry (a newer build's) was dropped by any write, with no copy. | The delete goes through the guard (`WriteRecord`). A record holding such a member is marked by `ReadRecordForUpdate` and kept aside before its first write or delete. |
+
+**How a held ref works.**
+- **Which refs are held:** `ShouldHoldRestoreRef` holds a launch that made no tab, and a shell whose saved actions throw
+  while parsing. It holds an unknown session only when `sessions.json` could not be used at this start
+  (`Engine::startupFleetLoadUsable`).
+- **Never held:** a duplicate ref, a session another window hosts, a truly unknown session, an empty shell ref.
+- **Saves:** `_RestoreWindowTabs` keeps the held refs in `_heldTabRefs`, sorted by record index. `_CaptureWindowRecord` puts
+  them back at their old index, clamped (`MergeHeldTabRefs`; the focused shell's index follows), so every save writes them.
+- **When a ref is let go:** when its session has a tab again, in this window or in another one (`live`), or when the user
+  closes the window. Closing it demotes the whole record to recoverable, like any close.
+- **The window:** a window holding refs is never Manager-only (`_IsManagerOnlyWindow`): no self-close, no record delete.
+- **The bot:** the window publishes the held sessions (`_PublishHeldTabRefs` → `Engine::NoteWindowHeldSessions`). The bot's
+  topic sync keeps a held session's "closed" topic (`ServiceHooks::sessionHeld`, the WINDOW HOLD) for as long as a window
+  holds it. Unlike the start-up hold (MESSAGING.md §21.4) it has no time limit.
+- **What the user sees** when Claude Code is missing at a start: the windows open without their Claude tabs (each launch is
+  `[launch-blocked]`), but no window closes itself, every record keeps its tabs, and the topics stay. The next start with
+  Claude Code found brings every tab back.
+
+**Log lines:**
+- per held tab: `[rehome] window <id> skip <sid> (the launch made no tab — see the line above) — HELD in the record; the
+  next start tries it again`, or `… (unknown — fleet not loaded / pruned) — HELD in the record: sessions.json could not be
+  used at this start`;
+- per held shell: `[rehome] window <id> skip shell #<n> (its saved actions could not be read) — HELD in the record`;
+- in the summary line: `held=N`;
+- when a held tab comes back: `[rehome] window <id> let go of held tab ref(s) whose session has a tab again; N still held`;
+- from the bot: `[msg] window hold: N topic(s) kept because a window holds their session's saved tab …`, written when N
+  changes;
+- for a restore without a transcript: `[restore-fresh] <sid> … (no transcript: a fresh conversation under the session's own
+  id)`;
+- for the bot's state file: `[msg] state.json could not be used (<why>); the previous copy (state.json.prev) was used …`.
+
+**Still open (the owner's call):**
+- **An older Agentmaster on this profile.** This happens when a second install is left beside the new one: the zip's
+  take-over box is unticked by default while the package is running. When the older version runs, it saves
+  `sessions.json`, `settings.json` and the window records without the fields it does not know. Builds before c50fb6468
+  also still fail open (§15). Nothing in this build can change an older build's code. A forward-compatible save (unknown
+  members kept on every round trip) plus a "written by a newer version" marker would cover the next downgrade.
+- **Two instances on one profile.** The second start asks "profile in use — Continue anyway?" (default No). Answering Yes,
+  or a headless `-Embedding` start (which never asks), runs both, and each saves its own fleet and window records over the
+  other's.
+- **Held refs of an unknown session last one run.** After a failed fleet load, the run's saves write the run's own fleet,
+  so the next start knows the fleet again and lets those refs go. The §15 recovery folder holds the copy.
+- **`settings.json` read-modify-writes and the engine-init seeders** still replace `settings.json` when it read as defaults.
+  It is now always with a copy kept (#3).
+- **No on-screen notice** of held refs: `hooks.log` only.
+- **Claude's own files.** The `~/.claude/settings.json` `cleanupPeriodDays` write re-serializes that file through
+  Agentmaster's JSON model: equivalent JSON, but a number past 2^53 loses precision. It runs once, or when the cog's "Keep
+  Claude history" changes. `~/.claude.json`'s trust flag is a text splice under Claude's own lock, refused on a file it
+  cannot parse.
+
+**Tests (m5 harness):**
+- `TestHeldTabRefs`: the hold table, the merge, the published ids.
+- `TestEngineHeldSessions`: the engine's held set.
+- `TestTranscriptLookupLongPath`: a real transcript past MAX_PATH.
+- `TestStateFileOverrides`: the read mark, the tag files' refusals, and the race itself — a lock that ends 150 ms into an
+  add or a color pick must keep every tag and color — then the store's guarded delete and foreign member.
+- `TestMessagingStateFileLoad`: missing, good, torn, foreign and locked `state.json`.
+
+**Negative controls (m5).** Each of eight fixes was undone, one by one, in an isolated copy (the m5 harness on Q:), and the
+check that guards it must FAIL in that run. The eight fixes: the extended-length probe, the read mark, the tag registry's
+and the tag colors' update reads, the guarded delete, the focused-shell index, the engine's per-window erase, and the bot's
+fallback for a locked file. A check that holds the lock through the whole call missed the tag fix (the guard refuses then
+anyway), which is why the race checks exist.
+
+The `TerminalPage` glue (restore, capture, Manager-only, restore-fresh, the Telegram resume's `fresh` flag) is checked with
+`cl /Zs` against the Debug PCH. It is not built and not run. The change adds data members to `TerminalPage`, `Engine` and
+`MessagingService`, so the next build must purge.

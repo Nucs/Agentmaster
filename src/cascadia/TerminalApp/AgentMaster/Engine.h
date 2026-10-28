@@ -157,6 +157,13 @@ namespace Agentmaster
         // populated, then sees restored==true and proceeds. Guards only `restored` + the one-time load.
         std::mutex restoreMutex;
 
+        // Agentmaster (PERSISTENCE.md §16 — held tab refs): whether THIS start's read of sessions.json could be used
+        // (LoadSessionsForStartup's `usable`). False makes every reopened window HOLD the saved refs of sessions it does not
+        // know (ShouldHoldRestoreRef, HeldTabRefs.h): they are unknown because the fleet did not load, not because they are
+        // gone, and dropping them would write each window's record without its Claude tabs. Written once by the loader
+        // (TerminalPage::_RestoreClaudeSessions, under restoreMutex); read by every window's restore after that barrier.
+        std::atomic<bool> startupFleetLoadUsable{ true };
+
         // M10 (window-record claiming; PERSISTENCE.md §13). Each window claims at most ONE
         // persisted WindowRecord at startup so two windows never adopt the same windowId and
         // clobber each other's windows/<id>.json. The set is loaded once (lazily, under the
@@ -195,6 +202,15 @@ namespace Agentmaster
         // + 68 s of re-home for 56 tabs on 2026-10-16), so the Telegram bot holds its "closed" topic
         // deletes. Guarded by windowMutex.
         std::set<std::wstring> restoringWindowIds;
+
+        // Agentmaster (PERSISTENCE.md §16 — held tab refs): per live window, the sessions of the saved tabs it HOLDS: refs
+        // its restore could not bring back (Claude Code not found, a preset that cannot launch, a pane that failed to build)
+        // and keeps in its record until the tab exists again (HeldTabRefs.h). The Telegram bot asks it
+        // (IsSessionHeldByAWindow) before it deletes a topic as "closed": such a session reads live=false only because its
+        // tab could not be made at this start, and deleteForumTopic would take the topic's whole history with it.
+        // Replaced per window by NoteWindowHeldSessions; a window's entry goes with it in UnregisterLiveWindow (closing a
+        // window is the user's close of its tabs). Guarded by windowMutex.
+        std::map<std::wstring, std::set<std::wstring>> heldSessionIdsByWindow;
 
         // Agentmaster (discard Manager-only windows): the windowIds that have RESERVED a Manager-only
         // self-close (ReserveManagerOnlyClose returned true for them) but haven't finished tearing down
@@ -559,6 +575,29 @@ namespace Agentmaster
     /// </summary>
     /// <returns>The count; 0 when no window is restoring.</returns>
     size_t WindowsStillRestoring();
+
+    /// <summary>
+    /// Publishes the sessions whose saved tabs a window HOLDS (PERSISTENCE.md §16): refs its restore could not bring back
+    /// and keeps in its record (TerminalPage::_RestoreWindowTabs; HeldTabRefs.h HeldSessionIds). It replaces whatever the
+    /// window published before, so the window calls it again whenever its held set changes (a held tab came back, the
+    /// window closed one of its refs' sessions elsewhere). While a session is in a live window's set the Telegram bot keeps
+    /// its topic (<see cref="IsSessionHeldByAWindow"/>): without this, a start without Claude Code would delete the topic
+    /// (and its history) of every tab the restore could not make.
+    /// </summary>
+    /// <param name="windowId">The window's id (the one it registered with). An empty id is ignored.</param>
+    /// <param name="sessionIds">The held sessions; empty ids are skipped, and an empty list clears the window's entry.</param>
+    /// <exception cref="std::bad_alloc">The set could not be built; the window's previous entry then stays.</exception>
+    void NoteWindowHeldSessions(const std::wstring& windowId, const std::vector<std::wstring>& sessionIds);
+
+    /// <summary>
+    /// Whether a live window holds a saved tab of this session (<see cref="NoteWindowHeldSessions"/>). The Telegram bot reads
+    /// it before it deletes a topic as "closed" (ServiceHooks::sessionHeld): a held session is not closed — its tab could not
+    /// be made at this start, and it comes back when it can. Cheap: one lock and a lookup per live window.
+    /// </summary>
+    /// <param name="sessionId">The session id. An empty id is never held.</param>
+    /// <returns>True when at least one live window holds it.</returns>
+    /// <remarks>Never throws.</remarks>
+    bool IsSessionHeldByAWindow(const std::wstring& sessionId) noexcept;
 
     // Agentmaster: UI-thread stall WATCHDOG (the 2026-08-14 RDP freeze's observability gap — the UI
     // thread ground for 20+ minutes while every engine lane logged normally, so hooks.log contained
@@ -1042,6 +1081,8 @@ namespace Agentmaster
     std::vector<std::wstring> LiveWindowIdsIn(Engine& e);
     void NoteWindowRestoreDoneIn(Engine& e, const std::wstring& windowId);
     size_t WindowsStillRestoringIn(Engine& e);
+    void NoteWindowHeldSessionsIn(Engine& e, const std::wstring& windowId, const std::vector<std::wstring>& sessionIds);
+    bool IsSessionHeldByAWindowIn(Engine& e, const std::wstring& sessionId) noexcept;
     bool ReserveManagerOnlyCloseIn(Engine& e, const std::wstring& windowId);
     std::vector<RecoverableWindow> RecoverableWindowsIn(Engine& e);
     // The taskbar unread census on a LOCAL Engine (tests_taskbar.cpp): same contracts as the SharedEngine() forms above.

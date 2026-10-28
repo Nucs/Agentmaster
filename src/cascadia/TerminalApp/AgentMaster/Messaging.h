@@ -162,6 +162,40 @@ namespace Agentmaster::Msg
     /// </summary>
     using LaunchMenuSource = std::function<LaunchMenuInfo(const std::wstring& launchModelsSpec)>;
 
+    // ===== the state file (PERSISTENCE.md §16) ==================================================
+
+    /// <summary>
+    /// What <see cref="LoadMessagingStateFile"/> made of the bot's state file: the topic map to run with and where it came from.
+    /// The Bot API cannot list a forum's topics, so state.json is the ONLY record of which topic belongs to which session; a
+    /// start that reads it as empty orphans every topic and makes a new one for each tab.
+    /// </summary>
+    struct MessagingStateFileLoad
+    {
+        /// <summary>The state to run with: state.json's, the backup's, or an empty one (a first start, or nothing usable).</summary>
+        MessagingState state;
+        /// <summary>state.json's bytes (UTF-8) when <see cref="fromFile"/>, for the save's no-op gate; empty otherwise.</summary>
+        std::string fileBytes;
+        /// <summary>True when the state is state.json's own (read, parsed and understood).</summary>
+        bool fromFile{ false };
+        /// <summary>True when state.json could not be used and the backup (state.json.prev) was.</summary>
+        bool fromPrevious{ false };
+        /// <summary>A "[msg] ..." log line when state.json exists but could not be used; empty for a clean read or a missing file.</summary>
+        std::wstring note;
+    };
+
+    /// <summary>
+    /// Loads the Telegram bot's state file the guarded way (PERSISTENCE.md §16). A missing file is a first start (an empty
+    /// state). A file that is there but could not be read (a lock past the state-file reader's retries), is not JSON (a torn
+    /// write) or is JSON this build does not read falls back to the backup (state.json.prev) and is MARKED for the state-file
+    /// guard, so the service's first save keeps a copy of it ("state.json.could-not-read-&lt;stamp&gt;") before replacing it —
+    /// it used to read a locked file as "no topics" and save that empty map over it.
+    /// </summary>
+    /// <param name="stateFile">The state file's full path (&lt;profile&gt;\messaging\telegram\state.json).</param>
+    /// <returns>The state to run with, where it came from, and the log line for a file that could not be used.</returns>
+    /// <exception cref="std::bad_alloc">The state could not be built.</exception>
+    /// <remarks>The reads use the startup retry budget (seconds): it runs once per bot start, off the UI thread.</remarks>
+    MessagingStateFileLoad LoadMessagingStateFile(const std::wstring& stateFile);
+
     // ===== what the service needs from the app ================================================
 
     // Each member may be empty (the test harness): the service then answers "not available".
@@ -201,6 +235,12 @@ namespace Agentmaster::Msg
         // While it is above 0, a session that reads live=false may only be waiting for its tab to be re-homed,
         // so the service holds its "closed" topic deletes (the START-UP HOLD, §21.4). Empty = 0.
         std::function<size_t()> windowsRestoring;
+        // PERSISTENCE.md §16: whether a live window HOLDS a saved tab of the session — a ref its restore could not bring back
+        // (Claude Code not found at this start, a preset that cannot launch) and keeps in its record (Engine::
+        // IsSessionHeldByAWindow). Such a session reads live=false only because its tab could not be made, so its "closed"
+        // topic delete is held for as long as a window holds the ref: deleteForumTopic would take the topic's whole history.
+        // Called on the service's tick thread; must not throw (the service also contains a throw). Empty = nothing is held.
+        std::function<bool(const std::wstring& sessionId)> sessionHeld;
         // §21.25: every window's tab strip (Engine.h CollectWindowCensus), waiting at most `timeoutMs` for the slowest window —
         // the new-thread wizard's window step (each window's tab count, newest tab and titles). It BLOCKS until every window
         // answered or the time is up, and must never run on a window's UI thread: the service calls it on a worker thread of
@@ -1022,6 +1062,18 @@ namespace Agentmaster::Msg
         /// <param name="sessionId">The session whose topic goes.</param>
         /// <param name="reason">Why, for the log and the idle notice: "idle", "closed", "not a claude tab", "left its tab", ….</param>
         void _deleteTopic(const std::wstring& sessionId, const std::wstring& reason);
+        /// <summary>
+        /// PERSISTENCE.md §16 — the WINDOW HOLD: asks the app (ServiceHooks::sessionHeld) whether a live window holds a saved
+        /// tab of the session that its restore could not make. The topic sync keeps such a session's "closed" topic instead
+        /// of deleting it (deleteForumTopic takes the topic's whole history). Tick thread.
+        /// </summary>
+        /// <param name="sessionId">The session the sync would delete the topic of.</param>
+        /// <returns>
+        /// True when a window holds it — and also when the hook threw (logged, Rule #18): "held" only keeps a topic one tick
+        /// longer, while a wrong "not held" would delete one. False when no hook is set (the harness) or none holds it.
+        /// </returns>
+        /// <remarks>Never throws.</remarks>
+        bool _sessionHeldByAWindow(const std::wstring& sessionId) const noexcept;
         /// <summary>
         /// Tells the chat's MAIN VIEW which sessions went idle (§21.31, the user's request of 2026-10-19: "send a message in the all
         /// chat that &lt;title&gt; is idle"): once IdleNoticeDue says the collected deletes have settled, ONE silent line names them
@@ -2462,6 +2514,13 @@ namespace Agentmaster::Msg
         std::unordered_set<std::wstring> _seenLive;
         bool _startupHoldLogged{ false };
         bool _startupHoldOpen{ false };
+        /// <summary>
+        /// PERSISTENCE.md §16 — the WINDOW HOLD on "closed" topic deletes: how many topics the last tick kept because a window
+        /// holds a saved tab of their session (`ServiceHooks::sessionHeld`). Unlike the start-up hold it has no time limit —
+        /// a held session stays held until its tab exists again or its window closes — so its log line is written when this
+        /// count CHANGES, not once per start (the plan re-asks every tick). Tick thread only.
+        /// </summary>
+        size_t _windowHeldClosesLogged{ 0 };
         /// <summary>
         /// The SECRETARY PROBE is due (a business connection arrived, or one was stored with no verdict yet) and
         /// waits for the Search topic to exist; the tick loop runs it. `_secretaryFailures` counts consecutive

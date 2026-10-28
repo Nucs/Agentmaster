@@ -14,7 +14,7 @@
 // TU — TerminalApp.dll, the m5 test harness, agentmaster-cli — would otherwise need its own link edit.
 #pragma comment(lib, "version.lib")
 
-#include <algorithm> // std::all_of — BuildPwshHostedCommandline's token-variable name guard
+#include <algorithm> // std::all_of — BuildPwshHostedCommandline's token-variable name guard; std::replace — ExtendedLengthPathIfLong
 #include <atomic> // Agentmaster (perf): AgentmasterStateDir's rate-limited directory re-assert
 #include <cstdio>
 #include <filesystem>
@@ -1550,13 +1550,47 @@ exit 0
         return ReadProcessCwd(claudePid);
     }
 
+    // Agentmaster (PERSISTENCE.md §16): the Win32 EXTENDED-LENGTH form of an absolute path that reaches MAX_PATH — "\\?\C:\..."
+    // or "\\?\UNC\server\share\..." — else the path unchanged. Claude names a project folder after the whole working folder
+    // (every separator a dash, up to ~200 characters), so <home>\.claude\projects\<folder>\<id>.jsonl passes 260 characters
+    // for a deep working folder, and a plain GetFileAttributesW then reports the transcript MISSING (ERROR_PATH_NOT_FOUND)
+    // unless the machine enabled long paths and the exe opted in. A missing transcript makes a restore start a fresh
+    // conversation, which Claude refuses for an id whose transcript exists — so the tab could never resume.
+    //   path    — the path to probe. Forward slashes become backslashes (the extended form does no normalization).
+    //   returns — the extended form when the path is absolute and at least MAX_PATH - 1 characters long; otherwise `path`
+    //             as given (a short path, a relative one — which has no extended form — or one already in that form).
+    //   throws  — std::bad_alloc only.
+    static std::wstring ExtendedLengthPathIfLong(const std::wstring& path)
+    {
+        if (path.size() < MAX_PATH - 1 || path.rfind(L"\\\\?\\", 0) == 0)
+        {
+            return path;
+        }
+        std::wstring p = path;
+        std::replace(p.begin(), p.end(), L'/', L'\\');
+        if (p.size() >= 3 && p[1] == L':' && p[2] == L'\\')
+        {
+            return L"\\\\?\\" + p; // a drive path
+        }
+        if (p.rfind(L"\\\\", 0) == 0)
+        {
+            return L"\\\\?\\UNC\\" + p.substr(2); // a UNC path: \\server\share\... -> \\?\UNC\server\share\...
+        }
+        return path; // relative: Windows has no extended form for it, so probe it as it is
+    }
+
     std::wstring ResolveClaudeTranscriptPath(std::wstring_view sessionId)
+    {
+        return ResolveClaudeTranscriptPathIn(ClaudeProjectsDir(), sessionId);
+    }
+
+    std::wstring ResolveClaudeTranscriptPathIn(const std::wstring& projectsDir, std::wstring_view sessionId)
     {
         if (sessionId.empty())
         {
             return {};
         }
-        const std::wstring projects = ClaudeProjectsDir();
+        const std::wstring& projects = projectsDir;
         if (projects.empty())
         {
             return {};
@@ -1585,7 +1619,9 @@ exit 0
                 continue;
             }
             const std::wstring candidate = projects + L"\\" + name + L"\\" + leaf;
-            const DWORD attr = ::GetFileAttributesW(candidate.c_str());
+            // Probed in the extended-length form when the path is that long (ExtendedLengthPathIfLong); `found` keeps the plain
+            // form every reader and log line has always received.
+            const DWORD attr = ::GetFileAttributesW(ExtendedLengthPathIfLong(candidate).c_str());
             if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0)
             {
                 found = candidate;

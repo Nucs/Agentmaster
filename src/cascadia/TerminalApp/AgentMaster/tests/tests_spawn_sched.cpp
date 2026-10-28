@@ -7265,3 +7265,63 @@ void TestDialogEchoCoverage()
     CHECK(scanned > 300, "coverage: the scan read the source tree");
     CHECK(violations == 0, "coverage: every dialog in src\\cascadia goes through DialogEcho.h (or is allowlisted with a reason)");
 }
+
+// ===== PERSISTENCE.md §16: the transcript lookup past MAX_PATH ===========================================================
+//
+// A restore resumes a conversation only when ResolveClaudeTranscriptPath finds its transcript, and otherwise starts a fresh
+// conversation under the same id — which Claude refuses while the transcript exists. Claude names a project folder after the
+// whole working folder, so for a deep one <projects>\<folder>\<id>.jsonl passes 260 characters, and the plain probe reported
+// it missing: such a session could never resume from its tab. These checks build that path for real (in a temp folder) and
+// require the lookup to find it — returning the plain form, as every reader and log line expects.
+
+void TestTranscriptLookupLongPath()
+{
+    std::wprintf(L"Transcript lookup (PERSISTENCE.md 16: a transcript past MAX_PATH is found, so its tab resumes):\n");
+    wchar_t tmp[MAX_PATH]{};
+    ::GetTempPathW(MAX_PATH, tmp);
+    const std::wstring root = std::wstring{ tmp } + L"am-lookup-" + NewSessionId();
+    const std::wstring projects = root + L"\\projects";
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path{ projects }, ec);
+    // Creates a transcript of one line at `path`, through the extended-length form (the folders past 248 characters and the
+    // file past 260 cannot be made otherwise). Returns whether the file now exists.
+    const auto plant = [](const std::wstring& dir, const std::wstring& file) {
+        ::CreateDirectoryW((L"\\\\?\\" + dir).c_str(), nullptr);
+        const HANDLE h = ::CreateFileW((L"\\\\?\\" + file).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE)
+        {
+            return false;
+        }
+        DWORD wrote = 0;
+        ::WriteFile(h, "{}\n", 3, &wrote, nullptr);
+        ::CloseHandle(h);
+        return wrote == 3;
+    };
+
+    // A short project folder: the lookup as it always worked.
+    const std::wstring shortId = L"5e55a0a0-0000-4000-8000-0000000000b0";
+    const std::wstring shortDir = projects + L"\\K--work-short";
+    const std::wstring shortFile = shortDir + L"\\" + shortId + L".jsonl";
+    CHECK(plant(shortDir, shortFile), "lookup: (setup) a transcript in a short project folder");
+    CHECK(ResolveClaudeTranscriptPathIn(projects, shortId) == shortFile, "lookup: a short path is found, as before");
+
+    // A deep working folder's project name: ~220 characters (under NTFS's 255 per name), so the transcript passes MAX_PATH.
+    const std::wstring longId = L"5e55a0a0-0000-4000-8000-0000000000b1";
+    const std::wstring longDir = projects + L"\\K--" + std::wstring(220, L'a');
+    const std::wstring longFile = longDir + L"\\" + longId + L".jsonl";
+    CHECK(longFile.size() >= MAX_PATH, "lookup: (setup) the transcript path is at least MAX_PATH characters");
+    CHECK(plant(longDir, longFile), "lookup: (setup) a transcript in a long project folder");
+    if (::GetFileAttributesW(longFile.c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
+        // The case the fix is for (no machine-wide long paths for this exe): say so, so a run on such a machine shows the
+        // check below exercised it. On a machine that has them, the plain probe also works and the check still must pass.
+        std::wprintf(L"  (the plain probe misses this transcript here - the extended-length probe is what finds it)\n");
+    }
+    CHECK(ResolveClaudeTranscriptPathIn(projects, longId) == longFile, "lookup: a transcript past MAX_PATH is FOUND, in its plain form (it was reported missing)");
+    CHECK(ResolveClaudeTranscriptPathIn(projects, L"5e55a0a0-0000-4000-8000-0000000000b2").empty(), "lookup: an id with no transcript is still not found");
+    CHECK(ResolveClaudeTranscriptPathIn(L"", longId).empty() && ResolveClaudeTranscriptPathIn(projects, L"").empty(), "lookup: an empty folder or id finds nothing");
+    CHECK(ResolveClaudeTranscriptPathIn(root + L"\\no-such-folder", longId).empty(), "lookup: a projects folder that is not there finds nothing");
+
+    // The extended-length form removes the whole tree, the long names included.
+    std::filesystem::remove_all(std::filesystem::path{ L"\\\\?\\" + root }, ec);
+}

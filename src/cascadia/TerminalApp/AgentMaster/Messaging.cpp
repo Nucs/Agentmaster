@@ -26,6 +26,7 @@
 #include "Scheduler.h"
 #include "SessionRegistry.h"
 #include "SessionStore.h" // the directory's tags (§21.16): LoadAllSessionTags, LoadKnownTags, LoadAllTagColors, ResolveTagDisplayHex
+#include "StateFileGuard.h" // PERSISTENCE.md §16: state.json's read (ReadStateFileUtf8) and the replace guard (PrepareStateFileReplace)
 #include "TelegramApi.h"
 #include "TranscriptTurns.h" // ParseTranscriptJsonl
 
@@ -1490,40 +1491,84 @@ namespace Agentmaster::Msg
 
     // ===== the state file ====================================================================
 
-    void MessagingService::_loadState()
+    MessagingStateFileLoad LoadMessagingStateFile(const std::wstring& stateFile)
     {
-        MessagingState loaded;
-        const std::string bytes = ReadFileBytes(_stateFile);
-        bool loadedFromFile = false; // the state came from state.json itself (not the backup, not empty)
-        if (!bytes.empty())
+        MessagingStateFileLoad out;
+        // The startup budget: the topic map is read once per bot start, and every topic the bot keeps depends on it.
+        const StateFileRead read = ReadStateFileUtf8(stateFile, kStartupStateReadRetryBudgetMs);
+        if (read.status == StateFileStatus::Missing)
         {
-            if (const auto doc = json::Parse(Profiles::detail::Utf8ToWide(bytes)))
+            return out; // the bot's first start in this profile: no topics yet, nothing to keep
+        }
+        std::wstring why;
+        if (read.status == StateFileStatus::Read)
+        {
+            if (const auto doc = json::Parse(read.text))
             {
                 if (auto s = StateFromJson(*doc))
                 {
-                    loaded = std::move(*s);
-                    loadedFromFile = true;
+                    out.state = std::move(*s);
+                    out.fromFile = true;
+                    // The save's no-op gate compares against these bytes. Re-encoded from the text (a BOM the reader dropped
+                    // is not part of it): for every file this service wrote they are the file's own bytes; for any other,
+                    // the worst case is one save that writes what the file already says.
+                    out.fileBytes = Profiles::detail::WideToUtf8(read.text);
+                    // Loaded: the guard's first replace of it needs no second read (MarkStateFileSafeToReplace's contract).
+                    MarkStateFileSafeToReplace(stateFile);
+                    return out;
                 }
+                why = L"it is JSON but not a state object this build reads";
             }
             else
             {
-                // A torn file: try the previous copy (refreshed at most once a minute by the saves, StatePrevCopyDue), else
-                // start fresh — the topics then become orphans the bot cannot find (§10.5) and new ones are created.
-                const std::string prev = ReadFileBytes(_stateFile + L".prev");
-                if (const auto doc2 = prev.empty() ? std::nullopt : json::Parse(Profiles::detail::Utf8ToWide(prev)))
+                why = L"its content is not valid JSON (a torn or damaged write)";
+            }
+            // Read but not usable: the saves would write a map that did not come from it, so its first replace keeps a copy
+            // of it ("state.json.could-not-read-<stamp>"). (An UNREADABLE read was marked by the reader itself.)
+            MarkStateFileKeepBeforeReplace(stateFile);
+        }
+        else
+        {
+            why = L"it could not be opened or read (Windows error " + std::to_wstring(read.error) + L")";
+        }
+        // state.json is there but this start cannot use it: the previous copy (refreshed at most once a minute by the saves,
+        // from a state.json this service could read — StatePrevCopyDue) is the topic map to run with. Without it every topic
+        // would become an orphan the bot cannot find (§10.5), a new one would be made for each tab, and the first save would
+        // write that empty map over state.json — which the keep mark now copies aside first in every case.
+        const StateFileRead prev = ReadStateFileUtf8(stateFile + L".prev", kStartupStateReadRetryBudgetMs);
+        if (prev.status == StateFileStatus::Read)
+        {
+            if (const auto doc2 = json::Parse(prev.text))
+            {
+                if (auto s = StateFromJson(*doc2))
                 {
-                    if (auto s = StateFromJson(*doc2))
-                    {
-                        loaded = std::move(*s);
-                        _log(L"[msg] state.json was unreadable; the previous copy was used");
-                    }
-                }
-                else
-                {
-                    _log(L"[msg] state.json was unreadable and no previous copy could be read: starting with no topic map");
+                    out.state = std::move(*s);
+                    out.fromPrevious = true;
+                    out.note = L"[msg] state.json could not be used (" + why +
+                               L"); the previous copy (state.json.prev) was used, and state.json is kept aside before it is next written";
+                    return out;
                 }
             }
         }
+        out.note = L"[msg] state.json could not be used (" + why +
+                   L") and no previous copy could be read: starting with no topic map; state.json is kept aside before it is next written";
+        return out;
+    }
+
+    void MessagingService::_loadState()
+    {
+        // PERSISTENCE.md §16: the guarded load (LoadMessagingStateFile) — it tells a missing state.json from one that cannot be
+        // read, parsed or understood, falls back to the backup for all three (it used to for a torn file only, and a LOCKED
+        // file read as "no topics" and was then saved over with an empty map), and marks a file it could not use so the guard
+        // keeps a copy of it before the first save replaces it.
+        MessagingStateFileLoad load = LoadMessagingStateFile(_stateFile);
+        if (!load.note.empty())
+        {
+            _log(load.note);
+        }
+        MessagingState loaded = std::move(load.state);
+        const bool loadedFromFile = load.fromFile; // the state came from state.json itself (not the backup, not empty)
+        const std::string bytes = std::move(load.fileBytes); // state.json's bytes when loadedFromFile, else empty
         {
             // What the file holds now: a save that would write exactly these bytes writes nothing (_saveStateIfDirty). A state
             // taken from the backup, or a fresh one, has no such bytes, so its first save always writes. A new bot start also
@@ -1596,9 +1641,17 @@ namespace Agentmaster::Msg
                 _lastPrevCopyMs = now;
             }
         }
-        if (!WriteFileAtomic(_stateFile, bytes))
+        // PERSISTENCE.md §16: the state-file guard before the replace, as for every other state file — it refuses a state.json
+        // it cannot read, and keeps a copy of one this start could not use (LoadMessagingStateFile marked it) or that does not
+        // parse, before the map in memory replaces it. A refusal is a failed write: the state stays dirty and the next tick
+        // tries again (the guard logged the refusal, once per quiet window).
+        const bool guardAllows = PrepareStateFileReplace(_stateFile);
+        if (!guardAllows || !WriteFileAtomic(_stateFile, bytes))
         {
-            _log(L"[msg] state.json could not be written (error " + std::to_wstring(::GetLastError()) + L")");
+            if (guardAllows)
+            {
+                _log(L"[msg] state.json could not be written (error " + std::to_wstring(::GetLastError()) + L")");
+            }
             // Dirty again, so the next tick tries again (a STRUCTURAL mark, so it retries within kStateSaveGapMs). The bounded
             // wait of the app-close flush applies here too: the process ends next, and the mark only matters if it does not.
             // `_lastSavedStateBytes` keeps the old file's bytes, which is what a failed atomic write leaves on disk.
@@ -1611,6 +1664,9 @@ namespace Agentmaster::Msg
         }
         _lastSavedStateBytes = std::move(bytes);
         _stateFileReadable = true;
+        // The file holds what this service just wrote: stamp it, so the guard's next check of it is one stat until someone
+        // else changes it (and a keep mark from the load is spent: the copy was made before this write).
+        MarkStateFileSafeToReplace(_stateFile);
     }
 
     // ===== the threads =======================================================================
@@ -4187,6 +4243,7 @@ namespace Agentmaster::Msg
         }
         size_t apiOps = 0;
         size_t heldCloses = 0;
+        size_t windowHeldCloses = 0; // PERSISTENCE.md §16: "closed" deletes kept because a window holds the session's tab
         bool createsPlanned = false;
         for (const auto& op : ops)
         {
@@ -4203,6 +4260,16 @@ namespace Agentmaster::Msg
                     // yet". The plan re-emits the delete every tick; once the session comes back live the plan
                     // stops asking, and a session still closed when the hold ends is deleted then.
                     ++heldCloses;
+                    break;
+                }
+                if (op.reason == L"closed" && _sessionHeldByAWindow(op.sessionId))
+                {
+                    // The WINDOW HOLD (PERSISTENCE.md §16): a window keeps this session's saved tab although its restore
+                    // could not make it (Claude Code not found at this start, a preset that cannot launch). The user closed
+                    // nothing, so the topic and its history stay; the plan re-asks every tick, and the delete happens only
+                    // once no window holds the ref any more (the tab came back — then the plan stops asking — or its
+                    // window was closed).
+                    ++windowHeldCloses;
                     break;
                 }
                 if (apiOps++ < kTopicOpsPerTick)
@@ -4287,6 +4354,14 @@ namespace Agentmaster::Msg
             // Once per start: the plan re-asks every tick, and the count only shrinks as the windows re-home.
             _startupHoldLogged = true;
             _log(L"[msg] start-up hold: " + std::to_wstring(heldCloses) + L" topic(s) kept until their sessions re-home (" + std::to_wstring(restoring) + L" window(s) still restoring; at least " + std::to_wstring(kStartupCloseHoldMinMs / 1000) + L" s after the start)");
+        }
+        if (windowHeldCloses != _windowHeldClosesLogged)
+        {
+            // Written when the count changes (the hold has no end of its own, and the plan re-asks every tick): the log
+            // then shows when the window hold began, how far it shrank as tabs came back, and when it ended (0).
+            _windowHeldClosesLogged = windowHeldCloses;
+            _log(L"[msg] window hold: " + std::to_wstring(windowHeldCloses) +
+                 L" topic(s) kept because a window holds their session's saved tab, which its restore could not make (PERSISTENCE.md 16)");
         }
         if (_recreating && !createsPlanned)
         {
@@ -5807,6 +5882,25 @@ namespace Agentmaster::Msg
             _renameTopic(toSessionId, title, s->state); // refreshes the card on success
         }
         _refreshCard(toSessionId, true);
+    }
+
+    bool MessagingService::_sessionHeldByAWindow(const std::wstring& sessionId) const noexcept
+    {
+        if (!_hooks.sessionHeld)
+        {
+            return false; // the harness, or an app without windows: nothing can be held
+        }
+        try
+        {
+            return _hooks.sessionHeld(sessionId);
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: "held" — the sync keeps the topic for this tick and asks again at the next one, where a
+            // wrong "not held" would delete the topic and its history for good.
+            LogSwallowedException(L"MessagingService::_sessionHeldByAWindow");
+            return true;
+        }
     }
 
     void MessagingService::_deleteTopic(const std::wstring& sessionId, const std::wstring& reason)

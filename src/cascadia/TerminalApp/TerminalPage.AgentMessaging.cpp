@@ -372,8 +372,11 @@ namespace winrt::TerminalApp::implementation
                 const auto before = _sessionRegistry ? _sessionRegistry->GetWithoutQueue(request.sessionId) : std::nullopt;
                 wasOpen = before && before->live;
                 openedId = _ResumeSessionFromDisk(request.sessionId, request.dir, request.title);
-                // A resume whose transcript was gone opens a FRESH session in the same folder (Rule #6) under a new id.
-                fresh = !wasOpen && !openedId.empty() && openedId != request.sessionId;
+                // A resume whose transcript was gone opens a FRESH conversation in the same folder (Rule #6) — under the
+                // SAME id since PERSISTENCE.md §16 (a restore never re-keys a session), so the id no longer tells it: the
+                // transcript does. Read after the launch: a resumed conversation's transcript exists, and a fresh one has
+                // none until its first turn. An id change still counts too (the belt for any path that re-keys).
+                fresh = !wasOpen && !openedId.empty() && (openedId != request.sessionId || !::Agentmaster::ClaudeConversationExists(openedId));
                 break;
             }
             case Kind::Fork:

@@ -233,12 +233,25 @@ namespace Agentmaster
             {
                 return true; // unparseable: kept aside by the write's guard before it is replaced
             }
+            bool foreignMember = false; // a member this version's string store cannot carry
             for (const auto& [k, v] : parsed->members)
             {
                 if (v.type == json::Value::Type::Str)
                 {
                     rec[k] = v.str;
                 }
+                else
+                {
+                    foreignMember = true;
+                }
+            }
+            if (foreignMember)
+            {
+                // Agentmaster (PERSISTENCE.md §16): every value this version writes is a string, so a member that is not one
+                // came from somewhere else — a newer Agentmaster, or a hand edit. The record type cannot hold it, so the
+                // write (or, when the record empties, the delete — WriteRecord) would drop it silently: the file is kept
+                // aside first ("<sid>.json.could-not-read-<stamp>", which no *.json scan reads), once per such record.
+                MarkStateFileKeepBeforeReplace(FilePath(storeDir, sid));
             }
             return true;
         }
@@ -569,7 +582,16 @@ namespace Agentmaster
             const std::wstring path = FilePath(storeDir, sid);
             if (rec.empty())
             {
+                // Agentmaster (PERSISTENCE.md §16): a delete REPLACES the record with nothing, so it meets the same guard as
+                // a write. Every caller read the record fresh first (ReadRecordForUpdate: an unreadable one never gets here),
+                // but the guard still refuses a file it cannot read now, and keeps a copy of one that does not parse or that
+                // the read marked (a member this version cannot carry) — the delete was the one record write without it.
+                if (!PrepareStateFileReplace(path))
+                {
+                    return false; // logged by the guard; the record keeps its bytes, and the caller's next write retries
+                }
                 ::DeleteFileW(path.c_str());
+                MarkStateFileSafeToReplace(path); // the file is gone: the guard forgets its entry (a missing file needs no judging)
                 std::lock_guard guard{ g_recCacheMtx };
                 // writtenAt = the new write count: a reader that parsed the file before this delete must
                 // not store its copy over the "absent" entry (WithRecordCached's write-order guard).
@@ -1241,22 +1263,16 @@ namespace Agentmaster
         std::unordered_map<std::wstring, TagColorsCacheEntry> g_tagColorsCache; // key: RecCacheKey(TagColorsPath(dir))
         std::unordered_map<std::wstring, KnownTagsCacheEntry> g_knownTagsCache; // key: RecCacheKey(KnownTagsPath(dir))
 
-        // Read + parse + validate <stateDir>\tag-colors.json straight from disk — the body LoadAllTagColorsIn
-        // had before the cache. Callers (both hold g_tagFilesMtx): the cached read on a stamp change, and
-        // SetTagColorIn's read-modify-write, which must see the freshest file (see the note above).
-        //   stateDir - the profile directory (non-empty; the callers checked).
-        //   returns  - folded tag name -> color; empty when the file is missing, unreadable, over 1 MiB or
-        //              not a JSON object. An entry with a malformed color is left out.
-        //   throws   - std::bad_alloc.
-        std::map<std::wstring, std::wstring> ReadTagColorsFile(const std::wstring& stateDir)
+        // Parse tag-colors.json's TEXT into the folded name -> color map — the one parser behind the display read
+        // (ReadTagColorsFile) and the read-modify-write's read (ReadTagColorsFileForUpdate), so both see the same map.
+        //   text    - the file's content as UTF-16.
+        //   returns - folded tag name -> "#AARRGGBB"; empty when the text is not a JSON object. An entry with a malformed
+        //             color, or a name that normalizes to nothing, is left out.
+        //   throws  - std::bad_alloc.
+        std::map<std::wstring, std::wstring> ParseTagColorsText(const std::wstring& text)
         {
             std::map<std::wstring, std::wstring> out;
-            const std::string bytes = ReadWhole(TagColorsPath(stateDir), 1u << 20);
-            if (bytes.empty())
-            {
-                return out; // no file yet / unreadable — every tag falls back to its hash color
-            }
-            const auto parsed = json::Parse(Utf8ToWide(bytes.data(), bytes.size()));
+            const auto parsed = json::Parse(text);
             if (!parsed || parsed->type != json::Value::Type::Obj)
             {
                 return out;
@@ -1276,6 +1292,52 @@ namespace Agentmaster
                 }
             }
             return out;
+        }
+
+        // Agentmaster (PERSISTENCE.md §16): the READ-MODIFY-WRITE read of tag-colors.json — SetTagColorIn's. The display read
+        // (ReadTagColorsFile) reads a missing, locked or over-1-MiB file alike as "no colors", which is right for painting
+        // ribbons and wrong for a write: a lock (an antivirus scan, a sync client) that ended before the write let the guard
+        // find a readable file and replace every picked color with the one being set. This read tells a file that cannot be
+        // read from one that is not there (the state-file reader's short retries; an unreadable read marks the file for the
+        // guard), and has no 1 MiB cap.
+        //   stateDir - the profile directory (non-empty; the caller checked).
+        //   out      - receives the map (cleared first; empty for a missing or unparseable file — an unparseable one is kept
+        //              aside by the write's guard before it is replaced).
+        //   returns  - false when the file exists but could not be read: the caller must NOT write. True otherwise.
+        //   throws   - std::bad_alloc.
+        bool ReadTagColorsFileForUpdate(const std::wstring& stateDir, std::map<std::wstring, std::wstring>& out)
+        {
+            out.clear();
+            const StateFileRead read = ReadStateFileUtf8(TagColorsPath(stateDir));
+            if (read.status == StateFileStatus::Unreadable)
+            {
+                return false; // logged by the reader ([persist-read-fail])
+            }
+            if (read.status == StateFileStatus::Read)
+            {
+                out = ParseTagColorsText(read.text);
+            }
+            return true;
+        }
+
+        // Read + parse + validate <stateDir>\tag-colors.json straight from disk — the body LoadAllTagColorsIn
+        // had before the cache: the DISPLAY read. Caller (holds g_tagFilesMtx): the cached read on a stamp
+        // change. SetTagColorIn's read-modify-write reads through ReadTagColorsFileForUpdate instead, which tells
+        // an unreadable file from a missing one (PERSISTENCE.md §16).
+        //   stateDir - the profile directory (non-empty; the callers checked).
+        //   returns  - folded tag name -> color; empty when the file is missing, unreadable, over 1 MiB or
+        //              not a JSON object. An entry with a malformed color is left out.
+        //   throws   - std::bad_alloc.
+        std::map<std::wstring, std::wstring> ReadTagColorsFile(const std::wstring& stateDir)
+        {
+            std::map<std::wstring, std::wstring> out;
+            const std::string bytes = ReadWhole(TagColorsPath(stateDir), 1u << 20);
+            if (bytes.empty())
+            {
+                return out; // no file yet / unreadable — every tag falls back to its hash color
+            }
+            // The shared parser (ParseTagColorsText) — the display read and the update read must see the same map.
+            return ParseTagColorsText(Utf8ToWide(bytes.data(), bytes.size()));
         }
     }
 
@@ -1341,8 +1403,13 @@ namespace Agentmaster
             // state, and two writers cannot lose one another's color (see the note above the two caches).
             std::lock_guard guard{ g_tagFilesMtx };
             // Freshest-disk read: straight from the file, never through the cache (a stale copy written
-            // back would undo another writer's color — the record store's RMW rule).
-            auto all = ReadTagColorsFile(stateDir);
+            // back would undo another writer's color — the record store's RMW rule). PERSISTENCE.md §16: the update read,
+            // which refuses a file it cannot read — writing then would replace every picked color with this one.
+            std::map<std::wstring, std::wstring> all;
+            if (!ReadTagColorsFileForUpdate(stateDir, all))
+            {
+                return false; // the file exists but could not be read: no write (the guard keeps it; the next set retries)
+            }
             const auto it = all.find(folded);
             if (hexOrEmpty.empty())
             {
@@ -1495,22 +1562,16 @@ namespace Agentmaster
             return true;
         }
 
-        // Read + parse <stateDir>\tags.json straight from disk — the body LoadKnownTagsIn had before the
-        // cache. Callers (all hold g_tagFilesMtx): the cached read on a stamp change, and the Register /
-        // Unregister read-modify-writes, which must see the freshest file (the note above the two caches).
-        //   stateDir - the profile directory (non-empty; the callers checked).
-        //   returns  - the registered names: display-cased, CI-deduped, in registration order; empty when
-        //              the file is missing, unreadable, over 1 MiB or not a JSON array.
-        //   throws   - std::bad_alloc.
-        std::vector<std::wstring> ReadKnownTagsFile(const std::wstring& stateDir)
+        // Parse tags.json's TEXT into the registered names — the one parser behind the display read (ReadKnownTagsFile) and
+        // the read-modify-write's read (ReadKnownTagsFileForUpdate), so both see the same list.
+        //   text    - the file's content as UTF-16.
+        //   returns - the registered names: display-cased, CI-deduped, in registration order; empty when the text is not a
+        //             JSON array (malformed -> "no registry", never a crash of the caller).
+        //   throws  - std::bad_alloc.
+        std::vector<std::wstring> ParseKnownTagsText(const std::wstring& text)
         {
             std::vector<std::wstring> out;
-            const std::string bytes = ReadWhole(KnownTagsPath(stateDir), 1u << 20);
-            if (bytes.empty())
-            {
-                return out; // no registry yet — the universe is purely session-derived
-            }
-            const auto parsed = json::Parse(Utf8ToWide(bytes.data(), bytes.size()));
+            const auto parsed = json::Parse(text);
             if (!parsed || parsed->type != json::Value::Type::Arr)
             {
                 return out; // malformed -> "no registry" (never crashes the caller)
@@ -1529,6 +1590,51 @@ namespace Agentmaster
                 }
             }
             return out;
+        }
+
+        // Agentmaster (PERSISTENCE.md §16): the READ-MODIFY-WRITE read of tags.json — Register / Unregister's. The display
+        // read (ReadKnownTagsFile) reads a missing, locked or over-1-MiB registry alike as empty; for a write that meant a
+        // lock that ended before the write let the guard find a readable file and replace the whole registry — every tag the
+        // user kept at ·0 carriers (Rule #17) — with the one being added. This read tells a file that cannot be read from one
+        // that is not there (the state-file reader's retries; an unreadable read marks the file for the guard), no 1 MiB cap.
+        //   stateDir - the profile directory (non-empty; the callers checked).
+        //   out      - receives the names (cleared first; empty for a missing or unparseable file — an unparseable one is
+        //              kept aside by the write's guard before it is replaced).
+        //   returns  - false when the file exists but could not be read: the caller must NOT write. True otherwise.
+        //   throws   - std::bad_alloc.
+        bool ReadKnownTagsFileForUpdate(const std::wstring& stateDir, std::vector<std::wstring>& out)
+        {
+            out.clear();
+            const StateFileRead read = ReadStateFileUtf8(KnownTagsPath(stateDir));
+            if (read.status == StateFileStatus::Unreadable)
+            {
+                return false; // logged by the reader ([persist-read-fail])
+            }
+            if (read.status == StateFileStatus::Read)
+            {
+                out = ParseKnownTagsText(read.text);
+            }
+            return true;
+        }
+
+        // Read + parse <stateDir>\tags.json straight from disk — the body LoadKnownTagsIn had before the
+        // cache: the DISPLAY read. Caller (holds g_tagFilesMtx): the cached read on a stamp change. The Register /
+        // Unregister read-modify-writes read through ReadKnownTagsFileForUpdate instead, which tells an unreadable
+        // registry from a missing one (PERSISTENCE.md §16).
+        //   stateDir - the profile directory (non-empty; the callers checked).
+        //   returns  - the registered names: display-cased, CI-deduped, in registration order; empty when
+        //              the file is missing, unreadable, over 1 MiB or not a JSON array.
+        //   throws   - std::bad_alloc.
+        std::vector<std::wstring> ReadKnownTagsFile(const std::wstring& stateDir)
+        {
+            std::vector<std::wstring> out;
+            const std::string bytes = ReadWhole(KnownTagsPath(stateDir), 1u << 20);
+            if (bytes.empty())
+            {
+                return out; // no registry yet — the universe is purely session-derived
+            }
+            // The shared parser (ParseKnownTagsText) — the display read and the update read must see the same list.
+            return ParseKnownTagsText(Utf8ToWide(bytes.data(), bytes.size()));
         }
     }
 
@@ -1573,7 +1679,13 @@ namespace Agentmaster
             return false;
         }
         std::lock_guard guard{ g_tagFilesMtx }; // the whole read-modify-write (WriteKnownTags relies on it)
-        auto known = ReadKnownTagsFile(stateDir); // freshest-disk read-modify-write, never the cache
+        // Freshest-disk read-modify-write, never the cache — through the update read (PERSISTENCE.md §16): a registry that
+        // cannot be read is not rewritten (that would replace every kept tag with this one).
+        std::vector<std::wstring> known;
+        if (!ReadKnownTagsFileForUpdate(stateDir, known))
+        {
+            return false;
+        }
         const std::wstring folded = FoldTagName(name);
         for (const auto& k : known)
         {
@@ -1598,7 +1710,13 @@ namespace Agentmaster
             return false;
         }
         std::lock_guard guard{ g_tagFilesMtx }; // the whole read-modify-write (WriteKnownTags relies on it)
-        auto known = ReadKnownTagsFile(stateDir); // freshest-disk read-modify-write, never the cache
+        // Freshest-disk read-modify-write, never the cache — through the update read (PERSISTENCE.md §16): a registry that
+        // cannot be read is not rewritten.
+        std::vector<std::wstring> known;
+        if (!ReadKnownTagsFileForUpdate(stateDir, known))
+        {
+            return false;
+        }
         const size_t before = known.size();
         known.erase(std::remove_if(known.begin(), known.end(), [&](const std::wstring& k) { return FoldTagName(k) == folded; }),
                     known.end());
