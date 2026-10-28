@@ -1,6 +1,6 @@
 # Agentmaster — voice notes: a Telegram voice note becomes the session's prompt
 
-> **Status (2026-10-27; the integration in dev since 0.0.1.38, 2026-10-28, not in production): the POC and the integration are WRITTEN.** The POC (`tools/voice-poc/`, Python)
+> **Status (2026-10-27; the integration in dev since 0.0.1.38 and in production since 0.8.0.1, both 2026-10-28): the POC and the integration are WRITTEN.** The POC (`tools/voice-poc/`, Python)
 > runs on this PC and measured the engines below. On the owner's three recordings the full pipeline — Whisper
 > large-v3-turbo with the session's glossary, a second engine's hearing (Parakeet, FUSION), the dictionary pass and the
 > CORRECTION by Claude Sonnet 5.5 — came out **word for word: 0.0 % WER, every term with its exact spelling, 3 runs of 3**
@@ -13,8 +13,9 @@
 >
 > The owner's recordings of the evaluation set: §7.1. Their results: §4.4.
 >
-> **2026-10-28, NOT BUILT:** a note in a NEW thread (writing in "All" opens one) starts its session like a typed message
-> there and becomes its first prompt (§3). Dev 0.0.1.38 still answers such a note "this thread has no session".
+> **2026-10-28, in dev since 0.0.1.39, not in production:** a note in a NEW thread (writing in "All" opens one) starts its
+> session like a typed message there and becomes its first prompt (§3). Production 0.8.0.1 still answers such a note "this
+> thread has no session".
 
 ## 1. The ask and the shape of the answer
 

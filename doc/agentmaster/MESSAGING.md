@@ -10,10 +10,11 @@
 > 0.6.8.21 since 2026-10-17 12:01 with 413 topics (§21.12.5); §21.17 = every title opens its topic, the "👤 You" line's title row, turns that quote turns, and a NEW THREAD that starts a session in a folder the user picks — LIVE on dev 0.0.1.29 since 2026-10-18 02:27; §22 = folder groups — the topics grouped by working
 > folder, a discovery, DESIGN ONLY); designed 2026-10-15, revised twice on 2026-10-16.**
 > **Where each part runs** (checked 2026-10-28 against git and the commit each installed `TerminalApp.dll` bakes):
-> PRODUCTION 0.8.0.0 (the installed MSIX of release v0.8.0, built from 7ee5fadcc, since 2026-10-22) holds everything
-> through §21.35, §21.32.4 included (its file links stay Off until switched on in the cog); DEV 0.0.1.38 (a Debug build
-> of 1e0076bc6 by the build server, since 2026-10-28) holds everything through §21.44 (but not §21.41's move of ⎋ Esc to the
-> Session page alone, 2026-10-28, which is in no build yet); §21.32–§21.32.3 and §21.36 are
+> PRODUCTION 0.8.0.1 (a Release build of 1e0076bc6 by the build server, a loose layout since 2026-10-28, in place of the
+> installed MSIX of release v0.8.0) holds everything through §21.44, §21.32.4 included (its file links stay Off until
+> switched on in the cog), but not the two changes of 2026-10-28: §21.41's move of ⎋ Esc to the Session page alone and
+> §21.43's note in a NEW thread; DEV 0.0.1.39 (a Debug build of 364e18f23 by the build server, since 2026-10-28) holds
+> everything through §21.44, those two included; §21.32–§21.32.3 and §21.36 are
 > research and design — §21.32.4's route home (Cloudflare, the tunnel, the fastrun relay) is LIVE —, §22 design only. A
 > heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than these builds. **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
@@ -5292,7 +5293,7 @@ last ~5 minutes is refreshed about every 2 s; the turn's final message removes t
 If the line must sit ABOVE the card, it can only be an edited message: one topic at a time (the one the user last acted in),
 every 5–10 s.
 
-### 21.37 The interrupted-turn questions, asked in the topic (2026-10-22; in dev since 0.0.1.35, not in production)
+### 21.37 The interrupted-turn questions, asked in the topic (2026-10-22; in dev since 0.0.1.35, in production since 0.8.0.1)
 
 The PC asks two questions since 2026-10-22 (HOOKS.md "Interrupted turns"): a restart of a turn the user interrupted asks
 whether to continue it (one rewind line in the transcript before the new claude starts), and a fork of a session in the
@@ -5320,7 +5321,7 @@ the answer on:
   continue the interrupted turn | keep it interrupted`, `remote telegram fork <sid8> -> asked (…) | not asked: <why> |
   interrupted | uninterrupted`.
 
-### 21.38 A pick's menu fits where the session stands: ▶ Activate for a deactivated tab (2026-10-23; in dev since 0.0.1.35, not in production)
+### 21.38 A pick's menu fits where the session stands: ▶ Activate for a deactivated tab (2026-10-23; in dev since 0.0.1.35, in production since 0.8.0.1)
 
 > The user's report (2026-10-23, after the 🔎 Search topic's "la cook" request): "the last one about 'la cook' was supposed
 > to find a tab. The la cook session was actually open in a tab that was idle. The tab was both idle and deactivated. A.
@@ -5406,7 +5407,7 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
 6. A menu drawn for a deactivated tab, then the tab entered at the PC, then ▶ Activate: the menu reads "woken" (no second
    start).
 
-### 21.39 📜 All Screen: the whole conversation as tall pictures (2026-10-25; in dev since 0.0.1.36, its level picker and File diffs of 2026-10-26 since 0.0.1.37, their emoji marks and the reset to Main after a pick since 0.0.1.38; not in production)
+### 21.39 📜 All Screen: the whole conversation as tall pictures (2026-10-25; in dev since 0.0.1.36, its level picker and File diffs of 2026-10-26 since 0.0.1.37, their emoji marks and the reset to Main after a pick since 0.0.1.38; in production since 0.8.0.1)
 
 > The user's request (2026-10-25): "check if we can add conversation render into an image so that its like a screenshot but
 > we get to see the entire claude code conversation in a tall tall image — look into that and have All Screen button"
@@ -5697,7 +5698,7 @@ this Debug run took 1,125 ms for 631.
 6. On a phone: open a tall part from Telegram, and from the gallery after Save; note whether the viewer keeps the text
    readable.
 
-### 21.40 `/status`: what Claude Code's own /status shows — its Status tab, the account, the plan usage (2026-10-26; in dev since 0.0.1.38, not in production)
+### 21.40 `/status`: what Claude Code's own /status shows — its Status tab, the account, the plan usage (2026-10-26; in dev since 0.0.1.38, in production since 0.8.0.1)
 
 > The user's request (2026-10-26): "When user send in telegram /status, we need to get all the info we can see in claude code
 > status and other tabs like usage to be sent to the user."
@@ -5879,7 +5880,7 @@ TerminalAppLib: a build over older intermediates must PURGE (the build-install s
   resumed with) still reports the engine's account and usage — the same account in every case seen.
 - A Codex session's own status (its rollout records rate limits) is not read.
 
-### 21.41 ⎋ Esc and 🌙 Deactivate on the card: stop a turn, park a tab (2026-10-27; in dev since 0.0.1.38, not in production)
+### 21.41 ⎋ Esc and 🌙 Deactivate on the card: stop a turn, park a tab (2026-10-27; in dev since 0.0.1.38, in production since 0.8.0.1; ⎋ Esc on the Session page alone since dev 0.0.1.39)
 
 > The user's request (2026-10-27): "Telegram bot needs to be able to also per session: a. interrupt via sending esc onto the
 > screen via esc button b. deactivate tab (and by that also claude stops running)".
@@ -5894,7 +5895,7 @@ input box, and `/deactivate`'s line said "Parked" whatever the window did. They 
 
 > The user's rule (2026-10-28, after dev 0.0.1.38): "The ESC button should be only inside Sessions menu". 0.0.1.38 also showed
 > [⚙️ Session] [⎋ Esc] on Main while a turn was in flight, where a tap meant for ⚙️ Session could stop the turn. Since then ⎋ Esc
-> is on the Session page only, in every state (`BuildCardButtonRows`; NOT BUILT yet). `CardButtonFacts::turnInFlight` stays
+> is on the Session page only, in every state (`BuildCardButtonRows`; in dev since 0.0.1.39, not in production). `CardButtonFacts::turnInFlight` stays
 > (no button reads it now), so the struct keeps its layout and the change needs no purged build.
 
 | Page | Change |
@@ -6002,7 +6003,7 @@ fail. `cl /Zs` of all 111 TerminalAppLib units over a shadow tree passes. No dat
    no row.
 8. `/interrupt` and `/deactivate` typed: the same outcomes, as lines in the thread.
 
-### 21.42 The card carries the screen: a fresh screenshot at every card update (2026-10-27; in dev since 0.0.1.38, not in production)
+### 21.42 The card carries the screen: a fresh screenshot at every card update (2026-10-27; in dev since 0.0.1.38, in production since 0.8.0.1)
 
 > The user's request (2026-10-27): "the running since messgae, called also i think status message that is pinned to the
 > bottom - whenever it updates, have it produce a screenshot (if possible) and have it shown and so every update we produce a
@@ -6107,7 +6108,7 @@ and an older file, the switch's round trip and default, the refusal limit. The r
 6. A new message in the topic: the card re-posts below it WITH the picture (by file_id when the screen did not change).
 7. The census after 10 minutes: `pictures(drawn=…, … KB drawn)`, and no `refused` lines.
 
-### 21.43 🎤 Voice notes: a voice note in a session's topic is read as the prompt it says (2026-10-27; in dev since 0.0.1.38, not in production, a clean build)
+### 21.43 🎤 Voice notes: a voice note in a session's topic is read as the prompt it says (2026-10-27; in dev since 0.0.1.38, in production since 0.8.0.1; a note in a NEW thread since dev 0.0.1.39)
 
 The design, the FluidVoice study, the POC and its measurements: [`VOICE.md`](VOICE.md). Here, what the bot does.
 
@@ -6124,7 +6125,7 @@ The design, the FluidVoice study, the POC and its measurements: [`VOICE.md`](VOI
   typed under the recording follows the transcript.
 * **Order:** a message of the same thread that arrives while a note is being transcribed WAITS behind it in the thread's
   lane (`_voiceLanes`; an edit replaces the held message) and is handed to `_handleMessage` again, in order, by the tick.
-* **In a NEW thread** (§21.17 / §21.25; 2026-10-28, NOT BUILT — dev 0.0.1.38 still answers "this thread has no session"): a
+* **In a NEW thread** (§21.17 / §21.25; 2026-10-28, in dev since 0.0.1.39 — production 0.8.0.1 still answers "this thread has no session"): a
   note goes where a typed message of its thread goes (`DecideVoiceNoteRoute`, `MessagingVoice.h`). Writing in "All" opens a
   thread with that very note: the thread's wizard HOLDS it (👀; the folder picker goes up with it), untranscribed until the
   pick has launched the session; the hand-over (`_adoptBoundThreads`) then sends it to the voice thread WITH that session —
@@ -6170,7 +6171,7 @@ The design, the FluidVoice study, the POC and its measurements: [`VOICE.md`](VOI
    note for its new session …`, then `voice note queued for transcription (…, held by its new thread …)`; `voice.log` names
    the new session's folder vocabulary (its terms count).
 
-### 21.44 A message that waited in the queue is posted where its turn starts: "📤 sent from the queue" (2026-10-27; in dev since 0.0.1.38, not in production, a clean build)
+### 21.44 A message that waited in the queue is posted where its turn starts: "📤 sent from the queue" (2026-10-27; in dev since 0.0.1.38, in production since 0.8.0.1)
 
 > The user's request (2026-10-27): "When user sends a message on telegram which gets queued as we are actively running then the
 > message will not be chronologically ordered which is fine since we queue up msgs. but if the queues msg gets dequeued and sent,
