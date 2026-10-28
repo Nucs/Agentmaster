@@ -1,13 +1,13 @@
 # Agentmaster — voice notes: a Telegram voice note becomes the session's prompt
 
-> **Status (2026-10-27): the POC and the integration are WRITTEN; NOT BUILT.** The POC (`tools/voice-poc/`, Python)
+> **Status (2026-10-27; the integration in dev since 0.0.1.38, 2026-10-28, not in production): the POC and the integration are WRITTEN.** The POC (`tools/voice-poc/`, Python)
 > runs on this PC and measured the engines below. On the owner's three recordings the full pipeline — Whisper
 > large-v3-turbo with the session's glossary, a second engine's hearing (Parakeet, FUSION), the dictionary pass and the
 > CORRECTION by Claude Sonnet 5.5 — came out **word for word: 0.0 % WER, every term with its exact spelling, 3 runs of 3**
 > (§4.4). The app integration (MESSAGING.md §21.43) is in the tree: the messaging service's voice path, the session
 > vocabulary in C++ and the correction layer (pinned to the POC by goldens: 223 checks pass standalone), the voice worker
-> protocol (with the fusion's `alternatives`), the endpoint engine, the settings and the cog's VOICE NOTES section. The
-> next build must PURGE (SessionModels.h changed). The bundled native worker (`agentmaster-voice.exe`, §6.4) is designed,
+> protocol (with the fusion's `alternatives`), the endpoint engine, the settings and the cog's VOICE NOTES section. A
+> build over older intermediates must PURGE (SessionModels.h changed; dev 0.0.1.38's was a clean build). The bundled native worker (`agentmaster-voice.exe`, §6.4) is designed,
 > not written: until it ships, the local engine is any worker command — the POC's Python worker on this PC (§6.2 gives the
 > measured command).
 >

@@ -9,11 +9,10 @@
 > "👤 You" line, the reply that quotes its prompt, the status on the last prompt — dev 0.0.1.22, and LIVE in PRODUCTION
 > 0.6.8.21 since 2026-10-17 12:01 with 413 topics (§21.12.5); §21.17 = every title opens its topic, the "👤 You" line's title row, turns that quote turns, and a NEW THREAD that starts a session in a folder the user picks — LIVE on dev 0.0.1.29 since 2026-10-18 02:27; §22 = folder groups — the topics grouped by working
 > folder, a discovery, DESIGN ONLY); designed 2026-10-15, revised twice on 2026-10-16.**
-> **Where each part runs** (checked 2026-10-26 against git and the commit each installed `TerminalApp.dll` bakes):
+> **Where each part runs** (checked 2026-10-28 against git and the commit each installed `TerminalApp.dll` bakes):
 > PRODUCTION 0.8.0.0 (the installed MSIX of release v0.8.0, built from 7ee5fadcc, since 2026-10-22) holds everything
-> through §21.35, §21.32.4 included (its file links stay Off until switched on in the cog); DEV 0.0.1.37 (a Debug build
-> of dae998824 by the build server, since 2026-10-26) holds everything through §21.39, its level picker and File diffs
-> included (§21.40 – §21.44 are in no build yet); §21.32–§21.32.3 and §21.36 are
+> through §21.35, §21.32.4 included (its file links stay Off until switched on in the cog); DEV 0.0.1.38 (a Debug build
+> of 1e0076bc6 by the build server, since 2026-10-28) holds everything through §21.44; §21.32–§21.32.3 and §21.36 are
 > research and design — §21.32.4's route home (Cloudflare, the tunnel, the fastrun relay) is LIVE —, §22 design only. A
 > heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than these builds. **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
@@ -5406,7 +5405,7 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
 6. A menu drawn for a deactivated tab, then the tab entered at the PC, then ▶ Activate: the menu reads "woken" (no second
    start).
 
-### 21.39 📜 All Screen: the whole conversation as tall pictures (2026-10-25; in dev since 0.0.1.36, its level picker and File diffs of 2026-10-26 since 0.0.1.37; their emoji marks and the reset to Main after a pick, of 2026-10-26, in no build yet; not in production)
+### 21.39 📜 All Screen: the whole conversation as tall pictures (2026-10-25; in dev since 0.0.1.36, its level picker and File diffs of 2026-10-26 since 0.0.1.37, their emoji marks and the reset to Main after a pick since 0.0.1.38; not in production)
 
 > The user's request (2026-10-25): "check if we can add conversation render into an image so that its like a screenshot but
 > we get to see the entire claude code conversation in a tall tall image — look into that and have All Screen button"
@@ -5627,9 +5626,9 @@ this Debug run took 1,125 ms for 631.
 - Negative controls fail as they must: a planted unused local and a narrowing give C4189 and C4244; a probe on the new verb
   gives C2338. The harness's no-cmark configuration (the stub) compiles at `/W3 /WX`.
 - ⚠ The messaging service gained data members (`_conversationImageRenders`, `_conversationImageSessions`), and a new unit
-  joins TerminalAppLib: the next build must purge (the build-install skill's §5.8).
+  joins TerminalAppLib: a build over older intermediates must purge (the build-install skill's §5.8).
 
-**Checked, the level picker** (2026-10-26; in no build yet):
+**Checked, the level picker** (2026-10-26, before any build; in dev since 0.0.1.37):
 - The m5 suite, isolated: 10,139 checks; the only failures are the three known `TestTaskbarBadge` ones.
 - `cl /Zs` with the recorded Debug lines passes for `Messaging.Inbound.cpp`, `Messaging.cpp`, `Persistence.cpp`,
   `Messaging.Files.cpp`, `Messaging.Menus.cpp`, `Messaging.Questions.cpp`, `Engine.cpp`, `MessagingSearchBridge.cpp`,
@@ -5638,7 +5637,7 @@ this Debug run took 1,125 ms for 631.
 - ⚠ `SessionModels.h` (AppSettings), `AgentManagerContent.h` and the messaging service (`_allScreenLevel`) gained members:
   a build over older intermediates must purge (dev 0.0.1.37's was a clean build).
 
-**Checked, File diffs** (2026-10-26; in no build yet):
+**Checked, File diffs** (2026-10-26, before any build; in dev since 0.0.1.37):
 - The m5 suite, isolated: 10,198 checks, every new one passing in each of three runs, all 55 goldens byte-identical. The only
   failures are the three known `TestTaskbarBadge` ones; one run also failed one real-time scheduler check (the load flake),
   which a rerun of the same exe passed.
@@ -5657,7 +5656,7 @@ this Debug run took 1,125 ms for 631.
   and the messaging service's members changed above: a build over older intermediates must purge (dev
   0.0.1.37's was a clean build).
 
-**Checked, the emoji marks and the reset to Main** (2026-10-26; in no build yet):
+**Checked, the emoji marks and the reset to Main** (2026-10-26, before any build; in dev since 0.0.1.38):
 - The m5 suite, isolated: 10,271 checks, all 55 goldens byte-identical; the only failures are the three known
   `TestTaskbarBadge` ones. The card checks pin ⬜ U+2B1C, ☑ U+2611 + U+FE0F and ⭐ U+2B50, and that neither text glyph
   (U+2610, U+2605) comes back on either page.
@@ -5697,7 +5696,7 @@ this Debug run took 1,125 ms for 631.
 6. On a phone: open a tall part from Telegram, and from the gallery after Save; note whether the viewer keeps the text
    readable.
 
-### 21.40 `/status`: what Claude Code's own /status shows — its Status tab, the account, the plan usage (2026-10-26; NOT BUILT)
+### 21.40 `/status`: what Claude Code's own /status shows — its Status tab, the account, the plan usage (2026-10-26; in dev since 0.0.1.38, not in production)
 
 > The user's request (2026-10-26): "When user send in telegram /status, we need to get all the info we can see in claude code
 > status and other tabs like usage to be sent to the user."
@@ -5856,7 +5855,7 @@ Release command lines (`/W3 /WX` + its `/we` list) on `Messaging.Status.cpp` and
 reads: the 10.8 MB transcript folded in 609 ms (an unoptimized build: 3,963 lines, 1,237 parsed), `auth status` in 532 ms,
 `/usage` in 6,468 ms, the second `/usage` from the cache in 0 ms; the report above is its output.
 ⚠ `Messaging.h`'s `ServiceHooks` grew a member (`claudeExe`, held by value in MessagingService) and two TUs join
-TerminalAppLib: the next build must PURGE (the build-install skill's §5.8).
+TerminalAppLib: a build over older intermediates must PURGE (the build-install skill's §5.8); dev 0.0.1.38's was a clean build.
 
 **Check after the build** (the dev bot):
 1. `/status` in a live session's topic: the card copy at once, then within ~7 s "📊 Claude Code status · <title>" as a reply to
@@ -5879,7 +5878,7 @@ TerminalAppLib: the next build must PURGE (the build-install skill's §5.8).
   resumed with) still reports the engine's account and usage — the same account in every case seen.
 - A Codex session's own status (its rollout records rate limits) is not read.
 
-### 21.41 ⎋ Esc and 🌙 Deactivate on the card: stop a turn, park a tab (2026-10-27; NOT BUILT)
+### 21.41 ⎋ Esc and 🌙 Deactivate on the card: stop a turn, park a tab (2026-10-27; in dev since 0.0.1.38, not in production)
 
 > The user's request (2026-10-27): "Telegram bot needs to be able to also per session: a. interrupt via sending esc onto the
 > screen via esc button b. deactivate tab (and by that also claude stops running)".
@@ -5966,7 +5965,7 @@ recorded lines (`/W3 /WX` + its `/we` list): `TerminalPage.AgentMessaging.cpp`, 
 `Messaging.Files.cpp`, `Messaging.Menus.cpp`, `Messaging.Questions.cpp` and `Messaging.Status.cpp` (borrowing
 `Messaging.Files.cpp`'s line) pass; five negative controls (an unknown member in each new branch, a call with a missing
 argument, two `static_assert`s on the new header's values) fail with exactly C2039 / C2660 / C2338 at their lines. The CLI
-builds none of the changed files. NOT BUILT; nothing tried live.
+builds none of the changed files. In dev since 0.0.1.38; nothing tried live yet.
 ⚠ `MessagingService` gained a data member (`_escPressMs`) and `CardButtonFacts` three: the next build purges anyway (§21.40).
 
 **Not changed, still open.**
@@ -5990,7 +5989,7 @@ builds none of the changed files. NOT BUILT; nothing tried live.
    no row.
 8. `/interrupt` and `/deactivate` typed: the same outcomes, as lines in the thread.
 
-### 21.42 The card carries the screen: a fresh screenshot at every card update (2026-10-27; NOT BUILT)
+### 21.42 The card carries the screen: a fresh screenshot at every card update (2026-10-27; in dev since 0.0.1.38, not in production)
 
 > The user's request (2026-10-27): "the running since messgae, called also i think status message that is pinned to the
 > bottom - whenever it updates, have it produce a screenshot (if possible) and have it shown and so every update we produce a
@@ -6082,8 +6081,8 @@ photo with an unknown hash is never reused for a screen read now), the caption's
 (attach vs file_id), the photo read back from an answer shaped like the probe's (the largest size), the record's round trip
 and an older file, the switch's round trip and default, the refusal limit. The run (an isolated copy of HEAD + this change):
 10,335 checks, only the 3 known `TestTaskbarBadge` failures. ⚠ `SessionModels.h` (AppSettings), `AgentManagerContent.h`,
-`Messaging.h` (MessagingService, OutItem, CardState) and `MessagingModels.h` (TopicRecord) changed: the next build must purge
-(it does anyway: §21.40).
+`Messaging.h` (MessagingService, OutItem, CardState) and `MessagingModels.h` (TopicRecord) changed: a build over older intermediates must purge
+(dev 0.0.1.38's was a clean build).
 
 **Check after the build** (dev, the bot; watch messaging.log's census):
 1. A running session's card: the screenshot under its text, "🖥 the screen at …" advancing every ~20 s with the turn; the card's
@@ -6095,7 +6094,7 @@ and an older file, the switch's round trip and default, the refusal limit. The r
 6. A new message in the topic: the card re-posts below it WITH the picture (by file_id when the screen did not change).
 7. The census after 10 minutes: `pictures(drawn=…, … KB drawn)`, and no `refused` lines.
 
-### 21.43 🎤 Voice notes: a voice note in a session's topic is read as the prompt it says (2026-10-27; NOT BUILT — the next build must purge)
+### 21.43 🎤 Voice notes: a voice note in a session's topic is read as the prompt it says (2026-10-27; in dev since 0.0.1.38, not in production, a clean build)
 
 The design, the FluidVoice study, the POC and its measurements: [`VOICE.md`](VOICE.md). Here, what the bot does.
 
@@ -6143,7 +6142,7 @@ The design, the FluidVoice study, the POC and its measurements: [`VOICE.md`](VOI
 8. The cog's VOICE NOTES status line: the engine, "running" after a note, the last failure when there was one; the worker
    ends after the idle minutes (`voice.log`: "idle for … min").
 
-### 21.44 A message that waited in the queue is posted where its turn starts: "📤 sent from the queue" (2026-10-27; NOT BUILT — the next build must purge)
+### 21.44 A message that waited in the queue is posted where its turn starts: "📤 sent from the queue" (2026-10-27; in dev since 0.0.1.38, not in production, a clean build)
 
 > The user's request (2026-10-27): "When user sends a message on telegram which gets queued as we are actively running then the
 > message will not be chronologically ordered which is fine since we queue up msgs. but if the queues msg gets dequeued and sent,
@@ -6238,7 +6237,7 @@ of the same files.
   - one bad line inside each new block (the mirror, the reaction sync, the queueing, the persistence) fails with C2039 at that
     line.
 
-⚠ `SessionModels.h` (QueuedPrompt) and `MessagingModels.h` changed: the next build must purge (it must anyway: §21.40).
+⚠ `SessionModels.h` (QueuedPrompt) and `MessagingModels.h` changed: a build over older intermediates must purge (dev 0.0.1.38's was a clean build).
 
 **Check after the build** (dev, the bot):
 1. A running session: type a message in its topic. It shows ✍, and `messaging.log` says `waits: the turn is in flight`.
