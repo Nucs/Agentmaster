@@ -993,8 +993,8 @@ namespace winrt::TerminalApp::implementation
         // Resume ONLY if Claude actually has a saved conversation for the (tail) id. A session that was
         // opened but never received a prompt — or whose transcript vanished — has none, so `claude
         // --resume <id>` would fail with "No conversation found" and the tab would die (exit code 1); it
-        // is re-launched FRESH instead (a new id, keeping the working dir + Auto Testing). (Correctness
-        // Rule #6: restore == resume, never replay.)
+        // is re-launched FRESH instead, under the SAME id (restoreFresh below; PERSISTENCE.md §16), keeping
+        // the working dir + Auto Testing. (Correctness Rule #6: restore == resume, never replay.)
         const bool wantResume = !resumeTargetId.empty() && ::Agentmaster::ClaudeConversationExists(resumeTargetId);
         const std::wstring resumeId = wantResume ? resumeTargetId : std::wstring{};
         // Agentmaster (restore a NEVER-MESSAGED fork): a fork's OWN transcript (<id>.jsonl) is written
@@ -1025,6 +1025,21 @@ namespace winrt::TerminalApp::implementation
         if (!presetSessionId.empty() && !restored && effectiveForkFrom.empty() && forkIntoId.empty())
         {
             forkIntoId = presetSessionId;
+        }
+        // Agentmaster (PERSISTENCE.md §16 — a restore never re-keys a session): a RESTORED record whose conversation has no
+        // transcript, and no fork source to re-fork from, starts a FRESH conversation under its OWN id (`claude --session-id
+        // <id>`), the way "Restart session" already does (BuildClaudeRelaunch). It used to mint a NEW id and remove the old
+        // record (the block after the Upsert below), which made a wrong "no transcript" destructive: the lookup runs for every
+        // reopened tab at startup, so a Claude config folder that could not be listed then (an unmounted drive, a
+        // CLAUDE_CONFIG_DIR this process does not see, a path past MAX_PATH) re-keyed every tab, dropped every record, and left
+        // the tags, the favorite and the Telegram topic behind on ids nothing pointed at any more. With the id kept, a lookup
+        // that missed a transcript that IS there fails harmlessly: Claude refuses an id whose transcript exists ("Session ID
+        // ... is already in use") and the tab says so, and nothing in the profile changes. Collision-free otherwise, for the
+        // same reason as the re-fork: an id with no transcript is unused on disk.
+        const bool restoreFresh = restored && !resumeTargetId.empty() && !wantResume && effectiveForkFrom.empty();
+        if (restoreFresh && forkIntoId.empty())
+        {
+            forkIntoId = resumeTargetId;
         }
         // forkFromId / a restore re-fork overrides resume/fresh: BuildClaudeSpawn forks the source
         // conversation into the target id (the source transcript is untouched). A genuine fork mints a new
@@ -1158,6 +1173,16 @@ namespace winrt::TerminalApp::implementation
         // it), dropped when the state is Idle — a fresh spawn (no `restored`) OR a Running-interrupted
         // record whose stale flag would otherwise falsely hold the queue. (RestoredQuestionFlag, Rule #16.)
         info.lastMessageWasQuestion = restored ? ::Agentmaster::RestoredQuestionFlag(info.state, info.lastMessageWasQuestion) : false;
+        if (restoreFresh)
+        {
+            // PERSISTENCE.md §16: the record keeps its id (and with it the queue, the runner mode, the title, the tags), but the
+            // CONVERSATION is new and has no history: no turn in flight (so neither the restore wake nor the cut-off reader acts
+            // on it — the old id-change made the wake see "nothing to wake"), no question waiting, and the state of a fresh
+            // session. The draft memory rides on (an unsent draft was never part of any conversation).
+            info.midTurnAtRestore = false;
+            info.lastMessageWasQuestion = false;
+            info.state = ::Agentmaster::SessionState::Idle;
+        }
         info.external = false; // we own this tab's ConPTY -> managed, not an adopted session
         info.live = true; // OPEN: has a live tab/claude now -> shows on the Triage Board (not Archived)
         // Agentmaster: stamp the hosting ConPTY's WT_SESSION (== the wire tabToken hooks will report)
@@ -1259,13 +1284,14 @@ namespace winrt::TerminalApp::implementation
         }
         _sessionRegistry->Upsert(info);
 
-        // The spawned id differs from the restored record's id in two cases: restore-FRESH (the
-        // transcript was gone, so a new conversation id was minted) and the continuation REDIRECT above
-        // (we resumed the chain tail, an id distinct from the persisted ancestor). Either way the new
-        // (live) record is keyed by the spawned id and the old archived record under restored->id is now
-        // stale — drop it so it doesn't linger in the Archived list as a duplicate/ancestor. A re-fork
-        // (forkIntoId) deliberately does NOT differ — it forks back into restored->id — so this is a
-        // no-op there and the fork keeps its identity (the whole point of re-forking into the same id).
+        // The spawned id used to differ from the restored record's id in two cases: restore-FRESH (the
+        // transcript was gone, so a new conversation id was minted) and a continuation REDIRECT (a chain tail,
+        // an id distinct from the persisted ancestor). Neither happens any more: restore-fresh keeps the
+        // record's id (restoreFresh above — PERSISTENCE.md §16: a wrong "no transcript" must never drop a
+        // record), the redirect was removed, and a re-fork (forkIntoId) forks back into restored->id. So for
+        // a restore this block is a no-op; it stays as the belt for any future path that re-keys a restored
+        // session: then the new (live) record is keyed by the spawned id and the old archived record under
+        // restored->id is stale — dropped so it doesn't linger as a duplicate/ancestor.
         // Tab color modes: the new record deliberately KEEPS the old one's inferredWorkingDir (it rode
         // the *restored copy above) as a CONTINUITY seed — a restore-fresh reopens the same work in the
         // same dir, so the old inferred color is the best first guess; the inferred-workdir scan
@@ -1388,7 +1414,7 @@ namespace winrt::TerminalApp::implementation
         }
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       tag + spec.sessionId + (effectiveForkFrom.empty() ? L"" : (L" (forked from " + effectiveForkFrom + L")")) + L" \"" + ttl + L"\" cwd=" + dir + launchNote +
-                                          (idChosenByCaller ? L" (under the id its caller chose)" : L"") + L"\n");
+                                          (idChosenByCaller ? (restoreFresh ? L" (no transcript: a fresh conversation under the session's own id)" : L" (under the id its caller chose)") : L"") + L"\n");
         return tab;
     }
 
@@ -1438,6 +1464,11 @@ namespace winrt::TerminalApp::implementation
                 {
                     ::Agentmaster::PreserveWorkspaceForRecovery(load.problem); // logs [persist-guard] with the folder
                 }
+                // PERSISTENCE.md §16: every window's restore reads this after the barrier. A fleet that could not be used makes
+                // them HOLD the refs of the sessions they do not know (ShouldHoldRestoreRef), so their records keep the
+                // Claude tabs instead of saving each window without them — the recovery folder above is then a second
+                // copy, not the only one.
+                eng.startupFleetLoadUsable.store(load.usable);
                 auto saved = std::move(load.sessions);
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[restore] " + std::to_wstring(saved.size()) + L" session(s) loaded as archived" +
                                                                 (load.usable ? std::wstring{} : (L" (sessions.json could not be used: " + load.problem + L")")) + L"\n");

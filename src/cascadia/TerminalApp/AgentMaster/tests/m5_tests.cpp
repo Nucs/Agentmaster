@@ -83,6 +83,7 @@ int wmain()
     TestSpawnBuilders();
     TestProfileBootstrap();
     TestWorkspaceTrust();
+    TestTranscriptLookupLongPath(); // PERSISTENCE.md §16: a transcript past MAX_PATH is found, so its tab resumes (tests_spawn_sched.cpp)
     TestScheduler();
     TestEnterRetry();
     TestDeliveryGate();
@@ -118,6 +119,7 @@ int wmain()
     TestEngineWindowLifecycle();
     TestUiStallEscalation();
     TestUnreadableStateFiles(); // PERSISTENCE.md "Unreadable state files": a state file that cannot be read is never replaced without its bytes kept (tests_persistence.cpp)
+    TestStateFileOverrides(); // PERSISTENCE.md §16: a failed read marks its file; the tag files' update read; the store's guarded delete (tests_persistence.cpp)
     TestProcessInspectTree();
     TestOrphanConsoleReaper();
     TestProcessInspectParse();
@@ -162,6 +164,7 @@ int wmain()
     TestSessionSearchTools(); // SESSIONS.md section 9 — the AI search's tools: arguments, one search, result text, handlers, the stepwise gather (tests_harness.cpp)
     TestSessionDb(); // SESSIONS_DB.md — the session database's shared parts (tests_sessiondb.cpp)
     TestMessaging(); // MESSAGING.md — the fleet in Telegram, the pure core (tests_messaging.cpp)
+    TestMessagingStateFileLoad(); // PERSISTENCE.md §16: state.json loaded the guarded way - never saved over with an empty topic map (tests_messaging.cpp)
     TestMessagingSearch(); // MESSAGING.md §5.4 / §21.7 — the Search topic's verbs, pick buttons and pick states (tests_messaging_search.cpp)
     TestMessagingDirectory(); // MESSAGING.md §21.16 — the pinned directory (tests_messaging_directory.cpp)
     TestMessagingNewThread(); // MESSAGING.md §21.17 — title links, the You lines' title row, the new-thread picker (tests_messaging_newthread.cpp)
@@ -182,6 +185,8 @@ int wmain()
     TestApiErrorRewind(); // HOOKS.md "API-error turns" — the rewind that lets a resumed session continue a turn an API error ended (tests_rewind.cpp)
     TestInterruptedTurns(); // HOOKS.md "Interrupted turns" — the restart question's rewind, the fork question's classifier and switch, the fork stop watch (tests_rewind.cpp)
     TestRestoreWake(); // PERSISTENCE.md §14 — after a restart, the restored tabs that were busy wake once every window's focused tab launched (tests_restorewake.cpp)
+    TestHeldTabRefs(); // PERSISTENCE.md §16 — a saved tab a restore could not bring back stays in the record (tests_restorewake.cpp)
+    TestEngineHeldSessions(); // PERSISTENCE.md §16 — the engine's held-session set, the Telegram bot's window hold (tests_persistence.cpp)
     TestVoiceVocabulary(); // MESSAGING.md §21.43 / VOICE.md §5.5 — the voice notes' session vocabulary vs the POC's goldens (tests_voice.cpp)
     TestVoiceProtocol(); // VOICE.md §6.2 — the voice worker protocol's lines and its answer reader (tests_voice.cpp)
     TestVoiceCorrection(); // VOICE.md §5.5 — the correction layer's prompts, guard, command line and output reader (tests_voice.cpp)

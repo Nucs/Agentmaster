@@ -559,6 +559,9 @@ namespace Agentmaster
                 hooks.restartSession = [](const std::wstring& sid, RestartTurnChoice turnChoice) { RestartSessionInOtherWindows(sid, L"", turnChoice); };
                 hooks.deactivateSession = [](const std::wstring& sid) { DeactivateSessionInOtherWindows(sid, L""); };
                 hooks.windowsRestoring = []() { return WindowsStillRestoring(); };
+                // PERSISTENCE.md §16: a session whose saved tab a window HOLDS (its restore could not make the tab) is not
+                // closed, so the bot keeps its topic for as long as the window holds the ref.
+                hooks.sessionHeld = [](const std::wstring& sid) { return IsSessionHeldByAWindow(sid); };
                 hooks.versionWord = []() { return AppVersionWordForMessaging(); };
                 // §21.25: the new-thread wizard's window step lists every window's strip (the AI search's census, answered by
                 // each window's UI thread). The service calls it on a worker thread of its own, never on a UI thread.
@@ -1011,6 +1014,69 @@ namespace Agentmaster
         return e.restoringWindowIds.size();
     }
 
+    void NoteWindowHeldSessions(const std::wstring& windowId, const std::vector<std::wstring>& sessionIds)
+    {
+        NoteWindowHeldSessionsIn(SharedEngine(), windowId, sessionIds);
+    }
+
+    void NoteWindowHeldSessionsIn(Engine& e, const std::wstring& windowId, const std::vector<std::wstring>& sessionIds)
+    {
+        if (windowId.empty())
+        {
+            return;
+        }
+        // Built BEFORE the lock: an allocation failure leaves the window's previous entry as it was (the documented
+        // contract), and the lock is never held across an allocation that could throw out of it.
+        std::set<std::wstring> held;
+        for (const auto& id : sessionIds)
+        {
+            if (!id.empty())
+            {
+                held.insert(id);
+            }
+        }
+        std::lock_guard<std::mutex> lk(e.windowMutex);
+        if (held.empty())
+        {
+            // Nothing held any more: drop the entry, so the map holds only windows that hold something.
+            e.heldSessionIdsByWindow.erase(windowId);
+            return;
+        }
+        e.heldSessionIdsByWindow[windowId] = std::move(held);
+    }
+
+    bool IsSessionHeldByAWindow(const std::wstring& sessionId) noexcept
+    {
+        return IsSessionHeldByAWindowIn(SharedEngine(), sessionId);
+    }
+
+    bool IsSessionHeldByAWindowIn(Engine& e, const std::wstring& sessionId) noexcept
+    {
+        if (sessionId.empty())
+        {
+            return false;
+        }
+        // std::mutex::lock can throw std::system_error in theory; set::find does not allocate. A failed lock reads as
+        // "held": the bot's answer to "held" is to keep a topic one tick longer, never to delete one.
+        try
+        {
+            std::lock_guard<std::mutex> lk(e.windowMutex);
+            for (const auto& [windowId, held] : e.heldSessionIdsByWindow)
+            {
+                if (held.find(sessionId) != held.end())
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"IsSessionHeldByAWindowIn"); // Rule #18. Recovery: "held" (the safe answer for a delete)
+            return true;
+        }
+    }
+
     // ---- Agentmaster: UI-thread stall watchdog (hooks.log [ui-stall]) --------------------------
     // See the Engine.h declaration for the why. The state is a LEAKED function-local static, never
     // an Engine member: the detached checker thread reads it up to process exit, and process
@@ -1406,6 +1472,9 @@ namespace Agentmaster
         std::lock_guard<std::mutex> lk(e.windowMutex);
         e.liveWindowIds.erase(windowId);
         e.restoringWindowIds.erase(windowId); // a window closed mid-restore must not hold the bot's deletes forever
+        // PERSISTENCE.md §16: the window's held refs go to the reclaimable pool with its record (below) — closing the window
+        // is the user's close of its tabs, so the bot may treat their sessions as closed from now on, as for any closed tab.
+        e.heldSessionIdsByWindow.erase(windowId);
         // Agentmaster (discard Manager-only windows): clear any Manager-only self-close reservation this
         // window held, so the set never accumulates stale ids across the process lifetime.
         e.closingWindowIds.erase(windowId);

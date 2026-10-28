@@ -43,6 +43,7 @@ namespace winrt::Microsoft::Terminal::Settings
 // TerminalPage can hold them by shared_ptr; SessionModels.h (value types) is included
 // because restore passes a SessionInfo by value.
 #include "AgentMaster/DraftCarry.h" // Agentmaster (PENDING_INPUT.md §11): PasteJournalEntry / DraftFillPaste — the fork carry's by-value pump state
+#include "AgentMaster/HeldTabRefs.h" // Agentmaster (PERSISTENCE.md §16): HeldTabRef — the saved tabs a restore could not bring back (by-value member)
 #include "AgentMaster/InterruptedTurns.h" // Agentmaster (HOOKS.md "Interrupted turns"): RestartTurnChoice / ForkTurnChoice / the fork stop watch's pure decision (by-value members + parameters)
 #include "AgentMaster/LaunchPresets.h" // Agentmaster (PRESETS, HARNESSES.md): LaunchArgs / CompiledClaudeLaunch — the launch seams' by-value snapshot + compile
 #include "AgentMaster/RemoteLaunch.h" // Agentmaster (MESSAGING.md §8.2): RemoteLaunchRequest — what the Telegram bot's launch sink asks this window to open
@@ -948,6 +949,15 @@ namespace winrt::TerminalApp::implementation
         // post-startup check), so an only-shells reopen is never mistaken for a discard.
         std::shared_ptr<ThrottledFunc<>> _managerOnlyCheckThrottled{ nullptr };
         bool _managerOnlyDiscard{ false };
+        // Agentmaster (PERSISTENCE.md §16 — HELD TAB REFS): the saved tab refs this window's restore could NOT bring back
+        // and keeps — a launch that made no tab (Claude Code not found at this start, a preset whose key is missing, a pane
+        // that failed to build), a shell tab whose saved actions do not parse, a session unknown because sessions.json did
+        // not load (HeldTabRefs.h ShouldHoldRestoreRef). Every capture puts them back into the record (MergeHeldTabRefs), so a
+        // failure that may pass never deletes tabs from the workspace; a window holding any is never Manager-only (no
+        // self-close, no record delete); the engine tells the Telegram bot to keep their sessions' topics
+        // (_PublishHeldTabRefs). A ref leaves when its tab exists again (here or in another window). Sorted by record index.
+        // Filled by _RestoreWindowTabs before the first capture can run (capture is gated on Initialized). UI thread only.
+        std::vector<::Agentmaster::HeldTabRef> _heldTabRefs;
         // True when _windowRecord was CLAIMED from disk (a real prior layout) vs freshly minted.
         // Only a claimed record seeds the Manager lens on wire — a fresh window keeps the content's
         // ctor-loaded global splitter sizes, so opening a new window never resets them to default.
@@ -2743,6 +2753,9 @@ namespace winrt::TerminalApp::implementation
         bool _IsManagerOnlyWindow() const;
         void _CloseWindowIfManagerOnly();
         void _ScheduleManagerOnlyCheck();
+        // Agentmaster (PERSISTENCE.md §16): publish the sessions of this window's held tab refs to the engine
+        // (Engine::NoteWindowHeldSessions), which the Telegram bot asks before it deletes a topic as "closed".
+        void _PublishHeldTabRefs() noexcept;
         // Agentmaster (updater; Updater.h): quit the app for an in-app update — the post-confirm half
         // of RequestQuit (flush this window's record, then raise QuitRequested) WITHOUT RequestQuit's
         // "close all tabs?" confirmation. The user already confirmed in the update dialog, and the

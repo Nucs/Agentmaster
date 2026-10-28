@@ -2500,3 +2500,202 @@ void TestUnreadableStateFiles()
               "store: once readable, the write goes through and the title stays");
     }
 }
+
+// ===== PERSISTENCE.md §16: the engine's held-session set (the Telegram bot's WINDOW HOLD) ===============================
+//
+// A window whose restore could not make some of its saved tabs HOLDS their refs (tests_restorewake.cpp, TestHeldTabRefs) and
+// publishes their sessions here; the bot asks IsSessionHeldByAWindow before it deletes a topic as "closed", so a start without
+// Claude Code no longer deletes every tab's topic and history. On a LOCAL engine (the window-lifecycle seams' pattern).
+
+void TestEngineHeldSessions()
+{
+    std::wprintf(L"Engine held sessions (PERSISTENCE.md 16: what the Telegram bot asks before it deletes a topic as closed):\n");
+    Agentmaster::Engine e;
+    CHECK(!Agentmaster::IsSessionHeldByAWindowIn(e, L"s1"), "engine: nothing is held at first");
+    Agentmaster::NoteWindowHeldSessionsIn(e, L"{w1}", { L"s1", L"s2", L"" });
+    Agentmaster::NoteWindowHeldSessionsIn(e, L"{w2}", { L"s3" });
+    CHECK(Agentmaster::IsSessionHeldByAWindowIn(e, L"s1") && Agentmaster::IsSessionHeldByAWindowIn(e, L"s2") && Agentmaster::IsSessionHeldByAWindowIn(e, L"s3"),
+          "engine: every window's held sessions are held");
+    CHECK(!Agentmaster::IsSessionHeldByAWindowIn(e, L"s4") && !Agentmaster::IsSessionHeldByAWindowIn(e, L""), "engine: another session, and an empty id, are not");
+    Agentmaster::NoteWindowHeldSessionsIn(e, L"{w1}", { L"s2" });
+    CHECK(!Agentmaster::IsSessionHeldByAWindowIn(e, L"s1") && Agentmaster::IsSessionHeldByAWindowIn(e, L"s2"),
+          "engine: a window's new list REPLACES its old one (s1's tab came back)");
+    Agentmaster::NoteWindowHeldSessionsIn(e, L"{w1}", {});
+    CHECK(!Agentmaster::IsSessionHeldByAWindowIn(e, L"s2") && Agentmaster::IsSessionHeldByAWindowIn(e, L"s3") && e.heldSessionIdsByWindow.count(L"{w1}") == 0,
+          "engine: an empty list clears the window's entry, and no other window's");
+    Agentmaster::NoteWindowHeldSessionsIn(e, L"", { L"s9" });
+    CHECK(!Agentmaster::IsSessionHeldByAWindowIn(e, L"s9"), "engine: an empty window id is ignored");
+    // Closing a window is the user's close of its tabs: its held sessions stop being held (the bot may then treat them as
+    // closed, as for any closed tab). The window was never registered live here, so nothing is written to disk.
+    Agentmaster::UnregisterLiveWindowIn(e, L"{w2}");
+    CHECK(!Agentmaster::IsSessionHeldByAWindowIn(e, L"s3"), "engine: a closed window's held sessions are no longer held");
+}
+
+// ===== PERSISTENCE.md §16: the overrides the 2026-10-28 audit found ======================================================
+//
+// The owner's question: "is there ANY other chance we will EVER override accidentally those files". Beside the restore's held
+// tab refs (tests_restorewake.cpp) and the transcript lookup (tests_spawn_sched.cpp), three writers could still replace a
+// file with state that did not come from it:
+//   * a loader whose read failed (a lock past the reader's retries) built its defaults, and the lock ended BEFORE its save:
+//     the guard then found a readable, valid file and replaced it with no copy;
+//   * tags.json and tag-colors.json read for their read-modify-write through the display read, which reads a locked file as
+//     empty: an add replaced the whole registry with one tag, a color pick every picked color with one;
+//   * a session-store record that EMPTIED was deleted without the guard, and a member this version's string store cannot
+//     carry (a newer build's) was dropped by any write without a copy.
+
+void TestStateFileOverrides()
+{
+    std::wprintf(L"State-file overrides (PERSISTENCE.md 16: the read mark, the tag files' update read, the store's guarded delete):\n");
+
+    const auto writeBytes = [](const std::wstring& path, const std::string& bytes) {
+        std::ofstream f(std::filesystem::path{ path }, std::ios::binary | std::ios::trunc);
+        f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    };
+    const auto readBytes = [](const std::wstring& path) {
+        std::ifstream f(std::filesystem::path{ path }, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    };
+    // The copies the guard kept of `leaf` in `dir` ("<leaf>.could-not-read-<stamp>[-n]"), in name order.
+    const auto keptCopies = [](const std::wstring& dir, const std::wstring& leaf) {
+        std::vector<std::wstring> out;
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator{ std::filesystem::path{ dir }, ec })
+        {
+            const std::wstring name = e.path().filename().wstring();
+            if (name.rfind(leaf + L".could-not-read-", 0) == 0)
+            {
+                out.push_back(e.path().wstring());
+            }
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+    // Another program holding `path` with no sharing — what an antivirus scan or a sync client can do for a moment.
+    const auto holdExclusively = [](const std::wstring& path) {
+        return ::CreateFileW(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    };
+    // A scratch folder for one block, removed when the block ends; the guard's memory is reset on entry and exit (the other
+    // tests write through it too). AgentmasterStateDir() is never redirected: the blocks use the `...In` seams.
+    struct ScratchDir
+    {
+        std::wstring dir;
+        explicit ScratchDir(const wchar_t* tag)
+        {
+            wchar_t tmp[MAX_PATH]{};
+            ::GetTempPathW(MAX_PATH, tmp);
+            dir = std::wstring{ tmp } + tag + NewSessionId();
+            std::filesystem::create_directories(std::filesystem::path{ dir });
+            ResetStateFileGuardForTests();
+        }
+        ~ScratchDir()
+        {
+            ResetStateFileGuardForTests();
+            std::error_code ec;
+            std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
+        }
+    };
+
+    // ---- a loader's failed read marks the file: the save after the lock ended keeps a copy ----
+    {
+        ScratchDir sd(L"am-override-read-");
+        const std::wstring f = sd.dir + L"\\dir-colors.json";
+        const std::string original = "{\"version\":2,\"colors\":{\"k:/work\":\"#FF8800\"}}";
+        writeBytes(f, original);
+        const HANDLE lock = holdExclusively(f);
+        CHECK(lock != INVALID_HANDLE_VALUE, "read mark: (setup) the file is held with no sharing");
+        CHECK(ReadStateFileUtf8(f, 100).status == StateFileStatus::Unreadable, "read mark: (setup) a loader's read while it is held fails, so the loader builds its defaults");
+        ::CloseHandle(lock);
+        // The loader's caller now saves what it built from nothing. The lock is over: the file reads fine and parses.
+        CHECK(PrepareStateFileReplace(f), "read mark: the save goes through once the file can be read...");
+        const auto copies = keptCopies(sd.dir, L"dir-colors.json");
+        CHECK(copies.size() == 1 && readBytes(copies[0]) == original,
+              "read mark: ...after the file a read could not use was kept aside byte for byte (it used to be replaced with no copy)");
+        writeBytes(f, "{\"version\":2,\"colors\":{}}");
+        MarkStateFileSafeToReplace(f);
+        CHECK(PrepareStateFileReplace(f) && keptCopies(sd.dir, L"dir-colors.json").size() == 1, "read mark: ...once per failed read, not at every save after it");
+    }
+
+    // ---- tags.json and tag-colors.json: an update read refuses a file it cannot read ----
+    {
+        ScratchDir st(L"am-override-tags-");
+        CHECK(RegisterKnownTagIn(st.dir, L"alpha") && RegisterKnownTagIn(st.dir, L"beta"), "tags: (setup) two kept tags");
+        CHECK(SetTagColorIn(st.dir, L"alpha", L"#FF112233"), "tags: (setup) a picked color");
+        const std::wstring tagsPath = st.dir + L"\\tags.json";
+        HANDLE lock = holdExclusively(tagsPath);
+        CHECK(!RegisterKnownTagIn(st.dir, L"gamma"), "tags: a registry that cannot be read is not rewritten (the add would have kept gamma alone)");
+        CHECK(!UnregisterKnownTagIn(st.dir, L"beta"), "tags: ...nor rewritten by a delete");
+        ::CloseHandle(lock);
+        CHECK((LoadKnownTagsIn(st.dir) == std::vector<std::wstring>{ L"alpha", L"beta" }), "tags: ...so every kept tag is still there");
+        CHECK(RegisterKnownTagIn(st.dir, L"gamma") && (LoadKnownTagsIn(st.dir) == std::vector<std::wstring>{ L"alpha", L"beta", L"gamma" }),
+              "tags: once readable, the add goes through and keeps the others");
+        CHECK(keptCopies(st.dir, L"tags.json").size() == 1, "tags: ...and the failed read's mark kept a copy of the registry before that write");
+        // THE RACE the update read closes: a lock that ENDS between a read-modify-write's read and its write (an antivirus
+        // scan of a few hundred ms). The display read gave up at once and returned an empty registry, and the guard's own
+        // read then rode the lock out and let the write replace the whole registry with the one new tag. The update read
+        // rides the lock out itself, so the add sees every tag. (A lock held through the whole call proves nothing here:
+        // the guard refuses then with or without the fix.)
+        ResetStateFileGuardForTests(); // out of the quiet window the refusals above opened, so every read gets its retries
+        const HANDLE raceLock = holdExclusively(tagsPath);
+        CHECK(raceLock != INVALID_HANDLE_VALUE, "tags race: (setup) the registry is held when the add starts");
+        std::thread releaser([raceLock]() {
+            ::Sleep(150);
+            ::CloseHandle(raceLock);
+        });
+        const bool added = RegisterKnownTagIn(st.dir, L"delta");
+        releaser.join();
+        CHECK(added && (LoadKnownTagsIn(st.dir) == std::vector<std::wstring>{ L"alpha", L"beta", L"gamma", L"delta" }),
+              "tags race: a lock that ends during an add keeps every tag (the old read gave up, and the write kept delta alone)");
+        const std::wstring colorsPath = st.dir + L"\\tag-colors.json";
+        lock = holdExclusively(colorsPath);
+        CHECK(!SetTagColorIn(st.dir, L"beta", L"#FF445566"), "colors: a tag-colors.json that cannot be read is not rewritten (the pick would have kept beta's alone)");
+        ::CloseHandle(lock);
+        CHECK(GetTagColorIn(st.dir, L"alpha") == L"#FF112233", "colors: ...so the picked color is still there");
+        CHECK(SetTagColorIn(st.dir, L"beta", L"#FF445566") && GetTagColorIn(st.dir, L"alpha") == L"#FF112233" && GetTagColorIn(st.dir, L"beta") == L"#FF445566",
+              "colors: once readable, the pick goes through and keeps the other color");
+        // The same race for a color pick: the lock ends while the pick runs.
+        ResetStateFileGuardForTests();
+        const HANDLE colorLock = holdExclusively(colorsPath);
+        CHECK(colorLock != INVALID_HANDLE_VALUE, "colors race: (setup) tag-colors.json is held when the pick starts");
+        std::thread colorReleaser([colorLock]() {
+            ::Sleep(150);
+            ::CloseHandle(colorLock);
+        });
+        const bool picked = SetTagColorIn(st.dir, L"gamma", L"#FF778899");
+        colorReleaser.join();
+        CHECK(picked && GetTagColorIn(st.dir, L"alpha") == L"#FF112233" && GetTagColorIn(st.dir, L"beta") == L"#FF445566" &&
+                  GetTagColorIn(st.dir, L"gamma") == L"#FF778899",
+              "colors race: a lock that ends during a pick keeps every picked color (the old read gave up, and the write kept gamma's alone)");
+    }
+
+    // ---- the session store: a guarded delete, and a member this version cannot carry ----
+    {
+        ScratchDir ss(L"am-override-store-");
+        const std::wstring store = ss.dir + L"\\session-store";
+        std::filesystem::create_directories(std::filesystem::path{ store });
+        // A record a NEWER build wrote: a title, plus a member that is not a string (this version's store holds strings only).
+        const std::string foreign = "{\"title\":\"T\",\"future\":{\"x\":1}}";
+        const std::wstring sid1 = L"5e55a0a0-0000-4000-8000-0000000000c1";
+        const std::wstring rec1 = store + L"\\" + sid1 + L".json";
+        writeBytes(rec1, foreign);
+        CHECK(SetSessionStoreFieldIn(store, sid1, kSessionStoreTitleKey, L""), "store: clearing the record's last string key goes through");
+        CHECK(!std::filesystem::exists(std::filesystem::path{ rec1 }), "store: ...and deletes the emptied record (the sparse store)");
+        const auto copies1 = keptCopies(store, sid1 + L".json");
+        CHECK(copies1.size() == 1 && readBytes(copies1[0]) == foreign,
+              "store: ...after the record, which held a member this version cannot carry, was kept aside (the delete used to skip the guard)");
+        const std::wstring sid2 = L"5e55a0a0-0000-4000-8000-0000000000c2";
+        writeBytes(store + L"\\" + sid2 + L".json", foreign);
+        CHECK(SetSessionStoreFieldIn(store, sid2, kSessionStoreFavoriteKey, L"1"), "store: a write into such a record goes through");
+        const auto copies2 = keptCopies(store, sid2 + L".json");
+        CHECK(copies2.size() == 1 && readBytes(copies2[0]) == foreign, "store: ...after it was kept aside (the write drops the member it cannot carry)");
+        CHECK(GetSessionStoreFieldIn(store, sid2, kSessionStoreTitleKey) == L"T", "store: ...and the record keeps its string keys");
+        // A record that cannot be read is never deleted (its read-modify-write refuses before the delete is reached).
+        const std::wstring sid3 = L"5e55a0a0-0000-4000-8000-0000000000c3";
+        const std::wstring rec3 = store + L"\\" + sid3 + L".json";
+        CHECK(SetSessionStoreFieldIn(store, sid3, kSessionStoreTitleKey, L"Only"), "store: (setup) a record with one key");
+        const HANDLE lock = holdExclusively(rec3);
+        CHECK(!SetSessionStoreFieldIn(store, sid3, kSessionStoreTitleKey, L""), "store: clearing the one key of a record that cannot be read is refused");
+        ::CloseHandle(lock);
+        CHECK(std::filesystem::exists(std::filesystem::path{ rec3 }) && GetSessionStoreFieldIn(store, sid3, kSessionStoreTitleKey) == L"Only",
+              "store: ...and the record is still there, title and all");
+    }
+}

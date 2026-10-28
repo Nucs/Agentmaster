@@ -588,7 +588,20 @@ namespace Agentmaster
     // recover what a dropped hook missed. Ids are unique UUIDs, so we glob across all project
     // dirs rather than reproduce Claude's cwd encoding. ClaudeConversationExists is now exactly
     // `!ResolveClaudeTranscriptPath(id).empty()`.
+    // Agentmaster (PERSISTENCE.md §16): a transcript path at or past MAX_PATH (a deep working folder's
+    // project name) is probed in the extended-length form, so it is FOUND — a missed transcript makes a
+    // restore start a fresh conversation under the same id, which Claude refuses while the transcript
+    // exists, so the tab could never resume. The returned path is the plain form, as always.
     std::wstring ResolveClaudeTranscriptPath(std::wstring_view sessionId);
+
+    // ResolveClaudeTranscriptPath over a given projects folder — the test seam (tests_spawn_sched.cpp points it at a
+    // temporary folder; the app passes ClaudeProjectsDir()).
+    //   projectsDir — the <claude-config>\projects folder to search; "" finds nothing.
+    //   sessionId   — the session id; "" finds nothing.
+    //   returns     — <projectsDir>\<folder>\<sessionId>.jsonl for the first project folder that has it (plain form,
+    //                 however long), or "" when none does or the folder cannot be listed.
+    //   throws      — std::bad_alloc only.
+    std::wstring ResolveClaudeTranscriptPathIn(const std::wstring& projectsDir, std::wstring_view sessionId);
 
     // The transcript a session's DISPLAY surfaces read — see ResolveClaudeDisplayTranscript.
     struct ClaudeDisplayTranscript

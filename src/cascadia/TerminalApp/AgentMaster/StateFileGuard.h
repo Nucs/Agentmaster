@@ -18,6 +18,8 @@
 //     text is not JSON is first copied aside as "<name>.could-not-read-<yyyyMMdd-HHmmss>" ([persist-guard]).
 //   * A loader that could not use a file it depends on (the startup fleet read) marks it, so its first replace keeps a
 //     copy whatever the file then holds — a lock that ended after the read must not let an empty fleet replace a good one.
+//     Every Unreadable read through ReadStateFileUtf8 marks its file the same way (PERSISTENCE.md §16), so the rule holds
+//     for each loader and read-modify-write, not only the fleet's.
 //
 // Implemented in Persistence.cpp, which every build that compiles SessionStore.cpp also compiles (TerminalAppLib, the
 // session-db service, the m5 harness, the probes). Std-only declarations, so a hot TU can include it cheaply.
@@ -65,6 +67,9 @@ namespace Agentmaster
     //   returns       - Missing (no file / no folder), Read (the text; a UTF-8 BOM dropped; bytes that are not UTF-8
     //                   become U+FFFD, as MultiByteToWideChar decodes them), or Unreadable (with the Win32 error; the
     //                   first failure of an episode logs "[persist-read-fail] <path> ..." to hooks.log).
+    // An Unreadable read also MARKS the file keep-before-replace (MarkStateFileKeepBeforeReplace): the caller now holds
+    // nothing in place of its content, and a lock that ends before the caller's save must not let that save replace the
+    // file without its bytes being kept (PERSISTENCE.md §16). A file that stays unreadable is still refused outright.
     // Never throws: an allocation failure or any other exception is logged (Rule #18) and reported as Unreadable.
     StateFileRead ReadStateFileUtf8(const std::wstring& path, unsigned retryBudgetMs = kStateReadRetryBudgetMs) noexcept;
 

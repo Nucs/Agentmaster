@@ -2176,6 +2176,14 @@ namespace Agentmaster
             }
             result.status = StateFileStatus::Unreadable;
             result.error = error;
+            // Agentmaster (PERSISTENCE.md §15/§16): whoever asked now holds NOTHING in place of this file's content (a loader
+            // returns its defaults, a read-modify-write its empty start), and the guard is the last thing between that and the
+            // file. PrepareStateFileReplace refuses while the file stays unreadable — but a lock that ENDS before the caller's
+            // save (an antivirus scan, a sync client, a backup) let the save find a readable, valid file and replace it, with no
+            // copy: the user's settings, colors or presets gone for the caller's defaults. The mark makes that first replace
+            // keep a copy of whatever the file then holds ("<name>.could-not-read-<stamp>"), as the startup fleet read already
+            // did for sessions.json. One mark per read: a file that stays locked costs one copy when it is next replaced.
+            MarkStateFileKeepBeforeReplace(path);
             bool firstOfEpisode = false;
             {
                 std::lock_guard lk{ g_stateGuardMtx };
@@ -2195,10 +2203,12 @@ namespace Agentmaster
         }
         catch (...)
         {
-            // Rule #18. Recovery: "unreadable" — the caller reads nothing, and the guard refuses to replace the file.
+            // Rule #18. Recovery: "unreadable" — the caller reads nothing, and the guard refuses to replace the file; the
+            // keep mark (as on the main path above) makes its first replace keep a copy once the file can be read.
             Agentmaster::LogSwallowedException(L"ReadStateFileUtf8");
             result.status = StateFileStatus::Unreadable;
             result.text.clear();
+            MarkStateFileKeepBeforeReplace(path);
         }
         return result;
     }

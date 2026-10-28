@@ -11,9 +11,12 @@
 #include <algorithm> // std::all_of (§21.22: the state icons' ids are digits)
 #include <cstdint> // SIZE_MAX (the rename-budget model's low-water mark)
 #include <deque> // the rename-budget model's call window
+#include <fstream> // TestMessagingStateFileLoad: state.json's raw bytes planted / read back (a torn write)
+#include <iterator> // std::istreambuf_iterator (the same read)
 #include <set> // §21.22: the state icons are distinct
 
 #include "../MessagingFromQueue.h" // §21.44: a topic message that waited in the queue (when it waits, the mirror's test, its 🫡)
+#include "../Messaging.h" // PERSISTENCE.md §16: LoadMessagingStateFile — the guarded load of state.json (TestMessagingStateFileLoad)
 #include "../MessagingModels.h"
 #include "../MessagingNewThread.h" // §21.22: StripTopicNameDecoration reads an icon-form name (the user's rename of a thread)
 #include "../MessagingStartNote.h" // §21.18: the start note's marker, version word, kind, sound and text
@@ -2613,4 +2616,108 @@ void TestMessaging()
         const QueuedPrompt olderPrompt = PromptFromJson(ParseLine(L"{\"id\":\"o\",\"text\":\"x\",\"remoteSource\":\"telegram:1\"}"));
         CHECK(olderPrompt.remoteQueuedBusyUnixMs == 0, "an older file's prompt reads 0");
     }
+}
+
+// ===== PERSISTENCE.md §16: the bot's state file, loaded the guarded way =================================================
+//
+// state.json is the ONLY record of which forum topic belongs to which session (the Bot API cannot list topics). The bot read
+// it with a reader that answered "" for a missing file AND for a locked one, so a lock at the bot's start meant "no topics":
+// every topic became an orphan, a new one was made per tab, and the first save wrote the empty map over the file. A JSON
+// that was not a state object did the same without even trying the backup. LoadMessagingStateFile tells the cases apart,
+// falls back to state.json.prev for all of them, and marks the file so the guard keeps it before the first save.
+
+void TestMessagingStateFileLoad()
+{
+    std::wprintf(L"Telegram state file (PERSISTENCE.md 16: a state.json the bot cannot use is never saved over with an empty topic map):\n");
+    const auto writeBytes = [](const std::wstring& path, const std::string& bytes) {
+        std::ofstream f(std::filesystem::path{ path }, std::ios::binary | std::ios::trunc);
+        f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    };
+    const auto readBytes = [](const std::wstring& path) {
+        std::ifstream f(std::filesystem::path{ path }, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    };
+    // The copies the guard kept of state.json in `dir`, in name (= creation) order.
+    const auto keptCopies = [](const std::wstring& dir) {
+        std::vector<std::wstring> out;
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator{ std::filesystem::path{ dir }, ec })
+        {
+            if (e.path().filename().wstring().rfind(L"state.json.could-not-read-", 0) == 0)
+            {
+                out.push_back(e.path().wstring());
+            }
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+    // A state's bytes as the service writes them (StateToJson, dumped, UTF-8): one field tells the loads apart.
+    const auto stateBytes = [](const wchar_t* botUsername, int64_t offset) {
+        MessagingState s;
+        s.botUsername = botUsername;
+        s.updateOffset = offset;
+        return Profiles::detail::WideToUtf8(json::Dump(StateToJson(s)));
+    };
+
+    wchar_t tmp[MAX_PATH]{};
+    ::GetTempPathW(MAX_PATH, tmp);
+    const std::wstring dir = std::wstring{ tmp } + L"am-msgstate-" + NewSessionId();
+    std::filesystem::create_directories(std::filesystem::path{ dir });
+    const std::wstring f = dir + L"\\state.json";
+    const std::wstring prev = f + L".prev";
+    const std::string good = stateBytes(L"main_bot", 42);
+    const std::string backup = stateBytes(L"prev_bot", 7);
+    ResetStateFileGuardForTests();
+
+    // A first start: nothing to load, nothing to say, nothing to keep.
+    auto l = LoadMessagingStateFile(f);
+    CHECK(!l.fromFile && !l.fromPrevious && l.note.empty() && l.state.botUsername.empty() && l.fileBytes.empty(), "missing: a first start - an empty map and no note");
+
+    // A good file: its own map, and its bytes for the save's no-op gate.
+    writeBytes(f, good);
+    l = LoadMessagingStateFile(f);
+    CHECK(l.fromFile && !l.fromPrevious && l.state.botUsername == L"main_bot" && l.state.updateOffset == 42 && l.fileBytes == good && l.note.empty(),
+          "good: state.json's own map, with its bytes");
+
+    // A torn file with a backup: the backup's map, and the torn bytes kept before the first save replaces them.
+    const std::string torn = "{\"botUsername\":\"main_b";
+    writeBytes(f, torn);
+    writeBytes(prev, backup);
+    ResetStateFileGuardForTests();
+    l = LoadMessagingStateFile(f);
+    CHECK(!l.fromFile && l.fromPrevious && l.state.botUsername == L"prev_bot" && l.note.find(L"not valid JSON") != std::wstring::npos,
+          "torn: the backup's map, and a note that says why");
+    CHECK(PrepareStateFileReplace(f), "torn: the first save may replace it...");
+    auto copies = keptCopies(dir);
+    CHECK(copies.size() == 1 && readBytes(copies[0]) == torn, "torn: ...after the torn bytes were kept aside");
+
+    // JSON that is not a state object, and no backup: an empty map (said so), and the file kept although it parses.
+    std::filesystem::remove(std::filesystem::path{ prev });
+    writeBytes(f, "[1,2]");
+    ResetStateFileGuardForTests();
+    l = LoadMessagingStateFile(f);
+    CHECK(!l.fromFile && !l.fromPrevious && l.state.botUsername.empty() && l.note.find(L"not a state object") != std::wstring::npos &&
+              l.note.find(L"no previous copy") != std::wstring::npos,
+          "foreign: JSON this build does not read is not a first start - it is said, and there is no backup to fall back to");
+    CHECK(PrepareStateFileReplace(f) && keptCopies(dir).size() == 2 && readBytes(keptCopies(dir).back()) == "[1,2]",
+          "foreign: it parses, so only the load's mark keeps it - and it is kept before the save");
+
+    // A LOCKED file with a backup: the backup's map (it used to read as "no topics"), no save while the lock lasts, and the good
+    // file kept before the first save once the lock ended.
+    writeBytes(f, good);
+    writeBytes(prev, backup);
+    ResetStateFileGuardForTests();
+    const HANDLE lock = ::CreateFileW(f.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    CHECK(lock != INVALID_HANDLE_VALUE, "locked: (setup) another program holds state.json with no sharing");
+    l = LoadMessagingStateFile(f); // waits the startup budget for the lock
+    CHECK(!l.fromFile && l.fromPrevious && l.state.botUsername == L"prev_bot" && l.note.find(L"could not be opened") != std::wstring::npos,
+          "locked: the backup's map - never an empty one");
+    CHECK(!PrepareStateFileReplace(f), "locked: no save replaces it while the lock lasts");
+    ::CloseHandle(lock);
+    CHECK(PrepareStateFileReplace(f), "locked: once readable, the save may go...");
+    CHECK(keptCopies(dir).size() == 3 && readBytes(keptCopies(dir).back()) == good, "locked: ...after the good state.json was kept aside");
+
+    ResetStateFileGuardForTests();
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
 }
