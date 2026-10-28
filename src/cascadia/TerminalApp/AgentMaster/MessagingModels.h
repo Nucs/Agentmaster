@@ -4792,12 +4792,13 @@ namespace Agentmaster::Msg
     /// itself. Nothing persists: after a restart every card is on Main again.
     /// §21.39: a third page, ALL SCREEN, is the level picker 📜 All Screen ▸ opens from the Session page (the user's request of
     /// 2026-10-26: "a second menu where we pick the transcript levels"); its ◀ Back returns to the Session page.
-    /// §21.41: ⎋ Esc and 🌙 Deactivate (the user's request of 2026-10-27): Main shows ⎋ Esc beside ⚙ Session while a turn is in
-    /// flight, and the Session page has a row of both above ◀ Back while the session's claude runs (MessagingSessionControl.h).
+    /// §21.41: ⎋ Esc and 🌙 Deactivate (the user's request of 2026-10-27) are a row of the Session page, above ◀ Back, while the
+    /// session's claude runs — and ⎋ Esc ONLY there (the user's rule of 2026-10-28: "The ESC button should be only inside Sessions
+    /// menu"; it had sat beside ⚙ Session on Main while a turn ran) (MessagingSessionControl.h).
     /// </remarks>
     enum class CardPage
     {
-        Main, // ⚙ Session (+ 🔄 Restart Session in Error / after an exit, ▶ Reactivate for a parked tab, or ⎋ Esc while a turn is in flight)
+        Main, // ⚙ Session (+ 🔄 Restart Session in Error / after an exit, or ▶ Reactivate for a parked tab); never ⎋ Esc (the Session page's alone)
         Session, // ⑂ Fork · 🆕 New Session · 🔄 Restart Session (+ 🔧 Resume Session in Error) · the runner · Queue · Pin · Transcript · 🖥 Screen Text · 🖼 Screen Image · 📜 All Screen ▸ · ⎋ Esc · 🌙 Deactivate (while claude runs) · ◀ Back
         AllScreen, // §21.39: ⬜ File diffs (unchecked) · one button per transcript level (Minimal · Compact · Default · Full · Max; the default level wears ⭐) · ◀ Back (to Session); a picked level takes the card back to Main
         AllScreenDiffs, // §21.39: the same picker with ☑️ File diffs checked - its levels draw every file change as a diff, whatever the level
@@ -4959,7 +4960,10 @@ namespace Agentmaster::Msg
         // §21.41 (the user's request of 2026-10-27): the card's ⎋ Esc and 🌙 Deactivate. Read from the session at render time like
         // the rest, so a card shows them exactly while they can do something - and the card's hash covers its buttons, so a state
         // change that adds or takes one away is the same one edit the state line costs anyway.
-        bool turnInFlight{ false }; // SessionTurnInFlight: Running or Needs approval - ⎋ Esc beside ⚙ Session on Main (with takesEsc)
+        // SessionTurnInFlight: Running or Needs approval. No button depends on it since the user's rule of 2026-10-28 (⎋ Esc only on
+        // the Session page, never beside ⚙ Session on Main): kept so the facts still say what the session is doing, and so this
+        // struct, which every unit that renders a card shares, keeps its layout (a removed member forces a purged build).
+        bool turnInFlight{ false };
         bool takesEsc{ false }; // SessionTakesEsc: a Claude session whose claude reads keys - ⎋ Esc on the Session page
         bool deactivatable{ false }; // SessionIsDeactivatable: a started tab Agentmaster launched - 🌙 Deactivate on the Session page
     };
@@ -5112,10 +5116,10 @@ namespace Agentmaster::Msg
     /// then one button per level, least to most (kAllScreenLevels: its name and a hint of what it adds), the default level
     /// (facts.allScreenLevel) wearing ⭐ in place of 📜, then ◀ Back to the Session page. A picked level takes the card back to
     /// MAIN (the service's handler, not this page's buttons).
-    /// §21.41 (the user's request of 2026-10-27): MAIN shows ⎋ Esc beside ⚙ Session while a turn is in flight (Running, Needs
-    /// approval) - the one moment an interrupt is wanted, so it is one tap away; SESSION gets a row of ⎋ Esc and 🌙 Deactivate right
-    /// above ◀ Back while the session's claude runs (each button only where it applies: no Esc for Codex or an exited claude, no
-    /// Deactivate for an adopted shell tab; no row at all for a parked tab, whose ▶ Reactivate is on Main).
+    /// §21.41 (the user's request of 2026-10-27): SESSION gets a row of ⎋ Esc and 🌙 Deactivate right above ◀ Back while the
+    /// session's claude runs (each button only where it applies: no Esc for Codex or an exited claude, no Deactivate for an adopted
+    /// shell tab; no row at all for a parked tab, whose ▶ Reactivate is on Main). ⎋ Esc is ONLY there (the user's rule of
+    /// 2026-10-28, "The ESC button should be only inside Sessions menu"): MAIN never shows it, a turn in flight included.
     /// </summary>
     /// <remarks>
     /// ▶ Reactivate restarts a session in Error or one whose claude exited, exactly as 🔄 Restart Session does there, so it is
@@ -5151,13 +5155,9 @@ namespace Agentmaster::Msg
             {
                 row.push_back({ L"\x25B6 Reactivate", CardCallbackData(L"reactivate", sessionId) });
             }
-            else if (facts.turnInFlight && facts.takesEsc)
-            {
-                // §21.41: while a turn runs (or waits on a permission / a question), stopping it is the state's own action - so
-                // ⎋ Esc sits where Restart and Reactivate sit in their states, right of the cog, which never moves. The three are
-                // exclusive: a turn in flight is never Error or Done, and a parked tab runs no turn.
-                row.push_back({ L"\x238B Esc", CardCallbackData(kCardVerbEsc, sessionId) });
-            }
+            // §21.41: NO ⎋ Esc here, a turn in flight included — the user's rule of 2026-10-28, "The ESC button should be only
+            // inside Sessions menu" (it sat right of the cog while a turn ran, where a tap meant for ⚙ Session could stop the
+            // turn). Esc is the Session page's, in its stopping row above ◀ Back (below).
             rows.push_back(std::move(row));
             return rows;
         }

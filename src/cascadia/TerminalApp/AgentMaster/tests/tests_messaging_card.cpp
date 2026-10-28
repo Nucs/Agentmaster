@@ -11,9 +11,10 @@
 //   1b. §21.39's level picker (the ALL SCREEN page 📜 All Screen ▸ opens: the File diffs checkbox, five levels, the default one
 //      starred, Back to the Session page; its checked twin whose levels carry +d), the level words and verbs, /allscreen's
 //      arguments, and the default level's setting (Full unless the cog says another);
-//   1c. §21.41's ⎋ Esc and 🌙 Deactivate (MessagingSessionControl.h, the user's request of 2026-10-27): Esc beside the cog on Main
-//      while a turn is in flight, the Esc / Deactivate row above Back on the Session page (each button only where it applies),
-//      the hosting window's two decisions, the answers' words, the texts and the Esc gap;
+//   1c. §21.41's ⎋ Esc and 🌙 Deactivate (MessagingSessionControl.h, the user's request of 2026-10-27): the Esc / Deactivate row
+//      above Back on the Session page (each button only where it applies), Esc NEVER on Main (the user's rule of 2026-10-28: "The
+//      ESC button should be only inside Sessions menu"), the hosting window's two decisions, the answers' words, the texts and
+//      the Esc gap;
 //   1d. §21.42's screenshot in the card (MessagingCardPicture.h, the user's request of 2026-10-27): the screen's hash, the plan
 //      (upload / reuse / keep / none), the caption's clock, the rich figure block, the media list, the photo read back from
 //      Telegram's answer, the picture's record across a restart, and the cog's switch;
@@ -490,13 +491,13 @@ void TestMessagingCard()
         const CardButtonFacts rf = CardButtonFactsFor(running);
         CHECK(rf.turnInFlight && rf.takesEsc && rf.deactivatable && !rf.reactivatable && !rf.error && !rf.done, "facts of a running session: a turn in flight, Esc and Deactivate apply");
 
-        // Main: Esc beside the cog while a turn is in flight, nowhere else.
+        // Main: NEVER Esc - the user's rule of 2026-10-28 ("The ESC button should be only inside Sessions menu"); a turn in flight
+        // leaves the cog alone on Main, and Esc is one tap further, on the Session page (below).
         const Rows runMain = BuildCardButtonRows(kCardSid, rf, CardPage::Main);
-        CHECK(runMain.size() == 1 && runMain[0].size() == 2 && runMain[0][0].second == L"c:panel:" + kCardSid && runMain[0][1].second == L"c:esc:" + kCardSid &&
-                  runMain[0][1].first == L"\x238B Esc",
-              "Running, Main: the cog first, then Esc");
+        CHECK(runMain.size() == 1 && runMain[0].size() == 1 && runMain[0][0].second == L"c:panel:" + kCardSid,
+              "Running, Main: the cog alone (no Esc beside it any more)");
         const Rows askMain = BuildCardButtonRows(kCardSid, CardButtonFactsFor(asking), CardPage::Main);
-        CHECK(askMain.size() == 1 && askMain[0].size() == 2 && askMain[0][1].second == L"c:esc:" + kCardSid, "Needs approval, Main: the cog, then Esc (it turns the dialog down)");
+        CHECK(askMain.size() == 1 && askMain[0].size() == 1, "Needs approval, Main: the cog alone");
         const Rows waitMain = BuildCardButtonRows(kCardSid, CardButtonFactsFor(waiting), CardPage::Main);
         const Rows idleMain = BuildCardButtonRows(kCardSid, CardButtonFactsFor(idle), CardPage::Main);
         CHECK(waitMain.size() == 1 && waitMain[0].size() == 1 && idleMain.size() == 1 && idleMain[0].size() == 1, "at rest (Waiting, Idle), Main: the cog alone, no Esc");
@@ -506,10 +507,21 @@ void TestMessagingCard()
         const Rows codexMain = BuildCardButtonRows(kCardSid, CardButtonFactsFor(codex), CardPage::Main);
         CHECK(codexMain.size() == 1 && codexMain[0].size() == 1, "a running Codex session, Main: the cog alone (nothing is typed into Codex)");
         const Rows adoptedMain = BuildCardButtonRows(kCardSid, CardButtonFactsFor(adopted), CardPage::Main);
-        CHECK(adoptedMain.size() == 1 && adoptedMain[0].size() == 2 && adoptedMain[0][1].second == L"c:esc:" + kCardSid,
-              "an adopted running claude, Main: Esc (its injector writes into that very tab)");
+        CHECK(adoptedMain.size() == 1 && adoptedMain[0].size() == 1, "an adopted running claude, Main: the cog alone too");
         const Rows closedMain = BuildCardButtonRows(kCardSid, CardButtonFactsFor(closed), CardPage::Main);
         CHECK(closedMain.size() == 1 && closedMain[0].size() == 1, "a closed session, Main: the cog alone");
+        bool escOnMain = false;
+        // An explicit array: a braced list of pointers to const and non-const sessions would not deduce one element type.
+        const SessionInfo* const everyState[] = { &running, &asking, &waiting, &idle, &error, &exited, &parked, &codex, &adopted, &closed };
+        for (const SessionInfo* sp : everyState)
+        {
+            escOnMain = escOnMain || HasData(BuildCardButtonRows(kCardSid, CardButtonFactsFor(*sp), CardPage::Main), L"c:esc:" + kCardSid);
+        }
+        CHECK(!escOnMain, "no state puts Esc on Main (it is the Session page's alone)");
+        CHECK(HasData(BuildCardButtonRows(kCardSid, rf, CardPage::Session), L"c:esc:" + kCardSid) &&
+                  HasData(BuildCardButtonRows(kCardSid, CardButtonFactsFor(asking), CardPage::Session), L"c:esc:" + kCardSid) &&
+                  HasData(BuildCardButtonRows(kCardSid, CardButtonFactsFor(adopted), CardPage::Session), L"c:esc:" + kCardSid),
+              "a turn in flight (Running, Needs approval, an adopted claude) still has Esc on its Session page");
 
         // The Session page: the stopping row right above Back, each button only where it applies, no row when neither does.
         const Rows runPage = BuildCardButtonRows(kCardSid, rf, CardPage::Session);

@@ -5819,8 +5819,9 @@ namespace Agentmaster::Msg
                    // §21.39: the card's 📜 All Screen ▸ (a level picker with a File diffs box), typed with a level or bare (the cog's
                    // default level, Full), and "diffs" for every file change as a diff.
                    L"/allscreen [level] [diffs] \x2014 the whole conversation as tall pictures, drawn like Claude Code draws it (bare: the default level, full unless set in the cog; diffs: every file change as a diff)\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n"
-                   // §21.41: the card's two stopping buttons, the typed commands' twins (one path each, so they behave alike).
-                   L"The card has \x238B Esc (one Esc at once, as at the PC \x2014 beside \x2699\xFE0F Session while a turn runs) and \U0001F319 Deactivate (on \x2699\xFE0F Session's page: claude stops, the tab keeps its place)\n"
+                   // §21.41: the card's two stopping buttons, the typed commands' twins (one path each, so they behave alike). Both
+                   // live on the Session page only (the user's rule of 2026-10-28 for Esc: "only inside Sessions menu").
+                   L"On \x2699\xFE0F Session's page the card has \x238B Esc (one Esc at once, as at the PC) and \U0001F319 Deactivate (claude stops, the tab keeps its place)\n"
                    L"/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not\n"
                    // §21.19: <code> keeps "/search-tab" from becoming a "/search" link (see the Search help above).
                    L"/search_tab \x2014 jump to the \U0001F50E Search topic: it goes first in the thread list (typed, <code>/search-tab</code> works too)\n"
