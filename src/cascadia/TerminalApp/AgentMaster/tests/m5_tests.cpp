@@ -185,6 +185,7 @@ int wmain()
     TestVoiceVocabulary(); // MESSAGING.md §21.43 / VOICE.md §5.5 — the voice notes' session vocabulary vs the POC's goldens (tests_voice.cpp)
     TestVoiceProtocol(); // VOICE.md §6.2 — the voice worker protocol's lines and its answer reader (tests_voice.cpp)
     TestVoiceCorrection(); // VOICE.md §5.5 — the correction layer's prompts, guard, command line and output reader (tests_voice.cpp)
+    TestVoiceNoteRoute(); // MESSAGING.md §21.43 — a voice note goes where a typed message of its thread goes (tests_voice.cpp)
 
     BenchPromptAnchor();
     BenchPromptAnchorRealSession(); // SUMMARY_JUMP.md §4: full batch resolve on a real heavy session (AM_BENCH_SESSION)

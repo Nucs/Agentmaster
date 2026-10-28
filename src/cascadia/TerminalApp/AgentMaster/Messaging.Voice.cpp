@@ -24,19 +24,19 @@
 #include <windows.h>
 #include <objbase.h>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 
 #include "ClaudeSpawn.h" // AppendStateLog, LogNav, ShortId, LogSwallowedException
+#include "MessagingVoice.h" // where a note goes (DecideVoiceNoteRoute), why one cannot be read, kVoiceMaxBytes, VoiceNoteMedia
 #include "SessionRegistry.h"
 
 namespace Agentmaster::Msg
 {
     namespace
     {
-        /// <summary>The most bytes a voice note may have: the Bot API serves files up to 20 MB through getFile.</summary>
-        constexpr size_t kVoiceMaxBytes = 20u << 20;
         /// <summary>The echo's transcript is cut here (a Telegram message holds 4,096 characters; the prompt keeps every word).</summary>
         constexpr size_t kVoiceEchoMaxChars = 3500;
         /// <summary>The reaction a note wears while it is downloaded and transcribed (one of the reactions a bot may set).</summary>
@@ -49,23 +49,6 @@ namespace Agentmaster::Msg
         int64_t WallMs()
         {
             return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-        }
-
-        /// <summary>The media object of a voice-like message (voice, audio, round video note) and its kind, or null.</summary>
-        /// <param name="msg">The message.</param>
-        /// <param name="kind">Receives "voice" / "audio" / "video_note".</param>
-        /// <returns>The media object, or null for any other message.</returns>
-        const json::Value* VoiceMedia(const json::Value& msg, std::wstring& kind)
-        {
-            for (const wchar_t* k : { L"voice", L"audio", L"video_note" })
-            {
-                if (const auto* m = msg.Find(k); m && m->type == json::Value::Type::Obj)
-                {
-                    kind = k;
-                    return m;
-                }
-            }
-            return nullptr;
         }
     }
 
@@ -230,10 +213,11 @@ namespace Agentmaster::Msg
 
     // ===== the poll thread: take a note, hold what follows it ==============================================================
 
-    bool MessagingService::_voiceTake(const json::Value& msg, const std::wstring& sessionId, int64_t threadId, bool bindHandingOver, bool edited)
+    bool MessagingService::_voiceTake(const json::Value& msg, const std::wstring& sessionId, int64_t threadId, bool bindHandingOver, bool edited,
+                                      bool heldByNewThread)
     {
         std::wstring kind;
-        const json::Value* media = VoiceMedia(msg, kind);
+        const json::Value* media = VoiceNoteMedia(msg, kind);
         const int64_t messageId = msg.I64At(L"message_id", 0);
         if (!media)
         {
@@ -261,6 +245,7 @@ namespace Agentmaster::Msg
                     VoiceLaneItem item;
                     item.seq = ++_voiceSeq;
                     item.isVoice = false;
+                    item.held = heldByNewThread; // a new thread's held message keeps its hand-over reading when its turn comes
                     item.sessionId = sessionId;
                     item.msg = msg;
                     it->second.push_back(std::move(item));
@@ -278,20 +263,40 @@ namespace Agentmaster::Msg
             }
             return heldNow;
         }
-        if (edited)
-        {
-            return true; // an edited note (its caption): nothing to read again
-        }
-        // A note where no session reads it: answered, never queued anywhere.
+        // §21.17 / §21.25: the note goes where a TYPED message of its thread goes (MessagingVoice.h) — a thread no session owns
+        // yet holds it in its new-thread wizard (writing in "All" opens such a thread with that very note), a topic whose bind
+        // still hands over holds it in the bind. Before 2026-10-28 both answered "no session" / "still starting" instead.
+        VoiceNoteRoute route = VoiceNoteRoute::Transcribe;
         if (sessionId.empty())
         {
-            _reply(threadId, L"\U0001F3A4 Voice notes are read in a session's topic (this thread has no session).", false, json::Value{}, messageId);
+            int64_t searchThread = 0;
+            bool orphan = false;
+            {
+                std::lock_guard lk{ _mtx };
+                searchThread = _state.searchThreadId;
+                orphan = std::find(_state.orphanThreads.begin(), _state.orphanThreads.end(), threadId) != _state.orphanThreads.end();
+            }
+            route = DecideVoiceNoteRoute(false, false, threadId, searchThread, orphan);
+        }
+        else
+        {
+            route = DecideVoiceNoteRoute(true, bindHandingOver, threadId, 0, false);
+        }
+        const bool holdForSession = route == VoiceNoteRoute::HoldForNewThread || route == VoiceNoteRoute::HoldInBind;
+        if (edited)
+        {
+            // An edited note (its caption) is never read again — but a copy a wizard or a bind still holds takes the edit, so the
+            // caption that follows its transcript is the latest one (_holdForNewThread replaces it; a copy gone by now: nothing).
+            if (holdForSession)
+            {
+                _holdForNewThread(threadId, msg, true);
+            }
             return true;
         }
-        if (bindHandingOver)
+        if (const std::wstring refusal = VoiceNoteRouteRefusalText(route); !refusal.empty())
         {
-            // §21.17: the thread is being bound to its new session this very moment; its held messages are handed over first.
-            _reply(threadId, L"\U0001F3A4 This topic's session is still starting \x2014 send the voice note again in a moment.", false, json::Value{}, messageId);
+            _reply(threadId, refusal, false, json::Value{}, messageId);
+            LogNav(L"remote telegram voice thread=" + std::to_wstring(threadId) + L" -> refused:no-session");
             return true;
         }
         VoiceJob job;
@@ -302,39 +307,46 @@ namespace Agentmaster::Msg
         job.durationSec = media->I64At(L"duration", 0);
         job.fileSize = media->I64At(L"file_size", 0);
         job.kind = kind;
+        if (holdForSession)
+        {
+            // Asked NOW whether the note can be read at all: a note that would fail must not wait through a whole folder pick
+            // for its answer. The hand-over asks again (this function, with the session): the settings may change meanwhile.
+            std::wstring refusal;
+            {
+                std::lock_guard lk{ _voiceMtx };
+                refusal = VoiceNoteUnreadableText(_voiceOn, static_cast<bool>(_voiceFactory), _voiceStopping, !job.fileId.empty(), job.fileSize);
+            }
+            if (!refusal.empty())
+            {
+                _reply(threadId, refusal, false, json::Value{}, messageId);
+                LogNav(L"remote telegram voice thread=" + std::to_wstring(threadId) + L" -> refused");
+                return true;
+            }
+            // Held untranscribed: the session it is for does not exist yet (or is being bound), and ITS folder and CLAUDE.md are
+            // the vocabulary the note needs — the hand-over (_adoptBoundThreads) brings it back here with the session.
+            _log(L"[msg] " + (route == VoiceNoteRoute::HoldForNewThread ? L"new thread " + std::to_wstring(threadId) : ShortId(sessionId) + L" (binding)") +
+                 L" holds a voice note for its new session (message " + std::to_wstring(messageId) + L", " + kind + L", " + std::to_wstring(job.durationSec) +
+                 L" s): transcribed with that session's vocabulary once it is up");
+            LogNav(L"remote telegram voice thread=" + std::to_wstring(threadId) + L" -> held for the new session");
+            _holdForNewThread(threadId, msg, false); // 👀, the picker (posted with a thread's first message), or the bind's queue
+            return true;
+        }
         std::wstring refusal;
         {
             std::lock_guard lk{ _voiceMtx };
-            if (!_voiceOn)
-            {
-                refusal = L"\U0001F3A4 Voice notes are off (\x2699 Settings \x203A Messaging \x203A Voice notes). Send it as text.";
-            }
-            else if (!_voiceFactory)
-            {
-                refusal = L"\U0001F3A4 Voice notes are not available in this build. Send it as text.";
-            }
-            else if (_voiceStopping)
-            {
-                refusal = L"\U0001F3A4 The bot is stopping \x2014 send the voice note again after it starts.";
-            }
-            else if (job.fileId.empty())
-            {
-                refusal = L"\U0001F3A4 This voice note carries no file. Send it again.";
-            }
-            else if (job.fileSize > static_cast<int64_t>(kVoiceMaxBytes))
-            {
-                refusal = L"\U0001F3A4 This recording is larger than the bot may download (20 MB). Send a shorter one.";
-            }
-            else
+            refusal = VoiceNoteUnreadableText(_voiceOn, static_cast<bool>(_voiceFactory), _voiceStopping, !job.fileId.empty(), job.fileSize);
+            if (refusal.empty())
             {
                 VoiceLaneItem item;
                 item.seq = ++_voiceSeq;
                 item.isVoice = true;
+                item.held = heldByNewThread;
                 item.sessionId = sessionId;
                 item.msg = msg;
                 // D2 is judged at ARRIVAL: a note read live stays live however long its transcription takes (a first worker start
-                // loads a model; a slow CPU engine on a long note).
-                item.liveAtArrival = !IsBacklogUpdate(msg.I64At(L"date", 0) * 1000, WallMs());
+                // loads a model; a slow CPU engine on a long note). A note a new thread held was read live when it came, however
+                // long the folder pick took (the typed messages it held are no backlog either: _handleTopicMessage's `held`).
+                item.liveAtArrival = heldByNewThread || !IsBacklogUpdate(msg.I64At(L"date", 0) * 1000, WallMs());
                 job.seq = item.seq;
                 _voiceLanes[threadId].push_back(std::move(item));
                 _voiceJobs.push_back(job);
@@ -351,7 +363,7 @@ namespace Agentmaster::Msg
         _react(messageId, kVoiceHeardReaction);
         _registry->UpdateQuiet(sessionId, [](SessionInfo& s) { s.readUnixMs = WallMs(); });
         _log(L"[msg] " + ShortId(sessionId) + L" voice note queued for transcription (message " + std::to_wstring(messageId) + L", " + kind + L", " +
-             std::to_wstring(job.durationSec) + L" s)");
+             std::to_wstring(job.durationSec) + L" s" + (heldByNewThread ? L", held by its new thread until the session came up)" : L")"));
         LogNav(L"remote telegram voice " + ShortId(sessionId) + L" seconds=" + std::to_wstring(job.durationSec));
         return true;
     }
@@ -598,7 +610,18 @@ namespace Agentmaster::Msg
                 {
                     try
                     {
-                        _handleMessage(item.msg, item.edited, true);
+                        if (item.held)
+                        {
+                            // A message a new thread HELD, behind a held voice note: handed over exactly as the hand-over
+                            // (_adoptBoundThreads) hands a held message — straight to the topic, read as live however long the
+                            // folder pick took. Through _handleMessage it would be judged by its date, and a long pick makes it
+                            // a backlog question.
+                            _handleTopicMessage(item.sessionId, item.msg, threadId, true);
+                        }
+                        else
+                        {
+                            _handleMessage(item.msg, item.edited, true);
+                        }
                     }
                     catch (...)
                     {
@@ -670,7 +693,9 @@ namespace Agentmaster::Msg
                 said.Set(L"am_voice_live", json::Value::MkBool(true));
             }
             _react(messageId, L"");
-            _handleTopicMessage(item.sessionId, said, threadId);
+            // A note a new thread HELD (the session's first prompt, maybe) is handed over like the typed messages it held: as a
+            // held message, which no question card takes and no backlog question asks about.
+            _handleTopicMessage(item.sessionId, said, threadId, item.held);
             LogNav(L"remote telegram voice " + ShortId(item.sessionId) + L" -> read chars=" + std::to_wstring(text.size()));
         }
         catch (...)

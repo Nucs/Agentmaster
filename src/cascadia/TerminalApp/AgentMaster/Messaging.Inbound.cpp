@@ -21,6 +21,7 @@
 #include "ApiErrorRewind.h" // HOOKS.md "Interrupted turns": PlanInterruptRewindForSession, AssessForkContinuation (the restart and fork questions)
 #include "ClaudeSpawn.h" // LogNav, ShortId, ResolveClaudeTranscriptPath, NewSessionId, LogSwallowedException
 #include "FolderProbe.h" // §21.17.4: SharedFolderProber — the poll thread's folder checks wait a bounded time
+#include "MessagingVoice.h" // §21.43: IsVoiceNoteMessage (a just-bound thread's voice note goes to the voice path)
 #include "Persistence.h" // DeriveSessionTitle
 #include "ProcessInspect.h" // AnalyzeSessionTranscript, ReadGitBranchForDir
 #include "ProfileBootstrap.h" // Profiles::detail::WideToUtf8
@@ -4749,7 +4750,16 @@ namespace Agentmaster::Msg
             }
             if (!topicSession.empty())
             {
-                _handleTopicMessage(topicSession, msg, threadId); // the thread's topic now: as if the caller had found it
+                // The thread's topic now: as if the caller had found it. §21.43: a voice note goes to the voice path with that
+                // session (a note has no text: _handleTopicMessage would drop it silently).
+                if (IsVoiceNoteMessage(msg))
+                {
+                    _voiceTake(msg, topicSession, threadId, false, false); // an edit never gets here: answered at the top
+                }
+                else
+                {
+                    _handleTopicMessage(topicSession, msg, threadId);
+                }
                 return;
             }
         }
