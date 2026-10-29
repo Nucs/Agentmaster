@@ -15,7 +15,8 @@ public enum BuildSource
 
 /// <summary>One file a build id holds, kept in the store and named by its SHA-256 in the manifest.</summary>
 /// <param name="Name">The file's name in the build (e.g. "Agentmaster_0.8.1.1_x64.zip").</param>
-/// <param name="Kind">What it is: "portable-zip", "layout-zip", "symbols-zip", "build-log", "build-json".</param>
+/// <param name="Kind">What it is: "portable-zip", "layout-zip", "symbols-zip", "build-log", "build-binlog" (msbuild's
+/// binary log), "build-json".</param>
 /// <param name="Bytes">Its size.</param>
 /// <param name="Sha256">Its SHA-256, lowercase hex: every consumer checks it before use.</param>
 /// <param name="StorePath">Its path relative to the store's root (<c>builds/&lt;build id&gt;/&lt;name&gt;</c>).</param>
@@ -60,6 +61,13 @@ public sealed record BuildRecord
 
     /// <summary>Import: where the artifact came from (the path or URL it was read from).</summary>
     public string? Origin { get; init; }
+
+    /// <summary>A build of a SNAPSHOT (uncommitted work, `amb build --snapshot`): the commit the snapshot was made on,
+    /// its parent; null for a build of a real commit.</summary>
+    /// <remarks>A snapshot commit lives only under <c>refs/buildserver/snapshots/</c> (in the source repository until
+    /// the CLI prunes it once built, and in the site's mirror for good): no branch reaches it, so this field is what
+    /// tells a reader which history the build belongs to.</remarks>
+    public string? SnapshotOf { get; init; }
 
     /// <summary>The build's files.</summary>
     public required IReadOnlyList<ArtifactRef> Artifacts { get; init; }

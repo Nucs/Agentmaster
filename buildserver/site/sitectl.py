@@ -477,7 +477,9 @@ def deploy() -> dict[str, object]:
     - amb-guest.exe: Native AOT, into /srv/buildserver/bin/ (the coordinator copies it into every slot's share);
     - amb-hostfacts.exe: Native AOT, into Q:\\buildserver\\bin\\ (a Windows file, so WSL's interop runs it natively);
     - hmp.py (the QEMU monitor helper the balloon uses) and coordinator-up.sh, into /srv/buildserver/bin/;
-    - buildserver/steps (the build job's guest scripts) into /srv/buildserver/bin/steps, replaced whole.
+    - buildserver/steps (steps/build: the build job's guest scripts; steps/install: the deploy job's Windows-side
+      script, which the coordinator stages on Q: and runs through WSL's interop) into /srv/buildserver/bin/steps,
+      replaced whole.
     A running coordinator keeps its old files open; `down` then `up` makes it use the new ones.
 
     Returns:

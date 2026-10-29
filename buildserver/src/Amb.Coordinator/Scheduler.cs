@@ -140,6 +140,13 @@ public sealed class Scheduler : BackgroundService
         DateTimeOffset now = _clock.GetUtcNow();
         foreach (RequestRecord request in _book.Active.Where(r => r.State == RequestState.Pending))
         {
+            if (request.Kind == RequestKind.Deploy && BusyDeploy(request.Id) is { } deploying)
+            {
+                // One install at a time: two would race for the instances' layout slots and the build lock, and a swap
+                // of one instance while the other's swap watches its start would read each other's processes.
+                Hold(request, now, $"another install runs: {deploying}");
+                continue;
+            }
             if (request.Resources is null)
             {
                 // No slot (an import): it only needs the coordinator.
@@ -204,6 +211,12 @@ public sealed class Scheduler : BackgroundService
     /// <returns>Its id, or null when the VM is free.</returns>
     private string? BusyBuild(string except) =>
         _book.Active.FirstOrDefault(r => r.Kind == RequestKind.Build && r.State != RequestState.Pending && r.Id != except)?.Id;
+
+    /// <summary>The deploy request that runs now (started and not ended), other than one.</summary>
+    /// <param name="except">The request asking.</param>
+    /// <returns>Its id, or null when no install runs.</returns>
+    private string? BusyDeploy(string except) =>
+        _book.Active.FirstOrDefault(r => r.Kind == RequestKind.Deploy && r.State != RequestState.Pending && r.Id != except)?.Id;
 
     /// <summary>Keeps a request pending for a reason (recorded once), or ends it no-capacity when it waited too long.</summary>
     /// <param name="request">The request.</param>
@@ -327,6 +340,7 @@ public sealed class Scheduler : BackgroundService
         RequestKind.Layer => new LayerJob(),
         RequestKind.E2e => new E2eJob(),
         RequestKind.Build => new BuildJob(),
+        RequestKind.Deploy => new DeployJob(),
         _ => throw new NotSupportedException($"{kind} is not served yet"),
     };
 }

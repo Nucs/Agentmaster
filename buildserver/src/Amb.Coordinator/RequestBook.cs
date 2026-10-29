@@ -46,8 +46,8 @@ public static class RequestDefaults
 
     /// <summary>How long a kind may wait for a slot.</summary>
     /// <param name="kind">The kind.</param>
-    /// <returns>Build 60 min, test 30, e2e 120, smoke 30, install and layer 60, import 5 (it needs no slot, only the
-    /// coordinator).</returns>
+    /// <returns>Build 60 min, test 30, e2e 120, smoke 30, install and layer 60, deploy 30 (it needs no slot, but waits
+    /// behind another deploy), import 5 (it needs no slot, only the coordinator).</returns>
     public static TimeSpan WaitOf(RequestKind kind) => TimeSpan.FromMinutes(kind switch
     {
         RequestKind.Build => 60,
@@ -55,13 +55,16 @@ public static class RequestDefaults
         RequestKind.E2e => 120,
         RequestKind.Smoke => 30,
         RequestKind.Install or RequestKind.Layer => 60,
+        RequestKind.Deploy => 30,
         _ => 5,
     });
 
     /// <summary>How long a kind's work may run.</summary>
     /// <param name="kind">The kind.</param>
     /// <returns>Build 3 h, test 1 h, e2e 2 h, smoke 20 min, install 75 min (its download and install took 16.5 min,
-    /// measured), layer 2 h (VS Build Tools took 28 min plus servicing), import 30 min.</returns>
+    /// measured), layer 2 h (VS Build Tools took 28 min plus servicing), deploy 75 min (up to 45 for the requesting
+    /// session's turn to end, 10 for the build lock, then the swap: 5-17 s down, measured, and the watch), import
+    /// 30 min.</returns>
     public static TimeSpan RunOf(RequestKind kind) => TimeSpan.FromMinutes(kind switch
     {
         RequestKind.Build => 180,
@@ -70,6 +73,7 @@ public static class RequestDefaults
         RequestKind.Smoke => 20,
         RequestKind.Install => 75,
         RequestKind.Layer => 120,
+        RequestKind.Deploy => 75,
         _ => 30,
     });
 }
@@ -134,6 +138,9 @@ public sealed class RequestBook
                 throw new RequestRejectedException("Test is not served yet (DESIGN.md §13: `amb test` comes after the build MVP)");
             case RequestKind.Build:
                 inputs = NormalizeBuild(inputs);
+                break;
+            case RequestKind.Deploy:
+                inputs = NormalizeDeploy(inputs);
                 break;
             case RequestKind.Install when !Ids.IsSafe(inputs.NewImage) || string.IsNullOrEmpty(inputs.Version)
                 || string.IsNullOrEmpty(inputs.OemDir):
@@ -206,7 +213,51 @@ public sealed class RequestBook
             "force" => "force",
             _ => throw new RequestRejectedException($"inputs.purge must be none or force, not {inputs.Purge}"),
         };
-        return inputs with { Commit = commit, Configuration = configuration, Identity = identity, Purge = purge };
+        // A snapshot names the commit it was made on by its full SHA too: the build job checks the snapshot's parent
+        // against it, and the build's record keeps it.
+        string? snapshotOf = inputs.SnapshotOf?.Trim().ToLowerInvariant();
+        if (snapshotOf is not null && (snapshotOf.Length != 40 || !snapshotOf.All(char.IsAsciiHexDigitLower)))
+        {
+            throw new RequestRejectedException("inputs.snapshotOf must be a full 40-character commit SHA");
+        }
+        return inputs with { Commit = commit, Configuration = configuration, Identity = identity, Purge = purge, SnapshotOf = snapshotOf };
+    }
+
+    /// <summary>Checks a deploy request's inputs and fills its defaults.</summary>
+    /// <param name="inputs">The inputs as asked.</param>
+    /// <returns>The inputs with the instance in its canonical spelling ("dev" / "production"), the wait for other sessions
+    /// set (default 0, the owner's "cut off at once"), and a dry run spelled out.</returns>
+    /// <exception cref="RequestRejectedException">The build id is missing or unsafe, the instance unknown, a number out
+    /// of range, or the injected failure unknown.</exception>
+    /// <remarks>No default instance: an install stops the instance it targets and ends every claude it hosts, so the
+    /// caller names it every time ("release" is accepted for production, the CLI's own name for it).</remarks>
+    internal static RequestInputs NormalizeDeploy(RequestInputs inputs)
+    {
+        if (!Ids.IsSafe(inputs.BuildId))
+        {
+            throw new RequestRejectedException("a deploy needs inputs.buildId (an existing build id)");
+        }
+        string instance = (inputs.Instance ?? "").Trim().ToLowerInvariant() switch
+        {
+            "dev" => "dev",
+            "production" or "release" => "production",
+            _ => throw new RequestRejectedException($"inputs.instance must be dev or production, not {inputs.Instance ?? "(none)"}"),
+        };
+        int waitOthers = inputs.WaitOthersMinutes ?? 0;
+        if (waitOthers is < 0 or > 240)
+        {
+            throw new RequestRejectedException("inputs.waitOthersMinutes must be 0 to 240");
+        }
+        if (inputs.RequestedByPid is <= 0)
+        {
+            throw new RequestRejectedException("inputs.requestedByPid must be a process id");
+        }
+        string? inject = inputs.InjectFailure?.Trim().ToLowerInvariant();
+        if (inject is not null and not "after-stop")
+        {
+            throw new RequestRejectedException($"inputs.injectFailure must be after-stop, not {inputs.InjectFailure}");
+        }
+        return inputs with { Instance = instance, WaitOthersMinutes = waitOthers, DryRun = inputs.DryRun ?? false, InjectFailure = inject };
     }
 
     /// <summary>Reads a request's record.</summary>

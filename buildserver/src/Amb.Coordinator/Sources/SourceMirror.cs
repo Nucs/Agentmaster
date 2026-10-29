@@ -45,6 +45,10 @@ public sealed class SourceMirror(CoordinatorOptions options, ILogger log)
     /// <summary>The submodule's path in the repository (its gitlink names the pinned commit).</summary>
     public const string SubmodulePath = "refs/claude-agent-sdk-cpp";
 
+    /// <summary>Where snapshots of uncommitted work live (DESIGN.md §11): <c>refs/buildserver/snapshots/&lt;commit&gt;</c>,
+    /// in the source repository (made by the CLI) and in the mirror.</summary>
+    public const string SnapshotRefs = "refs/buildserver/snapshots/";
+
     /// <summary>The repository's mirror.</summary>
     private string RepoMirror => Path.Combine(options.GitDir, "agentmaster.git");
 
@@ -73,9 +77,16 @@ public sealed class SourceMirror(CoordinatorOptions options, ILogger log)
     /// <exception cref="OperationCanceledException"><paramref name="cancel"/> was cancelled.</exception>
     public async Task<string?> FetchAsync(string commit, CancellationToken cancel)
     {
-        await EnsureBareAsync(RepoMirror, cancel).ConfigureAwait(false);
-        await GitAsync(RepoMirror, ["fetch", "--prune", "--no-tags", options.SourceRepo,
-            "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"], TimeSpan.FromMinutes(20), cancel).ConfigureAwait(false);
+        await RefreshAsync(cancel).ConfigureAwait(false);
+        if (!await HasCommitAsync(RepoMirror, commit, cancel).ConfigureAwait(false))
+        {
+            // A snapshot of uncommitted work (`amb build --snapshot`): the CLI made it under refs/buildserver/snapshots/
+            // in the source repository. Fetched without --prune, so the mirror keeps every snapshot it ever built: the CLI
+            // deletes the source's ref once its build exists, and the VM's worktree may still use the commit as its basis
+            // (a basis the mirror lost would cost the next build the whole history).
+            await GitAsync(RepoMirror, ["fetch", "--no-tags", options.SourceRepo,
+                "+" + SnapshotRefs + "*:" + SnapshotRefs + "*"], TimeSpan.FromMinutes(10), cancel, check: false).ConfigureAwait(false);
+        }
         if (!await HasCommitAsync(RepoMirror, commit, cancel).ConfigureAwait(false))
         {
             // A commit on no branch (a detached HEAD, a stash): ask the source for it by name; git allows that from a
@@ -192,6 +203,84 @@ public sealed class SourceMirror(CoordinatorOptions options, ILogger log)
             await GitAsync(mirror, ["update-ref", "-d", bundleRef], TimeSpan.FromSeconds(30), CancellationToken.None,
                 check: false).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>Brings the repository's mirror up to date with the source's branches and tags (made when missing).</summary>
+    /// <param name="cancel">Cancels the fetch.</param>
+    /// <returns>A task.</returns>
+    /// <exception cref="InvalidOperationException">git failed.</exception>
+    /// <exception cref="TimeoutException">The fetch took longer than 20 minutes.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> was cancelled.</exception>
+    /// <remarks>The first fetch of K:\source\Agentmaster took 92 s (145 MB), later ones 0-14 s (measured 2026-10-26).
+    /// --prune only touches refs/heads and refs/tags: snapshots under <see cref="SnapshotRefs"/> stay.</remarks>
+    public async Task RefreshAsync(CancellationToken cancel)
+    {
+        await EnsureBareAsync(RepoMirror, cancel).ConfigureAwait(false);
+        await GitAsync(RepoMirror, ["fetch", "--prune", "--no-tags", options.SourceRepo,
+            "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"], TimeSpan.FromMinutes(20), cancel).ConfigureAwait(false);
+    }
+
+    /// <summary>The first parent of a commit in the repository's mirror.</summary>
+    /// <param name="commit">The commit (a full SHA the mirror has).</param>
+    /// <param name="cancel">Cancels git.</param>
+    /// <returns>The parent's full SHA, or null for a root commit.</returns>
+    /// <exception cref="InvalidOperationException">git failed (the mirror lacks the commit).</exception>
+    public async Task<string?> ParentAsync(string commit, CancellationToken cancel)
+    {
+        CommandResult parents = await GitAsync(RepoMirror, ["rev-list", "--parents", "-n", "1", commit],
+            TimeSpan.FromSeconds(30), cancel).ConfigureAwait(false);
+        // "<commit> <parent1> [<parent2> ...]"
+        string[] shas = parents.Output.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        return shas.Length >= 2 ? shas[1] : null;
+    }
+
+    /// <summary>Writes one committed file of the repository's mirror to disk, byte for byte.</summary>
+    /// <param name="rev">The revision (a ref such as refs/heads/agentmaster, or a commit).</param>
+    /// <param name="path">The file's path in the tree, with '/' separators (tools/Swap-AgentmasterLayout.ps1).</param>
+    /// <param name="target">Where it goes (overwritten).</param>
+    /// <param name="cancel">Cancels git.</param>
+    /// <returns>The commit <paramref name="rev"/> names (the deploy records which copy it ran).</returns>
+    /// <exception cref="InvalidOperationException">The revision or the file is not in the mirror.</exception>
+    /// <exception cref="IOException">The file could not be written.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> was cancelled.</exception>
+    /// <remarks>Raw bytes, never decoded text: a script keeps its exact encoding and line ends (a decoded and re-encoded
+    /// copy would drop a byte-order mark, and a .sh with CR line ends breaks bash).</remarks>
+    public async Task<string> ExportFileAsync(string rev, string path, string target, CancellationToken cancel)
+    {
+        CommandResult resolved = await GitAsync(RepoMirror, ["rev-parse", "--verify", "--quiet", rev + "^{commit}"],
+            TimeSpan.FromSeconds(30), cancel, check: false).ConfigureAwait(false);
+        string commit = resolved.Output.Trim();
+        if (resolved.ExitCode != 0 || commit.Length != 40)
+        {
+            throw new InvalidOperationException($"the mirror has no {rev}");
+        }
+        var info = new System.Diagnostics.ProcessStartInfo("git")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        foreach (string arg in (string[])["-c", "safe.directory=*", "-C", RepoMirror, "cat-file", "blob", commit + ":" + path])
+        {
+            info.ArgumentList.Add(arg);
+        }
+        using var git = System.Diagnostics.Process.Start(info)
+            ?? throw new InvalidOperationException("git did not start");
+        Task<string> error = git.StandardError.ReadToEndAsync(CancellationToken.None);
+        string temp = target + ".part";
+        await using (var file = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            await git.StandardOutput.BaseStream.CopyToAsync(file, cancel).ConfigureAwait(false);
+        }
+        await git.WaitForExitAsync(cancel).ConfigureAwait(false);
+        if (git.ExitCode != 0)
+        {
+            File.Delete(temp);
+            throw new InvalidOperationException($"{path} is not in {rev} ({commit[..9]}): {(await error.ConfigureAwait(false)).Trim()}");
+        }
+        File.Move(temp, target, overwrite: true);
+        return commit;
     }
 
     /// <summary>The submodule's pinned commit at a commit (its gitlink), or null when the tree has none.</summary>

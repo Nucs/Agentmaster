@@ -131,6 +131,13 @@
   names the same package at the installed version. Any failure after the removal reinstalls it
   (Add-AppxPackage -Path) and starts it.
 
+.PARAMETER InjectFailureAfterStop
+  FOR TESTS ONLY: fail on purpose right after the drain, with the old version stopped and the new one not yet
+  registered, so the rollback runs exactly as it would for a real failure there (the old version is relaunched, then
+  the script throws). The build server's `amb install --inject-failure after-stop` uses it to prove that a failed
+  install brings the old version back (buildserver/DESIGN.md section 13, P4's done-when). It costs a full stop and
+  restart of the instance, every claude it hosts included, and changes nothing else.
+
 .OUTPUTS
   PSCustomObject with Package, OldVersion, OldLocation, NewVersion, NewLocation, StoppedPids,
   DrainSeconds, HostsLeft (old OpenConsole hosts still alive when the drain ended),
@@ -184,7 +191,9 @@
       the package in use when -RegisterRetrySec runs out. The old version is brought back first
       (see Rollback), then the error is rethrown;
     - anything else fails between the stop and the end of the register (the drain, step 4b's
-      removal): the same rollback runs first, then the error is rethrown.
+      removal): the same rollback runs first, then the error is rethrown;
+    - -InjectFailureAfterStop is given (a test): after the stop and the drain, the same rollback runs,
+      then the injected error is thrown.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -196,7 +205,8 @@ param(
     [ValidateRange(1, 600)][int]$LaunchTimeoutSec = 60,
     [switch]$NoLaunch,
     [switch]$ReplaceInstalledPackage,
-    [string]$RollbackBundle
+    [string]$RollbackBundle,
+    [switch]$InjectFailureAfterStop
 )
 
 $ErrorActionPreference = 'Stop'
@@ -611,6 +621,14 @@ if ($oldDir) {
 $result.DrainSeconds = [math]::Round($drain.Elapsed.TotalSeconds, 1)
 $result.HostsLeft = $hosts.Count
 Write-Step ("drained  old ConPTY hosts in {0:n1}s ({1} still alive)" -f $drain.Elapsed.TotalSeconds, $hosts.Count)
+
+# The test of the rollback (-InjectFailureAfterStop): a failure at the worst place, with the old version stopped and
+# the new one not registered. It goes through the same catch below as a real failure, so what it proves holds for
+# those too.
+if ($InjectFailureAfterStop) {
+    Write-Step 'INJECTED FAILURE after the stop (-InjectFailureAfterStop, a test): the rollback must bring the old version back'
+    throw 'injected failure after the stop (-InjectFailureAfterStop)'
+}
 
 # --- 4b. remove (an INSTALLED package, -ReplaceInstalledPackage) --------------------------------
 # Step 1 let an installed package through only with -ReplaceInstalledPackage and a checked

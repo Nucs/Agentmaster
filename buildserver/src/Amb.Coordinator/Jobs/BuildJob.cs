@@ -58,6 +58,17 @@ public sealed class BuildJob : VmJob
         string? sdkCommit = await mirror.FetchAsync(commit, cancel).ConfigureAwait(false);
         context.Event("source", FormattableString.Invariant(
             $"mirror has {commit[..9]} (submodule {(sdkCommit is null ? "none" : sdkCommit[..9])}) after {(context.Clock.GetUtcNow() - fetchStart).TotalSeconds:0} s"));
+        if (inputs.SnapshotOf is { } snapshotOf)
+        {
+            // The record will say which history this build belongs to (no branch reaches a snapshot), so the claim must
+            // hold: the snapshot's parent is the commit it says it was made on.
+            string? parent = await mirror.ParentAsync(commit, cancel).ConfigureAwait(false);
+            if (parent != snapshotOf)
+            {
+                return new JobOutcome(false, $"{commit[..9]} is not a snapshot of {snapshotOf[..9]}: its parent is {parent?[..9] ?? "none"}");
+            }
+            context.Event("source", $"a snapshot of uncommitted work on {snapshotOf[..9]}");
+        }
 
         VmRecord vm = PrepareVm(context);
         string key = WorktreeKey(configuration, identity);
@@ -80,10 +91,13 @@ public sealed class BuildJob : VmJob
 
             (int maxCpu, int clMpCount) = Parallelism(context.Grant);
             int buildTimeout = (int)Math.Max(600, request.RunTimeout.TotalSeconds - 1800);
+            // -BinLog: msbuild's binary log beside the log (<log>.binlog), kept as the build's build.binlog, and in the
+            // request's store folder when the build fails (KeepFailedLogs copies <log>*): a failed build's binlog is the
+            // one most worth reading.
             GuestStep buildStep = Script("build", "build.ps1", buildTimeout,
                 ["-Worktree", worktree, "-Configuration", configuration, "-Identity", identity, "-Purge", purge,
                  "-MaxCpu", maxCpu.ToString(CultureInfo.InvariantCulture),
-                 "-ClMpCount", clMpCount.ToString(CultureInfo.InvariantCulture), "-Layout", layout, "-Log", log],
+                 "-ClMpCount", clMpCount.ToString(CultureInfo.InvariantCulture), "-Layout", layout, "-Log", log, "-BinLog"],
                 progressFile: log);
             context.Event("step", FormattableString.Invariant(
                 $"step build: {configuration}, {identity}, purge {purge}, /m:{maxCpu}, CL_MPCount {clMpCount}, in {context.Grant}"));
@@ -427,6 +441,7 @@ public sealed class BuildJob : VmJob
                 Version = version,
                 BuildSeconds = Math.Round(buildSeconds, 1),
                 Origin = context.Options.SourceRepo,
+                SnapshotOf = context.Request.Inputs.SnapshotOf,
                 Artifacts = artifacts,
             };
             try
@@ -446,13 +461,16 @@ public sealed class BuildJob : VmJob
     /// <summary>What a file of a build is, by its name.</summary>
     /// <param name="name">The file's name.</param>
     /// <param name="portable">The portable zip's name (from build.json).</param>
-    /// <returns>"portable-zip", "layout-zip", "symbols-zip", "build-log", "build-json" or "file".</returns>
+    /// <returns>"portable-zip", "layout-zip", "symbols-zip", "build-log", "build-binlog", "build-json" or "file".</returns>
     internal static string ArtifactKind(string name, string portable) => name switch
     {
         _ when name == portable => "portable-zip",
         _ when name.EndsWith("_layout.zip", StringComparison.Ordinal) => "layout-zip",
         _ when name.EndsWith("_symbols.zip", StringComparison.Ordinal) => "symbols-zip",
         "build.log" or "build.log.err" => "build-log",
+        // msbuild's binary log (the MSBuild Structured Log Viewer reads it): its own kind, because at tens of MB it is
+        // fetched only when wanted, never with the text log.
+        "build.binlog" => "build-binlog",
         "build.json" => "build-json",
         _ => "file",
     };

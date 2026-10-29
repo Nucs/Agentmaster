@@ -12,6 +12,10 @@
       D:\tmp and vcpkg's binary cache D:\cache\vcpkg, both on the data disk, which outlives the VM's boots.
     - Afterwards the layout must hold AppxManifest.xml and Agentmaster.exe; one that does not fails the step even when
       msbuild said it succeeded.
+    - -BinLog adds msbuild's binary log (<Log>.binlog) through a Directory.Build.rsp in the worktree's root, which
+      msbuild reads by itself from the solution's folder (MSBuild's auto-response files): the commit's own wrapper,
+      whatever its age, builds with the binary log without knowing it. The file is removed again after the build (a
+      Directory.Build.rsp the commit tracks gets the line appended and is checked out again).
 
 .PARAMETER Worktree
     The worktree's folder (D:\src\<configuration>-<identity>).
@@ -38,6 +42,9 @@
     The build's output file (the step's progress file), one per request (D:\out\<worktree>\build-<request id>.log):
     the agent tails it from the step's start, so it must not be an earlier build's file.
 
+.PARAMETER BinLog
+    Also write msbuild's binary log, as <Log>.binlog (package.ps1 keeps it as build.binlog).
+
 .OUTPUTS
     The build's exit code and time, then "BUILD {json}".
 
@@ -52,9 +59,11 @@ param(
     [Parameter(Mandatory)][int]$MaxCpu,
     [Parameter(Mandatory)][int]$ClMpCount,
     [Parameter(Mandatory)][string]$Layout,
-    [Parameter(Mandatory)][string]$Log
+    [Parameter(Mandatory)][string]$Log,
+    [switch]$BinLog
 )
 $ErrorActionPreference = 'Stop'
+$git = "$env:ProgramFiles\Git\cmd\git.exe"
 
 if ($Purge -eq 'force') {
     $doomed = @("$Worktree\bin", "$Worktree\obj", "$Worktree\src\cascadia\CascadiaPackage\bin",
@@ -80,16 +89,40 @@ $env:VCPKG_DEFAULT_BINARY_CACHE = 'D:\cache\vcpkg'
 # msbuild's worker nodes otherwise outlive the build by up to 15 idle minutes (node reuse), holding memory the VM needs
 # and the build's output handles open.
 $env:MSBUILDDISABLENODEREUSE = '1'
+
+# The binary log through MSBuild's auto-response file (see -BinLog). A Directory.Build.rsp the commit tracks keeps its
+# own switches: the line is appended, and the file checked out again afterwards.
+$rsp = Join-Path $Worktree 'Directory.Build.rsp'
+$rspTracked = $false
+if ($BinLog) {
+    & $git -C $Worktree ls-files --error-unmatch Directory.Build.rsp *> $null
+    $rspTracked = $LASTEXITCODE -eq 0
+    $line = "-bl:$Log.binlog"
+    if ($rspTracked) { Add-Content -LiteralPath $rsp -Value $line -Encoding ascii }
+    else { Set-Content -LiteralPath $rsp -Value $line -Encoding ascii }
+    Write-Output "binary log: $Log.binlog (through $rsp)"
+}
+
 $watch = [Diagnostics.Stopwatch]::StartNew()
-# No -Wait: Start-Process -Wait waits for every DESCENDANT too, and the compiler server and mspdbsrv.exe stay up for
-# minutes after a build (measured: the first build's step ran on long after "Build OK"). Only the build's own process
-# decides when the step ends.
-$build = Start-Process -FilePath "$env:ProgramFiles\PowerShell\7\pwsh.exe" -ArgumentList $arguments `
-    -WorkingDirectory $Worktree -RedirectStandardOutput $Log -RedirectStandardError "$Log.err" -NoNewWindow -PassThru
-# Taking the handle now keeps the process's exit code readable after it ends (a Start-Process object whose handle was
-# never opened reports no ExitCode).
-$null = $build.Handle
-$build.WaitForExit()
+try {
+    # No -Wait: Start-Process -Wait waits for every DESCENDANT too, and the compiler server and mspdbsrv.exe stay up for
+    # minutes after a build (measured: the first build's step ran on long after "Build OK"). Only the build's own
+    # process decides when the step ends.
+    $build = Start-Process -FilePath "$env:ProgramFiles\PowerShell\7\pwsh.exe" -ArgumentList $arguments `
+        -WorkingDirectory $Worktree -RedirectStandardOutput $Log -RedirectStandardError "$Log.err" -NoNewWindow -PassThru
+    # Taking the handle now keeps the process's exit code readable after it ends (a Start-Process object whose handle
+    # was never opened reports no ExitCode).
+    $null = $build.Handle
+    $build.WaitForExit()
+}
+finally {
+    # Cleanup in every outcome: a response file left behind would add its switch to the worktree's next build, and a
+    # tracked one must not stay modified (the next checkout is forced anyway, but a failed one would keep it).
+    if ($BinLog) {
+        if ($rspTracked) { & $git -C $Worktree checkout -- Directory.Build.rsp *> $null }
+        else { Remove-Item -LiteralPath $rsp -Force -ErrorAction SilentlyContinue }
+    }
+}
 $seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1)
 $code = $build.ExitCode
 Write-Output "build exit $code after $([math]::Round($seconds / 60, 1)) min ($Configuration, $Identity, purge $Purge, /m:$MaxCpu, CL_MPCount $ClMpCount)"
@@ -111,6 +144,7 @@ $facts = [ordered]@{
     purge         = $Purge
     maxCpu        = $MaxCpu
     clMpCount     = $ClMpCount
+    binLogMB      = if (Test-Path -LiteralPath "$Log.binlog") { [math]::Round((Get-Item -LiteralPath "$Log.binlog").Length / 1MB, 1) } else { $null }
     freeD_GB      = [math]::Round((Get-PSDrive D).Free / 1GB, 1)
 }
 Write-Output ('BUILD ' + ($facts | ConvertTo-Json -Compress))

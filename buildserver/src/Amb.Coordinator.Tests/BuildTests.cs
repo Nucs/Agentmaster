@@ -48,11 +48,129 @@ public sealed class BuildTests : IDisposable
             new RequestInputs { Commit = Commit, Configuration = "Fast" },
             new RequestInputs { Commit = Commit, Identity = "prod" },
             new RequestInputs { Commit = Commit, Purge = "auto" },
+            new RequestInputs { Commit = Commit, SnapshotOf = "HEAD" },
         })
         {
             Assert.Throws<RequestRejectedException>(() => RequestBook.NormalizeBuild(bad));
         }
+        // A snapshot names its parent by its full SHA, kept in lower case like the commit.
+        Assert.Equal(Commit, RequestBook.NormalizeBuild(new RequestInputs { Commit = Commit, SnapshotOf = Commit.ToUpperInvariant() }).SnapshotOf);
+        Assert.Null(RequestBook.NormalizeBuild(new RequestInputs { Commit = Commit }).SnapshotOf);
     }
+
+    /// <summary>An install names an instance every time (production also as "release"), waits for nobody else by default,
+    /// and takes only the one injected failure the swap knows.</summary>
+    [Fact]
+    public void DeployInputsAreCheckedAndCompleted()
+    {
+        RequestInputs dev = RequestBook.NormalizeDeploy(new RequestInputs { BuildId = "b20261028-3", Instance = "Dev" });
+        Assert.Equal(("dev", 0, false, null), (dev.Instance, dev.WaitOthersMinutes, dev.DryRun, dev.InjectFailure));
+        Assert.Equal("production", RequestBook.NormalizeDeploy(new RequestInputs { BuildId = "b1", Instance = "release" }).Instance);
+        Assert.Equal("after-stop", RequestBook.NormalizeDeploy(new RequestInputs
+        {
+            BuildId = "b1", Instance = "dev", InjectFailure = "AFTER-STOP", DryRun = true, WaitOthersMinutes = 5, RequestedByPid = 42,
+        }).InjectFailure);
+        foreach (RequestInputs bad in new[]
+        {
+            new RequestInputs { Instance = "dev" },
+            new RequestInputs { BuildId = "../x", Instance = "dev" },
+            new RequestInputs { BuildId = "b1" },
+            new RequestInputs { BuildId = "b1", Instance = "staging" },
+            new RequestInputs { BuildId = "b1", Instance = "dev", WaitOthersMinutes = 241 },
+            new RequestInputs { BuildId = "b1", Instance = "dev", WaitOthersMinutes = -1 },
+            new RequestInputs { BuildId = "b1", Instance = "dev", RequestedByPid = 0 },
+            new RequestInputs { BuildId = "b1", Instance = "dev", InjectFailure = "before-stop" },
+        })
+        {
+            Assert.Throws<RequestRejectedException>(() => RequestBook.NormalizeDeploy(bad));
+        }
+    }
+
+    /// <summary>An install's target follows the instance, and a build it cannot install is refused before anything is
+    /// staged: no layout zip (an import), no commit, or the other identity.</summary>
+    [Fact]
+    public void DeployTargetAndRefusals()
+    {
+        CoordinatorOptions options = Options();
+        DeployJob.InstanceTarget dev = DeployJob.TargetOf("dev", options);
+        Assert.Equal(("AgentmasterDev", "dev", "dev"), (dev.Package, dev.CliInstance, dev.Identity));
+        Assert.Equal([@"Q:\agentmaster-layouts\Debug", @"Q:\agentmaster-layouts\Debug-B"], dev.Slots);
+        DeployJob.InstanceTarget production = DeployJob.TargetOf("production", options);
+        Assert.Equal(("Agentmaster", "release", "release"), (production.Package, production.CliInstance, production.Identity));
+        Assert.Throws<ArgumentException>(() => DeployJob.TargetOf("staging", options));
+
+        BuildRecord built = Built("b20261028-3", Commit, "Release") with
+        {
+            Artifacts = [new ArtifactRef("AgentmasterDev_0.0.1.0_x64_layout.zip", "layout-zip", 1, new string('a', 64), "builds/x/y")],
+        };
+        Assert.Null(DeployJob.Refusal(built, dev));
+        Assert.Contains("release-identity", DeployJob.Refusal(built with { Identity = "release" }, dev) ?? "", StringComparison.Ordinal);
+        Assert.Contains("--identity release", DeployJob.Refusal(built, production) ?? "", StringComparison.Ordinal);
+        Assert.Contains("no layout zip", DeployJob.Refusal(built with { Artifacts = [] }, dev) ?? "", StringComparison.Ordinal);
+        Assert.Contains("names no commit", DeployJob.Refusal(built with { Commit = null }, dev) ?? "", StringComparison.Ordinal);
+    }
+
+    /// <summary>The Windows side gets its paths as Windows paths, the slot pair as one ';'-separated value (pwsh -File
+    /// passes no arrays), and the dry run and the injected failure only when asked.</summary>
+    [Fact]
+    public void DeployScriptArguments()
+    {
+        CoordinatorOptions options = Options();
+        DeployJob.InstanceTarget dev = DeployJob.TargetOf("dev", options);
+        BuildRecord build = Built("b20261028-3", Commit, "Debug");
+        var layout = new ArtifactRef("AgentmasterDev_0.0.1.0_x64_layout.zip", "layout-zip", 1, new string('a', 64), "builds/x/y");
+        IReadOnlyList<string> args = DeployJob.ScriptArguments(new RequestInputs { Instance = "dev", RequestedByPid = 77 }, dev, build,
+            layout, @"Q:\buildserver\install\r1", "r1");
+        Assert.Equal(@"Q:\buildserver\install\r1\install-build.ps1", args[args.ToList().IndexOf("-File") + 1]);
+        Assert.Equal(@"Q:\agentmaster-layouts\Debug;Q:\agentmaster-layouts\Debug-B", args[args.ToList().IndexOf("-Slots") + 1]);
+        Assert.Equal("77", args[args.ToList().IndexOf("-RequestedByPid") + 1]);
+        Assert.Equal(Commit, args[args.ToList().IndexOf("-Commit") + 1]);
+        Assert.DoesNotContain("-DryRun", args);
+        Assert.DoesNotContain("-InjectFailureAfterStop", args);
+        IReadOnlyList<string> test = DeployJob.ScriptArguments(new RequestInputs { Instance = "dev", DryRun = true, InjectFailure = "after-stop" },
+            dev, build, layout, @"Q:\buildserver\install\r2", "r2");
+        Assert.Contains("-DryRun", test);
+        Assert.Contains("-InjectFailureAfterStop", test);
+        Assert.Equal("0", test[test.ToList().IndexOf("-RequestedByPid") + 1]);
+    }
+
+    /// <summary>The outcome comes from the script's result; a rollback and a "look now" say so first.</summary>
+    [Fact]
+    public void DeployOutcomes()
+    {
+        Assert.Equal((true, "installed it"), DeployJob.Summarize("""{"ok": true, "message": "installed it"}""", 0));
+        Assert.Equal((false, "ROLLED BACK: the swap failed"), DeployJob.Summarize("""{"ok": false, "message": "the swap failed"}""", 2));
+        Assert.StartsWith("LOOK AT THE INSTANCE NOW: ", DeployJob.Summarize("""{"ok": false, "message": "x"}""", 3).Message, StringComparison.Ordinal);
+        Assert.False(DeployJob.Summarize("""{"ok": true, "message": "x"}""", 1).Ok);
+        Assert.Equal((false, "the install script exited 1 without a result"), DeployJob.Summarize(null, 1));
+        Assert.Contains("unreadable", DeployJob.Summarize("{not json", 1).Message, StringComparison.Ordinal);
+        string file = Path.Combine(_root, "install.json");
+        Assert.Equal("""{"ok": true}""", DeployJob.ReadResultJson(file, ["x", DeployJob.ResultPrefix + """{"ok": true}"""]));
+        File.WriteAllText(file, """{"ok": false}""");
+        Assert.Equal("""{"ok": false}""", DeployJob.ReadResultJson(file, ["x"]));
+    }
+
+    /// <summary>The settings the deploy tests read (only the slot pairs matter to them).</summary>
+    /// <returns>The coordinator's defaults over the test's root.</returns>
+    private CoordinatorOptions Options() => CoordinatorOptions.FromEnvironment(name => name == "AMB_ROOT" ? _root : null);
+
+    /// <summary>A built dev-identity build record.</summary>
+    /// <param name="id">Its id.</param>
+    /// <param name="commit">Its commit.</param>
+    /// <param name="configuration">Its configuration.</param>
+    /// <returns>The record (no artifacts).</returns>
+    private static BuildRecord Built(string id, string commit, string configuration) => new()
+    {
+        Id = id,
+        Source = BuildSource.Built,
+        CreatedAt = DateTimeOffset.UnixEpoch,
+        RequestId = "r1",
+        Commit = commit,
+        Configuration = configuration,
+        Identity = "dev",
+        Purge = "none",
+        Artifacts = [],
+    };
 
     /// <summary>A build exists only for the same commit, configuration, identity and purge, and only when the service
     /// built it (an import of the same commit is no build of it); the newest one wins.</summary>
@@ -136,6 +254,7 @@ public sealed class BuildTests : IDisposable
         Assert.Equal("symbols-zip", BuildJob.ArtifactKind("AgentmasterDev_0.0.1.0_x64_symbols.zip", Portable));
         Assert.Equal("build-log", BuildJob.ArtifactKind("build.log", Portable));
         Assert.Equal("build-log", BuildJob.ArtifactKind("build.log.err", Portable));
+        Assert.Equal("build-binlog", BuildJob.ArtifactKind("build.binlog", Portable));
         Assert.Equal("build-json", BuildJob.ArtifactKind("build.json", Portable));
         Assert.Equal("file", BuildJob.ArtifactKind("other.txt", Portable));
         Assert.Equal("release-dev", BuildJob.WorktreeKey("Release", "dev"));

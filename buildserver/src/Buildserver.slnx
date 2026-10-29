@@ -7,4 +7,5 @@
   <Project Path="Amb.Coordinator/Amb.Coordinator.csproj" />
   <Project Path="Amb.Coordinator.Tests/Amb.Coordinator.Tests.csproj" />
   <Project Path="Amb.Cli/Amb.Cli.csproj" />
+  <Project Path="Amb.Cli.Tests/Amb.Cli.Tests.csproj" />
 </Solution>

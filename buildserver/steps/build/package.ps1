@@ -13,6 +13,8 @@
       Optional: a build whose symbols do not all match still has its zip, and says so in build.json.
     - build.log / build.log.err (copied from D:) and build.json: the commit, configuration, identity, the package's name
       and version, the files and their sizes.
+    - build.binlog: msbuild's binary log of the build (build.ps1 -BinLog writes it beside the log as <log>.binlog), for
+      the MSBuild Structured Log Viewer: every project, target, task and property of the build. Copied when it exists.
     Everything is written to -Out (the share, Z:\out\<request id>), from where the coordinator moves it into the store
     and records each file's SHA-256.
 
@@ -29,7 +31,7 @@
     The built layout.
 
 .PARAMETER Log
-    The build's output file (copied as build.log, with its .err).
+    The build's output file (copied as build.log, with its .err and its .binlog).
 
 .PARAMETER Out
     The folder in the share the artifacts go to.
@@ -107,6 +109,8 @@ try {
 
 Copy-Item -LiteralPath $Log -Destination (Join-Path $Out 'build.log') -Force
 if (Test-Path -LiteralPath "$Log.err") { Copy-Item -LiteralPath "$Log.err" -Destination (Join-Path $Out 'build.log.err') -Force }
+# The binary log: absent when the build ran without -BinLog (or msbuild never started), which is no reason to fail.
+if (Test-Path -LiteralPath "$Log.binlog") { Copy-Item -LiteralPath "$Log.binlog" -Destination (Join-Path $Out 'build.binlog') -Force }
 
 $files = Get-ChildItem -LiteralPath $Out -File | ForEach-Object { [ordered]@{ name = $_.Name; bytes = $_.Length } }
 $facts = [ordered]@{

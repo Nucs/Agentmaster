@@ -33,6 +33,14 @@ public enum RequestKind
     /// <summary>Makes a layer image (DESIGN.md §4.3, D2): boots an image through a new overlay, runs the request's steps
     /// in it, shuts it down, and keeps the overlay as a new read-only image over the first.</summary>
     Layer,
+
+    /// <summary>Installs a build on one of this PC's Agentmaster instances, dev or production (DESIGN.md §2's
+    /// <c>install</c>; the CLI's <c>amb install</c>): the build's layout zip goes into the instance's free layout slot,
+    /// is checked, and Swap-AgentmasterLayout.ps1 moves the instance onto it. No slot: the coordinator runs the Windows
+    /// side through WSL's interop, outside every instance's process tree.</summary>
+    /// <remarks>Not named Install: that kind makes a base image (dockur's unattended install), and records of it
+    /// exist.</remarks>
+    Deploy,
 }
 
 /// <summary>Where a request is in its life (DESIGN.md §12); every change is also an event line.</summary>
@@ -109,7 +117,7 @@ public sealed record RequestInputs
     /// <summary>Import: the commit the artifact was built from, when the caller knows it (recorded, not checked).</summary>
     public string? Commit { get; init; }
 
-    /// <summary>E2e and test: the build id whose artifacts are used.</summary>
+    /// <summary>E2e, test and deploy: the build id whose artifacts are used.</summary>
     public string? BuildId { get; init; }
 
     /// <summary>E2e: the arguments for the suite runner (pytest's), e.g. ["-v", "suites/test_tab_menu.py"].</summary>
@@ -150,6 +158,32 @@ public sealed record RequestInputs
     /// <summary>E2e: the e2e suite's folder to run (a path the coordinator can read); default: the coordinator's
     /// configured copy of the repository's e2e folder.</summary>
     public string? SuiteSource { get; init; }
+
+    /// <summary>Build: the commit <see cref="Commit"/> is a SNAPSHOT of uncommitted work made on (its parent), or null
+    /// for a real commit. Recorded as the build's <see cref="BuildRecord.SnapshotOf"/>; the build job checks that the
+    /// commit's parent is this one.</summary>
+    public string? SnapshotOf { get; init; }
+
+    /// <summary>Deploy: the instance to install the build on, "dev" (AgentmasterDev) or "production" (Agentmaster).</summary>
+    public string? Instance { get; init; }
+
+    /// <summary>Deploy: the process id of the claude.exe the request came from (the CLI's nearest claude.exe ancestor),
+    /// or null. When that claude is one of the instance's sessions, the install waits for its turn to end before the swap
+    /// ends it: its last message must be written first.</summary>
+    public int? RequestedByPid { get; init; }
+
+    /// <summary>Deploy: how long to wait, in minutes, for the instance's OTHER sessions to stop running before the swap
+    /// cuts their turns off; 0 (the default, the owner's choice of 2026-10-20: "cut off at once") waits for none and
+    /// names them in the request's events.</summary>
+    public int? WaitOthersMinutes { get; init; }
+
+    /// <summary>Deploy: stage and check everything and run the swap's dry run (-WhatIf), then put the slot back: nothing
+    /// is stopped or registered.</summary>
+    public bool? DryRun { get; init; }
+
+    /// <summary>Deploy, for tests only: "after-stop" makes the swap fail after it stopped the instance (the swap
+    /// script's -InjectFailureAfterStop), to prove that the old version comes back (DESIGN.md §13 P4's done-when).</summary>
+    public string? InjectFailure { get; init; }
 }
 
 /// <summary>One file or folder copied into a slot's share before its VM starts.</summary>
