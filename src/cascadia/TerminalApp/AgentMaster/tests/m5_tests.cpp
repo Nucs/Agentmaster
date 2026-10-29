@@ -63,6 +63,7 @@ int wmain()
     TestSummaryTableTrim();
     TestStateMachine();
     TestRestoredSessionState();
+    TestCloseAnswersWaiting(); // AGENT_MANAGER.md "Closing sessions": a user's Close lands a Waiting-for-you session in Idle (tests_state.cpp)
     TestOrderedStateMachine();
     TestWire();
     TestRegistry();
@@ -165,6 +166,7 @@ int wmain()
     TestSessionSearchTools(); // SESSIONS.md section 9 — the AI search's tools: arguments, one search, result text, handlers, the stepwise gather (tests_harness.cpp)
     TestSessionDb(); // SESSIONS_DB.md — the session database's shared parts (tests_sessiondb.cpp)
     TestMessaging(); // MESSAGING.md — the fleet in Telegram, the pure core (tests_messaging.cpp)
+    TestMessagingCloseAnswersWaiting(); // MESSAGING.md §21.45: a tab closed while Waiting for you, through the bot's own path (tests_messaging.cpp)
     TestMessagingStateFileLoad(); // PERSISTENCE.md §16: state.json loaded the guarded way - never saved over with an empty topic map (tests_messaging.cpp)
     TestMessagingSearch(); // MESSAGING.md §5.4 / §21.7 — the Search topic's verbs, pick buttons and pick states (tests_messaging_search.cpp)
     TestMessagingDirectory(); // MESSAGING.md §21.16 — the pinned directory (tests_messaging_directory.cpp)

@@ -165,6 +165,105 @@ void TestRestoredSessionState()
     CHECK(!RestoredQuestionFlag(SessionState::Idle, false), "Idle + no flag stays no flag");
 }
 
+// Agentmaster (A CLOSE ANSWERS "WAITING FOR YOU" — AGENT_MANAGER.md "Closing sessions"): DemoteWaitingOnClose, the state half of
+// the user's Close, which every close seam applies in the SAME registry Update that sets live=false. The case it fixes: a session
+// closed while "Waiting for you" kept that state in sessions.json whenever no SessionEnd followed the close (a dormant tab runs no
+// claude to send one), and a resume (RestoredSessionState keeps Waiting) raised the cue again. Checked here: the rule state by state,
+// the Mark Unread it clears, what a reopen makes of a closed record, and the rule applied through the registry the way the seams
+// apply it — one notify that already carries the closed, Idle record (the Telegram half: TestMessagingCloseAnswersWaiting).
+void TestCloseAnswersWaiting()
+{
+    std::wprintf(L"A close answers \"Waiting for you\" (DemoteWaitingOnClose):\n");
+    // The rule, state by state.
+    {
+        SessionInfo s = MakeSession(L"close-wait", SessionState::WaitingForInput);
+        s.live = true;
+        CHECK(DemoteWaitingOnClose(s) && s.state == SessionState::Idle, "close: Waiting for you -> Idle (closing the session answers it)");
+        CHECK(!DemoteWaitingOnClose(s) && s.state == SessionState::Idle, "close: a second call finds Idle, changes nothing and reports nothing");
+        for (const auto st : { SessionState::Idle, SessionState::Running, SessionState::NeedsApproval, SessionState::Error, SessionState::Done })
+        {
+            SessionInfo other = MakeSession(L"close-other", st);
+            CHECK(!DemoteWaitingOnClose(other) && other.state == st, "close: every other state is kept (a turn the close cut off, an ended claude, Idle)");
+        }
+    }
+    // The manual Mark Unread (the sticky form of "Waiting for you") goes with every close.
+    {
+        SessionInfo marked = MakeSession(L"close-marked", SessionState::WaitingForInput);
+        marked.manualUnread = true;
+        CHECK(DemoteWaitingOnClose(marked) && !marked.manualUnread && marked.state == SessionState::Idle, "close: a marked Waiting session is demoted and its mark cleared");
+        SessionInfo markedRunning = MakeSession(L"close-marked-run", SessionState::Running);
+        markedRunning.manualUnread = true;
+        CHECK(!DemoteWaitingOnClose(markedRunning) && !markedRunning.manualUnread && markedRunning.state == SessionState::Running,
+              "close: the mark goes whatever the state (no window can clear it once the tab is gone)");
+    }
+    // What the next reopen (a resume, the next start's load) makes of the closed record.
+    {
+        SessionInfo s = MakeSession(L"close-reopen", SessionState::WaitingForInput);
+        s.lastMessageWasQuestion = true;
+        (void)DemoteWaitingOnClose(s);
+        CHECK(RestoredSessionState(s.state) == SessionState::Idle, "reopen: a session closed while Waiting comes back Idle (it came back Waiting before)");
+        CHECK(!RestoredMidTurnFlag(s.state, false), "reopen: no cut-off turn is read into it (its turn had finished)");
+        CHECK(s.lastMessageWasQuestion && !RestoredQuestionFlag(RestoredSessionState(s.state), s.lastMessageWasQuestion),
+              "reopen: the question flag stays on the record, and the re-host drops it as for every Idle record");
+        SessionInfo cut = MakeSession(L"close-cut", SessionState::Running);
+        (void)DemoteWaitingOnClose(cut);
+        CHECK(RestoredMidTurnFlag(cut.state, false), "reopen: a turn the close cut off is still remembered (HOOKS.md \"Cut-off turns\")");
+    }
+    // Through the registry, the way the close seams call it: ONE Update sets live=false and demotes, ONE notify carries both.
+    {
+        SessionRegistry reg;
+        SessionInfo s = MakeSession(L"close-reg", SessionState::WaitingForInput);
+        s.live = true;
+        s.started = true;
+        s.tabToken = L"wt-close-reg";
+        s.stateChangedAtUnixMs = 1; // an old status: the close must restart the settle clock
+        reg.Upsert(s);
+        int notifies = 0;
+        SessionInfo seen;
+        // _notify calls each observer synchronously on the updating thread, so plain locals are enough here.
+        reg.AddObserver([&](const SessionInfo& n, HookEvent) {
+            if (n.id == L"close-reg")
+            {
+                ++notifies;
+                seen = n;
+            }
+        });
+        bool leftWaiting = false;
+        const int64_t beforeClose = NowMsTest();
+        reg.Update(L"close-reg", [&leftWaiting](SessionInfo& r) {
+            r.live = false;
+            leftWaiting = DemoteWaitingOnClose(r);
+        });
+        CHECK(leftWaiting && notifies == 1 && !seen.live && seen.state == SessionState::Idle,
+              "registry: the close notifies ONCE, and the notified record is already closed AND Idle (every observer, the Telegram bot's included, sees both together)");
+        CHECK(seen.stateChangedAtUnixMs >= beforeClose, "registry: the close restarts the state clock (StampSettleClock)");
+        CHECK(reg.Get(L"close-reg")->state == SessionState::Idle && !reg.Get(L"close-reg")->live, "registry: the stored record is closed and Idle (the seam's save persists it)");
+        // The dying claude's SessionEnd may still land after the close (a started tab's does, ~1-2 s later): it marks the
+        // closed record Done, and a re-host reads Done as Idle too — the close never leaves "Waiting for you" behind.
+        reg.OnHookEvent(Msg(L"close-reg", HookEvent::SessionEnd));
+        CHECK(reg.Get(L"close-reg")->state == SessionState::Done && RestoredSessionState(reg.Get(L"close-reg")->state) == SessionState::Idle,
+              "registry: a SessionEnd after the close reads Done, and a reopen reads it Idle");
+
+        // A PINNED session closes Idle too (the pin holds only a live record); its resume makes it live again, and the hold
+        // puts it back in Waiting for you (MESSAGING.md §5.3: a pinned session's topic never leaves the list).
+        SessionInfo pin = MakeSession(L"close-pin", SessionState::WaitingForInput);
+        pin.live = true;
+        pin.pinned = true;
+        pin.tabToken = L"wt-close-pin";
+        reg.Upsert(pin);
+        reg.Update(L"close-pin", [](SessionInfo& r) {
+            r.live = false;
+            (void)DemoteWaitingOnClose(r);
+        });
+        CHECK(reg.Get(L"close-pin")->state == SessionState::Idle, "registry: a pinned session closes Idle (ApplyPinHold leaves a closed record alone)");
+        reg.Update(L"close-pin", [](SessionInfo& r) {
+            r.live = true; // the resume's re-host, as _LaunchClaudeSession applies it
+            r.state = RestoredSessionState(r.state);
+        });
+        CHECK(reg.Get(L"close-pin")->state == SessionState::WaitingForInput, "registry: its resume is held in Waiting for you again by the pin");
+    }
+}
+
 // Agentmaster (event ordering + turn identity): the layer over NextSessionState that makes the
 // machine immune to out-of-order Stops (the Stop forwarder runs slow — transcript work — so turn
 // N's Stop can land after turn N+1's UserPromptSubmit) and aware of TYPE-AHEAD (a prompt typed

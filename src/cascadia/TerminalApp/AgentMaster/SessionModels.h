@@ -1926,6 +1926,43 @@ namespace Agentmaster
         return false;
     }
 
+    // Agentmaster (A CLOSE ANSWERS "WAITING FOR YOU" — AGENT_MANAGER.md "Closing sessions"): the state half of the USER'S Close
+    // of a session — the tab ✕ and every batch that closes tabs (Close ▸, Close All, Of Same Folder), a pane close, and the
+    // Manager's / tree's / session menu's Close of a session whose agent already exited. WaitingForInput says "a finished turn
+    // waits for you"; closing the session is the user's answer to it, so the record lands in Idle — where the triage "Move to
+    // Idle/Done" puts it. Before this, a closed session kept "Waiting for you" in sessions.json whenever no SessionEnd followed
+    // the close (a dormant tab runs no claude to send one), and a resume brought the cue back (RestoredSessionState keeps it).
+    // Call it inside the SAME registry Update that sets live=false: one notify then carries the close and the new state to every
+    // observer — the Manager lenses, the tab strip, the Telegram bot's topic sync (MESSAGING.md §21.45) — and the save after the
+    // Update persists Idle.
+    //   * The manual Mark Unread goes with EVERY close, whatever the state. The mark is the sticky form of "Waiting for you" (it
+    //     promotes the session there and keeps the decay off it), and the window's own copy of it (its ring set) is pruned with
+    //     the tab, so a mark left on the record could no longer be cleared by a visit: after a resume in the same run it would
+    //     hold the session's next "Waiting for you" against the decay.
+    //   * Every other state is kept. Running, NeedsApproval and Error are a turn the close cut off: the next reopen remembers it
+    //     (RestoredMidTurnFlag) and the scanner judges that turn (HOOKS.md "Cut-off turns"). Done is a claude that already ended,
+    //     and Idle has nothing to answer.
+    //   * ⚠ Only a USER'S close. A window close or an app quit (_ArchiveWindowSessionsOnTeardown) must NOT call it: the window's
+    //     record brings those tabs back (Reopen Windows, the next start), and Rule #16 keeps "which sessions need me" across that.
+    //     Deactivate keeps the tab, and the liveness sweep archives a session whose agent died while nobody closed anything.
+    //   * A PINNED session (MESSAGING.md §5.3) closes Idle too: ApplyPinHold holds only a LIVE record, and the close clears live in
+    //     the same mutation. A resume makes it live again, and the hold puts it back in Waiting for you.
+    //   * The question-guard flag (lastMessageWasQuestion) is left as it is, but no re-host keeps it: RestoredQuestionFlag drops it
+    //     for every Idle record — the same outcome the dying claude's SessionEnd (Done -> Idle at the re-host) always gave.
+    // PURE; never throws.
+    //   s       — the record being closed (the caller's Update lambda, under the registry lock).
+    //   returns — true when the record left WaitingForInput (the caller names the move in its close log line).
+    inline bool DemoteWaitingOnClose(SessionInfo& s) noexcept
+    {
+        s.manualUnread = false;
+        if (s.state != SessionState::WaitingForInput)
+        {
+            return false;
+        }
+        s.state = SessionState::Idle;
+        return true;
+    }
+
     // Restart the session's settle clock (SessionInfo::stateChangedAtUnixMs) when a mutation changed
     // any settle-relevant fact — the status itself, or the session becoming open/archived or
     // launched/dormant (a resumed or freshly activated tab is exactly as "just changed" as a Stop; its

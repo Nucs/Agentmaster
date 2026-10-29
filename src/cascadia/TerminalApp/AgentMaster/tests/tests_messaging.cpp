@@ -2618,6 +2618,158 @@ void TestMessaging()
     }
 }
 
+// ===== §21.45: a tab closed while "Waiting for you" — the bot takes the close as it takes any change ======================
+//
+// The PC's close seams land a Waiting-for-you session in Idle inside the SAME registry Update that sets live=false
+// (DemoteWaitingOnClose, AGENT_MANAGER.md "Closing sessions"). The bot has one door for every change: its registry observer
+// marks the session dirty and wakes the tick (MessagingService::_onRegistryNotify); the tick builds its facts from
+// SnapshotLiveForCards and plans the topics with PlanTopicSync (_syncTopics). These checks walk that path on a real registry.
+
+namespace
+{
+    /// <summary>
+    /// The facts MessagingService::_syncTopics builds for one tick, cut down to the fields PlanTopicSync and QualifiesForTopic
+    /// read, from the same lean registry read the service uses — so a closed session is absent exactly as it is in the bot.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ A copy of the service's loop (it lives inside _syncTopics, next to the color bookkeeping it also does): a fact the
+    /// plan starts reading must be added in both places.
+    /// </remarks>
+    /// <param name="reg">The registry the PC's seams mutated.</param>
+    /// <returns>One fact per LIVE session, in the registry's order.</returns>
+    /// <exception cref="std::bad_alloc">If the facts cannot be allocated.</exception>
+    std::vector<TabFact> SyncFactsOf(const SessionRegistry& reg)
+    {
+        std::vector<TabFact> facts;
+        for (const auto& s : reg.SnapshotLiveForCards())
+        {
+            TabFact f;
+            f.sessionId = s.id;
+            f.title = s.title;
+            f.state = s.state;
+            f.live = s.live;
+            f.inTab = !s.tabToken.empty();
+            f.claude = (s.kind == AgentKind::Claude);
+            f.pinned = s.pinned;
+            f.lastActivityMs = s.lastActivityUnixMs;
+            f.tabToken = s.tabToken;
+            f.continuedFromId = s.continuedFromId;
+            f.mostRecentMs = MostRecentSortKeyMs(s);
+            f.stateSinceMs = s.stateChangedAtUnixMs;
+            facts.push_back(std::move(f));
+        }
+        return facts;
+    }
+
+    /// <summary>The fact for one session id among a tick's facts.</summary>
+    /// <param name="facts">The tick's facts (SyncFactsOf).</param>
+    /// <param name="id">The session id.</param>
+    /// <returns>The fact, or null when the tick did not see the session (it is closed).</returns>
+    const TabFact* FactFor(const std::vector<TabFact>& facts, const std::wstring& id) noexcept
+    {
+        for (const auto& f : facts)
+        {
+            if (f.sessionId == id)
+            {
+                return &f;
+            }
+        }
+        return nullptr;
+    }
+}
+
+void TestMessagingCloseAnswersWaiting()
+{
+    std::wprintf(L"Telegram: a tab closed while Waiting for you - the bot takes the close as any change (MESSAGING.md 21.45):\n");
+    const int64_t grace = 10 * 60 * 1000;
+    const int64_t now = NowMsTest();
+    SessionRegistry reg;
+    // A session open in its tab, Waiting for you, its last turn long past the idle grace: Waiting alone holds its topic.
+    SessionInfo s = MakeSession(L"tg-close", SessionState::WaitingForInput);
+    s.live = true;
+    s.started = true;
+    s.tabToken = L"wt-tg-close";
+    s.lastActivityUnixMs = now - 2 * grace;
+    reg.Upsert(s);
+    int notifies = 0;
+    SessionInfo notified;
+    // The bot's door (_onRegistryNotify) sees exactly what this observer sees; the registry calls it on the updating thread.
+    reg.AddObserver([&](const SessionInfo& n, HookEvent) {
+        if (n.id == L"tg-close")
+        {
+            ++notifies;
+            notified = n;
+        }
+    });
+
+    auto facts = SyncFactsOf(reg);
+    const TabFact* open = FactFor(facts, L"tg-close");
+    CHECK(open && QualifiesForTopic(*open, now, grace), "open and Waiting for you: listed (its topic exists)");
+    std::map<std::wstring, TopicRecord> topics;
+    TopicRecord topic;
+    topic.sessionId = L"tg-close";
+    topic.threadId = 41;
+    topic.title = s.title; // the name already matches: no rename in the plans below
+    topic.tabToken = s.tabToken;
+    topics[L"tg-close"] = topic;
+    CHECK(PlanTopicSync(facts, topics, now, grace).empty(), "open, Waiting, with its topic: the sync has nothing to do");
+
+    // The close, as the seams make it: ONE Update sets live=false and lands Waiting in Idle.
+    bool leftWaiting = false;
+    reg.Update(L"tg-close", [&leftWaiting](SessionInfo& r) {
+        r.live = false;
+        leftWaiting = DemoteWaitingOnClose(r);
+    });
+    CHECK(leftWaiting && notifies == 1 && !notified.live && notified.state == SessionState::Idle,
+          "the close reaches the bot's door ONCE, already closed and Idle (it marks the session dirty and wakes the tick)");
+
+    facts = SyncFactsOf(reg);
+    CHECK(FactFor(facts, L"tg-close") == nullptr, "the next tick's facts leave the closed session out (SnapshotLiveForCards: live sessions only)");
+    auto ops = PlanTopicSync(facts, topics, now, grace);
+    CHECK(ops.size() == 1 && ops[0].kind == TopicSyncOp::Kind::Delete && ops[0].sessionId == L"tg-close" && ops[0].reason == L"closed",
+          "its topic leaves at once as \"closed\" (D21): no Idle card, no idle grace, no main-view idle notice (that line is for reason \"idle\" only)");
+    topics[L"tg-close"].idleSinceMs = now - 1000;
+    ops = PlanTopicSync(facts, topics, now, grace);
+    CHECK(ops.size() == 1 && ops[0].kind == TopicSyncOp::Kind::Delete && ops[0].reason == L"closed",
+          "a topic that already showed its Idle card (inside its grace) also leaves at once when the tab closes");
+    CHECK(CountDirectoryStats(facts, 0, false).waiting == 0 && CountDirectoryStats(facts, 0, false).idle == 0,
+          "the pinned directory's counts leave the closed session out (open tabs only)");
+
+    // A later resume (the Sessions page, the AI search's resume tool): the re-host normalizes the state like
+    // _LaunchClaudeSession does, on a new connection.
+    reg.Update(L"tg-close", [](SessionInfo& r) {
+        r.live = true;
+        r.state = RestoredSessionState(r.state);
+        r.tabToken = L"wt-tg-close-2";
+    });
+    topics.clear(); // its topic was deleted at the close
+    facts = SyncFactsOf(reg);
+    const TabFact* resumed = FactFor(facts, L"tg-close");
+    CHECK(resumed && resumed->state == SessionState::Idle && !QualifiesForTopic(*resumed, now, grace),
+          "resumed: it is Idle and makes no topic while it rests (a dormant tab, its old activity)");
+    TabFact started = resumed ? *resumed : TabFact{};
+    started.lastActivityMs = now; // its claude's SessionStart stamps the activity anchor when the tab starts
+    CHECK(QualifiesForTopic(started, now, grace),
+          "resumed and started: a just-used Idle tab is listed for the idle grace like any new tab (§21.6), then leaves as idle");
+
+    // The control: the same close WITHOUT the demotion (the build before §21.45) left "Waiting for you" on the record, and the
+    // resume listed the session at once, its topic kept until the Waiting decay and the grace after it.
+    SessionInfo before = MakeSession(L"tg-close-before", SessionState::WaitingForInput);
+    before.live = true;
+    before.tabToken = L"wt-tg-before";
+    before.lastActivityUnixMs = now - 2 * grace;
+    reg.Upsert(before);
+    reg.Update(L"tg-close-before", [](SessionInfo& r) { r.live = false; });
+    reg.Update(L"tg-close-before", [](SessionInfo& r) {
+        r.live = true;
+        r.state = RestoredSessionState(r.state);
+    });
+    facts = SyncFactsOf(reg);
+    const TabFact* old = FactFor(facts, L"tg-close-before");
+    CHECK(old && old->state == SessionState::WaitingForInput && QualifiesForTopic(*old, now, grace),
+          "the control: without the demotion a resumed session read Waiting for you and got its topic back at once");
+}
+
 // ===== PERSISTENCE.md §16: the bot's state file, loaded the guarded way =================================================
 //
 // state.json is the ONLY record of which forum topic belongs to which session (the Bot API cannot list topics). The bot read

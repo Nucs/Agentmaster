@@ -429,7 +429,7 @@ hot swap, direct reach of the registry, scheduler and sinks. It costs, with the 
 | `/clear` (a new conversation in the same tab) | The same topic continues the tab: a marker "— /clear: a new conversation —" |
 | Restarted / Deactivated / Activated | The same topic; a marker; a deactivated tab keeps its state, so it stays listed unless Idle |
 | Forked, or a new session in the same folder | A new tab → a new topic when it leaves Idle (at once when started from Telegram) |
-| Closed (archived) | The topic is deleted at once |
+| Closed (archived; a session that was Waiting for you closes as Idle, §21.45) | The topic is deleted at once — as "closed", never through the Idle card or the idle notice |
 | Agentmaster closed and reopened | Topics stay in Telegram; at start the sync keeps the topics of the tabs that still qualify (restored Waiting / Needs approval / cut-off Error sessions) and deletes the rest |
 | The user deletes a topic in Telegram | Nothing happens to the session; the next message for it fails, and the topic is created again (topics = tabs) *(As built, 2026-10-18: NOT made again — a known bug, §21.21: the record stays and every post into the thread fails until the session goes idle or closes. The Search topic: §5.1.)* |
 
@@ -6299,6 +6299,82 @@ of the same files.
 4. In an idle session a message gets no such line (👨‍💻 → 👌 on it, as before).
 5. Two messages typed while one turn runs: each gets its own line when it goes, in order.
 6. Restart Agentmaster while a message waits: after the restart it goes with its line.
+
+### 21.45 A tab closed while "Waiting for you" closes as Idle — and the bot takes it as any change (2026-10-29; NOT BUILT)
+
+> The user's request (2026-10-29): "When we close a tab with a session, we should move the session to status idle (if it was
+> waiting-for-you). This also should affect telegram the way telegram bot handles when the status changes (validate it does)".
+
+**What it was.** A Close set `live=false` and left the state alone. Production's hooks.log, read 2026-10-29: of 901 closes, 560
+were Waiting for you. In 352 of them the dying claude's `SessionEnd` marked the record Done a second or two later. The other 208
+— mostly dormant tabs, which run no claude to send one — stayed "Waiting for you" in `sessions.json`. A resume (the Sessions page,
+the AI search's `resume` tool) then brought the session back Waiting (`RestoredSessionState` keeps that state), and the bot made
+its topic at once: Waiting qualifies (§5.1).
+
+**Now (the PC side, AGENT_MANAGER.md *Closing sessions*).** Every close the user makes lands a Waiting-for-you session in Idle
+inside the same registry `Update` that sets `live=false` (`DemoteWaitingOnClose`); a window close or a quit does not.
+
+**The bot, validated on its own path.** The bot reads every change through one door, and a close goes through it like any
+status change:
+1. The close's `Update` notifies once, with the record already closed AND Idle. The bot's registry observer
+   (`_onRegistryNotify`) marks the session dirty and wakes the tick.
+2. The tick's facts come from `SnapshotLiveForCards`, which holds live sessions only, so the closed session is not among them.
+3. `PlanTopicSync` plans the topic's `Delete` with the reason `closed` (or a `Rekey`, when another session took the same tab
+   or continues this one). It never plans the Idle card for it, and the main view's idle notice (§21.31) is only for the reason
+   `idle`: a closed session is in no `/idle` list.
+4. `_deleteTopic` deletes it: `[msg] topic deleted <id8> (closed)`, 0.07–1 s after the close in production's log.
+
+A close of a session in any other state takes the same path; only its state differs.
+- **While a delete waits** — more than `kTopicOpsPerTick` (6) topic operations in one tick (a folder or Close All batch), or a
+  429 that parks `deleteForumTopic` — the per-topic pass still sees the closed session's topic. Its state edge is handled as
+  any edge (`[msg] <id8> waiting -> idle`, a card edit to "💤 Idle"), until the delete lands and drops the edits still queued
+  for the topic. That is the bot's ordinary handling, read in the code; no batch close with topics appears in the log yet.
+- **A later resume:** the session comes back Idle. A dormant tab with an old last activity gets no topic while it rests. Once
+  its claude starts, `SessionStart` stamps the activity, and the new-tab rule (§21.6) lists it for the idle grace. Its card then
+  shows "💤 … leaves the list at …", and it leaves as idle, with the main view's line. Before, it came back Waiting and kept its
+  topic until the read decay, and the grace after it. A revive from 🔎 Search is unchanged: `_sweepRevives` holds it in Waiting
+  for you on purpose. A pinned session comes back in Waiting for you too: the pin hold applies to a live record (§5.3).
+- **A window close or an app quit is unchanged.** The tabs come back with their "Waiting for you" (Reopen Windows, the next
+  start). After a quit the start keeps their topics (§5.2); a closed window's topics leave as closed and are made again when
+  the reopened window brings the tabs back.
+
+**Found while validating, NOT changed (for the user):**
+- **The dying claude's SessionEnd still marks the closed record Done.** For a started tab that is the record's final state. It
+  is invisible: the topic is gone, and a reopen reads Done as Idle.
+- **The re-adopt race (an observer bug, not the bot's).** 3 of the 901 closes in production's log show it. The Fleet Observer
+  re-bound the closing tab's dying claude (`[discover] … (observer wt=…)`, then `[adopt] … bound via observer`, ~0.2 s after
+  `close-done`), so the session read live again. In 2 of the 3 the bot then made a NEW topic for the closed tab, with its
+  history replay; one card also rang "claude exited" when the SessionEnd landed (5139b8db). The topics stayed until something
+  archived those sessions, ~1.5 h and over 16 h later.
+  Idle at the close does not prevent it, because the SessionEnd's Done qualifies for a topic. The fix belongs to the observer's
+  bind, for example:
+  - `RetireHostToken` at the close (it also drops that claude's late hooks: no Done);
+  - the probe refusing a retired (session, `WT_SESSION`) pair.
+
+**Tests and checks** (2026-10-29, nothing built):
+- The m5 suite gained two groups:
+  - `TestCloseAnswersWaiting` (tests_state.cpp, 19 checks): the rule state by state; the Mark Unread; what a reopen makes of
+    the record; the registry path as the seams call it (one notify, closed and Idle, the settle clock restarted); a later
+    SessionEnd; a pinned session.
+  - `TestMessagingCloseAnswersWaiting` (tests_messaging.cpp, 10 checks): the bot's path above on a real registry, with the
+    facts built as `_syncTopics` builds them; the directory counts; the resume; and the control: without the demotion, a
+    resumed session read Waiting and got its topic back at once.
+- An isolated copy (HEAD 825adee72 plus this change alone, its own profile) ran 10,852 checks, with only the 3 known
+  `TestTaskbarBadge` failures.
+- A negative control (the demotion left out, in the copy only) failed 10 of the new checks.
+- `cl /Zs` with the last Debug build's recorded lines passed `TerminalPage.AgentSessions.cpp` and `TabManagement.cpp`. A wrong
+  argument count planted in a scratch copy of each failed with C2660 at that line.
+- The CLI's `SessionRegistry.cpp`, `agentcli.cpp` and `Persistence.cpp` passed at `/W4 /WX`.
+- ⚠ `SessionModels.h` changed (a new inline function, no layout change): the next build purges anyway (21f0482d4, 89cc2766e,
+  825adee72).
+
+**Check after the build** (dev, with its bot):
+1. A session Waiting for you with a topic: close its tab. hooks.log shows `[archive] <id> (waiting for you -> idle)`, then
+   `[msg] topic deleted <id8> (closed)`; the topic leaves at once, and the main view gets no idle line.
+2. Resume it from the Sessions page: its dot is gray (Idle), not goldenrod. Once its claude started, its topic comes back with
+   the "💤 … leaves the list at …" card, and it leaves after the grace.
+3. Close a window holding a Waiting session, then Reopen Windows: the tab comes back Waiting for you, as before.
+4. Close a split pane that holds a Waiting session: `[pane-close] archived <id> (waiting for you -> idle)`.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

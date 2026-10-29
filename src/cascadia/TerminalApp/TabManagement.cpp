@@ -1268,14 +1268,19 @@ namespace winrt::TerminalApp::implementation
             });
             for (const auto& id : closing)
             {
-                _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
+                // Agentmaster (A CLOSE ANSWERS "WAITING FOR YOU" — AGENT_MANAGER.md "Closing sessions"): closing the
+                // session's pane is the user's Close, so a Waiting-for-you record lands in Idle in the same mutation as
+                // the archive (DemoteWaitingOnClose), exactly as the tab's ✕ does.
+                bool leftWaiting = false;
+                _sessionRegistry->Update(id, [&leftWaiting](::Agentmaster::SessionInfo& s) {
                     s.live = false;
+                    leftWaiting = ::Agentmaster::DemoteWaitingOnClose(s);
                 });
                 _sessionRegistry->SetInjector(id, nullptr);
                 _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
                 _claudeTabs.erase(id);
                 _claudeOverlays.erase(id);
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[pane-close] archived " + id + L"\n");
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[pane-close] archived " + id + (leftWaiting ? L" (waiting for you -> idle)" : L"") + L"\n");
             }
             if (!closing.empty())
             {

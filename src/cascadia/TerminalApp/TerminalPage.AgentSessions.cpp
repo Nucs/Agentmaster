@@ -1697,13 +1697,22 @@ namespace winrt::TerminalApp::implementation
                                               L"[archive] " + id + L" not archived here \x2014 claude pid=" + std::to_wstring(info->pid) + L" still alive, not hosted in this window\n");
                 return;
             }
-            _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
+            // Agentmaster (A CLOSE ANSWERS "WAITING FOR YOU"): the user's Close of an exited session lands a Waiting-for-you
+            // record in Idle too (DemoteWaitingOnClose), in the same mutation as the archive. Only that move is logged: this
+            // branch never logged the archive itself, and a Close of a session that was not waiting changes nothing new.
+            bool leftWaiting = false;
+            _sessionRegistry->Update(id, [&leftWaiting](::Agentmaster::SessionInfo& s) {
                 s.live = false;
+                leftWaiting = ::Agentmaster::DemoteWaitingOnClose(s);
             });
             _sessionRegistry->SetInjector(id, nullptr);
             _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
             _sessionRegistry->SetEnterPresser(id, nullptr); // DELIVERY_PLAN.md R8 — same lifetime as the submitter
             ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+            if (leftWaiting)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[archive] " + id + L" in place, no tab (waiting for you -> idle)\n");
+            }
         }
     }
 
@@ -1870,13 +1879,21 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::CloseSessionInOtherWindows(id, _windowId);
                 continue;
             }
-            _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
+            // Agentmaster (A CLOSE ANSWERS "WAITING FOR YOU"): the folder close is the user's Close too — a Waiting-for-you
+            // record lands in Idle in the same mutation as the archive (DemoteWaitingOnClose; only that move is logged).
+            bool leftWaiting = false;
+            _sessionRegistry->Update(id, [&leftWaiting](::Agentmaster::SessionInfo& s) {
                 s.live = false;
+                leftWaiting = ::Agentmaster::DemoteWaitingOnClose(s);
             });
             _sessionRegistry->SetInjector(id, nullptr);
             _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
             _sessionRegistry->SetEnterPresser(id, nullptr); // DELIVERY_PLAN.md R8 — same lifetime as the submitter
             ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+            if (leftWaiting)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[archive] " + id + L" in place, no tab (folder close; waiting for you -> idle)\n");
+            }
         }
         ::Agentmaster::LogNav(L"close-folder done dir=" + dir);
     }
@@ -2077,10 +2094,15 @@ namespace winrt::TerminalApp::implementation
 
         // Archive bookkeeping: KEEP the record, flip it to Archived, unbind stdin, persist, and
         // drop the sessionId -> tab mapping (so the close below is a plain teardown).
+        // Agentmaster (A CLOSE ANSWERS "WAITING FOR YOU" — AGENT_MANAGER.md "Closing sessions"): the same mutation lands a
+        // Waiting-for-you session in Idle (DemoteWaitingOnClose), so ONE notify tells every observer — the Telegram bot's
+        // topic sync included (MESSAGING.md §21.45) — that the session closed and is Idle, and the save below persists Idle.
+        bool leftWaiting = false;
         if (_sessionRegistry)
         {
-            _sessionRegistry->Update(sessionId, [](::Agentmaster::SessionInfo& s) {
+            _sessionRegistry->Update(sessionId, [&leftWaiting](::Agentmaster::SessionInfo& s) {
                 s.live = false;
+                leftWaiting = ::Agentmaster::DemoteWaitingOnClose(s);
             });
             _sessionRegistry->SetInjector(sessionId, nullptr);
             _sessionRegistry->SetPromptSubmitter(sessionId, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
@@ -2094,7 +2116,7 @@ namespace winrt::TerminalApp::implementation
         // tab.Close() tears down the ConPTY (claude.exe exits), so a close-begin with no close-done flags a
         // crash during teardown.
         ::Agentmaster::LogNav(L"close-begin " + ::Agentmaster::ShortId(sessionId) + L" (archived, resumable)");
-        ::Agentmaster::AppendStateLog(L"hooks.log", L"[archive] " + sessionId + L"\n");
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[archive] " + sessionId + (leftWaiting ? L" (waiting for you -> idle)" : L"") + L"\n");
 
         tab.Close(); // -> Closed -> _RemoveTab (tab.Shutdown disconnects -> claude.exe exits)
         ::Agentmaster::LogNav(L"close-done " + ::Agentmaster::ShortId(sessionId));

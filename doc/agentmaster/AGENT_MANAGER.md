@@ -243,6 +243,18 @@ Id, Path, Branch, Current Prompt, Launch CLI, Summary, Transcript ▸ Show + Def
   ★ Favorite & Close (☆ Unfavorite & Close for a starred session, `IsSessionFavorite`) · Cancel. Both
   close paths set `live=false`, clear the injector, persist and close the tab; the record and the
   transcript stay (FAVORITES.md). Logged `[nav] close-begin` ↔ `close-done`.
+- **A close answers "Waiting for you".** Every close the user makes — the tab ✕ and every batch below, a
+  pane close (`_HandleClosePaneRequested`), the Close of a session whose agent already exited — lands a
+  Waiting-for-you session in **Idle** and clears its Mark Unread, inside the same registry `Update` that sets
+  `live=false` (`DemoteWaitingOnClose`, `SessionModels.h`). One notify carries both: the Telegram bot deletes
+  the topic as closed (MESSAGING.md §21.45), and the save persists Idle, so a later resume reopens the session
+  Idle instead of raising the cue again. Every other state is kept (a turn the close cut off stays a cut-off
+  turn, HOOKS.md *Cut-off turns*). A pinned session closes Idle too and keeps its pin, so its resume is held
+  in Waiting for you again (MESSAGING.md §5.3).
+  The `[archive]` / `[pane-close]` line ends in `(waiting for you -> idle)` when the state moved. The dying
+  claude's `SessionEnd` can still mark the closed record Done a moment later; a reopen reads Done as Idle too.
+  ⚠ Not a window close or a quit (`_ArchiveWindowSessionsOnTeardown`): the window's record brings those tabs
+  back with their "Waiting for you" (Rule #16). Deactivate and the liveness sweep keep the state too.
 - **A batch** with managed sessions (a window close, the tab menu's Close ›) asks once: Close All ·
   ★ Favorite & Close All · Cancel All; a batch of only shell tabs closes without asking.
 - **Of Same Folder / Other of Same Folder** (the session menu and the tab menu's Close ›, shown for a
