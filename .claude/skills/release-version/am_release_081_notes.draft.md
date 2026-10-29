@@ -20,7 +20,30 @@
      Notes:   strip this comment (awk 'f{print} /^## Agentmaster 0.8.1/{f=1; print}' <draft> > body.md), then
               gh release edit v0.8.1 -R Nucs/Agentmaster --notes-file body.md
      Publish: gh release edit v0.8.1 -R Nucs/Agentmaster --draft=false --latest --prerelease=false (REPLACES 0.8.0 as Latest).
-     Assets: Agentmaster_0.8.1.0.msixbundle, _x64.zip, _arm64.zip, _x64_symbols.zip, _arm64_symbols.zip, Agentmaster.cer. -->
+     Assets: Agentmaster_0.8.1.0.msixbundle, _x64.zip, _arm64.zip, _x64_symbols.zip, _arm64_symbols.zip, Agentmaster.cer.
+     DONE 2026-10-29 (times UTC):
+       - pushed 68f44f0de..86a839a90 (the pin + this draft's first commit); annotated tag v0.8.1 (c0cecc0a2) -> 89cc2766e.
+       - ci.yml run 40820849372 (x64 Release from scratch, on 86a839a90): success, done by 05:29. That was the first
+         compile and link of 21f0482d4 and 89cc2766e anywhere.
+       - release.yml run 40820853815: success, with no queue wait:
+         - prep 05:00:18-05:00:21;
+         - x64 05:00:25-05:19:02 (18.6 min);
+         - arm64 05:00:24-05:33:27 (33 min; the first arm64 run of the symbols steps passed);
+         - bundle 05:33:29-05:33:57, then release (the draft) at 05:33:59.
+       - The assets:
+         - bundle 53,163,449 B;
+         - x64 zip 39,784,271 B, arm64 zip 41,268,761 B;
+         - x64 symbols 179,230,289 B, arm64 symbols 183,104,875 B;
+         - cer 768 B.
+       - Both x64 zips were downloaded into an empty scratch folder and listed:
+         - the portable zip: 83 files under agentmaster-0.8.1.0\, .am-version 0.8.1.0, and 16 public PDBs (83.4 MB
+           unpacked), each named in .am-manifest's 46 lines;
+         - the symbols zip: the same 16 names as full PDBs (893 MB unpacked; TerminalApp.pdb 222 MB).
+         - A UTF-16 probe of the zip's TerminalApp.dll finds "89cc2766e" and strings of 89cc2766e (the snapshot
+           marker), 21f0482d4 ("HELD in the record"), 48d0259db ("late save refused") and the voice notes.
+       - Notes applied; the read-back equals this body apart from its final newline. Published 05:37:58 as stable +
+         Latest: `gh release list` shows "Agentmaster 0.8.1 Latest", and /releases/latest answers v0.8.1 with 6
+         assets. -->
 ## Agentmaster 0.8.1
 
 **0.8.1 is a stable release building on 0.8.0. Its theme: your workspace survives everything.** No install, update or uninstall deletes Agentmaster's state any more. A state file that cannot be read is kept instead of saved over, and a window holds on to the tabs it could not bring back. Every save keeps what another version of Agentmaster wrote, and each new version first copies your state files into `backups\`.

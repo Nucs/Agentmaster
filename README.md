@@ -15,7 +15,12 @@ Each session is a real `claude.exe` on a **ConPTY** connection: a full-fidelity 
 The **Agent Manager** — one click on the tab strip's **Home** button — is mission control: a **Triage Board** that sorts every session into *Running · Waiting-for-you · Needs-approval · Error · Done*, an **Explorer Tree** of your working-dirs → sessions, and a **Prompt Queue** to queue prompts per session. Click a card and its terminal tab follows — both ways, across every window — so you never lose which tab is which. A **side panel** beside the terminal keeps the session cards in view while you work.
 
 ### 💾 Never lose a session — ever
-Close a window and reopen it **whole**: geometry, **resumed** Claude *and* Codex conversations, shell tabs back at their real cwd, even the focused tab. And the **Sessions browser** searches *every* conversation that's ever hit disk — an instant index, then ripgrep across the actual content — so you can **Resume or Fork** anything, from any day. Closing only archives a session; your transcripts are never deleted.
+Close a window and reopen it **whole**: geometry, **resumed** Claude *and* Codex conversations, shell tabs back at their real cwd, even the focused tab. And the **Sessions browser** searches *every* conversation that's ever hit disk — an instant index, then ripgrep across the actual content — so you can **Resume or Fork** anything, from any day. Closing only archives a session; your transcripts are never deleted. Your workspace also survives installs and version changes:
+- no install, update or uninstall deletes Agentmaster's state;
+- a state file that cannot be read is kept instead of saved over;
+- a window holds on to the tabs it could not bring back;
+- every save keeps what another version wrote;
+- each new version first copies your state files into `backups\`.
 
 ### 👀 Manages every agent — even the ones you didn't launch
 The **Fleet Observer** detects, correlates, and enriches *every* Claude/Codex session by reading process memory and transcripts **out-of-band** — no hooks, no setup, completely invisible to the shell. Hand-type `claude` in any tab and it's managed within seconds. Sessions running *outside* the app show up too: watch them read-only, or **adopt** them (fork a safe copy, or resume).
@@ -38,7 +43,14 @@ You never have to open the Manager to read a session. Every classified tab wears
 </table>
 
 ### 📱 Your fleet in your pocket
-Turn on the **Telegram** bot (**Settings → Messaging**, with a bot of your own; only your account is answered) and every working session becomes a topic on your phone: its whole conversation, Claude's replies with their Markdown rendered, and a live status card with buttons. A message in a topic is queued as that session's next prompt (`/steer` sends it into the running turn). From the phone you can answer Claude's questions with a tap, see the screen, fork or restart a session, start a new one in any folder and window, and ask the 🔎 Search topic to find and reopen old sessions.
+Turn on the **Telegram** bot (**Settings → Messaging**, with a bot of your own; only your account is answered) and every working session becomes a topic on your phone: its whole conversation, Claude's replies with their Markdown rendered, and a live status card with buttons. A message in a topic is queued as that session's next prompt (`/steer` sends it into the running turn). From the phone you can:
+- answer Claude's questions with a tap;
+- send a 🎤 **voice note**, transcribed with that session's own vocabulary and read as its prompt;
+- see the terminal's screen, which every status card carries as it updates;
+- see the whole conversation as tall pictures (📜 **All Screen**), file diffs included;
+- press **Esc**, deactivate, fork or restart a session, and read its `/status` and your plan usage;
+- start a new session in any folder and window;
+- ask the 🔎 Search topic to find and reopen old sessions.
 
 > **And the small stuff that adds up:** **★ favorite** a session to pin it, permanent **per-directory tab colors** (a folder keeps its color across tabs, windows, and restarts), per-install **profiles** so a from-source dev build sits beside the release, and a **Settings** cog for the knobs (model · env · Prompt Queue Runner defaults).
 
@@ -47,7 +59,7 @@ Turn on the **Telegram** bot (**Settings → Messaging**, with a bot of your own
 - **AI search** — the Sessions page's **AI** toggle takes a request in plain words; a hosted Sonnet 5.5 reads your sessions, shows the ones that fit with the evidence, and can reopen them into the window you choose.
 - **Presets** — launch or fork a session on other models and providers (OpenRouter, Xiaomi MiMo, NanoGPT, your own RunPod endpoint, any Anthropic-compatible URL), keys kept in Windows Credential Manager.
 - **Show Transcript** — any conversation as Markdown in a reading view; **Copy ▸ Transcript** at five detail levels.
-- **Deactivate** — park a session's claude while its tab keeps its place; entering the tab resumes the conversation.
+- **Deactivate** — park a session's claude while its tab keeps its place; entering the tab resumes the conversation. **Deactivate All Idle Tabs** parks every idle tab, in this window or all of them.
 - **`agentmaster` CLI** — query the fleet from any shell, app up or down (`show` / `list` / `sessions` / `tabs` / `windows` / `external`, `--self`, `--json`).
 - **In-app updater** — checks GitHub on launch and from Settings → Updates; one-click update, pre-release and (warning-gated) nightly opt-ins, and uninstall. Nightly builds — unstable dev versions, tag contains `nightly` — are always skipped unless you accept the nightly opt-in.
 - **Keep Awake** — toolbar toggle (Off / Always / While-Running) so the machine won't sleep mid-run.
@@ -60,7 +72,7 @@ Turn on the **Telegram** bot (**Settings → Messaging**, with a bot of your own
 
 ## 🟢 Status
 
-In active use, shipping regular [**releases**](https://github.com/Nucs/Agentmaster/releases). The full pipeline runs end-to-end in the packaged app; the standalone engine harness passes **9,000+** checks.
+In active use, shipping regular [**releases**](https://github.com/Nucs/Agentmaster/releases). The full pipeline runs end-to-end in the packaged app; the standalone engine harness passes **10,000+** checks.
 
 - **Claude Code** — fully managed: launch · observe · drive · persist · restore.
 - **Codex** (OpenAI Codex CLI) — managed for observe + state + the full launch / restore / adopt lifecycle (driving its TUI is next).
@@ -79,9 +91,9 @@ In active use, shipping regular [**releases**](https://github.com/Nucs/Agentmast
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1)))
 ```
 
-Flags: `-Scope User|Machine|Package` (skip the question) · `-Version <x.y.z>` · `-Prerelease` · `-Nightly` (also consider unstable nightly builds) · `-Launch` · `-Force` · `-Uninstall` (with `-Scope`) · `-ForCurrentAccount`. Run by an administrator from another account, or as SYSTEM, it installs for the user **signed in to Windows** and starts Agentmaster as them, without administrator rights; `-ForCurrentAccount` installs for the running account instead. Unattended (a scheduled task, a deployment tool): add PowerShell's own `-NonInteractive`.
+Flags: `-Scope User|Machine|Package` (skip the question) · `-Version <x.y.z>` · `-ZipPath <zip>` (install a portable zip you already have) · `-Prerelease` · `-Nightly` (also consider unstable nightly builds) · `-Launch` · `-Force` · `-Uninstall` (with `-Scope`) · `-ForCurrentAccount`. Run by an administrator from another account, or as SYSTEM, it installs for the user **signed in to Windows** and starts Agentmaster as them, without administrator rights; `-ForCurrentAccount` installs for the running account instead. Unattended (a scheduled task, a deployment tool): add PowerShell's own `-NonInteractive`.
 
-Prefer the files? Grab them from [**Releases**](https://github.com/Nucs/Agentmaster/releases): the **portable zip** (unzip, run `Agentmaster.exe` — its first launch asks the same question: **just for you** (recommended), **for all users**, **set it up for the signed-in user** when another account runs it, a folder you pick, here, keep it portable, or later) or the self-signed **`.msixbundle`** (trust that release's `Agentmaster.cer`, then `Add-AppxPackage`).
+Prefer the files? Grab them from [**Releases**](https://github.com/Nucs/Agentmaster/releases): the **portable zip** (unzip, run `Agentmaster.exe` — its first launch asks the same question: **just for you** (recommended), **for all users**, **set it up for the signed-in user** when another account runs it, a folder you pick, here, keep it portable, or later) or the self-signed **`.msixbundle`** (trust that release's `Agentmaster.cer`, then `Add-AppxPackage`). For debugging, each release's zips carry a public PDB beside every binary, and its `_symbols.zip` assets hold the full PDBs, Source-Linked to the release's commit.
 
 First launch silently picks a per-install **profile folder** (`~/.agentmaster`) holding everything it persists. **Requires** Windows 10 19041+, x64/arm64, and a native [Claude Code](https://www.anthropic.com/claude-code) `claude.exe` on `PATH` (Codex optional).
 
