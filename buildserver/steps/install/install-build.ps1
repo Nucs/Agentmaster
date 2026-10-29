@@ -476,13 +476,14 @@ try {
     # 7. The other sessions.
     if ($WaitOthersMinutes -gt 0) {
         $all = Wait-AtRest -Folder $running -TimeoutSec ($WaitOthersMinutes * 60) -HoldSec 10 -Except $RequestedByPid
-        if (-not $all.Ok) { $facts.cutOff = Format-Rows $all.Running; Say ('still Running after {0} min - the swap cuts these turns off: {1}' -f $WaitOthersMinutes, ($facts.cutOff -join ', ')) }
+        # @(...) around each call: a function's empty array comes back as $null, which the result would print as null.
+        if (-not $all.Ok) { $facts.cutOff = @(Format-Rows $all.Running); Say ('still Running after {0} min - the swap cuts these turns off: {1}' -f $WaitOthersMinutes, ($facts.cutOff -join ', ')) }
     }
     else {
         $s = Get-Sessions $running
         if ($s.Ok) {
-            $facts.cutOff = Format-Rows @($s.Rows | Where-Object { $_.derivedState -eq 'Running' -and $_.pid -ne $RequestedByPid })
-            $facts.asking = Format-Rows @($s.Rows | Where-Object { $_.derivedState -eq 'NeedsApproval' })
+            $facts.cutOff = @(Format-Rows @($s.Rows | Where-Object { $_.derivedState -eq 'Running' -and $_.pid -ne $RequestedByPid }))
+            $facts.asking = @(Format-Rows @($s.Rows | Where-Object { $_.derivedState -eq 'NeedsApproval' }))
             if ($facts.cutOff.Count) { Say ('the swap cuts these running turns off (no wait: the owner''s choice of 2026-10-20): ' + ($facts.cutOff -join ', ')) }
             else { Say "no other $Instance session is Running ($($s.Rows.Count) open)" }
             if ($facts.asking.Count) { Say ('these wait for an answer; the swap ends their claude too: ' + ($facts.asking -join ', ')) }

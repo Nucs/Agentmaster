@@ -1,8 +1,8 @@
 # Agentmaster build server — design and plan (fourth revision)
 
-> **Status (2026-10-26): Phase 1 (e2e on demand) and Phase 3's MVP (builds) run on this PC; the rest is design.**
-> What runs, and how it differs from this design, is in §13 ("Phase 1 as built", "Phase 3's MVP as built") and
-> [`README.md`](README.md). The measurements of 2026-10-25 ran in throwaway test machines and folders, which were
+> **Status (2026-10-29): Phase 1 (e2e on demand), Phase 3's MVP (builds, snapshots of uncommitted work, binary logs)
+> and Phase 4's `install` run on this PC; the rest is design.** What runs, and how it differs from this design, is in
+> §13 ("Phase 1 as built", "Phase 3's MVP as built", "Phase 4's install as built") and [`README.md`](README.md). The measurements of 2026-10-25 ran in throwaway test machines and folders, which were
 > removed afterwards (§16.8); the proofs and builds since (§16.9–§16.12) ran on the real site. The scripts are in
 > [`measure/`](measure/README.md).
 >
@@ -583,8 +583,11 @@ and K: was only read (§16.12). It differs from the table and from §2, §5.1, �
   runs on no PC without the SDK, `am-e2e` included. A Debug build of HEAD works the same way in its own worktree:
   `b20261026-4` (e54f37fae), cold, 23.9 min from its request (§16.12).
 - **Not built yet:** `amb test m5|syntax`; purge `auto` (`none` is the default, `force` deletes the worktree's build
-  outputs first); snapshot commits of uncommitted work (`amb build` takes a commit); the binlog; the store's budget
-  (each Release build keeps ~0.6 GB, and nothing deletes builds yet).
+  outputs first); the store's budget (each Release build keeps ~0.6 GB, and nothing deletes builds yet). Built since
+  (2026-10-29, fb20046ab): snapshot commits of uncommitted work (`amb build --snapshot [-- <paths>]`: a reproducible
+  commit made in a private index under `refs/buildserver/snapshots/`, as §11 asks; the CLI makes it, the mirror fetches
+  it, the build checks its parent) and the binlog (a `Directory.Build.rsp` with `-bl` beside the solution for the
+  build's duration, which msbuild reads by itself, so a commit of any age gets one; kept as `build.binlog`).
 - **The VM shuts down after each build** instead of staying up 10 minutes: the next build boots it again in 27–38 s.
   One build VM, one build at a time: a second identical request waits for the VM, then answers with the first's id.
 - **The mirror and the store are the coordinator's, inside the distro** (`/srv/buildserver/git`,
@@ -598,6 +601,32 @@ and K: was only read (§16.12). It differs from the table and from §2, §5.1, �
   `CL_MPCount` follow that grant (2 × 2 below 10 GB, 2 × 3 below 14 GB, else 3 × 3).
 - **W1 was not needed:** the site's disk is not sparse, so it keeps what a build frees for the next one; Q: had room
   once the owner freed it (W3).
+
+**Phase 4's install as built (2026-10-29, fb20046ab; [`README.md`](README.md) "Installs"):** `amb install <build id>
+--instance dev|production` is a request of its own kind (Deploy: the kind Install already makes base images) that the
+coordinator runs with no slot. The table's "install of a build id through the swap script" holds: on dev, a dry run, an
+install of `b20261028-3` (0.0.1.39 @ Debug-B → 0.0.1.40 @ Debug) and an install with an injected failure after the
+swap's stop (the old version relaunched, the staged folder put back, the request `ROLLED BACK`) all ran as designed
+(§16.13). It differs from the design in these ways:
+- **No host agent:** the coordinator runs the Windows side (`steps/install/install-build.ps1`) with Windows'
+  PowerShell 7 through WSL's interop. Measured first: a process started that way from the coordinator's daemon descends
+  from wslhost.exe ← wslservice.exe ← services.exe and runs in the user's session, so no Agentmaster instance is among
+  its ancestors: the swap's self-hosting guard passes and the stop cannot kill it, which made the one-shot scheduled task
+  of the hand installs (CLAUDE.md *The swap script*) unnecessary.
+- **The steps come from two places:** the install script is the build server's own (deployed with the coordinator, as
+  §11 says); the swap and lock scripts are the newest COMMITTED copies on the repository's branch
+  (`refs/heads/agentmaster`, from the mirror), not a copy under `buildserver/steps/`: one swap script, with every rollback
+  fix, and never a working tree's half-done edit.
+- **Whom it waits for:** the session that asked, when it is one of the instance's (found by the CLI's nearest
+  claude.exe ancestor), must be at rest for 15 s (its last message is written before the swap ends its claude); the other
+  sessions are not waited for unless asked (`--wait-others`), the owner's choice of 2026-10-20.
+- **Its checks** are the hand installs': the instance a loose registration on one folder of its pair, the other folder
+  idle, the zip's SHA-256, the manifest's package and version, the key binaries, the commit baked in TerminalApp.dll, no
+  binary of the running layout missing; then the build-launch mutex and the registration checked again under it, and a
+  60 s watch of the new instance. A failure before the swap puts the folder back; a folder the instance runs from is
+  never removed.
+- **Not built:** an installed MSIX as the starting point (refused: `-ReplaceInstalledPackage` and its rollback bundle
+  stay a person's step), the install lane and `am-install` (P4's other half), a weekly full run.
 
 ## 14. Decisions
 
@@ -832,6 +861,22 @@ the same wrapper and parallelism on this PC, from a private clone on Q: under th
 - **Made and removed:** the native reference clone and its build tree `Q:\tmp\p04-native` (29 GB), and a fetched test
   copy. Kept: the build VM's disks (they are the next build's), the four builds in the store (`b20261026-1` to `-4`),
   and the acceptance check's fetched zip in `Q:\buildserver\out\b20261026-3`.
+
+### 16.13 Phase 4's install, snapshots and binary logs (2026-10-29)
+
+The install rows are requests to `amb-coordinator` (the deploy job, no slot) against the dev instance, with build
+`b20261028-3` (a purged Debug dev build of 364e18f23: what dev ran, so its behaviour did not change); the session that
+asked ran inside production. While they ran the PC had 3.3-7.2 GB available and 4.9-7.9 GB of free commit (the owner's
+browser, a game and an IDE).
+
+| What | Measured |
+|---|---|
+| a Windows process started through the distro's interop socket (`/run/WSL/1_interop`) by a detached daemon (setsid, its wsl.exe gone) | ancestry pwsh.exe ← wslhost.exe ← wslservice.exe ← services.exe ← wininit.exe; session 1 (the user's desktop); USERPROFILE C:\Users\ELI; working folder Q:\buildserver (the daemon's /mnt/q/buildserver) |
+| `amb install … --dry-run` (r20261029-052053-6d078c) | 28 s from request to end: the scripts of refs/heads/agentmaster (fb20046ab) exported, the 121.0 MB layout zip staged in 3 s and its SHA-256 checked, Debug's older build (0.0.1.38) moved aside, 316 files extracted in 2.6 s, every check passed (AgentmasterDev 0.0.1.0, TerminalApp.dll bakes 364e18f23, the same 316 files as Debug-B), the swap's -WhatIf plan (0.0.1.40 @ Debug, stop pid 34424), Debug put back as it was |
+| `amb install …` (r20261029-052143-6045b9) | 2.5 min from request to end: staged and checked in 7 s; the requesting claude not one of dev's sessions (no wait); no dev session Running (2 open); the mutex; the swap's stop 11 s after its start (its own validation); drained 38.1 s; registered 0.0.1.40 @ Debug in 12.8 s; launched pid 22412: 55.2 s down (5.5-6.9 s on the quiet PC of 10-26 and 10-28: the drain is what the memory pressure slowed); the older build deleted; alive after the 60 s watch, no dialog, no trouble line |
+| `amb install … --inject-failure after-stop` (r20261029-052756-7ea5e1) | Debug-B's older build (0.0.1.39) moved aside, the build extracted and checked; the swap stopped pid 22412, drained 4.4 s, failed on purpose, "rollback: relaunching the still-registered 0.0.1.40"; that version's GUI (pid 79168) seen ~5 s later; Debug-B put back (0.0.1.39); the mutex released; `Failed: ROLLED BACK: …`, amb exit 1; ~9 s down |
+| `amb build --snapshot … -- buildserver/steps/install/install-build.ps1` | the snapshot c5f3cd907 of HEAD fb20046ab (the one named file over HEAD), its ref under refs/buildserver/snapshots/, the working tree, the index and HEAD unchanged. Its purged Debug build (r20261029-052923-e3a171, an 8-hour wait timeout) was queued at 05:29Z and waited `homepc: memory`: a build is admitted with 24 GB of free commit, and the PC had 3.3-7.9 GB |
+| msbuild 17.14 (this PC's VS 2022) with a `Directory.Build.rsp` holding `-bl:<file>` beside a `.slnx` | the binary log was written (the build-step route of the binlog, checked on a scratch solution; the VM's Build Tools are 17.14 too) |
 
 ## 17. Evidence
 

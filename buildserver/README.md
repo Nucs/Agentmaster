@@ -8,22 +8,29 @@ site distro holds the images `am-base` (Tiny11 Core + the guest agent's bootstra
 is cancelled or loses its VM (DESIGN.md §13 "Phase 1 as built", §16.10). Phase 3's MVP runs too: `amb build` builds a
 commit in the kept build VM (image `am-build`) into a build id whose portable zip `amb e2e` runs and `amb fetch` copies
 to Q:; a cold Release build takes 38 min of build, an incremental one 6–8 min, 1.17× and 1.31× the native time, so
-builds stay in VMs (DESIGN.md §13 "Phase 3's MVP as built", §16.12).**
+builds stay in VMs (DESIGN.md §13 "Phase 3's MVP as built", §16.12). Since 2026-10-29: `amb install` installs a build
+on dev or production through the swap script (a failure after the stop brings the old version back: tested), `amb build
+--snapshot` builds uncommitted work, and every build keeps msbuild's binary log (DESIGN.md §13 "Phase 4's install as
+built", §16.13).**
 
 **As built, it differs from DESIGN.md §10 in one way:** there is no always-on host agent yet. The coordinator reads
 Windows' numbers itself (it runs `amb-hostfacts.exe` through WSL's interop, which works from a daemon after the call that
 started it ended: measured), and the CLI wakes the site by starting the coordinator (`coordinator-up.sh`). Of the host
-agent's other duties, the coordinator keeps the bare mirror itself (in the distro) and `amb fetch` copies artifacts to
-Windows through the API; installs and a LAN port for Caddy come with Phase 4. Slots run through the podman + dockur
-stand-in until fastrun's VM slots exist (Track A, DESIGN.md §13).
+agent's other duties, the coordinator keeps the bare mirror itself (in the distro), `amb fetch` copies artifacts to
+Windows through the API, and `amb install` runs its Windows side through the same interop (a process started that way
+descends from wslhost.exe, never from an Agentmaster instance); a LAN port for Caddy is not built. Slots run through the
+podman + dockur stand-in until fastrun's VM slots exist (Track A, DESIGN.md §13).
 
 ## Use it
 
 ```text
 amb build [<rev>] [--config Release|Debug] [--identity dev|release] [--purge none|force] [--wait]
                                              # build a commit (default HEAD of K:\source\Agentmaster) in the build VM
-amb artifacts <build id>                     # a build's files: portable zip, layout zip, symbols zip, build log, build.json
+amb build --snapshot [--config ...] [-- <paths>]    # build uncommitted work: a snapshot commit of HEAD + the work
+amb artifacts <build id>                     # a build's files: portable zip, layout zip, symbols zip, logs, binlog, build.json
 amb fetch <build id> [--kind KIND|all] [--to DIR]   # copy them to Q:\buildserver\out\<build id> (never K:), SHA-checked
+amb install <build id> --instance dev|production [--dry-run] [--wait-others MIN] [--wait]
+                                             # install a build on this PC's dev or production instance (alias: deploy)
 amb status                                   # the coordinator, Windows' numbers, homepc's free share, active requests
 amb import <portable zip> [--commit SHA]     # a hand-built zip or a GitHub release's zip becomes a build id (b<date>-<n>)
 amb builds                                   # the build ids
@@ -46,7 +53,16 @@ amb list | show <id> | cancel <id>
 ## Builds
 
 `amb build` builds a **commit**, never the working tree: it resolves `<rev>` (default HEAD) in `K:\source\Agentmaster`
-(`AMB_REPO` overrides) and sends the full SHA. A build id names immutable bytes, so commit first.
+(`AMB_REPO` overrides) and sends the full SHA. A build id names immutable bytes, so commit first, or snapshot.
+
+- **Uncommitted work** (`amb build --snapshot [-- <paths>]`, `src/Amb.Cli/WorkingTreeSnapshot.cs`): the CLI makes a
+  commit of HEAD plus the work - the whole working tree (other sessions' uncommitted edits included), or only `<paths>`
+  over HEAD - in a PRIVATE index (`GIT_INDEX_FILE`), so HEAD, the branches, the repository's index and the files stay as
+  they are, and keeps it under `refs/buildserver/snapshots/<commit>`, which the site's mirror fetches. The commit is
+  reproducible (a fixed author, HEAD's date, a message of HEAD and the tree): the same work twice is the same build id.
+  Refused: a file over 100 MB or more than 300 MB in all (the objects go to K:). A clean tree builds HEAD. The build's
+  record names the commit it was made on (`snapshotOf`; `amb builds` shows it); a built snapshot's ref in the repository
+  goes at the next snapshot (the mirror keeps its own).
 
 - **Where it runs:** the kept build VM `build-1` (image `am-build`: Tiny11 Core + VS 2022 Build Tools 17.14, MSVC 14.44,
   SDKs 22621 and 26100, vcpkg, PowerShell 7, Git). Its overlay and its data disk D: (a sparse 128 GiB raw file) live in
@@ -59,8 +75,11 @@ amb list | show <id> | cancel <id>
   vcpkg's binary cache on D:), `/m` and `CL_MPCount` picked from the VM's memory (2 × 2 below 10 GB). `--purge force`
   deletes the worktree's build outputs first (a clean build); `none` builds incrementally.
 - **The artifacts** (`amb artifacts <id>`): the portable zip (`New-UnpackagedTerminalDistribution.ps1 -PortableMode`,
-  as release.yml makes it; e2e-ready), the layout as a zip (for an install through the swap script), the symbols zip,
-  `build.log` / `build.log.err` and `build.json`, each with its SHA-256 in the build's manifest.
+  as release.yml makes it; e2e-ready), the layout as a zip (what `amb install` installs), the symbols zip,
+  `build.log` / `build.log.err`, `build.binlog` (msbuild's binary log, kind `build-binlog`: open it in the MSBuild
+  Structured Log Viewer) and `build.json`, each with its SHA-256 in the build's manifest. The binary log comes from a
+  `Directory.Build.rsp` the build step puts beside the solution for the build's duration (msbuild reads it by itself), so
+  a commit of any age gets one; a failed build keeps it in `store/requests/<id>/`.
 - **The same request twice** (commit, configuration, identity, purge) returns the first build's id at once, without a
   slot; one that comes while the first still builds waits for the VM, then answers with the first's id.
 - **A failed build** ends `Failed` with the end of its log; the whole log is kept in `store/requests/<id>/build.log`.
@@ -75,17 +94,57 @@ amb list | show <id> | cancel <id>
   `b20261026-4`: a 124 MB portable zip). ⚠ Their binaries need `ucrtbased.dll`, the debug UCRT that only the Windows
   SDK installs, so a Debug portable zip does not run on a PC without the SDK, `am-e2e` included: `amb e2e` takes
   Release builds.
-- **Installing a build on this PC** (no `amb install` yet): `amb fetch <id> --kind layout-zip`, extract the zip into
-  the EMPTY layout folder of the instance's pair that it does not run from (`Q:\agentmaster-layouts\Debug` / `Debug-B`
-  for dev), check that `AppxManifest.xml` names the package at 0.0.1.0 and that `TerminalApp.dll` bakes the build's
-  commit, then `tools\Swap-AgentmasterLayout.ps1 -LayoutDir <folder> [-PackageName AgentmasterDev]` after a
-  `-WhatIf`. First done 2026-10-26: `b20261026-5` (a Debug dev build of a8d8b97a2, 6 min 48 s from request to build
-  id, 3.1 min of it the build) became dev 0.0.1.36: the fetch took 0.8 s, the extraction 1.6 s, its 316 files were
-  exactly those of the local msbuild layout it replaced, and the swap was down 6.9 s. Its PDBs stay in the build's
-  symbols zip.
+- **Installing a build on this PC:** `amb install` (next section). By hand, the same steps were first done on
+  2026-10-26: `b20261026-5` (a Debug dev build of a8d8b97a2) became dev 0.0.1.36: the fetch took 0.8 s, the extraction
+  1.6 s, its 316 files were exactly those of the local msbuild layout it replaced, and the swap was down 6.9 s. Its PDBs
+  stay in the build's symbols zip.
 - **Memory:** a build needs 8 GB beyond Windows' 6 GB reserve. While the PC has less, the request waits; the site's
   page cache counts as used memory for Windows, so after big copies it can help to drop it
   (`python buildserver/site/sitectl.py run -- sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'`).
+
+## Installs
+
+`amb install <build id> --instance dev|production` (alias `deploy`; `src/Amb.Coordinator/Jobs/DeployJob.cs`,
+`steps/install/install-build.ps1`) moves one of this PC's Agentmaster instances onto a build, the way the hand installs of
+2026-10-26/28 did, as one request. It is a deploy: ask the owner first, and update CLAUDE.md's *Builds* table after.
+
+- **Where it runs:** the coordinator stages, in `Q:\buildserver\install\<request id>`, the build's layout zip (hashed on
+  the way), its own `install-build.ps1`, and the COMMITTED `tools\Swap-AgentmasterLayout.ps1` and `tools\am-lock.sh` of
+  `refs/heads/agentmaster` (`AMB_INSTALL_SCRIPTS_REF`: never a working tree's half-done edit, never an old build's copy),
+  then runs the script with Windows' PowerShell 7 through WSL's interop. A process started that way descends from
+  `wslhost.exe` ← `wslservice.exe`, in the user's session (measured), never from an Agentmaster instance: the swap's
+  self-hosting guard passes and the stop cannot kill it, even when the session that asked lives in the instance being
+  swapped. The stage goes when the request ends; `install.log` and `install.json` stay in `store/requests/<id>/`.
+- **What it does:** (1) the instance must be a loose registration running from one folder of its pair (`AMB_DEV_SLOTS`,
+  `AMB_PRODUCTION_SLOTS`: `Debug` / `Debug-B` and `Release` / `Release-B` under `Q:\agentmaster-layouts`); an installed
+  MSIX is refused (its swap needs `-ReplaceInstalledPackage` and a rollback bundle: by hand). (2) The other folder must
+  run nothing; an older build there moves aside (`<folder>.amb-prev-<time>`) and the zip is extracted. (3) The checks:
+  the manifest names the instance's package at 0.0.1.0, the key binaries exist, `TerminalApp.dll` bakes the build's
+  commit, and no DLL or EXE of the running layout is missing. (4) A session of the instance that asked (the CLI sends
+  its nearest `claude.exe` ancestor) must not be Running for 15 s, up to 45 min; the other sessions' running turns are
+  cut off (the owner's choice of 2026-10-20) and named, unless `--wait-others MIN`. (5) The build-launch mutex, and the
+  registration checked again under it. (6) The swap: stamp, stop the GUI only, drain, register, launch; a failure after
+  the stop relaunches the old version. (7) A 60 s watch: the new GUI alive, a "Reopen your N windows?" dialog (it holds
+  the restore until answered), the instance's new trouble lines in `hooks.log`. Any failure before the swap's success
+  puts the folder back as it was; a folder the instance runs from is never removed.
+- **Refused before anything is staged:** a build without a layout zip (an import), a build of the other identity
+  (production takes `amb build --identity release` builds), an instance other than dev / production (`release` means
+  production).
+- **Outcomes:** `Succeeded: installed …`; `Failed: ROLLED BACK: …` (the swap failed after the stop, and the old version
+  runs again); `Failed: LOOK AT THE INSTANCE NOW: …` (the rollback did not finish, or the new instance died during the
+  watch); any other `Failed` stopped nothing.
+- **`--dry-run`:** stage, check and the swap's own `-WhatIf`, then the folder is put back. **`--inject-failure
+  after-stop`** (a test): the swap fails after the stop and the drain (`Swap-AgentmasterLayout.ps1
+  -InjectFailureAfterStop`), so the real rollback runs.
+- **From a session inside the instance:** the install waits for that session's turn to end, and `--wait` returns as soon
+  as it starts that wait (else the turn would hold itself open). The swap then ends that session's claude like every
+  other one of the instance; it resumes when its tab is entered.
+- **Cancel** (`amb cancel <id>`) stops it at its next safe point before the swap and puts the folder back; once the swap
+  started it runs to its end (killing it there could leave the instance stopped and unregistered).
+- **Measured 2026-10-29** (DESIGN.md §16.13), dev with build `b20261028-3`: the dry run 28 s from request to end; the
+  install 2.5 min (dev 0.0.1.39 @ Debug-B → 0.0.1.40 @ Debug, 55.2 s down: its drain took 38 s while the PC had under
+  5 GB of free commit); the injected failure: stopped, drained 4.4 s, the old version relaunched within ~5 s, the folder
+  put back, `ROLLED BACK`.
 
 ## The images
 
@@ -117,7 +176,7 @@ python buildserver/image/images.py list
 ## Build and test
 
 ```text
-dotnet test buildserver/src/Buildserver.slnx            # build everything + 64 unit tests (output in Q:\tmp\buildserver-build)
+dotnet test buildserver/src/Buildserver.slnx            # build everything + 75 unit tests (output in Q:\tmp\buildserver-build)
 python buildserver/tests/local_chain.py                 # the chain without a VM (Q:\tmp\buildserver-test, removed after)
 python buildserver/tests/site_outcomes.py               # Phase 1's done-when on the real site: e2e passed, failed, cancelled, lost VM
 python buildserver/tests/site_build.py                  # the build MVP's done-when on the real site (it builds: ask first)
@@ -159,13 +218,14 @@ python buildserver/site/sitectl.py run -- podman ps
 | [`site/sitectl.py`](site/sitectl.py) | makes, deploys into and inspects this PC's site: the WSL distro `buildserver`, its disk in `Q:\buildserver\wsl` (E2) | in use |
 | [`site/files/`](site/files) | the configuration it installs (`/etc/wsl.conf`, podman's `containers.conf`), each file documented | in use |
 | [`image/`](image) | the image kit: `images.py`, the OEM bootstrap (`oem/`), the layer steps (`steps/`) | `am-base`, `am-e2e` and `am-build` made with it |
-| [`steps/build/`](steps/build) | the build VM's steps, run with the image's PowerShell 7: `prepare-disk.ps1` (D:), `checkout.ps1` (the worktree from git bundles), `build.ps1` (the commit's own `tools\Build-Agentmaster.ps1`), `package.ps1` (the portable zip, the layout zip, the symbols, `build.json`); `sitectl.py deploy` copies them into the site, and each build stages them into its share | in use |
+| [`steps/build/`](steps/build) | the build VM's steps, run with the image's PowerShell 7: `prepare-disk.ps1` (D:), `checkout.ps1` (the worktree from git bundles), `build.ps1` (the commit's own `tools\Build-Agentmaster.ps1`, with msbuild's binary log), `package.ps1` (the portable zip, the layout zip, the symbols, the logs, `build.json`); `sitectl.py deploy` copies them into the site, and each build stages them into its share | in use |
+| [`steps/install/`](steps/install) | `install-build.ps1`: the Windows side of `amb install` (stage into the free slot, check, wait for the requesting session, the mutex, the swap, the watch), run by the coordinator through WSL's interop | in use (2026-10-29) |
 | [`measure/`](measure/README.md) | the measurements and proofs behind DESIGN.md §16, with their raw results | P0.1 (§16.9), P0.5's comparison (§16.11) and P0.4's native half (§16.12) |
 | [`src/Amb.Core`](src/Amb.Core) | the shared core: the allocation rule (§3), the request / build / slot / VM model, the guest and API protocol, the atomic record store (§6) | 27 unit tests (`src/Amb.Core.Tests`) |
-| [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API (artifacts streamed by name), the scheduler (admission by priority × availability, wait and run timeouts, cancel, one build at a time, existing builds answered without a slot), the guest broker, the jobs (import, smoke, install, layer, e2e, build), the source mirror and its bundles, the slot manager and its drivers (podman + dockur, kept VMs with a data disk; local, for tests) | runs in the site; 37 unit tests (`src/Amb.Coordinator.Tests`) |
+| [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API (artifacts streamed by name), the scheduler (admission by priority × availability, wait and run timeouts, cancel, one build at a time, existing builds answered without a slot), the guest broker, the jobs (import, smoke, install, layer, e2e, build, deploy), the source mirror (snapshots too) and its bundles, the slot manager and its drivers (podman + dockur, kept VMs with a data disk; local, for tests) | runs in the site; 41 unit tests (`src/Amb.Coordinator.Tests`) |
 | [`src/Amb.GuestAgent`](src/Amb.GuestAgent) | `amb-guest.exe` (Native AOT, 7 MB): the agent in every VM; hello, heartbeat with the guest's memory, one step at a time by long poll (run, fetch, expand, put, shutdown) | in every slot |
 | [`src/Amb.HostFacts`](src/Amb.HostFacts) | `amb-hostfacts.exe` (Native AOT): Windows' available memory, free commit, Q: free space and a full-screen game, as one line of JSON; the coordinator runs it every 10 s through WSL's interop | in use |
-| [`src/Amb.Cli`](src/Amb.Cli) | `amb.exe`: the command line above | in use |
+| [`src/Amb.Cli`](src/Amb.Cli) | `amb.exe`: the command line above; `WorkingTreeSnapshot.cs` (`--snapshot`), `ProcessAncestry.cs` (the requesting claude.exe of `amb install`) | in use; 7 unit tests (`src/Amb.Cli.Tests`) |
 | [`tests/local_chain.py`](tests/local_chain.py) | the whole chain on this PC without a VM: the coordinator with the local slot driver, the real guest agent, the real API | 15 checks pass |
 | [`tests/site_outcomes.py`](tests/site_outcomes.py) | Phase 1's done-when on the real site: e2e runs that pass, fail, are cancelled and lose their VM, each leaving nothing behind | 14 checks passed (2026-10-25) |
 | [`tests/site_build.py`](tests/site_build.py) | the build MVP's done-when on the real site: a build of HEAD, its manifest, an identical request, e2e on the build, fetch, no slot left, K: only read | 7 checks passed (2026-10-26, `b20261026-3`) |
