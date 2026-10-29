@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using Amb.Coordinator;
 using Amb.Coordinator.Jobs;
+using Amb.Core.Allocation;
 using Amb.Core.Model;
 using Amb.Core.Protocol;
 using Amb.Core.Records;
@@ -43,6 +44,62 @@ public sealed class RequestBookTests : IDisposable
         Assert.Empty(book.Active);
     }
 
+    /// <summary>An e2e or smoke VM sized on its own (DESIGN.md §16.14): a given memory and vCPU count become both its
+    /// minimum and its preferred amount; a guest RAM alone lowers the memory range to it; a size for another kind, one out
+    /// of range, or a guest RAM under the cap is refused; the book's record carries the sized resources.</summary>
+    [Fact]
+    public void SlotSizeOverridesTheKindsDefaults()
+    {
+        ResourceRequest e2e = RequestDefaults.ResourcesOf(RequestKind.E2e)!;
+        ResourceRequest capped = RequestBook.SizeSlot(RequestKind.E2e, e2e,
+            new RequestInputs { MemoryMiB = 2560, GuestMemoryMiB = 4096, Vcpus = 4 })!;
+        Assert.Equal(new Resources(2560, 4, e2e.Min.DiskMiB), capped.Min);
+        Assert.Equal(new Resources(2560, 4, e2e.Preferred.DiskMiB), capped.Preferred);
+        // A guest RAM under the default range lowers it: never more memory than the guest sees.
+        ResourceRequest guestOnly = RequestBook.SizeSlot(RequestKind.E2e, e2e, new RequestInputs { GuestMemoryMiB = 1536 })!;
+        Assert.Equal(1536, guestOnly.Min.MemoryMiB);
+        Assert.Equal(1536, guestOnly.Preferred.MemoryMiB);
+        Assert.Same(e2e, RequestBook.SizeSlot(RequestKind.E2e, e2e, new RequestInputs()));
+        Assert.Throws<RequestRejectedException>(() => RequestBook.SizeSlot(RequestKind.Build,
+            RequestDefaults.ResourcesOf(RequestKind.Build), new RequestInputs { MemoryMiB = 4096 }));
+        Assert.Throws<RequestRejectedException>(() => RequestBook.SizeSlot(RequestKind.E2e, e2e,
+            new RequestInputs { MemoryMiB = 512 }));
+        Assert.Throws<RequestRejectedException>(() => RequestBook.SizeSlot(RequestKind.E2e, e2e,
+            new RequestInputs { Vcpus = 0 }));
+        Assert.Throws<RequestRejectedException>(() => RequestBook.SizeSlot(RequestKind.E2e, e2e,
+            new RequestInputs { MemoryMiB = 4096, GuestMemoryMiB = 2048 }));
+
+        RequestRecord record = Book().Create(new CreateRequest(RequestKind.Smoke,
+            new RequestInputs { MemoryMiB = 2048, GuestMemoryMiB = 3072 }));
+        Assert.Equal(2048, record.Resources!.Min.MemoryMiB);
+        Assert.Equal(2048, record.Resources.Preferred.MemoryMiB);
+        Assert.True(Scheduler.IsCapped(record));
+    }
+
+    /// <summary>An e2e request that names no size gets the tuned capped VM (DESIGN.md §16.15): a 2 GB cap on a 3 GB guest
+    /// with 4 vCPUs; one that names its memory and no guest RAM gets an uncapped VM of that size; another kind keeps its
+    /// own defaults and no guest RAM.</summary>
+    [Fact]
+    public void E2eDefaultsToTheTunedCappedVm()
+    {
+        RequestBook book = Book();
+        RequestRecord tuned = book.Create(new CreateRequest(RequestKind.E2e, new RequestInputs { BuildId = "b20261029-1" }));
+        Assert.Equal(RequestDefaults.E2eGuestMemoryMiB, tuned.Inputs.GuestMemoryMiB);
+        Assert.Equal(new Resources(2048, 4, 1024), tuned.Resources!.Min);
+        Assert.Equal(2048, tuned.Resources.Preferred.MemoryMiB);
+        Assert.True(Scheduler.IsCapped(tuned));
+
+        RequestRecord uncapped = book.Create(new CreateRequest(RequestKind.E2e,
+            new RequestInputs { BuildId = "b20261029-1", MemoryMiB = 8192 }));
+        Assert.Null(uncapped.Inputs.GuestMemoryMiB);
+        Assert.Equal(8192, uncapped.Resources!.Preferred.MemoryMiB);
+        Assert.False(Scheduler.IsCapped(uncapped));
+
+        RequestRecord smoke = book.Create(new CreateRequest(RequestKind.Smoke, new RequestInputs()));
+        Assert.Null(smoke.Inputs.GuestMemoryMiB);
+        Assert.False(Scheduler.IsCapped(smoke));
+    }
+
     /// <summary>A request gets its kind's defaults, moves only along its life, and logs every move.</summary>
     [Fact]
     public void LifeAndEvents()
@@ -51,7 +108,7 @@ public sealed class RequestBookTests : IDisposable
         RequestRecord created = book.Create(new CreateRequest(RequestKind.E2e, new RequestInputs { BuildId = "b20261025-1" }));
         Assert.Equal(RequestState.Pending, created.State);
         Assert.Equal(TimeSpan.FromMinutes(120), created.WaitTimeout);
-        Assert.Equal(8 * 1024, created.Resources!.Preferred.MemoryMiB);
+        Assert.Equal(2 * 1024, created.Resources!.Preferred.MemoryMiB);
         Assert.Null(book.Move(created.Id, RequestState.Collecting, "not allowed from pending"));
         Assert.NotNull(book.Move(created.Id, RequestState.Starting, "placed"));
         RequestRecord? running = book.Move(created.Id, RequestState.Running, "guest ready");

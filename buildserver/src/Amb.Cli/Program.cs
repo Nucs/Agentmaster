@@ -11,8 +11,12 @@ using Amb.Core.Protocol;
 //   amb status | list [--limit N] | show <id> | builds | cancel <id>
 //   amb logs <id> [-f] [--wait-max S]
 //   amb import <zip> [--commit SHA] [--wait] [--wait-max S]
-//   amb smoke [--image am-base] [--wait] [--wait-max S]
-//   amb e2e <build id> [--image am-e2e] [--suite PATH] [--wait] [--wait-max S] [-- pytest arguments]
+//   amb smoke [--image am-base] [--ram GB] [--guest-ram GB] [--vcpus N] [--wait] [--wait-max S]
+//   amb e2e <build id> [--image am-e2e] [--suite PATH] [--ram GB] [--guest-ram GB] [--vcpus N] [--wait] [--wait-max S]
+//       [-- pytest arguments]
+//   --ram GB is the most the VM keeps in the PC's memory (its grant); a larger --guest-ram GB is the RAM Windows in the
+//   VM sees, the rest of it in the site's swap file on Q: (a capped slot: slower, admitted with a 6 GB commit margin
+//   instead of 16, DESIGN.md §16.14); --vcpus N fixes its vCPUs.
 //   amb build [<rev>] [--config Release|Debug] [--identity dev|release] [--purge none|force] [--wait] [--wait-max S]
 //   amb build --snapshot [--config ...] [-- <paths>]     (uncommitted work: the whole working tree, or only <paths>)
 //   amb artifacts <build id>
@@ -114,7 +118,7 @@ internal sealed class Options
     /// <summary>The options that take a value; every other "-x" is a flag.</summary>
     private static readonly HashSet<string> WithValue =
         ["--image", "--suite", "--commit", "--limit", "--wait-max", "--run-timeout", "--wait-timeout", "--config", "--identity",
-         "--purge", "--kind", "--to", "--instance", "--wait-others", "--inject-failure"];
+         "--purge", "--kind", "--to", "--instance", "--wait-others", "--inject-failure", "--ram", "--guest-ram", "--vcpus"];
 
     /// <summary>The flags amb knows (options without a value). Any other "-x" is refused, and so is a value option given
     /// without its value (it lands among the flags).</summary>
@@ -132,9 +136,13 @@ internal sealed class Options
           amb fetch <build id> [--kind portable-zip|layout-zip|symbols-zip|build-log|build-binlog|build-json|all] [--to DIR]
           amb install <build id> --instance dev|production [--dry-run] [--wait-others MIN] [--wait]   (alias: deploy)
           amb import <portable zip> [--commit SHA] [--wait]
-          amb e2e <build id> [--image am-e2e] [--suite PATH] [--wait] [-- pytest arguments]
-          amb smoke [--image am-base] [--wait]
+          amb e2e <build id> [--image am-e2e] [--suite PATH] [--ram GB] [--guest-ram GB] [--vcpus N] [--wait] [-- pytest arguments]
+          amb smoke [--image am-base] [--ram GB] [--guest-ram GB] [--vcpus N] [--wait]
 
+          e2e and smoke VMs: --ram GB is the most the VM keeps in the PC's memory; a larger --guest-ram GB is the RAM
+          Windows in it sees, the rest in the site's swap file on Q: (slower, admitted with a 6 GB commit margin
+          instead of 16); --vcpus N fixes its vCPUs. An e2e VM is by default a 2 GB cap on a 3 GB guest with 4 vCPUs
+          (tuned: 1.15x the time of 8 GB uncapped); --ram 8 asks for the old uncapped 8 GB VM.
           Requests also take --run-timeout MIN and --wait-timeout MIN (1-1440); --wait-max S stops watching after S
           seconds (exit 97); --json prints the coordinator's JSON. build and install are a build and a deploy: ask the
           owner first. An unknown option is refused: nothing is sent.
@@ -206,6 +214,62 @@ internal sealed class Options
         if (int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out int value) && value >= min && value <= max)
         {
             minutes = value;
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>Whether any slot-size option (--ram, --guest-ram, --vcpus) was given: only e2e and smoke take them.</summary>
+    public bool SlotSized => Values.ContainsKey("--ram") || Values.ContainsKey("--guest-ram") || Values.ContainsKey("--vcpus");
+
+    /// <summary>Reads the slot-size options of e2e and smoke (DESIGN.md §16.14).</summary>
+    /// <param name="memoryMiB">--ram in MiB: the most the VM keeps in the PC's memory; null when not given.</param>
+    /// <param name="guestMemoryMiB">--guest-ram in MiB: the RAM Windows in the VM sees; null when not given.</param>
+    /// <param name="vcpus">--vcpus; null when not given.</param>
+    /// <param name="error">What is wrong, when the result is false.</param>
+    /// <returns>False when one is given but is not a number in range (GB 1 to 64, a decimal point allowed; vCPUs 1 to
+    /// 16), or --guest-ram is less than --ram: the caller reports a usage error, and nothing is sent.</returns>
+    public bool TrySlotSize(out long? memoryMiB, out long? guestMemoryMiB, out int? vcpus, out string? error)
+    {
+        vcpus = null;
+        error = null;
+        // `|`, not `||`: both reads must run, each assigns its own out value.
+        if (!TryGigabytes("--ram", out memoryMiB) | !TryGigabytes("--guest-ram", out guestMemoryMiB))
+        {
+            error = "--ram and --guest-ram take gigabytes, 1 to 64 (e.g. 2.5)";
+            return false;
+        }
+        if (memoryMiB is long cap && guestMemoryMiB is long guest && guest < cap)
+        {
+            error = "--guest-ram must be at least --ram (the VM's cap)";
+            return false;
+        }
+        if (Values.TryGetValue("--vcpus", out string? text))
+        {
+            if (!int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out int count) || count is < 1 or > 16)
+            {
+                error = "--vcpus takes a whole number, 1 to 16";
+                return false;
+            }
+            vcpus = count;
+        }
+        return true;
+    }
+
+    /// <summary>Reads a gigabytes option (1 to 64, a decimal point allowed) as MiB.</summary>
+    /// <param name="name">The option.</param>
+    /// <param name="mib">The value in MiB (rounded to the nearest); null when the option was not given.</param>
+    /// <returns>False when it was given but is not such a number.</returns>
+    private bool TryGigabytes(string name, out long? mib)
+    {
+        mib = null;
+        if (!Values.TryGetValue(name, out string? text))
+        {
+            return true;
+        }
+        if (double.TryParse(text, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out double gb) && gb >= 1 && gb <= 64)
+        {
+            mib = (long)Math.Round(gb * 1024);
             return true;
         }
         return false;
@@ -372,6 +436,17 @@ internal static class Commands
     {
         CreateRequest body;
         Func<RequestEvent, string?>? stopAt = null;
+        // The VM's size (e2e and smoke only): checked before anything is sent, like every other option.
+        if (!options.TrySlotSize(out long? memoryMiB, out long? guestMemoryMiB, out int? vcpus, out string? sizeError))
+        {
+            Console.Error.WriteLine("amb: " + sizeError);
+            return 2;
+        }
+        if (options.SlotSized && options.Command is not ("e2e" or "smoke"))
+        {
+            Console.Error.WriteLine("amb: --ram, --guest-ram and --vcpus size an e2e or smoke VM only");
+            return 2;
+        }
         switch (options.Command)
         {
             case "build" when options.Flags.Contains("--snapshot") && options.Positional.Count == 0:
@@ -433,6 +508,9 @@ internal static class Commands
                 body = new CreateRequest(RequestKind.Smoke, new RequestInputs
                 {
                     Image = options.Values.GetValueOrDefault("--image", "am-base"),
+                    MemoryMiB = memoryMiB,
+                    GuestMemoryMiB = guestMemoryMiB,
+                    Vcpus = vcpus,
                 });
                 break;
             case "e2e" when options.Positional.Count == 1:
@@ -442,6 +520,9 @@ internal static class Commands
                     Image = options.Values.GetValueOrDefault("--image", "am-e2e"),
                     SuiteSource = options.Values.TryGetValue("--suite", out string? suite) ? Path.GetFullPath(suite) : null,
                     SuiteArgs = options.Rest.Count > 0 ? options.Rest : null,
+                    MemoryMiB = memoryMiB,
+                    GuestMemoryMiB = guestMemoryMiB,
+                    Vcpus = vcpus,
                 });
                 break;
             default:

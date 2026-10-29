@@ -20,11 +20,13 @@ public static class RequestDefaults
     /// <returns>The resource request, or null for an import.</returns>
     public static ResourceRequest? ResourcesOf(RequestKind kind) => kind switch
     {
-        // An e2e VM: Tiny11 Core uses 1.4-1.9 GB at rest, Agentmaster with a tab ~150 MB more; the e2e runner's own
-        // default is 8 GB / 6 CPUs. Its throwaway overlay grows 1-3 GB.
+        // An e2e VM, tuned 2026-10-29 (DESIGN.md §16.15): a 2 GB cap on a 3 GB guest (E2eGuestMemoryMiB: the rest of its
+        // RAM in the site's swap file on Q:) and 4 vCPUs ran the tuning tests in 1.15x the time of an uncapped 8 GB /
+        // 6 vCPU VM; a 1.5 GB cap timed Claude Code's start out, 2 vCPUs made a UI test 2.7x slower. `amb e2e --ram 8`
+        // asks for the old uncapped VM. Its throwaway overlay grows 1-3 GB.
         RequestKind.E2e => new ResourceRequest(
-            new Resources(Resources.Gib(3), 2, Resources.Gib(1)),
-            new Resources(Resources.Gib(8), 6, Resources.Gib(3))),
+            new Resources(Resources.Gib(2), 4, Resources.Gib(1)),
+            new Resources(Resources.Gib(2), 4, Resources.Gib(3))),
         // The smoke check only boots and runs one command.
         RequestKind.Smoke => new ResourceRequest(
             new Resources(Resources.Gib(2), 2, Resources.Gib(1)),
@@ -43,6 +45,25 @@ public static class RequestDefaults
             new Resources(Resources.Gib(6), 4, Resources.Gib(22))),
         _ => null,
     };
+
+    /// <summary>The RAM an e2e VM's guest sees when the request names no size (3 GB over the default 2 GB cap: a capped
+    /// slot, DESIGN.md §16.15). A request that names its memory (`--ram`) and no guest RAM gets an uncapped VM.</summary>
+    public const long E2eGuestMemoryMiB = 3 * 1024;
+
+    /// <summary>A request's inputs with its kind's default guest RAM filled in: an e2e request that names neither its
+    /// memory nor its guest's RAM becomes the tuned capped VM.</summary>
+    /// <param name="kind">The request's kind.</param>
+    /// <param name="inputs">The inputs as asked.</param>
+    /// <returns>The inputs, with <see cref="RequestInputs.GuestMemoryMiB"/> set to <see cref="E2eGuestMemoryMiB"/> for
+    /// such an e2e request; unchanged otherwise.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="inputs"/> is null.</exception>
+    public static RequestInputs WithDefaultGuestMemory(RequestKind kind, RequestInputs inputs)
+    {
+        ArgumentNullException.ThrowIfNull(inputs);
+        return kind == RequestKind.E2e && inputs.MemoryMiB is null && inputs.GuestMemoryMiB is null
+            ? inputs with { GuestMemoryMiB = E2eGuestMemoryMiB }
+            : inputs;
+    }
 
     /// <summary>How long a kind may wait for a slot.</summary>
     /// <param name="kind">The kind.</param>
@@ -161,6 +182,8 @@ public sealed class RequestBook
         {
             throw new RequestRejectedException($"not a safe image name: {inputs.Image}");
         }
+        // An e2e request that names no size gets the tuned capped VM; the record says so (its guest RAM).
+        inputs = RequestDefaults.WithDefaultGuestMemory(ask.Kind, inputs);
         DateTimeOffset now = _clock.GetUtcNow();
         var record = new RequestRecord
         {
@@ -168,7 +191,7 @@ public sealed class RequestBook
             Kind = ask.Kind,
             State = RequestState.Pending,
             Inputs = inputs,
-            Resources = ask.Resources ?? RequestDefaults.ResourcesOf(ask.Kind),
+            Resources = SizeSlot(ask.Kind, ask.Resources ?? RequestDefaults.ResourcesOf(ask.Kind), inputs),
             CreatedAt = now,
             UpdatedAt = now,
             WaitTimeout = ask.WaitTimeoutMinutes is int w ? TimeSpan.FromMinutes(w) : RequestDefaults.WaitOf(ask.Kind),
@@ -179,6 +202,60 @@ public sealed class RequestBook
         Event(record.Id, "state", $"accepted: {record.Kind}", RequestState.Pending);
         QueueChanged.Pulse();
         return record;
+    }
+
+    /// <summary>Applies an e2e or smoke request's own slot size (its memory, its vCPUs, its guest's RAM) to the resources
+    /// it is admitted by.</summary>
+    /// <param name="kind">The request's kind.</param>
+    /// <param name="resources">The resources the caller asked for, or the kind's defaults (null for a kind with no slot).</param>
+    /// <param name="inputs">The inputs: <see cref="RequestInputs.MemoryMiB"/>, <see cref="RequestInputs.Vcpus"/> and
+    /// <see cref="RequestInputs.GuestMemoryMiB"/> when given.</param>
+    /// <returns>The resources, unchanged when no size was given.</returns>
+    /// <exception cref="RequestRejectedException">A size was given for a kind other than e2e or smoke, or one is out of
+    /// range (memory and guest RAM 1-64 GiB, vCPUs 1-16), or the guest's RAM is less than the slot's memory.</exception>
+    /// <remarks>A given memory or vCPU count becomes both the minimum and the preferred amount: a tuned slot gets exactly
+    /// that or waits, so a measurement is never run on a bigger slot by chance. A guest RAM alone only lowers the memory
+    /// range to it: a slot is never granted more memory than its guest sees.</remarks>
+    internal static ResourceRequest? SizeSlot(RequestKind kind, ResourceRequest? resources, RequestInputs inputs)
+    {
+        if (inputs.MemoryMiB is null && inputs.Vcpus is null && inputs.GuestMemoryMiB is null)
+        {
+            return resources;
+        }
+        if (kind is not (RequestKind.E2e or RequestKind.Smoke) || resources is null)
+        {
+            throw new RequestRejectedException("inputs.memoryMiB, vcpus and guestMemoryMiB size an e2e or smoke slot only");
+        }
+        const long LeastMiB = 1024, MostMiB = 64 * 1024;
+        if (inputs.MemoryMiB is < LeastMiB or > MostMiB || inputs.GuestMemoryMiB is < LeastMiB or > MostMiB)
+        {
+            throw new RequestRejectedException("inputs.memoryMiB and inputs.guestMemoryMiB must be 1024 to 65536 MiB");
+        }
+        if (inputs.Vcpus is < 1 or > 16)
+        {
+            throw new RequestRejectedException("inputs.vcpus must be 1 to 16");
+        }
+        if (inputs.GuestMemoryMiB is long asked && inputs.MemoryMiB is long cap && asked < cap)
+        {
+            throw new RequestRejectedException("inputs.guestMemoryMiB must be at least inputs.memoryMiB (the slot's cap)");
+        }
+        Resources min = resources.Min, preferred = resources.Preferred;
+        if (inputs.MemoryMiB is long memory)
+        {
+            min = min with { MemoryMiB = memory };
+            preferred = preferred with { MemoryMiB = memory };
+        }
+        else if (inputs.GuestMemoryMiB is long guest)
+        {
+            min = min with { MemoryMiB = Math.Min(min.MemoryMiB, guest) };
+            preferred = preferred with { MemoryMiB = Math.Min(preferred.MemoryMiB, guest) };
+        }
+        if (inputs.Vcpus is int vcpus)
+        {
+            min = min with { Vcpus = vcpus };
+            preferred = preferred with { Vcpus = vcpus };
+        }
+        return new ResourceRequest(min, preferred);
     }
 
     /// <summary>Checks a build request's inputs and fills its defaults, so its record says exactly what is built.</summary>

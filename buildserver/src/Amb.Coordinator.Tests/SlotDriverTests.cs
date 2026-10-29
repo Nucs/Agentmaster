@@ -46,4 +46,35 @@ public sealed class SlotDriverTests : IDisposable
         }
         Assert.Throws<InvalidOperationException>(() => PodmanSlotDriver.ImageVersion(_image));
     }
+
+    /// <summary>An uncapped slot's guest sees its grant; so does one whose guest RAM is not above its grant.</summary>
+    /// <param name="guestMiB">The spec's guest RAM, or null for none.</param>
+    [Theory]
+    [InlineData(null)]
+    [InlineData(8192L)]
+    [InlineData(4096L)]
+    public void UncappedSlotSeesItsGrant(long? guestMiB)
+    {
+        SlotSpec spec = Spec(8192, guestMiB);
+        Assert.Equal(["-e", "RAM_SIZE=8192M"], PodmanSlotDriver.MemoryArguments(spec));
+    }
+
+    /// <summary>A capped slot (DESIGN.md §16.14): the guest sees its own RAM, the container keeps at most the grant
+    /// resident and may swap the rest plus a margin, and dockur's RAM check is off.</summary>
+    [Fact]
+    public void CappedSlotIsLimitedToItsGrant()
+    {
+        SlotSpec spec = Spec(2560, 4096);
+        Assert.Equal(
+            ["-e", "RAM_SIZE=4096M", "-e", "RAM_CHECK=N", "--memory", "2560m", "--memory-swap", "7680m"],
+            PodmanSlotDriver.MemoryArguments(spec));
+    }
+
+    /// <summary>A slot spec with the given grant and guest RAM (the other fields do not size memory).</summary>
+    /// <param name="grantMiB">The grant's memory.</param>
+    /// <param name="guestMiB">The guest's RAM, or null.</param>
+    /// <returns>The spec.</returns>
+    private SlotSpec Spec(long grantMiB, long? guestMiB) =>
+        new("s1", "am-e2e", new Amb.Core.Allocation.Resources(grantMiB, 4, 1024), _image, _image, _image,
+            GuestMemoryMiB: guestMiB);
 }

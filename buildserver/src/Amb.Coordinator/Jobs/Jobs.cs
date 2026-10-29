@@ -157,7 +157,8 @@ public sealed class SmokeJob : VmJob
         }
         finally
         {
-            await context.Slots.StopAsync(lease, graceful).ConfigureAwait(false);
+            // The slot's memory figures go into the request's events first (DESIGN.md §16.14).
+            await StopSlotAsync(context, lease, graceful).ConfigureAwait(false);
         }
     }
 }
@@ -334,7 +335,8 @@ public sealed class E2eJob : VmJob
         }
         finally
         {
-            await context.Slots.StopAsync(lease, graceful).ConfigureAwait(false);
+            // The slot's memory figures go into the request's events first (DESIGN.md §16.14).
+            await StopSlotAsync(context, lease, graceful).ConfigureAwait(false);
         }
     }
 

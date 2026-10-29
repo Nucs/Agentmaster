@@ -39,6 +39,19 @@ public sealed class SiteCapacityTests
         Assert.Equal(Resources.Gib(9.1), SiteCapacity.HomepcFree(facts, new HomepcReserves(), tolerant: true).Free.MemoryMiB);
     }
 
+    /// <summary>A capped slot keeps 6 GB of free commit, not 16 (DESIGN.md §16.14): on the PC of 2026-10-29 (9.5 GB
+    /// available, 12 GB of free commit) nothing uncapped fits, while a capped slot has min(3.5, 6.0) = 3.5 GB.</summary>
+    [Fact]
+    public void CappedSlotsKeepTheSmallerCommitMargin()
+    {
+        var facts = new HomepcFacts(Resources.Gib(9.5), Resources.Gib(29), Resources.Gib(12), 0, 0, Resources.Gib(100), false);
+        Assert.Equal(Resources.Gib(-4), SiteCapacity.HomepcFree(facts, new HomepcReserves()).Free.MemoryMiB);
+        Assert.Equal(Resources.Gib(3.5), SiteCapacity.HomepcFree(facts, new HomepcReserves(), capped: true).Free.MemoryMiB);
+        // The margin itself: with Windows' memory to spare, the commit term decides.
+        var roomy = facts with { WindowsAvailableMiB = Resources.Gib(30) };
+        Assert.Equal(Resources.Gib(6), SiteCapacity.HomepcFree(roomy, new HomepcReserves(), capped: true).Free.MemoryMiB);
+    }
+
     /// <summary>A full-screen game holds every new slot on homepc.</summary>
     [Fact]
     public void FullScreenGameHoldsHomepc()

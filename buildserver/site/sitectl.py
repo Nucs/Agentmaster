@@ -105,6 +105,20 @@ set -eu
 dir=/srv/buildserver/coordinator
 pidfile=$dir/amb-coordinator.pid
 mkdir -p "$dir"
+# The slots' swap file on the site's own disk (DESIGN.md §16.14): a capped slot's guest RAM above its cap lives there.
+# fallocate writes nothing, so the vhdx on Q: grows only by what is swapped out; priority 10 puts it ahead of WSL's own
+# swap (a vhdx on C:). WSL's VM forgets a swapon when it restarts, so every start turns it on again. A failure only
+# leaves capped slots on WSL's own swap.
+swap=/srv/buildserver/swap/slots.swap
+if ! grep -q "^$swap " /proc/swaps; then
+  mkdir -p /srv/buildserver/swap
+  if [ ! -f "$swap" ] && ! { fallocate -l 16G "$swap" && chmod 600 "$swap" && mkswap "$swap" >/dev/null; }; then
+    rm -f "$swap"
+    echo "could not make $swap: capped slots swap to WSL's own swap" >&2
+  elif ! swapon -p 10 "$swap"; then
+    echo "swapon $swap failed: capped slots swap to WSL's own swap" >&2
+  fi
+fi
 if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
   pid=$(cat "$pidfile")
   # A coordinator started before the last deploy runs the files that deploy put aside (coordinator.old/), or a deleted

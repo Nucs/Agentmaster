@@ -21,8 +21,21 @@ namespace Amb.Coordinator.Slots;
 /// the same disk; and it is always stopped with the driver's full graceful stop, because its disks are reused.</param>
 /// <param name="DataDiskGiB">When set: a raw data disk of this size (a sparse file, <c>data-disk.raw</c> in the slot
 /// folder, made when missing) is attached as a second disk; the guest formats it as D: at its first boot.</param>
+/// <param name="GuestMemoryMiB">When above the grant's memory: the RAM the guest sees, and the slot is CAPPED at its
+/// grant (<see cref="PodmanSlotDriver.MemoryArguments"/>): the rest of the guest's RAM lives in the site's swap file.</param>
 public sealed record SlotSpec(string SlotId, string Image, Resources Grant, string SlotDir, string ExchangeDir,
-    string ImageDir, string? InstallVersion = null, string? OemDir = null, bool Kept = false, int? DataDiskGiB = null);
+    string ImageDir, string? InstallVersion = null, string? OemDir = null, bool Kept = false, int? DataDiskGiB = null,
+    long? GuestMemoryMiB = null);
+
+/// <summary>What a slot's container used of the PC's memory over its life, read from its memory cgroup just before it
+/// stops (the measurements behind a slot's size, DESIGN.md §16.14).</summary>
+/// <param name="PeakResidentMiB">The most it held in memory at once (cgroup v1's <c>memory.max_usage_in_bytes</c>): what
+/// Windows was charged for it at its peak, QEMU and dockur's own processes included.</param>
+/// <param name="PeakWithSwapMiB">The most it held resident and swapped out together (<c>memory.memsw.max_usage_in_bytes</c>).</param>
+/// <param name="SwappedMiB">What it had in swap when read (<c>memory.stat</c>'s <c>total_swap</c>).</param>
+/// <param name="CapHits">How often it reached its limit (<c>memory.failcnt</c>); each hit made the kernel reclaim, so a
+/// large count over a short run means the guest kept paging.</param>
+public sealed record SlotMemoryStats(long PeakResidentMiB, long PeakWithSwapMiB, long SwappedMiB, long CapHits);
 
 /// <summary>
 /// Starts and stops slots. ONE interface for the stand-in (podman + dockur) and, later, fastrun's VM slots (DESIGN.md
@@ -69,6 +82,13 @@ public interface ISlotDriver
     /// <param name="cancel">Cancels the call.</param>
     /// <returns>True when the target was set; false when the driver has no balloon (a local slot).</returns>
     Task<bool> SetBalloonAsync(string handle, long targetMiB, CancellationToken cancel);
+
+    /// <summary>Reads what a running slot has used of the PC's memory so far (its peaks), for the request's events.</summary>
+    /// <param name="handle">The slot's handle.</param>
+    /// <param name="cancel">Cancels the read.</param>
+    /// <returns>The figures, or null when the driver cannot tell (no cgroup: a local slot, a test driver) or the read
+    /// failed: they are a report, never a reason to fail the slot.</returns>
+    Task<SlotMemoryStats?> ReadMemoryAsync(string handle, CancellationToken cancel) => Task.FromResult<SlotMemoryStats?>(null);
 }
 
 /// <summary>A program run by a slot driver, with its output.</summary>
@@ -189,6 +209,47 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
     /// <summary>The raw data disk's file name in a slot folder.</summary>
     public const string DataDiskFile = "data-disk.raw";
 
+    /// <summary>The site's swap file, on its own disk (the ext4.vhdx on Q:): a capped slot's guest RAM above its cap
+    /// lives there. coordinator-up.sh makes it (16 GB, fallocate: nothing is written until something is swapped out) and
+    /// turns it on at priority 10, ahead of WSL's own swap on C:, at every start of the coordinator.</summary>
+    public const string SwapFile = "/srv/buildserver/swap/slots.swap";
+
+    /// <summary>The swap a capped slot may use beyond its guest's RAM (QEMU's and dockur's own pages), MiB.</summary>
+    internal const long CappedSwapMarginMiB = 1024;
+
+    /// <summary>The podman arguments that size a slot's memory: RAM_SIZE, and for a capped slot its container's cap.</summary>
+    /// <param name="spec">The slot.</param>
+    /// <returns>The arguments, to add before the image's name.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="spec"/> is null.</exception>
+    /// <remarks>
+    /// <para>Uncapped (no <see cref="SlotSpec.GuestMemoryMiB"/>, or one not above the grant): RAM_SIZE is the grant, and
+    /// the PC holds all of it once the guest has touched it (a Windows guest touches all of its RAM within 1-2 minutes of
+    /// its boot, DESIGN.md §16).</para>
+    /// <para>Capped: RAM_SIZE is the guest's RAM; <c>--memory</c> is the grant, the most the container keeps resident
+    /// (cgroup v1's memory.limit_in_bytes: the WSL kernel has the memory controller and swap accounting, measured
+    /// 2026-10-29); <c>--memory-swap</c> is resident plus swapped (memsw): the grant, the guest's RAM and
+    /// <see cref="CappedSwapMarginMiB"/>, so at its cap the kernel swaps the guest's coldest pages to the site's swap
+    /// file instead of killing QEMU. RAM_CHECK=N, or dockur would judge RAM_SIZE against the memory it sees free.
+    /// ⚠ Without any swap turned on, a capped slot is killed at its cap (memsw then equals memory).</para>
+    /// </remarks>
+    internal static IReadOnlyList<string> MemoryArguments(SlotSpec spec)
+    {
+        ArgumentNullException.ThrowIfNull(spec);
+        long grant = spec.Grant.MemoryMiB;
+        if (spec.GuestMemoryMiB is not long guest || guest <= grant)
+        {
+            return ["-e", "RAM_SIZE=" + grant.ToString(CultureInfo.InvariantCulture) + "M"];
+        }
+        long residentAndSwapped = grant + guest + CappedSwapMarginMiB;
+        return
+        [
+            "-e", "RAM_SIZE=" + guest.ToString(CultureInfo.InvariantCulture) + "M",
+            "-e", "RAM_CHECK=N",
+            "--memory", grant.ToString(CultureInfo.InvariantCulture) + "m",
+            "--memory-swap", residentAndSwapped.ToString(CultureInfo.InvariantCulture) + "m",
+        ];
+    }
+
     /// <summary>QEMU's arguments that attach a slot's raw data disk (the measured attachment of
     /// buildserver/measure/run-slot.sh: a virtio-scsi controller of its own, a raw sparse file, O_DIRECT, discard).</summary>
     /// <remarks>discard=unmap passes the guest's TRIMs through, so what a build deletes (a purged tree) is punched out of
@@ -229,13 +290,14 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
             "--stop-timeout", "120",
             "-v", spec.SlotDir + ":/storage",
             "-v", spec.ExchangeDir + ":/shared",
-            "-e", "RAM_SIZE=" + spec.Grant.MemoryMiB.ToString(CultureInfo.InvariantCulture) + "M",
             "-e", "CPU_CORES=" + spec.Grant.Vcpus.ToString(CultureInfo.InvariantCulture),
             "-e", "DISK_FMT=qcow2",
             "-e", "NETWORK=user",
             "-e", "TZ=UTC",
             "-e", "ARGUMENTS=" + arguments,
         ];
+        // RAM_SIZE, and for a capped slot the container's cap and its swap allowance.
+        args.AddRange(MemoryArguments(spec));
         if (spec.InstallVersion is not null)
         {
             // An install: dockur downloads the version's ISO into /storage, installs unattended onto a new 64 GB
@@ -391,6 +453,56 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
                 .ConfigureAwait(false), env: Env).ConfigureAwait(false);
         return result.ExitCode == 0;
     }
+
+    /// <inheritdoc/>
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> was cancelled.</exception>
+    /// <remarks>The container's cgroup comes from podman (<c>{{.State.CgroupPath}}</c>, e.g. /libpod_parent/libpod-&lt;id&gt;);
+    /// the coordinator runs as root in the site, so it reads cgroup v1's files under /sys/fs/cgroup/memory itself. Any
+    /// other failure (the container gone, a file missing or unreadable) answers null and is logged.</remarks>
+    public async Task<SlotMemoryStats?> ReadMemoryAsync(string handle, CancellationToken cancel)
+    {
+        try
+        {
+            CommandResult inspect = await Commands.RunAsync("podman", ["inspect", "-f", "{{.State.CgroupPath}}", handle],
+                TimeSpan.FromSeconds(30), cancel, env: Env).ConfigureAwait(false);
+            string path = inspect.Output.Trim();
+            // The path comes from podman, but it is joined under /sys: never let it climb out.
+            if (inspect.ExitCode != 0 || !path.StartsWith('/') || path.Contains("..", StringComparison.Ordinal))
+            {
+                return null;
+            }
+            string dir = "/sys/fs/cgroup/memory" + path;
+            long swapped = 0;
+            foreach (string line in File.ReadLines(Path.Combine(dir, "memory.stat")))
+            {
+                if (line.StartsWith("total_swap ", StringComparison.Ordinal))
+                {
+                    swapped = long.Parse(line["total_swap ".Length..], NumberStyles.None, CultureInfo.InvariantCulture);
+                }
+            }
+            const long MiB = 1024 * 1024;
+            return new SlotMemoryStats(ReadCount(dir, "memory.max_usage_in_bytes") / MiB,
+                ReadCount(dir, "memory.memsw.max_usage_in_bytes") / MiB, swapped / MiB, ReadCount(dir, "memory.failcnt"));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FormatException or OverflowException
+            or InvalidOperationException or System.ComponentModel.Win32Exception or TimeoutException)
+        {
+            // A report only: a slot whose figures cannot be read is stopped all the same.
+            log.LogInformation("slot {Handle}: its memory figures could not be read: {Error}", handle, ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>Reads one cgroup file that holds a single number.</summary>
+    /// <param name="dir">The cgroup's folder.</param>
+    /// <param name="file">The file (memory.failcnt, memory.max_usage_in_bytes, …).</param>
+    /// <returns>Its number.</returns>
+    /// <exception cref="IOException">The file could not be read.</exception>
+    /// <exception cref="UnauthorizedAccessException">The file may not be read.</exception>
+    /// <exception cref="FormatException">It does not hold a plain number.</exception>
+    /// <exception cref="OverflowException">Its number does not fit a long.</exception>
+    private static long ReadCount(string dir, string file) =>
+        long.Parse(File.ReadAllText(Path.Combine(dir, file)).Trim(), NumberStyles.None, CultureInfo.InvariantCulture);
 }
 
 /// <summary>

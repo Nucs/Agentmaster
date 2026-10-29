@@ -17,7 +17,8 @@ namespace Amb.Coordinator;
 /// <para><b>Order:</b> first come, first served; a younger request may pass an older one that does not fit, until the
 /// older one has waited 10 minutes: from then on nothing younger that needs capacity is admitted, so a large request is
 /// not starved by a stream of small ones. A request that needs no slot (an import, a deploy, a build that exists) still
-/// starts behind it: it takes none of the capacity the older one waits for.</para>
+/// starts behind it: it takes none of the capacity the older one waits for. And the older one holds nothing back when
+/// it would not fit even with all of the site's slots stopped: then the owner's own programs hold what it lacks.</para>
 /// <para><b>Restarts:</b> a request that was starting or running when the coordinator stopped is marked lost (its slot is
 /// removed by <see cref="SlotManager.RemoveLeftoversAsync"/>); a pending one simply waits on.</para>
 /// </remarks>
@@ -142,8 +143,10 @@ public sealed class Scheduler : BackgroundService
     /// pass goes on to the end: a younger request that needs no slot (an import, a deploy, a build that exists) still
     /// starts, and a held one still ends no-capacity at its own wait timeout. Until 2026-10-29 the pass stopped at that
     /// request, so an import, which only copies a file into the store, waited behind a build that waited hours for memory,
-    /// and passed its own 5-minute wait timeout without ever being looked at. Internal for the scheduler's tests, which
-    /// run one pass at a time.
+    /// and passed its own 5-minute wait timeout without ever being looked at. The older request holds younger ones only
+    /// when it would fit on an idle site (<see cref="HostCapacity.HomepcFree"/> with idle): stopping slots cannot free
+    /// memory the owner's own programs hold. A capped request (<see cref="IsCapped"/>) is scored with the capped commit
+    /// margin. Internal for the scheduler's tests, which run one pass at a time.
     /// </remarks>
     /// <exception cref="IOException">A record could not be read or written.</exception>
     internal void Admit()
@@ -188,7 +191,8 @@ public sealed class Scheduler : BackgroundService
                 continue;
             }
             ResourceRequest resources = EffectiveResources(request);
-            SiteFree homepc = _capacity.HomepcFree();
+            bool capped = IsCapped(request);
+            SiteFree homepc = _capacity.HomepcFree(capped: capped);
             Placement? placement = Allocator.Choose(resources, [homepc]);
             if (placement is null)
             {
@@ -205,10 +209,14 @@ public sealed class Scheduler : BackgroundService
                     _book.Patch(request.Id, r => r with { Outcome = waiting });
                     _book.Event(request.Id, "placement", waiting);
                 }
-                if (now - request.CreatedAt > PassLimit)
+                if (now - request.CreatedAt > PassLimit
+                    && Allocator.Choose(resources, [_capacity.HomepcFree(capped: capped, idle: true)]) is not null)
                 {
-                    // It has waited long enough: nothing younger that needs capacity passes it, so the next free capacity
-                    // is its own. The pass goes on for the requests that need no slot.
+                    // It has waited long enough, and it is the site's own slots it lacks: nothing younger that needs
+                    // capacity passes it, so the next free capacity is its own. The pass goes on for the requests that
+                    // need no slot. When it would not fit even with every slot stopped, the owner's own programs hold
+                    // what it lacks, and holding younger requests would only leave the site idle (2026-10-29: a build
+                    // that needed 24 GB of free commit held every e2e run for hours on a PC that had 7-13 GB).
                     firstInLine = request.Id;
                 }
                 continue;
@@ -217,6 +225,19 @@ public sealed class Scheduler : BackgroundService
                 FormattableString.Invariant($"placed on {placement.Site} (score {placement.Score:0.00}): {placement.Grant}"),
                 r => r with { Site = placement.Site, Grant = placement.Grant, Outcome = null }));
         }
+    }
+
+    /// <summary>Whether a request asks for a capped slot: its guest's RAM is above the most memory it can be granted, so
+    /// its grant is only a cap and the rest of the guest's RAM lives in the site's swap file (DESIGN.md §16.14). It is
+    /// admitted with the smaller capped commit margin (<see cref="HomepcReserves.CappedCommitMiB"/>).</summary>
+    /// <param name="request">The request.</param>
+    /// <returns>True for a capped slot.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="request"/> is null.</exception>
+    internal static bool IsCapped(RequestRecord request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return request.Inputs.GuestMemoryMiB is long guest && request.Resources is { } resources
+            && guest > resources.Preferred.MemoryMiB;
     }
 
     /// <summary>Whether a build request names a build that exists (BuildJob.FindExisting): it is then answered without a

@@ -183,6 +183,35 @@ public abstract class VmJob : IJob
         }
     }
 
+    /// <summary>Records what the slot used of the PC's memory (an event: its peaks, its swap, how often it hit its cap),
+    /// then stops it. Every e2e and smoke run leaves these figures, the measurements a slot's size is tuned by.</summary>
+    /// <param name="context">The job's context.</param>
+    /// <param name="lease">The slot.</param>
+    /// <param name="graceful">Passed to <see cref="SlotManager.StopAsync"/>.</param>
+    /// <returns>A task that ends when the slot is gone.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="context"/> or <paramref name="lease"/> is null.</exception>
+    /// <remarks>The figures are read while the container still runs (its cgroup goes with it). The read never fails the
+    /// stop: it has its own 30-s budget, and anything it cannot read is simply not reported.</remarks>
+    protected static async Task StopSlotAsync(JobContext context, SlotLease lease, bool graceful)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(lease);
+        try
+        {
+            using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            if (await context.Slots.ReadMemoryAsync(lease, budget.Token).ConfigureAwait(false) is { } memory)
+            {
+                context.Event("slot", FormattableString.Invariant(
+                    $"slot memory: peak {memory.PeakResidentMiB / 1024.0:0.00} GB resident, {memory.PeakWithSwapMiB / 1024.0:0.00} GB with swap; {memory.SwappedMiB / 1024.0:0.00} GB swapped at the end; the cap reached {memory.CapHits:N0} times"));
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected when podman did not answer within the budget: the figures are skipped, the stop goes on.
+        }
+        await context.Slots.StopAsync(lease, graceful).ConfigureAwait(false);
+    }
+
     /// <summary>Runs one step and fails the job unless it succeeded.</summary>
     /// <param name="context">The job's context.</param>
     /// <param name="lease">The slot.</param>

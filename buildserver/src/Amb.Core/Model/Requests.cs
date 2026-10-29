@@ -126,6 +126,24 @@ public sealed record RequestInputs
     /// <summary>E2e: the image the VM boots ("am-e2e" by default; "am-install" for the install lane).</summary>
     public string? Image { get; init; }
 
+    /// <summary>E2e and smoke: the memory the slot is granted, in MiB, as both its minimum and its preferred amount (the
+    /// kind's default range otherwise). For a capped slot (<see cref="GuestMemoryMiB"/> above it) this is its cap: the
+    /// most it keeps in the PC's memory, the only amount Windows is charged and the slot is admitted by.</summary>
+    public long? MemoryMiB { get; init; }
+
+    /// <summary>E2e and smoke: the slot's vCPUs, as both its minimum and its preferred count (the kind's default range
+    /// otherwise). Fewer vCPUs take less of the PC's CPU and make the guest slower.</summary>
+    public int? Vcpus { get; init; }
+
+    /// <summary>E2e and smoke: the RAM the guest sees (dockur's RAM_SIZE), in MiB. Above the slot's grant the slot is
+    /// CAPPED: its container may keep only the grant in the PC's memory (the cgroup's limit), and the rest of the guest's
+    /// RAM lives in the site's swap file on Q: (DESIGN.md §16.14). Null boots an uncapped slot, whose RAM_SIZE is its
+    /// grant and all of which the guest touches within minutes of its boot.</summary>
+    /// <remarks>⚠ The further the cap is below what the guest uses, the more it pages and the slower everything in it
+    /// runs: measured 2026-10-29, a 4 GB guest capped at 1.5 GB reached its desktop in ~4.5 min (57-69 s uncapped) and
+    /// paged 3-4 MB/s at idle.</remarks>
+    public long? GuestMemoryMiB { get; init; }
+
     /// <summary>Build: "Debug" or "Release".</summary>
     public string? Configuration { get; init; }
 

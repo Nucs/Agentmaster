@@ -126,8 +126,10 @@ public sealed class SlotManager
         }
         string slotId = Ids.NewSlotId(_clock.GetUtcNow());
         string slotDir = keptVm is null ? Path.Combine(_options.SlotsDir, slotId) : Path.Combine(_options.VmsDir, keptVm);
+        // The request's guest RAM caps the slot at its grant when it is the larger (a capped slot, DESIGN.md §16.14).
         var spec = new SlotSpec(slotId, image, grant, slotDir, Path.Combine(_options.ExchangeDir, slotId),
-            Path.Combine(_options.ImagesDir, image), installVersion, oemDir, Kept: keptVm is not null, DataDiskGiB: dataDiskGiB);
+            Path.Combine(_options.ImagesDir, image), installVersion, oemDir, Kept: keptVm is not null, DataDiskGiB: dataDiskGiB,
+            GuestMemoryMiB: request.Inputs.GuestMemoryMiB);
         string token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
         // The share first: the guest agent and its slot.json must be there before the VM's logon task looks for them.
         string amb = Path.Combine(spec.ExchangeDir, "amb");
@@ -172,6 +174,18 @@ public sealed class SlotManager
             MarkGone(slotId);
             throw;
         }
+    }
+
+    /// <summary>Reads what a slot has used of the PC's memory so far (its peaks, its swap), for its request's events.</summary>
+    /// <param name="lease">The slot.</param>
+    /// <param name="cancel">Cancels the read.</param>
+    /// <returns>The figures, or null when the driver cannot tell.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="lease"/> is null.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> was cancelled.</exception>
+    public Task<SlotMemoryStats?> ReadMemoryAsync(SlotLease lease, CancellationToken cancel)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        return _driver.ReadMemoryAsync(lease.Handle, cancel);
     }
 
     /// <summary>Marks a slot ready once its guest agent said hello.</summary>

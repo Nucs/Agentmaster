@@ -63,8 +63,14 @@ public sealed class HostCapacity : BackgroundService
 
     /// <summary>homepc's free amounts for one request.</summary>
     /// <param name="tolerant">Whether the request may be admitted on commit alone (DESIGN.md §3.2).</param>
+    /// <param name="capped">Whether the request is a capped slot: the commit term keeps the smaller capped margin
+    /// (<see cref="HomepcReserves.CappedCommitMiB"/>, DESIGN.md §16.14).</param>
+    /// <param name="idle">Answer what homepc WOULD have free if none of the site's slots ran: every slot whose memory
+    /// Windows already shows is given back, and a young one is not taken. The scheduler asks it before it holds younger
+    /// requests behind an older one: when even an idle site could not fit the older one, the owner's own programs hold
+    /// what it lacks, and holding the younger ones would only leave the site idle.</param>
     /// <returns>The site's free amounts and holds; "no host facts" holds it while there is no fresh report.</returns>
-    public SiteFree HomepcFree(bool tolerant = false)
+    public SiteFree HomepcFree(bool tolerant = false, bool capped = false, bool idle = false)
     {
         HostFactsReport? report = _last;
         DateTimeOffset now = _clock.GetUtcNow();
@@ -75,16 +81,20 @@ public sealed class HostCapacity : BackgroundService
         }
         IReadOnlyList<SlotRecord> active = _slots.Active;
         long warming = active.Where(s => now - s.CreatedAt < WarmUp).Sum(s => s.Grant.MemoryMiB);
+        // Idle: the slots Windows' numbers already include are added back (their memory would be free); the young ones
+        // are simply not subtracted (Windows does not show them yet).
+        long settled = active.Where(s => now - s.CreatedAt >= WarmUp).Sum(s => s.Grant.MemoryMiB);
+        long adjust = idle ? settled : -warming;
         long wslAvailable = WslMemAvailableMiB() ?? report.AvailableMiB;
         var facts = new HomepcFacts(
-            WindowsAvailableMiB: report.AvailableMiB - warming,
-            WslMemAvailableMiB: wslAvailable - warming,
-            FreeCommitMiB: report.FreeCommitMiB - warming,
+            WindowsAvailableMiB: report.AvailableMiB + adjust,
+            WslMemAvailableMiB: wslAvailable + adjust,
+            FreeCommitMiB: report.FreeCommitMiB + adjust,
             ReclaimableBalloonMiB: 0,
-            RunningSlotVcpus: active.Sum(s => s.Grant.Vcpus),
+            RunningSlotVcpus: idle ? 0 : active.Sum(s => s.Grant.Vcpus),
             QFreeMiB: report.QFreeMiB,
             FullScreenGame: report.FullScreenGame);
-        return SiteCapacity.HomepcFree(facts, _options.Reserves, _options.HomepcPriority, tolerant);
+        return SiteCapacity.HomepcFree(facts, _options.Reserves, _options.HomepcPriority, tolerant, capped);
     }
 
     /// <summary>Runs the helper every 10 s for the coordinator's whole life.</summary>

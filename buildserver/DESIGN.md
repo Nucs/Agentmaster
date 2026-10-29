@@ -137,7 +137,7 @@ run timeout and locks (a build VM's data disk, an install's instance). The first
 
 | Kind | Memory min / preferred | vCPUs min / preferred | Disk | Why these |
 |---|---|---|---|---|
-| e2e VM (`am-e2e`) | 3 / 8 GB | 2 / 6 | an overlay, 1–3 GB, deleted | Tiny11 Core uses 1.4–1.9 GB at rest; Agentmaster with a tab adds ~150 MB; the e2e runner's default is 8 GB / 6 CPUs |
+| e2e VM (`am-e2e`) | 2 / 2 GB, a cap on a 3 GB guest (a *capped* slot: the rest of its RAM in the site's swap file on Q:) | 4 / 4 | an overlay, 1–3 GB, deleted | tuned 2026-10-29 (§16.15): 1.15× the time of an uncapped 8 GB / 6 vCPU VM; a 1.5 GB cap timed Claude Code's start out, 2 vCPUs made a UI test 2.7× slower. `amb e2e --ram 8` asks for the uncapped 8 GB VM of before |
 | install-lane VM (`am-install`) | 3 / 6 GB | 2 / 4 | an overlay, deleted | the same guest plus Defender (~180 MB, measured by claude-desktops) |
 | build VM, Debug (`am-build`) | 8 / 16 GB | 4 / 8 | a kept data disk, ~35 GB the first time | native: a Debug build at 3 compilers took 8.7 GB of commit; the TerminalApp PCH is 1.8–2.3 GB per compiler |
 | build VM, Release | 8 / 16 GB | 4 / 8 | ~40 GB the first time | native: 7.8 GB of commit at 3 compilers |
@@ -162,6 +162,10 @@ Each value is *free minus a reserve*; the reserves were set from §16's measurem
     slot marked *tolerant* (an idle build VM kept warm, a VM ballooned down to its minimum) may be admitted on commit
     alone, beyond Windows' available memory; its cold pages then live in the page file. A running build or e2e is
     never tolerant.
+  - **A capped slot** (§16.14, §16.15: its guest's RAM above its grant lives in the site's swap file on Q:, its
+    container never keeps more than the grant in memory) keeps 6 GB of free commit instead of 16: 4 GB for everything
+    else and 2 GB for the first seconds of its boot, when the guest touches pages faster than they are swapped out and
+    handed back. On 2026-10-29 the PC had 7–13 GB of free commit for hours, and the 16 GB margin let nothing run.
 - **vCPUs** = 24 − the running slots' vCPUs (24 of the 32 threads; a VM computes at 70–97 % of the host, §16.5).
 - **disk** = Q: free − 15 GB (other sessions' builds and e2e runs write 4–20 GB at a time on Q:).
 - **holds:** a full-screen game holds new slots (`QUNS_RUNNING_D3D_FULL_SCREEN`).
@@ -212,7 +216,9 @@ score        = priority(site) × availability        dock 2.0, homepc 1.0 (setti
   waited longer for capacity`) and still ends no-capacity at its own wait timeout; a request that needs no slot (an
   import, an install, a build whose build exists) starts anyway, since it takes nothing the older one waits for. (Until
   2026-10-29 the admission pass stopped at the older request, so an import waited behind a build that waited hours for
-  memory, past its own 5-minute wait timeout.)
+  memory, past its own 5-minute wait timeout.) And the older request holds nothing back when it would not fit even with
+  every slot of the site stopped: the owner's own programs then hold what it lacks, and holding younger requests would
+  only leave the site idle (the same day: a build that needed 24 GB of free commit held every e2e run behind it).
 - **Pressure while slots run** (the host agent watches Windows): first shrink balloons toward their minimums, oldest
   idle VM first; then hold new slots; then shut down an idle build VM; only at the floor (Windows available under
   2 GB twice in a row) stop the newest slot.
@@ -901,10 +907,38 @@ own programs (the WSL VM's charge stayed flat meanwhile).
 | the guest | at its desktop (1600×900, the bootstrap's terminal in the taskbar) when its screen was read through QEMU's monitor, ~4.5 min after the start (an uncapped e2e slot's agent says hello after 57 s, §16.10); no agent was staged, so no step ran |
 | swap traffic, the guest idle at its desktop | 3.9 MB/s in, 3.2 MB/s out (30 s of /proc/vmstat): 1.5 GB is under an idle Windows desktop's working set, so the guest keeps paging |
 
-**What it means** (not built): a slot can charge Windows only its cap, with the guest's RAM above the cap on Q:, so its
-admission would count the cap, not RAM_SIZE. An e2e run (Agentmaster and several `claude.exe`) needs a larger cap than
-an idle desktop: the next measurement is the smoke suite at caps of 2–3 GB, timed against an uncapped slot. The first
-seconds' peak (+2.85 GB here) comes before the cap takes hold, so admission has to leave room for it.
+**What it means** (built the same day, §16.15): a slot can charge Windows only its cap, with the guest's RAM above the
+cap on Q:, so its admission counts the cap, not RAM_SIZE. An e2e run (Agentmaster and several `claude.exe`) needs a
+larger cap than an idle desktop. The first seconds' peak (+2.85 GB here) comes before the cap takes hold, so admission
+leaves room for it (§3.2's capped margin).
+
+### 16.15 Capped slots built, and the e2e VM tuned (2026-10-29)
+
+The owner: "Finetune/optimize so we will use least performance while having e2e and agentmaster+os still runnable and
+interfaceable." Built: `amb e2e` / `amb smoke` take `--ram GB` (the grant: a cap when the guest's RAM is larger),
+`--guest-ram GB` (RAM_SIZE) and `--vcpus N`; a capped slot's container gets `--memory` and `--memory-swap`
+(`PodmanSlotDriver.MemoryArguments`) and RAM_CHECK=N; coordinator-up.sh makes a 16 GB swap file on the site's disk
+(`/srv/buildserver/swap/slots.swap`, priority 10) at every start; a capped request is admitted with §3.2's 6 GB commit
+margin; every e2e and smoke run ends with a `slot memory:` event (the cgroup's peaks, its swap, its cap hits).
+
+The tuning set: four tests the lost v0.8.1 run (an uncapped 8 GB / 6 vCPU VM on the same build, `b20261029-1`, and
+the same pinned suite) had already timed: `test_the_selection_is_readable_on_every_surface` (UI Automation over every
+surface, 80 s), `test_linked_lenses` (54 s), `test_two_sessions_keep_their_own_runner_modes` (two sessions and the
+runner's settle, 125 s) and `test_a_turn_cut_off_by_a_quit_pauses_the_runner_and_holds_the_queue` (a restart of the
+app, 117 s): 376 s in all.
+
+| VM | Guest's hello after placement | Provision | The four tests | Its peak (cgroup) | Requests |
+|---|---|---|---|---|---|
+| 8 GB uncapped, 6 vCPU (the lost run) | 77 s | 38.7 s | 376 s, all passed | all 8 GB | r20261029-062014-6da298 |
+| **2 GB cap, 3 GB guest, 4 vCPU** | 131 s | 37.1 s | **432 s (×1.15)**, 4/4 (×0.81–1.33 each) | 2.00 GB resident, 3.14 GB with swap, 1.13 GB swapped | r20261029-121609-551bea |
+| 1.5 GB cap, 3 GB guest, 4 vCPU | 142 s | 52.0 s | the first test errored at ×2.75: Claude Code's input box did not show within the driver's 60 s; cancelled | 1.50 GB resident, 3.14 GB with swap, 1.64 GB swapped | r20261029-122659-3093fa |
+| 2 GB cap, 3 GB guest, 2 vCPU | 128 s | 49.4 s | 539 s (×1.43), 4/4, `test_linked_lenses` ×2.73 | 2.00 GB resident, 3.13 GB with swap | r20261029-123608-9bc8ab |
+
+**The choice:** an e2e VM is by default the 2 GB cap on a 3 GB guest with 4 vCPUs (`RequestDefaults`,
+`E2eGuestMemoryMiB`): a quarter of the memory the PC gave an e2e VM before, for 15 % more time. 1.5 GB breaks the
+suite's own waits; 2 vCPUs saves CPU (the PC's least scarce resource: 24 usable threads) at a risk of timeouts in the
+UI tests. The guest uses all of its 3 GB (3.13–3.14 GB with QEMU's own), so a smaller guest would page inside Windows
+instead. `amb e2e --ram 8` asks for the old uncapped VM.
 
 ## 17. Evidence
 

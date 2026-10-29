@@ -36,6 +36,7 @@ amb import <portable zip> [--commit SHA]     # a hand-built zip or a GitHub rele
 amb builds                                   # the build ids
 amb e2e <build id> [--wait] -- suites/test_smoke.py -v     # a suite in a fresh am-e2e VM; pytest arguments after --
 amb e2e <build id> --run-timeout 480 -- -v                 # the whole suite (hours): a run timeout of its own
+amb e2e|smoke ... [--ram GB] [--guest-ram GB] [--vcpus N]  # the VM's size: a cap on a larger guest RAM, its vCPUs
 amb logs <request id> [-f]                   # its events: placement, slot, steps, each step's output, progress
 amb list | show <id> | cancel <id>
 ```
@@ -52,7 +53,16 @@ amb list | show <id> | cancel <id>
   then ends `NoCapacity`. Windows keeps 6 GB available and 16 GB of free commit (DESIGN.md §3.2).
 - Once a request has waited 10 minutes, a younger one that needs a slot waits behind it (`waiting: behind <id>, which
   has waited longer for capacity`) up to its own wait timeout; an import, an install or a build whose build exists
-  needs no slot and starts anyway (DESIGN.md §3.5; until 2026-10-29 it waited too, without ever ending).
+  needs no slot and starts anyway (DESIGN.md §3.5; until 2026-10-29 it waited too, without ever ending). The older one
+  holds nothing back when it would not fit even with every slot of the site stopped (the owner's programs hold what it
+  lacks).
+- **An e2e VM is a capped slot by default** (DESIGN.md §16.15): a 2 GB cap on a 3 GB guest with 4 vCPUs; the guest's
+  RAM above the cap lives in the site's swap file on Q:, so the PC is charged 2 GB, and the run takes ~1.15× the time of
+  the uncapped 8 GB VM of before (`--ram 8` asks for that one). `--ram GB` sets the VM's memory (a cap when
+  `--guest-ram GB` is larger), `--vcpus N` its vCPUs; a capped VM is admitted with 6 GB of free commit kept instead of
+  16. Every e2e and smoke run ends with a `slot memory:` event (the peak in memory, the peak with swap, the cap hits),
+  the figures to tune by. ⚠ A cap under ~2 GB breaks the suite's own waits (1.5 GB: Claude Code's input box did not
+  show within 60 s).
 - A released version runs e2e without a build: `amb import <its portable zip> --commit <the tag's commit>`, then `amb
   e2e` on the build id it prints; `--suite <folder>` pins the suite (e.g. `git archive <commit> e2e` extracted on Q:),
   since a request that waits for memory stages the suite only when it starts.
@@ -185,7 +195,7 @@ python buildserver/image/images.py list
 ## Build and test
 
 ```text
-dotnet test buildserver/src/Buildserver.slnx            # build everything + 77 unit tests (output in Q:\tmp\buildserver-build)
+dotnet test buildserver/src/Buildserver.slnx            # build everything + 87 unit tests (output in Q:\tmp\buildserver-build)
 python buildserver/tests/local_chain.py                 # the chain without a VM (Q:\tmp\buildserver-test, removed after)
 python buildserver/tests/site_outcomes.py               # Phase 1's done-when on the real site: e2e passed, failed, cancelled, lost VM
 python buildserver/tests/site_build.py                  # the build MVP's done-when on the real site (it builds: ask first)
@@ -221,6 +231,10 @@ python buildserver/site/sitectl.py run -- podman ps
   `wsl.exe -e` call ends with that call.
 - **The disk only grows** (`Q:\buildserver\wsl\ext4.vhdx` is not sparse until W1's WSL restart): ext4 reuses freed
   blocks, so it settles at the high-water mark of what the site held at once.
+- **The slots' swap file:** `/srv/buildserver/swap/slots.swap`, 16 GB on the site's disk (fallocate: the vhdx on Q:
+  grows only by what is swapped out), turned on at priority 10 (ahead of WSL's own swap on C:) by coordinator-up.sh at
+  every start, since WSL forgets a swapon when its VM restarts. Capped slots swap their guests' RAM there; without it
+  they use WSL's own swap.
 - **The registry credentials** fastrund pulls with live in `/srv/buildserver/fastrun/regcreds` (root only), copied from
   Docker Desktop's credential store by `measure/p01_fastrund.py`; nothing prints them.
 
@@ -234,11 +248,11 @@ python buildserver/site/sitectl.py run -- podman ps
 | [`steps/build/`](steps/build) | the build VM's steps, run with the image's PowerShell 7: `prepare-disk.ps1` (D:), `checkout.ps1` (the worktree from git bundles), `build.ps1` (the commit's own `tools\Build-Agentmaster.ps1`, with msbuild's binary log), `package.ps1` (the portable zip, the layout zip, the symbols, the logs, `build.json`); `sitectl.py deploy` copies them into the site, and each build stages them into its share | in use |
 | [`steps/install/`](steps/install) | `install-build.ps1`: the Windows side of `amb install` (stage into the free slot, check, wait for the requesting session, the mutex, the swap, the watch), run by the coordinator through WSL's interop | in use (2026-10-29) |
 | [`measure/`](measure/README.md) | the measurements and proofs behind DESIGN.md §16, with their raw results | P0.1 (§16.9), P0.5's comparison (§16.11) and P0.4's native half (§16.12) |
-| [`src/Amb.Core`](src/Amb.Core) | the shared core: the allocation rule (§3), the request / build / slot / VM model, the guest and API protocol, the atomic record store (§6) | 27 unit tests (`src/Amb.Core.Tests`) |
-| [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API (artifacts streamed by name), the scheduler (admission by priority × availability, wait and run timeouts, cancel, one build at a time, existing builds answered without a slot), the guest broker, the jobs (import, smoke, install, layer, e2e, build, deploy), the source mirror (snapshots too) and its bundles, the slot manager and its drivers (podman + dockur, kept VMs with a data disk; local, for tests) | runs in the site; 43 unit tests (`src/Amb.Coordinator.Tests`) |
+| [`src/Amb.Core`](src/Amb.Core) | the shared core: the allocation rule (§3), the request / build / slot / VM model, the guest and API protocol, the atomic record store (§6) | 28 unit tests (`src/Amb.Core.Tests`) |
+| [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API (artifacts streamed by name), the scheduler (admission by priority × availability, wait and run timeouts, cancel, one build at a time, existing builds answered without a slot), the guest broker, the jobs (import, smoke, install, layer, e2e, build, deploy), the source mirror (snapshots too) and its bundles, the slot manager and its drivers (podman + dockur, kept VMs with a data disk, capped slots with the site's swap file; local, for tests) | runs in the site; 51 unit tests (`src/Amb.Coordinator.Tests`) |
 | [`src/Amb.GuestAgent`](src/Amb.GuestAgent) | `amb-guest.exe` (Native AOT, 7 MB): the agent in every VM; hello, heartbeat with the guest's memory, one step at a time by long poll (run, fetch, expand, put, shutdown) | in every slot |
 | [`src/Amb.HostFacts`](src/Amb.HostFacts) | `amb-hostfacts.exe` (Native AOT): Windows' available memory, free commit, Q: free space and a full-screen game, as one line of JSON; the coordinator runs it every 10 s through WSL's interop | in use |
-| [`src/Amb.Cli`](src/Amb.Cli) | `amb.exe`: the command line above; `WorkingTreeSnapshot.cs` (`--snapshot`), `ProcessAncestry.cs` (the requesting claude.exe of `amb install`) | in use; 7 unit tests (`src/Amb.Cli.Tests`) |
+| [`src/Amb.Cli`](src/Amb.Cli) | `amb.exe`: the command line above; `WorkingTreeSnapshot.cs` (`--snapshot`), `ProcessAncestry.cs` (the requesting claude.exe of `amb install`) | in use; 8 unit tests (`src/Amb.Cli.Tests`) |
 | [`tests/local_chain.py`](tests/local_chain.py) | the whole chain on this PC without a VM: the coordinator with the local slot driver, the real guest agent, the real API | 15 checks pass |
 | [`tests/site_outcomes.py`](tests/site_outcomes.py) | Phase 1's done-when on the real site: e2e runs that pass, fail, are cancelled and lose their VM, each leaving nothing behind | 14 checks passed (2026-10-25) |
 | [`tests/site_build.py`](tests/site_build.py) | the build MVP's done-when on the real site: a build of HEAD, its manifest, an identical request, e2e on the build, fetch, no slot left, K: only read | 7 checks passed (2026-10-26, `b20261026-3`) |

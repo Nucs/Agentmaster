@@ -33,12 +33,18 @@ public sealed record HomepcFacts(
 /// <param name="UsableVcpus">vCPUs the site may hand out in total (24 of the 32 threads).</param>
 /// <param name="DiskMiB">Q: space kept for other work (15 GB: other sessions' builds and e2e runs write 4-20 GB at a
 /// time on Q:).</param>
+/// <param name="CappedCommitMiB">Free commit kept when a CAPPED slot is admitted (6 GB): 4 GB for everything else, and
+/// 2 GB for the first seconds of its boot, when the guest touches pages faster than the kernel swaps them out and WSL
+/// hands them back (+1.35 GB over a 1.5 GB cap, measured 2026-10-29, DESIGN.md §16.14). A capped slot never charges
+/// more than its cap after that, so it needs no 16 GB margin; with it, an e2e run waited hours on a PC that had 7-13 GB
+/// of free commit.</param>
 public sealed record HomepcReserves(
     long WindowsMiB = 6 * 1024,
     long WslMiB = 2 * 1024,
     long CommitMiB = 16 * 1024,
     int UsableVcpus = 24,
-    long DiskMiB = 15 * 1024);
+    long DiskMiB = 15 * 1024,
+    long CappedCommitMiB = 6 * 1024);
 
 /// <summary>What dock's fastrund reports of its node (DESIGN.md §3.2, §9 F7).</summary>
 /// <param name="MemAvailableMiB">MemAvailable of the node (6.0-7.1 GB all week, median 6.3 GB).</param>
@@ -70,20 +76,23 @@ public static class SiteCapacity
     /// <param name="tolerant">Whether the request may be admitted on commit alone, beyond Windows' available memory (an
     /// idle build VM kept warm, a VM ballooned down to its minimum): its cold pages then live in the page file. A running
     /// build or e2e is never tolerant. This is the owner's "utilize committed memory".</param>
+    /// <param name="capped">Whether the request is a capped slot (its guest's RAM above its cap lives in the site's swap
+    /// file): the commit term then keeps <see cref="HomepcReserves.CappedCommitMiB"/> instead of
+    /// <see cref="HomepcReserves.CommitMiB"/>.</param>
     /// <returns>The site's free amounts and its holds.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="facts"/> or <paramref name="reserves"/> is null.</exception>
     /// <remarks>
-    /// Memory = min(Windows available − 6 GB, WSL MemAvailable − 2 GB, free commit − 16 GB) + what the site's own
-    /// balloons could give back; a tolerant request leaves out the first term. Every term must hold at once: a VM's
-    /// memory comes out of the WSL VM (whose growth comes out of Windows' memory) and is charged to commit.
+    /// Memory = min(Windows available − 6 GB, WSL MemAvailable − 2 GB, free commit − 16 GB (6 GB for a capped slot)) +
+    /// what the site's own balloons could give back; a tolerant request leaves out the first term. Every term must hold at
+    /// once: a VM's memory comes out of the WSL VM (whose growth comes out of Windows' memory) and is charged to commit.
     /// </remarks>
     public static SiteFree HomepcFree(HomepcFacts facts, HomepcReserves reserves, double priority = 1.0,
-        bool tolerant = false)
+        bool tolerant = false, bool capped = false)
     {
         ArgumentNullException.ThrowIfNull(facts);
         ArgumentNullException.ThrowIfNull(reserves);
         long wsl = facts.WslMemAvailableMiB - reserves.WslMiB;
-        long commit = facts.FreeCommitMiB - reserves.CommitMiB;
+        long commit = facts.FreeCommitMiB - (capped ? reserves.CappedCommitMiB : reserves.CommitMiB);
         long memory = Math.Min(wsl, commit);
         if (!tolerant)
         {
