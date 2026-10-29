@@ -4500,13 +4500,22 @@ namespace Agentmaster
                     std::vector<std::wstring> body;
                     int number = 0; // real turns only: the pre-prompt pseudo-turn doesn't take "Turn 1"
                     std::optional<int> shownOrigin;
+                    // Agentmaster (lastTurnOnly, not in the reference): every turn is still counted, so the newest keeps its number
+                    // in the whole conversation, but only that one - the last of the chain's turns - is rendered. Its session's
+                    // heading belongs to the whole chain and goes with the rest (one turn under "Session 3 of 3" would point at
+                    // sessions the picture does not show).
+                    const Turn* const onlyTurn = (_opt.lastTurnOnly && !session.turns.empty()) ? &session.turns.back() : nullptr;
                     for (const Turn& turn : session.turns)
                     {
                         if (!turn.continued)
                         {
                             ++number; // numbered across the whole chain: it is one conversation
                         }
-                        if (headed && turn.origin && turn.origin != shownOrigin && static_cast<size_t>(*turn.origin) < links.size())
+                        if (_opt.lastTurnOnly && &turn != onlyTurn)
+                        {
+                            continue;
+                        }
+                        if (headed && !_opt.lastTurnOnly && turn.origin && turn.origin != shownOrigin && static_cast<size_t>(*turn.origin) < links.size())
                         {
                             body.push_back(SessionHeader(links, static_cast<size_t>(*turn.origin)));
                             shownOrigin = turn.origin;
@@ -4522,12 +4531,14 @@ namespace Agentmaster
                         body.push_back(L"After the last turn: " + after + L".\n");
                     }
                     std::vector<std::wstring> head;
-                    if (chained)
+                    // Agentmaster (lastTurnOnly): the chain block describes the whole conversation, and the notes before the first
+                    // turn belong to that first turn - kept only when the newest turn is the only one (then it IS the first).
+                    if (chained && !_opt.lastTurnOnly)
                     {
                         head.push_back(ChainBlock(links));
                     }
                     const std::wstring first = NotesText(session.notesFirst);
-                    if (!first.empty())
+                    if (!first.empty() && (!_opt.lastTurnOnly || session.turns.size() <= 1))
                     {
                         head.push_back(L"Before the first turn: " + first + L".\n");
                     }

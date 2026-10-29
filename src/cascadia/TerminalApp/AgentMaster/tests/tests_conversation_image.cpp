@@ -14,7 +14,8 @@
 //      and a ```diff block as "File diffs" draws it (3c): the gutter's numbers counted from the hunk headers, the green and red
 //      bands, the ellipsis between hunks, a quoted git diff's dim file header vs a lone "--- " line (a removed "-- " line),
 //      a "\ No newline" note, a long line broken at the edge on its band;
-//   4. end to end (RenderConversationImages) on a turns fixture transcript, and again with File diffs (two more rows).
+//   4. end to end (RenderConversationImages) on a turns fixture transcript, and again with File diffs (two more rows) and with
+//      Last Turn (its newest turn alone, still numbered as in the whole conversation).
 // Sections 3 and 4 need MarkdownBlocks (cmark): without the vcpkg cmark of a full build they report a skip, like
 // TestMarkdownBlocks. The service's half (the button, the worker thread, sendDocument) needs Telegram: the live check is the
 // dev bot (MESSAGING.md §21.39 "Check after the build").
@@ -751,6 +752,39 @@ void TestConversationImage()
               "diff: the continuation row's gutter is blank on the band, its text starting in the text's column");
     }
 
+    // ===== 3d. the turn the rows above the first turn heading belong to (Last Turn's own note, a conversation's head) =====
+    {
+        // Last Turn: RenderTurn writes the newest turn's "_Before this turn" note ABOVE its heading - it must count as that turn,
+        // or the picture of turn 31 starts at "turn 0" and is captioned "turns 1-31".
+        const std::wstring lastTurnDoc = L"_Before this turn: Jan 02 10:08 \x2014 the user ran `/cost`._\n\n"
+                                         L"### Turn 31 \x00B7 now\n\n"
+                                         L"**\x276F User**\n> hi\n\n"
+                                         L"**\x25CF Claude**\n> done\n";
+        const ConversationSheet lastTurn = ConvLayout(lastTurnDoc, kConversationImageCols);
+        bool all31 = !lastTurn.rowTurn.empty();
+        for (const int t : lastTurn.rowTurn)
+        {
+            all31 = all31 && t == 31;
+        }
+        CHECK(all31 && lastTurn.turns == 31, "layout: the note above a lone turn's heading counts as that turn (a Last Turn picture is turn 31's, not turns 1-31)");
+        // A whole conversation: its head (the path legend) counts as turn 1, as the captions always said; turn 2 stays turn 2's.
+        const std::wstring wholeDoc = L"Paths like `scratchpad\\\x2026` are inside the session's temp folder `C:\\t\\`.\n\n"
+                                      L"### Turn 1 \x00B7 a\n\n**\x276F User**\n> one\n\n"
+                                      L"### Turn 2 \x00B7 b\n\n**\x276F User**\n> two\n";
+        const ConversationSheet whole = ConvLayout(wholeDoc, kConversationImageCols);
+        const int second = ConvFindRow(whole, L"Turn 2");
+        CHECK(!whole.rowTurn.empty() && whole.rowTurn[0] == 1 && second > 0 && whole.rowTurn[static_cast<size_t>(second)] == 2 && whole.rowTurn[static_cast<size_t>(second) - 1] == 1,
+              "layout: a whole conversation's head (the path legend) counts as turn 1, and turn 2's rows stay turn 2's");
+        // A transcript that opens mid-turn: the pseudo-turn alone claims no number.
+        const ConversationSheet pseudo = ConvLayout(L"### Work before the first prompt\n\n**\x25CF Claude**\n> mid-turn\n", kConversationImageCols);
+        bool allZero = !pseudo.rowTurn.empty();
+        for (const int t : pseudo.rowTurn)
+        {
+            allZero = allZero && t == 0;
+        }
+        CHECK(allZero && pseudo.turns == 0, "layout: the pseudo-turn of a transcript that opens mid-turn claims no turn number");
+    }
+
     // ===== 4. end to end: a turns fixture transcript drawn as pictures =====
     {
         const fs::path transcript = ConvHarnessDir() / L"turns" / L"fixture_session.jsonl";
@@ -784,6 +818,25 @@ void TestConversationImage()
         if (diffs.rows != r.rows + 2)
         {
             std::wprintf(L"    with File diffs: %d rows (without: %d), error [%ls]\n", diffs.rows, r.rows, diffs.error.c_str());
+        }
+        // "Last Turn" (the user's request of 2026-10-29) on the same session: its newest turn alone - turn 3, still numbered 3 (the
+        // sheet reads the number from the heading, so the captions say "turn 3", not "turn 1") - in fewer rows than the whole.
+        ConversationImageOptions lastOnly;
+        lastOnly.utc = true;
+        lastOnly.lastTurnOnly = true;
+        int firstTurnSeen = 0;
+        int lastTurnSeen = 0;
+        lastOnly.onPart = [&](ConversationImagePart&& part) {
+            firstTurnSeen = firstTurnSeen == 0 ? part.firstTurn : (std::min)(firstTurnSeen, part.firstTurn);
+            lastTurnSeen = (std::max)(lastTurnSeen, part.lastTurn);
+        };
+        const ConversationImageResult last = RenderConversationImages(transcript, lastOnly);
+        CHECK(last.error.empty() && last.turns == r.turns && last.rows > 0 && last.rows < r.rows && firstTurnSeen == r.turns && lastTurnSeen == r.turns,
+              "end to end: Last Turn draws the newest turn alone, numbered as in the whole conversation, in fewer rows");
+        if (!last.error.empty() || last.turns != r.turns || firstTurnSeen != r.turns)
+        {
+            std::wprintf(L"    Last Turn: %d rows (whole: %d), turns %d (whole: %d), parts' turns %d-%d, error [%ls]\n", last.rows, r.rows, last.turns, r.turns, firstTurnSeen,
+                         lastTurnSeen, last.error.c_str());
         }
         const ConversationImageResult missing = RenderConversationImages(ConvHarnessDir() / L"turns" / L"no-such-transcript.jsonl", ConversationImageOptions{});
         CHECK(missing.parts.empty() && !missing.error.empty(), "end to end: a transcript that is not there is refused with a reason");

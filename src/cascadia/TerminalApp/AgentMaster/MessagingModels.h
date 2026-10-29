@@ -3601,7 +3601,7 @@ namespace Agentmaster::Msg
         L"newsession", L"interrupt", L"takedraft", L"idle", L"board", L"pauseall", L"resumeall", L"cc", L"status", L"card",
         L"reactivate", L"recreate", L"verbose",
         L"screenimage", // §21.24: the terminal's screen as a picture (the card's 🖼 Screen Image; /screen is the text)
-        L"allscreen", // §21.39: the whole conversation as tall pictures [minimal|compact|default|full|max] [diffs]; bare = the cog's default level (the card's 📜 All Screen ▸)
+        L"allscreen", // §21.39: the whole conversation as tall pictures [minimal|compact|default|full|max] [diffs] [last]; bare = the cog's default level (the card's 📜 All Screen ▸)
         L"search-tab", L"search_tab", // §21.19: jump to the 🔎 Search topic from any topic (kSearchTabCommands)
         L"search", // §21.19: /search <words> asks the Search topic's agent from any topic; a bare /search jumps (kSearchCommand)
         L"steer", // §21.33: /steer <message> sends the words NOW, into a running turn too (kSteerCommand, MessagingSteer.h)
@@ -4791,7 +4791,9 @@ namespace Agentmaster::Msg
     /// state's own action is, and a page opened after that is kept), and a typed /status copy starts on Main and flips by
     /// itself. Nothing persists: after a restart every card is on Main again.
     /// §21.39: a third page, ALL SCREEN, is the level picker 📜 All Screen ▸ opens from the Session page (the user's request of
-    /// 2026-10-26: "a second menu where we pick the transcript levels"); its ◀ Back returns to the Session page.
+    /// 2026-10-26: "a second menu where we pick the transcript levels"); its ◀ Back returns to the Session page. It comes as four
+    /// pages, one per pair of its two boxes (File Diffs, Last Turn: AllScreenBoxesOf / AllScreenPageFor), since a tap names the
+    /// page it shows and the boxes combine.
     /// §21.41: ⎋ Esc and 🌙 Deactivate (the user's request of 2026-10-27) are a row of the Session page, above ◀ Back, while the
     /// session's claude runs — and ⎋ Esc ONLY there (the user's rule of 2026-10-28: "The ESC button should be only inside Sessions
     /// menu"; it had sat beside ⚙ Session on Main while a turn ran) (MessagingSessionControl.h).
@@ -4800,9 +4802,76 @@ namespace Agentmaster::Msg
     {
         Main, // ⚙ Session (+ 🔄 Restart Session in Error / after an exit, or ▶ Reactivate for a parked tab); never ⎋ Esc (the Session page's alone)
         Session, // ⑂ Fork · 🆕 New Session · 🔄 Restart Session (+ 🔧 Resume Session in Error) · the runner · Queue · Pin · Transcript · 🖥 Screen Text · 🖼 Screen Image · 📜 All Screen ▸ · ⎋ Esc · 🌙 Deactivate (while claude runs) · ◀ Back
-        AllScreen, // §21.39: ⬜ File diffs (unchecked) · one button per transcript level (Minimal · Compact · Default · Full · Max; the default level wears ⭐) · ◀ Back (to Session); a picked level takes the card back to Main
-        AllScreenDiffs, // §21.39: the same picker with ☑️ File diffs checked - its levels draw every file change as a diff, whatever the level
+        AllScreen, // §21.39: ⬜ File Diffs · ⬜ Last Turn (both unchecked) · one button per transcript level (Minimal · Compact · Default · Full · Max; the default level wears ⭐) · ◀ Back (to Session); a picked level takes the card back to Main
+        AllScreenDiffs, // §21.39: the same picker with ☑️ File Diffs checked - its levels draw every file change as a diff, whatever the level
+        AllScreenLast, // §21.39: the same picker with ☑️ Last Turn checked (the user's request of 2026-10-29) - its levels draw the newest turn only
+        AllScreenLastDiffs, // §21.39: the same picker with both boxes checked - the newest turn only, every file change in it as a diff
     };
+
+    /// <summary>The picker's two boxes as one of its pages shows them (§21.39): File Diffs and Last Turn.</summary>
+    struct AllScreenBoxes
+    {
+        bool diffs{ false }; // ☑️ File Diffs: every file change as a diff, whatever the level
+        bool lastTurn{ false }; // ☑️ Last Turn: the newest turn only
+    };
+
+    /// <summary>The boxes a page of the picker shows - which of the four picker pages it is.</summary>
+    /// <param name="page">A card page.</param>
+    /// <returns>The boxes, or nullopt for a page that is not the picker (Main, Session).</returns>
+    inline std::optional<AllScreenBoxes> AllScreenBoxesOf(CardPage page) noexcept
+    {
+        switch (page)
+        {
+        case CardPage::AllScreen:
+            return AllScreenBoxes{ false, false };
+        case CardPage::AllScreenDiffs:
+            return AllScreenBoxes{ true, false };
+        case CardPage::AllScreenLast:
+            return AllScreenBoxes{ false, true };
+        case CardPage::AllScreenLastDiffs:
+            return AllScreenBoxes{ true, true };
+        case CardPage::Main:
+        case CardPage::Session:
+        default:
+            return std::nullopt;
+        }
+    }
+
+    /// <summary>The picker page that shows these boxes (the inverse of AllScreenBoxesOf).</summary>
+    /// <param name="diffs">☑️ File Diffs.</param>
+    /// <param name="lastTurn">☑️ Last Turn.</param>
+    /// <returns>One of the four picker pages.</returns>
+    inline CardPage AllScreenPageFor(bool diffs, bool lastTurn) noexcept
+    {
+        if (lastTurn)
+        {
+            return diffs ? CardPage::AllScreenLastDiffs : CardPage::AllScreenLast;
+        }
+        return diffs ? CardPage::AllScreenDiffs : CardPage::AllScreen;
+    }
+
+    /// <summary>A page's word in hooks.log's "[nav] remote telegram card-page" line ("main", "allscreen+diffs+last").</summary>
+    /// <param name="page">The page.</param>
+    /// <returns>The word (a static string).</returns>
+    inline const wchar_t* CardPageLogWord(CardPage page) noexcept
+    {
+        switch (page)
+        {
+        case CardPage::Session:
+            return L"session";
+        case CardPage::AllScreen:
+            return L"allscreen";
+        case CardPage::AllScreenDiffs:
+            return L"allscreen+diffs";
+        case CardPage::AllScreenLast:
+            return L"allscreen+last";
+        case CardPage::AllScreenLastDiffs:
+            return L"allscreen+diffs+last";
+        case CardPage::Main:
+        default:
+            return L"main";
+        }
+    }
 
     // ===== 📜 All Screen's levels (§21.39) ======================================================
 
@@ -4870,21 +4939,23 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
-    /// What one 📜 All Screen request draws: a level, and whether every file change is drawn as a diff whatever the level ("File
-    /// diffs", the picker's checkbox and /allscreen's "diffs" word; the user's request of 2026-10-26: "by default false (use the
-    /// selected lvl's default)" - no level draws diffs by itself).
+    /// What one 📜 All Screen request draws: a level, whether every file change is drawn as a diff whatever the level ("File
+    /// Diffs", the picker's first box and /allscreen's "diffs" word; the user's request of 2026-10-26: "by default false (use the
+    /// selected lvl's default)" - no level draws diffs by itself), and whether only the newest turn is drawn ("Last Turn", the
+    /// picker's second box and /allscreen's "last" word; the user's request of 2026-10-29).
     /// </summary>
     struct AllScreenPick
     {
         TurnsLevel level{ kAllScreenDefaultLevel }; // the transcript level
         bool diffs{ false }; // true = file diffs at any level (ConversationImageOptions::editDiffs); false = the level's own default
+        bool lastTurn{ false }; // true = the newest turn only (ConversationImageOptions::lastTurnOnly); false = the whole conversation
     };
 
     /// <summary>
-    /// Reads /allscreen's arguments: at most one level word and the word "diffs" (or "diff"), in any order and any case; nothing
-    /// = the default level without diffs. Pure, so the m5 suite checks it.
+    /// Reads /allscreen's arguments: at most one level word, the word "diffs" (or "diff") and the word "last", in any order and
+    /// any case; nothing = the default level, the whole conversation, without diffs. Pure, so the m5 suite checks it.
     /// </summary>
-    /// <param name="args">The command's arguments ("", "compact", "full diffs", "Diffs").</param>
+    /// <param name="args">The command's arguments ("", "compact", "full diffs", "Diffs", "last", "max last diffs").</param>
     /// <param name="defaultLevel">The level drawn when no level is named (the cog's default: AppSettings::messagingAllScreenLevel).</param>
     /// <returns>The request, or nullopt for anything else (an unknown word, two levels): the caller answers with the usage line.</returns>
     /// <exception cref="std::bad_alloc">If a word cannot be copied.</exception>
@@ -4917,6 +4988,10 @@ namespace Agentmaster::Msg
             if (word == L"diffs" || word == L"diff")
             {
                 pick.diffs = true;
+            }
+            else if (word == L"last")
+            {
+                pick.lastTurn = true; // the picker's ☑️ Last Turn: the newest turn only
             }
             else if (const auto level = AllScreenLevelFromWord(word); level && !levelNamed)
             {
@@ -5033,41 +5108,77 @@ namespace Agentmaster::Msg
     /// </remarks>
     inline constexpr std::wstring_view kCardVerbAllScreen = L"allscreen";
     /// <summary>
-    /// The picker with ☑️ File diffs checked (CardPage::AllScreenDiffs): what the unchecked box's button opens. Its checked box's
+    /// The picker with ☑️ File Diffs checked (CardPage::AllScreenDiffs): what the unchecked box's button opens. Its checked box's
     /// button is kCardVerbAllScreen again (unchecked). Each tap NAMES the page it shows, so a double tap never flips twice, and a
     /// copy of the card (whose page nobody remembers) gets the right one. "c:allscreen+d:" with a 36-character id is 50 bytes.
     /// </summary>
     inline constexpr std::wstring_view kCardVerbAllScreenDiffs = L"allscreen+d";
     /// <summary>
-    /// A level's button on the ALL SCREEN page: "allscreen-&lt;word&gt;" ("allscreen-full") is /allscreen &lt;word&gt;; on the checked
-    /// page it ends with kAllScreenDiffsSuffix ("allscreen-full+d" = /allscreen full diffs) - the button carries the box as it
-    /// was SHOWN, so what the user saw is what is drawn. The longest, "c:allscreen-compact+d:" (or -minimal / -default) with a
-    /// 36-character id, is 58 bytes of Telegram's 64. A tap on one also takes the card back to its MAIN page (the service's
-    /// handler; the user's rule of 2026-10-26, "after picking which, reset menu to main view").
+    /// The picker with ☑️ Last Turn checked and File Diffs not (CardPage::AllScreenLast; the user's request of 2026-10-29: "Add
+    /// another option for 'Last Turn'"). Named like kCardVerbAllScreenDiffs: each box's tap names the page with that box
+    /// flipped and the other kept as shown (CardAllScreenPageVerb). "c:allscreen+l:" with a 36-character id is 50 bytes.
+    /// </summary>
+    inline constexpr std::wstring_view kCardVerbAllScreenLast = L"allscreen+l";
+    /// <summary>The picker with both boxes checked (CardPage::AllScreenLastDiffs). "c:allscreen+dl:" with a 36-character id is 51 bytes.</summary>
+    inline constexpr std::wstring_view kCardVerbAllScreenLastDiffs = L"allscreen+dl";
+    /// <summary>
+    /// A level's button on the ALL SCREEN page: "allscreen-&lt;word&gt;" ("allscreen-full") is /allscreen &lt;word&gt;; on a page with a
+    /// box checked it ends with the boxes' suffix (kAllScreenDiffsSuffix "+d", kAllScreenLastSuffix "+l", kAllScreenLastDiffsSuffix
+    /// "+dl": "allscreen-full+dl" = /allscreen full diffs last) - the button carries the boxes as they were SHOWN, so what the
+    /// user saw is what is drawn. The longest, "c:allscreen-compact+dl:" (or -minimal / -default) with a 36-character id, is 59
+    /// bytes of Telegram's 64. A tap on one also takes the card back to its MAIN page (the service's handler; the user's rule
+    /// of 2026-10-26, "after picking which, reset menu to main view").
     /// </summary>
     inline constexpr std::wstring_view kCardVerbAllScreenLevelPrefix = L"allscreen-";
-    /// <summary>The ending of a level verb (and of kCardVerbAllScreenDiffs) that means "File diffs" is checked.</summary>
+    /// <summary>The ending of a level verb (and of kCardVerbAllScreenDiffs) that means "File Diffs" is checked.</summary>
     inline constexpr std::wstring_view kAllScreenDiffsSuffix = L"+d";
+    /// <summary>The ending of a level verb (and of kCardVerbAllScreenLast) that means "Last Turn" is checked.</summary>
+    inline constexpr std::wstring_view kAllScreenLastSuffix = L"+l";
+    /// <summary>The ending of a level verb (and of kCardVerbAllScreenLastDiffs) that means both boxes are checked.</summary>
+    inline constexpr std::wstring_view kAllScreenLastDiffsSuffix = L"+dl";
 
-    /// <summary>The card verb of one level's button on the ALL SCREEN page ("allscreen-full", "allscreen-full+d").</summary>
+    /// <summary>The verb of the picker page that shows these boxes: the box buttons' data (each flips its own box, keeps the other).</summary>
+    /// <param name="diffs">☑️ File Diffs.</param>
+    /// <param name="lastTurn">☑️ Last Turn.</param>
+    /// <returns>kCardVerbAllScreen, kCardVerbAllScreenDiffs, kCardVerbAllScreenLast or kCardVerbAllScreenLastDiffs.</returns>
+    inline std::wstring_view CardAllScreenPageVerb(bool diffs, bool lastTurn) noexcept
+    {
+        if (lastTurn)
+        {
+            return diffs ? kCardVerbAllScreenLastDiffs : kCardVerbAllScreenLast;
+        }
+        return diffs ? kCardVerbAllScreenDiffs : kCardVerbAllScreen;
+    }
+
+    /// <summary>The card verb of one level's button on the ALL SCREEN page ("allscreen-full", "allscreen-full+d", "allscreen-full+dl").</summary>
     /// <param name="level">The level.</param>
-    /// <param name="diffs">Whether the button sits on the checked page (File diffs on).</param>
+    /// <param name="diffs">Whether the button sits on a page with ☑️ File Diffs.</param>
+    /// <param name="lastTurn">Whether the button sits on a page with ☑️ Last Turn.</param>
     /// <returns>The verb.</returns>
     /// <exception cref="std::bad_alloc">If the verb cannot be allocated.</exception>
-    inline std::wstring CardAllScreenLevelVerb(TurnsLevel level, bool diffs = false)
+    inline std::wstring CardAllScreenLevelVerb(TurnsLevel level, bool diffs = false, bool lastTurn = false)
     {
         std::wstring verb{ kCardVerbAllScreenLevelPrefix };
         verb += AllScreenLevelWord(level);
-        if (diffs)
+        if (diffs && lastTurn)
+        {
+            verb += kAllScreenLastDiffsSuffix;
+        }
+        else if (diffs)
         {
             verb += kAllScreenDiffsSuffix;
+        }
+        else if (lastTurn)
+        {
+            verb += kAllScreenLastSuffix;
         }
         return verb;
     }
 
-    /// <summary>The request a card verb names when it is a level button of the ALL SCREEN page ("allscreen-max+d" -> Max with diffs).</summary>
+    /// <summary>The request a card verb names when it is a level button of the ALL SCREEN page ("allscreen-max+dl" -> Max, diffs, last turn).</summary>
     /// <param name="verb">The verb of a card button's data.</param>
-    /// <returns>The level and the box, or nullopt for any other verb (a bare "allscreen" or "allscreen+d" included: those open the page).</returns>
+    /// <returns>The level and the boxes, or nullopt for any other verb (the page verbs "allscreen", "allscreen+d", "allscreen+l" and
+    /// "allscreen+dl" included: those show a page), and for an ending other than the three exact ones ("+ld", "+dd", a bare "+").</returns>
     inline std::optional<AllScreenPick> ParseCardAllScreenLevelVerb(std::wstring_view verb) noexcept
     {
         if (verb.size() <= kCardVerbAllScreenLevelPrefix.size() || verb.substr(0, kCardVerbAllScreenLevelPrefix.size()) != kCardVerbAllScreenLevelPrefix)
@@ -5076,10 +5187,28 @@ namespace Agentmaster::Msg
         }
         std::wstring_view word = verb.substr(kCardVerbAllScreenLevelPrefix.size());
         AllScreenPick pick;
-        if (word.size() > kAllScreenDiffsSuffix.size() && word.substr(word.size() - kAllScreenDiffsSuffix.size()) == kAllScreenDiffsSuffix)
+        // The boxes' endings, each matched whole: "+dl" does not end with "+d" or "+l" (the character before its "l" is a "d"),
+        // so the order of the three tests does not matter, and anything else after a "+" leaves a word no level has.
+        const auto takeSuffix = [&word](std::wstring_view suffix) noexcept {
+            if (word.size() > suffix.size() && word.substr(word.size() - suffix.size()) == suffix)
+            {
+                word.remove_suffix(suffix.size());
+                return true;
+            }
+            return false;
+        };
+        if (takeSuffix(kAllScreenLastDiffsSuffix))
         {
             pick.diffs = true;
-            word.remove_suffix(kAllScreenDiffsSuffix.size());
+            pick.lastTurn = true;
+        }
+        else if (takeSuffix(kAllScreenDiffsSuffix))
+        {
+            pick.diffs = true;
+        }
+        else if (takeSuffix(kAllScreenLastSuffix))
+        {
+            pick.lastTurn = true;
         }
         const auto level = AllScreenLevelFromWord(word);
         if (!level)
@@ -5111,11 +5240,12 @@ namespace Agentmaster::Msg
     /// tab. SESSION holds ⑂ Fork · 🆕 New Session; 🔄 Restart Session, with 🔧 Resume Session beside it in Error (the user's
     /// "in case of error"); the runner · 📋 Queue; 📌 Pin · 📄 Transcript; 🖥 Screen Text · 🖼 Screen Image; 📜 All Screen ▸ alone
     /// (§21.39: the whole conversation as tall pictures - the user's request of 2026-10-25, a row of its own so the existing
-    /// buttons keep their places); and ◀ Back. ALL SCREEN (§21.39, the requests of 2026-10-26) is the level picker 📜 All
-    /// Screen ▸ opens: first the "File diffs" checkbox (⬜ on ALL SCREEN, ☑️ on ALL SCREEN DIFFS: a tap shows the other page),
-    /// then one button per level, least to most (kAllScreenLevels: its name and a hint of what it adds), the default level
-    /// (facts.allScreenLevel) wearing ⭐ in place of 📜, then ◀ Back to the Session page. A picked level takes the card back to
-    /// MAIN (the service's handler, not this page's buttons).
+    /// buttons keep their places); and ◀ Back. ALL SCREEN (§21.39, the requests of 2026-10-26 and 2026-10-29) is the level
+    /// picker 📜 All Screen ▸ opens: first the "File Diffs" and "Last Turn" checkboxes (⬜ unchecked, ☑️ checked; four pages, one
+    /// per pair of boxes - CardPage::AllScreen / AllScreenDiffs / AllScreenLast / AllScreenLastDiffs - and a box's tap shows the
+    /// page with that box flipped), then one button per level, least to most (kAllScreenLevels: its name and a hint of what it
+    /// adds), the default level (facts.allScreenLevel) wearing ⭐ in place of 📜, then ◀ Back to the Session page. A picked level
+    /// takes the card back to MAIN (the service's handler, not this page's buttons).
     /// §21.41 (the user's request of 2026-10-27): SESSION gets a row of ⎋ Esc and 🌙 Deactivate right above ◀ Back while the
     /// session's claude runs (each button only where it applies: no Esc for Codex or an exited claude, no Deactivate for an adopted
     /// shell tab; no row at all for a parked tab, whose ▶ Reactivate is on Main). ⎋ Esc is ONLY there (the user's rule of
@@ -5161,29 +5291,38 @@ namespace Agentmaster::Msg
             rows.push_back(std::move(row));
             return rows;
         }
-        if (page == CardPage::AllScreen || page == CardPage::AllScreenDiffs)
+        if (const auto boxes = AllScreenBoxesOf(page))
         {
-            // §21.39 (the request of 2026-10-26): "File diffs" first, a checkbox Telegram has no widget for - a button whose box
+            // §21.39 (the request of 2026-10-26): "File Diffs" first, a checkbox Telegram has no widget for - a button whose box
             // shows the state and whose tap shows the picker in the other state. It sits above the levels because it changes
             // what each of them draws. Unchecked = each level's own default (none draws diffs); checked = diffs at every level.
             // Both boxes are EMOJI, so they look alike (the user's word of 2026-10-26: the empty box "to match the checked
             // checkbox"): ☑️ is U+2611 + U+FE0F (alone, U+2611 may be drawn as a text glyph, like the cog's U+2699 above), and the
             // empty one is ⬜ U+2B1C, an emoji by default - the text glyph ☐ U+2610 has no emoji form at all.
-            const bool diffs = page == CardPage::AllScreenDiffs;
-            rows.push_back({ { diffs ? L"\x2611\xFE0F File diffs \x00B7 at every level" : L"\x2B1C File diffs \x00B7 the level's default",
-                               CardCallbackData(diffs ? kCardVerbAllScreen : kCardVerbAllScreenDiffs, sessionId) } });
+            // Each box's tap names the page with ITS box flipped and the other kept as shown (CardAllScreenPageVerb), so the two
+            // combine: four pages, one per pair of boxes. The labels are title case, as the card's other buttons (Screen Text,
+            // All Screen) and the user's own name for the second box ('Last Turn').
+            const bool diffs = boxes->diffs;
+            const bool lastTurn = boxes->lastTurn;
+            rows.push_back({ { diffs ? L"\x2611\xFE0F File Diffs \x00B7 at every level" : L"\x2B1C File Diffs \x00B7 the level's default",
+                               CardCallbackData(CardAllScreenPageVerb(!diffs, lastTurn), sessionId) } });
+            // §21.39 (the user's request of 2026-10-29: "Add another option for 'Last Turn'"): the second box, under the first and
+            // above the levels for the same reason - it changes what each level draws. Unchecked = the whole conversation (the
+            // chain included); checked = the newest turn only, at the level picked (TurnsOptions::lastTurnOnly).
+            rows.push_back({ { lastTurn ? L"\x2611\xFE0F Last Turn \x00B7 the newest turn only" : L"\x2B1C Last Turn \x00B7 the whole conversation",
+                               CardCallbackData(CardAllScreenPageVerb(diffs, !lastTurn), sessionId) } });
             // One level a row - "📜 Full · + commands & output" is too long for two a row on a phone, and the hint is what tells
             // the five apart. The default level wears ⭐ (U+2B50, an emoji by default; the user's word of 2026-10-26: "the star
             // of full should be emoji" - the text star ★ U+2605 was drawn beside the 📜 emoji of the others) instead of 📜: the
-            // one a bare /allscreen draws. Each level's data carries the box as shown (CardAllScreenLevelVerb's "+d"), so a tap
-            // draws exactly what the card said.
+            // one a bare /allscreen draws. Each level's data carries the boxes as shown (CardAllScreenLevelVerb's "+d" / "+l" /
+            // "+dl"), so a tap draws exactly what the card said.
             for (const auto& choice : kAllScreenLevels)
             {
                 std::wstring label = choice.level == facts.allScreenLevel ? L"\x2B50 " : L"\U0001F4DC ";
                 label += choice.label;
                 label += L" \x00B7 ";
                 label += choice.hint;
-                rows.push_back({ { std::move(label), CardCallbackData(CardAllScreenLevelVerb(choice.level, diffs), sessionId) } });
+                rows.push_back({ { std::move(label), CardCallbackData(CardAllScreenLevelVerb(choice.level, diffs, lastTurn), sessionId) } });
             }
             // Back to where the picker was opened from (⚙ Session's page), not to Main.
             rows.push_back({ { L"\x25C0 Back", CardCallbackData(kCardVerbSessionPage, sessionId) } });

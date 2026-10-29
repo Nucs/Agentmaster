@@ -8,9 +8,10 @@
 //      🔄 Restart Session with 🔧 Resume Session beside it in Error, then every other button the card had before (the runner,
 //      the queue, the pin, the transcript, the screen as text), 🖼 Screen Image, 📜 All Screen ▸ on a row of its own (§21.39) and
 //      ◀ Back; the card's text names the state's action (🔄 Restart Session in Error / after an exit, ▶ Reactivate for a parked tab);
-//   1b. §21.39's level picker (the ALL SCREEN page 📜 All Screen ▸ opens: the File diffs checkbox, five levels, the default one
-//      starred, Back to the Session page; its checked twin whose levels carry +d), the level words and verbs, /allscreen's
-//      arguments, and the default level's setting (Full unless the cog says another);
+//   1b. §21.39's level picker (the ALL SCREEN page 📜 All Screen ▸ opens: the File Diffs and Last Turn checkboxes, five levels,
+//      the default one starred, Back to the Session page; its three checked twins - one per other pair of boxes - whose levels
+//      carry +d, +l or +dl, each box flipping only itself), the level words and verbs, /allscreen's arguments (diffs, last), and
+//      the default level's setting (Full unless the cog says another);
 //   1c. §21.41's ⎋ Esc and 🌙 Deactivate (MessagingSessionControl.h, the user's request of 2026-10-27): the Esc / Deactivate row
 //      above Back on the Session page (each button only where it applies), Esc NEVER on Main (the user's rule of 2026-10-28: "The
 //      ESC button should be only inside Sessions menu"), the hosting window's two decisions, the answers' words, the texts and
@@ -314,7 +315,7 @@ void TestMessagingCard()
         bool twoARow = true;
         for (const SessionInfo* s : { &waiting, &error, &exited, &parked, &parkedError })
         {
-            for (const CardPage p : { CardPage::Main, CardPage::Session, CardPage::AllScreen, CardPage::AllScreenDiffs })
+            for (const CardPage p : { CardPage::Main, CardPage::Session, CardPage::AllScreen, CardPage::AllScreenDiffs, CardPage::AllScreenLast, CardPage::AllScreenLastDiffs })
             {
                 for (const auto& row : BuildCardButtonRows(kCardSid, CardButtonFactsFor(*s), p))
                 {
@@ -337,23 +338,51 @@ void TestMessagingCard()
                   CardCallbackData(CardAllScreenLevelVerb(TurnsLevel::Default), kCardSid).size() == 56,
               "the All Screen picker's unchecked data (c:allscreen-compact: / -minimal: / -default: + a 36-character id) is 56 bytes");
         CHECK(CardCallbackData(CardAllScreenLevelVerb(TurnsLevel::Compact, true), kCardSid).size() == 58 && CardCallbackData(kCardVerbAllScreenDiffs, kCardSid).size() == 50,
-              "the All Screen picker's longest data (c:allscreen-compact+d: + a 36-character id) is 58 bytes of 64; the checkbox's c:allscreen+d: 50");
+              "the All Screen picker's File Diffs data (c:allscreen-compact+d: + a 36-character id) is 58 bytes of 64; the checkbox's c:allscreen+d: 50");
+        CHECK(CardCallbackData(CardAllScreenLevelVerb(TurnsLevel::Compact, true, true), kCardSid).size() == 59 &&
+                  CardCallbackData(CardAllScreenLevelVerb(TurnsLevel::Compact, false, true), kCardSid).size() == 58 &&
+                  CardCallbackData(kCardVerbAllScreenLast, kCardSid).size() == 50 && CardCallbackData(kCardVerbAllScreenLastDiffs, kCardSid).size() == 51,
+              "the All Screen picker's longest data (c:allscreen-compact+dl: + a 36-character id) is 59 bytes of 64; Last Turn's level data 58, its page verbs 50 and 51");
     }
 
     // ===== 1b. MESSAGING.md 21.39 - All Screen's level picker (the ALL SCREEN page) and its default level =====
     {
-        // The words, the setting's reading and the button verbs (unchecked and checked File diffs).
+        // The words, the setting's reading and the button verbs (every pair of the two boxes: File Diffs, Last Turn).
         bool words = true;
         for (const auto& choice : kAllScreenLevels)
         {
             const auto plain = ParseCardAllScreenLevelVerb(CardAllScreenLevelVerb(choice.level));
             const auto withDiffs = ParseCardAllScreenLevelVerb(CardAllScreenLevelVerb(choice.level, true));
+            const auto withLast = ParseCardAllScreenLevelVerb(CardAllScreenLevelVerb(choice.level, false, true));
+            const auto withBoth = ParseCardAllScreenLevelVerb(CardAllScreenLevelVerb(choice.level, true, true));
             words = words && AllScreenLevelFromWord(choice.word) == choice.level && AllScreenLevelWord(choice.level) == choice.word && plain && plain->level == choice.level &&
-                    !plain->diffs && withDiffs && withDiffs->level == choice.level && withDiffs->diffs;
+                    !plain->diffs && !plain->lastTurn && withDiffs && withDiffs->level == choice.level && withDiffs->diffs && !withDiffs->lastTurn && withLast &&
+                    withLast->level == choice.level && !withLast->diffs && withLast->lastTurn && withBoth && withBoth->level == choice.level && withBoth->diffs &&
+                    withBoth->lastTurn;
         }
-        CHECK(words, "All Screen: every level's word, verb (with and without File diffs) and level map to each other");
-        CHECK(CardAllScreenLevelVerb(TurnsLevel::Full) == L"allscreen-full" && CardAllScreenLevelVerb(TurnsLevel::Full, true) == L"allscreen-full+d",
-              "All Screen: a level's verb is allscreen-<word>, plus +d when File diffs is checked");
+        CHECK(words, "All Screen: every level's word, verb (with each pair of boxes) and level map to each other");
+        CHECK(CardAllScreenLevelVerb(TurnsLevel::Full) == L"allscreen-full" && CardAllScreenLevelVerb(TurnsLevel::Full, true) == L"allscreen-full+d" &&
+                  CardAllScreenLevelVerb(TurnsLevel::Full, false, true) == L"allscreen-full+l" && CardAllScreenLevelVerb(TurnsLevel::Full, true, true) == L"allscreen-full+dl",
+              "All Screen: a level's verb is allscreen-<word>, plus +d (File Diffs), +l (Last Turn) or +dl (both)");
+        // The four picker pages: each pair of boxes has its page, its page verb and its log word, and back.
+        bool pages = !AllScreenBoxesOf(CardPage::Main) && !AllScreenBoxesOf(CardPage::Session);
+        for (const bool d : { false, true })
+        {
+            for (const bool l : { false, true })
+            {
+                const CardPage page = AllScreenPageFor(d, l);
+                const auto boxes = AllScreenBoxesOf(page);
+                pages = pages && boxes && boxes->diffs == d && boxes->lastTurn == l;
+            }
+        }
+        CHECK(pages, "All Screen: AllScreenPageFor and AllScreenBoxesOf map the four pairs of boxes to four pages and back; Main and Session are no picker page");
+        CHECK(CardAllScreenPageVerb(false, false) == kCardVerbAllScreen && CardAllScreenPageVerb(true, false) == L"allscreen+d" &&
+                  CardAllScreenPageVerb(false, true) == L"allscreen+l" && CardAllScreenPageVerb(true, true) == L"allscreen+dl",
+              "All Screen: the page verbs are allscreen, allscreen+d, allscreen+l and allscreen+dl");
+        CHECK(std::wstring{ CardPageLogWord(CardPage::Main) } == L"main" && std::wstring{ CardPageLogWord(CardPage::Session) } == L"session" &&
+                  std::wstring{ CardPageLogWord(CardPage::AllScreen) } == L"allscreen" && std::wstring{ CardPageLogWord(CardPage::AllScreenDiffs) } == L"allscreen+diffs" &&
+                  std::wstring{ CardPageLogWord(CardPage::AllScreenLast) } == L"allscreen+last" && std::wstring{ CardPageLogWord(CardPage::AllScreenLastDiffs) } == L"allscreen+diffs+last",
+              "All Screen: hooks.log names each page (the three of before as they were)");
         CHECK(std::size(kAllScreenLevels) == 5 && kAllScreenLevels[0].level == TurnsLevel::Minimal && kAllScreenLevels[4].level == TurnsLevel::Max,
               "All Screen: the five transcript levels, least to most");
         CHECK(!AllScreenLevelFromWord(L"") && !AllScreenLevelFromWord(L"FULL") && !AllScreenLevelFromWord(L"fu") && !AllScreenLevelFromWord(L"fullest"),
@@ -367,19 +396,30 @@ void TestMessagingCard()
                   !ParseCardAllScreenLevelVerb(L"allscreen-bogus") && !ParseCardAllScreenLevelVerb(L"allscreen-+d") && !ParseCardAllScreenLevelVerb(L"allscreen-full+x") &&
                   !ParseCardAllScreenLevelVerb(L"screenimg"),
               "All Screen: the page verbs (they open the picker) and malformed ones name no level");
+        CHECK(!ParseCardAllScreenLevelVerb(kCardVerbAllScreenLast) && !ParseCardAllScreenLevelVerb(kCardVerbAllScreenLastDiffs) &&
+                  !ParseCardAllScreenLevelVerb(L"allscreen-full+ld") && !ParseCardAllScreenLevelVerb(L"allscreen-full+dd") && !ParseCardAllScreenLevelVerb(L"allscreen-full+") &&
+                  !ParseCardAllScreenLevelVerb(L"allscreen-+l") && !ParseCardAllScreenLevelVerb(L"allscreen-+dl") && !ParseCardAllScreenLevelVerb(L"allscreen-full+d+l"),
+              "All Screen: Last Turn's page verbs name no level, and only the exact endings +d, +l, +dl are boxes");
 
-        // /allscreen's arguments: a level word and "diffs", in any order and case; nothing = the default level, no diffs.
+        // /allscreen's arguments: a level word, "diffs" and "last", in any order and case; nothing = the default level, the whole
+        // conversation, no diffs.
         const auto bare = ParseAllScreenArgs(L"", TurnsLevel::Full);
         const auto compactOnly = ParseAllScreenArgs(L"compact", TurnsLevel::Full);
         const auto diffsOnly = ParseAllScreenArgs(L"Diffs", TurnsLevel::Default);
         const auto both = ParseAllScreenArgs(L" diffs   MAX ", TurnsLevel::Full);
-        CHECK(bare && bare->level == TurnsLevel::Full && !bare->diffs, "/allscreen bare: the default level, no diffs");
-        CHECK(compactOnly && compactOnly->level == TurnsLevel::Compact && !compactOnly->diffs, "/allscreen compact: that level, no diffs");
+        CHECK(bare && bare->level == TurnsLevel::Full && !bare->diffs && !bare->lastTurn, "/allscreen bare: the default level, no diffs, the whole conversation");
+        CHECK(compactOnly && compactOnly->level == TurnsLevel::Compact && !compactOnly->diffs && !compactOnly->lastTurn, "/allscreen compact: that level, no diffs");
         CHECK(diffsOnly && diffsOnly->level == TurnsLevel::Default && diffsOnly->diffs, "/allscreen diffs: the default level (here Default), with diffs, any case");
-        CHECK(both && both->level == TurnsLevel::Max && both->diffs, "/allscreen diffs MAX: either order, extra blanks, any case");
+        CHECK(both && both->level == TurnsLevel::Max && both->diffs && !both->lastTurn, "/allscreen diffs MAX: either order, extra blanks, any case");
         CHECK(ParseAllScreenArgs(L"diff full", TurnsLevel::Full).has_value() && !ParseAllScreenArgs(L"full compact", TurnsLevel::Full) &&
                   !ParseAllScreenArgs(L"bogus", TurnsLevel::Full) && !ParseAllScreenArgs(L"full please", TurnsLevel::Full),
               "/allscreen: diff is accepted too; two levels or an unknown word are refused (the usage line answers)");
+        const auto lastOnly = ParseAllScreenArgs(L"LAST", TurnsLevel::Full);
+        const auto lastAll = ParseAllScreenArgs(L"last max diffs", TurnsLevel::Full);
+        CHECK(lastOnly && lastOnly->level == TurnsLevel::Full && lastOnly->lastTurn && !lastOnly->diffs, "/allscreen last: the default level, the last turn only, any case");
+        CHECK(lastAll && lastAll->level == TurnsLevel::Max && lastAll->lastTurn && lastAll->diffs, "/allscreen last max diffs: all three words, in any order");
+        CHECK(!ParseAllScreenArgs(L"lastturn", TurnsLevel::Full) && !ParseAllScreenArgs(L"last turn", TurnsLevel::Full),
+              "/allscreen: only the word last is the box (lastturn, or last turn as two words, gets the usage line)");
 
         // The Session page's button opens the picker: its label says so with the arrow.
         const SessionInfo waiting = CardSession(SessionState::WaitingForInput);
@@ -388,46 +428,74 @@ void TestMessagingCard()
                   session[5][0].first.back() == L'\x25B8',
               "All Screen: the Session page's button opens the picker (its label ends with the page arrow)");
 
-        // The picker: the File diffs box first (unchecked), one level a row, least to most, the default (Full) with the star,
-        // then Back to the Session page.
+        // The picker: the File Diffs box first and the Last Turn box under it (both unchecked), one level a row, least to most,
+        // the default (Full) with the star, then Back to the Session page.
         const Rows picker = BuildCardButtonRows(kCardSid, CardButtonFactsFor(waiting), CardPage::AllScreen);
-        CHECK(picker.size() == 7, "All Screen picker: the File diffs box, five levels and Back");
-        CHECK(picker.size() == 7 && picker[0].size() == 1 && picker[0][0].first.rfind(L"\x2B1C ", 0) == 0 && picker[0][0].first.find(L"File diffs") != std::wstring::npos &&
+        CHECK(picker.size() == 8, "All Screen picker: the File Diffs box, the Last Turn box, five levels and Back");
+        CHECK(picker.size() == 8 && picker[0].size() == 1 && picker[0][0].first.rfind(L"\x2B1C ", 0) == 0 && picker[0][0].first.find(L"File Diffs") != std::wstring::npos &&
                   picker[0][0].second == L"c:allscreen+d:" + kCardSid,
-              "All Screen picker: the first row is the UNCHECKED File diffs box (the empty-box emoji U+2B1C), and its tap shows the checked picker");
-        bool oneARow = picker.size() == 7;
-        bool ordered = picker.size() == 7;
-        for (size_t i = 0; i < 5 && i + 1 < picker.size(); ++i)
+              "All Screen picker: the first row is the UNCHECKED File Diffs box (the empty-box emoji U+2B1C), and its tap shows the checked picker");
+        CHECK(picker.size() == 8 && picker[1].size() == 1 && picker[1][0].first.rfind(L"\x2B1C ", 0) == 0 && picker[1][0].first.find(L"Last Turn") != std::wstring::npos &&
+                  picker[1][0].first.find(L"the whole conversation") != std::wstring::npos && picker[1][0].second == L"c:allscreen+l:" + kCardSid,
+              "All Screen picker: the second row is the UNCHECKED Last Turn box (the whole conversation), and its tap shows the picker with it checked");
+        bool oneARow = picker.size() == 8;
+        bool ordered = picker.size() == 8;
+        for (size_t i = 0; i < 5 && i + 2 < picker.size(); ++i)
         {
-            const auto& row = picker[i + 1];
+            const auto& row = picker[i + 2];
             oneARow = oneARow && row.size() == 1;
             ordered = ordered && !row.empty() && row[0].second == L"c:allscreen-" + std::wstring{ kAllScreenLevels[i].word } + L":" + kCardSid &&
                       row[0].first.find(kAllScreenLevels[i].label) != std::wstring::npos && row[0].first.find(kAllScreenLevels[i].hint) != std::wstring::npos;
         }
-        CHECK(oneARow && ordered, "All Screen picker: one level a row, least to most, each with its name, its hint and its verb (no diffs)");
-        CHECK(picker.size() == 7 && picker[4][0].first.rfind(L"\x2B50 ", 0) == 0 && picker[1][0].first.rfind(L"\U0001F4DC ", 0) == 0 && picker[5][0].first.rfind(L"\U0001F4DC ", 0) == 0,
+        CHECK(oneARow && ordered, "All Screen picker: one level a row, least to most, each with its name, its hint and its verb (no box)");
+        CHECK(picker.size() == 8 && picker[5][0].first.rfind(L"\x2B50 ", 0) == 0 && picker[2][0].first.rfind(L"\U0001F4DC ", 0) == 0 && picker[6][0].first.rfind(L"\U0001F4DC ", 0) == 0,
               "All Screen picker: the default level (Full) wears the star EMOJI (U+2B50), the others the scroll");
-        CHECK(picker.size() == 7 && picker[6].size() == 1 && picker[6][0].second == L"c:panel:" + kCardSid && picker[6][0].first.find(L"Back") != std::wstring::npos,
+        CHECK(picker.size() == 8 && picker[7].size() == 1 && picker[7][0].second == L"c:panel:" + kCardSid && picker[7][0].first.find(L"Back") != std::wstring::npos,
               "All Screen picker: Back returns to the Session page (not to Main)");
 
         // The checked picker: the box checked (its tap shows the unchecked one), every level carrying +d, the same star and Back.
         const Rows checked = BuildCardButtonRows(kCardSid, CardButtonFactsFor(waiting), CardPage::AllScreenDiffs);
-        CHECK(checked.size() == 7 && checked[0][0].first.rfind(L"\x2611\xFE0F ", 0) == 0 && checked[0][0].second == L"c:allscreen:" + kCardSid,
+        CHECK(checked.size() == 8 && checked[0][0].first.rfind(L"\x2611\xFE0F ", 0) == 0 && checked[0][0].second == L"c:allscreen:" + kCardSid,
               "All Screen picker, checked: the box shows checked (U+2611 + U+FE0F: drawn as the emoji everywhere), and its tap shows the unchecked picker");
-        bool allDiffs = checked.size() == 7;
-        for (size_t i = 0; i < 5 && i + 1 < checked.size(); ++i)
+        bool allDiffs = checked.size() == 8;
+        for (size_t i = 0; i < 5 && i + 2 < checked.size(); ++i)
         {
-            allDiffs = allDiffs && checked[i + 1][0].second == L"c:allscreen-" + std::wstring{ kAllScreenLevels[i].word } + L"+d:" + kCardSid &&
-                       checked[i + 1][0].first == picker[i + 1][0].first;
+            allDiffs = allDiffs && checked[i + 2][0].second == L"c:allscreen-" + std::wstring{ kAllScreenLevels[i].word } + L"+d:" + kCardSid &&
+                       checked[i + 2][0].first == picker[i + 2][0].first;
         }
         CHECK(allDiffs, "All Screen picker, checked: every level's data carries +d (the box as shown), its label unchanged");
-        CHECK(checked.size() == 7 && checked[4][0].first.rfind(L"\x2B50 ", 0) == 0 && checked[6][0].second == L"c:panel:" + kCardSid,
+        CHECK(checked.size() == 8 && checked[5][0].first.rfind(L"\x2B50 ", 0) == 0 && checked[7][0].second == L"c:panel:" + kCardSid,
               "All Screen picker, checked: the same star and the same Back");
-        // Every mark on both pages is an EMOJI (the user's words of 2026-10-26: the empty box "to match the checked checkbox", "the
-        // star of full should be emoji"): neither the text box U+2610 nor the text star U+2605 comes back, and the checked box
+
+        // Last Turn (the user's request of 2026-10-29): its two pages, and each box flipping only itself on all four.
+        const Rows last = BuildCardButtonRows(kCardSid, CardButtonFactsFor(waiting), CardPage::AllScreenLast);
+        const Rows lastDiffs = BuildCardButtonRows(kCardSid, CardButtonFactsFor(waiting), CardPage::AllScreenLastDiffs);
+        CHECK(last.size() == 8 && last[1][0].first.rfind(L"\x2611\xFE0F ", 0) == 0 && last[1][0].first.find(L"Last Turn") != std::wstring::npos &&
+                  last[1][0].first.find(L"the newest turn only") != std::wstring::npos && last[0][0].first.rfind(L"\x2B1C ", 0) == 0,
+              "All Screen picker, Last Turn: its box shows checked (the newest turn only), File Diffs still unchecked");
+        CHECK(lastDiffs.size() == 8 && lastDiffs[0][0].first.rfind(L"\x2611\xFE0F ", 0) == 0 && lastDiffs[1][0].first.rfind(L"\x2611\xFE0F ", 0) == 0,
+              "All Screen picker, both: both boxes show checked");
+        // Each box's tap names the page with ITS box flipped and the other kept: from the unchecked page, from File Diffs, from
+        // Last Turn and from both.
+        CHECK(picker[0][0].second == L"c:allscreen+d:" + kCardSid && picker[1][0].second == L"c:allscreen+l:" + kCardSid &&
+                  checked[0][0].second == L"c:allscreen:" + kCardSid && checked[1][0].second == L"c:allscreen+dl:" + kCardSid &&
+                  last[0][0].second == L"c:allscreen+dl:" + kCardSid && last[1][0].second == L"c:allscreen:" + kCardSid &&
+                  lastDiffs[0][0].second == L"c:allscreen+l:" + kCardSid && lastDiffs[1][0].second == L"c:allscreen+d:" + kCardSid,
+              "All Screen picker: each box flips only itself, on every page (the two combine)");
+        bool lastLevels = last.size() == 8 && lastDiffs.size() == 8;
+        for (size_t i = 0; i < 5 && lastLevels; ++i)
+        {
+            lastLevels = last[i + 2][0].second == L"c:allscreen-" + std::wstring{ kAllScreenLevels[i].word } + L"+l:" + kCardSid &&
+                         lastDiffs[i + 2][0].second == L"c:allscreen-" + std::wstring{ kAllScreenLevels[i].word } + L"+dl:" + kCardSid &&
+                         last[i + 2][0].first == picker[i + 2][0].first && lastDiffs[i + 2][0].first == picker[i + 2][0].first;
+        }
+        CHECK(lastLevels, "All Screen picker, Last Turn: every level's data carries +l (or +dl with File Diffs), its label unchanged");
+        CHECK(last[7][0].second == L"c:panel:" + kCardSid && lastDiffs[7][0].second == L"c:panel:" + kCardSid, "All Screen picker, Last Turn: the same Back");
+        // Every mark on all four pages is an EMOJI (the user's words of 2026-10-26: the empty box "to match the checked checkbox",
+        // "the star of full should be emoji"): neither the text box U+2610 nor the text star U+2605 comes back, and the checked box
         // keeps its U+FE0F.
         bool noTextGlyphs = true;
-        for (const Rows* page : { &picker, &checked })
+        for (const Rows* page : { &picker, &checked, &last, &lastDiffs })
         {
             for (const auto& row : *page)
             {
@@ -439,15 +507,15 @@ void TestMessagingCard()
                 }
             }
         }
-        CHECK(noTextGlyphs, "All Screen picker: no text-glyph box or star on either page, and the checked box always carries U+FE0F");
+        CHECK(noTextGlyphs, "All Screen picker: no text-glyph box or star on any of its four pages, and a checked box always carries U+FE0F");
 
         CardButtonFacts compact = CardButtonFactsFor(waiting);
         compact.allScreenLevel = TurnsLevel::Compact; // the cog's setting, as the service sets it
         const Rows compactPicker = BuildCardButtonRows(kCardSid, compact, CardPage::AllScreen);
-        CHECK(compactPicker.size() == 7 && compactPicker[2][0].first.rfind(L"\x2B50 ", 0) == 0 && compactPicker[4][0].first.rfind(L"\U0001F4DC ", 0) == 0,
+        CHECK(compactPicker.size() == 8 && compactPicker[3][0].first.rfind(L"\x2B50 ", 0) == 0 && compactPicker[5][0].first.rfind(L"\U0001F4DC ", 0) == 0,
               "All Screen picker: the star follows the default level the cog sets");
-        CHECK(BuildCardButtonRows(kCardSid, CardButtonFactsFor(CardSession(SessionState::Error)), CardPage::AllScreen).size() == 7,
-              "All Screen picker: the same box and five levels whatever the session's state");
+        CHECK(BuildCardButtonRows(kCardSid, CardButtonFactsFor(CardSession(SessionState::Error)), CardPage::AllScreen).size() == 8,
+              "All Screen picker: the same boxes and five levels whatever the session's state");
 
         // The setting round-trips through settings.json; an older file without it reads as Full.
         const AppSettings defaults;

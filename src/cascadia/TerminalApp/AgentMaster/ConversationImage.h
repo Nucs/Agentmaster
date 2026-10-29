@@ -115,7 +115,7 @@ namespace Agentmaster
     {
         ScreenSnapshot snapshot; // cols x rows; fontFace "" (the renderer's monospace fallbacks), the palette's colors
         std::vector<uint8_t> cuts; // one per row: kTallCut* for a part that would START at that row (PlanTallImageParts)
-        std::vector<int> rowTurn; // one per row: the number of the turn the row belongs to (0 = before the first turn)
+        std::vector<int> rowTurn; // one per row: the number of the turn the row belongs to (the rows above the first turn heading - the legend, the notes, a Last Turn's own note - count as that first turn; 0 only before any real turn)
         int turns{ 0 }; // the highest turn number laid out (0 = none: a transcript without a turn yet)
         int droppedRows{ 0 }; // rows left out at the TOP because of maxRows (0 = the whole conversation is on the sheet)
         int droppedThroughTurn{ 0 }; // the last turn that lost rows to the cut (0 = none, or only rows before the first turn)
@@ -149,7 +149,7 @@ namespace Agentmaster
         TallImagePart picture; // the PNG and the rows it shows
         size_t index{ 0 }; // 0-based, in conversation order
         size_t count{ 0 }; // how many parts the conversation has
-        int firstTurn{ 0 }; // the turn of the part's first row (0 = before the first turn)
+        int firstTurn{ 0 }; // the turn of the part's first row (rows above the first turn heading count as that turn: ConversationSheet::rowTurn)
         int lastTurn{ 0 }; // the turn of its last row
     };
 
@@ -161,6 +161,9 @@ namespace Agentmaster
         // whatever the level (TurnsOptions::editDiffs; at Minimal and Compact the file-changing calls are listed for it); false =
         // the level's own default, which shows no diffs (only Max shows each Write's whole content).
         bool editDiffs{ false };
+        // §21.39 "Last Turn": true = only the conversation's newest turn is drawn (TurnsOptions::lastTurnOnly - numbered as in the
+        // whole conversation, so the pictures still say "turn 31"); false = the whole conversation, its chain included.
+        bool lastTurnOnly{ false };
         int cols{ kConversationImageCols }; // the sheet's width in cells
         size_t maxParts{ kConversationImageMaxParts }; // the most pictures (at least 1)
         TallScreenImageOptions image; // the cell, the padding and the part height

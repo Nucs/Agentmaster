@@ -5475,7 +5475,7 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
 6. A menu drawn for a deactivated tab, then the tab entered at the PC, then ▶ Activate: the menu reads "woken" (no second
    start).
 
-### 21.39 📜 All Screen: the whole conversation as tall pictures (2026-10-25; in dev since 0.0.1.36, its level picker and File diffs of 2026-10-26 since 0.0.1.37, their emoji marks and the reset to Main after a pick since 0.0.1.38; in production since 0.8.0.1)
+### 21.39 📜 All Screen: the whole conversation as tall pictures (2026-10-25; in dev since 0.0.1.36, its level picker and File diffs of 2026-10-26 since 0.0.1.37, their emoji marks and the reset to Main after a pick since 0.0.1.38; in production since 0.8.0.1; its Last Turn box of 2026-10-29 in no build yet)
 
 > The user's request (2026-10-25): "check if we can add conversation render into an image so that its like a screenshot but
 > we get to see the entire claude code conversation in a tall tall image — look into that and have All Screen button"
@@ -5488,6 +5488,8 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
 >
 > And, after trying the picker on dev 0.0.1.37 (2026-10-26): "1. put emoji of empty checkbox to match the checked checkbox
 > 2. the star of full should be emoji 3. after picking which, reset menu to main view"
+>
+> And (2026-10-29): "Add another option for 'Last Turn'"
 
 **Not from the terminal; from the transcript.**
 - This machine's Claude Code runs its fullscreen renderer (`CLAUDE_CODE_NO_FLICKER=1` in `~/.claude/settings.json`). Its whole
@@ -5505,12 +5507,14 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
   48 bytes). The page now has seven rows; no existing button moved. In its first build (7c7397861, dev 0.0.1.36) the button
   drew at the Default level at once; since the follow-up it opens the level picker below. A card posted by that build opens
   the picker too: the verb is the same.
-- **The level picker** (the card's third page, `CardPage::AllScreen`; MessagingModels.h `kAllScreenLevels`): the File diffs
-  box, then one level a row, least to most, each with a hint of what it adds, then [◀ Back] to the Session page:
+- **The level picker** (the card's third page, `CardPage::AllScreen`; MessagingModels.h `kAllScreenLevels`): the File Diffs
+  box, the Last Turn box, then one level a row, least to most, each with a hint of what it adds, then [◀ Back] to the Session
+  page:
 
   | Button | Draws |
   |---|---|
-  | ⬜ File diffs · the level's default | (a box, not a drawing: a tap checks it, below) |
+  | ⬜ File Diffs · the level's default | (a box, not a drawing: a tap checks it, below) |
+  | ⬜ Last Turn · the whole conversation | (a box: a tap checks it, below) |
   | 📜 Minimal · prompts & replies | your messages and each turn's final reply |
   | 📜 Compact · + answers & agents | + compactions, your answers, the slash commands you ran, each agent's brief and report |
   | 📜 Default · + every tool call | + every tool call on one line, and Claude's remarks between calls |
@@ -5529,24 +5533,36 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
   the line saying why there are none) follow. The tap's answer itself still waits for them (no toast; past §21.28's 9 s the
   answer says the work goes on). Another level is three taps away again (⚙ Session → 📜 All Screen ▸ → the level).
   A card that starts to ring goes back to Main, as from the Session page (§21.24).
-- **File diffs** (the third request): Telegram has no checkbox, so the box is a button whose ⬜ / ☑️ shows the state and whose
+- **File Diffs** (the third request): Telegram has no checkbox, so the box is a button whose ⬜ / ☑️ shows the state and whose
   tap edits the card into the picker in the other state: ⬜ (`c:allscreen+d:<sid>`, 50 bytes) shows the checked page
-  (`CardPage::AllScreenDiffs`, `☑️ File diffs · at every level`), whose ☑️ (`c:allscreen:<sid>`) shows the unchecked one
+  (`CardPage::AllScreenDiffs`, `☑️ File Diffs · at every level`), whose ☑️ (`c:allscreen:<sid>`) shows the unchecked one
   again. Each tap names the page it shows, so a double tap never flips twice. Nothing remembers the box: the picker always
-  opens unchecked, the user's "by default false" (and a pick leaves the picker, above).
+  opens unchecked, the user's "by default false" (and a pick leaves the picker, above). The box's label was "File diffs"
+  until the Last Turn box came: both are title case now, as the card's other buttons and the user's 'Last Turn'.
   - **Unchecked:** each level draws its own default. No level draws diffs by itself; Max shows each Write's whole content.
   - **Checked:** every level draws each file change as a diff under its call (`TurnsOptions::editDiffs`, below). Minimal and
     Compact hide the calls, so there the file-changing calls are listed for it, each with its diff, and nothing else.
-  - A level button on the checked page carries the box in its data (`c:allscreen-<word>+d:<sid>`, 58 bytes at most: the
-    longest of all) and runs `/allscreen <word> diffs`: what the card showed is what is drawn. The page flip logs
+  - A level button on the checked page carries the box in its data (`c:allscreen-<word>+d:<sid>`, 58 bytes) and runs
+    `/allscreen <word> diffs`: what the card showed is what is drawn. The page flip logs
     `[nav] remote telegram card-page <sid8> allscreen+diffs`.
+- **Last Turn** (the request of 2026-10-29): the second box, under File Diffs, works the same way and combines with it.
+  - **Unchecked** (`⬜ Last Turn · the whole conversation`): the level draws the whole conversation, its chain included.
+  - **Checked** (`☑️ Last Turn · the newest turn only`): the level draws only the conversation's newest turn: the turn running
+    now, or the one that ended last (`TurnsOptions::lastTurnOnly`, below).
+  - **Four pages, one per pair of boxes** (`CardPage::AllScreen` / `AllScreenDiffs` / `AllScreenLast` / `AllScreenLastDiffs`;
+    `AllScreenBoxesOf`, `AllScreenPageFor`). Each box's tap names the page with ITS box flipped and the other kept
+    (`CardAllScreenPageVerb`: `c:allscreen:`, `c:allscreen+d:`, `c:allscreen+l:` 50 bytes, `c:allscreen+dl:` 51 bytes).
+  - A level's data carries both boxes as shown: `+d`, `+l` or `+dl` (`c:allscreen-compact+dl:<sid>`, 59 bytes, the longest
+    card data of all), and runs `/allscreen <word> [diffs] [last]`. A pick still takes the card back to Main.
+  - The page flips log `[nav] remote telegram card-page <sid8> allscreen+last` / `allscreen+diffs+last` (`CardPageLogWord`).
 - **The default level** wears ⭐ in place of 📜: **Full**, the user's rule, unless the cog's Messaging tab sets another
   ("All Screen's default transcript level", `messagingAllScreenLevel`: `minimal` / `compact` / `default` / `full` / `max`;
   an empty or unknown word reads as full). It applies at once (`MessagingService::Apply` → `_allScreenLevel`): the next bare
   `/allscreen` draws it and the next render of a picker moves the ⭐.
-- Typed: `/allscreen [minimal|compact|default|full|max] [diffs]`, the `/transcript` levels; a bare `/allscreen` draws the
-  default level (not `/transcript`'s Default). `diffs` (or `diff`) is the checked box; the words come in any order and any case
-  (`ParseAllScreenArgs`); two levels or an unknown word get the usage line. It is in the "/" menu and the help.
+- Typed: `/allscreen [minimal|compact|default|full|max] [diffs] [last]`, the `/transcript` levels; a bare `/allscreen` draws
+  the default level (not `/transcript`'s Default). `diffs` (or `diff`) is the checked File Diffs, `last` the checked Last Turn;
+  the words come in any order and any case (`ParseAllScreenArgs`); two levels or an unknown word (`lastturn`, "last turn" as two
+  words) get the usage line. It is in the "/" menu and the help.
 
 **The diffs** (`TurnsOptions::editDiffs`, TranscriptTurns.h; Agentmaster's own option, not the reference's: no level and no
 preset sets it, so Copy ▸ Transcript and its goldens never see it). Each file-changing call (Edit, MultiEdit, Write,
@@ -5560,6 +5576,19 @@ NotebookEdit) gets a ```` ```diff ```` block under its line (`EditDiffText`), re
 A refused call (an error result: the file was not written) and one with no result (interrupted, still running) get none, and
 a level that hides the calls then lists nothing for them, never an empty timeline. At Max a Write's diff takes the place of its
 content block (the same lines, said once). A subagent's or teammate's changes show where its entry does: Compact and up.
+
+**The last turn** (`TurnsOptions::lastTurnOnly`, TranscriptTurns.h `Document`; Agentmaster's own as well, set by no level).
+- Only the conversation's newest turn is rendered: the last of the whole chain's turns. It keeps its number in the whole
+  conversation ("Turn 31", never "Turn 1"), its own "_Before this turn_" note (a command run before it), its agents' entries
+  and the notes after it ("After the last turn").
+- What belongs to the whole conversation goes: the chain block, the per-session headings, and the notes before the first turn
+  (kept when the newest turn is the only one, since then it IS the first). The path legend follows what the turn shows.
+- The chain is still walked and every turn parsed, since the number needs them: Last Turn costs the whole parse and saves the
+  rendering, the layout and most of the drawing.
+- The sheet counts the rows above the first turn heading as that turn (`SheetWriter::SetTurn`), so a picture of turn 31 is
+  captioned "turn 31", not "turns 1–31" (for a whole conversation those rows - the legend, the head notes - count as turn 1,
+  as the captions always said).
+- A transcript with no turn yet draws no turn; one that opens mid-turn draws its pseudo-turn ("Work before the first prompt").
 
 **What a picture looks like** (`BuildConversationSheet`; looked at on real sessions of this machine): 100 columns of a 12 px
 cell in Cascadia Mono, on Campbell's colors, 1,232 px wide.
@@ -5595,7 +5624,8 @@ cell in Cascadia Mono, on Campbell's colors, 1,232 px wide.
 - **The cap.** At most 10 parts (`kConversationImageMaxParts`; ten parts hold ~13,300 rows). A longer conversation keeps its
   MOST RECENT rows. The first picture's top row then says how many earlier rows, through which turn, are left out, and the
   thread gets a line naming a shorter level of the picker (Default or Compact after Full or Max, Compact after Default), and,
-  with File diffs checked, "Without File diffs the pictures are shorter too."
+  with File Diffs checked, "Without File Diffs the pictures are shorter too." With Last Turn checked the line names "the last
+  turn", says no "through turn" (one turn's rows are all that turn's) and keeps `last` in its typed hint (`/allscreen compact last`).
   Full, the default, keeps the most per turn: the largest session measured passes the cap at Full (below).
 - **Memory.** The drawing goes through a 2,048 px strip, so memory does not grow with the picture, and each part is
   PNG-encoded strip by strip (WIC `WritePixels`). A row is drawn in every strip it touches; two strip heights give the same
@@ -5609,7 +5639,10 @@ a photo to 2,560 px on its long side and refuses one past 10,000 px of width + h
 is queued as soon as it is drawn, so part 1 travels while part 2 is drawn, and the outbox keeps their order. The caption
 reads `📜 <title> · conversation (<level>[ + diffs]) [· 2/4] · turns 12–31`; the file is
 `conversation-<title>-<level>[-diffs][-2of4].png`. The level is always named (until File diffs, it was left out for Default):
-the default is the cog's choice, so a bare caption would not say which level it is.
+the default is the cog's choice, so a bare caption would not say which level it is. With Last Turn the caption says what it
+shows instead of "conversation" (`📜 <title> · last turn (<level>[ + diffs]) [· 2/2] · turn 31`) and the file starts so
+(`last-turn-<title>-<level>[-diffs][-2of2].png`); the hooks.log line adds `+last` (`full+diffs+last`), and the thread's lines
+name "The last turn" ("… could not be drawn", "… is longer than N pictures hold").
 
 **Bounds.**
 - One conversation is drawn at a time, process-wide (`kConversationImageMaxRenders`). Another request then hears "Another
@@ -5633,6 +5666,8 @@ the default is the cog's choice, so a bare caption would not say which level it 
 | 95 MB, 11 turns | Full | 17,295 → 13,320 kept | 10 (the cap; turns 1–3 left out) | 57 MB | 12.4 s (2026-10-26) |
 | 14 MB, 3 turns, 209 file changes | Default | 1,158 | 1 | 5.5 MB | 1.2 s (2026-10-26) |
 | the same | Default + File diffs | 9,595 | 8 | 35.5 MB | 7.4 s (turns view 0.5 s, layout 0.08 s, drawing 6.9 s; 2026-10-26) |
+| 18 MB, 5 turns | Full | 3,769 | 3 | 17.5 MB | 2.9 s (2026-10-29) |
+| the same | Full + Last Turn | 588 (turn 5) | 1 | 2.7 MB | 0.9 s (turns view 0.5 s - the whole parse still runs -, drawing 0.4 s; 2026-10-29) |
 
 Peak commit: ~315 MB for the 95 MB transcript at any level (mostly the transcript's own parse), 51–78 MB for the small ones,
 134 MB for the 14 MB one with File diffs. File diffs can multiply a session that wrote much: there, 8× the rows (whole new
@@ -5665,8 +5700,10 @@ this Debug run took 1,125 ms for 631.
   them), the bands from the gutter to the edge, the corner on the block's first row only, the `⋮` between hunks, unnumbered
   lines without headers, the lone `---` line as a removed line, the dim italic note, a quoted git diff's dim header, a long
   line broken at the edge on its band with a blank gutter.
+- The turn of the rows above the first turn heading (3d): a lone turn's own note counts as that turn (31), a whole
+  conversation's head (the legend) as turn 1 with turn 2's rows still turn 2's, and a pseudo-turn alone claims no number.
 - `RenderConversationImages` end to end on a turns fixture, and again with File diffs: exactly two more rows (its created
-  file's two lines).
+  file's two lines); and with Last Turn: its newest turn alone (turn 3, every part's turns 3–3), in fewer rows.
 - The layout and end-to-end cases need cmark. Without the vcpkg cmark, `tests\conversation_image_stub.cpp` stands in for
   `ConversationImage.cpp` and those cases report a skip.
 - `tests_turns.cpp` → `TestTranscriptTurnsEditDiffs` (File diffs' Markdown), on a synthetic transcript with every way a change
@@ -5674,14 +5711,24 @@ this Debug run took 1,125 ms for 631.
   each block as written (the hunk with its header, the created file from line 1, the strings without hunks, a MultiEdit's
   edits in order, a NotebookEdit's source); below Max only lines are ADDED to the level's own render; Minimal lists just the
   file changes and opens no empty timeline; Max shows a Write once, as its diff; the reference's session fixture renders as
-  its Default golden plus one diff. `TestTranscriptTurns` checks that neither the preset nor any level sets `editDiffs`.
+  its Default golden plus one diff. `TestTranscriptTurns` checks that neither the preset nor any level sets `editDiffs` or
+  `lastTurnOnly`.
+- `tests_turns.cpp` → `TestTranscriptTurnsLastTurn` (Last Turn's Markdown): every golden ENDS with its last turn, so all 11
+  reference fixtures × 5 levels pin it byte for byte - the Last Turn render equals the golden's text from its last turn on (its
+  "_Before this turn_" note in, its session heading out), after the head paragraphs Last Turn keeps (the path legend; the
+  notes before the first turn of a one-turn conversation), each of which the golden writes too: 55 of 55. Then a three-session
+  chain's newest turn is Turn 5 with no session heading or chain block; the synthetic two-turn transcript gives turn 2 alone,
+  with File Diffs adding none of turn 1's five diffs; Minimal; and no turn renders no turn.
 - `tests_messaging_card.cpp` checks the Session page's seven rows, All Screen ▸ alone on its row, and no All Screen on Main;
   and (1b, the picker) the five levels' words, verbs and settings reading (empty, unknown or overlong → Full; any case),
-  the picker's rows (the box first, then one level a row, least to most, names, hints and verbs, ⭐ on Full, the ⭐ following a
-  set default, Back to the Session page, the same for every state), the checked page (☑️, the levels' `+d` verbs, the same
-  labels), every mark an emoji on both pages (⬜ U+2B1C, ☑ with U+FE0F, ⭐ U+2B50; no text box U+2610 or text star U+2605),
-  the verbs' round trip with and without the box and their refusals, `ParseAllScreenArgs` (any order and case, `diff` too,
-  two levels or an unknown word refused), the 58-byte data, and the setting's round trip through settings.json.
+  the picker's rows (the File Diffs box, the Last Turn box, then one level a row, least to most, names, hints and verbs, ⭐ on
+  Full, the ⭐ following a set default, Back to the Session page, the same for every state), the three checked pages (☑️ on
+  the right box, the levels' `+d` / `+l` / `+dl` verbs, the same labels), each box flipping only itself on all four pages,
+  every mark an emoji on all four (⬜ U+2B1C, ☑ with U+FE0F, ⭐ U+2B50; no text box U+2610 or text star U+2605), the pages'
+  round trip (`AllScreenPageFor` / `AllScreenBoxesOf`, the page verbs, `CardPageLogWord`), the level verbs' round trip with
+  every pair of boxes and their refusals (`+ld`, `+dd`, a bare `+`, `+d+l`), `ParseAllScreenArgs` (any order and case, `diff`
+  too, `last`; two levels or an unknown word - `lastturn`, "last turn" - refused), the 59-byte data, and the setting's round
+  trip through settings.json.
 - Not in the suite: the reset to Main after a pick lives in the service's button handler, which needs Telegram (the live
   check below, 1).
 
@@ -5737,22 +5784,49 @@ this Debug run took 1,125 ms for 631.
 - No data member changed here (labels, one handler call, comments; `SessionModels.h` only in a comment); the purge the
   `/status` commit (§21.40) asks for covers the next build anyway.
 
+**Checked, Last Turn** (2026-10-29, before any build):
+- The m5 suite, isolated (its voice fixtures copied beside the exe too): 11,045 checks, all 55 goldens byte-identical, 55 of
+  55 last turns equal to their golden's tail; the only failures are the three known `TestTaskbarBadge` ones (one run also
+  failed a real-time scheduler check, the load flake, which a rerun of the same exe passed).
+- A negative control (mutated copies in the scratchpad, the repo untouched): with the skipped turns no longer counted (the
+  newest turn becomes "Turn 1") and the sheet no longer claiming the rows above the first heading, 45 of the 55 golden tails
+  fail (the 10 left are the two one-turn fixtures, where Turn 1 is right), and so do the chain's Turn 5, the two synthetic
+  turn checks, both claim checks and the end-to-end check.
+- `cl /Zs` with the recorded Debug lines passes for every unit that includes a changed header: `TranscriptTurns.cpp`,
+  `ConversationImage.cpp`, `Messaging.Inbound.cpp`, `Messaging.cpp`, `Messaging.Files.cpp`, `Messaging.Menus.cpp`,
+  `Messaging.Questions.cpp`, `Messaging.Status.cpp`, `Messaging.Voice.cpp`, `Engine.cpp`, `SessionSearchTools.cpp`,
+  `MessagingSearchBridge.cpp`, and the PCH units `AgentManagerContent.Settings.cpp`, `AgentTabOverlay.Actions.cpp`,
+  `AgentTabOverlay.Summary.cpp`, `AgentTabOverlay.cpp`, `AgentTranscriptOverlay.cpp`, `TerminalPage.AgentEngine.cpp`. Probes
+  through the same line: true asserts on the two page verbs and `lastTurnOnly`'s default pass, an unused local gives C4189,
+  a false one on the new suffix C2338.
+- Looked at (the scratch driver, `/O2`): the reference's session fixture's last turn at Full - its own "/cost" note, the rule
+  "Turn 3", the prompt, the work, the reply - one part, turns 3–3.
+- ⚠ `TurnsOptions` and `ConversationImageOptions` gained a member (`TranscriptTurns.h`, included through `MessagingModels.h`
+  by most of the messaging units): the next build must purge.
+
 **Check after the build** (dev, with the bot):
 1. A session's card → ⚙️ Session: [📜 All Screen ▸] alone under the two screen buttons. Tap it: the keyboard flips to the
-   picker — ⬜ File diffs, five levels, ⭐ Full, ◀ Back (hooks.log `[nav] remote telegram card-page <sid8> allscreen`); the
-   ⬜ and the ⭐ are drawn as emoji, like the 📜 beside them. Tap a level: the card's keyboard goes back to Main at once
+   picker — ⬜ File Diffs, ⬜ Last Turn, five levels, ⭐ Full, ◀ Back (hooks.log `[nav] remote telegram card-page <sid8>
+   allscreen`); the ⬜ and the ⭐ are drawn as emoji, like the 📜 beside them. Tap a level: the card's keyboard goes back to Main at once
    (`[nav] remote telegram card-page <sid8> main`), then one or more documents `conversation-<title>-<level>….png` arrive in
    order, captioned with their level, part and turns. Opened, each shows the conversation in Claude Code's look. ◀ Back (on
    the picker) still returns to the Session page.
 1b. The cog's Messaging tab → "All Screen's default transcript level" → Compact → Save: the picker's ⭐ moves to Compact at the
    card's next render, and a bare `/allscreen` draws Compact (the level is in the hooks.log line).
-1c. File diffs: the picker opens with ⬜ File diffs; tap it: the card shows ☑️ File diffs · at every level, the two boxes alike
+1c. File Diffs: the picker opens with ⬜ File Diffs; tap it: the card shows ☑️ File Diffs · at every level, the two boxes alike
    (hooks.log `[nav] remote telegram card-page <sid8> allscreen+diffs`); tap ☑️: back to ⬜. Checked, tap Minimal in a session that edited
    files: the documents are `conversation-<title>-minimal-diffs….png`, captioned `(minimal + diffs)`, and show only the
    prompts, the replies and each file change with its numbered lines on green / red bands. Tap Full checked: every call, each
    Edit / Write with its diff. `/allscreen compact diffs` typed: the same as the checked Compact; `/allscreen full compact`:
    the usage line.
-2. hooks.log: `[msg] conversation pictures of <sid8>: <level>[+diffs], N of N part(s) sent, <rows> rows (0 left out), 1232 px wide,
+1d. Last Turn (2026-10-29): in a session of several turns, tap ⬜ Last Turn: the card shows ☑️ Last Turn · the newest turn only
+   (`… card-page <sid8> allscreen+last`); tap ⭐ Full: the card goes back to Main, and ONE document
+   `last-turn-<title>-full.png` arrives, captioned `📜 <title> · last turn (full) · turn N` - N the turn's number in the whole
+   conversation - showing that turn alone (its prompt, its work, its reply; its "Before this turn" note above it when a command
+   ran before it). Both boxes checked (`… allscreen+diffs+last`): the newest turn with its file changes as diffs,
+   `last-turn-<title>-full-diffs.png`. While a turn runs, Last Turn draws it as far as it got. `/allscreen last` typed: the
+   same at the default level; `/allscreen last turn`: the usage line.
+2. hooks.log: `[msg] conversation pictures of <sid8>: <level>[+diffs][+last], N of N part(s) sent, <rows> rows (0 left out), 1232 px wide,
    … KB, Cascadia Mono, turns view … ms (… K chars), layout … ms, drawn in … ms`, and `[nav] remote telegram /allscreen
    <sid8> -> ok`. (Seen on dev 0.0.1.36 before the picker; above.)
 3. A second request while the pictures are drawn (the picker opened again and a level tapped — the first pick took the card

@@ -213,6 +213,13 @@ void TestTranscriptTurns()
             anyLevelDiffs = anyLevelDiffs || TurnsOptionsForLevel(level).editDiffs;
         }
         CHECK(!anyLevelDiffs, "TranscriptTurns: neither the preset nor any level turns on Agentmaster's editDiffs");
+        // The same for lastTurnOnly (All Screen's "Last Turn", TestTranscriptTurnsLastTurn).
+        bool anyLevelLast = latest.lastTurnOnly;
+        for (const TurnsLevel level : { TurnsLevel::Minimal, TurnsLevel::Compact, TurnsLevel::Default, TurnsLevel::Full, TurnsLevel::Max })
+        {
+            anyLevelLast = anyLevelLast || TurnsOptionsForLevel(level).lastTurnOnly;
+        }
+        CHECK(!anyLevelLast, "TranscriptTurns: neither the preset nor any level turns on Agentmaster's lastTurnOnly");
         CHECK(std::wstring{ TurnsLevelName(TurnsLevel::Minimal) } == L"minimal" && std::wstring{ TurnsLevelName(TurnsLevel::Default) } == L"default" &&
                   std::wstring{ TurnsLevelName(TurnsLevel::Max) } == L"max",
               "TranscriptTurns: level names");
@@ -556,6 +563,195 @@ void TestTranscriptTurnsEditDiffs()
                    "TurnsEditDiffs: the fixture's created scan.py is drawn as two added lines", on);
             expect(TurnsLinesKeptInOrder(golden, on) && CountTurnsOccurrences(on, L"```diff") == 1, "TurnsEditDiffs: the fixture's render is its golden plus that one diff", on);
         }
+    }
+}
+
+namespace
+{
+    // ---- Last Turn (TurnsOptions::lastTurnOnly): what a golden says its last turn is ----
+
+    // The golden's text from its LAST turn on: from the last turn heading ("### Turn N", or "### Work before the first prompt"
+    // for a transcript that opens mid-turn) - or from the "_Before this turn: ..._" note RenderTurn writes right above that
+    // heading, after a blank line - to the end. A session heading above the turn ("## Session 3 of 3 ...") is NOT in it: the
+    // whole chain's headings are what Last Turn leaves out.
+    // Returns the tail, or "" when the golden holds no turn heading.
+    std::wstring GoldenLastTurnTail(const std::wstring& golden)
+    {
+        size_t at = std::wstring::npos;
+        for (const std::wstring head : { std::wstring{ L"### Turn " }, std::wstring{ L"### Work before the first prompt" } })
+        {
+            // A heading starts a line: at the very start, or after a '\n' (a quoted or indented "### Turn" never does).
+            size_t start = golden.rfind(L"\n" + head);
+            start = start == std::wstring::npos ? (golden.rfind(head, 0) == 0 ? 0 : std::wstring::npos) : start + 1;
+            if (start != std::wstring::npos && (at == std::wstring::npos || start > at))
+            {
+                at = start;
+            }
+        }
+        if (at == std::wstring::npos)
+        {
+            return {};
+        }
+        // "_Before this turn: X._\n\n### Turn 3": step back over the blank line to the note's own line.
+        if (at >= 3 && golden.compare(at - 2, 2, L"\n\n") == 0)
+        {
+            const size_t previousEnd = golden.rfind(L'\n', at - 3);
+            const size_t lineStart = previousEnd == std::wstring::npos ? 0 : previousEnd + 1;
+            if (golden.compare(lineStart, 19, L"_Before this turn: ") == 0)
+            {
+                at = lineStart;
+            }
+        }
+        return golden.substr(at);
+    }
+
+    // Takes one head paragraph off the front of a Last Turn render when it starts with `lead` ("Paths like ...", "Before the first
+    // turn: ..."): the paragraph and the blank line after it. A paragraph taken must also be in the golden (the whole render
+    // writes it at its head too): `inGolden` says so.
+    // Returns true when a paragraph was taken.
+    bool TakeHeadParagraph(std::wstring& render, const std::wstring& golden, std::wstring_view lead, bool& inGolden)
+    {
+        if (render.compare(0, lead.size(), lead) != 0)
+        {
+            return false;
+        }
+        const size_t end = render.find(L"\n\n");
+        if (end == std::wstring::npos)
+        {
+            return false;
+        }
+        const std::wstring paragraph = render.substr(0, end + 1);
+        inGolden = inGolden && golden.find(paragraph) != std::wstring::npos;
+        render.erase(0, end + 2);
+        return true;
+    }
+}
+
+// Agentmaster (TurnsOptions::lastTurnOnly - 📜 All Screen's "Last Turn", MESSAGING.md section 21.39, the user's request of
+// 2026-10-29): NOT part of the port, so no golden covers it directly - but every golden ENDS with its last turn, so each of the
+// 11 reference fixtures at each of the 5 levels pins it byte for byte: the Last Turn render is the golden's text from the last
+// turn on (its "_Before this turn" note included, its session heading not), after the head paragraphs Last Turn keeps (the path
+// legend, which follows what the turn shows; the notes before the first turn, for a one-turn conversation) - each of which the
+// golden writes too. Then the synthetic transcript: the newest turn alone, and File Diffs adding nothing from the turns it
+// leaves out.
+void TestTranscriptTurnsLastTurn()
+{
+    std::wprintf(L"\n[TranscriptTurns] Last Turn (lastTurnOnly, All Screen): the newest turn only, numbered as in the whole conversation\n");
+
+    // ---- the goldens' last turns ----
+    const fs::path root = TurnsHarnessDir() / L"turns";
+    if (!fs::is_directory(root / L"expected"))
+    {
+        CHECK(false, "TurnsLastTurn: tests\\turns\\expected is missing (the fixtures ship beside m5_tests.exe)");
+        return;
+    }
+    // make_goldens.py's FIXTURES, as TestTranscriptTurns lists them.
+    static const wchar_t* const kFixtures[] = {
+        L"fixture_session.jsonl",
+        L"fixture_compaction.jsonl",
+        L"fixture_malformed.jsonl",
+        L"fixture_questions.jsonl",
+        L"fixture_preserved.jsonl",
+        L"chain/a4a4a4a4-0000-4000-8000-000000000004.jsonl",
+        L"chain/a1a1a1a1-0000-4000-8000-000000000001.jsonl",
+        L"chain/b2b2b2b2-0000-4000-8000-000000000002.jsonl",
+        L"chain/b3b3b3b3-0000-4000-8000-000000000003.jsonl",
+        L"agents/c1c1c1c1-0000-4000-8000-000000000001.jsonl",
+        L"agents/c2c2c2c2-0000-4000-8000-000000000002.jsonl",
+    };
+    static const std::pair<const wchar_t*, TurnsLevel> kLevels[] = {
+        { L"minimal", TurnsLevel::Minimal },
+        { L"compact", TurnsLevel::Compact },
+        { L"default", TurnsLevel::Default },
+        { L"full", TurnsLevel::Full },
+        { L"max", TurnsLevel::Max },
+    };
+    int matched = 0;
+    int total = 0;
+    for (const wchar_t* fixture : kFixtures)
+    {
+        const fs::path file = root / fs::path{ fixture };
+        const fs::path birthsFile = file.parent_path() / L"births.json";
+        // As TestTranscriptTurns renders it: a chained fixture from its FILE with the pinned creation times, any other from its
+        // lines alone.
+        const bool chained = fs::is_regular_file(birthsFile);
+        const auto births = chained ? LoadTurnsBirths(birthsFile) : std::map<std::wstring, double>{};
+        const TurnsBirthFn born = [births](const fs::path& path) -> std::optional<double> {
+            const auto it = births.find(path.stem().wstring());
+            if (it == births.end())
+            {
+                return std::nullopt;
+            }
+            return it->second;
+        };
+        for (const auto& [levelName, level] : kLevels)
+        {
+            ++total;
+            TurnsOptions opts = TurnsOptionsForLevel(level);
+            opts.lastTurnOnly = true;
+            std::wstring got = chained ? RenderTranscriptTurnsFile(file, opts, /*utc*/ true, born).value_or(L"<the render failed>") :
+                                         RenderTranscriptTurns(ParseTranscriptJsonl(ReadTurnsFileBytes(file)), opts, /*utc*/ true);
+            const std::wstring golden = WidenTurnsUtf8(ReadTurnsFileBytes(root / L"expected" / TurnsGoldenName(fixture, levelName)));
+            const std::wstring want = GoldenLastTurnTail(golden);
+            // The head paragraphs Last Turn keeps, in the order Document writes them; each must be in the golden as well.
+            bool headsInGolden = true;
+            TakeHeadParagraph(got, golden, L"Before the first turn: ", headsInGolden);
+            TakeHeadParagraph(got, golden, L"Paths like ", headsInGolden);
+            const bool ok = !want.empty() && headsInGolden && got == want;
+            const std::string label = "TurnsLastTurn: the last turn of " + NarrowAsciiForCheck(TurnsGoldenName(fixture, levelName)) + " is the golden's tail";
+            CHECK(ok, label.c_str());
+            if (ok)
+            {
+                ++matched;
+            }
+            else if (want.empty())
+            {
+                std::wprintf(L"    the golden has no turn heading (or is missing)\n");
+            }
+            else
+            {
+                PrintFirstTurnsDifference(got, want);
+            }
+        }
+    }
+    std::wprintf(L"  %d of %d last turns match their golden's tail\n", matched, total);
+
+    // ---- a chain: the newest turn keeps its number in the whole chain, and nothing of the chain is drawn ----
+    {
+        TurnsOptions opts = TurnsOptionsForLevel(TurnsLevel::Default);
+        opts.lastTurnOnly = true;
+        const fs::path chain = root / L"chain" / L"a4a4a4a4-0000-4000-8000-000000000004.jsonl";
+        const auto births = LoadTurnsBirths(root / L"chain" / L"births.json");
+        const TurnsBirthFn born = [births](const fs::path& path) -> std::optional<double> {
+            const auto it = births.find(path.stem().wstring());
+            return it == births.end() ? std::nullopt : std::optional<double>{ it->second };
+        };
+        const std::wstring last = RenderTranscriptTurnsFile(chain, opts, /*utc*/ true, born).value_or(L"");
+        CHECK(last.rfind(L"### Turn 5 ", 0) == 0 && last.find(L"### Turn 4") == std::wstring::npos && last.find(L"## Session") == std::wstring::npos &&
+                  last.find(L"Session chain") == std::wstring::npos,
+              "TurnsLastTurn: a three-session chain's newest turn is Turn 5 (its number in the whole chain), with no session heading and no chain block");
+    }
+
+    // ---- the synthetic transcript (two turns): the newest alone, and File Diffs adds nothing from the turn left out ----
+    {
+        const auto lines = ParseTranscriptJsonl(EditDiffsTranscript());
+        TurnsOptions opts = TurnsOptionsForLevel(TurnsLevel::Default);
+        opts.lastTurnOnly = true;
+        const std::wstring last = RenderTranscriptTurns(lines, opts, /*utc*/ true);
+        CHECK(last.rfind(L"### Turn 2 ", 0) == 0 && last.find(L"Now the farewell") != std::wstring::npos && last.find(L"### Turn 1") == std::wstring::npos &&
+                  last.find(L"Fix the greeting") == std::wstring::npos && last.find(L"Greeting fixed.") == std::wstring::npos,
+              "TurnsLastTurn: two turns -> turn 2 alone, its prompt in, turn 1's prompt and reply out");
+        opts.editDiffs = true;
+        const std::wstring lastWithDiffs = RenderTranscriptTurns(lines, opts, /*utc*/ true);
+        CHECK(CountTurnsOccurrences(lastWithDiffs, L"```diff") == 0 && lastWithDiffs.find(L"- **Edit** `C:/w/app.py` \x00B7 no result") != std::wstring::npos,
+              "TurnsLastTurn: with File Diffs too, turn 1's five diffs stay out; turn 2's unanswered Edit has none");
+        TurnsOptions minimal = TurnsOptionsForLevel(TurnsLevel::Minimal);
+        minimal.lastTurnOnly = true;
+        const std::wstring lastMinimal = RenderTranscriptTurns(lines, minimal, /*utc*/ true);
+        CHECK(lastMinimal.rfind(L"### Turn 2 ", 0) == 0 && lastMinimal.find(L"**\x25CF Claude**\n> (no text") != std::wstring::npos,
+              "TurnsLastTurn: at Minimal, turn 2's prompt and its ending, nothing else");
+        const std::wstring none = RenderTranscriptTurns({}, opts, /*utc*/ true);
+        CHECK(none.find(L"### Turn") == std::wstring::npos, "TurnsLastTurn: a transcript with no turn renders no turn");
     }
 }
 

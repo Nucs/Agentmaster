@@ -147,10 +147,25 @@ namespace Agentmaster
                 return _rows.empty() && _dropped == 0;
             }
 
-            /// <summary>The turn the rows written from now on belong to.</summary>
-            /// <param name="turn">Its number (0 = before the first turn).</param>
+            /// <summary>
+            /// The turn the rows written from now on belong to. The FIRST real turn heading also claims every row kept above it: the
+            /// path legend, the chain block and the notes before the first turn of a whole conversation (which the captions count
+            /// as turn 1 anyway), and - §21.39's Last Turn - the newest turn's own "_Before this turn" note, which RenderTurn writes
+            /// above its heading: without the claim a Last Turn picture of turn 31 would start at "turn 0" and be captioned
+            /// "turns 1-31".
+            /// </summary>
+            /// <param name="turn">Its number (0 = the pseudo-turn of a transcript that opens mid-turn, which claims nothing).</param>
             void SetTurn(int turn) noexcept
             {
+                if (_highestTurn == 0 && turn > 0)
+                {
+                    // Every row kept so far was written before any real turn (turn 0); rows the cap dropped already were counted
+                    // with the turn they had then.
+                    for (int& kept : _turns)
+                    {
+                        kept = turn;
+                    }
+                }
                 _turn = turn;
                 _highestTurn = (std::max)(_highestTurn, turn);
             }
@@ -1596,9 +1611,11 @@ namespace Agentmaster
             const auto now = []() noexcept { return static_cast<int64_t>(::GetTickCount64()); };
             const int64_t started = now();
             // 1. The conversation turn by turn (the chain it continues included), as Copy > Transcript renders it - plus, with
-            // "File diffs", every file change as a diff (TurnsOptions::editDiffs: Agentmaster's own option, which no level sets).
+            // "File diffs", every file change as a diff (TurnsOptions::editDiffs: Agentmaster's own option, which no level sets),
+            // and with "Last Turn" only the newest turn (TurnsOptions::lastTurnOnly, Agentmaster's own as well).
             TurnsOptions turns = TurnsOptionsForLevel(options.level);
             turns.editDiffs = turns.editDiffs || options.editDiffs;
+            turns.lastTurnOnly = turns.lastTurnOnly || options.lastTurnOnly;
             const auto markdown = RenderTranscriptTurnsFile(transcript, turns, options.utc);
             out.turnsMs = now() - started;
             if (!markdown || markdown->empty())

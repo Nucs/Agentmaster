@@ -55,8 +55,9 @@
 // summary panel's "whole conversation" view. It reuses the port's chain walk (fork + plan restart)
 // and adds the links only Agentmaster can know (a /clear in the same tab, a /handover origin) — a
 // default-constructed walk is exactly the reference's, so the Copy ▸ Transcript goldens are untouched.
-// ONE option is not part of the port either: TurnsOptions::editDiffs (📜 All Screen's file diffs). No
-// level and no preset sets it, so with it off every render is still the reference's, byte for byte.
+// TWO options are not part of the port either: TurnsOptions::editDiffs and TurnsOptions::lastTurnOnly
+// (📜 All Screen's File Diffs and Last Turn boxes). No level and no preset sets them, so with both off
+// every render is still the reference's, byte for byte.
 
 #pragma once
 
@@ -128,6 +129,13 @@ namespace Agentmaster
         // hides". A Write's diff replaces fullWrite's content block (the same lines, said once). For 📜 All Screen's "File
         // diffs" (MESSAGING.md section 21.39); Copy > Transcript never sets it.
         bool editDiffs = false;
+        // Only the conversation's NEWEST turn (the last one of the whole chain: the turn running now, or the one that ended last),
+        // numbered as in the whole conversation ("Turn 31", never "Turn 1"), with its own notes, its agents and the notes after
+        // it. What belongs to the whole conversation goes: the chain block, the per-session headings and the notes before the
+        // first turn (kept when the newest turn IS the first). The chain is still walked and every turn still parsed - the
+        // number needs them - so it costs the whole parse and saves only the rendering. For 📜 All Screen's "Last Turn"
+        // (MESSAGING.md section 21.39, the user's request of 2026-10-29); Copy > Transcript never sets it.
+        bool lastTurnOnly = false;
         // --- correctness rules (on in every preset; off only to inspect raw behavior) ---
         bool liveBranch = true; // follow only the live branch (a rewound prompt and what it produced are dropped)
         bool skipTaskNotices = true; // Claude Code's background-task notices are not user input

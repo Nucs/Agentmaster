@@ -1881,6 +1881,9 @@ namespace Agentmaster::Msg
         /// <param name="turnsLevel">The TurnsLevel's numeric value (TranscriptTurns.h: stable) - how much of each turn is drawn.</param>
         /// <param name="editDiffs">§21.39 "File diffs": true = every file change drawn as a diff whatever the level (the picker's
         /// checked box, /allscreen's "diffs"); false = the level's own default. It shows in the captions and the files' names.</param>
+        /// <param name="lastTurnOnly">§21.39 "Last Turn": true = only the conversation's newest turn is drawn (the picker's second
+        /// box, /allscreen's "last"; the user's request of 2026-10-29); false = the whole conversation. The captions then say "last
+        /// turn" instead of "conversation", the files start "last-turn-", and the thread's lines name the last turn.</param>
         /// <returns>
         /// The outcome for the command's [nav] line: "ok" (the worker runs), "busy" (another conversation is being drawn: the
         /// thread was told to ask again) or "failed" (the thread could not start: logged, the thread told). On every outcome but
@@ -1893,7 +1896,7 @@ namespace Agentmaster::Msg
         /// §21.28: the worker carries the calling scope's taps (a tapped 📜 All Screen) and queues every part inside a scope of them,
         /// so the button stays busy until the last picture - or the line saying why there is none - is in.
         /// </remarks>
-        const wchar_t* _startConversationImage(const std::wstring& sessionId, int64_t threadId, const std::wstring& transcript, int turnsLevel, bool editDiffs);
+        const wchar_t* _startConversationImage(const std::wstring& sessionId, int64_t threadId, const std::wstring& transcript, int turnsLevel, bool editDiffs, bool lastTurnOnly);
         /// <summary>
         /// Sends a picture into a topic as a PHOTO (sendPhoto, silent, at `prio`); when Telegram refuses it as a photo (a size
         /// it will not take as one, a picture it cannot read), the same bytes go again as a document, in its place.

@@ -1831,13 +1831,14 @@ namespace Agentmaster::Msg
             // (ConversationImage.h). So no window is asked, and a parked tab or a closed session draws as well as a live one.
             // The level: the one named (a level button of the card's picker names one), else the cog's default (§21.39: Full
             // unless set otherwise) - NOT LevelFromWord's Default, which /transcript keeps for a bare /transcript. "diffs" (the
-            // picker's checked File diffs) draws every file change as a diff, whatever the level.
+            // picker's checked File Diffs) draws every file change as a diff, whatever the level; "last" (its checked Last Turn)
+            // draws the newest turn only.
             const TurnsLevel defaultLevel = static_cast<TurnsLevel>(_allScreenLevel.load());
             const auto pick = ParseAllScreenArgs(cmd.args, defaultLevel);
             if (!pick)
             {
-                _reply(threadId, L"Usage: /allscreen [minimal|compact|default|full|max] [diffs] \x2014 bare, it draws " + std::wstring{ AllScreenLevelWord(defaultLevel) } +
-                                     L" (the default level, set in the cog's Messaging tab); \x201C" L"diffs\x201D adds every file change as a diff, whatever the level.",
+                _reply(threadId, L"Usage: /allscreen [minimal|compact|default|full|max] [diffs] [last] \x2014 bare, it draws " + std::wstring{ AllScreenLevelWord(defaultLevel) } +
+                                     L" (the default level, set in the cog's Messaging tab); \x201C" L"diffs\x201D adds every file change as a diff, whatever the level; \x201C" L"last\x201D draws the last turn only.",
                        false);
                 return;
             }
@@ -1870,7 +1871,7 @@ namespace Agentmaster::Msg
                     return;
                 }
             }
-            done(_startConversationImage(sessionId, threadId, path, static_cast<int>(pick->level), pick->diffs));
+            done(_startConversationImage(sessionId, threadId, path, static_cast<int>(pick->level), pick->diffs, pick->lastTurn));
             return;
         }
         if (name == L"reactivate")
@@ -2870,20 +2871,36 @@ namespace Agentmaster::Msg
             }
             else if (verb == kCardVerbAllScreenDiffs)
             {
-                // §21.39: the picker's ⬜ File diffs was tapped - the same picker with the box checked (its ☑️ names the unchecked
+                // §21.39: the picker's ⬜ File Diffs was tapped - the same picker with the box checked (its ☑️ names the unchecked
                 // page again). A page flip; nothing is drawn until a level is picked.
                 answer(L"");
                 _showCardPage(sid, messageId, CardPage::AllScreenDiffs);
                 return;
             }
+            else if (verb == kCardVerbAllScreenLast)
+            {
+                // §21.39 (the user's request of 2026-10-29, "Last Turn"): a box tap that shows the picker with ☑️ Last Turn and ⬜ File
+                // Diffs - the Last Turn box checked on the unchecked page, or File Diffs unchecked on the page with both checked.
+                // A page flip, like the File Diffs box's; nothing is drawn until a level is picked.
+                answer(L"");
+                _showCardPage(sid, messageId, CardPage::AllScreenLast);
+                return;
+            }
+            else if (verb == kCardVerbAllScreenLastDiffs)
+            {
+                // §21.39: a box tap that shows the picker with both boxes checked.
+                answer(L"");
+                _showCardPage(sid, messageId, CardPage::AllScreenLastDiffs);
+                return;
+            }
             else if (const auto pick = ParseCardAllScreenLevelVerb(verb); pick)
             {
-                // §21.39: a level of the picker - /allscreen <level>, with "diffs" when the button sat on the checked page (its
-                // data says so: what the card showed is what is drawn). No toast, as for 🖼 Screen Image (§21.28): the tap's answer
-                // still waits until the last picture is in (the worker carries the tap), and past the hold's limit it says the work
-                // goes on.
+                // §21.39: a level of the picker - /allscreen <level>, with "diffs" and / or "last" when the button sat on a page
+                // with that box checked (its data says so: what the card showed is what is drawn). No toast, as for 🖼 Screen Image
+                // (§21.28): the tap's answer still waits until the last picture is in (the worker carries the tap), and past the
+                // hold's limit it says the work goes on.
                 cmd.name = L"allscreen";
-                cmd.args = std::wstring{ AllScreenLevelWord(pick->level) } + (pick->diffs ? L" diffs" : L"");
+                cmd.args = std::wstring{ AllScreenLevelWord(pick->level) } + (pick->diffs ? L" diffs" : L"") + (pick->lastTurn ? L" last" : L"");
                 _runSessionCommand(sid, cmd, fake, threadId);
                 // Then the card goes back to MAIN at once (the user's rule of 2026-10-26: "after picking which, reset menu to main
                 // view") - the same page flip as ◀ Back, at an answer's priority, so it lands before the first picture. After the
@@ -3721,9 +3738,9 @@ namespace Agentmaster::Msg
                 }
             }
         }
-        LogNav(L"remote telegram card-page " + ShortId(cardOwner.empty() ? sessionId : cardOwner) +
-               (page == CardPage::Session ? L" session" :
-                                            (page == CardPage::AllScreen ? L" allscreen" : (page == CardPage::AllScreenDiffs ? L" allscreen+diffs" : L" main"))) +
+        // The page's word (CardPageLogWord): "main", "session", and the picker's four - "allscreen", "allscreen+diffs",
+        // "allscreen+last", "allscreen+diffs+last" - so the trail says which boxes the user checked.
+        LogNav(L"remote telegram card-page " + ShortId(cardOwner.empty() ? sessionId : cardOwner) + L" " + CardPageLogWord(page) +
                (cardOwner.empty() ? L" (a copy of the card)" : L""));
         if (!cardOwner.empty())
         {
@@ -3830,7 +3847,7 @@ namespace Agentmaster::Msg
         }
     }
 
-    const wchar_t* MessagingService::_startConversationImage(const std::wstring& sessionId, int64_t threadId, const std::wstring& transcript, int turnsLevel, bool editDiffs)
+    const wchar_t* MessagingService::_startConversationImage(const std::wstring& sessionId, int64_t threadId, const std::wstring& transcript, int turnsLevel, bool editDiffs, bool lastTurnOnly)
     {
         // The poll thread (a typed /allscreen, a tapped 📜 All Screen): nothing here may wait for the drawing.
         const auto unmark = [this, &sessionId]() {
@@ -3854,7 +3871,7 @@ namespace Agentmaster::Msg
         {
             // §21.28: the worker carries the tapped 📜 All Screen along (`taps`: empty for a typed /allscreen) and queues every part
             // inside a scope of them, so the button stays busy until the last picture - or the line saying why there is none - is in.
-            std::thread([self = weak_from_this(), sessionId, threadId, transcript, turnsLevel, editDiffs, title, taps = _holdTaps()]() noexcept {
+            std::thread([self = weak_from_this(), sessionId, threadId, transcript, turnsLevel, editDiffs, lastTurnOnly, title, taps = _holdTaps()]() noexcept {
                 const auto me = self.lock();
                 if (!me)
                 {
@@ -3865,21 +3882,25 @@ namespace Agentmaster::Msg
                 {
                     ConversationImageOptions options;
                     options.level = static_cast<TurnsLevel>(turnsLevel);
-                    options.editDiffs = editDiffs; // §21.39 "File diffs": every file change as a diff, whatever the level
+                    options.editDiffs = editDiffs; // §21.39 "File Diffs": every file change as a diff, whatever the level
+                    options.lastTurnOnly = lastTurnOnly; // §21.39 "Last Turn": the newest turn only
                     const std::wstring levelName = TurnsLevelName(options.level);
                     // What was drawn, in every caption and file name: the level always (the default is the cog's choice, so a bare
-                    // name would not say which), and "+ diffs" when File diffs was checked.
+                    // name would not say which), and "+ diffs" when File Diffs was checked. "Last turn" names the WHAT instead of
+                    // "conversation" (the caption's subject, the file's first word), so the two never read alike in the thread.
                     const std::wstring drawn = levelName + (editDiffs ? L" + diffs" : L"");
+                    const wchar_t* const subject = lastTurnOnly ? L"last turn" : L"conversation";
                     const std::wstring titleLine = TgTitleLine(title, 120).empty() ? ShortId(sessionId) : TgTitleLine(title, 120);
-                    // "conversation-Agentmaster-full.png", "conversation-Agentmaster-compact-diffs-2of4.png": the part only when there
-                    // are several.
-                    const std::wstring stem = L"conversation-" + SafeFileStem(title) + L"-" + levelName + (editDiffs ? L"-diffs" : L"");
+                    // "conversation-Agentmaster-full.png", "conversation-Agentmaster-compact-diffs-2of4.png", "last-turn-Agentmaster-
+                    // max-diffs.png": the part only when there are several.
+                    const std::wstring stem = std::wstring{ lastTurnOnly ? L"last-turn-" : L"conversation-" } + SafeFileStem(title) + L"-" + levelName + (editDiffs ? L"-diffs" : L"");
                     size_t sent = 0;
                     size_t totalBytes = 0;
                     options.onPart = [&](ConversationImagePart&& part) {
-                        // "📜 Agentmaster · conversation (full + diffs) · 2/4 · turns 12–31": what was drawn, which part, and which
-                        // turns it shows (a part's first rows may be the path legend before turn 1, counted as turn 1 here).
-                        std::wstring caption = L"\U0001F4DC " + titleLine + L" \x00B7 conversation (" + drawn + L")";
+                        // "📜 Agentmaster · conversation (full + diffs) · 2/4 · turns 12–31", "📜 Agentmaster · last turn (max) · turn
+                        // 31": what was drawn, which part, and which turns it shows (the sheet counts the rows above the first turn
+                        // heading - the path legend, a Last Turn's own note - as that turn; the 1 below only guards a sheet with none).
+                        std::wstring caption = L"\U0001F4DC " + titleLine + L" \x00B7 " + subject + L" (" + drawn + L")";
                         if (part.count > 1)
                         {
                             caption += L" \x00B7 " + std::to_wstring(part.index + 1) + L"/" + std::to_wstring(part.count);
@@ -3899,30 +3920,37 @@ namespace Agentmaster::Msg
                         ++sent;
                     };
                     const ConversationImageResult r = RenderConversationImages(transcript, options);
-                    me->_log(L"[msg] conversation pictures of " + ShortId(sessionId) + L": " + levelName + (editDiffs ? L"+diffs" : L"") + L", " + std::to_wstring(sent) + L" of " + std::to_wstring(r.parts.size()) +
+                    me->_log(L"[msg] conversation pictures of " + ShortId(sessionId) + L": " + levelName + (editDiffs ? L"+diffs" : L"") + (lastTurnOnly ? L"+last" : L"") + L", " +
+                             std::to_wstring(sent) + L" of " + std::to_wstring(r.parts.size()) +
                              L" part(s) sent, " + std::to_wstring(r.rows) + L" rows (" + std::to_wstring(r.droppedRows) + L" left out), " + std::to_wstring(r.grid.widthPx) + L" px wide, " +
                              std::to_wstring(totalBytes / 1024) + L" KB, " + r.fontFamily + L", turns view " + std::to_wstring(r.turnsMs) + L" ms (" +
                              std::to_wstring(r.markdownChars / 1024) + L" K chars), layout " + std::to_wstring(r.layoutMs) + L" ms, drawn in " + std::to_wstring(r.drawMs) + L" ms" +
                              (r.error.empty() ? std::wstring{} : L" - failed: " + r.error));
+                    // The thread's lines name what was asked for: "the conversation" or "the last turn" (Last Turn).
+                    const std::wstring what = lastTurnOnly ? L"The last turn" : L"The conversation";
                     if (!r.error.empty())
                     {
                         me->_reply(threadId,
-                                   sent == 0 ? L"The conversation could not be drawn: " + TgEscapeHtml(r.error) :
-                                               L"The conversation's pictures stopped after part " + std::to_wstring(sent) + L": " + TgEscapeHtml(r.error),
+                                   sent == 0 ? what + L" could not be drawn: " + TgEscapeHtml(r.error) :
+                                               what + L"'s pictures stopped after part " + std::to_wstring(sent) + L": " + TgEscapeHtml(r.error),
                                    false);
                     }
                     else if (r.droppedRows > 0)
                     {
                         // The first picture says it too (its top row); this line adds what to do about it: a shorter level of the
                         // card's picker (§21.39 - Full, the default, keeps the most per turn, so a long session hits the cap first).
-                        const wchar_t* shorter = options.level >= TurnsLevel::Full ?
-                                                     L" A shorter level draws more of it: Default or Compact in \U0001F4DC All Screen \x25B8 (or /allscreen compact)." :
-                                                     (options.level == TurnsLevel::Default ? L" Compact draws more of it: \U0001F4DC All Screen \x25B8 Compact (or /allscreen compact)." : L"");
-                        // With File diffs checked the diffs take room too: unchecking it draws more of the conversation as well.
+                        // With Last Turn checked the typed form keeps its "last" (the same request, shorter).
+                        const std::wstring typedLast = lastTurnOnly ? L" last" : L"";
+                        const std::wstring shorter = options.level >= TurnsLevel::Full ?
+                                                         L" A shorter level draws more of it: Default or Compact in \U0001F4DC All Screen \x25B8 (or /allscreen compact" + typedLast + L")." :
+                                                         (options.level == TurnsLevel::Default ? L" Compact draws more of it: \U0001F4DC All Screen \x25B8 Compact (or /allscreen compact" + typedLast + L")." :
+                                                                                                 std::wstring{});
+                        // With File Diffs checked the diffs take room too: unchecking it draws more of the conversation as well. One
+                        // turn's rows are all that turn's, so Last Turn says no "through turn".
                         me->_reply(threadId,
-                                   L"The conversation is longer than " + std::to_wstring(r.parts.size()) + L" pictures hold: its first " + std::to_wstring(r.droppedRows) +
-                                       L" rows" + (r.droppedThroughTurn > 0 ? L" (through turn " + std::to_wstring(r.droppedThroughTurn) + L")" : std::wstring{}) +
-                                       L" are left out." + shorter + (editDiffs ? L" Without File diffs the pictures are shorter too." : L""),
+                                   what + L" is longer than " + std::to_wstring(r.parts.size()) + L" pictures hold: its first " + std::to_wstring(r.droppedRows) +
+                                       L" rows" + (r.droppedThroughTurn > 0 && !lastTurnOnly ? L" (through turn " + std::to_wstring(r.droppedThroughTurn) + L")" : std::wstring{}) +
+                                       L" are left out." + shorter + (editDiffs ? L" Without File Diffs the pictures are shorter too." : L""),
                                    false);
                     }
                 }
@@ -5816,9 +5844,9 @@ namespace Agentmaster::Msg
                    L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /screenimage\n"
                    // §21.40: /status sends the card copy, then what Claude Code's own /status dialog shows.
                    L"/status \x2014 the card, then what Claude Code's /status shows: version, model, MCP servers, memory, account, plan usage\n"
-                   // §21.39: the card's 📜 All Screen ▸ (a level picker with a File diffs box), typed with a level or bare (the cog's
-                   // default level, Full), and "diffs" for every file change as a diff.
-                   L"/allscreen [level] [diffs] \x2014 the whole conversation as tall pictures, drawn like Claude Code draws it (bare: the default level, full unless set in the cog; diffs: every file change as a diff)\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n"
+                   // §21.39: the card's 📜 All Screen ▸ (a level picker with File Diffs and Last Turn boxes), typed with a level or bare
+                   // (the cog's default level, Full), "diffs" for every file change as a diff, and "last" for the newest turn only.
+                   L"/allscreen [level] [diffs] [last] \x2014 the whole conversation as tall pictures, drawn like Claude Code draws it (bare: the default level, full unless set in the cog; diffs: every file change as a diff; last: the last turn only)\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n"
                    // §21.41: the card's two stopping buttons, the typed commands' twins (one path each, so they behave alike). Both
                    // live on the Session page only (the user's rule of 2026-10-28 for Esc: "only inside Sessions menu").
                    L"On \x2699\xFE0F Session's page the card has \x238B Esc (one Esc at once, as at the PC) and \U0001F319 Deactivate (claude stops, the tab keeps its place)\n"
