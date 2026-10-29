@@ -208,7 +208,11 @@ score        = priority(site) × availability        dock 2.0, homepc 1.0 (setti
 ### 3.5 Order, pressure
 
 - **Order:** first come, first served; a smaller request may pass a larger one that waits, until that one has waited
-  10 minutes.
+  10 minutes. From then on a younger request that needs capacity waits behind it (`waiting: behind <id>, which has
+  waited longer for capacity`) and still ends no-capacity at its own wait timeout; a request that needs no slot (an
+  import, an install, a build whose build exists) starts anyway, since it takes nothing the older one waits for. (Until
+  2026-10-29 the admission pass stopped at the older request, so an import waited behind a build that waited hours for
+  memory, past its own 5-minute wait timeout.)
 - **Pressure while slots run** (the host agent watches Windows): first shrink balloons toward their minimums, oldest
   idle VM first; then hold new slots; then shut down an idle build VM; only at the floor (Windows available under
   2 GB twice in a row) stop the newest slot.

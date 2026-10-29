@@ -106,7 +106,17 @@ dir=/srv/buildserver/coordinator
 pidfile=$dir/amb-coordinator.pid
 mkdir -p "$dir"
 if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-  echo "running $(cat "$pidfile")"
+  pid=$(cat "$pidfile")
+  # A coordinator started before the last deploy runs the files that deploy put aside (coordinator.old/), or a deleted
+  # file: it answers, but with the old code. It happens when an `amb` call finds the coordinator down between `down` and
+  # the deploy's swap and wakes it from the old folder (2026-10-29). Still exit 0: amb's wake only needs one that answers;
+  # sitectl.py `up` turns this line into an error.
+  exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
+  if [ "$exe" != /srv/buildserver/bin/coordinator/amb-coordinator ]; then
+    echo "running $pid from an old binary ($exe): stop it (sitectl.py down), then start it (sitectl.py up)"
+    exit 0
+  fi
+  echo "running $pid"
   exit 0
 fi
 export AMB_ROOT=/srv/buildserver
@@ -480,10 +490,13 @@ def deploy() -> dict[str, object]:
     - buildserver/steps (steps/build: the build job's guest scripts; steps/install: the deploy job's Windows-side
       script, which the coordinator stages on Q: and runs through WSL's interop) into /srv/buildserver/bin/steps,
       replaced whole.
-    A running coordinator keeps its old files open; `down` then `up` makes it use the new ones.
+    A running coordinator keeps its old files open; `down` then `up` makes it use the new ones. One that runs when the
+    deploy ends is named in the result (`still_running_old_binary`): a deploy after `down` can still meet one, because an
+    `amb` call that finds the coordinator down wakes it from the old files (stop your own `amb ... --wait` and
+    `amb logs -f` first).
 
     Returns:
-        The deployed files' sizes.
+        The deployed files' sizes, and the pid of a coordinator that still runs the replaced binary.
 
     Raises:
         SiteError: a publish or a copy failed.
@@ -515,6 +528,9 @@ def deploy() -> dict[str, object]:
         _install_file_script_text(COORDINATOR_UP, "/srv/buildserver/bin/coordinator-up.sh", "0755"),
         "du -sk /srv/buildserver/bin/coordinator | awk '{print \"coordinator_kb=\"$1}'",
         "stat -c 'guest_bytes=%s' /srv/buildserver/bin/amb-guest.exe",
+        # A coordinator alive now was started from the files just put aside: say so, so `up` is not taken for a restart.
+        "p=/srv/buildserver/coordinator/amb-coordinator.pid",
+        "if [ -f \"$p\" ] && kill -0 \"$(cat \"$p\")\" 2>/dev/null; then echo \"still_running_old_binary=$(cat \"$p\")\"; fi",
     ])
     out = in_distro(script, timeout=600).stdout.decode("utf-8", "replace")
     facts: dict[str, object] = {"hostfacts": str(WINDOWS_BIN / "amb-hostfacts.exe")}
@@ -553,12 +569,18 @@ def up() -> dict[str, object]:
         What coordinator-up.sh said, the distro's address, and whether Windows' localhost reaches the coordinator.
 
     Raises:
-        SiteError: it did not start (its log's last lines are in the message).
+        SiteError: it did not start (its log's last lines are in the message), or the coordinator that runs is not the
+            deployed binary (one started before the last deploy: `down`, then `up`).
     """
     done = in_distro("/srv/buildserver/bin/coordinator-up.sh\n", timeout=120, check=False)
     if done.returncode != 0:
         log = in_distro("tail -n 30 /srv/buildserver/coordinator/coordinator.log\n", timeout=60, check=False)
         raise SiteError("the coordinator did not start:\n" + log.stdout.decode("utf-8", "replace"))
+    said = done.stdout.decode("utf-8", "replace").strip()
+    if "from an old binary" in said:
+        # The redeploy's `up` must not report success while the old code runs: on 2026-10-29 it said "running 583" for a
+        # coordinator an amb call had woken from the old folder mid-deploy, and the fix being deployed seemed not to work.
+        raise SiteError(f"the coordinator {said}")
     address = in_distro("ip -4 -o addr show eth0 | awk '{print $4}' | cut -d/ -f1\n", timeout=30).stdout.decode().strip()
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{COORDINATOR_PORT}/healthz", timeout=5) as response:

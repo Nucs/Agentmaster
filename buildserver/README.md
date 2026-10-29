@@ -50,6 +50,12 @@ amb list | show <id> | cancel <id>
   and `amb build --help` submitted a build).
 - A request waits for a slot while homepc has too little free (`waiting: memory`, …), up to its kind's wait timeout,
   then ends `NoCapacity`. Windows keeps 6 GB available and 16 GB of free commit (DESIGN.md §3.2).
+- Once a request has waited 10 minutes, a younger one that needs a slot waits behind it (`waiting: behind <id>, which
+  has waited longer for capacity`) up to its own wait timeout; an import, an install or a build whose build exists
+  needs no slot and starts anyway (DESIGN.md §3.5; until 2026-10-29 it waited too, without ever ending).
+- A released version runs e2e without a build: `amb import <its portable zip> --commit <the tag's commit>`, then `amb
+  e2e` on the build id it prints; `--suite <folder>` pins the suite (e.g. `git archive <commit> e2e` extracted on Q:),
+  since a request that waits for memory stages the suite only when it starts.
 - A run's results stay in the site's store: `/srv/buildserver/store/requests/<id>/` (`<id>.status.json`,
   `<id>.progress.jsonl`, `<id>.zip` with pytest.log, junit.xml, the mock's requests and each failed test's evidence).
 
@@ -179,7 +185,7 @@ python buildserver/image/images.py list
 ## Build and test
 
 ```text
-dotnet test buildserver/src/Buildserver.slnx            # build everything + 75 unit tests (output in Q:\tmp\buildserver-build)
+dotnet test buildserver/src/Buildserver.slnx            # build everything + 77 unit tests (output in Q:\tmp\buildserver-build)
 python buildserver/tests/local_chain.py                 # the chain without a VM (Q:\tmp\buildserver-test, removed after)
 python buildserver/tests/site_outcomes.py               # Phase 1's done-when on the real site: e2e passed, failed, cancelled, lost VM
 python buildserver/tests/site_build.py                  # the build MVP's done-when on the real site (it builds: ask first)
@@ -203,6 +209,10 @@ python buildserver/site/sitectl.py run -- podman ps
 - **What it holds:** podman (rootful, cgroupfs, overlay), crun, slirp4netns, qemu-img, python3; the folders of
   DESIGN.md §8.1 under `/srv/buildserver` (images, slots, exchange, records, store, bin, fastrun, …).
 - **A redeploy:** `down` (check `amb status` first: it cancels running requests and stops their slots), `deploy`, `up`.
+  Stop your own `amb … --wait` and `amb logs -f` first: an `amb` call that finds the coordinator down starts it again,
+  from the files the deploy then puts aside. `deploy` names such a coordinator (`still_running_old_binary`), and `up`
+  fails on it ("running <pid> from an old binary"): `down`, then `up` (2026-10-29: `up` said "running 583" for one,
+  and the fix being deployed seemed not to work).
 - **Never `wsl --shutdown`** for the site: it ends every Docker container and other sessions' desktops. The script only
   ever terminates its own distro (`wsl --terminate buildserver`).
 - **Windows reaches the coordinator at 127.0.0.1:2207** (it listens on IPv4); fastrund, which listens on the IPv6
@@ -225,7 +235,7 @@ python buildserver/site/sitectl.py run -- podman ps
 | [`steps/install/`](steps/install) | `install-build.ps1`: the Windows side of `amb install` (stage into the free slot, check, wait for the requesting session, the mutex, the swap, the watch), run by the coordinator through WSL's interop | in use (2026-10-29) |
 | [`measure/`](measure/README.md) | the measurements and proofs behind DESIGN.md §16, with their raw results | P0.1 (§16.9), P0.5's comparison (§16.11) and P0.4's native half (§16.12) |
 | [`src/Amb.Core`](src/Amb.Core) | the shared core: the allocation rule (§3), the request / build / slot / VM model, the guest and API protocol, the atomic record store (§6) | 27 unit tests (`src/Amb.Core.Tests`) |
-| [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API (artifacts streamed by name), the scheduler (admission by priority × availability, wait and run timeouts, cancel, one build at a time, existing builds answered without a slot), the guest broker, the jobs (import, smoke, install, layer, e2e, build, deploy), the source mirror (snapshots too) and its bundles, the slot manager and its drivers (podman + dockur, kept VMs with a data disk; local, for tests) | runs in the site; 41 unit tests (`src/Amb.Coordinator.Tests`) |
+| [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API (artifacts streamed by name), the scheduler (admission by priority × availability, wait and run timeouts, cancel, one build at a time, existing builds answered without a slot), the guest broker, the jobs (import, smoke, install, layer, e2e, build, deploy), the source mirror (snapshots too) and its bundles, the slot manager and its drivers (podman + dockur, kept VMs with a data disk; local, for tests) | runs in the site; 43 unit tests (`src/Amb.Coordinator.Tests`) |
 | [`src/Amb.GuestAgent`](src/Amb.GuestAgent) | `amb-guest.exe` (Native AOT, 7 MB): the agent in every VM; hello, heartbeat with the guest's memory, one step at a time by long poll (run, fetch, expand, put, shutdown) | in every slot |
 | [`src/Amb.HostFacts`](src/Amb.HostFacts) | `amb-hostfacts.exe` (Native AOT): Windows' available memory, free commit, Q: free space and a full-screen game, as one line of JSON; the coordinator runs it every 10 s through WSL's interop | in use |
 | [`src/Amb.Cli`](src/Amb.Cli) | `amb.exe`: the command line above; `WorkingTreeSnapshot.cs` (`--snapshot`), `ProcessAncestry.cs` (the requesting claude.exe of `amb install`) | in use; 7 unit tests (`src/Amb.Cli.Tests`) |

@@ -15,8 +15,9 @@ namespace Amb.Coordinator;
 /// </summary>
 /// <remarks>
 /// <para><b>Order:</b> first come, first served; a younger request may pass an older one that does not fit, until the
-/// older one has waited 10 minutes: from then on nothing younger is admitted, so a large request is not starved by a
-/// stream of small ones.</para>
+/// older one has waited 10 minutes: from then on nothing younger that needs capacity is admitted, so a large request is
+/// not starved by a stream of small ones. A request that needs no slot (an import, a deploy, a build that exists) still
+/// starts behind it: it takes none of the capacity the older one waits for.</para>
 /// <para><b>Restarts:</b> a request that was starting or running when the coordinator stopped is marked lost (its slot is
 /// removed by <see cref="SlotManager.RemoveLeftoversAsync"/>); a pending one simply waits on.</para>
 /// </remarks>
@@ -133,11 +134,23 @@ public sealed class Scheduler : BackgroundService
         await Task.WhenAll(_running.Values.Select(j => j.Task ?? Task.CompletedTask)).ConfigureAwait(false);
     }
 
-    /// <summary>One admission pass over every pending request, oldest first.</summary>
+    /// <summary>One admission pass over every pending request, oldest first: each one is started, placed, held or ended
+    /// no-capacity.</summary>
+    /// <remarks>
+    /// Once the pass meets a request that needs capacity, does not fit, and has waited past <see cref="PassLimit"/>, every
+    /// younger request that needs capacity is held behind it unscored (the next free capacity is the older one's), but the
+    /// pass goes on to the end: a younger request that needs no slot (an import, a deploy, a build that exists) still
+    /// starts, and a held one still ends no-capacity at its own wait timeout. Until 2026-10-29 the pass stopped at that
+    /// request, so an import, which only copies a file into the store, waited behind a build that waited hours for memory,
+    /// and passed its own 5-minute wait timeout without ever being looked at. Internal for the scheduler's tests, which
+    /// run one pass at a time.
+    /// </remarks>
     /// <exception cref="IOException">A record could not be read or written.</exception>
-    private void Admit()
+    internal void Admit()
     {
         DateTimeOffset now = _clock.GetUtcNow();
+        // The request the rest of the pass's capacity requests queue behind, once one has waited past PassLimit.
+        string? firstInLine = null;
         foreach (RequestRecord request in _book.Active.Where(r => r.State == RequestState.Pending))
         {
             if (request.Kind == RequestKind.Deploy && BusyDeploy(request.Id) is { } deploying)
@@ -149,7 +162,8 @@ public sealed class Scheduler : BackgroundService
             }
             if (request.Resources is null)
             {
-                // No slot (an import): it only needs the coordinator.
+                // No slot (an import, a deploy): it only needs the coordinator, so it starts even behind a request that
+                // waits for capacity.
                 Start(_book.Move(request.Id, RequestState.Starting, "started (no slot needed)"));
                 continue;
             }
@@ -164,6 +178,13 @@ public sealed class Scheduler : BackgroundService
                 // One kept build VM, so one build at a time: this one waits for it (an identical request then finds
                 // the first one's build and returns its id at once).
                 Hold(request, now, $"the build VM is busy with {busy}");
+                continue;
+            }
+            if (firstInLine is not null)
+            {
+                // Not scored at all: even a fit would take capacity the older request has waited longer for. Hold still
+                // ends it at its own wait timeout, which the pass's old early stop never reached.
+                Hold(request, now, $"behind {firstInLine}, which has waited longer for capacity");
                 continue;
             }
             ResourceRequest resources = EffectiveResources(request);
@@ -186,8 +207,9 @@ public sealed class Scheduler : BackgroundService
                 }
                 if (now - request.CreatedAt > PassLimit)
                 {
-                    // It has waited long enough: nothing younger passes it, so the next free capacity is its own.
-                    break;
+                    // It has waited long enough: nothing younger that needs capacity passes it, so the next free capacity
+                    // is its own. The pass goes on for the requests that need no slot.
+                    firstInLine = request.Id;
                 }
                 continue;
             }
