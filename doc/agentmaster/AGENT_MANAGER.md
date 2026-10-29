@@ -79,6 +79,11 @@ it), `AgentLaunchBar.{h,cpp}` (the launch row), `TabManagement.cpp` (closing tab
   comes back by itself.
 - ⚠ A named window's caption no longer carries the focused tab's title: a script or window switcher that finds a
   window by its caption sees the name.
+- **Away from the PC:** every window reports its name in the census (`WindowCensus::name`, apart from
+  `WindowCensus::title`, which cannot tell a name from a tab's title). Telegram's new-thread wizard shows a named
+  window by its name at its window step — its entry, its button, the default and the launch line — and takes the
+  name typed like the number (MESSAGING.md §21.25.8). The AI search's window tools (the 🔎 Search topic and the
+  Sessions page) describe a named window by its name and take it as their `window` argument (SESSIONS.md §9.14).
 - Logs: `[window-name]` (every change, the record's apply), `[nav] window-rename …` (the header's commit, the
   window menu's open).
 

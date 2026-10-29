@@ -3783,7 +3783,7 @@ model and window choices, the views, the persisted records); the service half is
 | **Create folder** (a typed folder that does not exist) | "📁 *X* does not exist yet: `K:\a\b\X`" — what exists, what a Create makes ("2 new folders") | [📁 Create the folder] · [◀ Back to the folders] · [✖ Cancel] |
 | **Model** (optional) | the chosen folder; "Default is the settings model, `opus`" (or Claude Code's own default); how to type an id | [✅ Default] [✏ Specify…] first (the PC menus' order), then the model last typed in a "Specify a model" prompt (↺) when the menu lacks it, the menu's models (🧠) and presets (🔌), then [◀ Back] [✖ Cancel]; or "/model &lt;id&gt;" typed |
 | **Model id** (after ✏ Specify…) | "Send the model id as your next message — like `claude-opus-5-5[1m]`" | one word typed; [✅ Use Default] · [◀ Back to the list] · [✖ Cancel] |
-| **Window** | per window: its number, tab count, "used last", how many tabs work in the folder, its newest tab ("newest: “beta” · opened 2h ago"), its ten newest titles; "⭐ Default: window 1 — next to “beta”, the newest tab in proj" | [⭐ Default — window N], one [🪟 N] per window, [🔄 Refresh], [◀ Back], [✖ Cancel]; or the window's number typed (2, #2, w2, window 2) |
+| **Window** | per window: its number (and its name, when the user named it: §21.25.8), tab count, "used last", how many tabs work in the folder, its newest tab ("newest: “beta” · opened 2h ago"), its ten newest titles; "⭐ Default: window 1 — next to “beta”, the newest tab in proj" ("Research (window 1)" for a named window) | [⭐ Default — window N], one [🪟 N] per window ([🪟 N · Name] for a named one), [🔄 Refresh], [◀ Back], [✖ Cancel]; or the window's number typed (2, #2, w2, window 2), or its name |
 
 Then the launch: "🚀 Opening a new session in **proj** · Opus · window 2, next to “beta”…" (a line in the thread, quoting the
 message when the last choice was typed), the picker is deleted, and the bind of §21.17.4 makes the thread the session's
@@ -3951,6 +3951,52 @@ paths (no wizard, the model unchecked, §21.21); a held command still replays as
 session restores under a NEW id (restore-fresh), so a launch restored from the state file can time out and send its thread back
 into the wizard; the window step counts a Codex tab like any tab; a thread the user deletes is noticed only at the next edit
 or post.
+
+#### 21.25.8 The window's name: a window the user named is shown and picked by it (2026-10-29; NOT BUILT)
+
+> The user (2026-10-29), right after windows got names (AGENT_MANAGER.md *The window name*): "Kindly integrate the new title
+> mechanism to telegram, if user specified. I think we have picker menues or something like that".
+
+A window the user NAMED on the PC (the window menu's "Rename window…" or the Agent Manager header) is shown by that name in
+the window step, beside its number; an unnamed window reads exactly as before.
+
+| Where | Unnamed (as before) | Named |
+|---|---|---|
+| the window's entry | **2** · 5 tabs · used last | **2 · Research** · 5 tabs · used last |
+| the default line | ⭐ Default: **window 2** — next to “beta”… | ⭐ Default: **Research (window 2)** — next to “beta”… |
+| the default button | [⭐ Default — window 2] | [⭐ Default — Research (window 2)] |
+| a window's button | [🪟 2], four to a row | [🪟 2 · Research], two to a row while any window is named |
+| the closing line | "Or send the window’s number." | "Or send the window’s number or its name." |
+| the launch line | 🚀 Opening … · window 2, next to “beta”… | 🚀 Opening … · Research (window 2), next to “beta”… |
+
+- **Where the name comes from:** the census (`WindowCensus::name`, filled by each window in
+  `TerminalPage.AgentSessionsAi.cpp` from `WindowProperties::WindowName`, never "_quake"); `BuildNewThreadWindowPlan` keeps it on
+  the choice (`NewThreadWindowChoice::name`: one trimmed line, whole up to `kMaxWindowNameLength`, 256). Printed cut at 40
+  characters (`kNewThreadWindowNameChars`), on a button at 28 (`kNewThreadButtonLabelChars`); HTML-escaped in the text, plain on
+  the buttons. `NewThreadWindowLabel` makes "window N" / "Name (window N)": the name first (what the user knows the window by on
+  the taskbar), the number kept (what the buttons and a typed choice use).
+- **A typed name picks its window** (`MatchNewThreadWindowName`): the whole message, trimmed, in any case. A typed NUMBER is read
+  first, so a window named "2" never hides window 2. A name two windows share picks neither: the step answers "More than one
+  window has that name — send the window’s number instead" (a Reply: nothing chosen, nothing held). Any other text is held for
+  the session, as before.
+- **Kept:** the choices' names (`"name"`) and the chosen window's (`NewThreadWizard::windowName`, `"windowName"`) are saved with
+  the thread's record, so a restarted wizard shows (and matches) the names it showed; a wizard saved before this reads every
+  window unnamed. The one-window skip keeps the name with its choice; a skipped step still names no window in the launch line.
+- **The Search topic** (and the PC's AI search) learns the names from its tools, not from a prompt change: `list` carries a
+  named window's `"name"`, `overview` heads it `## Window 1 named "Research" (id …)`, the "which window?" refusal describes it
+  `window 1 named "Research" (id …)`, and the `window` argument of `list`, `overview`, `status`, `resume` and `fork` takes the name
+  (`ResolveWindowArgument`: a number in range first, then the name, then an id; a name two windows share is refused with the
+  list). The prompt's own wording (`tools/ai-search-eval/pieces.txt`) is unchanged, so no eval round was needed; the tools'
+  schema says "its number, its name (when the user named it) or its id". SESSIONS.md §9.14.
+- **Tests:** `TestMessagingNewThreadWizard` W15 (the plan's name, the cap, the label, a typed name in any case, a prefix and
+  more words picking nothing, a shared name, the entries / default / closing line / buttons and their rows, a typed name's
+  launch and its launch line, the number winning over a name "2", the one-window skip, the round trip and a wizard saved
+  before the names); `TestWindowRules` and `TestTabsServer` (the description, the resolver's order and its refusals, the
+  overview heading, `list`'s `"name"` and a name narrowing `list`).
+- **Check after the build** (dev, with the bot, two windows, one named "Research" on the PC): open a new thread and reach the
+  window step — the named window's entry, its button [🪟 N · Research] and the default (when it is that window) carry the name;
+  send `research`: the tab opens there and the launch line says "Research (window N)". In 🔎 Search ask to resume a session
+  without naming a window: the question names "Research"; answer `Research`: it opens there.
 
 ### 21.26 The card leads with its state, the title under it (2026-10-19; in production since 0.6.8.23 and dev since 0.0.1.31)
 

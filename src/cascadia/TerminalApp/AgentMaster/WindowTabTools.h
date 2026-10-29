@@ -141,6 +141,11 @@ namespace Agentmaster
     {
         std::wstring windowId; // the window's record id ("{guid}", TerminalPage::_windowId): what a request names
         std::wstring title; // the window's title (TerminalPage::Title): its name when the user named it, else the selected tab's title, or "Agent Manager"
+        // The name the user gave the window (AGENT_MANAGER.md "The window name": WT's WindowProperties::WindowName, the
+        // caption while set); "" = unnamed. Never "_quake" (WT's quake switch, not a name). Separate from `title`, which
+        // cannot tell a name from a tab's title: what shows a window by its name (the Telegram wizard's window step, the
+        // AI search's window tools) reads this, and an unnamed window keeps being shown by its number alone.
+        std::wstring name;
         bool managerPageVisible{ false }; // the window shows its Agent Manager page: no tab is selected
         // The window the user activated last (Engine NoteWindowActivated). Set by the engine when it gathers the
         // census, never by the window: a window cannot know whether another one was activated after it.

@@ -1101,7 +1101,7 @@ four below on 2026-10-24):
 
 | Tool | What it does |
 |---|---|
-| `mcp__tabs__list` | Every window — its number (1..N, creation order), short id, tab count, `last_used`, `asked_from`, `agent_manager_page` — and its tabs: `pos`, `title`, `kind` (claude / codex / shell), the session's short id (the same ids every other tool takes), `state` in the Triage Board's words, `dormant`, `adopted`, `dir`, `works_in` (the inferred folder, when it differs), `branch`, `last_turn` (the newest turn's start), `active` (the newest activity), `selected`. Filters: `window`, `dir` (the folder or works_in), `title`; `limit` per window (default 40, at most 200: the selected tab and the most recently active ones, listed in strip order, with a note when tabs were left out). Read-only. |
+| `mcp__tabs__list` | Every window — its number (1..N, creation order), `name` (only when the user named the window: AGENT_MANAGER.md *The window name*), short id, tab count, `last_used`, `asked_from`, `agent_manager_page` — and its tabs: `pos`, `title`, `kind` (claude / codex / shell), the session's short id (the same ids every other tool takes), `state` in the Triage Board's words, `dormant`, `adopted`, `dir`, `works_in` (the inferred folder, when it differs), `branch`, `last_turn` (the newest turn's start), `active` (the newest activity), `selected`. Filters: `window`, `dir` (the folder or works_in), `title`; `limit` per window (default 40, at most 200: the selected tab and the most recently active ones, listed in strip order, with a note when tabs were left out). Read-only. |
 | `mcp__tabs__resume` | Opens a closed session again as a tab: `id`; `window` (required while more than one is open); `after` (a pos or a session id of THAT window; without it, the end of the strip); `focus` (default false: a background tab, nothing changes on the user's view). An open session is never opened a second time: the result says where its tab is, and `focus:true` brings it to the front. |
 | `mcp__tabs__fork` | Opens a FORK (a new conversation that starts with the source's history; the source is untouched) as a tab: the same arguments plus `model`. Without `after` the fork goes right after its source's tab when the source is in that window (the tab menu's Fork session placement), else at the end. |
 | `mcp__tabs__deactivate` | Parks ONE tab (the tab menu's Deactivate ▸ Deactivate Tab): `id`, `cut_off_turn`. |
@@ -1114,6 +1114,13 @@ call (`SDK_HARNESS.md` §5.1):
   selected; this request came from it"); a fork's refusal also names the tab of its source. With
   one window there is nothing to ask. `ResolveWindowArgument` takes a number, `#2`, `window 2`, a
   short or whole window id (4 characters at least), and refuses an ambiguous prefix.
+- **A window the user named** (AGENT_MANAGER.md *The window name*; `WindowCensus::name`, never "_quake") is described
+  by it (`window 1 named "Research" (id 8a2b1c3d): ...`, and `## Window 1 named "Research" (id ...)` in `overview`),
+  and `ResolveWindowArgument` takes the name too: whole, trimmed, any case, also after `window` ("window Research"). The
+  order: a number in range, then a name (window 2 is never hidden by a window named "2"; a short name is never read as an id
+  prefix), then a number out of range is refused, then an id. A name two windows share is refused with the list. The tools'
+  schema says so ("its number, its name (when the user named it) or its id"); the prompt's wording is unchanged
+  (MESSAGING.md §21.25.8: the Telegram Search topic and the new-thread wizard).
 - At most 5 opens (`kMaxTabOpensPerRequest`) and ONE deactivate per request; the request
   generation restarts the counts. A window that refused an open gives its slot back; one that did
   not answer in time keeps it spent (the tab may still open), and the model is told to list the tabs

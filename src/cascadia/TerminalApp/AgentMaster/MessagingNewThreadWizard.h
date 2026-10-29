@@ -23,7 +23,9 @@
 //                 the Model step does the same in one message.
 //   Window        by number, each window with its stats (tabs, the newest tab, the ten newest titles). The DEFAULT is the window
 //                 of the NEWEST tab working in the chosen folder (its launch or inferred folder), and the new tab opens right
-//                 after that tab. One window, or none answering, skips the step.
+//                 after that tab. One window, or none answering, skips the step. A window the user NAMED (AGENT_MANAGER.md
+//                 "The window name") is shown by its name beside its number — in its list entry, on its button, in the
+//                 default and in the launch line — and its name typed picks it like its number (MESSAGING.md §21.25.8).
 //   Then the launch (§21.17.4 / §21.23). A launch the PC refuses comes back to the step that can fix it
 //   (NewThreadStepAfterRefusal). ✖ Cancel at any step deletes the thread — the user's rule, "If the creation process aborts in
 //   any way, the new topic needs to be deleted" — and so does a wizard nobody touched for a day (kNewThreadPickerIdleMs).
@@ -52,6 +54,7 @@
 #include "Json.h" // json::Value (the held messages, the persisted records)
 #include "MessagingNewThread.h" // NewThreadLists, NewThreadAction, the picker's builders, kNewThread* limits
 #include "RemoteLaunch.h" // RemoteLaunchResult (where a refused launch goes back to)
+#include "WindowName.h" // kMaxWindowNameLength: the longest window name a window choice keeps (§21.25.8)
 #include "WindowTabTools.h" // WindowCensus (the window step's input)
 
 namespace Agentmaster::Msg
@@ -63,6 +66,11 @@ namespace Agentmaster::Msg
     // The most characters of ONE title in a window's stats (an ellipsis past it): ten titles for several windows must fit in one
     // Telegram message (4,096 characters), and the title is there to be recognized, not read in full.
     inline constexpr size_t kNewThreadWindowTitleChars = 40;
+    // The most characters of a window's NAME where the step prints it (§21.25.8: its list entry, the default line, the launch
+    // line; an ellipsis past it). The choice keeps the whole name (up to kMaxWindowNameLength) so a typed name matches it in
+    // full; a button cuts it shorter still (kNewThreadButtonLabelChars). The title's budget, for the same reason: twenty
+    // windows' names must not crowd out their stats.
+    inline constexpr size_t kNewThreadWindowNameChars = 40;
     // The most windows the step lists (one button each). A session is rarely opened into the 21st window; past it the step lists
     // the first ones in creation order and says how many it left out.
     inline constexpr size_t kNewThreadWindowsMax = 20;
@@ -689,6 +697,9 @@ namespace Agentmaster::Msg
     {
         std::wstring windowId; // the window's record id — what the launch targets (RemoteLaunchRequest::windowId)
         uint32_t number{ 0 }; // 1-based, the census order
+        // The name the user gave the window (WindowCensus::name; §21.25.8), on one line and trimmed, kept WHOLE up to
+        // kMaxWindowNameLength so a typed name matches it in full; "" = unnamed (the step shows the number alone).
+        std::wstring name;
         bool lastActive{ false }; // the window the user activated last
         uint32_t tabCount{ 0 }; // every tab of its strip, shells included
         std::wstring newestTitle; // the user's "last tab created": the newest tab's title ("" = no tab)
@@ -767,6 +778,9 @@ namespace Agentmaster::Msg
             NewThreadWindowChoice choice;
             choice.windowId = w.windowId;
             choice.number = static_cast<uint32_t>(plan.windows.size() + 1);
+            // §21.25.8: the window's own name, one line and trimmed (TgTitleLine), capped where the PC's own editor caps it — a
+            // name from WT's renamer has no cap, and the choice is persisted with the thread.
+            choice.name = TgTitleLine(w.name, kMaxWindowNameLength);
             choice.lastActive = w.lastActive;
             choice.tabCount = static_cast<uint32_t>(w.tabs.size());
             // Every tab with its newness, sorted newest first: the newest one and the ten titles come from the same order.
@@ -920,6 +934,61 @@ namespace Agentmaster::Msg
         return n - 1;
     }
 
+    /// <summary>
+    /// The words that name a window in a sentence or on a one-button row (§21.25.8): "window 2" for an unnamed window,
+    /// "Research (window 2)" for one the user named (AGENT_MANAGER.md "The window name") — the name FIRST, since it is what the
+    /// user knows the window by on the PC's taskbar, and the number kept, since the step's buttons and a typed number use it.
+    /// Plain text: a caller that writes HTML escapes the whole result (the name is the user's text).
+    /// </summary>
+    /// <param name="number">The window's number as the step shows it (1-based).</param>
+    /// <param name="name">Its name ("" = unnamed).</param>
+    /// <param name="maxNameChars">The most characters of the name printed (an ellipsis past it; TgTitleLine's surrogate-safe cut).</param>
+    /// <returns>The words.</returns>
+    /// <exception cref="std::bad_alloc">If the string cannot be allocated.</exception>
+    inline std::wstring NewThreadWindowLabel(uint32_t number, std::wstring_view name, size_t maxNameChars)
+    {
+        std::wstring numbered = L"window " + std::to_wstring(number);
+        const std::wstring shown = TgTitleLine(name, maxNameChars);
+        return shown.empty() ? numbered : shown + L" (" + numbered + L")";
+    }
+
+    /// <summary>
+    /// The window a NAME typed at the window step picks (§21.25.8): the one window whose name equals the whole message — on one
+    /// line, trimmed, in any case (NewThreadTargetsEqual). The step reads a typed NUMBER first (ParseNewThreadWindowNumber), so a
+    /// window named "2" answers to window 2's number; and a name two windows share picks neither — `ambiguous` says so, and the
+    /// step asks for the number instead of taking the text as the session's first message.
+    /// </summary>
+    /// <param name="text">The message's text.</param>
+    /// <param name="windows">The windows as the step showed them.</param>
+    /// <param name="ambiguous">Set to true when two windows or more carry the typed name (false otherwise).</param>
+    /// <returns>The window's 0-based index; nullopt for a text that is no window's name, or several windows' name.</returns>
+    /// <exception cref="std::bad_alloc">If the trimmed copy of the text cannot be allocated.</exception>
+    inline std::optional<size_t> MatchNewThreadWindowName(std::wstring_view text, const std::vector<NewThreadWindowChoice>& windows, bool& ambiguous)
+    {
+        ambiguous = false;
+        // The choice's name went through TgTitleLine when it was built; the text goes through it too, so both sides are one
+        // trimmed line (no cut: maxChars 0) and compare as the user sees them.
+        const std::wstring typed = TgTitleLine(text, 0);
+        if (typed.empty())
+        {
+            return std::nullopt;
+        }
+        std::optional<size_t> found;
+        for (size_t i = 0; i < windows.size(); ++i)
+        {
+            if (!windows[i].name.empty() && NewThreadTargetsEqual(windows[i].name, typed))
+            {
+                if (found)
+                {
+                    ambiguous = true;
+                    return std::nullopt;
+                }
+                found = i;
+            }
+        }
+        return found;
+    }
+
     // ===== the records ================================================================================================
 
     /// <summary>
@@ -966,6 +1035,7 @@ namespace Agentmaster::Msg
         bool askWindow{ false };
         std::wstring windowId; // the window the tab opens in ("" = the engine's own choice: the window used last)
         uint32_t windowNumber{ 0 }; // as the step showed it (0 = none)
+        std::wstring windowName; // the chosen window's name as the step showed it ("" = unnamed, or none chosen): the launch line names it (§21.25.8)
         std::wstring anchorSessionId; // the tab the new one opens right after ("" = the strip's end)
         std::wstring anchorTitle;
     };
@@ -1094,6 +1164,7 @@ namespace Agentmaster::Msg
         w.windowAuto = false;
         w.windowId.clear();
         w.windowNumber = 0;
+        w.windowName.clear();
         w.anchorSessionId.clear();
         w.anchorTitle.clear();
     }
@@ -1119,8 +1190,9 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
-    /// Records a window choice (an index of the step's list): its id, its number, and the tab to open right after. The choice ends
-    /// the step's "must ask" (askWindow) and clears the notice: the launch that follows is the user's own.
+    /// Records a window choice (an index of the step's list): its id, its number, its name (§21.25.8: the launch line names the
+    /// window by it), and the tab to open right after. The choice ends the step's "must ask" (askWindow) and clears the notice:
+    /// the launch that follows is the user's own.
     /// </summary>
     /// <param name="w">The wizard.</param>
     /// <param name="index">The window's index in w.windows (must be in range; the callers check it).</param>
@@ -1130,6 +1202,7 @@ namespace Agentmaster::Msg
         w.windowChosen = true;
         w.windowId = c.windowId;
         w.windowNumber = c.number;
+        w.windowName = c.name;
         w.anchorSessionId = c.anchorSessionId;
         w.anchorTitle = c.anchorTitle;
         w.askWindow = false;
@@ -1269,7 +1342,8 @@ namespace Agentmaster::Msg
     /// <summary>
     /// A MESSAGE typed in the wizard's thread (§21.25): a lone folder path is a folder choice at every step (the user changed
     /// their mind about the folder); "/model &lt;id&gt;" at the model step and one word at the model-id step are a model; a
-    /// window number at the window step is a window; anything else is the user's message, HELD for the session.
+    /// window number — or a window's name (§21.25.8; a name several windows share is answered with a Reply) — at the window
+    /// step is a window; anything else is the user's message, HELD for the session.
     /// </summary>
     /// <param name="r">The thread's record (changed in place).</param>
     /// <param name="text">The message's text.</param>
@@ -1366,6 +1440,21 @@ namespace Agentmaster::Msg
                 {
                     ChooseNewThreadWindow(w, *index);
                     out.kind = NewThreadOutcome::Kind::Launch;
+                    return out;
+                }
+                // §21.25.8: a window's NAME typed (after the number, so a window named "2" never hides window 2). A name two
+                // windows share is answered, not held: the user meant a window, and only its number can say which.
+                bool ambiguous = false;
+                if (const auto index = MatchNewThreadWindowName(text, w.windows, ambiguous))
+                {
+                    ChooseNewThreadWindow(w, *index);
+                    out.kind = NewThreadOutcome::Kind::Launch;
+                    return out;
+                }
+                if (ambiguous)
+                {
+                    out.kind = NewThreadOutcome::Kind::Reply;
+                    out.text = L"More than one window has that name \x2014 send the window\x2019s number instead.";
                     return out;
                 }
             }
@@ -1514,6 +1603,7 @@ namespace Agentmaster::Msg
             w.windowChosen = true;
             w.windowId.clear();
             w.windowNumber = 0;
+            w.windowName.clear();
             w.anchorSessionId.clear();
             w.anchorTitle.clear();
         }
@@ -1601,7 +1691,8 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// The launch the wizard's choices ask for, and the line that tells the user what is opening: the folder (and "created" when
-    /// the wizard made it), the model (when not Default), the window (when the step was shown) and the tab it opens next to.
+    /// the wizard made it), the model (when not Default), the window (when the step was shown; by its name too when the user
+    /// named it, §21.25.8) and the tab it opens next to.
     /// </summary>
     /// <param name="r">The thread's record, every choice made.</param>
     /// <returns>The plan.</returns>
@@ -1631,8 +1722,10 @@ namespace Agentmaster::Msg
         }
         if (w.windowNumber > 0 && !w.windowAuto)
         {
-            textTail += L" \x00B7 window " + std::to_wstring(w.windowNumber);
-            htmlTail += L" \x00B7 window " + std::to_wstring(w.windowNumber);
+            // "window 2", or "Research (window 2)" for a window the user named (§21.25.8).
+            const std::wstring windowLabel = NewThreadWindowLabel(w.windowNumber, w.windowName, kNewThreadWindowNameChars);
+            textTail += L" \x00B7 " + windowLabel;
+            htmlTail += L" \x00B7 " + TgEscapeHtml(windowLabel);
         }
         if (!w.anchorTitle.empty())
         {
@@ -1771,12 +1864,20 @@ namespace Agentmaster::Msg
             }
             if (w.defaultWindow >= 0 && static_cast<size_t>(w.defaultWindow) < w.windows.size())
             {
-                html += L"\n\u2B50 Default: <b>window " + std::to_wstring(w.windows[static_cast<size_t>(w.defaultWindow)].number) + L"</b> \x2014 " + TgEscapeHtml(w.defaultReason) + L".";
+                html += L"\n\u2B50 Default: <b>" +
+                        TgEscapeHtml(NewThreadWindowLabel(w.windows[static_cast<size_t>(w.defaultWindow)].number, w.windows[static_cast<size_t>(w.defaultWindow)].name, kNewThreadWindowNameChars)) +
+                        L"</b> \x2014 " + TgEscapeHtml(w.defaultReason) + L".";
             }
+            bool anyNamed = false; // §21.25.8: the closing line then says that a name can be typed too
             for (size_t i = 0; i < w.windows.size(); ++i)
             {
                 const auto& c = w.windows[i];
-                html += L"\n\n<b>" + std::to_wstring(c.number) + L"</b> \x00B7 " + std::to_wstring(c.tabCount) + (c.tabCount == 1 ? L" tab" : L" tabs");
+                // A named window's entry leads with its number AND its name, bold together: the number the buttons and a typed
+                // choice use, the name the user knows it by (§21.25.8).
+                const std::wstring shownName = TgTitleLine(c.name, kNewThreadWindowNameChars);
+                anyNamed = anyNamed || !shownName.empty();
+                html += L"\n\n<b>" + std::to_wstring(c.number) + (shownName.empty() ? std::wstring{} : L" \x00B7 " + TgEscapeHtml(shownName)) + L"</b> \x00B7 " +
+                        std::to_wstring(c.tabCount) + (c.tabCount == 1 ? L" tab" : L" tabs");
                 if (static_cast<int>(i) == w.defaultWindow)
                 {
                     html += L" \u2B50";
@@ -1815,7 +1916,7 @@ namespace Agentmaster::Msg
             {
                 html += L"\n\n<i>" + std::to_wstring(w.windowsLeftOut) + L" more window(s) not listed.</i>";
             }
-            html += L"\n\n<i>Or send the window\x2019s number.</i>";
+            html += anyNamed ? L"\n\n<i>Or send the window\x2019s number or its name.</i>" : L"\n\n<i>Or send the window\x2019s number.</i>";
             return html + NewThreadHeldLine(r.held.size());
         }
     }
@@ -1910,14 +2011,26 @@ namespace Agentmaster::Msg
             {
                 if (w.defaultWindow >= 0 && static_cast<size_t>(w.defaultWindow) < w.windows.size())
                 {
-                    v.rows.push_back({ NewThreadButton{ L"\u2B50 Default \x2014 window " + std::to_wstring(w.windows[static_cast<size_t>(w.defaultWindow)].number),
+                    v.rows.push_back({ NewThreadButton{ L"\u2B50 Default \x2014 " +
+                                                            NewThreadWindowLabel(w.windows[static_cast<size_t>(w.defaultWindow)].number, w.windows[static_cast<size_t>(w.defaultWindow)].name, kNewThreadButtonLabelChars),
                                                         NewThreadCallbackData(K::WindowDefault, 0) } });
                 }
+                // §21.25.8: a named window's button carries its name after its number ("🪟 2 · Research", the name cut at
+                // kNewThreadButtonLabelChars). Four bare numbers share a row on a phone; a name needs the width, so a list with
+                // any named window goes two to a row.
+                const bool anyNamed = std::any_of(w.windows.begin(), w.windows.end(), [](const NewThreadWindowChoice& c) { return !c.name.empty(); });
+                const size_t perRow = anyNamed ? 2 : 4;
                 std::vector<NewThreadButton> row;
                 for (size_t i = 0; i < w.windows.size(); ++i)
                 {
-                    row.push_back(NewThreadButton{ L"\U0001FA9F " + std::to_wstring(w.windows[i].number), NewThreadCallbackData(K::WindowPick, i) });
-                    if (row.size() == 4)
+                    const auto& c = w.windows[i];
+                    std::wstring label = L"\U0001FA9F " + std::to_wstring(c.number);
+                    if (!c.name.empty())
+                    {
+                        label += L" \x00B7 " + detail::NewThreadButtonLabel(c.name);
+                    }
+                    row.push_back(NewThreadButton{ std::move(label), NewThreadCallbackData(K::WindowPick, i) });
+                    if (row.size() == perRow)
                     {
                         v.rows.push_back(std::move(row));
                         row.clear();
@@ -2071,6 +2184,7 @@ namespace Agentmaster::Msg
             auto m = json::Value::MkObj();
             m.Set(L"windowId", json::Value::MkStr(c.windowId));
             m.Set(L"number", json::Value::MkNum(static_cast<double>(c.number)));
+            m.Set(L"name", json::Value::MkStr(c.name)); // §21.25.8: a restored step shows (and matches) the names it showed
             m.Set(L"lastActive", json::Value::MkBool(c.lastActive));
             m.Set(L"tabCount", json::Value::MkNum(static_cast<double>(c.tabCount)));
             m.Set(L"newestTitle", json::Value::MkStr(c.newestTitle));
@@ -2092,6 +2206,7 @@ namespace Agentmaster::Msg
         o.Set(L"askWindow", json::Value::MkBool(w.askWindow));
         o.Set(L"windowId", json::Value::MkStr(w.windowId));
         o.Set(L"windowNumber", json::Value::MkNum(static_cast<double>(w.windowNumber)));
+        o.Set(L"windowName", json::Value::MkStr(w.windowName));
         o.Set(L"anchorSessionId", json::Value::MkStr(w.anchorSessionId));
         o.Set(L"anchorTitle", json::Value::MkStr(w.anchorTitle));
         return o;
@@ -2151,6 +2266,7 @@ namespace Agentmaster::Msg
                 NewThreadWindowChoice c;
                 c.windowId = m.StrAt(L"windowId");
                 c.number = static_cast<uint32_t>(m.I64At(L"number", 0));
+                c.name = m.StrAt(L"name"); // absent (a wizard saved before §21.25.8) or not a string: unnamed, the number alone
                 c.lastActive = m.BoolAt(L"lastActive", false);
                 c.tabCount = static_cast<uint32_t>(m.I64At(L"tabCount", 0));
                 c.newestTitle = m.StrAt(L"newestTitle");
@@ -2173,6 +2289,7 @@ namespace Agentmaster::Msg
         w.askWindow = v.BoolAt(L"askWindow", false);
         w.windowId = v.StrAt(L"windowId");
         w.windowNumber = static_cast<uint32_t>(v.I64At(L"windowNumber", 0));
+        w.windowName = v.StrAt(L"windowName"); // absent before §21.25.8: the launch line names the window by its number
         w.anchorSessionId = v.StrAt(L"anchorSessionId");
         w.anchorTitle = v.StrAt(L"anchorTitle");
         // A window step whose list did not survive is read again (the step shows "looking at the windows…").

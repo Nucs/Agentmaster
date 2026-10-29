@@ -482,7 +482,9 @@ namespace Agentmaster
 
     /// <summary>
     /// One line per window, the way the model describes the windows to the user when it must ask which one:
-    /// "window 1 (id 8a2b1c3d): 24 tabs, "Agentmaster" selected; you used it last; this request came from it".
+    /// "window 1 (id 8a2b1c3d): 24 tabs, "Agentmaster" selected; you used it last; this request came from it". A window the
+    /// user NAMED (WindowCensus::name, AGENT_MANAGER.md "The window name") reads "window 1 named "Research" (id …)": the
+    /// name is what the user calls it, and what the model should ask with.
     /// </summary>
     /// <param name="windows">The census, in its order (the numbers are 1-based positions in it).</param>
     /// <param name="originWindowId">The window the request came from ("" = none: a phone).</param>
@@ -494,15 +496,17 @@ namespace Agentmaster
     /// Which window a tool's `window` argument names — the rule behind "with more than one window, the model must ask".
     /// </summary>
     /// <param name="windows">The census, in its order.</param>
-    /// <param name="argument">What the model passed: "" (none), a 1-based number, or a window id (short or whole, any
-    /// case, braces optional).</param>
+    /// <param name="argument">What the model passed: "" (none), a 1-based number, the NAME the user gave a window (whole,
+    /// trimmed, any case; "window Research" too), or a window id (short or whole, any case, braces optional).</param>
     /// <param name="originWindowId">The window the request came from ("" = none); only named in an error.</param>
     /// <param name="error">Receives, when the result is nullopt, the error written FOR THE MODEL: with no window
     /// named and more than one open, the instruction to ask the user plus every window's description line.</param>
     /// <returns>The index into `windows`; nullopt with `error` set when nothing is open, the argument names no
-    /// window, or none was named while more than one is open.</returns>
+    /// window, a name two windows share, or none was named while more than one is open.</returns>
     /// <exception cref="std::bad_alloc">If the error text cannot be allocated.</exception>
-    /// <remarks>Pure; with exactly one window an empty argument means that window (there is nothing to ask).</remarks>
+    /// <remarks>Pure; with exactly one window an empty argument means that window (there is nothing to ask). The order:
+    /// a number in range, then a name (so window 2 is never hidden by a window named "2", and a short name is never read
+    /// as an id prefix), then a number out of range is refused, then an id.</remarks>
     std::optional<size_t> ResolveWindowArgument(const std::vector<WindowCensus>& windows, std::wstring_view argument, const std::wstring& originWindowId, std::wstring& error);
 
     // ===== live facts: the status and overview tools (SESSIONS.md §9.16) ====================

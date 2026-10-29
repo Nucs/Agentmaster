@@ -1237,6 +1237,13 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::WindowCensus& census = outcome.census;
                 census.windowId = _windowId;
                 census.title = std::wstring{ Title() };
+                // THE WINDOW NAME (AGENT_MANAGER.md "The window name"): the user's own name for this window, apart from the
+                // title (which an unnamed window fills with its tab's title). A quake window reports none: "_quake" is WT's
+                // mode switch, which the caption and the window record skip too.
+                if (_WindowProperties && !_WindowProperties.IsQuakeWindow())
+                {
+                    census.name = std::wstring{ _WindowProperties.WindowName() };
+                }
                 census.managerPageVisible = _managerPageVisible;
                 const auto focused = _GetFocusedTabIndex(); // nullopt while the Agent Manager page is up
                 const uint32_t count = _tabs.Size();

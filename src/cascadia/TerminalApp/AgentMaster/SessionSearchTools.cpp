@@ -905,7 +905,7 @@ namespace
     // checks every tool): a request from a phone has none.
     const wchar_t kTabsListSchema[] =
         LR"({"type":"object","properties":{)"
-        LR"("window":{"type":"string","description":"Only this window: its number from an earlier list, or its id."},)"
+        LR"("window":{"type":"string","description":"Only this window: its number from an earlier list, its name (when the user named it), or its id."},)"
         LR"("dir":{"type":"string","description":"Only tabs whose folder (dir or works_in) contains this text. '/' and '\\' are the same."},)"
         LR"("title":{"type":"string","description":"Only tabs whose title contains this text, any case."},)"
         LR"("limit":{"type":"integer","description":"Tabs per window, 1 to 200. Default 40: the selected tab and the most recently active ones, listed in strip order."})"
@@ -914,7 +914,7 @@ namespace
     const wchar_t kTabsResumeSchema[] =
         LR"({"type":"object","properties":{)"
         LR"("id":{"type":"string","description":"The session to resume: a short id from a result, or a whole session id."},)"
-        LR"("window":{"type":"string","description":"The window to open it in: its number or id from list. Required when more than one window is open."},)"
+        LR"("window":{"type":"string","description":"The window to open it in: its number, its name (when the user named it) or its id from list. Required when more than one window is open."},)"
         LR"("after":{"type":"string","description":"Put the new tab right after this tab of that window: its pos (a number) or its session id. Leave it out to put it at the end."},)"
         LR"("focus":{"type":"boolean","description":"true: switch the window to the new tab and bring the window to the front. Default false: a background tab."})"
         LR"(},"required":["id"]})";
@@ -922,7 +922,7 @@ namespace
     const wchar_t kTabsForkSchema[] =
         LR"({"type":"object","properties":{)"
         LR"("id":{"type":"string","description":"The session to fork: a short id from a result, or a whole session id. It may be open or closed."},)"
-        LR"("window":{"type":"string","description":"The window to open the fork in: its number or id from list. Required when more than one window is open."},)"
+        LR"("window":{"type":"string","description":"The window to open the fork in: its number, its name (when the user named it) or its id from list. Required when more than one window is open."},)"
         LR"("after":{"type":"string","description":"Put the fork right after this tab of that window: its pos (a number) or its session id. Leave it out: right after the source's tab when the source is open in that window, else at the end."},)"
         LR"("model":{"type":"string","description":"Start the fork on this model: an id or an alias such as opus or sonnet. Leave it out for the usual model."},)"
         LR"("focus":{"type":"boolean","description":"true: switch the window to the fork and bring the window to the front. Default false: a background tab."})"
@@ -940,7 +940,7 @@ namespace
     // call against the schema anyway (AgentHarness.h). Their words are the prompt's; no description speaks of a "screen".
     const wchar_t kTabsOverviewSchema[] =
         LR"({"type":"object","properties":{)"
-        LR"("window":{"anyOf":[{"type":"string"},{"type":"integer"},{"type":"array","items":{"anyOf":[{"type":"string"},{"type":"integer"}]}}],"description":"Only this window (its number or id from a result), or only the windows of a list. Leave it out for every window."},)"
+        LR"("window":{"anyOf":[{"type":"string"},{"type":"integer"},{"type":"array","items":{"anyOf":[{"type":"string"},{"type":"integer"}]}}],"description":"Only this window (its number, its name or its id from a result), or only the windows of a list. Leave it out for every window."},)"
         LR"("dir":{"anyOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Only tabs whose folder (dir or works_in) contains this text, or any text of a list. Any case; '/' and '\\' are the same."},)"
         LR"("state":{"anyOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Only tabs in this state, or in any state of a list: running, waiting for you, needs approval, error, idle, done, dormant, unread, queued, draft, pinned, compacting or shell. \"what needs me\" is [\"waiting for you\",\"needs approval\",\"error\"]."})"
         LR"(},"required":[]})";
@@ -2122,7 +2122,10 @@ namespace Agentmaster
         for (size_t i = 0; i < windows.size(); ++i)
         {
             const auto& w = windows[i];
-            out += L"window " + std::to_wstring(i + 1) + L" (id " + WindowHandleOf(w.windowId) + L"): " + std::to_wstring(w.tabs.size()) + (w.tabs.size() == 1 ? L" tab" : L" tabs");
+            // THE WINDOW NAME (AGENT_MANAGER.md "The window name"): a window the user named is described by that name too —
+            // it is what the user calls the window, on the PC's taskbar and in a request ("open it in the Research window").
+            const std::wstring named = w.name.empty() ? std::wstring{} : L" named \"" + Cut(OneLine(w.name), 60) + L"\"";
+            out += L"window " + std::to_wstring(i + 1) + named + L" (id " + WindowHandleOf(w.windowId) + L"): " + std::to_wstring(w.tabs.size()) + (w.tabs.size() == 1 ? L" tab" : L" tabs");
             // The tab a window shows is what the user recognizes it by ("the window with the Agentmaster tab").
             std::wstring selected;
             for (const auto& t : w.tabs)
@@ -2162,6 +2165,9 @@ namespace Agentmaster
             return std::nullopt;
         }
         std::wstring arg = FoldLower(Trim(argument));
+        // The whole argument, before the number shapes below strip a leading "window" or "#" from it: a window's NAME is
+        // matched against this too, since a name may start with either ("windows build", "#2 release").
+        const std::wstring whole = arg;
         // Forgiving about the shapes a model writes a number in: "2", "#2", "window 2".
         if (arg.rfind(L"window", 0) == 0)
         {
@@ -2188,8 +2194,38 @@ namespace Agentmaster
             const size_t n = SmallNumberValue(arg);
             if (n >= 1 && n <= windows.size())
             {
-                return n - 1;
+                return n - 1; // a number in range wins over a window NAMED like it: window 2 is never hidden by a name "2"
             }
+            // Out of range: it may still be a window's name ("3" with two windows); the refusal comes after the name check.
+        }
+        // THE WINDOW NAME (AGENT_MANAGER.md "The window name"): the name the user gave a window, matched whole, trimmed and in any
+        // case — as the argument came, or after its "window" / "#" shape (the model may write "window Research"). Before the id
+        // forms, so a short name is never read as an id prefix. A name two windows share is refused with the list: only the
+        // number (or the id) can say which.
+        {
+            std::optional<size_t> named;
+            for (size_t i = 0; i < windows.size(); ++i)
+            {
+                const std::wstring name = FoldLower(Trim(OneLine(windows[i].name)));
+                if (name.empty() || (name != whole && name != arg))
+                {
+                    continue;
+                }
+                if (named)
+                {
+                    error = L"More than one window is named \"" + Cut(OneLine(windows[i].name), 60) + L"\": pass its number instead. The open windows are:\n" +
+                            DescribeWindowsForModel(windows, originWindowId);
+                    return std::nullopt;
+                }
+                named = i;
+            }
+            if (named)
+            {
+                return named;
+            }
+        }
+        if (IsSmallNumber(arg))
+        {
             error = L"There is no window " + arg + L". The open windows are:\n" + DescribeWindowsForModel(windows, originWindowId);
             return std::nullopt;
         }
@@ -2973,7 +3009,10 @@ namespace Agentmaster
                     ++omittedWindows;
                     continue;
                 }
-                std::wstring section = L"\n## Window " + std::to_wstring(part.index + 1) + L" (id " + WindowHandleOf(win.windowId) + L"): " + std::to_wstring(win.tabs.size()) + (win.tabs.size() == 1 ? L" tab" : L" tabs");
+                // THE WINDOW NAME: a window the user named carries it in its heading, as DescribeWindowsForModel words it.
+                const std::wstring named = win.name.empty() ? std::wstring{} : L" named \"" + MdCell(win.name, 60) + L"\"";
+                std::wstring section = L"\n## Window " + std::to_wstring(part.index + 1) + named + L" (id " + WindowHandleOf(win.windowId) + L"): " + std::to_wstring(win.tabs.size()) +
+                                       (win.tabs.size() == 1 ? L" tab" : L" tabs");
                 if (filtered && part.listed != win.tabs.size())
                 {
                     section += L", " + std::to_wstring(part.listed) + L" listed";
@@ -4566,6 +4605,12 @@ namespace Agentmaster
             }
             Value wobj = Value::MkObj();
             wobj.Set(L"window", Value::MkNum(static_cast<double>(w + 1)));
+            // THE WINDOW NAME: only when the user named the window (like the flags below: fewer tokens otherwise). The model
+            // may pass it back as `window`; ResolveWindowArgument reads a name as well as the number and the id.
+            if (!win.name.empty())
+            {
+                wobj.Set(L"name", Value::MkStr(Cut(OneLine(win.name), 120)));
+            }
             wobj.Set(L"id", Value::MkStr(WindowHandleOf(win.windowId)));
             wobj.Set(L"tabs", Value::MkNum(static_cast<double>(win.tabs.size())));
             if (keep.size() != win.tabs.size())

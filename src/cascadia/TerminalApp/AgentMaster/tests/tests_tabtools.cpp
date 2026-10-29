@@ -210,6 +210,37 @@ namespace
         twins[1].windowId = L"{AAAA1111-9999-4000-8000-000000000009}";
         error.clear();
         CHECK(!ResolveWindowArgument(twins, L"aaaa1111", L"", error) && error.find(L"fits more than one window") != std::wstring::npos, "an id prefix two windows share is refused: pass the number");
+
+        // THE WINDOW NAME (AGENT_MANAGER.md "The window name"): a window the user named is described by its name and answers to it.
+        auto named = windows;
+        named[0].name = L"Research";
+        const std::wstring namedDescribed = DescribeWindowsForModel(named, L"");
+        CHECK(namedDescribed.find(L"window 1 named \"Research\" (id aaaa1111): 5 tabs") != std::wstring::npos && namedDescribed.find(L"window 2 (id bbbb2222): 2 tabs") != std::wstring::npos,
+              "DescribeWindowsForModel: a named window by its name too; an unnamed one exactly as before");
+        CHECK(ResolveWindowArgument(named, L"research", L"", error) == size_t{ 0 } && ResolveWindowArgument(named, L"  RESEARCH ", L"", error) == size_t{ 0 } &&
+                  ResolveWindowArgument(named, L"window Research", L"", error) == size_t{ 0 },
+              "a window's name - any case, trimmed, or after \"window\" - names it");
+        named[0].name = L"2";
+        CHECK(ResolveWindowArgument(named, L"2", L"", error) == size_t{ 1 }, "a number in range wins over a window named like it (window 2 is never hidden)");
+        named[0].name = L"3";
+        CHECK(ResolveWindowArgument(named, L"3", L"", error) == size_t{ 0 }, "a number past the windows may still be a window's name");
+        named[0].name = L"bbbb";
+        CHECK(ResolveWindowArgument(named, L"bbbb", L"", error) == size_t{ 0 }, "a name is read before an id prefix (window 1 named bbbb, not window 2 whose id starts so)");
+        named[0].name = L"#2 release";
+        CHECK(ResolveWindowArgument(named, L"#2 Release", L"", error) == size_t{ 0 }, "a name that starts with # is matched whole");
+        named[0].name = L"Work";
+        named[1].name = L"work";
+        error.clear();
+        CHECK(!ResolveWindowArgument(named, L"WORK", L"", error) && error.find(L"More than one window is named") != std::wstring::npos &&
+                  error.find(L"window 1 named \"Work\"") != std::wstring::npos,
+              "a name two windows share is refused with the list: pass the number");
+        named[1].name.clear();
+        error.clear();
+        CHECK(!ResolveWindowArgument(named, L"Research", L"", error) && error.find(L"window 1 named \"Work\"") != std::wstring::npos,
+              "a name no window has is refused, and the list shows the names there are");
+        const std::wstring namedOverview = RenderWorkspaceOverview(named, OverviewFilter{}, L"", 1'800'000'000'000LL, [](const std::wstring& id) { return id.substr(0, 8); });
+        CHECK(namedOverview.find(L"\n## Window 1 named \"Work\" (id aaaa1111): 5 tabs") != std::wstring::npos && namedOverview.find(L"\n## Window 2 (id bbbb2222): 2 tabs") != std::wstring::npos,
+              "overview: a named window's heading carries its name; an unnamed one's is unchanged");
     }
 
     /// <summary>The tabs server on a toolset with fake windows.</summary>
@@ -321,6 +352,33 @@ namespace
         CHECK(cut && cut->arr.size() == 2 && cut->arr[0].I64At(L"pos") == 1 && cut->arr[1].I64At(L"pos") == 3 && !parsed->StrAt(L"note").empty(),
               "list: over the limit it keeps the selected tab and the most recently active one, in strip order, and says so");
         CHECK(list->handler(Args(LR"({"window":"9"})")).isError, "list: an unknown window is an error");
+        // THE WINDOW NAME (AGENT_MANAGER.md "The window name"): a named window carries "name" in list (an unnamed one no key:
+        // fewer tokens), and its name narrows list like its number. A toolset of its own, whose census names window 1.
+        {
+            SessionSearchToolset::Callbacks namedCb = cb;
+            namedCb.tabs.census = [now] {
+                auto census = FakeCensus(now);
+                census[0].name = L"Research";
+                return census;
+            };
+            SessionSearchToolset namedToolset{ namedCb };
+            const auto namedServers = namedToolset.Servers();
+            const HarnessTool* namedList = FindTool(namedServers, L"tabs", L"list");
+            CHECK(namedList != nullptr, "list: served by the named toolset too");
+            if (namedList)
+            {
+                const HarnessToolResult all = namedList->handler(Args(L"{}"));
+                const auto allParsed = json::Parse(all.text);
+                const json::Value* allWindows = allParsed ? allParsed->Find(L"list") : nullptr;
+                CHECK(allWindows && allWindows->arr.size() == 2 && allWindows->arr[0].StrAt(L"name") == L"Research" && allWindows->arr[1].Find(L"name") == nullptr,
+                      "list: a named window carries its name; an unnamed one has no name key");
+                const HarnessToolResult byName = namedList->handler(Args(LR"({"window":"research"})"));
+                const auto byNameParsed = json::Parse(byName.text);
+                const json::Value* byNameWindows = byNameParsed ? byNameParsed->Find(L"list") : nullptr;
+                CHECK(!byName.isError && byNameWindows && byNameWindows->arr.size() == 1 && byNameWindows->arr[0].I64At(L"window") == 1,
+                      "list: a window's name narrows it like its number");
+            }
+        }
 
         // ---- resume ----
         r = resume->handler(Args(L"{\"id\":\"" + kS6 + L"\"}"));

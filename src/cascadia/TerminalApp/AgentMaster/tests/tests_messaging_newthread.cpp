@@ -796,6 +796,122 @@ namespace
             const json::Value none = ToJson(MakeSession(L"created-0"));
             CHECK((none.Find(L"createdUnixMs") == nullptr && SessionFromJson(none).createdUnixMs == 0), "W14: an unstamped session writes no key (sessions.json byte-unchanged)");
         }
+
+        // ===== W15. a window the user NAMED (21.25.8; AGENT_MANAGER.md "The window name") ===================================
+        {
+            // The plan: the census's name, one trimmed line, kept whole up to the PC editor's cap; an unnamed window has none.
+            auto census = WzCensus();
+            census[0].name = L"  Research \x2014 \x05D0  "; // spaces around (WT's own renamer keeps them), an em dash, a Hebrew letter
+            auto plan = BuildNewThreadWindowPlan(census, WzTabFacts(), NormDirKey(L"K:\\proj"), L"proj");
+            CHECK((plan.windows.size() == 2 && plan.windows[0].name == L"Research \x2014 \x05D0" && plan.windows[1].name.empty()),
+                  "W15: a named window's choice carries its name on one trimmed line; an unnamed one carries none");
+            census[0].name = std::wstring(kMaxWindowNameLength + 30, L'n');
+            plan = BuildNewThreadWindowPlan(census, WzTabFacts(), NormDirKey(L"K:\\proj"), L"proj");
+            CHECK((plan.windows[0].name.size() == kMaxWindowNameLength && plan.windows[0].name.back() == L'\x2026'), "W15: a name past the PC's cap is kept up to it, with an ellipsis");
+
+            // The label: the number alone, or the name first with the number kept; a long name is cut.
+            CHECK((NewThreadWindowLabel(2, L"", 40) == L"window 2" && NewThreadWindowLabel(2, L"Research", 40) == L"Research (window 2)" &&
+                      NewThreadWindowLabel(3, std::wstring(50, L'x'), 10) == std::wstring(9, L'x') + L"\x2026 (window 3)"),
+                  "W15: the label - window N, or Name (window N), the name cut with an ellipsis");
+
+            // A typed name: the whole message, trimmed, any case; a prefix, more words or nothing pick nothing; a shared name is ambiguous.
+            std::vector<NewThreadWindowChoice> ws(3);
+            ws[0].name = L"Research";
+            ws[2].name = L"Docs";
+            bool ambiguous = true;
+            CHECK((MatchNewThreadWindowName(L"  research ", ws, ambiguous) == std::optional<size_t>{ 0 } && !ambiguous), "W15: a typed name in any case, trimmed, picks its window");
+            CHECK((!MatchNewThreadWindowName(L"Research notes", ws, ambiguous) && !ambiguous && !MatchNewThreadWindowName(L"Resear", ws, ambiguous) &&
+                      !MatchNewThreadWindowName(L"   ", ws, ambiguous) && !ambiguous),
+                  "W15: more words, a prefix or a blank message pick no window");
+            ws[2].name = L"RESEARCH";
+            CHECK((!MatchNewThreadWindowName(L"research", ws, ambiguous) && ambiguous), "W15: a name two windows share picks neither (ambiguous)");
+
+            // The step: entries, the default, the closing line and the buttons name the window; the HTML escapes the name.
+            NewThreadRecord r;
+            r.wizard.folder = L"K:\\proj";
+            r.wizard.step = NewThreadStep::Window;
+            census = WzCensus();
+            census[0].name = L"Research <a>";
+            ApplyNewThreadWindows(r.wizard, BuildNewThreadWindowPlan(census, WzTabFacts(), NormDirKey(L"K:\\proj"), L"proj"));
+            NewThreadView v = BuildNewThreadView(r, 2000);
+            CHECK((v.html.find(L"<b>1 \x00B7 Research &lt;a&gt;</b> \x00B7 4 tabs") != std::wstring::npos && v.html.find(L"<b>2</b> \x00B7 2 tabs") != std::wstring::npos),
+                  "W15: a named window's entry leads with its number and its name (escaped); an unnamed one with its number alone");
+            CHECK((v.html.find(L"Default: <b>Research &lt;a&gt; (window 1)</b>") != std::wstring::npos && v.html.find(L"number or its name") != std::wstring::npos),
+                  "W15: the default names the window by its name (its number kept), and the step says a name can be typed");
+            CHECK((WzPress(v.rows, L"\U0001FA9F 1 \x00B7 Research <a>").kind == K::WindowPick && WzPress(v.rows, L"Default \x2014 Research <a> (window 1)").kind == K::WindowDefault),
+                  "W15: the buttons carry the name (a button is plain text, so it is not escaped)");
+            size_t pickRow = 0;
+            for (const auto& row : v.rows)
+            {
+                if (!row.empty() && ParseNewThreadCallbackData(row[0].data).kind == K::WindowPick)
+                {
+                    pickRow = row.size();
+                }
+            }
+            CHECK((pickRow == 2), "W15: with a named window the window buttons go two to a row");
+            NewThreadRecord bare;
+            bare.wizard.folder = L"K:\\proj";
+            bare.wizard.step = NewThreadStep::Window;
+            ApplyNewThreadWindows(bare.wizard, BuildNewThreadWindowPlan(WzCensus(), WzTabFacts(), NormDirKey(L"K:\\proj"), L"proj"));
+            const NewThreadView bv = BuildNewThreadView(bare, 2000);
+            CHECK((bv.html.find(L"number or its name") == std::wstring::npos && bv.html.find(L"Or send the window\x2019s number.") != std::wstring::npos),
+                  "W15: no named window - the closing line asks for the number only, as before");
+
+            // The typed name launches into its window, and the launch line names it (escaped in its HTML).
+            NewThreadOutcome out = ApplyNewThreadText(r, L"research <A>");
+            CHECK((out.kind == O::Launch && r.wizard.windowId == L"{W1}" && r.wizard.windowName == L"Research <a>" && r.wizard.anchorSessionId == L"b"),
+                  "W15: the window's name typed at the window step - that window, after its folder tab");
+            const NewThreadLaunchPlan lp = BuildNewThreadLaunchPlan(r);
+            CHECK((lp.summaryText.find(L"\x00B7 Research <a> (window 1), next to") != std::wstring::npos && lp.summaryHtml.find(L"Research &lt;a&gt; (window 1)") != std::wstring::npos),
+                  "W15: the launch line names the window by its name");
+
+            // A name two windows share is answered (nothing chosen, nothing held); its number still picks; a NUMBER beats a name.
+            NewThreadRecord twins;
+            twins.wizard.step = NewThreadStep::Window;
+            census = WzCensus();
+            census[0].name = L"Work";
+            census[1].name = L"work";
+            ApplyNewThreadWindows(twins.wizard, BuildNewThreadWindowPlan(census, WzTabFacts(), NormDirKey(L"K:\\proj"), L"proj"));
+            out = ApplyNewThreadText(twins, L"WORK");
+            CHECK((out.kind == O::Reply && out.text.find(L"number") != std::wstring::npos && !twins.wizard.windowChosen),
+                  "W15: a name two windows share is answered, asking for the number; nothing is chosen or held");
+            census[0].name = L"2";
+            census[1].name.clear();
+            NewThreadRecord numbered;
+            numbered.wizard.step = NewThreadStep::Window;
+            ApplyNewThreadWindows(numbered.wizard, BuildNewThreadWindowPlan(census, WzTabFacts(), NormDirKey(L"K:\\proj"), L"proj"));
+            out = ApplyNewThreadText(numbered, L"2");
+            CHECK((out.kind == O::Launch && numbered.wizard.windowId == L"{W2}"), "W15: a window named 2 never hides window 2 - the typed number wins");
+
+            // The one-window skip: the chosen window's name rides along, and a skipped step still names no window in the line.
+            NewThreadWizard one;
+            one.step = NewThreadStep::Window;
+            census = WzCensus();
+            census.resize(1);
+            census[0].name = L"Solo";
+            out = ApplyNewThreadWindows(one, BuildNewThreadWindowPlan(census, WzTabFacts(), NormDirKey(L"K:\\proj"), L"proj"));
+            CHECK((out.kind == O::Launch && one.windowAuto && one.windowName == L"Solo"), "W15: one window skips the step, its name kept with the choice");
+
+            // Persistence: the step's names and the chosen name survive a restart; a wizard saved before 21.25.8 reads unnamed.
+            const NewThreadWizard back = NewThreadWizardFromJson(NewThreadWizardToJson(r.wizard));
+            CHECK((back.windows.size() == 2 && back.windows[0].name == L"Research <a>" && back.windows[1].name.empty() && back.windowName == L"Research <a>"),
+                  "W15: the window choices' names and the chosen name round-trip");
+            json::Value legacy = NewThreadWizardToJson(r.wizard);
+            legacy.members.erase(std::remove_if(legacy.members.begin(), legacy.members.end(), [](const auto& m) { return m.first == L"windowName"; }), legacy.members.end());
+            for (auto& [key, value] : legacy.members)
+            {
+                if (key == L"windows")
+                {
+                    for (auto& c : value.arr)
+                    {
+                        c.members.erase(std::remove_if(c.members.begin(), c.members.end(), [](const auto& m) { return m.first == L"name"; }), c.members.end());
+                    }
+                }
+            }
+            const NewThreadWizard old = NewThreadWizardFromJson(legacy);
+            CHECK((old.windows.size() == 2 && old.windows[0].name.empty() && old.windowName.empty() && old.windowNumber == 1),
+                  "W15: a wizard saved before the names reads every window unnamed (by its number), its choice intact");
+        }
     }
 }
 
