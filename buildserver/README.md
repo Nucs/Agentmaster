@@ -45,6 +45,9 @@ amb list | show <id> | cancel <id>
   `%LOCALAPPDATA%\amb\token`; nothing prints it.
 - Exit codes: 0 succeeded (or accepted, without `--wait`); 1 ended otherwise; 2 usage; 97 still running at `--wait-max`;
   98 the coordinator could not be reached or woken.
+- `amb --help` (or `-h`) prints every command and option. An option amb does not know - a typo such as `--dryrun`, or
+  a value option without its value - is refused with exit 2 before anything is sent (until 2026-10-29 it was ignored,
+  and `amb build --help` submitted a build).
 - A request waits for a slot while homepc has too little free (`waiting: memory`, …), up to its kind's wait timeout,
   then ends `NoCapacity`. Windows keeps 6 GB available and 16 GB of free commit (DESIGN.md §3.2).
 - A run's results stay in the site's store: `/srv/buildserver/store/requests/<id>/` (`<id>.status.json`,

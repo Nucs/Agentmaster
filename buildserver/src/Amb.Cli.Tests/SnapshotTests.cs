@@ -136,6 +136,24 @@ public sealed class SnapshotTests : IDisposable
         Assert.Contains(head, WorkingTreeSnapshot.Message(head, tree), StringComparison.Ordinal);
     }
 
+    /// <summary>A help flag asks for the usage, and an option amb does not know is reported so the command is refused
+    /// before anything is sent: an ignored `--help` once submitted a build, and an ignored `--dryrun` would install for
+    /// real. A value option given without its value counts as unknown too.</summary>
+    [Fact]
+    public void UnknownOptionsAreReported()
+    {
+        Assert.True(global::Options.Parse(["build", "--help"]).Help);
+        Assert.True(global::Options.Parse(["install", "b1", "-h"]).Help);
+        Assert.Equal(["--dryrun"], global::Options.Parse(["install", "b1", "--instance", "dev", "--dryrun"]).UnknownOptions);
+        Assert.Equal(["--instance"], global::Options.Parse(["install", "b1", "--instance"]).UnknownOptions);
+        global::Options good = global::Options.Parse(["install", "b1", "--instance", "dev", "--dry-run", "--wait"]);
+        Assert.Empty(good.UnknownOptions);
+        Assert.False(good.Help);
+        Assert.Equal("dev", good.Values["--instance"]);
+        // What follows "--" belongs to pytest or names snapshot paths: never options of amb's.
+        Assert.Empty(global::Options.Parse(["e2e", "b1", "--", "-v", "--collect-only"]).UnknownOptions);
+    }
+
     /// <summary>The test process runs under no claude.exe; the walk ends without one (and without throwing).</summary>
     [Fact]
     public void AncestryWalkEnds()

@@ -35,9 +35,21 @@ using Amb.Core.Protocol;
 
 string url = Environment.GetEnvironmentVariable("AMB_URL") is { Length: > 0 } u ? u : "http://127.0.0.1:2207";
 var options = Options.Parse(args);
+if (options.Help)
+{
+    Console.WriteLine(Options.UsageText);
+    return 0;
+}
+// An option amb does not know is refused BEFORE anything is sent: ignored, `amb build --help` submitted a build (seen
+// 2026-10-28), and a typo such as `amb install <id> --instance dev --dryrun` would install for real.
+if (options.UnknownOptions.Count > 0)
+{
+    Console.Error.WriteLine($"amb: unknown option(s) {string.Join(", ", options.UnknownOptions)}: nothing was done (amb --help lists the options)");
+    return 2;
+}
 if (options.Command is null)
 {
-    Console.Error.WriteLine("usage: amb status|list|show|logs|cancel|builds|import|smoke|e2e|build|artifacts|fetch|install ... (see the header of Program.cs)");
+    Console.Error.WriteLine("usage: amb status|list|show|logs|cancel|builds|import|smoke|e2e|build|artifacts|fetch|install ... (amb --help)");
     return 2;
 }
 using var client = new SiteClient(url);
@@ -103,6 +115,36 @@ internal sealed class Options
     private static readonly HashSet<string> WithValue =
         ["--image", "--suite", "--commit", "--limit", "--wait-max", "--run-timeout", "--wait-timeout", "--config", "--identity",
          "--purge", "--kind", "--to", "--instance", "--wait-others", "--inject-failure"];
+
+    /// <summary>The flags amb knows (options without a value). Any other "-x" is refused, and so is a value option given
+    /// without its value (it lands among the flags).</summary>
+    private static readonly HashSet<string> KnownFlags = ["--wait", "-f", "--json", "--snapshot", "--dry-run", "--help", "-h"];
+
+    /// <summary>What `amb --help` prints: every command and option (the header of Program.cs says more).</summary>
+    public const string UsageText = """
+        amb - the Agentmaster build server's command line (buildserver/README.md)
+
+          amb status | list [--limit N] | show <id> | builds | cancel <id>
+          amb logs <id> [-f] [--wait-max S]
+          amb build [<rev>] [--config Release|Debug] [--identity dev|release] [--purge none|force] [--wait]
+          amb build --snapshot [--config ...] [--identity ...] [--purge ...] [--wait] [-- <paths>]
+          amb artifacts <build id>
+          amb fetch <build id> [--kind portable-zip|layout-zip|symbols-zip|build-log|build-binlog|build-json|all] [--to DIR]
+          amb install <build id> --instance dev|production [--dry-run] [--wait-others MIN] [--wait]   (alias: deploy)
+          amb import <portable zip> [--commit SHA] [--wait]
+          amb e2e <build id> [--image am-e2e] [--suite PATH] [--wait] [-- pytest arguments]
+          amb smoke [--image am-base] [--wait]
+
+          Requests also take --run-timeout MIN and --wait-timeout MIN (1-1440); --wait-max S stops watching after S
+          seconds (exit 97); --json prints the coordinator's JSON. build and install are a build and a deploy: ask the
+          owner first. An unknown option is refused: nothing is sent.
+        """;
+
+    /// <summary>Whether --help or -h was given: the usage is printed and nothing else happens.</summary>
+    public bool Help => Flags.Contains("--help") || Flags.Contains("-h");
+
+    /// <summary>The options amb does not know (a typo, a value option without its value), in no particular order.</summary>
+    public IReadOnlyList<string> UnknownOptions => [.. Flags.Where(f => !KnownFlags.Contains(f))];
 
     /// <summary>Parses the arguments.</summary>
     /// <param name="args">The process's arguments.</param>
