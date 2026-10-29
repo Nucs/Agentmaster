@@ -1,7 +1,7 @@
 # Build server measurements: the kit
 
-The scripts behind every number in [`../DESIGN.md`](../DESIGN.md) §16, as they ran on 2026-10-24, 2026-10-25 and
-2026-10-26. Nothing here is part of the build server: they are the measurements' proof, kept so that each number can be
+The scripts behind every number in [`../DESIGN.md`](../DESIGN.md) §16, as they ran on 2026-10-24, 2026-10-25,
+2026-10-26 and 2026-10-29. Nothing here is part of the build server: they are the measurements' proof, kept so that each number can be
 measured again.
 
 ## Where they ran
@@ -35,6 +35,8 @@ measured again.
 | [`p04_native.sh`](p04_native.sh) | proof P0.4's native half (DESIGN.md §16.12): the build VM's Release build of a commit repeated on this PC from a private clone on Q:, with the same wrapper and parallelism (`/m:2`, `CL_MPCount` 2), under the build lock; its header says how the clone was made. The VM half is the builds' own requests (`amb build`) | Git Bash on Windows |
 | [`results-2026-10-25/`](results-2026-10-25) | every result file the numbers in DESIGN.md §16.1–§16.11 come from: `docker-vm-*` (the VM in Docker Desktop), `distro-slot-*` (the slot in the test distro), `host-*` (this PC), `p01-fastrund.json` (P0.1), and the screenshot of Agentmaster on Tiny11 Core | — |
 | [`results-2026-10-26/`](results-2026-10-26) | `p04-full-build.json` (P0.4: the cold and incremental builds, VM against native, with their requests, build ids and ratios) | — |
+| [`diskram/`](diskram) | a slot whose RAM lives mostly on the site's disk (DESIGN.md §16.14): `setup.sh` boots `am-e2e` the way `PodmanSlotDriver` does, its container capped by `--memory`, with an 8 GB swap file on the site's disk; `sample.py` samples Windows' available RAM and free commit, vmmemWSL and the container's cgroup every few seconds, and removes the container when the PC runs short (the tripwire); `probe.sh` (one cgroup sample), `swaprate.py` (the swap traffic), `cleanup.sh` (the container, the swap file and the folder) | the site distro, as root (`*.sh`, through `wsl.exe … sh -s`); Windows (`*.py`) |
+| [`results-2026-10-29/`](results-2026-10-29) | `diskram-samples.csv` (§16.14: the 4.5 min of the capped slot's boot, every 5 s) | — |
 
 ## Traps met on the way (each one is in DESIGN.md too)
 

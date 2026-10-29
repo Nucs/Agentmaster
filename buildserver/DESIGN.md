@@ -882,6 +882,30 @@ browser, a game and an IDE).
 | `amb build --snapshot … -- buildserver/steps/install/install-build.ps1` | the snapshot c5f3cd907 of HEAD fb20046ab (the one named file over HEAD), its ref under refs/buildserver/snapshots/, the working tree, the index and HEAD unchanged. Its purged Debug build (r20261029-052923-e3a171, an 8-hour wait timeout) was queued at 05:29Z and waited `homepc: memory`: a build is admitted with 24 GB of free commit, and the PC had 3.3-7.9 GB |
 | msbuild 17.14 (this PC's VS 2022) with a `Directory.Build.rsp` holding `-bl:<file>` beside a `.slnx` | the binary log was written (the build-step route of the binlog, checked on a scratch solution; the VM's Build Tools are 17.14 too) |
 
+### 16.14 A slot's RAM on the site's disk: a memory cap and a swap file on Q: (2026-10-29)
+
+The owner, after an e2e run of v0.8.1 waited for 19 GB of free commit: "Can the e2e system utilize the disk instead of
+changing the os? so we will run but slower", then "Lets try to run a VM, disk only except ram. no commit ram usage". The
+`am-e2e` image was booted the way `PodmanSlotDriver` starts a slot (4 GB of guest RAM, 4 vCPUs), with two additions: a
+memory cap on its container (`--memory 1536m --memory-swap 9728m`) and an 8 GB swap file on the site's disk (fallocate,
+mkswap, `swapon -p 10`, ahead of WSL's own swap, a vhdx on C:). The scripts are in [`measure/diskram/`](measure/diskram),
+the samples in `measure/results-2026-10-29/diskram-samples.csv`; the container, the swap file and the folder were removed
+afterwards. During the run the PC had 8.5–12.5 GB available and 8.8–13.9 GB of free commit, moved by the owner's
+own programs (the WSL VM's charge stayed flat meanwhile).
+
+| What | Measured |
+|---|---|
+| WSL's kernel 5.15.153.1, podman 5.6.2 (cgroupfs) | cgroup v1 with the memory controller and swap accounting (`memory.memsw.*`): `--memory` and `--memory-swap` work as they are, no WSL restart (W1 is not needed for this) |
+| the container's resident memory | at the cap (1.50 GB) from 5 s after the start to the end, 4.5 min; 2.64–2.66 GB of the guest swapped to the file on Q: (2.85–2.93 GB of it in use); the cap hit 0.9 million times; never killed (`OOMKilled` false) |
+| Windows' charge for the WSL VM (vmmemWSL's private bytes) | 4.43 GB before; a peak of 7.28 GB 5 s after the start (the guest zeroing its RAM faster than the freed pages went back to Windows); 6.13–6.20 GB from 50 s on: +1.7 GB for a 4 GB VM, where an uncapped one charges all of RAM_SIZE (§16.10); 5.45 GB after the cleanup and a drop of the page cache (WSL hands memory back gradually) |
+| the guest | at its desktop (1600×900, the bootstrap's terminal in the taskbar) when its screen was read through QEMU's monitor, ~4.5 min after the start (an uncapped e2e slot's agent says hello after 57 s, §16.10); no agent was staged, so no step ran |
+| swap traffic, the guest idle at its desktop | 3.9 MB/s in, 3.2 MB/s out (30 s of /proc/vmstat): 1.5 GB is under an idle Windows desktop's working set, so the guest keeps paging |
+
+**What it means** (not built): a slot can charge Windows only its cap, with the guest's RAM above the cap on Q:, so its
+admission would count the cap, not RAM_SIZE. An e2e run (Agentmaster and several `claude.exe`) needs a larger cap than
+an idle desktop: the next measurement is the smoke suite at caps of 2–3 GB, timed against an uncapped slot. The first
+seconds' peak (+2.85 GB here) comes before the cap takes hold, so admission has to leave room for it.
+
 ## 17. Evidence
 
 - **The scripts:** [`measure/README.md`](measure/README.md), one per measurement.
