@@ -3734,6 +3734,17 @@ namespace Agentmaster
         // re-selects this tab so closing/reopening preserves what was ACTIVE, not just the set of tabs.
         std::wstring selectedSessionId; // selected Claude tab's conversation id (stable); empty otherwise
         int selectedTabIndex{ -1 }; // fallback for a non-Claude selected tab: index into `tabs`; -1 = the Manager page / none
+        // Agentmaster (THE WINDOW NAME; AGENT_MANAGER.md "The window name"): the name the user gave this window — Windows
+        // Terminal's own window name (WindowProperties::WindowName), which is also this window's caption while it is set:
+        // what its taskbar preview, its Alt+Tab entry and its taskbar label read. Empty == unnamed: the caption follows the
+        // focused tab's title (or the Agent Manager page's), as before the feature. Captured from the live window at every
+        // save; applied back to the window when it claims this record, but only to a window that has no name yet (a name
+        // given on the command line, `-w <name>`, wins and is saved over this one). Never "_quake" — that name is WT's
+        // quake-mode switch, not a title, and a hidden drop-down window must not come back by itself at the next start.
+        // ⚠ Written UNCONDITIONALLY (an empty name too): only a member every save writes is in the default document's
+        // template, and only such a member can come back through the older-writer repair (StateCompat.h,
+        // PERSISTENCE.md §17) after a build that predates it rewrote the file without it.
+        std::wstring name;
         ManagerState manager;
         // Agentmaster: RETIRED — the old pinned Manager tab's user-chosen color ("#RRGGBB"; empty =>
         // none), persisted PER WINDOW (that tab was a per-window singleton with no dir, so Rule #12's

@@ -35,6 +35,7 @@
 #include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Auto Testing of an external) + BringClaudeWindowToFront (EXTERNAL menu)
 #include "AgentMaster/TranscriptStore.h" // ReadTranscriptQuickFacts — resolve a launch-box session id's cwd
 #include "AgentMaster/Updater.h" // the in-app updater: the cog's "Check for updates" + the "vX available!" label
+#include "AgentMaster/WindowName.h" // THE WINDOW NAME: kMaxWindowNameLength (the header editor's MaxLength)
 
 // Agentmaster: the build-stamped git commit + branch (the Settings page header). Generated into
 // $(GeneratedFilesDir) by TerminalAppLib.vcxproj's AgentmasterGenerateBuildInfo target, which is
@@ -445,6 +446,209 @@ namespace winrt::TerminalApp::implementation
     void AgentManagerContent::SetReopenWindowsHandler(std::function<void()> handler)
     {
         _reopenWindowsHandler = std::move(handler);
+    }
+
+    // ---- THE WINDOW NAME (AGENT_MANAGER.md "The window name"; the contracts are in the header) ----
+
+    void AgentManagerContent::SetWindowName(std::wstring_view name)
+    {
+        _windowName = std::wstring{ name };
+        if (_windowNameEditing)
+        {
+            return; // the user's typing wins; _EndWindowNameEdit re-shows the name from _windowName when the editor closes
+        }
+        _ShowWindowName();
+    }
+
+    void AgentManagerContent::SetRenameWindowHandler(std::function<void(const std::wstring&)> handler)
+    {
+        _renameWindowHandler = std::move(handler);
+    }
+
+    FrameworkElement AgentManagerContent::_BuildWindowNameControl()
+    {
+        // One grid cell for both faces, so swapping them never moves the rest of the actions row by more than the width
+        // difference — and never re-parents an element (a re-parented focused box loses its focus and its text state).
+        _windowNameHost = Grid{};
+        _windowNameHost.VerticalAlignment(VerticalAlignment::Center);
+
+        // The name button: [name][rename glyph] in the actions row's slim style (FontSize 11, 8/1 padding, as the cog).
+        _windowNameBtn = Button{};
+        _windowNameBtn.FontSize(11);
+        _windowNameBtn.Padding(Thickness{ 8, 1, 8, 1 });
+        {
+            StackPanel face;
+            face.Orientation(Orientation::Horizontal);
+            face.Spacing(6);
+            _windowNameText = TextBlock{};
+            _windowNameText.FontSize(11);
+            _windowNameText.MaxWidth(260); // a long name ends in "…" HERE only; the caption and the record keep it whole
+            _windowNameText.TextWrapping(TextWrapping::NoWrap);
+            _windowNameText.TextTrimming(TextTrimming::CharacterEllipsis);
+            _windowNameText.VerticalAlignment(VerticalAlignment::Center);
+            face.Children().Append(_windowNameText);
+            FontIcon glyph;
+            glyph.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+            glyph.Glyph(L"\xE8AC"); // Rename — the glyph of the WT tab menu's "Rename Tab", so it reads as the same verb
+            glyph.FontSize(11);
+            glyph.Opacity(0.75);
+            glyph.VerticalAlignment(VerticalAlignment::Center);
+            face.Children().Append(glyph);
+            _windowNameBtn.Content(face);
+        }
+        AgentSetTitledTip(_windowNameBtn, L"Window name", L"This window's title in its taskbar preview, in Alt+Tab and on its taskbar button \x2014 so you can tell your windows apart there. Click to rename it; empty it to show the focused tab's title again. Saved with the window, so it comes back when the window reopens. Also in the window menu: right-click the title bar or this window's taskbar preview \x2192 Rename window\x2026");
+        _windowNameBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _BeginWindowNameEdit(); });
+        _windowNameHost.Children().Append(_windowNameBtn);
+
+        // The inline editor: collapsed until a click swaps it in. Sized to the button's scale (FontSize 11, no TextBox
+        // MinHeight) so the row does not jump taller while it is open; capped at the name's maximum so typing stops
+        // where the normalization would cut anyway. No spell check or prediction: a name is not prose.
+        _windowNameBox = TextBox{};
+        _windowNameBox.FontSize(11);
+        _windowNameBox.MinHeight(0);
+        _windowNameBox.Padding(Thickness{ 6, 1, 6, 1 });
+        _windowNameBox.Width(260);
+        _windowNameBox.MaxLength(static_cast<int32_t>(::Agentmaster::kMaxWindowNameLength));
+        _windowNameBox.AcceptsReturn(false);
+        _windowNameBox.IsSpellCheckEnabled(false);
+        _windowNameBox.IsTextPredictionEnabled(false);
+        _windowNameBox.PlaceholderText(L"Window name (empty = the focused tab's title)");
+        _windowNameBox.VerticalAlignment(VerticalAlignment::Center);
+        _windowNameBox.Visibility(Visibility::Collapsed);
+        // Enter commits and Esc cancels, each on its KEY-UP: the down is only ARMED here (and marked handled, so nothing
+        // above the box acts on it), and the release closes the editor — so the key's release never lands on whatever
+        // takes the focus next. PreviewKeyDown (tunneling) sees the key before the box's own handling.
+        _windowNameBox.PreviewKeyDown([this](const IInspectable&, const KeyRoutedEventArgs& e) {
+            const auto key = e.Key();
+            if (key == VirtualKey::Enter)
+            {
+                _windowNameKeyArmed = WindowNameKey::Commit;
+                e.Handled(true);
+            }
+            else if (key == VirtualKey::Escape)
+            {
+                _windowNameKeyArmed = WindowNameKey::Cancel;
+                e.Handled(true);
+            }
+        });
+        _windowNameBox.KeyUp([this](const IInspectable&, const KeyRoutedEventArgs& e) {
+            const auto key = e.Key();
+            if (key == VirtualKey::Enter && _windowNameKeyArmed == WindowNameKey::Commit)
+            {
+                e.Handled(true);
+                _EndWindowNameEdit(true, true);
+            }
+            else if (key == VirtualKey::Escape && _windowNameKeyArmed == WindowNameKey::Cancel)
+            {
+                e.Handled(true);
+                _EndWindowNameEdit(false, true);
+            }
+        });
+        // A click anywhere else commits, like the Explorer Tree's in-place rename. After an Enter or an Esc the editor is
+        // already closed, and this call is the latch's no-op.
+        _windowNameBox.LostFocus([this](const IInspectable&, const RoutedEventArgs&) { _EndWindowNameEdit(true, false); });
+        _windowNameHost.Children().Append(_windowNameBox);
+
+        _ShowWindowName();
+        return _windowNameHost;
+    }
+
+    void AgentManagerContent::_ShowWindowName()
+    {
+        if (!_windowNameText || !_windowNameBtn)
+        {
+            return;
+        }
+        const bool named = !_windowName.empty();
+        _windowNameText.Text(named ? winrt::hstring{ _windowName } : winrt::hstring{ L"Name this window" });
+        // Unnamed reads as an invitation, not a value: dimmed and italic, never mistaken for a window called that.
+        _windowNameText.Opacity(named ? 1.0 : 0.6);
+        _windowNameText.FontStyle(named ? winrt::Windows::UI::Text::FontStyle::Normal : winrt::Windows::UI::Text::FontStyle::Italic);
+        // The button's content is a panel, so it has no accessible name of its own (AgentAutomation.h): give it one that
+        // carries the VALUE, which is what a screen reader must announce.
+        AgentSetAccessibleName(_windowNameBtn, named ? L"Window name: " + _windowName : std::wstring{ L"Name this window" });
+    }
+
+    void AgentManagerContent::_BeginWindowNameEdit()
+    {
+        if (!_windowNameBox || !_windowNameBtn || _windowNameEditing)
+        {
+            return;
+        }
+        _windowNameEditing = true;
+        _windowNameKeyArmed = WindowNameKey::None; // a key armed in an earlier edit whose release never came must not act now
+        _windowNameBox.Text(winrt::hstring{ _windowName });
+        _windowNameBtn.Visibility(Visibility::Collapsed);
+        _windowNameBox.Visibility(Visibility::Visible);
+        // Focus + select-all one dispatcher turn later: the box was collapsed a moment ago and takes no focus before its
+        // layout pass. A box that still cannot take it stays open; a click into it, then Enter or a click away, closes it.
+        if (_dispatcher)
+        {
+            _dispatcher.TryEnqueue([weak = get_weak()]() {
+                const auto self = weak.get();
+                if (!self || !self->_windowNameEditing || !self->_windowNameBox)
+                {
+                    return; // the page is gone, or the editor closed before this turn came
+                }
+                try
+                {
+                    self->_windowNameBox.Focus(FocusState::Programmatic);
+                    self->_windowNameBox.SelectAll(); // the first keystroke replaces the old name
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"window name editor focus");
+                }
+            });
+        }
+    }
+
+    void AgentManagerContent::_EndWindowNameEdit(bool commit, bool returnFocus)
+    {
+        if (!_windowNameEditing)
+        {
+            return;
+        }
+        // The latch FIRST: hiding the focused box below raises LostFocus, which calls back in here — and must be a no-op,
+        // or an Esc would commit after all.
+        _windowNameEditing = false;
+        _windowNameKeyArmed = WindowNameKey::None;
+        const std::wstring typed = _windowNameBox ? std::wstring{ _windowNameBox.Text() } : std::wstring{};
+        if (_windowNameBtn)
+        {
+            _windowNameBtn.Visibility(Visibility::Visible);
+            if (returnFocus)
+            {
+                // Onto the button BEFORE the box goes away: collapsing a focused box first would let the focus manager drop
+                // the keyboard on whatever element it picks next.
+                _windowNameBtn.Focus(FocusState::Programmatic);
+            }
+        }
+        if (_windowNameBox)
+        {
+            _windowNameBox.Visibility(Visibility::Collapsed);
+        }
+        if (commit)
+        {
+            if (_renameWindowHandler)
+            {
+                try
+                {
+                    // The page normalizes and renames; the new name comes straight back through SetWindowName (the rename is
+                    // synchronous), so the header shows what the window really got, not what was typed.
+                    _renameWindowHandler(typed);
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"window name commit (rename the window)");
+                }
+            }
+            else
+            {
+                _windowName = typed; // unwired (the standalone harness): show the text; nothing is renamed
+            }
+        }
+        _ShowWindowName();
     }
     void AgentManagerContent::SetOpenSessionsHandler(std::function<void()> handler)
     {
@@ -1022,6 +1226,12 @@ namespace winrt::TerminalApp::implementation
             // The launch-buttons group sits inline at the end of the title row by default; _ReflowLaunchBar
             // moves it to its own line (between the title row and the actions row) when the bar is too narrow.
             bar.Children().Append(_launchBtns);
+
+            // Agentmaster (THE WINDOW NAME; AGENT_MANAGER.md "The window name"): the window's name, FIRST in the actions row —
+            // directly under the brand, where a page's title belongs — with its rename glyph and inline editor. Here and
+            // not in the title row above: that row is measured and stage-collapsed by _ReflowLaunchBar, this one is a
+            // plain left-aligned stack, so the name can grow and shrink without changing the launch bar's reflow math.
+            actionsRow.Children().Append(_BuildWindowNameControl());
 
             // Settings cog (opens the in-content settings overlay; built at the end of layout).
             // Lives in the compact actions row below the title — thinner, smaller font.
@@ -1888,6 +2098,10 @@ namespace winrt::TerminalApp::implementation
         // which is often the VALUE a screen reader must announce and the e2e suite reads.
         AgentSetAutomationId(_settingsBtn, L"am.mgr.toolbar.settings");
         AgentSetAccessibleName(_settingsBtn, L"Settings");
+        // THE WINDOW NAME: the button's accessible NAME is set by _ShowWindowName (its content is a panel, so it has none of
+        // its own, and the name it carries is the value a screen reader must announce); the box keeps its placeholder.
+        AgentSetAutomationId(_windowNameBtn, L"am.mgr.toolbar.windowName");
+        AgentSetAutomationId(_windowNameBox, L"am.mgr.toolbar.windowNameBox");
         AgentSetAutomationId(_sessionsBtn, L"am.mgr.toolbar.sessions");
         AgentSetAutomationId(_keepAwakeBtn, L"am.mgr.toolbar.keepAwake");
         AgentSetAutomationId(_pauseBtn, L"am.mgr.toolbar.pause");

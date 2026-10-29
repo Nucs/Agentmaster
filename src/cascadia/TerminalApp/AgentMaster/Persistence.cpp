@@ -1539,6 +1539,10 @@ namespace Agentmaster
         o.Set(L"tabs", std::move(tabs));
         o.Set(L"selectedSessionId", json::Value::MkStr(w.selectedSessionId)); // stable id of the focused Claude tab
         o.Set(L"selectedTabIndex", json::Value::MkNum(static_cast<double>(w.selectedTabIndex))); // fallback for a shell tab
+        // The window name (the caption while set; "" == unnamed). Written even when empty, unlike the side panel's
+        // omitted sentinels below: a member every save writes is in the default document's template, which is what lets
+        // the older-writer repair (PERSISTENCE.md §17) put a user's name back after a build that predates it saved the file.
+        o.Set(L"name", json::Value::MkStr(w.name));
         o.Set(L"manager", ToJson(w.manager));
         o.Set(L"managerTabColor", json::Value::MkStr(w.managerTabColor)); // Agentmaster: RETIRED — the old Manager tab's per-window color ("#RRGGBB"; "" => none); round-tripped, never applied (the Manager is a page now)
         // Side panel (window chrome): this window's own layout. The UNSET sentinels are written only
@@ -1591,6 +1595,9 @@ namespace Agentmaster
         // preferred on restore; selectedTabIndex is the shell-tab fallback.
         w.selectedSessionId = v.StrAt(L"selectedSessionId");
         w.selectedTabIndex = static_cast<int>(v.I64At(L"selectedTabIndex", -1));
+        // The window name: absent (a record from before the feature) or not a string (hand-edited) reads unnamed, which
+        // is exactly how every window behaved before — the caption follows the focused tab.
+        w.name = v.StrAt(L"name");
         w.managerTabColor = v.StrAt(L"managerTabColor"); // RETIRED — read only to round-trip (empty when absent)
         // Side panel (window chrome): absent keys stay at the UNSET sentinels (0 fraction / -1
         // collapsed) so a pre-feature record follows the GLOBAL defaults at open. A stored fraction is

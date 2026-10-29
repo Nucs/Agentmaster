@@ -238,6 +238,19 @@ namespace winrt::TerminalApp::implementation
         // WindowEmperor's startup reopen loop). The content computes N itself
         // (::Agentmaster::RecoverableWindows) and shows the button only when N>0.
         void SetReopenWindowsHandler(std::function<void()> handler);
+        // Agentmaster (THE WINDOW NAME; AGENT_MANAGER.md "The window name"): show this window's name in the page's header
+        // (the first control of the toolbar's actions row: the name and a rename glyph, or "Name this window" while it
+        // has none). The page calls it when it wires this content and after EVERY rename, whatever made it (the window
+        // menu, the command palette, a `renameWindow` action, this header), so the header never disagrees with the
+        // caption. An open editor is left alone — the user's typing wins until they commit or cancel. UI thread only.
+        //   name   - the window's name; "" == unnamed.
+        //   throws - what a XAML property write throws on the UI thread (the page's callers contain it).
+        void SetWindowName(std::wstring_view name);
+        // Agentmaster (THE WINDOW NAME): the header editor's commit. The handler (TerminalPage::_RenameWindowFromManager)
+        // normalizes the typed text and renames the window; the new name comes back through SetWindowName. Unwired (the
+        // standalone harness), a commit only re-shows the typed text in the header and renames nothing.
+        //   handler - called on the UI thread with the box's text exactly as typed ("" asks to unname the window).
+        void SetRenameWindowHandler(std::function<void(const std::wstring&)> handler);
         // Agentmaster (Sessions page; SESSIONS.md / FAVORITES.md): the Manager's "Sessions" button opens
         // the full-window browser over EVERY on-disk Claude Code session — the sole history view.
         void SetOpenSessionsHandler(std::function<void()> handler);
@@ -391,6 +404,26 @@ namespace winrt::TerminalApp::implementation
 
     private:
         void _BuildLayout();
+        // Agentmaster (THE WINDOW NAME; AGENT_MANAGER.md "The window name"): the header's window-name control (the members'
+        // note has the shape).
+        //   _BuildWindowNameControl - build the name button, its inline editor and their one-cell host, wire the editor's
+        //     keys (Enter commits, Esc cancels — each on its KEY-UP — and a click away commits), and show the current
+        //     name. Called once, from _BuildLayout's toolbar block. Returns the host for the actions row. Throws what
+        //     XAML element creation throws (the layout build's own failure path).
+        //   _ShowWindowName - put _windowName on the button (or "Name this window", dimmed, while unnamed) together with
+        //     its accessible name. A no-op before the build. Never throws on the UI thread in practice.
+        //   _BeginWindowNameEdit - swap the box in, filled with the current name, and focus it with everything selected
+        //     one dispatcher turn later (a box that was collapsed a moment ago takes no focus before its layout pass).
+        //     A no-op while already editing.
+        //   _EndWindowNameEdit - close the editor: `commit` hands the typed text to _renameWindowHandler (the page
+        //     normalizes it and renames the window; an unwired page only shows the text), otherwise the name stays.
+        //     `returnFocus` puts the keyboard back on the name button (Enter / Esc); a click away leaves focus where the
+        //     click put it. A no-op when no editor is open, which is what makes the LostFocus that follows an Enter or an
+        //     Esc harmless. A throwing rename handler is logged ([exc]) and the header keeps the name it showed.
+        winrt::Windows::UI::Xaml::FrameworkElement _BuildWindowNameControl();
+        void _ShowWindowName();
+        void _BeginWindowNameEdit();
+        void _EndWindowNameEdit(bool commit, bool returnFocus);
         // The lens rebuild every refresh trigger funnels through (the hidden-lens gate lives here).
         //   boardOnly - false (every caller but one): the board, the tree, the plan, the Summary tab, the
         //               toolbar counts and the keep-awake hold. true (NoteTagsChanged): the board alone,
@@ -1079,6 +1112,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(bool)> _pauseHandler; // Agentmaster (DELIVERY.md §17): asks the page to set the process-wide pause (SetPauseHandler)
         std::function<void(::Agentmaster::AppSettings)> _settingsSink;
         std::function<void()> _reopenWindowsHandler; // Agentmaster (M10): the "Reopen Windows" recover-button action
+        std::function<void(const std::wstring&)> _renameWindowHandler; // Agentmaster (THE WINDOW NAME): the header editor's commit -> the page renames the window (SetRenameWindowHandler)
         std::function<void()> _openSessionsHandler; // Agentmaster (Sessions page): open the full-window global Sessions browser (TerminalPage-hosted)
         std::function<void()> _resetHiddenSessionsHandler; // Agentmaster (Sessions page): the Settings cog's "Reset hidden sessions" action — clear AppSettings.hiddenSessionIds (TerminalPage-side)
         std::function<void()> _quitForUpdateHandler; // Agentmaster (updater): "Update now" -> quit the app gracefully (page's RequestQuit) so the installer can replace it
@@ -1297,6 +1331,30 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _pauseBtn{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _settingsBtn{ nullptr }; // the cog (next to Pause)
         winrt::Windows::UI::Xaml::Controls::Button _sessionsBtn{ nullptr }; // Agentmaster (Sessions page): "Sessions" -> the global on-disk sessions browser (the sole history view; FAVORITES.md)
+        // Agentmaster (THE WINDOW NAME; AGENT_MANAGER.md "The window name"): the header's window-name control, the first
+        // one in the toolbar's actions row. ONE grid cell holds the name button and its inline editor, and exactly one of
+        // the two is visible: the button shows the name (or "Name this window") with a rename glyph, a click swaps in the
+        // box. Inline, never a ContentDialog: a text box inside a ContentDialog gets no keys under XAML Islands (Gotcha).
+        // Built once by _BuildWindowNameControl and never rebuilt (the toolbar is outside the lens rebuild), so it costs
+        // nothing per refresh.
+        //   _windowName         - the name as the page last pushed it (SetWindowName); "" == unnamed.
+        //   _windowNameEditing  - the editor is open. The latch _EndWindowNameEdit clears FIRST, so the LostFocus that
+        //                         collapsing a focused box raises cannot commit a second time (or after a cancel).
+        //   _windowNameKeyArmed - an Enter or Esc whose KEY-DOWN reached the box; its KEY-UP commits or cancels, so the key's
+        //                         release never lands on whatever takes focus next.
+        winrt::Windows::UI::Xaml::Controls::Grid _windowNameHost{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Button _windowNameBtn{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBlock _windowNameText{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBox _windowNameBox{ nullptr };
+        std::wstring _windowName;
+        bool _windowNameEditing{ false };
+        enum class WindowNameKey
+        {
+            None,
+            Commit,
+            Cancel
+        };
+        WindowNameKey _windowNameKeyArmed{ WindowNameKey::None };
         winrt::Windows::UI::Xaml::Controls::Button _reopenBtn{ nullptr }; // Agentmaster (M10): "Reopen Windows (N)" -> reopen saved-but-not-open windows (shown only when N>0)
         winrt::Windows::UI::Xaml::Controls::Button _activateAllBtn{ nullptr }; // Agentmaster (eager-init): "Activate All Tabs (N)" -> wake this window's dormant tabs (shown only when N>0)
         bool _activateAllBusy{ false }; // Agentmaster (eager-init pacing): true while the page's drip is waking this window's tabs — relabels/disables _activateAllBtn + disables _cwdBox (SetActivateAllBusy)

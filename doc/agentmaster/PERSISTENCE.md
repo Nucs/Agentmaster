@@ -119,6 +119,10 @@ WindowRecord {
   tabs:      [ TabEntry... ]   // ORDERED
   selectedSessionId / selectedTabIndex   // focused-at-close tab by STABLE identity (Claude convId,
                                          //   else shell-tab index; Increment 5)
+  name:      the window's name (WT's WindowName; "" = unnamed) — its caption while set; captured live,
+             applied back at claim unless the window was created with a name, never "_quake", written
+             even when empty so the §17 older-writer repair can restore it (AGENT_MANAGER.md
+             "The window name")
   manager:   { selectedId, scopeDir, selectedPromptId, collapsedDirs[], splitterFractions,
                treeScope }   // treeScope: 0=LOCAL 1=GLOBAL 2=EXTERNAL — the ONE scope behind the
                              // Explorer Tree's 3-way toggle AND the Triage Board's 2-way twin

@@ -527,6 +527,9 @@ differs from the plan above, and why:
   text), the runner toggle (its label), the side panel's ⌖ ⇄ and chevrons, the badge's icon buttons. Item 1's HELP
   TEXT half is built as planned: every `AgentSetTip` text becomes the control's help text, unless its builder set one.
 - **Ids built:** `am.mgr.toolbar.{settings,sessions,keepAwake,pause,reopen,activateAll}`,
+  `am.mgr.toolbar.windowName` (the window name's button; its accessible name is `Window name: <name>`, or
+  `Name this window` while unnamed) + `am.mgr.toolbar.windowNameBox` (its inline editor, a TextBox named by its
+  placeholder; AGENT_MANAGER.md *The window name*),
   `am.mgr.board.{scope,sort,refresh,clear,showAll}`, `am.mgr.board.card.<key>` + `am.mgr.board.more.<key>`,
   `am.mgr.board.external.<key|pidN>` (+ `.more.`), `am.mgr.tree.{scope,sort,refresh}`, `am.mgr.tree.row.<key>`,
   `am.mgr.tree.external.<key|pidN>`, `am.mgr.pane.{summary,queue}`,

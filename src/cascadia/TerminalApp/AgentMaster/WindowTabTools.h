@@ -140,7 +140,7 @@ namespace Agentmaster
     struct WindowCensus
     {
         std::wstring windowId; // the window's record id ("{guid}", TerminalPage::_windowId): what a request names
-        std::wstring title; // the window's title (the selected tab's title, or "Agent Manager")
+        std::wstring title; // the window's title (TerminalPage::Title): its name when the user named it, else the selected tab's title, or "Agent Manager"
         bool managerPageVisible{ false }; // the window shows its Agent Manager page: no tab is selected
         // The window the user activated last (Engine NoteWindowActivated). Set by the engine when it gathers the
         // census, never by the window: a window cannot know whether another one was activated after it.

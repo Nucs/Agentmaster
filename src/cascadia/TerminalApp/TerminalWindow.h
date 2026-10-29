@@ -212,6 +212,12 @@ namespace winrt::TerminalApp::implementation
         void _OnLoaded(const IInspectable& sender, const Windows::UI::Xaml::RoutedEventArgs& eventArgs);
         void _pageInitialized(const IInspectable& sender, const IInspectable& eventArgs);
         void _OpenSettingsUI();
+        // Agentmaster (THE WINDOW NAME; AGENT_MANAGER.md "The window name"): the window menu's "Rename window…" item —
+        // the system menu a right-click on the title bar's empty strip, Alt+Space and a right-click on the window's
+        // taskbar preview all open. Hands off to TerminalPage::OpenWindowRenamer, which brings the window forward and
+        // opens WT's renamer. Runs on the window's UI thread from IslandWindow's WM_SYSCOMMAND; a no-op once the page
+        // is gone (a menu command that arrives while the window closes). Never throws: the page contains its failures.
+        void _OpenWindowRenamerFromSystemMenu();
         void _WindowSizeChanged(const IInspectable& sender, winrt::Microsoft::Terminal::Control::WindowSizeChangedEventArgs args);
         void _RenameWindowRequested(const IInspectable& sender, const winrt::TerminalApp::RenameWindowRequestedArgs args);
 

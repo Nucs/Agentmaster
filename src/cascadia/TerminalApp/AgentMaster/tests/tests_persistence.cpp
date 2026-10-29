@@ -25,6 +25,7 @@
 #include "../LaunchPresets.h" // PERSISTENCE.md §17: launch-presets.json's consumed migration key (TestStateCompat)
 #include "../StateBackups.h" // PERSISTENCE.md §17: the snapshots, the shadow paths, the version-change check (TestStateCompat)
 #include "../StateCompat.h" // PERSISTENCE.md §17: the residue, the lookups, the writer stamp, the older-writer repair (TestStateCompat)
+#include "../WindowName.h" // AGENT_MANAGER.md "The window name": the header's name rules (TestWindowRecord)
 
 #include <algorithm> // TestUnreadableStateFiles: the kept copies in name (= creation) order
 #include <fstream> // TestUnreadableStateFiles: raw bytes planted / read back (a BOM, NULs, a torn write)
@@ -569,6 +570,9 @@ void TestWindowRecord()
     // would otherwise mask a missing index).
     in.selectedSessionId = L"conv-abc";
     in.selectedTabIndex = 1;
+    // The window name (AGENT_MANAGER.md "The window name"): non-empty so a dropped key fails the round-trip, with an em
+    // dash and a Hebrew letter so the escaper's non-ASCII path is pinned too (a name is free text the user typed).
+    in.name = L"Research \x2014 \x05D0";
     in.managerTabColor = L"#3A6EA5"; // the RETIRED pinned-Manager-tab per-window color — the Manager is a page now and nothing reads it, but the key must still round-trip so an older record is never wiped (non-default so a dropped field fails the round-trip)
 
     in.manager.selectedId = L"conv-abc";
@@ -612,6 +616,7 @@ void TestWindowRecord()
 
     CHECK(out.selectedSessionId == L"conv-abc", "selected tab persisted by stable Claude id (round-trip)");
     CHECK(out.selectedTabIndex == 1, "selectedTabIndex shell fallback (round-trip)");
+    CHECK(out.name == L"Research \x2014 \x05D0", "the window name (the caption while set) round-trips, non-ASCII kept");
     CHECK(out.managerTabColor == L"#3A6EA5", "managerTabColor (retired Manager-tab color, kept for back-compat) round-trip");
 
     CHECK(out.manager.selectedId == L"conv-abc", "lens selectedId round-trip");
@@ -660,6 +665,21 @@ void TestWindowRecord()
         // The card-list scope has NO global default: an absent key is LOCAL, full stop — a
         // pre-feature record must never reopen listing another window's tabs.
         CHECK(sideLegacy.sidePanelGlobal == false, "missing sidePanelGlobal -> LOCAL (a pre-feature record never lists another window's tabs)");
+        // The window name: a record from before it reads UNNAMED, so the window keeps the caption it always had (the
+        // focused tab's title); a hand-edited non-string value is no name either, never a crash or a "42" caption.
+        CHECK(sideLegacy.name.empty(), "missing name -> unnamed (a record from before the window name keeps the tab-title caption)");
+        {
+            const auto nameBad = DeserializeWindowRecord(L"{\"version\":1,\"window\":{\"windowId\":\"w\",\"name\":42}}");
+            CHECK(nameBad.windowId == L"w" && nameBad.name.empty(), "a non-string name -> unnamed");
+        }
+        // ⚠ The name is written even when EMPTY: only a member every save writes is in the default document's template,
+        // and only such a member can be put back by the older-writer repair (PERSISTENCE.md §17) after a build that
+        // predates the feature rewrote the file. Pinned so an "omit it when empty" tidy-up cannot silently lose names.
+        {
+            WindowRecord unnamed;
+            unnamed.windowId = L"w-unnamed";
+            CHECK(SerializeWindowRecord(unnamed).find(L"\"name\":\"\"") != std::wstring::npos, "an unnamed window still writes \"name\":\"\" (the older-writer repair's template needs it)");
+        }
         // An out-of-band stored fraction degrades to UNSET (the global default), never a
         // degenerate layout; a committed FALSE stays 0 (distinct from the -1 unset); a non-bool
         // scope value (hand-edited) reads LOCAL — the safe direction.
@@ -693,6 +713,33 @@ void TestWindowRecord()
             CHECK(text.find(L"sidePanelGlobal") != std::wstring::npos, "sidePanelGlobal GLOBAL (true) is written");
             CHECK(DeserializeWindowRecord(text).sidePanelGlobal == true, "sidePanelGlobal GLOBAL survives the on-disk shape");
         }
+    }
+
+    // The Agent Manager header's name rules (WindowName.h): one line, no blank ends, a cap that never splits a surrogate
+    // pair — and an empty result UNNAMES the window (its caption follows the focused tab again).
+    {
+        CHECK(NormalizeWindowName(L"Research") == L"Research", "window name: a plain name is kept as typed");
+        CHECK(NormalizeWindowName(L"  Deep  work \x05D0  ") == L"Deep  work \x05D0", "window name: blank ends dropped, inner spacing and non-ASCII kept");
+        CHECK(NormalizeWindowName(L"a\r\nb\tc") == L"a  b c", "window name: CR, LF and TAB become spaces (a caption is one line)");
+        CHECK(NormalizeWindowName(L"x\x2028y\x0085z\x007F") == L"x y z", "window name: line / paragraph separators, NEL and DEL become spaces; a trailing one is trimmed");
+        CHECK(NormalizeWindowName(L"").empty() && NormalizeWindowName(L" \t\r\n").empty(), "window name: empty or blank -> \"\" (unname the window)");
+        CHECK(NormalizeWindowName(L"\x00A0\x3000\x200B\xFEFF").empty(), "window name: only invisible blanks -> \"\" (never an invisible caption)");
+        CHECK(NormalizeWindowName(L"\xFEFFName\x00A0") == L"Name", "window name: a BOM / no-break space at the ends is trimmed");
+        {
+            const std::wstring longName(kMaxWindowNameLength + 50, L'w');
+            CHECK(NormalizeWindowName(longName).size() == kMaxWindowNameLength, "window name: capped at kMaxWindowNameLength code units");
+            // A surrogate pair straddling the cap: its high half would end the name, so it is dropped with its low half.
+            std::wstring straddle(kMaxWindowNameLength - 1, L'a');
+            straddle += L"\xD83D\xDE00"; // U+1F600, its high half at index cap-1
+            straddle += L"tail";
+            const auto cut = NormalizeWindowName(straddle);
+            CHECK(cut.size() == kMaxWindowNameLength - 1 && cut.back() == L'a', "window name: the cap never ends on half of a surrogate pair");
+            // A cut that lands in a run of spaces leaves no trailing blank.
+            std::wstring spaced(kMaxWindowNameLength - 2, L'b');
+            spaced += L"      end";
+            CHECK(NormalizeWindowName(spaced) == std::wstring(kMaxWindowNameLength - 2, L'b'), "window name: a cut inside spaces is trimmed again");
+        }
+        CHECK(kQuakeWindowName == L"_quake", "window name: the quake switch is WT's \"_quake\" (the caption and the record skip it)");
     }
 
     // Disk round-trip (one file per window under .agentmaster\windows\). Uses a sentinel id and
@@ -2895,6 +2942,24 @@ void TestStateCompat()
         std::vector<std::wstring> paths2;
         SC::RestoreKeysDroppedByOlderWriter(knew, shadow, P(LR"j({"version":1,"sessions":[]})j"), nullptr, paths2);
         CHECK(!knew.Find(L"sessions")->arr[0].Find(L"created"), "repair: a member one record carries is known to the writer - not put back on the others");
+    }
+
+    // ---- 5b. the window name survives a build that predates it (AGENT_MANAGER.md "The window name") ----
+    // The repair puts back a singleton member only when this build's TEMPLATE (the document a default record saves to)
+    // carries it. The template here is the real one, built by the window record's own round trip — so this fails the day
+    // a tidy-up stops writing an empty name, which would make every user's window name unrecoverable after a rollback.
+    {
+        const json::Value templ = WindowRecordRoundTrip(json::Value::MkObj());
+        const auto* templWindow = templ.Find(L"window");
+        CHECK(templWindow && templWindow->Find(L"name"), "window name: the window record's template carries \"name\" (written even when empty)");
+        const json::Value shadow = P(LR"j({"writer":{"app":"Agentmaster"},"version":1,"window":{"windowId":"w1","name":"Research","selectedTabIndex":-1}})j");
+        // The older build rewrote the record without the name it never knew (and moved the focus, a member it knew).
+        json::Value main = P(LR"j({"version":1,"window":{"windowId":"w1","selectedTabIndex":2}})j");
+        std::vector<std::wstring> paths;
+        const size_t n = SC::RestoreKeysDroppedByOlderWriter(main, shadow, templ, nullptr, paths);
+        const auto* window = main.Find(L"window");
+        CHECK(n == 1 && window && window->StrAt(L"name") == L"Research", "window name: the name an older build dropped comes back from the shadow");
+        CHECK(window && window->NumAt(L"selectedTabIndex") == 2, "window name: ...and the older build's own change to a member it knew stands");
     }
 
     // ---- 6. a save keeps a newer build's members, stamps the file and writes its shadow ----

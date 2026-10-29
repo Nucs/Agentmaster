@@ -302,6 +302,16 @@ namespace winrt::TerminalApp::implementation
         bool IsRunningElevated() const noexcept;
 
         void OpenSettingsUI();
+        // Agentmaster (THE WINDOW NAME; AGENT_MANAGER.md "The window name"): the window menu's "Rename window…" (the
+        // system menu of a right-click on the title bar's empty strip, of Alt+Space, and of a right-click on the
+        // window's TASKBAR PREVIEW). Brings the window forward when it is minimized or in the background — the renamer
+        // is a TeachingTip INSIDE the window, so opening it on a window nobody sees would take no keys — then opens
+        // Windows Terminal's own renamer (the command palette's "Rename window…", ShortcutAction::OpenWindowRenamer)
+        // one Low-priority dispatcher turn later, after a restore has laid the window out. What the renamer applies
+        // lands in _windowPropertyChanged like every other rename. UI thread only (TerminalWindow's WM_SYSCOMMAND).
+        // noexcept: it runs inside the window procedure, where an escaping exception would end the process — a
+        // failure is logged ([exc]) and the menu item simply does nothing.
+        void OpenWindowRenamer() noexcept;
         void WindowActivated(const bool activated);
         bool FocusTab(const winrt::TerminalApp::Tab& tab);
 
@@ -2742,6 +2752,25 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::WindowRecord _CaptureWindowRecord();
         void _ScheduleWindowRecordSave();
         void _FlushWindowRecord();
+        // Agentmaster (THE WINDOW NAME; AGENT_MANAGER.md "The window name"): a named window's caption is its name
+        // (Title), the name is saved in its WindowRecord (`name`, captured live by _CaptureWindowRecord) and shown in the
+        // Agent Manager page's header.
+        //   _ApplyRecordedWindowName - at engine init, right after the record is claimed (before Initialized, so WT's
+        //     "identify window" toast stays quiet): give the window the record's name, through the same
+        //     RenameWindowRequested a renamer raises. Only to a window with no name yet — a name it was created with
+        //     (`agentmaster -w <name>`) is the user's newer choice and the next save writes it over the record's — and
+        //     never "_quake" (a hand-edited record could hold it; it is WT's quake switch, not a title). Never throws:
+        //     a failure is logged ([exc]) and the window stays unnamed, which is what it was before the feature.
+        //   _OnWindowNameChanged - from _windowPropertyChanged, for EVERY rename whatever made it: re-raises TitleChanged
+        //     (AppHost re-reads Title(): the name, or the focused tab's title once unnamed), pushes the name to the page
+        //     header, schedules the record save (a no-op until Initialized) and logs `[window-name]`. Never throws: it
+        //     runs before WT's own handling of the change (the identify toast), which must not be skipped.
+        //   _RenameWindowFromManager - the page header's commit: normalizes the typed text (WindowName.h: one line, no
+        //     blank ends, capped; "" unnames the window) and raises RenameWindowRequested unless the name is unchanged.
+        //     Throws what raising the event throws (the page header's caller contains it).
+        void _ApplyRecordedWindowName() noexcept;
+        void _OnWindowNameChanged() noexcept;
+        void _RenameWindowFromManager(const std::wstring& typed);
         // Agentmaster (discard Manager-only windows): a window that ends up holding no tab at all — just
         // the Agent Manager page — must not persist as a restorable window, and unless it is the LAST
         // Agentmaster window it self-closes (every window has a Manager page, so an empty one is noise).

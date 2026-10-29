@@ -4147,8 +4147,21 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster: while the Agent Manager page is on screen no tab is focused, so the window title is the
     // page's own ("Agent Manager" / "Agent Manager Dev" — the at-a-glance which-install marker the
     // pinned Manager tab's title used to put in the title bar). Same ShowTitleInTitlebar gate as a tab's.
+    // Agentmaster (THE WINDOW NAME; AGENT_MANAGER.md "The window name"): a NAMED window's title is its name and nothing
+    // else — the caption its taskbar preview, its Alt+Tab entry and its taskbar label show, so windows can be told apart
+    // there. Checked before the ShowTitleInTitlebar gate: that setting hides TAB titles, and a name the user gave the
+    // window on purpose is shown either way. ⚠ Consequence: the tab title no longer reaches a named window's caption, so
+    // anything that finds a window by its caption (a script, a window switcher) sees the name. The quake window keeps the
+    // old title: its "_quake" name is WT's mode switch, not a title.
     hstring TerminalPage::Title()
     {
+        if (_WindowProperties && !_WindowProperties.IsQuakeWindow())
+        {
+            if (auto name = _WindowProperties.WindowName(); !name.empty())
+            {
+                return name;
+            }
+        }
         if (_settings.GlobalSettings().ShowTitleInTitlebar())
         {
             if (const auto tab{ _GetFocusedTab() })
@@ -7172,6 +7185,12 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+
+        // Agentmaster (THE WINDOW NAME): every rename lands here, whatever made it — the window menu's and the command
+        // palette's renamer, a `renameWindow` action, the Agent Manager header, the record's name at startup — so the
+        // caption, the saved record and the header follow from this one place. Before the toast below: a toast that
+        // throws must not leave the caption on the old name.
+        _OnWindowNameChanged();
 
         // DON'T display the confirmation if this is the name we were
         // given on startup!

@@ -247,6 +247,17 @@ namespace winrt::TerminalApp::implementation
                                                            SystemMenuItemHandler(this, &TerminalWindow::_OpenSettingsUI));
         SystemMenuChangeRequested.raise(*this, *args);
 
+        // Agentmaster (THE WINDOW NAME; AGENT_MANAGER.md "The window name"): "Rename window…" beside "Settings" in the
+        // window's system menu. That menu is what a right-click on the window's TASKBAR PREVIEW opens — the very place a
+        // named window's caption shows — as well as a right-click on the title bar's empty strip and Alt+Space, so the
+        // name can be set where it is read. Bound to `this` like the Settings item above: the menu belongs to this
+        // window and dies with it. The label is a literal, not an RS_ key (a Debug build fail-fasts at launch on a
+        // missing key, and Agentmaster's own strings are English literals throughout).
+        auto renameArgs = winrt::make_self<SystemMenuChangeArgs>(winrt::hstring{ L"Rename window\x2026" },
+                                                                 SystemMenuChangeAction::Add,
+                                                                 SystemMenuItemHandler(this, &TerminalWindow::_OpenWindowRenamerFromSystemMenu));
+        SystemMenuChangeRequested.raise(*this, *renameArgs);
+
         TraceLoggingWrite(
             g_hTerminalAppProvider,
             "WindowCreated",
@@ -972,6 +983,17 @@ namespace winrt::TerminalApp::implementation
     void TerminalWindow::_OpenSettingsUI()
     {
         _root->OpenSettingsUI();
+    }
+
+    // Agentmaster (THE WINDOW NAME): see the header. The page does the work (the summon, then WT's renamer one dispatcher
+    // turn later); this only guards the page's lifetime — a system-menu command can still be in the window's queue when
+    // the page is torn down at close.
+    void TerminalWindow::_OpenWindowRenamerFromSystemMenu()
+    {
+        if (_root)
+        {
+            _root->OpenWindowRenamer();
+        }
     }
     UIElement TerminalWindow::GetRoot() noexcept
     {

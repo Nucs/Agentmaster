@@ -20,12 +20,14 @@
 //
 // Agentmaster — per-window workspace persistence (M10; doc/agentmaster/PERSISTENCE.md):
 // capture this window's WindowRecord from LIVE state (geometry via the PersistState
-// recipe + ordered tab refs + the Manager lens), the debounced autosave + close-flush,
-// re-home a reopened window's whole workspace (_RestoreWindowTabs: resume Claude
+// recipe + ordered tab refs + the Manager lens + the window name), the debounced autosave +
+// close-flush, re-home a reopened window's whole workspace (_RestoreWindowTabs: resume Claude
 // sessions + replay shell tabs, in record order), the RESTORE WAKE of the re-homed tabs
 // that were busy when Agentmaster went down (_BeginRestoreWake .. _LeaveRestoreWake;
-// PERSISTENCE.md §14), and the "Reopen window(s)" dispatch
-// (`agentmaster.exe -w -1 -s <idx>` via the execution alias BY NAME).
+// PERSISTENCE.md §14), the "Reopen window(s)" dispatch
+// (`agentmaster.exe -w -1 -s <idx>` via the execution alias BY NAME), and THE WINDOW NAME
+// (AGENT_MANAGER.md "The window name": the record's name applied at claim, every rename's
+// caption / header / save, the window menu's "Rename window…", the Manager header's commit).
 //
 // This file implements TerminalPage methods (same class, separate TU — the
 // TabManagement.cpp pattern) so the Agentmaster additions live in responsibility-
@@ -36,12 +38,14 @@
 
 #include "../../types/inc/utils.hpp" // IsValidDirectory + GuidToPlainString (shell-tab cwd capture)
 #include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
+#include "AgentManagerContent.h" // THE WINDOW NAME: _managerPage->SetWindowName (the header follows every rename)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog
 #include "AgentMaster/Engine.h" // RecoverableWindows (the reopen dispatch)
 #include "AgentMaster/Persistence.h" // SaveWindowRecord
 #include "AgentMaster/ProcessObserver.h" // Activity() table -> out-of-band shell-tab cwd for capture
 #include "AgentMaster/ProfileBootstrap.h" // PackageFamilyName/IsDevPackage (the per-identity reopen alias)
 #include "AgentMaster/SessionRegistry.h" // _RestoreWindowTabs reads the fleet
+#include "AgentMaster/WindowName.h" // THE WINDOW NAME: NormalizeWindowName (the Manager header's commit), kQuakeWindowName
 
 using namespace winrt;
 using namespace winrt::Microsoft::Management::Deployment;
@@ -391,6 +395,17 @@ namespace winrt::TerminalApp::implementation
             rec.sidePanelCollapsed = _sidePanelCollapsed ? 1 : 0; // the tri-state commits once the panel exists
             rec.sidePanelSummaryHidden = _sidePanelSummaryHidden ? 1 : 0; // the "Sum" toggle — same tri-state commit
             rec.sidePanelGlobal = _sidePanelGlobal; // the card-list scope — per-window ONLY (no global default exists for it; ToJson omits a LOCAL false)
+        }
+
+        // --- The window name (AGENT_MANAGER.md "The window name") ---
+        // Read LIVE from WT's window properties, the one owner of the name: every renamer (the window menu's, the command
+        // palette's, a `renameWindow` action, the Agent Manager header) writes there, so the record can never disagree with
+        // the caption. A quake window saves no name: "_quake" is WT's drop-down switch, and a record holding it would bring
+        // a hidden drop-down window back by itself at the next start. A capture with no properties object (not expected —
+        // the page is constructed with one) keeps what the claimed record carried (rec is a copy of _windowRecord).
+        if (_WindowProperties)
+        {
+            rec.name = _WindowProperties.IsQuakeWindow() ? std::wstring{} : std::wstring{ _WindowProperties.WindowName() };
         }
 
         return rec;
@@ -1438,5 +1453,134 @@ namespace winrt::TerminalApp::implementation
         }
         CATCH_LOG();
         co_return;
+    }
+
+    // ======================================================================================
+    // Agentmaster — THE WINDOW NAME (AGENT_MANAGER.md "The window name"; each member's contract is in TerminalPage.h).
+    // The name is Windows Terminal's own window name (WindowProperties::WindowName): the one owner every renamer writes
+    // to. Agentmaster adds what upstream lacks — the name as the caption (Title), its persistence (WindowRecord::name,
+    // _CaptureWindowRecord + _ApplyRecordedWindowName), the window menu's entry (OpenWindowRenamer) and the Agent Manager
+    // header (_RenameWindowFromManager, kept current by _OnWindowNameChanged).
+    // ======================================================================================
+
+    void TerminalPage::_ApplyRecordedWindowName() noexcept
+    {
+        try
+        {
+            // A copy, not a reference: the raise below runs handlers synchronously, and nothing they do may pull the
+            // string out from under the call.
+            const std::wstring recorded = _windowRecord.name;
+            if (recorded.empty() || !_WindowProperties)
+            {
+                return; // unnamed (or a record from before the feature): the caption keeps following the focused tab
+            }
+            if (recorded == ::Agentmaster::kQuakeWindowName)
+            {
+                // _CaptureWindowRecord never writes it, so only a hand edit puts it here — and applying it would turn this
+                // window into WT's hidden drop-down at every start.
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[window-name] " + _windowId + L" record names it \"_quake\" (WT's quake switch, not a title): not applied\n");
+                return;
+            }
+            if (const auto current = _WindowProperties.WindowName(); !current.empty())
+            {
+                // Created with a name (`agentmaster -w <name>` opening a new window): the newer choice wins, and the next
+                // save writes it over the record's.
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[window-name] " + _windowId + L" keeps the name it was created with, \"" + std::wstring{ current } +
+                                                                L"\", over the record's \"" + recorded + L"\"\n");
+                return;
+            }
+            // The request every renamer raises: TerminalWindow applies it to WindowProperties, whose PropertyChanged comes
+            // back through _windowPropertyChanged -> _OnWindowNameChanged (the caption). We are InStartup here, so WT's
+            // identify toast stays quiet and the save it schedules is a no-op — the claimed record holds this name already.
+            RenameWindowRequested.raise(*this, winrt::make<implementation::RenameWindowRequestedArgs>(winrt::hstring{ recorded }));
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ApplyRecordedWindowName");
+        }
+    }
+
+    void TerminalPage::_OnWindowNameChanged() noexcept
+    {
+        try
+        {
+            const std::wstring name = _WindowProperties ? std::wstring{ _WindowProperties.WindowName() } : std::wstring{};
+            // The caption: AppHost answers TitleChanged by re-reading Title() — this name, or the focused tab's title again
+            // once the window is unnamed (and the old caption for "_quake", which Title() never shows).
+            TitleChanged.raise(*this, nullptr);
+            // The Agent Manager header. Null during startup's record-name apply (engine init runs before the page is
+            // built); _WireAgentManagerContent seeds the header from the live name when it wires the page.
+            if (_managerPage)
+            {
+                _managerPage->SetWindowName(name);
+            }
+            // The record: the debounced save, which re-captures the name live. A no-op until Initialized — and the only
+            // rename before that is the record's own name, which the claimed record already holds.
+            _ScheduleWindowRecordSave();
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[window-name] " + _windowId + L" is now " +
+                                                            (name.empty() ? std::wstring{ L"unnamed (the caption follows the focused tab)" } : L"\"" + name + L"\"") + L"\n");
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_OnWindowNameChanged");
+        }
+    }
+
+    void TerminalPage::_RenameWindowFromManager(const std::wstring& typed)
+    {
+        // One line, no blank ends, capped (WindowName.h); "" unnames the window. WT's own renamer applies its text as typed
+        // (upstream behavior) — only this Agentmaster entry normalizes.
+        const std::wstring name = ::Agentmaster::NormalizeWindowName(typed);
+        const std::wstring current = _WindowProperties ? std::wstring{ _WindowProperties.WindowName() } : std::wstring{};
+        if (name == current)
+        {
+            // Unchanged (or typed with extra spaces around the same name): no event, so no identify toast and no save. The
+            // header still gets the name back — its box may hold the untrimmed text the user typed.
+            if (_managerPage)
+            {
+                _managerPage->SetWindowName(current);
+            }
+            return;
+        }
+        ::Agentmaster::LogNav(L"window-rename (Agent Manager header) " + _windowId + (name.empty() ? std::wstring{ L" -> unnamed" } : L" -> \"" + name + L"\""));
+        // The request every renamer raises; the caption, the header and the save follow through _OnWindowNameChanged.
+        RenameWindowRequested.raise(*this, winrt::make<implementation::RenameWindowRequestedArgs>(winrt::hstring{ name }));
+    }
+
+    void TerminalPage::OpenWindowRenamer() noexcept
+    {
+        try
+        {
+            ::Agentmaster::LogNav(L"window-rename open (window menu) " + _windowId);
+            // The window menu also opens from the TASKBAR PREVIEW of a minimized or background window, and the renamer is a
+            // TeachingTip inside the window (light-dismiss, so an unfocused window would close it at once): bring the
+            // window up first — restore + foreground, AppHost::_SummonWindowRequested. Only when needed: summoning the
+            // foreground window would still run the activation dance (a WM_NULL round trip, AttachThreadInput) for nothing.
+            if (_hostingHwnd && (::IsIconic(*_hostingHwnd) || ::GetForegroundWindow() != *_hostingHwnd))
+            {
+                SummonWindowRequested.raise(*this, nullptr);
+            }
+            // One Low-priority turn later: a restore from minimized resizes the island through the messages the summon just
+            // queued, and a TeachingTip opened before that would be placed against the minimized bounds.
+            Dispatcher().RunAsync(CoreDispatcherPriority::Low, [weakThis = get_weak()]() {
+                if (const auto self = weakThis.get())
+                {
+                    try
+                    {
+                        // The command palette's "Rename window…" — WT's renamer with its Enter / Esc handling and its focus
+                        // dance (GH#12021) — dispatched as that very action, so both entries share one path.
+                        self->_actionDispatch->DoAction(ActionAndArgs{ ShortcutAction::OpenWindowRenamer, nullptr });
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"OpenWindowRenamer (open the renamer)");
+                    }
+                }
+            });
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"OpenWindowRenamer");
+        }
     }
 }

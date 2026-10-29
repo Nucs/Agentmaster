@@ -1412,6 +1412,12 @@ namespace winrt::TerminalApp::implementation
                                           L"[window-fresh] " + _windowId + (_isContentWindow ? std::wstring{ L" (dragged-out content window)" } : std::wstring{ L" (new window \x2014 no saved record)" }) + L"\n");
         }
 
+        // Agentmaster (THE WINDOW NAME; AGENT_MANAGER.md "The window name"): give the window the name its record saved, so
+        // a reopened window shows it in its taskbar preview and Alt+Tab at once. Here, right after the claim and before
+        // Initialized: WT's identify toast stays quiet for this apply, and the Manager page built next reads the name
+        // live. A fresh record has none (a no-op); a window created with a name keeps that one (see the function).
+        _ApplyRecordedWindowName();
+
         // M10 Increment 3 (open-at-exit manifest; PERSISTENCE.md §13.5): mark this window LIVE in the
         // process-wide set, which rewrites open-windows.json. Done here (not at WindowEmperor create
         // time) because _windowId is only resolved now — register early + correct so even a one-window
@@ -2603,6 +2609,17 @@ namespace winrt::TerminalApp::implementation
             if (auto self = weakThis.get())
             {
                 self->_ReopenSavedWindows();
+            }
+        });
+        // Agentmaster (THE WINDOW NAME; AGENT_MANAGER.md "The window name"): the header's window name. Seeded from the
+        // LIVE name — a record's name was applied at engine init, before this page existed, and a `-w <name>` window got
+        // its name before the page did — and kept current by _OnWindowNameChanged for every later rename. The header's
+        // commit renames the window through the same request every renamer raises.
+        content->SetWindowName(_WindowProperties ? std::wstring{ _WindowProperties.WindowName() } : std::wstring{});
+        content->SetRenameWindowHandler([weakThis](const std::wstring& typed) {
+            if (auto self = weakThis.get())
+            {
+                self->_RenameWindowFromManager(typed);
             }
         });
         // Agentmaster (Sessions page; SESSIONS.md): the Manager's "Sessions" button opens the

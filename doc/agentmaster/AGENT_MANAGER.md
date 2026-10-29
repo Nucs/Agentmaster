@@ -17,7 +17,7 @@ it), `AgentLaunchBar.{h,cpp}` (the launch row), `TabManagement.cpp` (closing tab
   action then no-ops), re-opens a Sessions page left open over it, and runs
   `_ApplyAgentTabSelection(nullptr)` (the lens on screen with a catch-up rebuild, the selection pill,
   bring-into-view). Home paints as the strip's active entry while the page is up. The window title is
-  "Agent Manager" ("Agent Manager Dev" in dev).
+  "Agent Manager" ("Agent Manager Dev" in dev), unless the window has a name (*The window name*).
 - **The one authority** is `_managerPageVisible`. `_GetFocusedTabIndex` answers `nullopt` while it is
   set, even when MUX re-selected a tab under the page (MUX selects a neighbor when an item leaves a
   selection-less strip; `_RemoveTab` clears it again). `_UpdateManagerSelectionHighlight`,
@@ -38,9 +38,49 @@ it), `AgentLaunchBar.{h,cpp}` (the launch row), `TabManagement.cpp` (closing tab
   window that starts with no tab, and for a window reopened while it was on the Manager (with async
   shell replays, after the batch's last tab: `_showManagerPageAfterStartupBatch`).
 - `_MakePane` refuses an `agentManager` pane: there is never a second Manager.
-- **Toolbar:** Launch · Fork · Reopen Windows (N) (`_reopenBtn`, shown while N > 0) · ⚙ · Pause Prompt
-  Queue Runner · Sessions.
+- **Toolbar:** the title row (the brand, the launch row, Launch · Fork · Reopen Windows (N) (`_reopenBtn`,
+  shown while N > 0) · Activate All Tabs (N)) over the actions row (the window name (*The window name*) · ⚙ ·
+  Sessions · Keep Awake · Pause Prompt Queue Runner).
 - The page is always dark (CLAUDE.md *Conventions*).
+
+## The window name
+
+- **What it is:** Windows Terminal's own window name (`WindowProperties::WindowName`, also the `-w <name>`
+  target), made visible and saved. A named window's caption is its name and nothing else
+  (`TerminalPage::Title`, checked before the `showTitleInTitlebar` gate): its taskbar preview, its Alt+Tab
+  entry, its taskbar label and the AI search's window census (`WindowCensus::title`) read it. An unnamed window's
+  caption follows the focused tab's title, or "Agent Manager" while the page shows.
+- **Where it is set:**
+  - **The window menu:** "Rename window…" beside "Settings" in the system menu (`TerminalWindow::Create`,
+    through `SystemMenuChangeRequested`): a right-click on the window's taskbar preview, a right-click on the
+    title bar's empty strip, or Alt+Space. `TerminalPage::OpenWindowRenamer` summons a minimized or background
+    window first (the renamer is a light-dismiss TeachingTip inside the window), then opens WT's renamer (the
+    `openWindowRenamer` action) one Low-priority dispatcher turn later.
+  - **The Agent Manager header:** the first control of the toolbar's actions row, the name with a rename glyph
+    (`Name this window`, dimmed and italic, while unnamed). A click swaps in an inline box (`_windowNameBox`; never
+    a ContentDialog, which gets no keys under XAML Islands). Enter commits and Esc cancels, each on its KEY-UP
+    (armed in `PreviewKeyDown`), and a click away commits. `_RenameWindowFromManager` normalizes the text
+    (`AgentMaster/WindowName.h`: one line, no blank ends, at most 256 UTF-16 code units, never cut inside a
+    surrogate pair); an empty name unnames the window.
+  - **WT's own entries:** the command palette's "Rename window…" and "Reset window name", and a
+    `renameWindow` action. They apply their text as typed (upstream behavior).
+- **One path for every rename:** each entry raises `RenameWindowRequested`; TerminalWindow sets the name, and
+  `_windowPropertyChanged` → `_OnWindowNameChanged` re-raises `TitleChanged` (AppHost re-reads `Title()`),
+  updates the header (`AgentManagerContent::SetWindowName`), schedules the record save and logs
+  `[window-name] <windowId> is now "<name>"`. WT's identify toast confirms a rename made after startup.
+- **Saved:** `WindowRecord::name` in `windows/<id>.json`, captured live by `_CaptureWindowRecord` and applied
+  back when the window claims its record (`_ApplyRecordedWindowName`, at engine init, before `Initialized`, so no
+  toast). A window created with a name (`agentmaster -w <name>`) keeps that one, and its next save writes it over
+  the record's. ⚠ The key is written even when empty: only a member every save writes is in the default
+  document's template, and only such a member comes back through the older-writer repair (PERSISTENCE.md §17)
+  after an older build rewrote the file (`TestWindowRecord` and `TestStateCompat` pin both).
+- **`_quake`** is WT's quake-mode switch, not a title: `Title()` never shows it, `_CaptureWindowRecord` never saves
+  it and `_ApplyRecordedWindowName` refuses it from a hand-edited record, so a hidden drop-down window never
+  comes back by itself.
+- ⚠ A named window's caption no longer carries the focused tab's title: a script or window switcher that finds a
+  window by its caption sees the name.
+- Logs: `[window-name]` (every change, the record's apply), `[nav] window-rename …` (the header's commit, the
+  window menu's open).
 
 ## Home and the jump-back arrow
 
