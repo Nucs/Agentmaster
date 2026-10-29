@@ -185,14 +185,16 @@ becomes a managed session (its name, its card, its badge), and the runner can dr
 > **Since** ≤ 0.7.7 · **P1** · **Needs** F-RS · **Spec** CLAUDE.md Rule #6 (transcript-gated resume)
 
 **Promise.** A session that was never prompted has nothing to resume, so a reopen starts a fresh claude in its place —
-same folder, same title — instead of a `--resume` that would die on "No conversation found".
+same id, same folder, same title, same record — instead of a `--resume` that would die on "No conversation found".
 
 **Phases**
 1. **Launch, no prompt.** *Expect:* idle, no transcript.
-2. **Quit and reopen.** *Expect:* the restored tab's claude has a NEW `--session-id` and no `--resume`; the stale
-   record is dropped. *Check:* [LOG] `[restore-fresh] <new id> "<title>" cwd=…`; [OS] the command line (measured:
-   `--session-id 0f7fd620…` for the never-prompted `c8ecfa7d…`); [ENG] the old id is gone from `sessions.json`
-   (measured, run pqr1: a test that reads the title from the old record after the reopen finds no record).
+2. **Quit and reopen.** *Expect:* the restored tab's claude runs `--session-id <the SAME id>` and no `--resume`; the
+   record is kept. *Check:* [LOG] `[restore-fresh] <id> "<title>" cwd=…`, the same id; [OS] the command line; [ENG]
+   the record still in `sessions.json` with its title. Since v0.8.1 (21f0482d4, PERSISTENCE.md §16): a lookup that found
+   no transcript never re-keys or drops a record, because a lookup that missed an existing transcript would otherwise
+   lose the session (Claude Code then refuses the id in the tab instead). Until then the reopen minted a NEW id and
+   dropped the old record (measured on 0.8.0, run pqr1); the test asserted that until the v0.8.1 run of 2026-10-29.
 
 ---
 

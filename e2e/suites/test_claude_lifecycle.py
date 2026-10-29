@@ -458,26 +458,29 @@ def test_a_claude_typed_into_a_shell_tab_is_adopted_and_driven(am, s1):
 @pytest.mark.flow("LIF-06")
 def test_a_never_prompted_session_comes_back_fresh_after_a_restart(am):
     """LIF-06 phases 1–2 (Rule #6): a session launched and never prompted has no transcript, so a reopen cannot resume
-    it: the restored tab starts a FRESH claude (`[restore-fresh] <new id> "<title>"`, a new `--session-id`, never
-    `--resume`), in the same folder and under the same title, and the stale record is dropped (measured, run pqr1: the
-    old id is gone from sessions.json — so the title is read before the restart).
+    it: the restored tab starts a FRESH claude under the SAME id (`[restore-fresh] <id> "<title>"`, `--session-id <id>`,
+    never `--resume`), in the same folder and under the same title, and its record is kept.
+
+    Until v0.8.1 the restore minted a new id and dropped the old record (measured on 0.8.0, run pqr1). Since 21f0482d4
+    (PERSISTENCE.md §16) a lookup that found no transcript never re-keys or drops a record: had the lookup missed a
+    transcript that exists, Claude Code refuses the id in the tab instead of the session being lost. The run of v0.8.1
+    (r20261029-062014-6da298 and r20261029-125141-126ed7) logged the same id, which the old assertion took for a failure.
 
     Args:
         am: The app.
     """
     s = am.launch("t1", prompt=None)
-    title = s.title  # read now: the restore-fresh drops the old record
+    title = s.title
     am.window.side_panel.wait_card(title, state="idle", timeout_s=60)
     assert am.claude.transcript_path(s.id) is None
     mark = am.profile.hooks.mark()
     am.restart()
     m = am.profile.hooks.wait(r"\[restore-fresh\] ([0-9a-f-]{36}) \"(.*?)\"", since=mark, timeout_s=60)
-    new_id = m.group(1)
-    assert new_id != s.id and m.group(2) == title, m.group(0)
+    assert m.group(1) == s.id and m.group(2) == title, m.group(0)
     am.window.tabs.wait_tab(title, timeout_s=30)
     claudes = wait_until(lambda: [" ".join(p.cmdline()) for p in am.claude_processes()] or None, 60,
                          what="the restored tab's claude")
-    assert all("--resume" not in c and s.id not in c for c in claudes), claudes
-    assert any(f"--session-id {new_id}" in c for c in claudes), claudes
-    wait_until(lambda: am.profile.session(new_id), 15, what=f"the fresh session {new_id[:8]} in sessions.json")
-    assert am.profile.session(s.id) is None, "the never-prompted record was kept"
+    assert all("--resume" not in c for c in claudes), claudes
+    assert any(f"--session-id {s.id}" in c for c in claudes), claudes
+    record = wait_until(lambda: am.profile.session(s.id), 15, what=f"the kept record {s.short} in sessions.json")
+    assert record.title == title, record
