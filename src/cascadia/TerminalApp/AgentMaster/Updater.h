@@ -4,7 +4,11 @@
 // Agentmaster — the in-app auto-updater (header-only, plain Win32; no WinRT, no engine-lib deps,
 // exactly like ProfileBootstrap.h). It checks the GitHub Releases of Nucs/Agentmaster for a newer
 // version, prompts the user (Update now / Postpone [next restart · tomorrow 08:00 · 3·7·30 days · skip])
-// with a Win32 TaskDialog, and — on Update — materializes the installer script into the active
+// in a dark window of its own that shows the RELEASE NOTES beside the choices — a tab per release on the
+// user's channel, rendered from GitHub's Markdown into HTML by cmark and shown in WebView2, plain text
+// where WebView2 cannot run (UPDATER.md "The prompt window"; the two PARTS included at this file's end:
+// UpdaterReleaseNotes.h, UpdaterPromptWindow.h) — with the Win32 TaskDialog as its fallback,
+// and — on Update — materializes the installer script into the active
 // profile dir (am-update.ps1 + a tiny am-update.cmd launcher) and runs it detached to download +
 // cert-trust + Add-AppxPackage the new .msixbundle and relaunch. A PORTABLE copy (unpackaged +
 // the `.portable` marker — IsPortableUpdateTarget) updates IN PLACE instead: the SAME script in
@@ -69,6 +73,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <optional> // ShowUpdatePromptWindow's answer (nothing: the TaskDialog shows instead)
 #include <string>
 #include <string_view>
 #include <thread>
@@ -889,7 +894,7 @@ namespace Agentmaster::Updater
         bool portableInstallable{ false }; // the release carries a portable zip for THIS binary's arch (kPortableZipSuffix)
         std::wstring zipUrl; // the arch-matched portable-zip browser_download_url (the -Portable update's payload)
         std::wstring zipSha256; // that asset's "sha256:<hex>" digest (when GitHub provides it) — verified by am-update.ps1
-        std::wstring notes; // release body (markdown; parsed + available — the prompt now LINKS to the release page rather than showing it inline)
+        std::wstring notes; // release body (Markdown): the prompt window's notes column shows it at once, before the release list arrives (UpdaterReleaseNotes.h)
         std::wstring htmlUrl; // release page (changelog) — .../releases/tag/<tag>; "What's new" / "Update's changelog" open this
     };
 
@@ -1582,12 +1587,26 @@ namespace Agentmaster::Updater
         Skip
     };
 
+    // What the prompt window answered: the TaskDialog's button and radio ids, so ShowUpdatePrompt maps one answer for both.
+    struct PromptWindowAnswer
+    {
+        int button{ IDCANCEL }; // the pressed button's id; IDCANCEL for Esc, ✕, Alt+F4 or a quit
+        int radio{ 0 }; // the selected radio's id
+    };
+
+    // The prompt window with the release notes (UpdaterPromptWindow.h, a part included at this file's end): shows `cfg`'s
+    // words and choices beside the notes and answers with `cfg`'s ids; nothing when it could not be shown, and the caller
+    // then shows the TaskDialog. Declared here because ShowUpdatePrompt calls it before its definition is reached.
+    inline std::optional<PromptWindowAnswer> ShowUpdatePromptWindow(HWND owner, const UpdateInfo& info, const TASKDIALOGCONFIG& cfg) noexcept;
+
     // The "same question" shown at startup AND from the cog: TWO buttons (Update now / Postpone), with
     // the postpone DURATION chosen via a radio group (tomorrow 08:00 / 3 / 7 / 30 days / skip this version) — the
     // TaskDialog analog of the requested dropdown (a TaskDialog can't host a combobox; radios are
     // the idiomatic in-dialog choice). Cancel / X == the default radio, "Remind me next restart" — and
     // ALSO the answer on any exception: a broken prompt must never crash the caller (the cog path
     // calls this straight off a UI lambda) nor fabricate a consequential choice.
+    // It is shown in the prompt WINDOW, the release notes beside these same words and choices (ShowUpdatePromptWindow);
+    // the TaskDialog built here is that window's fallback, and both answer with the ids below.
     inline Decision ShowUpdatePrompt(HWND owner, const UpdateInfo& info)
     {
         // The allocating part (string building) under guard; the remainder is plain structs + one
@@ -1698,9 +1717,16 @@ namespace Agentmaster::Updater
         cfg.pfCallback = UpdatePromptCallback;
 
         int pressed = 0, radio = ridRestart;
-        // Echoed to the command's console (DialogEcho.h): at a launch from a shell this prompt holds the startup, and
-        // the caller reads which version is offered, every postpone option, and the answer.
-        if (FAILED(DialogEcho::ShowTaskDialogIndirect(&cfg, &pressed, &radio, nullptr)))
+        // The window with the release notes first (UPDATER.md "The prompt window"); the TaskDialog when it could not be shown (or
+        // AGENTMASTER_UPDATE_PROMPT=taskdialog). Both are echoed to the command's console (DialogEcho.h): at a launch from a
+        // shell this prompt holds the startup, and the caller reads which version is offered, every postpone option, and
+        // the answer.
+        if (const auto shown = ShowUpdatePromptWindow(owner, info, cfg))
+        {
+            pressed = shown->button;
+            radio = shown->radio;
+        }
+        else if (FAILED(DialogEcho::ShowTaskDialogIndirect(&cfg, &pressed, &radio, nullptr)))
         {
             return Decision::RemindNextRestart; // comctl v6 unavailable / unexpected failure -> least-destructive
         }
@@ -2246,3 +2272,10 @@ namespace Agentmaster::Updater
         return RunUpdateCheckAndPrompt(owner, L"periodic");
     }
 }
+
+// The PARTS of this header (UPDATER.md "The prompt window"): the prompt window's release notes, and the window itself. Included HERE, after
+// everything they use is declared, and only here — each refuses to compile without this macro, so no translation unit can
+// include a part on its own and see half the updater. ShowUpdatePrompt above calls the window through its declaration.
+#define AGENTMASTER_UPDATER_PARTS 1
+#include "UpdaterReleaseNotes.h"
+#include "UpdaterPromptWindow.h"

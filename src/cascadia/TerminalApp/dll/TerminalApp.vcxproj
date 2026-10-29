@@ -96,9 +96,17 @@
     </Reference>
   </ItemGroup>
 
+  <!-- Agentmaster (UPDATER.md, The prompt window): the update prompt window (Updater.h, compiled into TerminalAppLib) hosts WebView2
+       through the WebView2 SDK's STATIC loader - no WebView2Loader.dll to ship beside the binaries. The package's folders
+       are named x86 / x64 / arm64, so Win32 maps to x86. -->
+  <PropertyGroup>
+    <AgentmasterWebView2Arch>$(Platform)</AgentmasterWebView2Arch>
+    <AgentmasterWebView2Arch Condition="'$(Platform)'=='Win32'">x86</AgentmasterWebView2Arch>
+  </PropertyGroup>
   <ItemDefinitionGroup>
     <Link>
-      <AdditionalDependencies>User32.lib;WindowsApp.lib;shell32.lib;WinMM.Lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>User32.lib;WindowsApp.lib;shell32.lib;WinMM.Lib;WebView2LoaderStatic.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(WebView2PackageRoot)\build\native\$(AgentmasterWebView2Arch);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <!-- TerminalAppLib contains a DllMain that we need to force the use of. -->
       <AdditionalOptions Condition="'$(Platform)'=='Win32'">/INCLUDE:_DllMain@12 %(AdditionalOptions)</AdditionalOptions>
       <AdditionalOptions Condition="'$(Platform)'!='Win32'">/INCLUDE:DllMain %(AdditionalOptions)</AdditionalOptions>

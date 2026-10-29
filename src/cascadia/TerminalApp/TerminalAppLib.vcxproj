@@ -266,6 +266,10 @@
     <ClInclude Include="AgentMaster\ConversationImage.h" />
     <ClInclude Include="MessagingSearchBridge.h" />
     <ClInclude Include="AgentMaster\Updater.h" />
+    <!-- Agentmaster (UPDATER.md, The prompt window): the parts of Updater.h, included at its end - the update prompt window and its
+         release notes (cmark's HTML in WebView2). -->
+    <ClInclude Include="AgentMaster\UpdaterReleaseNotes.h" />
+    <ClInclude Include="AgentMaster\UpdaterPromptWindow.h" />
     <ClInclude Include="AgentMaster\StartupTiming.h" />
     <ClInclude Include="AgentMaster\Splash.h" />
     <ClInclude Include="AgentMaster\TaskbarBadge.h" />
@@ -843,10 +847,15 @@
     </Reference>
   </ItemGroup>
   <!-- ====================== Compiler & Linker Flags ===================== -->
+  <!-- Agentmaster (UPDATER.md, The prompt window): the update prompt window shows the release notes in WebView2, whose native headers
+       come from the WebView2 SDK package the repository already restores for WinUI (WebView2PackageRoot,
+       common.nugetversions.targets). On EVERY unit's include path, not only the ones that include Updater.h: the window is
+       inline code, and two units of one module compiling it differently (with and without WebView2) would break the one
+       definition rule. TerminalApp.dll links the package's static loader (dll\TerminalApp.vcxproj). -->
   <ItemDefinitionGroup>
     <ClCompile>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>..;%(AdditionalIncludeDirectories);</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..;$(WebView2PackageRoot)\build\native\include;%(AdditionalIncludeDirectories);</AdditionalIncludeDirectories>
       <!-- Manually disable unreachable code warning, because jconcpp has a ton of that. -->
       <DisableSpecificWarnings>4702;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>

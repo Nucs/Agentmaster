@@ -21,7 +21,8 @@
 // EchoForeignDialog).
 //
 // THE RULE: no Agentmaster code calls MessageBoxW, TaskDialog, TaskDialogIndirect or IFileDialog::Show directly; it
-// calls the wrappers below (ShowMessageBox, ShowTaskDialog, ShowTaskDialogIndirect, ShowFileDialog). The m5 test
+// calls the wrappers below (ShowMessageBox, ShowTaskDialog, ShowTaskDialogIndirect, ShowFileDialog), and a dialog it draws
+// itself (a window of its own with a modal loop, like the update prompt) runs through ShowCustomDialog. The m5 test
 // TestDialogEchoCoverage scans src\cascadia and fails on a direct call, and on a call of any other Win32 dialog family
 // (the common file / folder / color / font / print dialogs, the shell's message boxes, resource dialogs, the
 // credential prompts), which needs a wrapper here before its first use. So a new dialog cannot skip the echo.
@@ -605,6 +606,27 @@ namespace Agentmaster::DialogEcho
             *pressed = result;
         }
         return hr;
+    }
+
+    // A dialog Agentmaster draws ITSELF — a window class of its own with its own modal loop, no Win32 dialog function the
+    // coverage test could find (TestDialogEchoCoverage scans for the dialog families only) — echoed like every wrapped dialog:
+    // "opened" with its description before it shows, "answered" in words once it closes. The update prompt with its release
+    // notes is one (Updater.h, UpdaterPromptWindow.h). A new self-drawn dialog must come through here too.
+    //   opened   — the dialog as the console should read it; DescribeTaskDialog of a TASKDIALOGCONFIG with the same words
+    //              gives the same lines a TaskDialog echo gives.
+    //   run      — shows the dialog and returns its answer; called exactly once, between the two echoes. Must not throw: an
+    //              exception skips the "answered" line (the startup's hold is still released by the destructor).
+    //   answerOf — turns run's result into words for the "answered" line (TaskDialogAnswer, for a TaskDialog twin).
+    //   returns  — run's result.
+    //   throws   — whatever run throws (nothing, for a conforming run); the echoes never throw.
+    template<typename Run, typename AnswerOf>
+    inline auto ShowCustomDialog(const Description& opened, Run&& run, AnswerOf&& answerOf)
+    {
+        const CallerSink::Hold hold; // the startup's release waits for this answer, as for every wrapped dialog
+        detail::Echo([&] { return FormatOpened(opened, detail::Self() + L", waits for an answer on the desktop"); });
+        auto result = run();
+        detail::Echo([&] { return FormatAnswered(opened.title, answerOf(result)); });
+        return result;
     }
 
     // IFileDialog::Show, echoed: a file or folder picker. The answer names the chosen path, or "cancelled".

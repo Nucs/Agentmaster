@@ -190,6 +190,11 @@ other Win32 dialog family (the common file / folder / color / font / print dialo
 message boxes, resource dialogs, the credential prompts): none is used today, and a first use needs a
 wrapper. Two files are allowed, each with its reason: `DialogEcho.h` (the wrappers) and upstream's
 `WinRTUtils\inc\Utils.h` (the settings editor's file picker, opened only from the running app's UI).
+A dialog Agentmaster draws ITSELF — a window class and a modal loop of its own, like the update prompt
+window (UPDATER.md *The prompt window*) — makes no Win32 dialog call the scan could find: it runs
+through `ShowCustomDialog`, which echoes the description it is given (the update prompt passes its
+TaskDialog twin's, `DescribeTaskDialog`, plus a line for the release notes) and the answer in words.
+The scan cannot enforce this one; review does.
 
 **What is echoed.** Every Win32 dialog of the app exe's startup: the architecture mismatch box, the
 portable copy's install question, its progress dialog, its errors, the uninstall confirmation and

@@ -100,6 +100,7 @@ int wmain()
     TestStateSettle(); // DELIVERY.md §16 — the STATE SETTLE hold (tests_spawn_sched.cpp)
     TestInterruptHold();
     TestUpdaterVersionLogic();
+    TestUpdateReleaseNotes(); // UPDATER.md "The prompt window" — the update prompt's release notes and its window's layout (tests_update_notes.cpp)
     TestCmdPathLimit();
     TestStartupGuard(); // the startup-deadlock fix (StartupGuard.h, tests_spawn_sched.cpp)
     TestPortableInstall();
