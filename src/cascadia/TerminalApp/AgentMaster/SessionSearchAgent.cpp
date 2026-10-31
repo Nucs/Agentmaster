@@ -1920,4 +1920,23 @@ namespace Agentmaster
                  L"\\sessiondb\\bin): this conversation reads the transcripts directly");
         return {};
     }
+
+    std::optional<SessionIndexEntry> LoadSessionIndexEntryById(const std::wstring& sessionId)
+    {
+        if (sessionId.empty())
+        {
+            return std::nullopt; // no id, no transcript to find (and ResolveClaudeTranscriptPath would glob for nothing)
+        }
+        // The file-local reader the database mode's EntriesFor already uses: the transcript where Claude keeps it, then its
+        // sidecar. It logs a failed read itself and answers nullopt, so a caller only ever sees "an entry" or "no entry".
+        auto entry = IndexEntryForSession(sessionId);
+        if (entry)
+        {
+            // A row shows the title, folder, branch, times and counts — never the up to 512 touched paths. Dropped here, like
+            // EntriesFor drops them, so a surface that keeps the entries for its whole list holds kilobytes, not megabytes.
+            entry->stats.pathsAccessed.clear();
+            entry->stats.pathsAccessed.shrink_to_fit();
+        }
+        return entry;
+    }
 }

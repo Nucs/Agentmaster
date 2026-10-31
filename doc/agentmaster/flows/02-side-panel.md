@@ -277,6 +277,48 @@ rising embers) while the server cache is warm.
 
 ---
 
+### SP-09 · The AI search in the side panel
+
+> **Since** after 0.8.1 (NOT BUILT) · **P1** · **Needs** F-S2, mock (the AI search's model), keys · **Spec** SIDE_PANEL.md §2h; SESSIONS.md §9.6
+
+**Promise.** The filter box's **AI** toggle turns the box into the AI search's request line and shows the model's answer and
+its list in place of the cards, as side panel cards with the model's evidence under each — the Sessions page's conversation,
+not a second one. Its claude.exe starts only when the box is clicked or a request is sent, and ends after the idle time set
+in Settings ▸ Sessions ▸ AI SEARCH (2 hours by default).
+
+**Phases**
+1. **Toggle on.** *Do:* type a filter, then click **AI** inside the box. *Expect:* the text stays (now the request), the caret
+   after it; the card area shows the strip over the conversation's last list (or an empty one); the count line reads the AI
+   hint. *Check:* [LOG] `[nav] sidepanel ai on box=N`, then `[harness] sessions-search: process up` (the caret's focus).
+2. **Ask.** *Do:* Enter. *Expect:* the box empties; the strip shows "❯ <request>", the plan and "Searching …" in blue; the
+   candidates show at once ("N candidates, choosing…"), then the pick, each card with its why; the answer in the strip
+   (green dot). *Check:* [LOG] `sidepanel ai-ask turn=1 chars=N`; then `[ai-search] side panel (window …): the idle process
+   parks in 120 min (its request was answered)`.
+3. **Results.** *Expect:* an open session's card shows its live state; a closed one reads **closed** in gray; the summary area
+   below still follows the focused tab.
+4. **Gestures.** *Do:* click an open session's card. *Expect:* the summary peeks it; the Manager lens follows. *Do:*
+   double-click it. *Expect:* its tab comes up. *Do:* double-click a closed one. *Expect:* it resumes as a new tab in this
+   window. *Do:* right-click a closed one. *Expect:* Resume here · Fork here ▸ · Open New Session Here ▸ · Show Transcript ·
+   Copy ▸.
+5. **Shared conversation.** *Do:* open the Sessions page, turn its AI on. *Expect:* its list is the side panel's; a follow-up
+   asked on the page replaces the side panel's list too.
+6. **Toggle off.** *Do:* type text without Enter, click **AI**. *Expect:* the text stays and filters the cards at once; the
+   cards are current (a session launched meanwhile is listed); ⌖ scrolls to the focused tab's card. *Check:* [LOG]
+   `[nav] sidepanel ai off box=N`.
+7. **Persist.** *Do:* close and reopen the window with AI on. *Expect:* it opens in AI mode on the last list and starts no
+   claude.exe (no `process up` line until a click into the box).
+
+**Edge cases**
+- **E1 Esc during a request** → it stops (`sidepanel ai-stop`); Esc with nothing running does nothing.
+- **E2 ⊘** → the conversation resets here and on the Sessions page; the box keeps its text (`ai-reset box=N`).
+- **E3 A Sessions page shows the AI search** → no side-panel park line after a request (the page's rule holds the process).
+- **E4 A session Agentmaster never opened** → its card's click opens its transcript reading view (no summary record exists).
+- **E5 A restored list of unknown sessions** → their cards read "session <id8> — reading…" and fill in from disk within a
+  moment.
+- **E6 No native claude.exe** → AI on shows the "Claude not detected" notice and the toggle stays off.
+
+---
+
 ## Known defects (expected failures until fixed)
 
 ### SP-K1 · In the + card, Launch needs a second click while its presets menu is open — FIXED in code 2026-10-23 (NOT BUILT into a release)

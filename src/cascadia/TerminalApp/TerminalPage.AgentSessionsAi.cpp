@@ -93,12 +93,12 @@ namespace winrt::TerminalApp::implementation
         // ~TerminalPage).
         std::atomic<int> g_sessionsAiPagesInUse{ 0 };
 
-        // How long the idle claude.exe of the AI search lives after the last page left it. Long
-        // enough that a user who closes the Sessions page, resumes a session and comes back
-        // finds the same process (and with it the model's whole context); short enough that a
-        // process nobody uses does not hold its memory for the rest of the day. After a park the
+        // How long the idle claude.exe of the AI search lives after the last page left it is no longer a constant here: it
+        // is AppSettings::sessionsAiParkMinutes (default 120; a fixed 10 minutes until 2026-10-31, when the user asked for
+        // it to be configurable with a 2-hour default), read through TerminalPage::_SessionsAiParkDelayMs by this page and
+        // by the side panel's AI search (SIDE_PANEL.md §2h), so one setting decides it for both. After a park the
         // conversation continues from a digest of its record (HarnessConversation::ParkAfter).
-        constexpr int64_t kSessionsAiParkAfterMs = 10 * 60 * 1000;
+        constexpr int64_t kSessionsAiMsPerMinute = 60 * 1000;
 
         // The search box's two placeholders. The AI one says the two things that differ from the
         // filter box: write a sentence, and Enter sends it.
@@ -711,11 +711,26 @@ namespace winrt::TerminalApp::implementation
         _SessionsAiSetInUse(false);
     }
 
+    int TerminalPage::_SessionsAiPagesShowingCount() noexcept
+    {
+        // A relaxed read is enough: the caller (the side panel's park decision) only asks "does a page hold the process
+        // right now", and a page that comes on screen a moment later cancels any park with its own Prewarm.
+        return g_sessionsAiPagesInUse.load(std::memory_order_relaxed);
+    }
+
+    int64_t TerminalPage::_SessionsAiParkDelayMs() const noexcept
+    {
+        // The clamp is the one rule the loader, the cog and both surfaces share; _appSettings is a plain member, so this is
+        // safe from the destructor's thread as well (no XAML, no lock).
+        return static_cast<int64_t>(::Agentmaster::ClampSessionsAiParkMinutes(_appSettings.sessionsAiParkMinutes)) * kSessionsAiMsPerMinute;
+    }
+
     // Count this page in or out of the pages that show the AI search.
     //   inUse — true: this page shows it now. false: it does not (the mode is off, the page was
     //           closed, or the window goes away).
     // The page that takes the count to 0 frees the agent's session index (tens of megabytes)
-    // and parks its process after kSessionsAiParkAfterMs. Idempotent. Never throws.
+    // and parks its process after the configured delay (_SessionsAiParkDelayMs: AppSettings::
+    // sessionsAiParkMinutes, 2 hours by default). Idempotent. Never throws.
     void TerminalPage::_SessionsAiSetInUse(bool inUse) noexcept
     {
         if (inUse == _sessionsAiInUse)
@@ -737,7 +752,7 @@ namespace winrt::TerminalApp::implementation
             // _sessionsAiInUse was true, so the agent exists: this call cannot create it.
             auto& agent = ::Agentmaster::SharedSessionSearchAgent();
             agent.ReleaseCatalog();
-            agent.ParkProcessAfter(kSessionsAiParkAfterMs);
+            agent.ParkProcessAfter(_SessionsAiParkDelayMs());
         }
         catch (...)
         {

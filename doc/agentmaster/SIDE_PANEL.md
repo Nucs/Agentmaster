@@ -50,6 +50,27 @@ the panel:
 └───────────────────────────────┴──┴──────────────────────────────────┘
 ```
 
+With the filter box's **AI** toggle ON (§2h) the box is the AI search's request line, and the card area shows the
+model's answer and its list of sessions instead of the session cards; the summary area stays below:
+
+```
+┌ tab row ────────────────────────────────────────────────────────────┐
+├───────────────────────────────┬──┬──────────────────────────────────┤
+│[+][Sum][LOCAL][sort][⌖][⇄][«] │ ▌│                                  │
+│ [describe a session, Enter[AI]]│ ▌│                                  │  ← the filter box is the REQUEST line (AI checked)
+│ 3 sessions found              │ ▌│                                  │  ← the count line speaks for the AI view
+│ ╭───────────────────────────╮ │ ▌│                                  │
+│ │● ❯ the tab drag crash  [⊘]│ │ ▌│                                  │  ← the strip: request, plan / answer,
+│ │  Three sessions are about…│ │ ▌│                                  │    "thinking off  ctx 18K / 200K", ⊘ = start over
+│ ╰───────────────────────────╯ │ ▌│                                  │
+│ ┌ result card ──────────────┐ │ ▌│                                  │  ← the side panel's own card + the model's
+│ │ ▏You asked: "dragging a…" │ │ ▌│                                  │    "why" under it (closed sessions read "closed")
+│ └───────────────────────────┘ │ ▌│                                  │
+│ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ │ ▌│                                  │
+│ selected session's SUMMARY    │ ▌│                                  │  ← "Sum" works as always: a result click peeks it here
+└───────────────────────────────┴──┴──────────────────────────────────┘
+```
+
 - `TerminalPage.xaml`'s content row became a 3-column `ContentArea` grid; code
   (`_SidePanelApplyDock`) assigns TabContent / splitter / panel to the columns per the GLOBAL
   dock side (`AppSettings::sidePanelOnLeft`, LEFT by default), so either dock is a pure column
@@ -119,7 +140,8 @@ the panel:
   the Sessions browser's grammar reused — `ParseSessionQuery` +
   `MatchesQueryText`/`MatchesPathQuery` over title / effective dir / branch / id;
   whitespace-split AND terms, "quoted phrase" exact, a bare whole GUID matches the session +
-  its forks by IDENTITY.
+  its forks by IDENTITY. The **AI** toggle inside the box, at its right end (§2h; its tip waits the buttons' 3 s), turns
+  it into the AI search's request line, and the card area then shows the model's list instead of these cards.
 - **Order** (header, first line): the SHARED `AppSettings::boardSort`, cycled through
   `AgentManagerContent::CycleBoardSort` (a new public wrapper over the board's own
   `_CycleBoardSort`) and applied with the board's own `MakeSortKey`/`SortKeyLess` — one sort
@@ -896,6 +918,120 @@ controls (an unknown member planted in the glyph and in `_SidePanelRefreshIndica
 - Collapse the panel while cards ring / glow / pulse, expand it: they move again; no `[exc] status glyph …`,
   `[exc] _SidePanelRefreshIndicators` or `[sidepanel] … out of step` line in hooks.log.
 
+### 2h. The AI search — the filter box's "AI" toggle (2026-10-31, NOT BUILT yet)
+
+The user's request: "add a 'Search' area similarly how 'Sum' works … the same search agent we have, same lifecycle but
+custom UI matching a sidemenu". Their answers to the four design questions (design-ask, 2026-10-31):
+
+| Question | Answer |
+|---|---|
+| Where the search sits | **Replaces the cards** — and the trigger is an **"AI" button on the right inside the search box** (the filter box), not a header button; clicking it again brings the cards back |
+| What a result looks like | **The side panel's own card + the model's why** under it |
+| What a click does | **Like a card**: click = select + the summary area peeks it; double-click = jump to its tab, or resume a closed session as a new tab here; right-click = the session menu |
+| When the process runs | **Only after a request**, with the park **configurable, 2 hours by default** |
+
+**What it is.** The "AI" toggle (`_sidePanelAiBtn`, `am.side.ai`) is a sibling of the filter box in the box's grid cell,
+drawn over its right end — the Sessions page's AI toggle, scaled to the slim box: 24 × 16 DIP, 10 px, flat at rest,
+accent-filled when on. `_SidePanelAiFitToggleIntoBox` grows the box's right padding by the toggle's reserve (29 DIP) and
+shifts the box's own clear button (the template part `DeleteButton`) left by the same amount, each once (the Sessions page's
+§9.5 recipe). Clicking it runs `_SidePanelSetAiMode` on a clean tick:
+
+- **The box keeps its text through the switch, both ways, and through ⊘** — the user's rule for the AI search box (the
+  Sessions page's d45d079e0, same day: "the box is one box: the prompt line with AI on, the search box with AI off"). Only
+  its placeholder and tip follow the mode, and only Enter sends or empties it. The nav lines carry the box's length:
+  `[nav] sidepanel ai on box=N`, `… ai off box=N`, `… ai-reset box=N`.
+- **On:** the box becomes the REQUEST line (placeholder "describe a session, then press Enter", its own tip; a typed filter
+  waits as the request, and the card filter is dropped); the card list's ScrollViewer is collapsed and the AI view
+  (`_sidePanelAiRoot`, built on the first AI-on) shows in the same cell of the cards area (`_sidePanelCardsHost`). The view
+  adopts the conversation's current state (its last list comes back from the agent's stored view). A user's AI-on puts the
+  caret in the box, after any kept text. Refused, with the "Claude not detected" notice, when no native claude.exe exists.
+- **Off:** the box filters the cards again — its kept text at once, as if just typed; the cards come back and catch up
+  (every update deferred while they were covered runs, and an owed ⌖ reveal is paid); the result cards are dropped. The
+  conversation is kept.
+- **Enter** in the box sends the request (`SessionSearchAgent::Ask`, with this window's id as `asked_from`) and empties the
+  box (the strip shows the request); **Esc** stops a request that runs (only then is the key taken). Typing in AI mode
+  filters nothing.
+
+**The view** (rows: the strip, then the results):
+
+- **The strip** — the Sessions page's strip for a narrow panel: the state dot (blue working, green answered / ready, red
+  failed, gray idle), "❯ the request" (one line), then the model's plan and what runs now (busy), or its answer, or the
+  failure, or how to start (selectable, wrapping, scrolling inside 150 DIP), and a footer "thinking <level>  ctx 18K / 200K"
+  (the thinking toggle is the Sessions page's own rotation, `_CycleSessionsAiThinking`). ⊘ (`am.side.ai.reset`) throws the
+  conversation away everywhere. Its rounded look is a childless back Border behind the content (no composition node).
+- **The results** — one card per listed session, in the model's order: the side panel's card skeleton
+  (`_SidePanelBuildCardSkeleton`, the same builder as the session cards, so the two can never drift apart) — folder-color
+  band with the title and tag ribbons, the status icon and its label, the timing line, the folder / branch line — plus the
+  model's **why** under it (a 2 DIP quote bar and one italic line; the tip has it whole). A session with a live tab shows
+  its live state; one without reads **closed** in gray (`kSidePanelAiClosedColor`). A search's candidates show at once (no
+  why lines, "N candidates, choosing…" on the count line), and the model's pick replaces them. An empty pick reads "No
+  session fits this request."
+- **The data of a card**: the registry's record when it has one (an open or a closed session: the managed title, its color,
+  its state), else the index entry the agent sent with the list, else — a list restored when the window opens, before any
+  search read the index — the entry read from disk off the UI thread (`_SidePanelAiFetchMissingEntries` →
+  `LoadSessionIndexEntryById`, one fetch per list), showing "session <id8> — reading…" until it lands.
+- **Gestures** (`_SidePanelAiCreateResultView`): click = `_SidePanelAiClickResult` (a session the registry knows is selected,
+  so the summary area peeks it; an open one also drives the Manager lens and reveals its tab on the Agent Manager page; a
+  session Agentmaster never opened has no summary record, so the click opens its transcript reading view instead);
+  double-click = `_SidePanelAiOpenResult` on a clean tick (an open session's tab is activated, cross-window; a closed one is
+  resumed as a new tab in this window through the Sessions page's `_ResumeSessionFromDisk`; a folder not known yet opens the
+  transcript); right-click = the shared session menu for an open session, and for a closed one a lazy menu of its own
+  (`_SidePanelAiMakeClosedResultMenu`): Resume here (Jump to Tab if it opened since) · Fork here ▸ · Open New Session Here ▸
+  (the shared launch-model pick lists) · Show Transcript · Copy ▸ Session Id / Folder Path. The selection ring follows
+  `_sidePanelSelectedId` on the result cards too (`_SidePanelAiRestyleSelection`).
+- **Freshness**: the result cards are rebuilt per list (a handful); a registry change while the view shows only OWES them a
+  refresh, which the periodic tick pays (at most one per ~2.5 s tick, however busy the drain), and the tick refreshes every
+  ~30 s on its own (the "ago" texts). A refresh re-reads each listed session's lean record and writes only what moved; the
+  tags are re-read only when the tag epoch moved.
+
+**One conversation, the Sessions page's.** The view is a listener on `SharedSessionSearchAgent` (its own token,
+`_sidePanelAiListenerToken`, removed in `~TerminalPage`): a request asked here shows in a Sessions page with its AI search on,
+and the reverse; the thinking level and ⊘ are shared too.
+
+**The lifecycle — "only after a request".** A window that shows the AI view starts no process (a window can open in AI mode:
+the mode is persisted). The process starts at the first click into the box (`GotFocus` → `Prewarm`) or at a request. The
+park (`SessionSearchAgent::ParkProcessAfter`, `AppSettings::sessionsAiParkMinutes`, 2 hours by default, 1–1440) is armed
+when THIS window's request ends (its Answer / Failed event), when the box loses focus with nothing running, when the AI view
+closes, after ⊘, and when the window closes — but never while a Sessions page shows the AI search (its own rule holds the
+process then: `_SessionsAiPagesShowingCount`) and never while a request runs (its end arms it). ⚠ Never arm the park right
+after a Prewarm: `ParkAfter` drops a start that has not happened yet. The Sessions page's own park (the last page out) uses
+the same setting since this change (it was a fixed 10 minutes). Logged `[ai-search] side panel (window …): the idle process
+parks in N min (<why>)` and `[nav] sidepanel ai on box=N | ai off box=N | ai-ask turn=N chars=M | ai-stop | ai-reset box=N |
+ai-open <sid8> -> jump | resume here | transcript`.
+
+**While the view shows, the card list rests like a collapsed one** (`_SidePanelCardsHidden`): its updates are owed
+(`_SidePanelScheduleRebuild` / `_SidePanelRebuildCards` only mark it dirty — a forced one too, since it would write the
+count line the AI view owns), its ⌖ reveal stays owed, and its status icons hold still (`SetHostShown`). The summary area
+keeps refreshing. The count line speaks for the AI view ("3 sessions found", "4 candidates, choosing…", "no session fits",
+the idle hint).
+
+**Persistence** — the "Sum" contract: per window (`WindowRecord::sidePanelAiMode`, tri-state) and the last change is the
+new-window default (`AppSettings::sidePanelAiMode`), written outside the cog form (both cog-Save preserve blocks restore it).
+
+**Tested** (no build): `tests_persistence.cpp` — the record's tri-state (round-trip, a legacy record, a committed false, a
+non-bool value, the unset value omitted), the settings' round-trip and defaults, and `ClampSessionsAiParkMinutes` (0 → 120,
+past a day → 1440, a hand-edited 0, a write of an unclamped value).
+
+**Check after the build:**
+- The AI toggle sits inside the filter box at its right end; the box's text and its clear button end before it.
+- AI on with a filter typed: the text stays (it is now the request; Enter sends it), the caret stays after it, and the card
+  area shows the strip (hint text, a gray or green dot) over the conversation's last list; the count line reads the idle
+  hint. hooks.log: `[nav] sidepanel ai on box=N`, then the agent's process start (`[harness] sessions-search: process up …`).
+  AI off with text in the box: the text stays and filters the cards at once (`[nav] sidepanel ai off box=N`). ⊘ with text in
+  the box: the conversation resets, the text stays (`ai-reset box=N`).
+- A request: the plan and "Searching …" in blue, candidates at once, then the pick with a why under each card and the answer
+  in the strip; the summary area still follows the focused tab.
+- Click a result of an open session: the summary peeks it, the Manager lens follows; double-click: its tab comes up. A closed
+  one: double-click resumes it as a new tab here; right-click shows the closed-session menu. A session never opened in
+  Agentmaster: the click opens its transcript.
+- Esc during a request stops it; ⊘ clears this view and a Sessions page's AI list too.
+- AI off: the cards come back current (a session launched meanwhile is listed), ⌖ scrolls to the focused tab's card.
+- A restart with AI mode on: the window opens on the last list with no claude.exe started (no `process up` line until a
+  click into the box); the cards of sessions the registry does not know fill in from disk.
+- The park: after a request, hooks.log says `parks in 120 min`; with a Sessions page showing the AI search, no side-panel
+  park line; Settings ▸ Sessions ▸ AI SEARCH changes the minutes.
+- No `[exc] _SidePanelAi…` / `[exc] side panel AI …` line in hooks.log.
+
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 
 The bottom area hosts a REAL `AgentTabOverlay` whose summary panel is switched into the new
@@ -1026,6 +1162,7 @@ below).
 | dock side | — | `AppSettings::sidePanelOnLeft` (true = **left, the default**; false = right) |
 | card scope (LOCAL/GLOBAL) | `WindowRecord::sidePanelGlobal` (absent = LOCAL; written only when GLOBAL) | — **none by design**: every new window starts LOCAL |
 | `⌖` scroll to the selected tab (§2a) | — | `AppSettings::sidePanelScrollToSelectedTab` (true = **ON, the default**; absent key = ON) — a GLOBAL preference, broadcast live to every open window |
+| the filter box's **AI** toggle (§2h) | `WindowRecord::sidePanelAiMode` (-1 = unset; written only when set; a non-bool value reads unset) | `AppSettings::sidePanelAiMode` (false = **the session cards, the default**) |
 
 - **The card scope is the one field with NO last-one-wins export**: `_SidePanelToggleScope`
   persists it through the window-record autosave alone — never `_SidePanelPersistDefaults`, and
@@ -1097,6 +1234,10 @@ below).
   down (detached) before its card leaves the list or the list resets, its floating tips are silenced
   meanwhile (`AgentSuppressTip`), its arm-build reads no transcript, and every handler it wires holds
   the page and the host weakly.
+- The AI search (§2h): its view is built on the first AI-on; while it shows, the card list rests like a collapsed one
+  (updates owed, reveal owed, icons still); its result cards are the model's handful, rebuilt per list and refreshed at
+  most once per periodic tick; its disk reads run on a pool thread that holds the page weakly; its claude.exe starts only
+  at a click into the box or a request, and parks after `sessionsAiParkMinutes`.
 - The `+` launcher card (§2e) is built on the first click and never rebuilt; its placement runs on a
   coalesced dispatcher tick (never inside `SizeChanged`), writes the popup offsets only on a real
   move, and its keys act on the KEY-UP, so no CR / ESC of a key that closes the card can reach a
@@ -1153,3 +1294,14 @@ below).
   census-sink hop), `TerminalPage.h` (the model / view fields, the two declarations), `TerminalAppLib.vcxproj`
   (the new TU + headers), `tests/tests_sidepanel.cpp` (`TestStatusIconMotion`), `tests/tests_taskbar.cpp`
   (`TestUnreadCensus`'s set checks).
+  The AI search (§2h): `TerminalPage.AgentSidePanel.cpp` (the toggle in the filter box, the box's keys and focus hooks,
+  the cards host, `_SidePanelBuildCardSkeleton` + `_SidePanelWireCardHandlers` split out of `_SidePanelCreateCardView`,
+  the AI section — the mode switch, the view, the listener, the lifecycle, the result cards and their menus — and the
+  gates in the card list's update, reveal and periodic tick), `TerminalPage.AgentSessionsAi.cpp`
+  (`_SessionsAiPagesShowingCount`, `_SessionsAiParkDelayMs`: the Sessions page's park reads the setting too),
+  `TerminalPage.h` (`AgentSidePanelAiResultView`, the members, the declarations), `TerminalPage.AgentWindowRecord.cpp`
+  (capture), `TerminalPage.AgentEngine.cpp` (`~TerminalPage`'s `_SidePanelAiDetach`, the cog-Save preserve),
+  `AgentManagerContent.Settings.cpp` + `AgentManagerContent.h` (the AI SEARCH park field, the preserve),
+  `AgentMaster/SessionModels.h` + `Persistence.cpp` (`sidePanelAiMode` both halves, `sessionsAiParkMinutes`,
+  `ClampSessionsAiParkMinutes`), `AgentMaster/SessionSearchAgent.{h,cpp}` (`LoadSessionIndexEntryById`),
+  `tests/tests_persistence.cpp`.

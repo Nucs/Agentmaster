@@ -586,6 +586,11 @@ namespace winrt::TerminalApp::implementation
         // XAML inside, so it needs no guard and is never skipped; a no-op for a page that never
         // turned the AI search on.
         _SessionsAiDetach();
+        // Agentmaster (the side panel's AI search, SIDE_PANEL.md §2h): remove this window's side-panel listener from the same
+        // agent and, when no Sessions page shows the search, arm the park of a process this window may have started (its own
+        // request end or focus loss will never come now). AFTER _SessionsAiDetach, so the tally it reads already counts this
+        // page out. Thread-safe and noexcept, no XAML inside; a no-op for a window that never turned the AI view on.
+        _SidePanelAiDetach();
         // Agentmaster (cross-window activate): drop this window's activate sink from the shared
         // engine — a stray fan-out after teardown is already a safe no-op (the sink captures
         // get_weak() + an agile dispatcher), this keeps the engine's sink list bounded (Rule #10).
@@ -2461,6 +2466,7 @@ namespace winrt::TerminalApp::implementation
                     s.sidePanelSplitFraction = disk.sidePanelSplitFraction;
                     s.sidePanelCollapsed = disk.sidePanelCollapsed;
                     s.sidePanelSummaryHidden = disk.sidePanelSummaryHidden; // the header "Sum" toggle — written by its own RMW, never by this form
+                    s.sidePanelAiMode = disk.sidePanelAiMode; // the filter box's "AI" toggle (SIDE_PANEL.md §2h) — its own RMW too
                     // ...and the header's ⌖ scroll-to-tab toggle, written by its own RMW. It matters most
                     // HERE: the board-sort cycle reaches this sink too, carrying the Manager content's
                     // _appSettings, which never learns of THIS window's own flip (the toggle lives on the

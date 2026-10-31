@@ -924,6 +924,9 @@ namespace Agentmaster
         o.Set(L"transcriptOverlayLevel", json::Value::MkStr(s.transcriptOverlayLevel)); // the level the transcript overlay opens at (the overlay's own RMW)
         o.Set(L"transcriptOverlayWrapLines", json::Value::MkBool(s.transcriptOverlayWrapLines)); // the transcript overlay's ↵ line-wrap toggle (the overlay's own RMW)
         o.Set(L"sessionsAiThinkingLevel", json::Value::MkStr(s.sessionsAiThinkingLevel)); // the Sessions AI search's thinking level (the page's own RMW)
+        // The AI search's park delay (the cog's SESSIONS tab, "AI SEARCH"): written clamped, so the file never holds a value
+        // the loader would read differently.
+        o.Set(L"sessionsAiParkMinutes", json::Value::MkNum(ClampSessionsAiParkMinutes(s.sessionsAiParkMinutes)));
         // The session database (SESSIONS_DB.md): its mode, the refresh tick's period (D16), DuckDB's limits.
         o.Set(L"sessionDbMode", json::Value::MkStr(ToString(s.sessionDbMode)));
         o.Set(L"sessionDbRefreshSeconds", json::Value::MkNum(ClampSessionDbRefreshSeconds(s.sessionDbRefreshSeconds)));
@@ -943,6 +946,7 @@ namespace Agentmaster
         o.Set(L"sidePanelSplitFraction", json::Value::MkNum(s.sidePanelSplitFraction));
         o.Set(L"sidePanelCollapsed", json::Value::MkBool(s.sidePanelCollapsed));
         o.Set(L"sidePanelSummaryHidden", json::Value::MkBool(s.sidePanelSummaryHidden)); // the "Sum" toggle OFF (cards show the rich session tooltip) — a new-window default like the collapse
+        o.Set(L"sidePanelAiMode", json::Value::MkBool(s.sidePanelAiMode)); // the filter box's "AI" toggle ON (the card area shows the AI search) — a new-window default like "Sum"
         // The header ⌖ toggle — a GLOBAL behavior preference (no per-window copy), not a new-window default.
         o.Set(L"sidePanelScrollToSelectedTab", json::Value::MkBool(s.sidePanelScrollToSelectedTab));
         o.Set(L"allowUpdatePrerelease", json::Value::MkBool(s.allowUpdatePrerelease));
@@ -1179,6 +1183,9 @@ namespace Agentmaster
         // an unknown one as "off", so a hand-edited value can never break a request (absent => "off",
         // the agent's only setting before the toggle existed).
         s.sessionsAiThinkingLevel = v.StrAt(L"sessionsAiThinkingLevel", L"off");
+        // The AI search's park delay: absent => the 120-minute default; 0 or a value past a day is clamped by the one rule
+        // every reader shares, so a hand-edited 0 can never end the process after every answer.
+        s.sessionsAiParkMinutes = ClampSessionsAiParkMinutes(v.U32At(L"sessionsAiParkMinutes", 120));
         s.sessionDbMode = SessionDbModeFromString(v.StrAt(L"sessionDbMode", L"off")); // absent/unknown => Off (no service)
         s.sessionDbRefreshSeconds = ClampSessionDbRefreshSeconds(v.U32At(L"sessionDbRefreshSeconds", 5));
         s.sessionDbThreads = ClampSessionDbThreads(v.U32At(L"sessionDbThreads", 4));
@@ -1229,6 +1236,7 @@ namespace Agentmaster
             s.sidePanelSplitFraction = (ps >= 0.15 && ps <= 0.85) ? ps : 0.5;
             s.sidePanelCollapsed = v.BoolAt(L"sidePanelCollapsed", false); // absent => expanded
             s.sidePanelSummaryHidden = v.BoolAt(L"sidePanelSummaryHidden", false); // absent => the summary area shown (the pre-toggle layout)
+            s.sidePanelAiMode = v.BoolAt(L"sidePanelAiMode", false); // absent => the session cards (the pre-toggle layout); a new window opens in AI mode only after someone left one there last
             // The ⌖ scroll-to-selected-tab toggle: absent => ON, the SAME value as the struct default, so a
             // settings.json from before the toggle existed behaves exactly like a missing file. A PRESENT
             // false is the user's explicit OFF and wins.
@@ -1564,6 +1572,10 @@ namespace Agentmaster
         {
             o.Set(L"sidePanelSummaryHidden", json::Value::MkBool(w.sidePanelSummaryHidden != 0)); // the "Sum" toggle's per-window choice (absent == follow the global default)
         }
+        if (w.sidePanelAiMode >= 0)
+        {
+            o.Set(L"sidePanelAiMode", json::Value::MkBool(w.sidePanelAiMode != 0)); // the filter box's "AI" toggle — per-window choice (absent == follow the global default)
+        }
         // The card-list SCOPE is a plain per-window bool with a FIXED default (LOCAL) and NO global
         // default to fall back to — so only a GLOBAL choice is worth a key: omitting `false` keeps a
         // never-flipped window's record byte-identical to a pre-feature one, and a reader can only
@@ -1619,6 +1631,12 @@ namespace Agentmaster
             if (const auto* h = v.Find(L"sidePanelSummaryHidden"); h && h->type == json::Value::Type::Bool)
             {
                 w.sidePanelSummaryHidden = v.BoolAt(L"sidePanelSummaryHidden", false) ? 1 : 0;
+            }
+            // The "AI" toggle (SIDE_PANEL.md §2h): the same tri-state rule — only a PRESENT bool is this window's choice; an
+            // absent key (a record from before the toggle) or a non-bool value stays -1 and follows the global default.
+            if (const auto* a = v.Find(L"sidePanelAiMode"); a && a->type == json::Value::Type::Bool)
+            {
+                w.sidePanelAiMode = v.BoolAt(L"sidePanelAiMode", false) ? 1 : 0;
             }
             // Card-list scope: absent (a pre-feature record / a never-flipped window) or anything but a
             // true bool reads LOCAL — the fixed per-window default; there is no global setting for it

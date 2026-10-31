@@ -593,6 +593,7 @@ void TestWindowRecord()
     in.sidePanelSplitFraction = 0.6;
     in.sidePanelCollapsed = 1; // collapsed (the tri-state's TRUE)
     in.sidePanelSummaryHidden = 1; // the "Sum" toggle OFF (the tri-state's TRUE) — set so a dropped key fails the round-trip
+    in.sidePanelAiMode = 1; // the filter box's "AI" toggle ON (SIDE_PANEL.md §2h; the tri-state's TRUE) — set so a dropped key fails the round-trip
     in.sidePanelGlobal = true; // GLOBAL card scope — non-default (LOCAL is the fixed default; an absent key == false) so a dropped key fails the round-trip
 
     const auto out = DeserializeWindowRecord(SerializeWindowRecord(in));
@@ -634,6 +635,7 @@ void TestWindowRecord()
     CHECK(approx(out.sidePanelSplitFraction, 0.6), "sidePanelSplitFraction (per-window cards/summary split) round-trip");
     CHECK(out.sidePanelCollapsed == 1, "sidePanelCollapsed committed TRUE round-trips as 1 (not the -1 unset)");
     CHECK(out.sidePanelSummaryHidden == 1, "sidePanelSummaryHidden (the Sum toggle OFF) committed TRUE round-trips as 1 (not the -1 unset)");
+    CHECK(out.sidePanelAiMode == 1, "sidePanelAiMode (the AI toggle ON) committed TRUE round-trips as 1 (not the -1 unset)");
     CHECK(out.sidePanelGlobal == true, "sidePanelGlobal (the per-window card-list scope) round-trips GLOBAL");
 
     // Tolerant of a missing / corrupt document.
@@ -662,6 +664,7 @@ void TestWindowRecord()
         CHECK(sideLegacy.sidePanelWidthFraction == 0.0 && sideLegacy.sidePanelSplitFraction == 0.0, "missing sidePanel fractions -> unset (older record follows the global defaults)");
         CHECK(sideLegacy.sidePanelCollapsed == -1, "missing sidePanelCollapsed -> -1 unset (older record follows the global default)");
         CHECK(sideLegacy.sidePanelSummaryHidden == -1, "missing sidePanelSummaryHidden -> -1 unset (a record from before the Sum toggle follows the global default)");
+        CHECK(sideLegacy.sidePanelAiMode == -1, "missing sidePanelAiMode -> -1 unset (a record from before the AI toggle follows the global default)");
         // The card-list scope has NO global default: an absent key is LOCAL, full stop — a
         // pre-feature record must never reopen listing another window's tabs.
         CHECK(sideLegacy.sidePanelGlobal == false, "missing sidePanelGlobal -> LOCAL (a pre-feature record never lists another window's tabs)");
@@ -696,6 +699,19 @@ void TestWindowRecord()
             WindowRecord unsetSum;
             unsetSum.windowId = L"w";
             CHECK(SerializeWindowRecord(unsetSum).find(L"sidePanelSummaryHidden") == std::wstring::npos, "sidePanelSummaryHidden -1 unset is not written (absent == follow the global default)");
+            CHECK(SerializeWindowRecord(unsetSum).find(L"sidePanelAiMode") == std::wstring::npos, "sidePanelAiMode -1 unset is not written (absent == follow the global default)");
+        }
+        // The "AI" toggle (SIDE_PANEL.md §2h) — the same tri-state rules as "Sum": a committed FALSE is a real choice (0, the
+        // cards chosen), and a non-bool value (hand-edited) is no choice at all (-1, the global default decides).
+        {
+            const auto aiOff = DeserializeWindowRecord(L"{\"version\":1,\"window\":{\"windowId\":\"w\",\"sidePanelAiMode\":false}}");
+            CHECK(aiOff.windowId == L"w" && aiOff.sidePanelAiMode == 0, "sidePanelAiMode committed FALSE reads 0 (the cards chosen, not the -1 unset)");
+            const auto aiBad = DeserializeWindowRecord(L"{\"version\":1,\"window\":{\"windowId\":\"w\",\"sidePanelAiMode\":1}}");
+            CHECK(aiBad.windowId == L"w" && aiBad.sidePanelAiMode == -1, "sidePanelAiMode non-bool (a number) -> -1 unset (follows the global default)");
+            WindowRecord aiChosenOff;
+            aiChosenOff.windowId = L"w";
+            aiChosenOff.sidePanelAiMode = 0;
+            CHECK(DeserializeWindowRecord(SerializeWindowRecord(aiChosenOff)).sidePanelAiMode == 0, "sidePanelAiMode committed FALSE round-trips as 0 (written, unlike the unset -1)");
         }
         CHECK(sideBad.sidePanelGlobal == false, "sidePanelGlobal non-bool -> LOCAL (never another window's tabs on a corrupt value)");
         // The scope key is written ONLY for a GLOBAL choice: `false` carries no information (no
@@ -818,6 +834,7 @@ void TestAppSettings()
         in.transcriptOverlayLevel = L"compact"; // non-default (default "default") — the transcript overlay's last-picked level tab
         in.transcriptOverlayWrapLines = false; // non-default (default true = long lines wrap) — the transcript overlay's line-wrap toggle
         in.sessionsAiThinkingLevel = L"xhigh"; // non-default (default "off") — the Sessions AI search's strip toggle
+        in.sessionsAiParkMinutes = 45; // non-default (default 120) — the AI search's park delay (the cog's SESSIONS tab, "AI SEARCH")
         in.showTabCloseButton = false; // non-default (default true = show the X / theme-driven)
         in.closeTabOnMiddleClick = false; // non-default (default true = middle-click closes a tab)
         in.showTabIcon = true; // non-default (default false = tab icons HIDDEN)
@@ -852,6 +869,7 @@ void TestAppSettings()
         in.sidePanelSplitFraction = 0.7; // in-band (0.15..0.85); default 0.5
         in.sidePanelCollapsed = true; // non-default (default false = expanded)
         in.sidePanelSummaryHidden = true; // non-default (default false = the summary area shown) — the "Sum" toggle OFF
+        in.sidePanelAiMode = true; // non-default (default false = the session cards) — the filter box's "AI" toggle ON (SIDE_PANEL.md §2h)
         // The side panel header's scroll-to-tab toggle (a GLOBAL preference, not a new-window default):
         // an explicit OFF must survive the round-trip (the default is ON).
         in.sidePanelScrollToSelectedTab = false;
@@ -924,6 +942,7 @@ void TestAppSettings()
         CHECK(out.transcriptOverlayLevel == L"compact", "settings transcriptOverlayLevel round-trip (the remembered level name)");
         CHECK(out.transcriptOverlayWrapLines == false, "settings transcriptOverlayWrapLines round-trip (the transcript overlay's line-wrap toggle)");
         CHECK(out.sessionsAiThinkingLevel == L"xhigh", "settings sessionsAiThinkingLevel round-trip (the AI search's thinking level word)");
+        CHECK(out.sessionsAiParkMinutes == 45, "settings sessionsAiParkMinutes round-trip (the AI search's park delay)");
         CHECK(out.showTabCloseButton == false, "settings showTabCloseButton round-trip");
         CHECK(out.closeTabOnMiddleClick == false, "settings closeTabOnMiddleClick round-trip");
         CHECK(out.showTabIcon == true, "settings showTabIcon round-trip");
@@ -954,6 +973,7 @@ void TestAppSettings()
         CHECK(out.sidePanelSplitFraction > 0.699 && out.sidePanelSplitFraction < 0.701, "settings sidePanelSplitFraction round-trip");
         CHECK(out.sidePanelCollapsed == true, "settings sidePanelCollapsed round-trip (collapsed stored)");
         CHECK(out.sidePanelSummaryHidden == true, "settings sidePanelSummaryHidden round-trip (the Sum toggle OFF stored)");
+        CHECK(out.sidePanelAiMode == true, "settings sidePanelAiMode round-trip (the AI toggle ON stored as the new-window default)");
         CHECK(out.sidePanelScrollToSelectedTab == false, "settings sidePanelScrollToSelectedTab round-trip (the scroll-to-tab toggle's explicit OFF stored + honored)");
     }
 
@@ -1016,6 +1036,7 @@ void TestAppSettings()
         CHECK(out.transcriptOverlayLevel == L"default", "settings transcriptOverlayLevel default \"default\" (the overlay opens at Default) on empty");
         CHECK(out.transcriptOverlayWrapLines == true, "settings transcriptOverlayWrapLines default true (long lines wrap) on empty");
         CHECK(out.sessionsAiThinkingLevel == L"off", "settings sessionsAiThinkingLevel default \"off\" (no thinking, the agent's setting before the toggle) on empty");
+        CHECK(out.sessionsAiParkMinutes == 120, "settings sessionsAiParkMinutes default 120 (2 hours) on empty");
         CHECK(out.showTabCloseButton == true, "settings showTabCloseButton default true (show X) on empty");
         CHECK(out.closeTabOnMiddleClick == true, "settings closeTabOnMiddleClick default true (middle-click closes) on empty");
         CHECK(out.showTabIcon == false, "settings showTabIcon default false (tab icons HIDDEN) on empty");
@@ -1056,6 +1077,7 @@ void TestAppSettings()
         CHECK(out.sidePanelSplitFraction > 0.499 && out.sidePanelSplitFraction < 0.501, "settings sidePanelSplitFraction default 0.5 on empty");
         CHECK(out.sidePanelCollapsed == false, "settings sidePanelCollapsed default false (expanded) on empty");
         CHECK(out.sidePanelSummaryHidden == false, "settings sidePanelSummaryHidden default false (the summary area shown — the pre-toggle layout) on empty");
+        CHECK(out.sidePanelAiMode == false, "settings sidePanelAiMode default false (the session cards — the pre-toggle layout) on empty");
         CHECK(out.sidePanelScrollToSelectedTab == true, "settings sidePanelScrollToSelectedTab default true (scroll-to-tab ON) on empty");
         const auto out2 = DeserializeAppSettings(L"not json");
         CHECK(out2.skipPermissions == true && out2.confirmBeforeKill == true, "settings defaults on garbage");
@@ -1076,6 +1098,22 @@ void TestAppSettings()
         CHECK(legacy.waitingForYouTimeoutMinutes == 4320u, "settings legacy waitingDecayMinutes key is IGNORED -> 4320 (3d) default (rename invalidates the stale value)");
         const auto fresh = DeserializeAppSettings(L"{\"settings\":{\"waitingForYouTimeoutMinutes\":120}}");
         CHECK(fresh.waitingForYouTimeoutMinutes == 120u, "settings new waitingForYouTimeoutMinutes key is read");
+    }
+
+    // Agentmaster (SESSIONS.md §9.6, SIDE_PANEL.md §2h): the AI search's PARK delay. One clamp for every reader: 0 — an
+    // absent key, a blank or garbage cog box, a hand-edited 0 — is the 120-minute default (a park of 0 would end the process
+    // after every answer and lose the model's context between two follow-ups), and nothing parks later than a day.
+    {
+        CHECK(ClampSessionsAiParkMinutes(0) == 120 && ClampSessionsAiParkMinutes(1) == 1 && ClampSessionsAiParkMinutes(1440) == 1440 &&
+                  ClampSessionsAiParkMinutes(1441) == 1440 && ClampSessionsAiParkMinutes(4000000000u) == 1440,
+              "ClampSessionsAiParkMinutes: 0 -> 120, 1..1440 kept, past a day -> 1440");
+        const auto zero = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"sessionsAiParkMinutes\":0}}");
+        CHECK(zero.sessionsAiParkMinutes == 120, "settings sessionsAiParkMinutes 0 (hand-edited) -> 120 (never a park after every answer)");
+        const auto huge = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"sessionsAiParkMinutes\":100000}}");
+        CHECK(huge.sessionsAiParkMinutes == 1440, "settings sessionsAiParkMinutes past a day -> 1440");
+        AppSettings unclamped;
+        unclamped.sessionsAiParkMinutes = 0; // an in-memory value no reader would accept
+        CHECK(DeserializeAppSettings(SerializeAppSettings(unclamped)).sessionsAiParkMinutes == 120, "settings sessionsAiParkMinutes is written clamped (an in-memory 0 saves as the default)");
     }
 
     // ExplorerSort token parsing for treeSort/boardSort: each token -> its mode; an unknown token falls

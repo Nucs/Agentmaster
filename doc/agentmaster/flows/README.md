@@ -27,7 +27,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | File | Area (code) | Flows | P0 / P1 / P2 | Phases | Edge cases | Known defects |
 |---|---|---|---|---|---|---|
 | [01-agent-manager-page.md](01-agent-manager-page.md) | The Agent Manager page, Home, jump back, zero-tab windows (MGR) | 7 | 4 / 2 / 1 (+1 NOT BUILT) | 29 | 22 | 1 (fixed in code) |
-| [02-side-panel.md](02-side-panel.md) | The side panel, its cards, Sum, the + launcher (SP) | 8 | 3 / 3 / 1 (+1 NOT BUILT) | 37 | 27 | 2 (fixed in code; SP-K2 reclassified as a feature) |
+| [02-side-panel.md](02-side-panel.md) | The side panel, its cards, Sum, the + launcher, the AI search (SP) | 9 | 3 / 3 / 1 (+2 NOT BUILT) | 44 | 33 | 2 (fixed in code; SP-K2 reclassified as a feature) |
 | [03-prompt-queue-runner.md](03-prompt-queue-runner.md) | The Prompt Queue Runner (PQR) | 16 | 10 / 6 / 0 | 60 | 69 | 10 (1 fixed in code; PQR-K6 and PQR-K7 reclassified as accepted behavior) |
 | [04-drafts-and-delivery.md](04-drafts-and-delivery.md) | Unsent drafts, the draft swap, the mail button, the fork carry (DRF) | 9 | 5 / 3 / 1 | 33 | 42 | — |
 | [05-session-state.md](05-session-state.md) | Session state on every surface, through Claude Code's own events (STA) | 16 | 8 / 7 / 1 | 42 | 52 | 2 (STA-K2–K4 reclassified as accepted delays) |
@@ -50,7 +50,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [22-cli-and-session-database.md](22-cli-and-session-database.md) | The `agentmaster` CLI and the session database (CLI, SDB) | 6 | 0 / 1 / 5 | 18 | 7 | 2 (1 fixed in code) |
 | [23-tab-context-menu.md](23-tab-context-menu.md) | The tab's context menu: what it shows where, and what each item does (TCM) | 9 | 5 / 4 / 0 | 36 | 27 | 2 (1 fixed in code) |
 | [24-claude-lifecycle.md](24-claude-lifecycle.md) | Claude Code's life cycle in a tab: launch, `/exit`, a kill, Close and Resume here, a claude typed by hand, a restart, `/clear` (LIF) | 7 | 4 / 3 / 0 | 22 | 2 | — (its two are filed in 03 and 05: PQR-K8, fixed in code, and STA-K1) |
-| **Total** | | **193** | **82 / 80 / 26** (+6 NOT BUILT) | **≈ 699** | **≈ 571** | **31** (9 fixed in code) |
+| **Total** | | **194** | **82 / 80 / 26** (+7 NOT BUILT) | **≈ 706** | **≈ 577** | **31** (9 fixed in code) |
 
 ---
 

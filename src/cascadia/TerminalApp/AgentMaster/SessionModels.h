@@ -2848,6 +2848,16 @@ namespace Agentmaster
         // turned on; the process's one search agent applies it, so every window shows the same level.
         // The engine stores the word opaquely; an unknown or empty word reads as "off". Default "off".
         std::wstring sessionsAiThinkingLevel{ L"off" };
+        // Agentmaster (SESSIONS.md §9.6, SIDE_PANEL.md §2h): how long the AI search's idle claude.exe lives after its last
+        // use, in MINUTES — its PARK delay. Two surfaces arm the park: the Sessions page when the last page showing the AI
+        // search leaves it, and the side panel's AI search when one of its requests ends (or its request box loses focus with
+        // nothing running) while no Sessions page shows the search. A park ends only the PROCESS (~400 MB of commit): the
+        // next request starts a new one that continues from a DIGEST of the conversation's record. So the trade-off: a
+        // short delay frees the memory soon but loses the model's full context between uses; a long one keeps the process
+        // (and its memory) up that long after the last use, with the whole context. 1..1440 (ClampSessionsAiParkMinutes;
+        // 0 / absent -> 120). The cog's SESSIONS tab, "AI SEARCH"; a Save applies to the next park armed (one already armed
+        // keeps its time). Default 120: 2 hours (the user's choice of 2026-10-31; it was a fixed 10 minutes before).
+        uint32_t sessionsAiParkMinutes{ 120 };
         // --- the session database (SESSIONS_DB.md; the cog's SESSIONS tab, "Session database") ---
         // How the app uses it (see SessionDbMode). Default Off: the database costs a background cold
         // build (minutes of CPU, ~1 GB per 3 GB of transcripts on disk) the first time it runs, so it is
@@ -2922,11 +2932,18 @@ namespace Agentmaster
         //     header shows, placed beside the panel (SIDE_PANEL.md §2d). Default false (the summary shown — the
         //     pre-toggle layout). Same "last one wins" contract as sidePanelCollapsed, and like the four above it
         //     is written OUTSIDE the cog form, so both cog-Save preserve blocks restore it from disk.
+        //   sidePanelAiMode: the filter box's "AI" toggle ON — the box becomes the AI search's REQUEST line and the card
+        //     area shows the model's list of sessions instead of the session cards (SIDE_PANEL.md §2h; the conversation is
+        //     the process's one SharedSessionSearchAgent, shared with the Sessions page). Default false (the cards). The
+        //     same "last one wins" contract and the same out-of-cog writer rule as sidePanelSummaryHidden. A window that
+        //     opens in AI mode starts no process: the search's claude.exe starts only at the first click into the box or the
+        //     first request (sessionsAiParkMinutes ends it again).
         bool sidePanelOnLeft{ true };
         double sidePanelWidthFraction{ 0.22 };
         double sidePanelSplitFraction{ 0.5 };
         bool sidePanelCollapsed{ false };
         bool sidePanelSummaryHidden{ false };
+        bool sidePanelAiMode{ false };
         // Agentmaster (SIDE PANEL): the header's ⌖ "scroll to the selected tab" toggle. ON (the DEFAULT)
         // == selecting a tab scrolls the panel's card list until THAT tab's card is on screen (a card that
         // is already fully visible stays put; one scroll per selection, never a re-scroll on every list
@@ -3302,6 +3319,21 @@ namespace Agentmaster
             return 5;
         }
         return v > 60 ? 60 : v;
+    }
+
+    // Agentmaster (SESSIONS.md §9.6, SIDE_PANEL.md §2h): clamp AppSettings::sessionsAiParkMinutes into 1..1440 minutes (a day
+    // at most). 0 — an absent key, a blank or non-numeric cog box — falls back to the 120-minute default: a park of 0 would
+    // end the process right after every answer and throw the model's full context away between two follow-ups. The ONE
+    // rule the Persistence load and save, the cog and both surfaces that arm the park (the Sessions page, the side panel)
+    // read, so a hand-edited value can never make them disagree.
+    // Parameters: v — the stored or typed minutes. Returns: the park delay in minutes, 1..1440. Never throws.
+    inline uint32_t ClampSessionsAiParkMinutes(uint32_t v) noexcept
+    {
+        if (v < 1)
+        {
+            return 120;
+        }
+        return v > 1440 ? 1440 : v;
     }
 
     // Agentmaster (SESSIONS_DB.md §10): clamp AppSettings::sessionDbThreads into 1..16 (0 / garbage -> 4).
@@ -3806,10 +3838,15 @@ namespace Agentmaster
         //   sidePanelSummaryHidden: the "Sum" toggle — 1 == the summary area hidden (the cards' rich
         //     session tooltip mode), 0 == shown, -1 == unset (absent — follow the AppSettings default).
         //     The same tri-state as sidePanelCollapsed, for the same reason.
+        //   sidePanelAiMode: the filter box's "AI" toggle (SIDE_PANEL.md §2h) — 1 == AI mode (the box is the AI
+        //     search's request line, the card area shows the model's list), 0 == the cards, -1 == unset (absent —
+        //     follow AppSettings::sidePanelAiMode). The same tri-state again: a window that never touched the
+        //     toggle keeps following the last change made anywhere.
         double sidePanelWidthFraction{ 0.0 };
         double sidePanelSplitFraction{ 0.0 };
         int sidePanelCollapsed{ -1 };
         int sidePanelSummaryHidden{ -1 };
+        int sidePanelAiMode{ -1 };
         //   sidePanelGlobal: which sessions the panel's CARD LIST shows — false (the default) == LOCAL,
         //     only the sessions whose tab is hosted in THIS window (the same live hosted-tab set the
         //     Explorer Tree's LOCAL scope reads — TerminalPage::_HostedSessionIds — so a card here always

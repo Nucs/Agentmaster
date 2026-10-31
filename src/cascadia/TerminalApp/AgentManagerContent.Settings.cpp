@@ -1164,6 +1164,16 @@ namespace winrt::TerminalApp::implementation
         _setResumeApiErrorTurns.Header(winrt::box_value(L"Continue a turn that ended in an API error when its session is resumed"));
         AgentSetTip(_setResumeApiErrorTurns, L"A turn can die on an API error \x2014 \x201C" L"Connection lost mid-response\x201D, an overloaded or rate-limited API, a server error. Resuming such a session (Restart session, entering a Deactivated or restored tab, Resume here on the Sessions page) normally leaves Claude sitting at the error.\n\nWith this on, Agentmaster first adds ONE line to the session's transcript \x2014 the same line Claude Code writes when you rewind with Esc Esc \x2014 that steps the conversation back to just before the failed response. The resumed Claude then sees an interrupted turn and continues it by itself (your ~/.claude/settings.json sets CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1). Nothing is deleted: the error and the half-written reply stay in the file on an abandoned branch.\n\nA refusal or a safety block is never retried. Restart waits (up to 15 s) for the old Claude to exit before it writes the line, because that Claude would otherwise put the error back on exit. Off: a resumed errored session waits at the error for you to type.");
         panel.Children().Append(_setResumeApiErrorTurns);
+        // SESSIONS.md §9.6 / SIDE_PANEL.md §2h: the AI search's PARK delay — how long its idle claude.exe lives after the
+        // last use, on both surfaces (the Sessions page's AI toggle and the side panel's). One number: a park ends only the
+        // process, so the trade-off is memory (~400 MB of commit while it lives) against the model's full context (a
+        // parked conversation continues from a digest). Read by the next park armed; a park already armed keeps its time.
+        panel.Children().Append(SettingsSeparator(L"AI SEARCH"));
+        _setSessionsAiPark = TextBox{};
+        _setSessionsAiPark.Header(winrt::box_value(L"Keep the AI search's process after its last use (minutes)"));
+        _setSessionsAiPark.PlaceholderText(L"120 (1\x2013" L"1440)");
+        AgentSetTip(_setSessionsAiPark, L"The AI search (the Sessions page's AI toggle and the side panel's) runs one hidden claude.exe of about 400 MB. It starts when you use the search and ends this many minutes after its last use: after a request ends, or when no Sessions page shows the search any more. A follow-up within this time keeps the model's full context; after it, the next request starts a new process that continues from a digest of the conversation. Blank resets to 120 (2 hours); the range is 1\x2013" L"1440 (a day). Applies to the next time the process is left idle.");
+        panel.Children().Append(_setSessionsAiPark);
         // SESSIONS_DB.md: the session database. Off by default: nothing changes until the user picks Shadow (it
         // runs beside today's search and logs where the two differ) or On (the Sessions page and the AI search
         // read it). Save applies the mode and the interval at once (the refresh tick starts or stops); the threads
@@ -3192,6 +3202,11 @@ namespace winrt::TerminalApp::implementation
         {
             _setResumeApiErrorTurns.IsOn(_appSettings.resumeApiErrorTurns); // HOOKS.md "API-error turns"
         }
+        if (_setSessionsAiPark)
+        {
+            // Shown clamped, the way every surface that arms the park reads it (a hand-edited 0 shows the 120 it means).
+            _setSessionsAiPark.Text(winrt::hstring{ std::to_wstring(::Agentmaster::ClampSessionsAiParkMinutes(_appSettings.sessionsAiParkMinutes)) });
+        }
         if (_setSessionDbMode)
         {
             // SESSIONS_DB.md: the four settings, clamped the way the engine reads them, and what the refresh tick
@@ -4065,6 +4080,24 @@ namespace winrt::TerminalApp::implementation
         {
             _appSettings.resumeApiErrorTurns = _setResumeApiErrorTurns.IsOn(); // HOOKS.md "API-error turns"
         }
+        if (_setSessionsAiPark)
+        {
+            // SESSIONS.md §9.6: the digits of the box (a blank, a "0" or garbage reads 0, which the clamp turns into the
+            // 120-minute default; a value past a day is held at 1440). The same digit reader as the session database's boxes:
+            // a number is read up to six digits, so an absurd entry cannot overflow before the clamp sees it.
+            uint32_t minutes = 0;
+            // Held in a local first: a range-for over a view of the temporary Text() would read a destroyed string (a
+            // temporary inside the range expression is not lifetime-extended before C++23).
+            const winrt::hstring typed = _setSessionsAiPark.Text();
+            for (const wchar_t c : std::wstring_view{ typed })
+            {
+                if (c >= L'0' && c <= L'9' && minutes < 1000000)
+                {
+                    minutes = minutes * 10 + static_cast<uint32_t>(c - L'0');
+                }
+            }
+            _appSettings.sessionsAiParkMinutes = ::Agentmaster::ClampSessionsAiParkMinutes(minutes);
+        }
         if (_setSessionDbMode)
         {
             // SESSIONS_DB.md: blank / garbage / 0 fall back to each setting's default through the engine's clamps.
@@ -4596,6 +4629,7 @@ namespace winrt::TerminalApp::implementation
             _appSettings.sidePanelSplitFraction = disk.sidePanelSplitFraction;
             _appSettings.sidePanelCollapsed = disk.sidePanelCollapsed;
             _appSettings.sidePanelSummaryHidden = disk.sidePanelSummaryHidden; // the header "Sum" toggle's own RMW — this form never edits it
+            _appSettings.sidePanelAiMode = disk.sidePanelAiMode; // the filter box's "AI" toggle's own RMW (SIDE_PANEL.md §2h) — this form never edits it
             _appSettings.sidePanelScrollToSelectedTab = disk.sidePanelScrollToSelectedTab; // the header ⌖ toggle's own RMW — this form never edits it
         }
         // MESSAGING.md: commit the bot token to Windows Credential Manager BEFORE the sink runs, so the engine

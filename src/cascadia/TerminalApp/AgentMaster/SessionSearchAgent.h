@@ -34,6 +34,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -466,4 +467,19 @@ namespace Agentmaster
     /// installed).
     /// </remarks>
     std::wstring SearchDatabaseProfileIfUsable(bool databaseModeOn, std::wstring_view who);
+
+    /// <summary>
+    /// The index entry (title, folder, branch, times, counts) of ONE session by its whole id, read from DISK: its transcript
+    /// found where Claude keeps it, then its sidecar index (LoadOrRefreshSessionIndex). For a surface that must show a
+    /// session the agent's in-memory index does not hold — the side panel's AI search restoring the conversation's last list
+    /// when a window opens, before any search has read the index (SIDE_PANEL.md §2h). EntriesFor answers only from that
+    /// index, and reading the whole index just to draw a handful of rows would cost every sidecar file instead of a few.
+    /// </summary>
+    /// <param name="sessionId">The session's whole id; an empty id answers nullopt.</param>
+    /// <returns>The entry, its stats.pathsAccessed emptied (no row shows them, and a session may list up to 512); nullopt when
+    /// the transcript is gone or could not be read (the read is logged).</returns>
+    /// <exception cref="std::bad_alloc">If the strings cannot be allocated; every other failure is logged and reads as nullopt.</exception>
+    /// <remarks>⚠ Blocking file IO: usually one small sidecar read, but a transcript that grew since its sidecar was written
+    /// is parsed from the stored offset — seconds for a large one. Call it OFF the UI thread.</remarks>
+    std::optional<SessionIndexEntry> LoadSessionIndexEntryById(const std::wstring& sessionId);
 }

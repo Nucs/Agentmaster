@@ -536,7 +536,10 @@ differs from the plan above, and why:
   `am.mgr.queue.{compose,jump,sendNow,add,templates,pullDraft,runner,templateName,templateList}`,
   `am.mgr.queue.row.<promptKey>`, `am.tab.<key>` (the `TabViewItem`; cleared when the tab stops hosting a session),
   `am.badge.<key>.{mode,up,down,folder,mail,copy,pencil}`,
-  `am.side.{launch,filter,sum,scope,sort,scrollToTab,dock,collapse,expand}`, `am.side.card.<key>` (the card's title).
+  `am.side.{launch,filter,sum,scope,sort,scrollToTab,dock,collapse,expand}`, `am.side.card.<key>` (the card's title);
+  the side panel's AI search (SIDE_PANEL.md §2h, NOT BUILT): `am.side.ai` (the filter box's AI toggle, named by its "AI"),
+  `am.side.ai.{status,thinking,reset}` (the strip's text, the thinking toggle, ⊘ — named "New conversation"),
+  `am.side.ai.result.<key>` (a result card's title; its item status is the state word or "closed", the tags, "selected").
   Home keeps its XAML id `ManagerHomeButton` (an x:Name is never overridden).
 - **Item status built:** the tab — the state word, then not started, unread, unsent draft, favorite, cache warm,
   "selected on the Agent Manager page" (the Linked-Lenses pill, MGR-05 phase 2) and "tags: …", composed by `Tab` from

@@ -75,6 +75,7 @@
 
 #include "AgentManagerContent.h" // CycleBoardSort / BuildSessionMenuFor / SelectSession (the Linked-Lenses delegation targets) + LaunchBoxText / SetLaunchBoxText / LaunchRecentDirs (the "+" launcher mirrors its box)
 #include "AgentLaunchBar.h" // the "+" launcher card's launch row — the Agent Manager's own launch bar, Claude only (SIDE_PANEL.md §2e)
+#include "AgentModelMenu.h" // AgentFillModelPickItems — the AI search's closed-result menu: Fork here ▸ / Open New Session Here ▸ (SIDE_PANEL.md §2h)
 #include "AgentSessionToolTip.h" // the cards' rich session tooltip host ("Sum" off — the tab tooltip's lifecycle, shared)
 #include "AgentStatusGlyph.h" // every card's STATUS ICON — the tab's dot with its 3 dots, flash ring and spark crown (SIDE_PANEL.md §2g)
 #include "AgentTabOverlay.h" // the fill-hosted summary panel (SetSummaryFillHost)
@@ -85,6 +86,7 @@
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / LogNav / ShortId
 #include "AgentMaster/Engine.h" // BroadcastSettingsChanged — the ⌖ scroll-to-tab toggle reaches every OTHER open window live; CurrentUnreadSessionIds — which cards' status icons ring (SIDE_PANEL.md §2g)
 #include "AgentMaster/KeyedListDiff.h" // PlanKeyedListOps / ApplyKeyedListOp — the card list's fewest removes / inserts / moves (SIDE_PANEL.md §2c)
+#include "AgentMaster/LaunchPresetsOs.h" // PRESETS (HARNESSES.md): LaunchMenuEntries — the AI search's closed-result menu lists the models, then the visible presets (SIDE_PANEL.md §2h)
 #include "AgentMaster/VirtualListWindow.h" // PlanRealizedRows / RowsAroundRow / SpacersFor / MedianRowHeight — which rows of the card list have cards (SIDE_PANEL.md §2f)
 #include "AgentMaster/PointerCardPlacement.h" // PlacePointerCard — the "+" launcher card opens at the click, toward the window's center (SIDE_PANEL.md §2e)
 #include "AgentMaster/Persistence.h" // Load/SaveAppSettings + EffectiveWorkingDir / ResolveSessionColorHex + LoadDirColorIndex (one color snapshot per list update)
@@ -92,6 +94,7 @@
 #include "AgentMaster/ProfileBootstrap.h" // (Internal.h convention — harmless here, keeps the include set board-identical)
 #include "AgentMaster/SessionRegistry.h" // SnapshotLiveForCards / Get
 #include "AgentMaster/SessionSearch.h" // ParseSessionQuery / MatchesQueryText / MatchesPathQuery — the Sessions grammar, reused
+#include "AgentMaster/SessionSearchAgent.h" // SharedSessionSearchAgent / SessionSearchEvent / LoadSessionIndexEntryById — the side panel's AI search, a view of the process's one search conversation (SIDE_PANEL.md §2h)
 #include "AgentMaster/SessionStore.h" // GetSessionTags / LoadAllTagColors / SessionTagsEpoch — the cards' bookmark-tag strip (cached per card until a tag changes)
 
 #include <algorithm>
@@ -263,6 +266,116 @@ namespace
         L"Drag to resize the side panel.\nThis window remembers its own width; the last resize anywhere becomes the default for new windows.";
     constexpr const wchar_t* kSidePanelSplitSplitterTip =
         L"Drag to rebalance the cards list and the summary.\nThis window remembers its own split; the last resize anywhere becomes the default for new windows.";
+
+    // --- The AI SEARCH (SIDE_PANEL.md §2h) ------------------------------------------------------------------------------
+    // The "AI" toggle sits INSIDE the slim filter box, at its right end (the Sessions page's idiom, scaled to the ~22 DIP
+    // box): a fixed size, so the room the box must leave for it is known before anything is laid out. The reserve = the
+    // gap between the text and the toggle + the toggle + its inset from the box's right edge. DIPs.
+    constexpr double kSidePanelAiToggleWidth = 24.0;
+    constexpr double kSidePanelAiToggleHeight = 16.0; // the box is ~22 DIPs high: 3 above and below
+    constexpr double kSidePanelAiToggleInset = 3.0;
+    constexpr double kSidePanelAiToggleGap = 2.0;
+    constexpr double kSidePanelAiToggleReserve = kSidePanelAiToggleGap + kSidePanelAiToggleWidth + kSidePanelAiToggleInset;
+    // The strip's plan / answer text scrolls inside this height, so a long descriptive answer (the prompt asks for up to
+    // ~1,200 characters) never pushes the result cards out of a narrow panel.
+    constexpr double kSidePanelAiStatusMaxHeight = 150.0;
+    // The refresh cadence of the result cards while nothing owes one (the "ago" texts age): the session cards' own 30 s.
+    constexpr uint64_t kSidePanelAiRefreshMs = 30'000;
+    // The two meanings of the filter box, as its placeholder says them: filtering, or a request in the user's own words that
+    // Enter sends.
+    constexpr const wchar_t* kSidePanelFilterPlaceholder = L"filter sessions";
+    constexpr const wchar_t* kSidePanelAiPlaceholder = L"describe a session, then press Enter";
+    constexpr const wchar_t* kSidePanelFilterTipTitle = L"Filter the cards";
+    constexpr const wchar_t* kSidePanelFilterTip =
+        L"Whitespace-split terms AND-match a session's title, working directory, branch, or id.\n\"quoted phrase\" matches exactly; a pasted whole session-id GUID matches that session and its forks by identity.";
+    constexpr const wchar_t* kSidePanelAiBoxTipTitle = L"AI search";
+    constexpr const wchar_t* kSidePanelAiBoxTip =
+        L"Write what you remember (\x201Cthe session where I fixed the tab drag crash\x201D) and press Enter: a Claude model searches every session and lists the ones that fit, each with the line of evidence it found. A follow-up refines the list (\x201Conly the open ones\x201D). Esc stops a request that runs.\n\nThe AI toggle at the right brings the session cards back, and the text in the box then filters them; the conversation is kept.";
+    // A session with no live tab (closed in Agentmaster, or never opened in it): its card's dot and state label. The Idle
+    // gray darkened, so "closed" never reads as a live session at rest.
+    constexpr Color kSidePanelAiClosedColor{ 0xFF, 0x6A, 0x6A, 0x6A };
+    // The why line's quote bar: the Sessions page's evidence-bar blue family, so the model's evidence reads the same on both.
+    constexpr Color kSidePanelAiWhyBarColor{ 0xFF, 0x6B, 0x8F, 0xD6 };
+
+    // The first element named `name` in the visual tree under `root`, depth first — a template part of the filter box.
+    //   root    - where to look; its own name is not tested.
+    //   name    - the x:Name to find.
+    //   returns - the element, or null (the template is not applied yet, or it has no such part).
+    //   throws  - what the visual tree calls throw (hresult_error); the one caller contains it.
+    // The tree under a TextBox is a dozen elements, so the walk is cheap.
+    FrameworkElement SidePanelFindDescendant(const DependencyObject& root, std::wstring_view name)
+    {
+        const int count = VisualTreeHelper::GetChildrenCount(root);
+        for (int i = 0; i < count; ++i)
+        {
+            const auto child = VisualTreeHelper::GetChild(root, i);
+            if (const auto element = child.try_as<FrameworkElement>(); element && std::wstring_view{ element.Name() } == name)
+            {
+                return element;
+            }
+            if (auto found = SidePanelFindDescendant(child, name))
+            {
+                return found;
+            }
+        }
+        return nullptr;
+    }
+
+    // `text` without the white space at its two ends (a request is sent trimmed; a box of spaces sends nothing).
+    //   text    - the box's text.
+    //   returns - the trimmed copy.
+    //   throws  - std::bad_alloc only.
+    std::wstring SidePanelAiTrim(std::wstring_view text)
+    {
+        const auto isSpace = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n'; };
+        size_t a = 0;
+        size_t b = text.size();
+        while (a < b && isSpace(text[a]))
+        {
+            ++a;
+        }
+        while (b > a && isSpace(text[b - 1]))
+        {
+            --b;
+        }
+        return std::wstring{ text.substr(a, b - a) };
+    }
+
+    // The color a RESULT card's state shows — its dot, its label, its hover and selection ring: the live state's color for a
+    // session with a tab, the "closed" gray for one without (SIDE_PANEL.md §2h).
+    //   view    - the result card (its `open` flag and the state of its model).
+    //   returns - the color. Never throws.
+    Color SidePanelAiRingColor(const winrt::TerminalApp::implementation::AgentSidePanelAiResultView& view) noexcept
+    {
+        return view.open ? StateColor(view.base.model.state) : kSidePanelAiClosedColor;
+    }
+
+    // A RESULT card's ITEM STATUS (E2E_TESTING.md §6.3), written on its title like a session card's: the state word — or
+    // "closed" for a session with no tab — then its tags, then "selected". The session card's own composer
+    // (SidePanelApplyCardItemStatus) would read a closed session as "idle", which is not what the card shows.
+    //   view     - the result card; a card with no title yet is skipped.
+    //   selected - the card's session is the side panel's selected session.
+    // Throws what a XAML property write throws (the callers contain it).
+    void SidePanelAiApplyItemStatus(const winrt::TerminalApp::implementation::AgentSidePanelAiResultView& view, bool selected)
+    {
+        namespace impl = winrt::TerminalApp::implementation;
+        if (!view.base.title)
+        {
+            return;
+        }
+        std::wstring tags;
+        for (const auto& tag : view.base.model.tags)
+        {
+            tags += tags.empty() ? L"tags: " : L", ";
+            tags += tag;
+        }
+        impl::AgentItemStatus status;
+        status.Add(view.open ? impl::AgentStateWord(view.base.model.state) : std::wstring_view{ L"closed" })
+            .Add(impl::kAgentStatusCodex, view.base.model.codex)
+            .Add(tags)
+            .Add(impl::kAgentStatusSelected, selected);
+        impl::AgentSetItemStatus(view.base.title, status.Text());
+    }
 
     // Case-fold for the in-process matchers (MatchesQueryText expects PRE-FOLDED haystacks; the
     // parser pre-folds the needles into SearchTerm::textLower). Per-character towlower — the same
@@ -771,6 +884,10 @@ namespace winrt::TerminalApp::implementation
         // The "Sum" toggle (summary area hidden == the cards' rich tooltip mode) follows the collapse contract:
         // this window's own choice when its record has one, else the last change anywhere (the global default).
         _sidePanelSummaryHidden = (_windowRecord.sidePanelSummaryHidden >= 0) ? (_windowRecord.sidePanelSummaryHidden != 0) : _appSettings.sidePanelSummaryHidden;
+        // The "AI" toggle (SIDE_PANEL.md §2h) follows the same contract: this window's own choice, else the last change
+        // anywhere. Only READ here: the AI view replaces the card list, which must exist first, so the mode is applied at the
+        // end of the build (_SidePanelSetAiMode, silently — a window's open persists nothing and starts no process).
+        const bool startInAiMode = (_windowRecord.sidePanelAiMode >= 0) ? (_windowRecord.sidePanelAiMode != 0) : _appSettings.sidePanelAiMode;
         // The card-list SCOPE is per-window ONLY: the record's flag (absent == false), never an
         // AppSettings default — the user's contract is that every window starts on ITS OWN tabs
         // (LOCAL), and a fleet-wide (GLOBAL) view is an explicit choice that stays with the window
@@ -969,12 +1086,21 @@ namespace winrt::TerminalApp::implementation
         // MinHeight(0) is a belt in case a style ever sets a floor on the control itself.
         _sidePanelSearchBox.Resources().Insert(winrt::box_value(L"TextControlThemeMinHeight"), winrt::box_value(kSidePanelSearchBoxMinHeightPx));
         _sidePanelSearchBox.MinHeight(0.0);
-        _sidePanelSearchBox.PlaceholderText(L"filter sessions");
+        _sidePanelSearchBox.PlaceholderText(kSidePanelFilterPlaceholder); // the AI mode swaps it for its own (_SidePanelSetAiMode)
         _sidePanelSearchBox.VerticalAlignment(VerticalAlignment::Center);
-        AgentSetTitledTip(_sidePanelSearchBox, L"Filter the cards", winrt::hstring{ L"Whitespace-split terms AND-match a session's title, working directory, branch, or id.\n\"quoted phrase\" matches exactly; a pasted whole session-id GUID matches that session and its forks by identity." });
+        AgentSetTitledTip(_sidePanelSearchBox, winrt::hstring{ kSidePanelFilterTipTitle }, winrt::hstring{ kSidePanelFilterTip });
         _sidePanelSearchBox.TextChanged([weakThis](const IInspectable& sender, const TextChangedEventArgs&) {
             const auto self = weakThis.get();
             if (!self)
+            {
+                return;
+            }
+            // The "AI" toggle lies over the box's right end: each text change is a moment the box may show its own clear
+            // button, which must be moved left of the toggle (a no-op once done — SIDE_PANEL.md §2h).
+            self->_SidePanelAiFitToggleIntoBox();
+            // In AI mode the box is the AI search's REQUEST line: what is typed there is a sentence for the model, sent by
+            // Enter — it must never filter the (hidden) cards, which would come back filtered by half a request.
+            if (self->_sidePanelAiMode)
             {
                 return;
             }
@@ -985,12 +1111,140 @@ namespace winrt::TerminalApp::implementation
             // User-driven — rebuild NOW (forced past the min-gap throttle) so typing filters live.
             self->_SidePanelScheduleRebuild(/*force*/ true);
         });
+        // The AI search's keys, in AI mode only (SIDE_PANEL.md §2h): Enter sends the request, Escape stops a request that
+        // runs. KeyDown on the box (the keys mean this only while the caret is in it). Neither moves focus to a terminal, so
+        // acting on the key-down is safe here (the KEY-UP rule is for a panel that hands focus to a terminal as it closes).
+        _sidePanelSearchBox.KeyDown([weakThis](const IInspectable&, const KeyRoutedEventArgs& e) {
+            const auto self = weakThis.get();
+            if (!self || !self->_sidePanelAiMode)
+            {
+                return; // the filter box: its keys keep their meaning
+            }
+            if (e.Key() == VirtualKey::Enter)
+            {
+                e.Handled(true); // a TextBox without AcceptsReturn would ignore it anyway; nothing else may see it as a submit
+                try
+                {
+                    // On a clean tick: the request clears the box (a programmatic write) and repaints the strip.
+                    self->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis]() {
+                        if (const auto page = weakThis.get())
+                        {
+                            page->_SidePanelAiAsk();
+                        }
+                    });
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"side panel AI search: queue a request"); // the request is lost; the text stays in the box
+                }
+            }
+            else if (e.Key() == VirtualKey::Escape)
+            {
+                try
+                {
+                    auto& agent = ::Agentmaster::SharedSessionSearchAgent();
+                    if (agent.Snapshot().busy)
+                    {
+                        // Only then is the key ours: an Escape with nothing running keeps whatever meaning it has.
+                        e.Handled(true);
+                        ::Agentmaster::LogNav(L"sidepanel ai-stop");
+                        agent.Interrupt();
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"side panel AI search: stop a request");
+                }
+            }
+        });
+        // The box's focus in AI mode drives the search's PROCESS (SIDE_PANEL.md §2h, the user's "only after a request"
+        // rule): a click into the box starts it (so it is usually up by the time Enter is pressed), and leaving the box with
+        // nothing running arms its park. GotFocus also gives the "AI" toggle its room (the box's clear button appears with
+        // focus). Both are plain bubbling events: the box has no focusable child that would raise them twice in a way that
+        // matters (a Prewarm with the process up does nothing; a second park arming only moves its time).
+        _sidePanelSearchBox.GotFocus([weakThis](const IInspectable&, const RoutedEventArgs&) {
+            if (const auto self = weakThis.get())
+            {
+                self->_SidePanelAiFitToggleIntoBox();
+                if (self->_sidePanelAiMode)
+                {
+                    self->_SidePanelAiPrewarm();
+                }
+            }
+        });
+        _sidePanelSearchBox.LostFocus([weakThis](const IInspectable&, const RoutedEventArgs&) {
+            if (const auto self = weakThis.get(); self && self->_sidePanelAiMode)
+            {
+                self->_SidePanelAiArmPark(L"the request box lost focus");
+            }
+        });
+        _sidePanelSearchBox.Loaded([weakThis](const IInspectable&, const RoutedEventArgs&) {
+            if (const auto self = weakThis.get())
+            {
+                self->_SidePanelAiFitToggleIntoBox(); // the style's padding is known and the template exists from here on
+            }
+        });
         // Line 2, spanning EVERY column — counted, not hard-coded, so a button added to line 1 later (a new
         // column) can't silently leave the box one column short of the right edge.
         Grid::SetRow(_sidePanelSearchBox, 1);
         Grid::SetColumn(_sidePanelSearchBox, 0);
         Grid::SetColumnSpan(_sidePanelSearchBox, static_cast<int32_t>(header.ColumnDefinitions().Size()));
         header.Children().Append(_sidePanelSearchBox);
+
+        // The "AI" toggle (SIDE_PANEL.md §2h) — INSIDE the filter box, at its right end, like the Sessions page's AI toggle in
+        // its search box (the user's "AI button on the right inside the search box"). It says how the box reads its text, so
+        // it belongs to the box, not to the button line. It is NOT a part of the TextBox: a sibling in the box's grid cell,
+        // appended after it, so it is drawn over the box's right end and takes the pointer there, while the box keeps its whole
+        // chrome around both and leaves the toggle room (_SidePanelAiFitToggleIntoBox). Flat while off (a transparent fill and
+        // no border — LOCAL values, which only the rest state uses, so the stock hover / pressed fills and the accent fill of
+        // the checked state still show: the one cue that the box is a request line). IsTabStop false like the panel's buttons:
+        // a click must never pull keyboard focus out of the terminal by itself (an AI-on puts the caret in the box on purpose).
+        _sidePanelAiBtn = winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton{};
+        _sidePanelAiBtn.Content(winrt::box_value(L"AI"));
+        _sidePanelAiBtn.Width(kSidePanelAiToggleWidth);
+        _sidePanelAiBtn.Height(kSidePanelAiToggleHeight);
+        _sidePanelAiBtn.MinWidth(0.0);
+        _sidePanelAiBtn.MinHeight(0.0);
+        _sidePanelAiBtn.Padding(ThicknessHelper::FromUniformLength(0));
+        _sidePanelAiBtn.FontSize(10);
+        _sidePanelAiBtn.FontWeight(FontWeights::SemiBold());
+        _sidePanelAiBtn.Background(SolidColorBrush{ Colors::Transparent() });
+        _sidePanelAiBtn.BorderThickness(ThicknessHelper::FromUniformLength(0));
+        _sidePanelAiBtn.CornerRadius(CornerRadiusHelper::FromUniformRadius(3));
+        _sidePanelAiBtn.HorizontalAlignment(HorizontalAlignment::Right);
+        _sidePanelAiBtn.VerticalAlignment(VerticalAlignment::Center);
+        _sidePanelAiBtn.Margin(ThicknessHelper::FromLengths(0, 0, kSidePanelAiToggleInset, 0));
+        _sidePanelAiBtn.IsTabStop(false);
+        AgentSetTitledTip(_sidePanelAiBtn, L"AI search", winrt::hstring{ L"On: the box takes a request in your own words \x2014 \x201Cthe session where I fixed the tab drag crash\x201D, Enter \x2014 and a Claude model (Sonnet) lists the sessions that fit here, in place of the cards, each with the evidence it found. Refine it with a follow-up; \x2298 starts over.\nOff: the box filters the cards again. The conversation is kept, and it is the SAME one as the Sessions page's AI search.\nIts claude.exe starts only when you click into the box or ask, and ends after the idle time set in Settings \x25B8 Sessions \x25B8 AI SEARCH (2 hours by default).\nThis window remembers its own choice; the last change becomes the default for new windows." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        // Its Click reads no state from the button: the member is the truth (the ToggleButton flips itself before Click, and
+        // _SidePanelSetAiMode re-pins it). The mode change itself — it swaps the card area, may show the "Claude not
+        // detected" notice and moves focus — runs on a clean tick (the pointer-handler rule: no tree change inside the click).
+        _sidePanelAiBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+            const auto self = weakThis.get();
+            if (!self)
+            {
+                return;
+            }
+            try
+            {
+                self->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis]() {
+                    if (const auto page = weakThis.get())
+                    {
+                        page->_SidePanelSetAiMode(!page->_sidePanelAiMode, /*userAction*/ true);
+                    }
+                });
+            }
+            catch (...)
+            {
+                // The click is lost: re-pin the toggle so it never shows a mode that did not happen (Rule #18).
+                ::Agentmaster::AgentLogCaughtException(L"side panel AI toggle: queue the mode change");
+                self->_SidePanelUpdateAiButton();
+            }
+        });
+        Grid::SetRow(_sidePanelAiBtn, 1);
+        Grid::SetColumn(_sidePanelAiBtn, 0);
+        Grid::SetColumnSpan(_sidePanelAiBtn, static_cast<int32_t>(header.ColumnDefinitions().Size())); // the box's own cell, so HorizontalAlignment Right lands on the box's right end
+        header.Children().Append(_sidePanelAiBtn); // after the box: drawn over it
 
         // The "+" LAUNCHER (SIDE_PANEL.md §2e) — the first of the right-aligned buttons, left of "Sum" (the user's
         // "leftmost, to Sum"): a click opens a card AT the click point holding the Agent Manager's own launch row
@@ -1249,7 +1503,12 @@ namespace winrt::TerminalApp::implementation
         });
         Border cardsArea{};
         cardsArea.Background(Fill(0xFF, 0x2A, 0x2A, 0x2A));
-        cardsArea.Child(_sidePanelCardsScroll);
+        // The cards area holds ONE grid: the card list's ScrollViewer, and — from the first AI-on (_SidePanelAiEnsureView) —
+        // the AI search's view over it in the same cell. One of the two is visible (SIDE_PANEL.md §2h). A plain Grid with no
+        // corner radius, so it adds no composition node.
+        _sidePanelCardsHost = Grid{};
+        _sidePanelCardsHost.Children().Append(_sidePanelCardsScroll);
+        cardsArea.Child(_sidePanelCardsHost);
         Grid::SetRow(cardsArea, 0);
         _sidePanelBody.Children().Append(cardsArea);
 
@@ -1406,6 +1665,7 @@ namespace winrt::TerminalApp::implementation
         // and the filter box keeps its placeholder as its name. "+" was named before ("Launch a session").
         AgentSetAutomationId(_sidePanelLaunchBtn, L"am.side.launch");
         AgentSetAutomationId(_sidePanelSearchBox, L"am.side.filter");
+        AgentSetAutomationId(_sidePanelAiBtn, L"am.side.ai"); // the filter box's "AI" toggle (SIDE_PANEL.md §2h); its content "AI" names it
         AgentSetAutomationId(_sidePanelSumBtn, L"am.side.sum");
         AgentSetAutomationId(_sidePanelScopeBtn, L"am.side.scope");
         AgentSetAutomationId(_sidePanelSortBtn, L"am.side.sort");
@@ -1570,12 +1830,22 @@ namespace winrt::TerminalApp::implementation
         {
             _SidePanelSelectSession(_windowRecord.manager.selectedId, /*driveManagerLens*/ false);
         }
+        // The "AI" toggle's seeded mode (SIDE_PANEL.md §2h), applied now that the card list exists for the AI view to cover.
+        // userAction=false: nothing is persisted (the seed IS the persisted state), no focus moves, no process starts — the
+        // view shows the conversation's last list from the agent's stored view, and the search's claude.exe waits for a click
+        // into the box or a request.
+        _SidePanelUpdateAiButton();
+        if (startInAiMode)
+        {
+            _SidePanelSetAiMode(true, /*userAction*/ false);
+        }
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       L"[sidepanel] built (window " + ::Agentmaster::ShortId(_windowId) +
                                           L") width=" + std::to_wstring(_sidePanelWidthFraction) +
                                           L" split=" + std::to_wstring(_sidePanelSplitFraction) +
                                           (_sidePanelCollapsed ? L" collapsed" : L" expanded") +
                                           (_sidePanelSummaryHidden ? L" summary=hidden(card-tooltips)" : L" summary=shown") +
+                                          (_sidePanelAiMode ? L" ai=on" : L" ai=off") +
                                           (_sidePanelGlobal ? L" scope=global" : L" scope=local") +
                                           (_appSettings.sidePanelScrollToSelectedTab ? L" scroll-to-tab=on" : L" scroll-to-tab=off") +
                                           (_appSettings.sidePanelOnLeft ? L" dock=left\n" : L" dock=right\n"));
@@ -1842,12 +2112,28 @@ namespace winrt::TerminalApp::implementation
         {
             if (view.glyph)
             {
-                view.glyph->SetHostShown(!_sidePanelCollapsed);
+                // Hidden too while the AI view covers the list (SIDE_PANEL.md §2h): an expand in AI mode shows the AI view,
+                // not the session cards, so their icons keep still.
+                view.glyph->SetHostShown(!_SidePanelCardsHidden());
+            }
+        }
+        // The AI search's result cards move with the panel itself: shown whenever the expanded panel shows the AI view.
+        for (const auto& [resultId, result] : _sidePanelAiResultViews)
+        {
+            if (result.base.glyph)
+            {
+                result.base.glyph->SetHostShown(!_sidePanelCollapsed);
             }
         }
         if (!_sidePanelCollapsed && _sidePanelDirty)
         {
-            _SidePanelRebuildCards(); // the deferred catch-up — the list is visible again
+            _SidePanelRebuildCards(); // the deferred catch-up — the list is visible again (in AI mode it stays owed: the AI view covers the list until it closes)
+        }
+        if (!_sidePanelCollapsed && _sidePanelAiMode)
+        {
+            // A collapsed AI view refreshed nothing (the periodic tick idles while collapsed): its cards' states and "ago"
+            // texts catch up now that they are on screen again.
+            _SidePanelAiRefreshResults();
         }
         if (!_sidePanelCollapsed)
         {
@@ -2056,7 +2342,9 @@ namespace winrt::TerminalApp::implementation
     // and the coalescer re-armed, so the latch can never stick shut.
     void TerminalPage::_SidePanelQueueReveal()
     {
-        if (!_sidePanelBuilt || _sidePanelCollapsed || _sidePanelRevealPendingId.empty() || _sidePanelRevealQueued)
+        // _SidePanelCardsHidden: a collapsed panel, and a card list the AI view covers (SIDE_PANEL.md §2h), have nothing to
+        // scroll — the debt stays owed for the expand / the AI view's close, which re-queue it.
+        if (!_sidePanelBuilt || _SidePanelCardsHidden() || _sidePanelRevealPendingId.empty() || _sidePanelRevealQueued)
         {
             return;
         }
@@ -2095,9 +2383,9 @@ namespace winrt::TerminalApp::implementation
     // logged (Rule #18) and swallowed — a lost scroll must never cost the window.
     void TerminalPage::_SidePanelRevealPendingNow()
     {
-        if (!_sidePanelBuilt || _sidePanelCollapsed || _sidePanelRevealPendingId.empty())
+        if (!_sidePanelBuilt || _SidePanelCardsHidden() || _sidePanelRevealPendingId.empty())
         {
-            return; // collapsed: the expand path re-queues; nothing owed: a stale tick
+            return; // collapsed / covered by the AI view: the expand path or the view's close re-queues; nothing owed: a stale tick
         }
         if (!_appSettings.sidePanelScrollToSelectedTab)
         {
@@ -2149,9 +2437,10 @@ namespace winrt::TerminalApp::implementation
     // fields from this window's live values (granular on purpose — a width drag must never export
     // this window's collapse or summary state as the global default), then keep the in-memory copy in
     // step so a later cog Save's preserve block can't regress it.
-    // `width`/`split`/`collapsed`/`summaryHidden`: which live values to export as the new-window defaults
-    // (`summaryHidden` defaults to false so the three older call sites read unchanged).
-    void TerminalPage::_SidePanelPersistDefaults(bool width, bool split, bool collapsed, bool summaryHidden)
+    // `width`/`split`/`collapsed`/`summaryHidden`/`aiMode`: which live values to export as the new-window defaults
+    // (`summaryHidden` and `aiMode` default to false so the older call sites read unchanged; `aiMode` is the filter box's
+    // "AI" toggle, SIDE_PANEL.md §2h).
+    void TerminalPage::_SidePanelPersistDefaults(bool width, bool split, bool collapsed, bool summaryHidden, bool aiMode)
     {
         auto s = ::Agentmaster::LoadAppSettings();
         if (width)
@@ -2170,6 +2459,10 @@ namespace winrt::TerminalApp::implementation
         {
             s.sidePanelSummaryHidden = _sidePanelSummaryHidden;
         }
+        if (aiMode)
+        {
+            s.sidePanelAiMode = _sidePanelAiMode;
+        }
         ::Agentmaster::SaveAppSettings(s);
         // Adopt the merged set (not just the flagged one): the freshest disk may carry another
         // window's newer defaults, and _appSettings must mirror what is actually stored.
@@ -2177,6 +2470,7 @@ namespace winrt::TerminalApp::implementation
         _appSettings.sidePanelSplitFraction = s.sidePanelSplitFraction;
         _appSettings.sidePanelCollapsed = s.sidePanelCollapsed;
         _appSettings.sidePanelSummaryHidden = s.sidePanelSummaryHidden;
+        _appSettings.sidePanelAiMode = s.sidePanelAiMode;
     }
 
     // Coalesced rebuild entry. force==true (a user action — typing, sort, settings) rebuilds NOW;
@@ -2187,6 +2481,16 @@ namespace winrt::TerminalApp::implementation
     {
         if (!_sidePanelBuilt)
         {
+            return;
+        }
+        if (_sidePanelAiMode)
+        {
+            // The AI view covers the card list (SIDE_PANEL.md §2h): the list catches up when the view closes (_SidePanelSetAiMode
+            // rebuilds it), even for a user action — a forced rebuild would also write the count line the AI view owns now.
+            // The same change may concern a session the model listed (it opened, closed or moved on): its result card owes a
+            // refresh, which the periodic tick pays (never more than once per tick, however busy the fleet's drain is).
+            _sidePanelDirty = true;
+            _sidePanelAiRefreshOwed = true;
             return;
         }
         if (_sidePanelCollapsed && !force)
@@ -2225,6 +2529,16 @@ namespace winrt::TerminalApp::implementation
         if (_sidePanelCollapsed)
         {
             _sidePanelDirty = true; // nothing on screen to repaint — the expand path runs the catch-up rebuild
+            return;
+        }
+        if (_sidePanelAiMode)
+        {
+            // The AI view is on screen (SIDE_PANEL.md §2h): the hidden card list catches up when the view closes, and the
+            // result cards — which may show the session just tagged — re-read their tags NOW (a user's edit, so not on the
+            // next tick): the epoch moved, so their cached tags and colors are dropped first. Never throws (contained inside).
+            _sidePanelDirty = true;
+            _sidePanelAiTagsEpoch = UINT64_MAX;
+            _SidePanelAiRefreshResults();
             return;
         }
         // A deliberate user edit, so NOW — past the registry-drain min-gap throttle (a throttled rebuild
@@ -2389,6 +2703,21 @@ namespace winrt::TerminalApp::implementation
         {
             co_return; // collapsed: stay fully idle — the expand path runs the catch-up
         }
+        if (_sidePanelAiMode)
+        {
+            // The AI view covers the card list (SIDE_PANEL.md §2h): the list's belts and its timing pass wait for the view to
+            // close (which rebuilds it). What IS on screen keeps fresh: the summary area (it stays below the AI view), and the
+            // result cards — when a registry change owed them a refresh, or ~30 s passed (the "ago" texts age).
+            if (_sidePanelSummaryOverlay)
+            {
+                _sidePanelSummaryOverlay->RefreshSummaryContent(); // mtime-gated: a quiet transcript costs one stat
+            }
+            if (_sidePanelAiRefreshOwed || ::GetTickCount64() >= _sidePanelAiNextRefreshMs)
+            {
+                _SidePanelAiRefreshResults(); // re-arms the 30 s deadline and clears the debt itself; never throws
+            }
+            co_return;
+        }
         // LOCAL-scope belt: the hosted set can change with NO registry notify — a tab docked into
         // or torn out of this window moves a session that stays live + unchanged (the [move-out]
         // path drops only the per-window binding), so the registry-drain trigger never fires for
@@ -2485,6 +2814,14 @@ namespace winrt::TerminalApp::implementation
     {
         if (!_sidePanelBuilt || !_sidePanelCards || !_sessionRegistry)
         {
+            return;
+        }
+        if (_sidePanelAiMode)
+        {
+            // The AI view covers the card list (SIDE_PANEL.md §2h): every caller's update is owed instead — the expand path,
+            // a tag edit, the build's first update when the window opens in AI mode — and _SidePanelSetAiMode(false) pays it
+            // the moment the list is on screen again. Running it now would write the count line the AI view owns.
+            _sidePanelDirty = true;
             return;
         }
         if (_sidePanelRealizing)
@@ -3027,6 +3364,21 @@ namespace winrt::TerminalApp::implementation
     // _SidePanelRebuildCards calls it on the UI thread and resets the list on a throw.
     AgentSidePanelCardView TerminalPage::_SidePanelCreateCardView(const std::wstring& id)
     {
+        // The elements every side panel card has (since SIDE_PANEL.md §2h one builder for the session cards and the AI
+        // search's result cards, so the two can never drift apart); this card's own part is its handlers, below.
+        AgentSidePanelCardView v = _SidePanelBuildCardSkeleton(id, L"am.side.card.");
+        // A collapsed panel holds still from the start, and so does a card list the AI view covers (SIDE_PANEL.md §2h): the
+        // host gate (_SidePanelToggleCollapsed and _SidePanelSetAiMode flip it for the realized cards).
+        v.glyph->SetHostShown(!_SidePanelCardsHidden());
+        _SidePanelWireCardHandlers(v, id);
+        return v;
+    }
+
+    // The skeleton of a side panel card (see the declaration in TerminalPage.h): the elements, no handler. Its body is the
+    // session card's original build, moved here unchanged except for the title's AutomationId prefix (a parameter: the result
+    // cards use their own) and the glyph's host gate (each caller decides it).
+    AgentSidePanelCardView TerminalPage::_SidePanelBuildCardSkeleton(const std::wstring& id, std::wstring_view automationIdPrefix)
+    {
         AgentSidePanelCardView v;
         // The card is a plain Grid with TWO layers in its one cell: the rounded background, then the content. The
         // rounded shapes stay CHILDLESS (UI_THREAD.md §10h / §14): XAML gives an element with a non-zero CornerRadius
@@ -3069,7 +3421,7 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (accessibility, E2E_TESTING.md §6.3): a card is a Grid of Borders — no automation peer — so its
         // TITLE carries the card's id (am.side.card.<key>) and its item status (_SidePanelApplyCardAutomation). A test
         // finds the card by the id and clicks the title's rectangle; a screen reader reads the title, then the state.
-        AgentSetAutomationId(v.title, AgentAutomationIdFor(L"am.side.card.", id));
+        AgentSetAutomationId(v.title, AgentAutomationIdFor(automationIdPrefix, id));
         body.Children().Append(v.bandArea);
 
         // State line: [ state row Auto ][ timing * ]. The row holds the status icon and the label, and the model inserts
@@ -3094,8 +3446,9 @@ namespace winrt::TerminalApp::implementation
         // glow + rising embers) with the tab's composition motions. It replaces the plain 8 DIP dot and the separate draft
         // dots cluster this row held before. Top-aligned: the row is the icon's 22 DIP tall, and the label / pill / timing
         // center on the DOT through their kSidePanelStatusIconBandPx bottom margin. The horizontal overhang keeps the dot
-        // where the old one sat (see kSidePanelStatusIconOverhangPx). A collapsed panel holds still from the start (the
-        // host gate; _SidePanelToggleCollapsed flips it for the realized cards).
+        // where the old one sat (see kSidePanelStatusIconOverhangPx). Whether its host shows (a collapsed panel, or a list the
+        // AI view covers, holds still from the start) is the CALLER's call: a session card and a result card hide with
+        // different things (_SidePanelCreateCardView, _SidePanelAiCreateResultView).
         v.glyph = AgentStatusGlyph::Create();
         {
             const auto icon = v.glyph->Root();
@@ -3103,7 +3456,6 @@ namespace winrt::TerminalApp::implementation
             icon.Margin(ThicknessHelper::FromLengths(-kSidePanelStatusIconOverhangPx, 0, -kSidePanelStatusIconOverhangPx, 0));
             v.stateRow.Children().Append(icon);
         }
-        v.glyph->SetHostShown(!_sidePanelCollapsed);
         v.stateText = Text(L"", 10, false, 0.9);
         v.stateText.Margin(ThicknessHelper::FromLengths(0, 0, 0, kSidePanelStatusIconBandPx)); // centered on the dot, not the whole icon
         v.stateRow.Children().Append(v.stateText);
@@ -3117,7 +3469,19 @@ namespace winrt::TerminalApp::implementation
         body.Children().Append(v.dirLine);
 
         v.card.Children().Append(body); // second: over the background
+        return v;
+    }
 
+    // Wire a SESSION card's gestures on its skeleton — the hover ring, click = select (Linked Lenses), double-click = activate,
+    // right-click = the shared lazy session menu — every one resolving the card through _sidePanelCardViews at event time.
+    // (The AI search's result cards wire their own, against their own map: _SidePanelAiCreateResultView.) The handlers'
+    // bodies are the session card's original ones, moved here unchanged.
+    //   v  - the card (its root Grid owns the handlers).
+    //   id - the card's session, captured by value.
+    // Throws winrt::hresult_error if XAML refuses a handler registration (a torn-down tree) — the list update's catch resets
+    // the list.
+    void TerminalPage::_SidePanelWireCardHandlers(AgentSidePanelCardView& v, const std::wstring& id)
+    {
         const auto weakThis = get_weak();
         // Hover ring — guarded by PointerStillWithin so a child-bubbled exit (crossing between the card's
         // hit-testable labels) can't strobe the ring off while the pointer is still inside. The ring takes the
@@ -3218,7 +3582,6 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::AgentLogCaughtException(L"sidepanel card context menu");
             }
         });
-        return v;
     }
 
     // Write `model` into a card IN PLACE: every value that differs from the one the card shows now (its
@@ -3960,6 +4323,9 @@ namespace winrt::TerminalApp::implementation
         {
             restyle(id, true);
         }
+        // The AI search's result cards (SIDE_PANEL.md §2h) follow the same selection: a result card of the session now
+        // selected wears the ring, the one of the session left loses it (a no-op while no result card exists).
+        _SidePanelAiRestyleSelection(prev, id);
         _SidePanelBindSummary(id);
         if (driveManagerLens && !id.empty())
         {
@@ -4185,7 +4551,13 @@ namespace winrt::TerminalApp::implementation
             _sidePanelSummaryOverlay->SetTabColorMode(static_cast<int>(_appSettings.tabColorMode));
             _sidePanelSummaryOverlay->SetModelFamilies(_appSettings.modelFamilies);
         }
-        _SidePanelScheduleRebuild(/*force*/ true);
+        _SidePanelScheduleRebuild(/*force*/ true); // in AI mode it is owed until the AI view closes (SIDE_PANEL.md §2h)
+        if (_sidePanelAiMode)
+        {
+            // The tab coloring rules may have changed: the result cards' bands resolve against the new mode now, not on the
+            // next tick (never throws).
+            _SidePanelAiRefreshResults();
+        }
     }
 
     // ======================================================================================
@@ -5051,5 +5423,1617 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::AgentLogCaughtException(L"side panel launcher: press walk"); // an unreadable press counts as outside: the card closes
         }
         return false;
+    }
+
+    // ======================================================================================
+    // The side panel's AI SEARCH (SIDE_PANEL.md §2h)
+    // ======================================================================================
+    // WHAT: the filter box's "AI" toggle (inside the box, at its right end — the user's choice of 2026-10-31) turns the box
+    // into a REQUEST line and replaces the card list with the AI view: a strip (the request, the model's plan while it works,
+    // then its answer; "thinking <level>" and the context size; ⊘ to start over) over the model's list of sessions, each a side
+    // panel card with the model's evidence (its "why") under it. The summary area stays below and works with it: a result's
+    // click peeks its summary like a card's. Clicking AI again brings the cards back; the conversation is kept.
+    // WHOSE CONVERSATION: the process's ONE search agent (SharedSessionSearchAgent) — the Sessions page's. Every surface is a view
+    // of it, so a request asked here shows in a Sessions page with its AI search on, and the reverse.
+    // LIFECYCLE (the user's "only after a request" rule, with a configurable park): a window that shows the AI view starts no
+    // process. The first click into the box (or a request) starts it; the end of THIS window's request, the box losing focus with
+    // nothing running, leaving AI mode and the window closing each arm its park after AppSettings::sessionsAiParkMinutes (2 hours
+    // by default) — unless a Sessions page shows the AI search, whose own rule (the process lives while a page shows it) then
+    // holds. A park ends only the process; the next request continues from a digest of the conversation.
+    // COST: the view is built on the first AI-on; the result cards are a handful (the model shows 1 to 8 as a rule), rebuilt per
+    // list and patched in place by the periodic tick; while the view shows, the card list is deferred like a collapsed one.
+
+    bool TerminalPage::_SidePanelCardsHidden() const noexcept
+    {
+        return _sidePanelCollapsed || _sidePanelAiMode;
+    }
+
+    void TerminalPage::_SidePanelUpdateAiButton()
+    {
+        if (!_sidePanelAiBtn)
+        {
+            return;
+        }
+        // A programmatic IsChecked raises no Click, so re-pinning can never loop back into the toggle or persist anything.
+        _sidePanelAiBtn.IsChecked(_sidePanelAiMode);
+    }
+
+    void TerminalPage::_SidePanelAiFitToggleIntoBox()
+    {
+        if (!_sidePanelSearchBox || (_sidePanelAiBoxPadded && _sidePanelAiClearButtonMoved))
+        {
+            return;
+        }
+        try
+        {
+            if (!_sidePanelSearchBox.IsLoaded())
+            {
+                return; // before Loaded the style's padding is not known yet: the Loaded hook tries again
+            }
+            if (!_sidePanelAiBoxPadded)
+            {
+                // Read from the box, not hard-coded: the box's own tight padding (8,2,6,3) stays what it is, and the text and
+                // the placeholder now end before the toggle.
+                auto padding = _sidePanelSearchBox.Padding();
+                padding.Right += kSidePanelAiToggleReserve;
+                _sidePanelSearchBox.Padding(padding);
+                _sidePanelAiBoxPadded = true; // set once applied: a second Loaded must not add the room again
+            }
+            if (!_sidePanelAiClearButtonMoved)
+            {
+                // The box's own clear button (the template part "DeleteButton", the X shown while the box has focus and text)
+                // sits in the template's last column; shifted left by the reserve it stands left of the toggle (text | X | AI),
+                // and a render transform moves its hit area with its picture. A template without the part leaves the X under
+                // the toggle — cosmetic only (the toggle takes the click) — and every later call tries again.
+                if (const auto clear = SidePanelFindDescendant(_sidePanelSearchBox, L"DeleteButton"))
+                {
+                    TranslateTransform shift;
+                    shift.X(-kSidePanelAiToggleReserve);
+                    clear.RenderTransform(shift);
+                    _sidePanelAiClearButtonMoved = true;
+                }
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelAiFitToggleIntoBox"); // the next Loaded / GotFocus / TextChanged tries again
+        }
+    }
+
+    void TerminalPage::_SidePanelSetAiMode(bool on, bool userAction)
+    {
+        if (!_sidePanelBuilt)
+        {
+            return;
+        }
+        try
+        {
+            if (on == _sidePanelAiMode)
+            {
+                _SidePanelUpdateAiButton(); // keep the button honest after a repeated or refused change
+                return;
+            }
+            if (on && userAction && !::Agentmaster::EnsureClaudeAvailable())
+            {
+                // The AI search runs through the native claude.exe: without one, "on" would show a view that can never
+                // answer. The page's own install notice says what to do (the Sessions page's rule). A window that OPENS in
+                // AI mode is not refused: it starts no process, and a request then shows the notice.
+                ::Agentmaster::LogNav(L"sidepanel ai on (blocked: no native claude.exe)");
+                _SidePanelUpdateAiButton();
+                _PromptClaudeMissing();
+                return;
+            }
+            if (on)
+            {
+                // First the steps that can fail for a reason other than memory: the view, and the listener — whose first call
+                // creates the process's agent object (no process). A mode that is on without either would show a view that
+                // never changes; a throw here leaves the mode off (the catch below).
+                _SidePanelAiEnsureView();
+                _SidePanelAiAttach();
+            }
+            _sidePanelAiMode = on;
+            // The box KEEPS its text through the switch, both ways — the user's rule for the AI search box (2026-10-31, the
+            // Sessions page's d45d079e0: "the box is one box: the prompt line with AI on, the search box with AI off"). Only
+            // its placeholder and tip follow the mode (a placeholder shows only while the box is empty), and only Enter sends
+            // or empties it. ⚠ Never empty the box here: that loses what the user typed. The nav line carries the box's
+            // LENGTH (never its words, which stay out of the nav trail), so a live check can read that the text survived.
+            if (userAction)
+            {
+                const uint32_t boxChars = _sidePanelSearchBox ? _sidePanelSearchBox.Text().size() : 0u;
+                ::Agentmaster::LogNav(std::wstring{ on ? L"sidepanel ai on box=" : L"sidepanel ai off box=" } + std::to_wstring(boxChars));
+            }
+            _SidePanelUpdateAiButton();
+            // The FILTER follows the box's meaning, not its text. On: the card filter is dropped (TextChanged ignores the box in
+            // AI mode, so a kept filter would narrow the cards by a text that is now a request). Off: the kept text filters the
+            // cards at once, as if just typed — no TextChanged comes, since the text did not change at the switch.
+            _sidePanelSearchText = (!on && _sidePanelSearchBox) ? std::wstring{ _sidePanelSearchBox.Text() } : std::wstring{};
+            if (_sidePanelSearchBox)
+            {
+                _sidePanelSearchBox.PlaceholderText(on ? kSidePanelAiPlaceholder : kSidePanelFilterPlaceholder);
+                AgentSetTitledTip(_sidePanelSearchBox, winrt::hstring{ on ? kSidePanelAiBoxTipTitle : kSidePanelFilterTipTitle }, winrt::hstring{ on ? kSidePanelAiBoxTip : kSidePanelFilterTip });
+            }
+            // The two views share the cards area's one cell: exactly one is visible.
+            if (_sidePanelCardsScroll)
+            {
+                _sidePanelCardsScroll.Visibility(on ? Visibility::Collapsed : Visibility::Visible);
+            }
+            if (_sidePanelAiRoot)
+            {
+                _sidePanelAiRoot.Visibility(on ? Visibility::Visible : Visibility::Collapsed);
+            }
+            // A Collapsed element stays loaded, so the covered session cards' status icons would keep pulsing, blinking and
+            // glowing for nobody (the collapse's rule, SIDE_PANEL.md §2g): their host gate follows the cover.
+            for (const auto& [cardId, view] : _sidePanelCardViews)
+            {
+                if (view.glyph)
+                {
+                    view.glyph->SetHostShown(!_SidePanelCardsHidden());
+                }
+            }
+            // The count line belongs to whichever view shows: each writes it from scratch after a switch (their "last written"
+            // caches would otherwise skip a text that the other view overwrote).
+            _sidePanelCountValue.clear();
+            _sidePanelAiCountValue.clear();
+            if (on)
+            {
+                auto& agent = ::Agentmaster::SharedSessionSearchAgent();
+                const auto snapshot = agent.Snapshot();
+                _sidePanelAiEpoch = snapshot.epoch;
+                _SidePanelAiAdoptSnapshot(snapshot);
+                _SidePanelAiRebuildResults();
+                _SidePanelAiUpdateStrip(snapshot);
+                _SidePanelAiUpdateCountLine(snapshot);
+            }
+            else
+            {
+                _SidePanelAiClearResultCards();
+                _sidePanelAiShownIds.clear();
+                _sidePanelAiReasons.clear();
+                _sidePanelAiEntries.clear();
+                _sidePanelAiHasShown = false;
+                _sidePanelAiPreview = false;
+                _sidePanelAiListTurn = 0;
+                ++_sidePanelAiListSeq; // a disk fetch still in flight now lands for a list that is gone, and is dropped
+                // The card list catches up at once: every update deferred while the view covered it (registry changes, tag
+                // edits, the sort, a settings Save) runs now, and an owed ⌖ reveal is paid on the list the user sees.
+                _SidePanelRebuildCards();
+                _SidePanelQueueReveal();
+                // Leaving the AI view is "not using the search": the caret may stay in the box (now a filter), so no LostFocus
+                // would arm the park — arm it here (a request running, or a Sessions page showing the search, keeps it).
+                _SidePanelAiArmPark(L"the AI view closed");
+            }
+            if (userAction)
+            {
+                // Both halves of the "Sum" contract: this window's record (the autosave reads the live member) and the
+                // new-window default (a granular freshest-disk RMW of that one field).
+                _ScheduleWindowRecordSave();
+                _SidePanelPersistDefaults(/*width*/ false, /*split*/ false, /*collapsed*/ false, /*summaryHidden*/ false, /*aiMode*/ true);
+                if (on && _sidePanelSearchBox)
+                {
+                    // The user who turns it on is about to ask: the caret waits in the box — where the user left it, after any
+                    // kept text (a programmatic focus selects nothing), so typing goes on with that text. Its GotFocus starts
+                    // the search's process — the click asked to search: the "first click into the box" of the lifecycle rule.
+                    _sidePanelSearchBox.Focus(FocusState::Programmatic);
+                }
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelSetAiMode");
+            // Keep the button honest: it must not read a mode that did not happen.
+            try
+            {
+                _SidePanelUpdateAiButton();
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"_SidePanelSetAiMode: restore the toggle");
+            }
+        }
+    }
+
+    void TerminalPage::_SidePanelAiEnsureView()
+    {
+        if (_sidePanelAiRoot || !_sidePanelCardsHost)
+        {
+            return;
+        }
+        const auto weakThis = get_weak();
+        Grid root{};
+        {
+            RowDefinition stripRow{};
+            stripRow.Height(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            RowDefinition resultsRow{};
+            resultsRow.Height(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            root.RowDefinitions().Append(stripRow);
+            root.RowDefinitions().Append(resultsRow);
+        }
+
+        // THE STRIP: the Sessions page's strip, laid out for a narrow panel. Its rounded look is a CHILDLESS back Border behind the
+        // content in one Grid cell (the card's rule, UI_THREAD.md §10h): a rounded element with children would be a composition
+        // node every frame walks.
+        Grid strip{};
+        strip.Margin(ThicknessHelper::FromLengths(4, 4, 4, 4));
+        Border stripBack{};
+        stripBack.Background(Fill(0xFF, 0x26, 0x26, 0x26));
+        stripBack.BorderBrush(Fill(0xFF, 0x3A, 0x3A, 0x3A));
+        stripBack.BorderThickness(ThicknessHelper::FromUniformLength(1));
+        stripBack.CornerRadius(CornerRadiusHelper::FromUniformRadius(6));
+        strip.Children().Append(stripBack); // first: drawn behind
+        Grid inner{};
+        inner.Margin(ThicknessHelper::FromLengths(8, 5, 4, 5));
+        {
+            ColumnDefinition dotCol{};
+            dotCol.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            ColumnDefinition linesCol{};
+            linesCol.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            ColumnDefinition resetCol{};
+            resetCol.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            inner.ColumnDefinitions().Append(dotCol);
+            inner.ColumnDefinitions().Append(linesCol);
+            inner.ColumnDefinitions().Append(resetCol);
+        }
+        // The state dot: a CHILDLESS rounded Border (no node), top-aligned with the first line.
+        _sidePanelAiDot = Border{};
+        _sidePanelAiDot.Width(8);
+        _sidePanelAiDot.Height(8);
+        _sidePanelAiDot.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
+        _sidePanelAiDot.Margin(ThicknessHelper::FromLengths(0, 4, 7, 0));
+        _sidePanelAiDot.VerticalAlignment(VerticalAlignment::Top);
+        _sidePanelAiDot.Background(Fill(0xFF, 0x80, 0x80, 0x80));
+        Grid::SetColumn(_sidePanelAiDot, 0);
+        inner.Children().Append(_sidePanelAiDot);
+
+        StackPanel lines{};
+        lines.Spacing(2);
+        _sidePanelAiQuestionText = Text(L"", 10, false, 0.6);
+        _sidePanelAiQuestionText.TextTrimming(TextTrimming::CharacterEllipsis); // one line: the whole request is in the conversation
+        _sidePanelAiQuestionText.Visibility(Visibility::Collapsed); // until there is a request
+        lines.Children().Append(_sidePanelAiQuestionText);
+        _sidePanelAiStatusText = Text(L"", 11, false, 0.95);
+        _sidePanelAiStatusText.TextWrapping(TextWrapping::Wrap);
+        _sidePanelAiStatusText.MaxLines(0); // every line: the plan is several numbered lines, the answer up to ~1,200 characters
+        _sidePanelAiStatusText.IsTextSelectionEnabled(true); // the answer can be selected and copied
+        ScrollViewer statusScroll{};
+        statusScroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+        statusScroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+        statusScroll.MaxHeight(kSidePanelAiStatusMaxHeight); // a long answer scrolls inside the strip instead of pushing the results away
+        statusScroll.Content(_sidePanelAiStatusText);
+        lines.Children().Append(statusScroll);
+        // The footer: "thinking <level>  ctx 18K / 200K" — the Sessions strip's right end, under the text here (a narrow panel
+        // has no room beside it).
+        StackPanel footer{};
+        footer.Orientation(Orientation::Horizontal);
+        _sidePanelAiThinkingText = Text(L"thinking off", 10, false, 0.6);
+        _sidePanelAiThinkingBtn = Button{};
+        _sidePanelAiThinkingBtn.Content(_sidePanelAiThinkingText);
+        _sidePanelAiThinkingBtn.Padding(ThicknessHelper::FromLengths(4, 0, 4, 1));
+        _sidePanelAiThinkingBtn.MinWidth(0.0);
+        _sidePanelAiThinkingBtn.MinHeight(0.0);
+        // FLAT at rest (local values only the rest state uses: the stock hover / pressed fills still show), as small as the
+        // strip's text, so the footer keeps its height.
+        _sidePanelAiThinkingBtn.Background(SolidColorBrush{ Colors::Transparent() });
+        _sidePanelAiThinkingBtn.BorderThickness(ThicknessHelper::FromUniformLength(0));
+        _sidePanelAiThinkingBtn.CornerRadius(CornerRadiusHelper::FromUniformRadius(3));
+        _sidePanelAiThinkingBtn.IsTabStop(false);
+        AgentSetTitledTip(_sidePanelAiThinkingBtn, L"Thinking", winrt::hstring{ L"How much the model thinks before it searches. Click for the next level: off \x2192 low \x2192 medium \x2192 high \x2192 xhigh \x2192 max \x2192 off.\nOff is the fastest; the other levels turn on adaptive thinking at that effort \x2014 deeper answers harder requests better and takes longer.\nIt applies from your next request, in every window and on the Sessions page (one conversation), and is kept after a restart." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        _sidePanelAiThinkingBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+            const auto self = weakThis.get();
+            if (!self)
+            {
+                return;
+            }
+            try
+            {
+                // On a clean tick (the pointer-handler rule). The Sessions page's own rotation: it persists the next level and
+                // gives it to the agent, whose StateChanged event repaints every surface's strip — this one included.
+                self->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis]() {
+                    if (const auto page = weakThis.get())
+                    {
+                        page->_CycleSessionsAiThinking();
+                    }
+                });
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"side panel AI search: queue the thinking rotation");
+            }
+        });
+        footer.Children().Append(_sidePanelAiThinkingBtn);
+        _sidePanelAiUsageText = Text(L"", 10, false, 0.5);
+        _sidePanelAiUsageText.Margin(ThicknessHelper::FromLengths(4, 0, 0, 0));
+        _sidePanelAiUsageText.VerticalAlignment(VerticalAlignment::Center);
+        AgentSetTitledTip(_sidePanelAiUsageText, L"Conversation size", winrt::hstring{ L"How much the AI search's conversation holds, in tokens, of the most it can hold before Claude Code compacts it by itself. A new subject is better served by a new conversation: \x2298." });
+        footer.Children().Append(_sidePanelAiUsageText);
+        lines.Children().Append(footer);
+        Grid::SetColumn(lines, 1);
+        inner.Children().Append(lines);
+
+        // ⊘ — a new conversation. A FontIcon, not a TextBlock: a TextBlock keeps room for descenders and the glyph sits high.
+        _sidePanelAiResetBtn = Button{};
+        {
+            FontIcon icon;
+            // Qualified: inside a TerminalPage member the bare name is the page's own FontFamily property.
+            icon.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ L"Segoe UI Symbol" });
+            icon.Glyph(L"\x2298"); // CIRCLED DIVISION SLASH, the Sessions page's reset glyph
+            icon.FontSize(13);
+            _sidePanelAiResetBtn.Content(icon);
+        }
+        _sidePanelAiResetBtn.Padding(ThicknessHelper::FromLengths(4, 0, 4, 0));
+        _sidePanelAiResetBtn.MinWidth(0.0);
+        _sidePanelAiResetBtn.MinHeight(0.0);
+        _sidePanelAiResetBtn.Background(SolidColorBrush{ Colors::Transparent() });
+        _sidePanelAiResetBtn.BorderThickness(ThicknessHelper::FromUniformLength(0));
+        _sidePanelAiResetBtn.VerticalAlignment(VerticalAlignment::Top);
+        _sidePanelAiResetBtn.IsTabStop(false);
+        AgentSetTitledTip(_sidePanelAiResetBtn, L"New conversation", winrt::hstring{ L"Throw the AI search's conversation away and start a new one: the model forgets what you asked and what it showed. Use it when you start looking for something else \x2014 a follow-up refers to the list before it. What you typed in the box stays: Enter sends it to the new conversation.\nIt clears the conversation everywhere (every window, the Sessions page). Your sessions are not touched." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        _sidePanelAiResetBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+            const auto self = weakThis.get();
+            if (!self)
+            {
+                return;
+            }
+            try
+            {
+                self->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis]() {
+                    const auto page = weakThis.get();
+                    if (!page)
+                    {
+                        return;
+                    }
+                    try
+                    {
+                        // A reset throws the CONVERSATION away, never the box's text: what is typed there is often the new
+                        // request itself, written before the user saw it would read as a follow-up (the user's rule, the
+                        // Sessions page's ⊘ too). ⚠ So neither this handler nor the Reset event's path writes the box. The nav
+                        // line says how much the box kept — its length only.
+                        const uint32_t boxChars = page->_sidePanelSearchBox ? page->_sidePanelSearchBox.Text().size() : 0u;
+                        ::Agentmaster::LogNav(L"sidepanel ai-reset box=" + std::to_wstring(boxChars));
+                        // The Reset event clears this view (and every other surface's). A reset restarts a process that was up;
+                        // with nobody asking afterwards it must still end: the park, as after a request.
+                        ::Agentmaster::SharedSessionSearchAgent().Reset();
+                        page->_SidePanelAiArmPark(L"the conversation was reset");
+                        if (page->_sidePanelSearchBox && page->_sidePanelAiMode)
+                        {
+                            page->_sidePanelSearchBox.Focus(FocusState::Programmatic); // the user who resets is about to ask again: Enter sends the kept text to the new conversation
+                        }
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"side panel AI search: reset");
+                    }
+                });
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"side panel AI search: queue the reset");
+            }
+        });
+        Grid::SetColumn(_sidePanelAiResetBtn, 2);
+        inner.Children().Append(_sidePanelAiResetBtn);
+        strip.Children().Append(inner); // second: over the back
+        Grid::SetRow(strip, 0);
+        root.Children().Append(strip);
+
+        // THE RESULTS: the model's list, in its own scroll (a long list never moves the strip).
+        _sidePanelAiResults = StackPanel{};
+        _sidePanelAiResults.Orientation(Orientation::Vertical);
+        _sidePanelAiResultsScroll = ScrollViewer{};
+        _sidePanelAiResultsScroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+        _sidePanelAiResultsScroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+        _sidePanelAiResultsScroll.Content(_sidePanelAiResults);
+        Grid::SetRow(_sidePanelAiResultsScroll, 1);
+        root.Children().Append(_sidePanelAiResultsScroll);
+
+        // Agentmaster (accessibility, E2E_TESTING.md §6.3): the AI view's stable ids. Names only where a glyph is the content.
+        AgentSetAutomationId(_sidePanelAiStatusText, L"am.side.ai.status");
+        AgentSetAutomationId(_sidePanelAiThinkingBtn, L"am.side.ai.thinking");
+        AgentSetAutomationId(_sidePanelAiResetBtn, L"am.side.ai.reset");
+        AgentSetAccessibleName(_sidePanelAiResetBtn, L"New conversation");
+
+        root.Visibility(Visibility::Collapsed); // _SidePanelSetAiMode shows it
+        _sidePanelCardsHost.Children().Append(root); // after the card list's ScrollViewer: drawn over it in the shared cell
+        _sidePanelAiRoot = root;
+    }
+
+    void TerminalPage::_SidePanelAiAttach()
+    {
+        if (_sidePanelAiListenerToken != 0)
+        {
+            return;
+        }
+        const auto weakThis = get_weak();
+        const auto dispatcher = Dispatcher(); // agile: callable from the agent's threads
+        _sidePanelAiListenerToken = ::Agentmaster::SharedSessionSearchAgent().AddListener([weakThis, dispatcher](const ::Agentmaster::SessionSearchEvent& e) {
+            // ⚠ No strong reference to the page on the agent's thread: one that is the LAST would run ~TerminalPage there, off
+            // the UI thread (the terminate-net note in ~TerminalPage). The weak reference is resolved inside the dispatched call.
+            try
+            {
+                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, e]() {
+                    if (const auto self = weakThis.get())
+                    {
+                        try
+                        {
+                            self->_OnSidePanelAiEvent(e);
+                        }
+                        catch (...)
+                        {
+                            ::Agentmaster::AgentLogCaughtException(L"side panel AI search: an agent event");
+                        }
+                    }
+                });
+            }
+            catch (...)
+            {
+                // The window's dispatcher is gone (it is closing): the event is for nobody. Recorded (Rule #18).
+                ::Agentmaster::AgentLogCaughtException(L"side panel AI search: post an agent event");
+            }
+        });
+    }
+
+    void TerminalPage::_SidePanelAiDetach() noexcept
+    {
+        if (_sidePanelAiListenerToken == 0)
+        {
+            return; // never turned on in this window: nothing registered, nothing of ours to park
+        }
+        try
+        {
+            // A token exists only when the agent does: this call cannot create it.
+            auto& agent = ::Agentmaster::SharedSessionSearchAgent();
+            agent.RemoveListener(_sidePanelAiListenerToken);
+            _sidePanelAiListenerToken = 0;
+            // A window that closes while its side panel used the search must not leave the process up for the rest of the run
+            // (its own request end, focus loss or mode change will never come now): arm the park — unless a Sessions page
+            // shows the search, whose rule holds the process. The destructor may run on a pool thread: the agent's methods
+            // are thread-safe, and _SessionsAiParkDelayMs reads a plain member.
+            if (_SessionsAiPagesShowingCount() == 0)
+            {
+                agent.ParkProcessAfter(_SessionsAiParkDelayMs());
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelAiDetach");
+        }
+    }
+
+    void TerminalPage::_SidePanelAiAsk()
+    {
+        try
+        {
+            if (!_sidePanelAiMode || !_sidePanelSearchBox)
+            {
+                return;
+            }
+            const std::wstring text = SidePanelAiTrim(std::wstring_view{ _sidePanelSearchBox.Text() });
+            if (text.empty())
+            {
+                return;
+            }
+            // The path can be gone since the mode was turned on (the Settings cog's override), and a window that opened in AI
+            // mode was never checked.
+            if (!::Agentmaster::EnsureClaudeAvailable())
+            {
+                ::Agentmaster::LogNav(L"sidepanel ai-ask (blocked: no native claude.exe)");
+                _PromptClaudeMissing();
+                return;
+            }
+            _SidePanelAiAttach();
+            auto& agent = ::Agentmaster::SharedSessionSearchAgent();
+            agent.SetClaudeExePath(::Agentmaster::SharedEngine().claudeExePath); // UI thread: the path's owner
+            // The window the request comes from: the tabs server tells the model (asked_from), so with several windows it can
+            // offer this one when it must ask where to open a session (SESSIONS.md §9.14).
+            const uint64_t turn = agent.Ask(text, _windowId);
+            if (turn != 0)
+            {
+                _sidePanelAiAskedTurn = turn; // its Answer / Failed event — in this window — arms the park
+            }
+            // The words stay out of the nav trail (the agent's own [ai-search] line has them).
+            ::Agentmaster::LogNav(L"sidepanel ai-ask turn=" + std::to_wstring(turn) + L" chars=" + std::to_wstring(text.size()));
+            _sidePanelSearchBox.Text(L""); // the strip shows the request; the box is free for the follow-up
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelAiAsk");
+        }
+    }
+
+    void TerminalPage::_SidePanelAiPrewarm()
+    {
+        try
+        {
+            // The cached check only (no re-scan): a missing claude.exe is reported by the request itself, with the notice.
+            if (!_sidePanelAiMode || !::Agentmaster::ClaudeAvailable())
+            {
+                return;
+            }
+            _SidePanelAiAttach();
+            auto& agent = ::Agentmaster::SharedSessionSearchAgent();
+            agent.SetClaudeExePath(::Agentmaster::SharedEngine().claudeExePath);
+            // The process and the session index, both in the background. A process already up makes this a no-op — and it
+            // CANCELS a pending park ("somebody is back"), which the box's LostFocus or the request's end arms again.
+            agent.Prewarm(/*readIndex*/ true);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelAiPrewarm");
+        }
+    }
+
+    void TerminalPage::_SidePanelAiArmPark(std::wstring_view why) noexcept
+    {
+        try
+        {
+            if (_sidePanelAiListenerToken == 0)
+            {
+                return; // this window never used the search: nothing it started, nothing of its to park
+            }
+            if (_SessionsAiPagesShowingCount() > 0)
+            {
+                return; // a Sessions page shows the search: its rule (the process lives while a page shows it) holds
+            }
+            auto& agent = ::Agentmaster::SharedSessionSearchAgent();
+            if (agent.Snapshot().busy)
+            {
+                return; // a request runs: its end arms the park (the asking window's Answer / Failed event)
+            }
+            // ⚠ Never right after a Prewarm of our own: ParkProcessAfter drops a start that has not happened yet (the
+            // harness's "a Prewarm would start one only for the park to end it"). The callers are all moments AFTER use.
+            const int64_t delayMs = _SessionsAiParkDelayMs();
+            agent.ParkProcessAfter(delayMs);
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[ai-search] side panel (window " + ::Agentmaster::ShortId(_windowId) + L"): the idle process parks in " + std::to_wstring(delayMs / 60000) + L" min (" + std::wstring{ why } + L")\n");
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelAiArmPark");
+        }
+    }
+
+    void TerminalPage::_OnSidePanelAiEvent(const ::Agentmaster::SessionSearchEvent& e)
+    {
+        using Kind = ::Agentmaster::SessionSearchEventKind;
+        if (e.snapshot.epoch < _sidePanelAiEpoch)
+        {
+            return; // an event of a conversation a reset threw away
+        }
+        _sidePanelAiEpoch = e.snapshot.epoch;
+        // THIS window's request ended: arm the park — even when the AI view was closed meanwhile (the process is still ours).
+        if ((e.kind == Kind::Answer || e.kind == Kind::Failed) && e.turn != 0 && e.turn == _sidePanelAiAskedTurn)
+        {
+            _SidePanelAiArmPark(e.kind == Kind::Answer ? L"its request was answered" : L"its request failed");
+        }
+        if (!_sidePanelAiMode || !_sidePanelAiRoot)
+        {
+            return; // no view: turning the AI mode on adopts the conversation's whole state (_SidePanelSetAiMode)
+        }
+        bool rebuild = false;
+        bool newList = false; // a list the model picked, or a reset: it starts at its top
+        switch (e.kind)
+        {
+        case Kind::Reset:
+            _SidePanelAiAdoptSnapshot(e.snapshot); // an empty conversation: no list
+            rebuild = true;
+            newList = true;
+            break;
+        case Kind::Candidates:
+            // A search's rows, before the model picked from them: shown at once (the pick replaces them a second later). Not an
+            // empty one — a blank list while the model tries other words reads as "nothing found" — and never over the final
+            // list of the same request.
+            if (!e.sessionIds.empty() && (e.turn > _sidePanelAiListTurn || (e.turn == _sidePanelAiListTurn && _sidePanelAiPreview)))
+            {
+                _sidePanelAiPreview = true;
+                _sidePanelAiListTurn = e.turn;
+                _sidePanelAiShownIds = e.sessionIds;
+                _sidePanelAiReasons.clear(); // the model has read none of them yet: no evidence
+                for (const auto& entry : e.entries)
+                {
+                    _sidePanelAiEntries.insert_or_assign(entry.sessionId, entry);
+                }
+                ++_sidePanelAiListSeq;
+                rebuild = true;
+            }
+            break;
+        case Kind::Shown:
+            _sidePanelAiHasShown = true;
+            _sidePanelAiPreview = false;
+            _sidePanelAiListTurn = e.turn;
+            _sidePanelAiShownIds = e.sessionIds;
+            _sidePanelAiReasons.clear();
+            for (size_t i = 0; i < e.sessionIds.size() && i < e.reasons.size(); ++i)
+            {
+                if (!e.reasons[i].empty())
+                {
+                    _sidePanelAiReasons.insert_or_assign(e.sessionIds[i], e.reasons[i]);
+                }
+            }
+            for (const auto& entry : e.entries)
+            {
+                _sidePanelAiEntries.insert_or_assign(entry.sessionId, entry);
+            }
+            ++_sidePanelAiListSeq;
+            rebuild = true;
+            newList = true;
+            break;
+        case Kind::Answer:
+        case Kind::Failed:
+            if (_sidePanelAiPreview)
+            {
+                // The request ended without a pick (the model answered in words, or it failed): the preview was never the
+                // model's list. Back to the conversation's real one.
+                _SidePanelAiAdoptSnapshot(e.snapshot);
+                rebuild = true;
+            }
+            break;
+        case Kind::StateChanged:
+        case Kind::Asked:
+        case Kind::Searching:
+        case Kind::Compacting:
+        case Kind::Narration:
+        default:
+            break; // the strip below is all they change
+        }
+        if (rebuild)
+        {
+            _SidePanelAiRebuildResults();
+            if (newList && _sidePanelAiResultsScroll)
+            {
+                _sidePanelAiResultsScroll.ChangeView(nullptr, 0.0, nullptr, true); // a new list starts at its top
+            }
+        }
+        _SidePanelAiUpdateStrip(e.snapshot);
+        _SidePanelAiUpdateCountLine(e.snapshot);
+    }
+
+    void TerminalPage::_SidePanelAiAdoptSnapshot(const ::Agentmaster::SessionSearchSnapshot& snapshot)
+    {
+        _sidePanelAiHasShown = snapshot.hasShown;
+        _sidePanelAiPreview = false;
+        // The list's request is not in the snapshot; the newest request is the latest it can be (a preview of a later one may
+        // replace it, one of that request may not).
+        _sidePanelAiListTurn = snapshot.hasShown ? snapshot.turns : 0;
+        _sidePanelAiShownIds = snapshot.hasShown ? snapshot.shownIds : std::vector<std::wstring>{};
+        _sidePanelAiReasons.clear();
+        for (size_t i = 0; i < _sidePanelAiShownIds.size() && i < snapshot.shownReasons.size(); ++i)
+        {
+            if (!snapshot.shownReasons[i].empty())
+            {
+                _sidePanelAiReasons.insert_or_assign(_sidePanelAiShownIds[i], snapshot.shownReasons[i]);
+            }
+        }
+        // The entries the agent's in-memory index holds for the list (none when no search ran yet this run — the window's open
+        // restores the last list from the agent's stored view before any index exists; the rebuild fetches those from disk).
+        _sidePanelAiEntries.clear();
+        if (!_sidePanelAiShownIds.empty())
+        {
+            for (auto& entry : ::Agentmaster::SharedSessionSearchAgent().EntriesFor(_sidePanelAiShownIds))
+            {
+                const std::wstring id = entry.sessionId;
+                _sidePanelAiEntries.insert_or_assign(id, std::move(entry));
+            }
+        }
+        ++_sidePanelAiListSeq;
+    }
+
+    winrt::fire_and_forget TerminalPage::_SidePanelAiFetchMissingEntries(std::vector<std::wstring> ids, uint64_t listSeq)
+    {
+        // ⚠ Only a WEAK page reference crosses the pool hop: a strong one dropped last on the pool thread would run the whole
+        // page teardown there (the fire_and_forget rule, CLAUDE.md "Engine, threads and data"). The dispatcher is agile.
+        const auto weakThis = get_weak();
+        const auto dispatcher = Dispatcher();
+        try
+        {
+            co_await winrt::resume_background();
+            std::vector<::Agentmaster::SessionIndexEntry> found;
+            found.reserve(ids.size());
+            for (const auto& id : ids)
+            {
+                // One small sidecar read each (a transcript that grew is parsed from its stored offset — the reason this runs
+                // off the UI thread). A gone transcript reads nullopt: its card keeps its placeholder until the next list.
+                if (auto entry = ::Agentmaster::LoadSessionIndexEntryById(id))
+                {
+                    found.push_back(std::move(*entry));
+                }
+            }
+            co_await wil::resume_foreground(dispatcher);
+            const auto self = weakThis.get();
+            if (!self || listSeq != self->_sidePanelAiListSeq || !self->_sidePanelAiMode)
+            {
+                co_return; // the window closed, the list was replaced, or the view closed: these entries are for nobody
+            }
+            for (auto& entry : found)
+            {
+                const std::wstring id = entry.sessionId;
+                self->_sidePanelAiEntries.insert_or_assign(id, std::move(entry));
+            }
+            if (!found.empty())
+            {
+                self->_SidePanelAiRebuildResults(); // the placeholders become real cards (the fetch is not queued again: one per list)
+            }
+        }
+        catch (...)
+        {
+            // Rule #18; a fire_and_forget must never let an exception escape (winrt::terminate). The cards keep their
+            // placeholders until the next list.
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelAiFetchMissingEntries");
+        }
+    }
+
+    void TerminalPage::_SidePanelAiUpdateStrip(const ::Agentmaster::SessionSearchSnapshot& snapshot)
+    {
+        using State = ::Agentmaster::HarnessState;
+        if (!_sidePanelAiRoot || !_sidePanelAiStatusText || !_sidePanelAiQuestionText || !_sidePanelAiDot || !_sidePanelAiUsageText)
+        {
+            return;
+        }
+        if (_sidePanelAiResetBtn)
+        {
+            // Nothing to throw away in a conversation that has not started.
+            _sidePanelAiResetBtn.IsEnabled(snapshot.turns > 0 || snapshot.busy || snapshot.hasShown);
+        }
+        if (snapshot.question.empty())
+        {
+            _sidePanelAiQuestionText.Visibility(Visibility::Collapsed);
+        }
+        else
+        {
+            _sidePanelAiQuestionText.Text(winrt::hstring{ L"\x276F " + snapshot.question });
+            _sidePanelAiQuestionText.Visibility(Visibility::Visible);
+        }
+        // The status line and the dot — the Sessions strip's rules: working (blue; the model's plan above what it does now),
+        // an error (red), the answer (green, plain), starting, or — before any request — how to use it (dim).
+        std::wstring status;
+        Color dot = ColorHelper::FromArgb(0xFF, 0x80, 0x80, 0x80);
+        Color ink = ColorHelper::FromArgb(0xFF, 0xF2, 0xF2, 0xF2);
+        double inkOpacity = 0.95;
+        if (snapshot.busy)
+        {
+            status = !snapshot.activity.empty() ? snapshot.activity : std::wstring{ L"Thinking\x2026" };
+            if (_sidePanelAiPreview)
+            {
+                status += L" \x2014 " + std::to_wstring(_sidePanelAiShownIds.size()) + (_sidePanelAiShownIds.size() == 1 ? L" candidate, choosing\x2026" : L" candidates, choosing\x2026");
+            }
+            if (!snapshot.narration.empty())
+            {
+                status = snapshot.narration + L"\n" + status; // the plan the model wrote before its first call ("I'll 1. ... 2. ...")
+            }
+            dot = ColorHelper::FromArgb(0xFF, 0x4E, 0xA1, 0xFF);
+            ink = ColorHelper::FromArgb(0xFF, 0x8A, 0xB4, 0xF8);
+        }
+        else if (snapshot.answerIsError || snapshot.state == State::Failed)
+        {
+            status = !snapshot.answer.empty() ? snapshot.answer : std::wstring{ L"The search assistant could not start." };
+            dot = ColorHelper::FromArgb(0xFF, 0xE5, 0x53, 0x3D);
+            ink = ColorHelper::FromArgb(0xFF, 0xF2, 0x8B, 0x82);
+        }
+        else if (!snapshot.answer.empty())
+        {
+            status = snapshot.answer;
+            dot = ColorHelper::FromArgb(0xFF, 0x5C, 0xB8, 0x5C);
+        }
+        else if (snapshot.state == State::Starting)
+        {
+            status = L"Starting the search assistant\x2026";
+            dot = ColorHelper::FromArgb(0xFF, 0x4E, 0xA1, 0xFF);
+            inkOpacity = 0.6;
+        }
+        else
+        {
+            status = L"Describe the session you are looking for, or ask what is open, and press Enter. A follow-up refines the list; \x2298 starts over.";
+            if (snapshot.state == State::Ready)
+            {
+                dot = ColorHelper::FromArgb(0xFF, 0x5C, 0xB8, 0x5C);
+            }
+            inkOpacity = 0.6;
+        }
+        _sidePanelAiStatusText.Text(winrt::hstring{ status });
+        _sidePanelAiStatusText.Foreground(SolidColorBrush{ ink });
+        _sidePanelAiStatusText.Opacity(inkOpacity);
+        _sidePanelAiDot.Background(SolidColorBrush{ dot });
+        // The thinking level the next request runs with — the agent's, so a click in another window shows here too. Off stays
+        // dim like the context size; a level that thinks reads brighter (it changes how long a request takes).
+        if (_sidePanelAiThinkingText)
+        {
+            const bool thinks = ::Agentmaster::HarnessThinkingLevelThinks(snapshot.thinkingLevel);
+            _sidePanelAiThinkingText.Text(winrt::hstring{ std::wstring{ L"thinking " } + ::Agentmaster::HarnessThinkingLevelWord(snapshot.thinkingLevel) });
+            _sidePanelAiThinkingText.Opacity(thinks ? 0.95 : 0.6);
+        }
+        std::wstring usage;
+        if (snapshot.usage.contextTokens > 0)
+        {
+            usage = L"ctx " + FormatTokenCount(snapshot.usage.contextTokens);
+            if (snapshot.usage.contextWindow > 0)
+            {
+                usage += L" / " + FormatTokenCount(snapshot.usage.contextWindow);
+            }
+            if (snapshot.compactions > 0)
+            {
+                usage += L" \x00B7 compacted " + std::to_wstring(snapshot.compactions) + L"\x00D7";
+            }
+        }
+        _sidePanelAiUsageText.Text(winrt::hstring{ usage });
+    }
+
+    void TerminalPage::_SidePanelAiUpdateCountLine(const ::Agentmaster::SessionSearchSnapshot& snapshot)
+    {
+        if (!_sidePanelAiMode || !_sidePanelCountText)
+        {
+            return;
+        }
+        std::wstring text;
+        const size_t n = _sidePanelAiShownIds.size();
+        if (_sidePanelAiPreview)
+        {
+            text = std::to_wstring(n) + (n == 1 ? L" candidate, choosing\x2026" : L" candidates, choosing\x2026");
+        }
+        else if (_sidePanelAiHasShown)
+        {
+            text = n == 0 ? std::wstring{ L"no session fits" } : (std::to_wstring(n) + (n == 1 ? L" session found" : L" sessions found"));
+        }
+        else if (snapshot.busy)
+        {
+            text = L"AI search \x2014 searching\x2026";
+        }
+        else
+        {
+            text = L"AI search \x2014 the same conversation as the Sessions page";
+        }
+        if (text != _sidePanelAiCountValue)
+        {
+            _sidePanelCountText.Text(winrt::hstring{ text });
+            _sidePanelAiCountValue = std::move(text);
+        }
+    }
+
+    void TerminalPage::_SidePanelAiClearResultCards() noexcept
+    {
+        // Every status icon first: its motions stop and its flash ring gives back the shared blink clock NOW, not at the
+        // glyph's destruction (the session cards' Remove rule). Shutdown is noexcept.
+        for (auto& [id, view] : _sidePanelAiResultViews)
+        {
+            if (view.base.glyph)
+            {
+                view.base.glyph->Shutdown();
+            }
+        }
+        _sidePanelAiResultViews.clear();
+        try
+        {
+            if (_sidePanelAiResults)
+            {
+                // A whole clear is right here, unlike the session card list (SIDE_PANEL.md §2c): this list is the model's
+                // handful, replaced as one when the model shows a new one.
+                _sidePanelAiResults.Children().Clear();
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelAiClearResultCards"); // a torn-down tree: nothing left to show anyway
+        }
+    }
+
+    AgentSidePanelCardModel TerminalPage::_SidePanelAiResultModelFor(const std::wstring& id,
+                                                                     const std::optional<::Agentmaster::SessionInfo>& lean,
+                                                                     const ::Agentmaster::DirColorIndex& dirColors,
+                                                                     const std::map<std::wstring, std::wstring>& tagColors,
+                                                                     const std::vector<std::wstring>& tags,
+                                                                     AgentSidePanelAiResultView& out)
+    {
+        AgentSidePanelCardModel m;
+        const auto mode = _appSettings.tabColorMode;
+        out.open = false;
+        out.known = false;
+        out.dir.clear();
+        out.title.clear();
+        out.hasMessages = false;
+        const auto entryIt = _sidePanelAiEntries.find(id);
+        const ::Agentmaster::SessionIndexEntry* entry = entryIt != _sidePanelAiEntries.end() ? &entryIt->second : nullptr;
+        std::wstring shownDir; // the folder the card names (the effective working dir, like a session card)
+        std::wstring branch;
+        int64_t createdMs = 0;
+        int64_t lastMs = 0;
+        if (lean)
+        {
+            // The registry knows it (open, or closed and archived): its record is the truth — the managed title (Rule #11),
+            // its color, its live state. The cwd is what a resume or a fork launches in (the effective dir is display only).
+            out.known = true;
+            out.open = lean->live;
+            out.dir = lean->workingDir;
+            out.title = lean->title;
+            out.hasMessages = true; // a managed session's title is its own: a fork derives " (fork)" from it
+            shownDir = ::Agentmaster::EffectiveWorkingDir(mode, *lean);
+            branch = lean->branch;
+            createdMs = lean->convCreatedUnixMs;
+            lastMs = lean->convLastActivityUnixMs ? lean->convLastActivityUnixMs : lean->lastActivityUnixMs;
+            m.bandHex = ::Agentmaster::ResolveSessionColorHex(mode, *lean, dirColors);
+            m.state = lean->state;
+            m.codex = (lean->kind == ::Agentmaster::AgentKind::Codex);
+            if (entry)
+            {
+                // An older archived record may lack facts its transcript index has.
+                if (createdMs == 0)
+                {
+                    createdMs = ::Agentmaster::SessionSearchCreatedMs(*entry);
+                }
+                if (lastMs == 0)
+                {
+                    lastMs = ::Agentmaster::SessionSearchLastActivityMs(*entry);
+                }
+                if (branch.empty())
+                {
+                    branch = entry->stats.gitBranch;
+                }
+            }
+        }
+        else if (entry)
+        {
+            // A session Agentmaster never opened: the facts its transcript index has (the Sessions page's own field rules).
+            out.dir = ::Agentmaster::SessionSearchDirOf(*entry);
+            out.title = ::Agentmaster::SessionSearchTitleOf(*entry);
+            out.hasMessages = entry->stats.userPrompts > 0;
+            shownDir = out.dir;
+            branch = entry->stats.gitBranch;
+            createdMs = ::Agentmaster::SessionSearchCreatedMs(*entry);
+            lastMs = ::Agentmaster::SessionSearchLastActivityMs(*entry);
+            // The band: the folder's color as every surface resolves it, through a stand-in record that carries only the
+            // folder (the dir-keyed modes; "Individual" has no color for a session that never had a tab — the neutral band).
+            ::Agentmaster::SessionInfo standIn;
+            standIn.id = id;
+            standIn.workingDir = out.dir;
+            m.bandHex = ::Agentmaster::ResolveSessionColorHex(mode, standIn, dirColors);
+        }
+        m.title = !out.title.empty() ? out.title : (L"session " + ::Agentmaster::ShortId(id));
+        if (!lean && !entry)
+        {
+            m.title += L" \x2014 reading\x2026"; // its index entry is on its way from disk (_SidePanelAiFetchMissingEntries)
+        }
+        if (const auto band = HexToColor(m.bandHex))
+        {
+            m.darkInk = PreferDarkTextOn(*band);
+        }
+        m.timing = (createdMs != 0 || lastMs != 0) ? FormatSessionTiming(createdMs, lastMs) : std::wstring{};
+        m.dirLine = SidePanelLeafOf(shownDir);
+        if (!branch.empty())
+        {
+            m.dirLine += L" / " + branch;
+        }
+        m.tags = tags;
+        m.tagArgb.reserve(tags.size());
+        for (const auto& tag : tags)
+        {
+            m.tagArgb.push_back(SidePanelPackArgb(ResolveTagDisplayColor(tag, tagColors))); // the ONE tag color resolution (Rule #17)
+        }
+        // The why: the model's evidence for this session, only on its pick (a preview's rows were read by nobody yet).
+        out.whyText.clear();
+        if (!_sidePanelAiPreview)
+        {
+            if (const auto why = _sidePanelAiReasons.find(id); why != _sidePanelAiReasons.end())
+            {
+                out.whyText = why->second;
+            }
+        }
+        // The tip: the whole folder, the branch, every tag, the whole why, and what the gestures do for THIS session.
+        std::wstring tipText = shownDir.empty() ? std::wstring{ L"(the session's folder is being read)" } : shownDir;
+        if (!branch.empty())
+        {
+            tipText += L"\nbranch: " + branch;
+        }
+        if (!tags.empty())
+        {
+            tipText += L"\ntags: ";
+            for (size_t i = 0; i < tags.size(); ++i)
+            {
+                tipText += (i ? L" \x00B7 " : L"") + tags[i];
+            }
+        }
+        if (!out.whyText.empty())
+        {
+            tipText += L"\n\nwhy: " + out.whyText;
+        }
+        tipText += out.open ? L"\n\nClick to see its summary below \x00B7 double-click to jump to its tab \x00B7 right-click for actions." :
+                   out.known ? L"\n\nClosed. Click to see its summary below \x00B7 double-click to resume it in a new tab here \x00B7 right-click for actions." :
+                               L"\n\nNever opened in Agentmaster. Click to read its transcript \x00B7 double-click to resume it in a new tab here \x00B7 right-click for actions.";
+        m.tipTitle = m.title;
+        m.tipText = std::move(tipText);
+        return m;
+    }
+
+    AgentSidePanelAiResultView TerminalPage::_SidePanelAiCreateResultView(const std::wstring& id)
+    {
+        AgentSidePanelAiResultView v;
+        v.base = _SidePanelBuildCardSkeleton(id, L"am.side.ai.result.");
+        // The result cards are the AI view's: they hold still only when the panel collapses (the view shows whenever the
+        // expanded panel is in AI mode, which is when these cards exist at all).
+        v.base.glyph->SetHostShown(!_sidePanelCollapsed);
+        const auto weakThis = get_weak();
+        // ⚠ Every handler reaches the card through `sender` and the view through _sidePanelAiResultViews — capturing the card in
+        // a handler attached TO it would be the element -> handler -> element cycle that leaks every card a list replaces. A
+        // sender that is not the live card of `id` (a card a newer list replaced) is ignored.
+        v.base.card.PointerEntered([weakThis, id](const IInspectable& sender, const PointerRoutedEventArgs&) {
+            const auto self = weakThis.get();
+            const auto g = sender.try_as<Grid>();
+            if (!self || !g)
+            {
+                return;
+            }
+            const auto it = self->_sidePanelAiResultViews.find(id);
+            if (it == self->_sidePanelAiResultViews.end() || it->second.base.card != g)
+            {
+                return;
+            }
+            it->second.base.hovered = true;
+            SidePanelStyleCardBorder(it->second.base.cardBack, SidePanelAiRingColor(it->second), id == self->_sidePanelSelectedId, /*hover*/ true);
+        });
+        v.base.card.PointerExited([weakThis, id](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+            const auto self = weakThis.get();
+            const auto g = sender.try_as<Grid>();
+            if (!self || !g || PointerStillWithin(sender, e))
+            {
+                return; // bubbled from a child: the pointer never left the card
+            }
+            const auto it = self->_sidePanelAiResultViews.find(id);
+            if (it == self->_sidePanelAiResultViews.end() || it->second.base.card != g)
+            {
+                return;
+            }
+            it->second.base.hovered = false;
+            SidePanelStyleCardBorder(it->second.base.cardBack, SidePanelAiRingColor(it->second), id == self->_sidePanelSelectedId, /*hover*/ false);
+        });
+        v.base.card.Tapped([weakThis, id](const IInspectable&, const TappedRoutedEventArgs&) {
+            if (const auto self = weakThis.get())
+            {
+                self->_SidePanelAiClickResult(id);
+            }
+        });
+        v.base.card.DoubleTapped([weakThis, id](const IInspectable&, const DoubleTappedRoutedEventArgs& e) {
+            e.Handled(true);
+            if (const auto self = weakThis.get())
+            {
+                self->_SidePanelAiOpenResult(id);
+            }
+        });
+        v.base.card.RightTapped([weakThis, id](const IInspectable& sender, const RightTappedRoutedEventArgs& e) {
+            e.Handled(true);
+            const auto self = weakThis.get();
+            if (!self)
+            {
+                return;
+            }
+            // Contained: a menu build + ShowAt can throw under islands teardown races — a lost menu never costs the window.
+            try
+            {
+                const auto it = self->_sidePanelAiResultViews.find(id);
+                const auto anchor = sender.try_as<FrameworkElement>();
+                if (it == self->_sidePanelAiResultViews.end() || !anchor)
+                {
+                    return;
+                }
+                // Read before the selection below: it repaints the cards (the map itself is not changed, but the facts are
+                // taken once, at the press).
+                const bool open = it->second.open;
+                const bool known = it->second.known;
+                if (open)
+                {
+                    // An open session: THE session menu every card and tree row shows, anchored on this card (its Tags item
+                    // opens the tag panel under it), after the lenses align on it — the session card's own right-click.
+                    self->_SidePanelSelectSession(id, /*driveManagerLens*/ true);
+                    if (const auto ipc = self->_agentManagerContent.get())
+                    {
+                        if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+                        {
+                            std::wstring cwd;
+                            if (self->_sessionRegistry)
+                            {
+                                if (const auto cur = self->_sessionRegistry->Get(id))
+                                {
+                                    cwd = ::Agentmaster::EffectiveWorkingDir(self->_appSettings.tabColorMode, *cur);
+                                }
+                            }
+                            auto menu = mgr->BuildSessionMenuFor(id, cwd, anchor);
+                            menu.ShowAt(anchor, e.GetPosition(anchor));
+                        }
+                    }
+                    return;
+                }
+                if (known)
+                {
+                    self->_SidePanelSelectSession(id, /*driveManagerLens*/ false); // the summary shows the session the menu is about
+                }
+                auto menu = self->_SidePanelAiMakeClosedResultMenu(id);
+                menu.ShowAt(anchor, e.GetPosition(anchor));
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"side panel AI result: context menu");
+            }
+        });
+        return v;
+    }
+
+    void TerminalPage::_SidePanelAiApplyResultModel(AgentSidePanelAiResultView& view, AgentSidePanelCardModel model, const std::wstring& id, bool fresh)
+    {
+        auto& b = view.base;
+        const AgentSidePanelCardModel& shown = b.model; // the card as it is now (ignored when fresh)
+        if (fresh || model.title != shown.title)
+        {
+            b.title.Text(winrt::hstring{ model.title });
+        }
+        if (fresh || model.bandHex != shown.bandHex)
+        {
+            const auto bandColor = HexToColor(model.bandHex);
+            b.band.Background(SolidColorBrush{ bandColor.value_or(Color{ 0xFF, 0x3A, 0x3A, 0x3A }) });
+        }
+        if (fresh || model.darkInk != shown.darkInk)
+        {
+            b.title.Foreground(model.darkInk ? Fill(0xFF, 0x10, 0x10, 0x10) : Fill(0xFF, 0xF0, 0xF0, 0xF0));
+        }
+        if (fresh || model.tags != shown.tags || model.tagArgb != shown.tagArgb || (!model.tags.empty() && model.darkInk != shown.darkInk))
+        {
+            _SidePanelApplyCardTags(b, model, id); // the session card's own band layout and tag strip (the shared hover panel)
+        }
+        // The state line: the live state for a session with a tab; "closed" in gray for one without — a result is often a
+        // session nobody runs now, and a gray "idle" would read as an open tab at rest.
+        if (fresh || model.state != shown.state || view.open != view.shownOpen)
+        {
+            const Color stateColor = view.open ? StateColor(model.state) : kSidePanelAiClosedColor;
+            b.glyph->SetStateColor(stateColor);
+            b.stateText.Text(view.open ? StateLabel(model.state) : winrt::hstring{ L"closed" });
+            b.stateText.Foreground(SolidColorBrush{ stateColor });
+            SidePanelStyleCardBorder(b.cardBack, stateColor, id == _sidePanelSelectedId, b.hovered);
+            view.shownOpen = view.open;
+        }
+        if (model.codex && !b.codexPill)
+        {
+            b.codexPill = Text(L"codex", 9, true, 0.9);
+            b.codexPill.Foreground(Fill(0xFF, 0x2E, 0xB8, 0xA8)); // the session card's teal pill
+            b.codexPill.Margin(ThicknessHelper::FromLengths(0, 0, 0, kSidePanelStatusIconBandPx));
+            b.stateRow.Children().InsertAt(2, b.codexPill); // right after the status icon and the label
+        }
+        else if (!model.codex && b.codexPill)
+        {
+            SidePanelRemoveChild(b.stateRow, b.codexPill);
+            b.codexPill = nullptr;
+        }
+        if (model.timing.empty())
+        {
+            if (b.timing)
+            {
+                SidePanelRemoveChild(b.stateLine, b.timing);
+                b.timing = nullptr;
+            }
+        }
+        else if (!b.timing)
+        {
+            // The session card's timing text and its explanatory tip (a result card's tips are always the floating ones: it has
+            // no rich tooltip host, whatever "Sum" says).
+            b.timing = Text(winrt::hstring{ model.timing }, 10, false, 0.45);
+            b.timing.Margin(ThicknessHelper::FromLengths(5, 0, 0, kSidePanelStatusIconBandPx));
+            AgentSetTitledTip(b.timing, winrt::hstring{ kTimingTooltipTitle }, winrt::hstring{ kTimingTooltip });
+            Grid::SetColumn(b.timing, 1); // the state line's star column: it trims with "…" on a narrow panel
+            b.stateLine.Children().Append(b.timing);
+        }
+        else if (fresh || model.timing != shown.timing)
+        {
+            b.timing.Text(winrt::hstring{ model.timing });
+        }
+        if (fresh || model.dirLine != shown.dirLine)
+        {
+            b.dirLine.Text(winrt::hstring{ model.dirLine });
+        }
+        if (fresh || model.tipTitle != shown.tipTitle || model.tipText != shown.tipText)
+        {
+            AgentSetTitledTip(b.card, winrt::hstring{ model.tipTitle }, winrt::hstring{ model.tipText }, kCardTipDelay);
+        }
+        // The WHY row, under the folder line: [ a 2 DIP quote bar ][ the evidence, one line, "…" ]. Added on the first apply
+        // only — the why belongs to the list, which a new list replaces with new cards.
+        if (fresh && !view.whyText.empty() && !view.whyRow)
+        {
+            if (const auto body = b.card.Children().Size() >= 2 ? b.card.Children().GetAt(1).try_as<StackPanel>() : nullptr)
+            {
+                Grid whyRow{};
+                whyRow.Margin(ThicknessHelper::FromLengths(6, 0, 6, 5));
+                ColumnDefinition barCol{};
+                barCol.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+                ColumnDefinition textCol{};
+                textCol.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+                whyRow.ColumnDefinitions().Append(barCol);
+                whyRow.ColumnDefinitions().Append(textCol);
+                Border bar{}; // square corners, no child: no composition node
+                bar.Width(2);
+                bar.Background(SolidColorBrush{ kSidePanelAiWhyBarColor });
+                bar.Margin(ThicknessHelper::FromLengths(0, 1, 6, 1));
+                whyRow.Children().Append(bar);
+                view.why = Text(winrt::hstring{ view.whyText }, 10, false, 0.85);
+                view.why.FontStyle(winrt::Windows::UI::Text::FontStyle::Italic);
+                view.why.TextTrimming(TextTrimming::CharacterEllipsis); // one line on the card; the tip has it whole
+                view.why.Foreground(Fill(0xFF, 0xC9, 0xD6, 0xEE));
+                Grid::SetColumn(view.why, 1);
+                whyRow.Children().Append(view.why);
+                body.Children().Append(whyRow); // after the folder line
+                view.whyRow = whyRow;
+            }
+        }
+        b.model = std::move(model);
+        SidePanelAiApplyItemStatus(view, id == _sidePanelSelectedId); // Agentmaster (accessibility): the words for what the card shows
+    }
+
+    void TerminalPage::_SidePanelAiRebuildResults()
+    {
+        if (!_sidePanelAiResults)
+        {
+            return;
+        }
+        try
+        {
+            _SidePanelAiClearResultCards();
+            _sidePanelAiRefreshOwed = false;
+            _sidePanelAiNextRefreshMs = ::GetTickCount64() + kSidePanelAiRefreshMs;
+            if (_sidePanelAiShownIds.empty())
+            {
+                if (_sidePanelAiHasShown && !_sidePanelAiPreview)
+                {
+                    // The model said "nothing fits" (an empty show): say so where the list would be, so an empty area does not
+                    // read as "still working".
+                    auto none = Text(L"No session fits this request.", 11, false, 0.5);
+                    none.Margin(ThicknessHelper::FromLengths(10, 8, 10, 8));
+                    none.TextWrapping(TextWrapping::Wrap);
+                    _sidePanelAiResults.Children().Append(none);
+                }
+                return;
+            }
+            // The tags, read once per listed session (SessionStore's (size,mtime)-validated cache: one stat each), with the
+            // epoch loaded BEFORE the reads (the SessionStore contract: a write that lands meanwhile leaves the older epoch,
+            // so the next refresh reads again), and the colors file once — only when a listed session is tagged.
+            const uint64_t tagsEpoch = ::Agentmaster::SessionTagsEpoch();
+            struct Row
+            {
+                std::wstring id;
+                std::optional<::Agentmaster::SessionInfo> lean;
+                std::vector<std::wstring> tags;
+            };
+            std::vector<Row> rows;
+            rows.reserve(_sidePanelAiShownIds.size());
+            std::unordered_set<std::wstring> seen; // belt: a list never names a session twice, and a card is keyed by its id
+            bool anyTagged = false;
+            for (const auto& id : _sidePanelAiShownIds)
+            {
+                if (id.empty() || !seen.insert(id).second)
+                {
+                    continue;
+                }
+                Row row;
+                row.id = id;
+                // Without the prompt queue (the costliest part of a record copy, which no card shows — UI_THREAD.md §10a #4).
+                row.lean = _sessionRegistry ? _sessionRegistry->GetWithoutQueue(id) : std::nullopt;
+                row.tags = ::Agentmaster::GetSessionTags(id);
+                anyTagged = anyTagged || !row.tags.empty();
+                rows.push_back(std::move(row));
+            }
+            _sidePanelAiTagColors = anyTagged ? ::Agentmaster::LoadAllTagColors() : std::map<std::wstring, std::wstring>{};
+            _sidePanelAiTagsEpoch = tagsEpoch;
+            const auto dirColors = ::Agentmaster::LoadDirColorIndex(); // ONE folder-colors snapshot for every card's band
+            std::vector<std::wstring> missing; // sessions neither the registry nor the agent's index knows: read from disk
+            for (auto& row : rows)
+            {
+                AgentSidePanelAiResultView view = _SidePanelAiCreateResultView(row.id);
+                auto model = _SidePanelAiResultModelFor(row.id, row.lean, dirColors, _sidePanelAiTagColors, row.tags, view);
+                if (!row.lean && _sidePanelAiEntries.find(row.id) == _sidePanelAiEntries.end())
+                {
+                    missing.push_back(row.id);
+                }
+                _SidePanelAiApplyResultModel(view, std::move(model), row.id, /*fresh*/ true);
+                _sidePanelAiResults.Children().Append(view.base.card);
+                _sidePanelAiResultViews.insert_or_assign(row.id, std::move(view));
+            }
+            if (!missing.empty() && _sidePanelAiFetchedSeq != _sidePanelAiListSeq)
+            {
+                // One fetch per list: its landing rebuilds the cards, and a refresh or a rebuild of the same list must not queue
+                // the same reads again (a transcript that is gone stays a placeholder until the next list).
+                _sidePanelAiFetchedSeq = _sidePanelAiListSeq;
+                _SidePanelAiFetchMissingEntries(std::move(missing), _sidePanelAiListSeq);
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: an empty list rather than a half-built one; the next list event (or the AI view's next open)
+            // builds it again.
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelAiRebuildResults");
+            _SidePanelAiClearResultCards();
+        }
+    }
+
+    void TerminalPage::_SidePanelAiRefreshResults()
+    {
+        if (!_sidePanelAiMode || !_sidePanelAiResults)
+        {
+            return;
+        }
+        _sidePanelAiRefreshOwed = false;
+        _sidePanelAiNextRefreshMs = ::GetTickCount64() + kSidePanelAiRefreshMs;
+        if (_sidePanelAiResultViews.empty())
+        {
+            return;
+        }
+        try
+        {
+            // Tags: re-read only when the process-wide tag epoch moved since the last read (a tag edited anywhere in this
+            // process); otherwise each card's own model already holds them — a quiet refresh reads no tag file at all.
+            const uint64_t tagsEpoch = ::Agentmaster::SessionTagsEpoch();
+            const bool tagsMoved = tagsEpoch != _sidePanelAiTagsEpoch;
+            std::unordered_map<std::wstring, std::vector<std::wstring>> tagsById;
+            tagsById.reserve(_sidePanelAiResultViews.size());
+            bool anyTagged = false;
+            for (const auto& [id, view] : _sidePanelAiResultViews)
+            {
+                auto tags = tagsMoved ? ::Agentmaster::GetSessionTags(id) : view.base.model.tags;
+                anyTagged = anyTagged || !tags.empty();
+                tagsById.emplace(id, std::move(tags));
+            }
+            if (tagsMoved)
+            {
+                _sidePanelAiTagColors = anyTagged ? ::Agentmaster::LoadAllTagColors() : std::map<std::wstring, std::wstring>{};
+                _sidePanelAiTagsEpoch = tagsEpoch;
+            }
+            const auto dirColors = ::Agentmaster::LoadDirColorIndex();
+            for (auto& [id, view] : _sidePanelAiResultViews)
+            {
+                // A fresh lean read each: the session may have opened, closed, been renamed or moved on since the last pass.
+                const auto lean = _sessionRegistry ? _sessionRegistry->GetWithoutQueue(id) : std::nullopt;
+                auto model = _SidePanelAiResultModelFor(id, lean, dirColors, _sidePanelAiTagColors, tagsById[id], view);
+                _SidePanelAiApplyResultModel(view, std::move(model), id, /*fresh*/ false); // only the values that moved are written
+            }
+        }
+        catch (...)
+        {
+            // A refused XAML write or an allocation failure: the cards keep what they showed; the next list event rebuilds them.
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelAiRefreshResults");
+        }
+    }
+
+    void TerminalPage::_SidePanelAiRestyleSelection(const std::wstring& previous, const std::wstring& current) noexcept
+    {
+        if (_sidePanelAiResultViews.empty())
+        {
+            return;
+        }
+        try
+        {
+            const auto paint = [this](const std::wstring& sid, bool selected) {
+                const auto it = _sidePanelAiResultViews.find(sid);
+                if (it == _sidePanelAiResultViews.end() || !it->second.base.cardBack)
+                {
+                    return;
+                }
+                SidePanelStyleCardBorder(it->second.base.cardBack, SidePanelAiRingColor(it->second), selected, it->second.base.hovered);
+                SidePanelAiApplyItemStatus(it->second, selected); // "selected" follows the ring
+            };
+            if (!previous.empty())
+            {
+                paint(previous, false);
+            }
+            if (!current.empty())
+            {
+                paint(current, true);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelAiRestyleSelection"); // only a ring is lost
+        }
+    }
+
+    void TerminalPage::_SidePanelAiClickResult(const std::wstring& id)
+    {
+        try
+        {
+            const auto it = _sidePanelAiResultViews.find(id);
+            if (it == _sidePanelAiResultViews.end())
+            {
+                return;
+            }
+            if (it->second.known)
+            {
+                // Like a session card's click: the summary area peeks it until a click into the terminal ends the peek. Only
+                // an OPEN session drives the Manager lens (a closed one has no card there to select) and reveals its tab on
+                // the Agent Manager page.
+                const bool open = it->second.open;
+                _SidePanelSelectSession(id, /*driveManagerLens*/ open);
+                if (open)
+                {
+                    _RevealClickedSessionTab(id);
+                }
+                return;
+            }
+            // Never opened in Agentmaster: the summary has no record to read, so the click opens the transcript reading view —
+            // on a clean tick (an overlay over the window must not be built inside a pointer handler).
+            Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis = get_weak(), id]() {
+                if (const auto self = weakThis.get())
+                {
+                    self->_ShowTranscriptOverlayForSession(id, L"side panel AI search"); // never throws
+                }
+            });
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelAiClickResult");
+        }
+    }
+
+    void TerminalPage::_SidePanelAiOpenResult(const std::wstring& id)
+    {
+        try
+        {
+            // On a clean tick: a resume opens a tab, and nothing may change the tree inside the pointer handler (or the menu
+            // click) that asked for it.
+            Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis = get_weak(), id]() {
+                const auto self = weakThis.get();
+                if (!self)
+                {
+                    return;
+                }
+                try
+                {
+                    // The registry is read again NOW: the session may have opened or closed since its card was drawn.
+                    const auto lean = self->_sessionRegistry ? self->_sessionRegistry->GetWithoutQueue(id) : std::nullopt;
+                    if (lean && lean->live)
+                    {
+                        ::Agentmaster::LogNav(L"sidepanel ai-open " + ::Agentmaster::ShortId(id) + L" -> jump (its tab is open)");
+                        self->_ActivateClaudeSession(winrt::hstring{ id }); // cross-window through the activate sinks
+                        return;
+                    }
+                    const auto it = self->_sidePanelAiResultViews.find(id);
+                    const std::wstring dir = lean ? lean->workingDir : (it != self->_sidePanelAiResultViews.end() ? it->second.dir : std::wstring{});
+                    const std::wstring title = lean ? lean->title : (it != self->_sidePanelAiResultViews.end() ? it->second.title : std::wstring{});
+                    if (dir.empty())
+                    {
+                        // The folder is not known yet (its index entry is still being read): a resume has nowhere to launch, so
+                        // the transcript is what this double-click can show.
+                        ::Agentmaster::LogNav(L"sidepanel ai-open " + ::Agentmaster::ShortId(id) + L" -> transcript (its folder is not known yet)");
+                        self->_ShowTranscriptOverlayForSession(id, L"side panel AI search");
+                        return;
+                    }
+                    ::Agentmaster::LogNav(L"sidepanel ai-open " + ::Agentmaster::ShortId(id) + L" -> resume here");
+                    // The Sessions page's resume seam: transcript-gated (claude --resume, else a fresh conversation under the same
+                    // id), the "Claude not detected" gate and its notice, an upserted record for a session never opened before.
+                    self->_ResumeSessionFromDisk(id, dir, title);
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"side panel AI result: open");
+                }
+            });
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelAiOpenResult");
+        }
+    }
+
+    MenuFlyout TerminalPage::_SidePanelAiMakeClosedResultMenu(const std::wstring& id)
+    {
+        MenuFlyout menu;
+        const auto weakThis = get_weak();
+        // Filled on Opening, from the session's facts AT OPEN TIME (the session may have been resumed elsewhere since the list
+        // was drawn: then the first item jumps instead).
+        menu.Opening([weakThis, id](const IInspectable& sender, const IInspectable&) {
+            const auto self = weakThis.get();
+            auto m = sender.try_as<MenuFlyout>();
+            if (!self || !m)
+            {
+                return;
+            }
+            try
+            {
+                m.Items().Clear();
+                const auto lean = self->_sessionRegistry ? self->_sessionRegistry->GetWithoutQueue(id) : std::nullopt;
+                const auto it = self->_sidePanelAiResultViews.find(id);
+                const bool listed = it != self->_sidePanelAiResultViews.end();
+                const std::wstring dir = lean ? lean->workingDir : (listed ? it->second.dir : std::wstring{});
+                const std::wstring title = lean ? lean->title : (listed ? it->second.title : std::wstring{});
+                // A never-prompted source lets the fork seam derive a smart name (the Sessions page's rule).
+                const std::wstring forkTitle = (lean || (listed && it->second.hasMessages)) ? title : std::wstring{};
+                const bool openNow = lean && lean->live;
+
+                // Resume here (or Jump to Tab, when it opened since): what the double-click does.
+                MenuFlyoutItem resume;
+                resume.Text(openNow ? L"Jump to Tab" : L"Resume here");
+                resume.IsEnabled(openNow || !dir.empty());
+                AgentSetTip(resume, openNow ? L"Switch to this session's tab \x2014 it is open now." : L"Continue this conversation in a new tab in this window (claude --resume), with its whole history.");
+                resume.Click([weakThis, id](const IInspectable&, const RoutedEventArgs&) {
+                    if (const auto s = weakThis.get())
+                    {
+                        s->_SidePanelAiOpenResult(id); // re-reads the registry and defers itself
+                    }
+                });
+                m.Items().Append(resume);
+
+                // Fork here ▸ and Open New Session Here ▸: the shared launch-model pick lists (Default, Specify…, the models,
+                // the presets), each acting on a clean tick (the menu restores focus as it closes).
+                const auto models = ::Agentmaster::LaunchMenuEntries(self->_appSettings.launchModels);
+                MenuFlyoutSubItem fork;
+                fork.Text(L"Fork here");
+                fork.IsEnabled(!dir.empty());
+                AgentSetTip(fork, winrt::hstring{ L"Branch a new conversation off this one in a new tab here \x2014 the original is left exactly as it is. Pick the model the fork starts on, or Default. " } + AgentModelEditHint());
+                AgentFillModelPickItems(fork.Items(), models, [weakThis, id, dir, forkTitle](winrt::hstring model) {
+                    if (const auto s = weakThis.get())
+                    {
+                        s->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, id, dir, forkTitle, model]() {
+                            if (const auto page = weakThis.get())
+                            {
+                                // The fork question first when the source is mid-turn (HOOKS.md "Interrupted turns"), then the fork
+                                // seam for a session on disk — the Sessions page's row menu, in the foreground.
+                                ForkLaunchRequest request;
+                                request.sourceId = id;
+                                request.dir = dir;
+                                request.title = forkTitle;
+                                request.model = std::wstring{ model };
+                                request.background = false;
+                                request.origin = L"sidepanel-ai";
+                                page->_ForkAskingAboutRunningTurn(std::move(request));
+                            }
+                        });
+                    }
+                },
+                                        self->_ModelSpecifyOpener(), self->_AddPresetsOpener());
+                m.Items().Append(fork);
+                MenuFlyoutSubItem fresh;
+                fresh.Text(L"Open New Session Here");
+                fresh.IsEnabled(!dir.empty());
+                AgentSetTip(fresh, winrt::hstring{ L"Start a FRESH session in this session's folder. Pick the model it starts on, or Default. " } + AgentModelEditHint());
+                AgentFillModelPickItems(fresh.Items(), models, [weakThis, dir](winrt::hstring model) {
+                    if (const auto s = weakThis.get())
+                    {
+                        s->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, dir, model]() {
+                            if (const auto page = weakThis.get())
+                            {
+                                page->_SpawnClaudeSession(winrt::hstring{ dir }, winrt::hstring{}, static_cast<uint32_t>(-1), model);
+                            }
+                        });
+                    }
+                },
+                                        self->_ModelSpecifyOpener(), self->_AddPresetsOpener());
+                m.Items().Append(fresh);
+
+                m.Items().Append(MenuFlyoutSeparator{});
+                MenuFlyoutItem show;
+                show.Text(L"Show Transcript");
+                AgentSetTip(show, L"Read the whole conversation in a view over the window, at the level you pick.");
+                show.Click([weakThis, id](const IInspectable&, const RoutedEventArgs&) {
+                    if (const auto s = weakThis.get())
+                    {
+                        s->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, id]() {
+                            if (const auto page = weakThis.get())
+                            {
+                                page->_ShowTranscriptOverlayForSession(id, L"side panel AI search"); // never throws
+                            }
+                        });
+                    }
+                });
+                m.Items().Append(show);
+                MenuFlyoutSubItem copy;
+                copy.Text(L"Copy");
+                MenuFlyoutItem copyId;
+                copyId.Text(L"Session Id");
+                copyId.Click([id](const IInspectable&, const RoutedEventArgs&) {
+                    ::Agentmaster::LogNav(L"copy session-id " + ::Agentmaster::ShortId(id) + L" (side panel AI search)");
+                    CopyTextToClipboard(id);
+                });
+                copy.Items().Append(copyId);
+                MenuFlyoutItem copyPath;
+                copyPath.Text(L"Folder Path");
+                copyPath.IsEnabled(!dir.empty());
+                copyPath.Click([id, dir](const IInspectable&, const RoutedEventArgs&) {
+                    ::Agentmaster::LogNav(L"copy path " + ::Agentmaster::ShortId(id) + L" (side panel AI search)");
+                    CopyTextToClipboard(dir);
+                });
+                copy.Items().Append(copyPath);
+                m.Items().Append(copy);
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"side panel AI result: closed-session menu"); // an empty menu rather than a dead card
+            }
+        });
+        return menu;
     }
 }

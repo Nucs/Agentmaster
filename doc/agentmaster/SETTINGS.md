@@ -87,6 +87,15 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
   logging `[sessdb-diff]`; On makes the page use it and gives the AI search its tools from the next app
   start.
 
+## The AI search
+
+- `sessionsAiParkMinutes` (120; 1–1440, a blank or 0 reads 120 — `ClampSessionsAiParkMinutes`): the AI SEARCH section of
+  the Sessions tab. How long the AI search's idle claude.exe (~400 MB of commit) lives after its last use, on both surfaces:
+  the Sessions page's AI toggle (the last page that shows the search left it, [SESSIONS.md](SESSIONS.md) §9.6) and the side
+  panel's (its request ended, its box lost focus, its AI view closed, [SIDE_PANEL.md](SIDE_PANEL.md) §2h). A park ends only
+  the process; the next request continues from a digest of the conversation. Read by the next park armed (one already armed
+  keeps its time).
+
 ## Prompt Queue Runner and delivery
 
 - Stamped onto every new session: `defaultAutorunnerMode` (`Full` = Auto), `maxAutoSends` (100),
@@ -293,7 +302,7 @@ Every color surface — tabs, board bands, Sessions chips, the pending dots — 
 - `sessionsAiThinkingLevel` (`off`): the AI search's thinking level.
 - The side panel: `sidePanelOnLeft` (true), `sidePanelScrollToSelectedTab` (true), and the seeds for new
   windows `sidePanelWidthFraction` (0.22), `sidePanelSplitFraction` (0.5), `sidePanelCollapsed` (false),
-  `sidePanelSummaryHidden` (false).
+  `sidePanelSummaryHidden` (false), `sidePanelAiMode` (false: the filter box's AI toggle, SIDE_PANEL.md §2h).
 - The tab color flyout: `tabColorPickerCustomOpen`, `tabColorPickerAdvancedOpen` (true).
 - The updater: `updateSkippedVersion`, `updatePostponedUntilUnixMs`.
 - `hiddenSessionIds`: the Sessions page's hidden rows.

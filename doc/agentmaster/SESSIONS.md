@@ -538,6 +538,14 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
 > waits as the request and only Enter sends it; off, it filters the list at once. The ⊘ reset never
 > wrote the box; its tooltip now says that the text stays. The nav lines carry the box's length
 > (`box=N`, 9.10).
+>
+> **2026-10-31, later (the user's request; NOT BUILT): a second view, in the side panel, and a configurable park.** The
+> side panel's filter box has an **AI** toggle at its right end: on, the box is the request line and the card area shows
+> the model's answer and its list as side panel cards with their `why` ([`SIDE_PANEL.md`](SIDE_PANEL.md) §2h; the box keeps
+> its text by the rule above). It is a view of the SAME conversation (`SharedSessionSearchAgent`), with its own process
+> rule — the process starts only at a click into its box or a request — and the park is now a setting for both surfaces:
+> `AppSettings::sessionsAiParkMinutes` (Settings ▸ Sessions ▸ AI SEARCH; 120 minutes by default, 1–1440; a fixed 10 minutes
+> before) — 9.6.
 
 ### 9.1 What the user sees
 
@@ -751,9 +759,18 @@ the header build, the open and close seams, the gather's end, and the render.
 The idle `claude.exe` holds about 400 MB, and the catalog tens of megabytes. A process-wide tally
 counts the pages that show the AI search (the mode is on and the page is on screen). When the last
 one leaves (the toggle goes off, the page closes or is covered by a tab, the window closes), the
-agent **frees its catalog** at once and **parks its process** 10 minutes later. A page that comes
-back sooner finds the same process. After a park, the conversation continues from a digest of its
-record.
+agent **frees its catalog** at once and **parks its process** after the configured delay —
+`AppSettings::sessionsAiParkMinutes`, the cog's Sessions tab, "AI SEARCH": 120 minutes by default,
+1–1440, a blank or 0 reads 120 (`ClampSessionsAiParkMinutes`); a fixed 10 minutes until 2026-10-31,
+when the user asked for it to be configurable with a 2-hour default. A page that comes back sooner
+finds the same process. After a park, the conversation continues from a digest of its record.
+
+**The side panel's view** ([`SIDE_PANEL.md`](SIDE_PANEL.md) §2h) is not counted in that tally: a side panel
+in AI mode may stay on screen all day, so it starts the process only at a click into its box or a
+request, and arms the same park after its own request ends, when its box loses focus with nothing
+running, when its AI view closes, after ⊘ and when its window closes — never while a page of the
+tally shows the search (`TerminalPage::_SessionsAiPagesShowingCount`; the page's rule holds the
+process then) and never while a request runs.
 
 The hidden process is not a session: the Fleet Observer and the CLI skip it
 (`SDK_HARNESS.md` section 5).

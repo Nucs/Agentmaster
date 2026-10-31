@@ -67,6 +67,7 @@ namespace Agentmaster
     enum class DockProbeMode : int; // Agentmaster: Engine.h — cross-window tab docking, what a drag asks a dock target (complete type included by the .cpp)
     struct DockProbeResult; // Agentmaster: Engine.h — cross-window tab docking, a dock target's answer (slot + numeric window id)
     class ProcessExitWait; // Agentmaster: ApiErrorRewind.h — handles on the claude.exe processes a resume must outlive (HOOKS.md "API-error turns"; complete type included by TerminalPage.AgentSessions.cpp)
+    struct DirColorIndex; // Agentmaster: Persistence.h — one snapshot of the folder colors; a parameter of the side panel's AI result model (complete type included by TerminalPage.AgentSidePanel.cpp)
 }
 
 namespace winrt::TerminalApp::implementation
@@ -215,6 +216,30 @@ namespace winrt::TerminalApp::implementation
         // Cleared (detached) when the summary comes back, and shut down before the card leaves the list — a
         // ToolTip still attached to a dropped element is the islands leak class AgentTipHelpers.h describes.
         std::shared_ptr<AgentSessionToolTipHost> tipHost;
+    };
+
+    // Agentmaster (SIDE_PANEL.md §2h — the side panel's AI SEARCH): ONE card of the model's list — the side panel's own card
+    // (the skeleton _SidePanelBuildCardSkeleton builds for the session cards: the folder-color band with the title and the tag
+    // ribbons, the status icon and its label, the timing line, the folder line) with the model's WHY under it, and what the
+    // card's click, double-click and right-click need to act on a session that may have no tab and no registry record.
+    // Rebuilt whenever the model shows a new list (a handful of cards, never the fleet), and patched in place by the periodic
+    // tick and the registry drain (a listed session that opens, closes or changes state). Before a card leaves the list its
+    // status icon is shut down (AgentStatusGlyph::Shutdown — its motions stop and its flash ring gives back the shared blink
+    // clock), exactly as a session card's is.
+    // ⚠ The skeleton's rounded shapes are CHILDLESS (see AgentSidePanelCardView): never give `base.cardBack` or `base.band` a
+    // child; the why line sits in the card's body, beside them.
+    struct AgentSidePanelAiResultView
+    {
+        AgentSidePanelCardView base; // the side panel card skeleton and the model it shows (base.tipHost stays null: a result card's tip is the floating one)
+        winrt::Windows::UI::Xaml::Controls::Grid whyRow{ nullptr }; // [ bar ][ why * ] under the folder line; null when the card carries no why (a search's preview, or the model gave none)
+        winrt::Windows::UI::Xaml::Controls::TextBlock why{ nullptr }; // the model's evidence for this session (one line, trimmed with "…"; the tip holds it whole)
+        std::wstring whyText; // what `why` shows ("" = no why row)
+        bool open{ false }; // the session has a live tab somewhere (the registry's live flag): a double-click jumps to it, a right-click is the shared session menu
+        bool shownOpen{ false }; // what the card's state line shows now (the live state, or "closed"): an in-place refresh rewrites the line only when this or the state moved
+        bool known{ false }; // the registry has a record (live or closed): a click can bind the summary area to it; false = a click opens the transcript reading view
+        std::wstring dir; // the session's working directory (the cwd a resume or a fork launches in); "" while its data is still being read from disk
+        std::wstring title; // the title a resume pins / a fork derives its name from; "" while unknown
+        bool hasMessages{ false }; // the session was prompted at least once (a never-prompted fork source lets the fork seam derive a name)
     };
 
     struct TerminalPage : TerminalPageT<TerminalPage>
@@ -792,6 +817,56 @@ namespace winrt::TerminalApp::implementation
             Fork, // Enter on the focused Fork button: what its click does
         };
         SidePanelLaunchKeyAction _sidePanelLaunchArmedAction{ SidePanelLaunchKeyAction::None };
+        // --- The side panel's AI SEARCH (SIDE_PANEL.md §2h) ---
+        // The filter box's "AI" toggle (an "AI" ToggleButton drawn over the box's right end, like the Sessions page's) turns
+        // the box into the AI search's REQUEST line and replaces the card list with the model's answer and its list of
+        // sessions. It is a VIEW of the process's one search conversation (SharedSessionSearchAgent — the Sessions page's
+        // agent, same conversation, same process), with the side panel's own lifecycle rule: its claude.exe starts only at a
+        // click into the box or a request, and parks AppSettings::sessionsAiParkMinutes after the last request ends (unless a
+        // Sessions page shows the AI search, whose own rule then holds it). UI-thread-only, like every side panel member;
+        // the AI view is built on the first AI-on (_SidePanelAiEnsureView), so a window that never turns it on pays nothing.
+        winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sidePanelAiBtn{ nullptr }; // the "AI" toggle inside the filter box (a sibling in the box's grid cell, appended after it, so it draws over the box's right end); IsChecked pinned to _sidePanelAiMode
+        // The AI mode: true == the box is the request line and the card area shows the AI view. Per window
+        // (WindowRecord::sidePanelAiMode) and the last change sets the new-window default (AppSettings::sidePanelAiMode) —
+        // the "Sum" contract.
+        bool _sidePanelAiMode{ false };
+        bool _sidePanelAiBoxPadded{ false }; // the filter box's right padding grew by the toggle's reserve (once: a second Loaded must not add it again)
+        bool _sidePanelAiClearButtonMoved{ false }; // the box's own clear button (the template part DeleteButton) is shifted left of the toggle (once)
+        winrt::Windows::UI::Xaml::Controls::Grid _sidePanelCardsHost{ nullptr }; // the cards area's one child: holds the card list's ScrollViewer and, once built, the AI view over it (one of the two is visible)
+        winrt::Windows::UI::Xaml::Controls::Grid _sidePanelAiRoot{ nullptr }; // the AI view: rows [strip Auto][results *]; null until the first AI-on
+        winrt::Windows::UI::Xaml::Controls::Border _sidePanelAiDot{ nullptr }; // the strip's state dot: blue working, green answered / ready, red failed, gray idle
+        winrt::Windows::UI::Xaml::Controls::TextBlock _sidePanelAiQuestionText{ nullptr }; // "❯ <the newest request>" (dim); collapsed until there is one
+        winrt::Windows::UI::Xaml::Controls::TextBlock _sidePanelAiStatusText{ nullptr }; // the plan + what runs now, or the answer, or the failure, or how to start (selectable, wrapping; its ScrollViewer caps the strip's height)
+        winrt::Windows::UI::Xaml::Controls::Button _sidePanelAiThinkingBtn{ nullptr }; // the flat "thinking <level>" toggle: the agent's level, rotated by a click (the Sessions page's _CycleSessionsAiThinking)
+        winrt::Windows::UI::Xaml::Controls::TextBlock _sidePanelAiThinkingText{ nullptr }; // the thinking toggle's text
+        winrt::Windows::UI::Xaml::Controls::TextBlock _sidePanelAiUsageText{ nullptr }; // "ctx 18k / 200k" (dim), once the model answered
+        winrt::Windows::UI::Xaml::Controls::Button _sidePanelAiResetBtn{ nullptr }; // ⊘ — throw the conversation away (every window's view of it clears)
+        winrt::Windows::UI::Xaml::Controls::ScrollViewer _sidePanelAiResultsScroll{ nullptr }; // the result cards' own scroll
+        winrt::Windows::UI::Xaml::Controls::StackPanel _sidePanelAiResults{ nullptr }; // the result cards, in the model's order
+        // THE LIST: the sessions the view shows, in the model's order — its final pick (a show) or a search's preview — with
+        // the model's why per session (a pick only) and the index entries the agent sent along (title, folder, times for a
+        // session the registry does not know).
+        std::vector<std::wstring> _sidePanelAiShownIds;
+        std::unordered_map<std::wstring, std::wstring> _sidePanelAiReasons; // id -> the model's why ("" never stored)
+        std::unordered_map<std::wstring, ::Agentmaster::SessionIndexEntry> _sidePanelAiEntries; // id -> its index entry (from the event, the agent's index, or the disk fetch)
+        std::unordered_map<std::wstring, AgentSidePanelAiResultView> _sidePanelAiResultViews; // id -> its result card (the cards on screen)
+        bool _sidePanelAiHasShown{ false }; // the model showed a list in this conversation (an EMPTY list then reads "nothing fits", not "no result yet")
+        bool _sidePanelAiPreview{ false }; // the list on screen is a search's candidates, not the model's pick (no why lines; "choosing…")
+        uint64_t _sidePanelAiListTurn{ 0 }; // the request the list on screen belongs to (a preview of an older request never replaces it)
+        uint64_t _sidePanelAiEpoch{ 0 }; // the conversation epoch this view follows (an event of an epoch a reset left behind is dropped)
+        uint64_t _sidePanelAiListenerToken{ 0 }; // this window's side-panel listener on the shared agent (0 = none); removed in ~TerminalPage (Rule #10)
+        uint64_t _sidePanelAiAskedTurn{ 0 }; // the newest request THIS window's side panel sent: its end arms the park (only the asking window arms it)
+        uint64_t _sidePanelAiListSeq{ 0 }; // counts the lists the view adopted: a disk fetch that lands for an older list is dropped
+        uint64_t _sidePanelAiFetchedSeq{ 0 }; // the list a disk fetch was started for (one fetch per list: a refresh or a rebuild of the same list never queues a second)
+        std::wstring _sidePanelAiCountValue; // the count line's text in AI mode as last written (written again only when it changes)
+        // The result cards' freshness: a registry drain while the AI view shows only OWES a refresh (the drains of a busy fleet
+        // come many times a second), which the periodic tick (~2.5 s) pays; the tick also refreshes every ~30 s on its own, so
+        // the "ago" texts age like the session cards'. The tags are re-read only when SessionTagsEpoch moved (the session
+        // cards' cache rule), and the colors file once per epoch while a listed session is tagged.
+        bool _sidePanelAiRefreshOwed{ false };
+        uint64_t _sidePanelAiNextRefreshMs{ 0 }; // GetTickCount64 at/after which the tick refreshes the result cards unprompted
+        uint64_t _sidePanelAiTagsEpoch{ UINT64_MAX }; // the tags epoch the result cards' tags and colors were read at (UINT64_MAX = never)
+        std::map<std::wstring, std::wstring> _sidePanelAiTagColors; // LoadAllTagColors() of that epoch (read only while a listed session is tagged)
         // Splitter drag state (one drag at a time; pointer captured on the splitter Border).
         bool _sidePanelDragWidth{ false }; // a vertical-separator drag is in flight
         bool _sidePanelDragSplit{ false }; // a horizontal-separator drag is in flight
@@ -2830,6 +2905,17 @@ namespace winrt::TerminalApp::implementation
         void _SessionsAiAttach(); // register this page's agent listener once (events are marshalled to this window's UI thread)
         void _SessionsAiDetach() noexcept; // ~TerminalPage: remove the listener and leave the in-use tally. Thread-safe, never throws
         void _SessionsAiSetInUse(bool inUse) noexcept; // count this page in / out of the pages that show the AI search; the last one out frees the agent's index and parks its process
+        // Agentmaster (SIDE_PANEL.md §2h): how many Sessions pages show the AI search right now, across every window — the
+        // process-wide tally _SessionsAiSetInUse keeps. The side panel's AI search reads it before it arms a park: while a page
+        // shows the search, the page's own rule holds the process, and a park armed by the side panel would end it under the
+        // page. Thread-safe (an atomic load). Returns the count (0 = no page shows it). Never throws.
+        static int _SessionsAiPagesShowingCount() noexcept;
+        // Agentmaster (SESSIONS.md §9.6): the AI search's park delay in milliseconds — AppSettings::sessionsAiParkMinutes
+        // through ClampSessionsAiParkMinutes (1..1440 minutes, 0 -> 120), read from this window's settings copy (a cog Save
+        // updates it). Both surfaces that arm the park (the Sessions page's last-page-out, the side panel's request end) use
+        // it, so one setting decides how long the idle process lives. Touches no XAML: ~TerminalPage's detach calls it, on
+        // whatever thread runs the destructor. Returns the delay (60,000 .. 86,400,000 ms). Never throws.
+        int64_t _SessionsAiParkDelayMs() const noexcept;
         void _SessionsAiNotePageShown(bool shown); // the page came on screen or left it (opened / closed, or uncovered / covered by a tab switch): keep the tally right, and warm the agent up when the page comes back in AI mode
         void _SessionsAiAfterGather(); // the page's own gather landed: put the AI list's extra rows back, and let the agent read the index now (the sidecar files are current)
         void _OnSessionsAiEvent(const ::Agentmaster::SessionSearchEvent& e); // one agent event, on the UI thread: update the list, the strip, the table
@@ -3011,7 +3097,7 @@ namespace winrt::TerminalApp::implementation
         void _SidePanelFollowFocusedTab(); // the PEEK-vs-FOLLOW rule: snap the side panel (card highlight + bottom summary) back to the FOCUSED terminal tab's session, ENDING any card "peek". Hooked to TabContent's PointerPressed (handledEventsToo — the click-back-to-work gesture) + bubbling GotFocus in _InitAgentSidePanel; gated on StartupState::Initialized (never clobber the restore-time selection) + a managed focused tab (Manager/pwsh/cmd/external resolve empty -> keep the current peek); driveManagerLens=false, so ONLY the side panel moves (the Manager board/tree/Auto-Testing keeps its deliberate selection). Cheap at rest — the same-id early-out in _SidePanelSelectSession makes the common "already on the focused tab" case free
         void _SidePanelBindSummary(const std::wstring& id); // point the bottom area's fill-hosted AgentTabOverlay summary at `id` (create/replace the overlay; empty id -> release it + show the hint); same-id rebinds just kick RefreshSummaryContent
         void _SidePanelApplySettings(); // adopt GLOBAL settings changes (cog Save / cross-window broadcast): sort label + dock side live, wrap/truncate/previous + color-mode pushed into the summary overlay, then a forced rebuild
-        void _SidePanelPersistDefaults(bool width, bool split, bool collapsed, bool summaryHidden = false); // the "last one to adjust sets the default" half: freshest-disk RMW of ONLY the flagged AppSettings sidePanel* fields (granular, so a width drag never exports this window's collapse or summary state), keeping _appSettings in step
+        void _SidePanelPersistDefaults(bool width, bool split, bool collapsed, bool summaryHidden = false, bool aiMode = false); // the "last one to adjust sets the default" half: freshest-disk RMW of ONLY the flagged AppSettings sidePanel* fields (granular, so a width drag never exports this window's collapse or summary state), keeping _appSettings in step
         void _SidePanelToggleSummary(); // the "Sum" header toggle: show / hide the summary area (and its splitter); hidden switches every card to the RICH session tooltip beside the panel, shown back to the classic floating tip + the bound summary. Persists per window (record autosave) AND as the new-window default (RMW). Never throws: a failed card switch is logged per card (Rule #18)
         void _SidePanelUpdateSumButton(); // pin the "Sum" toggle's IsChecked to !_sidePanelSummaryHidden (after a click and at build) — the member is the truth, the ToggleButton's self-flip is not
         void _SidePanelApplyCardTipMode(AgentSidePanelCardView& view, const std::wstring& id, bool rebuildTags, const ::Agentmaster::SessionInfo* lean); // switch ONE card to the tooltip mode the summary state asks for: hidden -> silence its floating tips (card, timing, "+N") and arm its rich tooltip host; shown -> clear the host and give the floating tips back. `rebuildTags` re-makes the tag strip (its "+N" tip follows the mode); `lean` is the card's lean session row for the arm-build (null -> a GetWithoutQueue). Never throws (logged)
@@ -3094,7 +3180,26 @@ namespace winrt::TerminalApp::implementation
         void _SidePanelQueueReveal(); // coalesce the owed reveal onto ONE Low-priority dispatcher tick (after the rebuild/layout that may have just created the card); a no-op while collapsed or when nothing is owed — the expand path / next rebuild re-queues
         void _SidePanelRevealPendingNow(); // the reveal tick's body: if the owed session is a LISTED row, realize the rows around it (a row outside the realized range has no card yet — SIDE_PANEL.md §2f), UpdateLayout + StartBringIntoView its card (minimal scroll — a fully visible card never moves) and consume the debt; a session not listed yet keeps it owed. Never throws (XAML failures are logged, Rule #18) and never moves keyboard focus
         std::unordered_set<std::wstring> _HostedSessionIds() const; // the ids of the managed sessions whose tab lives in THIS window (the live _claudeTabs entries) — the ONE "is this session here?" predicate the Explorer Tree's LOCAL scope provider (_WireAgentManagerContent) AND the side panel's LOCAL card list share, so the two surfaces can never disagree; defined in TerminalPage.AgentSidePanel.cpp
-        AgentSidePanelCardView _SidePanelCreateCardView(const std::wstring& id); // build ONE card's empty skeleton (card grid over a CHILDLESS rounded back / band area over a CHILDLESS rounded band / title / state row / dir line — the elements every card has; the rounded shapes stay childless so a card gets no composition node of its own) and wire its select / activate / hover / the shared lazy context menu (anchored on the card, so its Tags item opens under it); the caller fills it with _SidePanelApplyCardModel(fresh=true) and inserts it
+        AgentSidePanelCardView _SidePanelCreateCardView(const std::wstring& id); // build ONE card's empty skeleton (_SidePanelBuildCardSkeleton) and wire its select / activate / hover / the shared lazy context menu (anchored on the card, so its Tags item opens under it); the caller fills it with _SidePanelApplyCardModel(fresh=true) and inserts it
+        // Agentmaster (SIDE_PANEL.md §2c / §2h): the elements every side panel card has, with NO handler wired — the card grid
+        // over a CHILDLESS rounded back, the band area over a CHILDLESS rounded band with the title, the state line with the
+        // status icon and its label, the folder line. The session cards (_SidePanelCreateCardView) and the AI search's result
+        // cards (_SidePanelAiCreateResultView) wire their own handlers on it, because each looks the card up in its own map;
+        // the shape stays ONE code path, so the two kinds of cards can never drift apart.
+        //   id                 - the card's session (its title's AutomationId key).
+        //   automationIdPrefix - the title's AutomationId prefix ("am.side.card." for a session card, "am.side.ai.result." for a
+        //                        result card; E2E_TESTING.md §6.3).
+        //   returns            - the unparented skeleton; its glyph is created (the caller tells it whether its host shows:
+        //                        the session cards hide with the collapse AND the AI view, the result cards with the collapse).
+        //   throws             - winrt::hresult_error when XAML refuses an element (off the UI thread / a torn-down core).
+        AgentSidePanelCardView _SidePanelBuildCardSkeleton(const std::wstring& id, std::wstring_view automationIdPrefix);
+        // Agentmaster (SIDE_PANEL.md §2c): wire a SESSION card's gestures on its skeleton — the hover ring, click = select,
+        // double-click = activate, right-click = the shared lazy session menu — each resolving the card through
+        // _sidePanelCardViews at event time (a dropped or replaced card is ignored), never by capture.
+        //   v  - the card (its root Grid owns the handlers).
+        //   id - the card's session.
+        //   throws - winrt::hresult_error when XAML refuses a registration; the list update's catch resets the list.
+        void _SidePanelWireCardHandlers(AgentSidePanelCardView& v, const std::wstring& id);
         void _SidePanelApplyCardModel(AgentSidePanelCardView& view, AgentSidePanelCardModel model, const std::wstring& id, bool fresh); // write `model` into the card: with fresh==false only the values that differ from view.model (a text, a brush, a part added or dropped); fresh==true writes everything (a new card). Then view.model = model
         void _SidePanelApplyCardTags(AgentSidePanelCardView& view, const AgentSidePanelCardModel& model, const std::wstring& id); // give the band the layout `model.tags` needs: untagged = the band is exactly the title; tagged = [ title * ][ a NEW tag strip ] (a changed tag list, tag color or ink replaces the strip; the title element is re-parented, never rebuilt); `id` = the card's session (the strip's ribbons suspend its rich tooltip in the "Sum" off mode)
         winrt::Windows::UI::Xaml::Controls::StackPanel _SidePanelMakeTagStrip(const std::vector<std::wstring>& tags,
@@ -3103,6 +3208,129 @@ namespace winrt::TerminalApp::implementation
                                                                               double hangPx,
                                                                               const winrt::Windows::UI::Xaml::UIElement& card,
                                                                               const std::wstring& id); // a card's top-right tag strip: one ribbon per tag in its resolved `colors` entry (capped at kSidePanelCardTagSlots, the last slot a "+N" — with its own floating tip in the classic mode only), each opening the shared tag hover panel; hung from the band's top edge by `hangPx`; a tooltip-FREE zone for `card` (held weakly) so the card's floating tip never stacks on the hover panel — and, with the summary hidden, a ribbon / "+N" entry detaches the card's rich tooltip (_SidePanelSuspendCardToolTip(id))
+
+        // ===== Agentmaster: the side panel's AI SEARCH (SIDE_PANEL.md §2h; TerminalPage.AgentSidePanel.cpp) =====
+        // True while the side panel's card list is not on screen: the panel is collapsed, or the AI view covers it. The fleet
+        // list then defers its updates (marks itself dirty), keeps a ⌖ reveal owed, and stops its status icons' motions —
+        // the collapse rules, for the same reason: nothing would be seen. Never throws.
+        bool _SidePanelCardsHidden() const noexcept;
+        // Make room in the filter box for the "AI" toggle over its right end: grow the box's right padding by the toggle's
+        // reserve, and shift the box's own clear button (the template part DeleteButton) left by the same amount, each ONCE —
+        // the Sessions page's _SessionsAiFitToggleIntoBox for the slim box. Called at the box's Loaded, GotFocus and
+        // TextChanged until both are done. Never throws (a failure is logged; the next call tries again).
+        void _SidePanelAiFitToggleIntoBox();
+        // Turn the AI view on or off for THIS window. On: the filter box becomes the request line (emptied, its placeholder
+        // and tip changed), the AI view replaces the card list and shows the conversation's current state and list; no
+        // process starts (the first click into the box or the first request starts it). Off: the box filters the cards again
+        // (emptied), the cards come back and catch up; the conversation is kept.
+        //   on         - the mode to enter.
+        //   userAction - true for the toggle's click: the change is persisted (this window's record + the new-window default),
+        //                logged as [nav], refused with the "Claude not detected" notice when there is no native claude.exe,
+        //                and an AI-on puts the caret in the box (which starts the process: the click asked to search). false
+        //                for the window's open (the seeded mode is applied silently, nothing persisted, no focus moved).
+        // Never throws: a failure is logged and leaves the toggle showing the mode that holds.
+        void _SidePanelSetAiMode(bool on, bool userAction);
+        void _SidePanelUpdateAiButton(); // pin the "AI" toggle's IsChecked to _sidePanelAiMode (the member is the truth; the ToggleButton flips itself before Click). Never throws past a XAML write on a live control
+        // Build the AI view (the strip and the results list) into the cards host on the first AI-on; a no-op once built.
+        // Throws what XAML throws (hresult_error); _SidePanelSetAiMode contains it.
+        void _SidePanelAiEnsureView();
+        // Register THIS window's side-panel listener on the process's search agent, once (events are marshalled to this
+        // window's UI thread and handled by _OnSidePanelAiEvent). The first call creates the agent object (no process).
+        // Throws what SharedSessionSearchAgent() throws on its first call, std::bad_alloc.
+        void _SidePanelAiAttach();
+        // ~TerminalPage: remove the side-panel listener (Rule #10). Thread-safe (the destructor can run on a pool thread),
+        // touches no XAML, never throws; a no-op for a window that never turned the AI view on.
+        void _SidePanelAiDetach() noexcept;
+        // Send the box's text to the conversation (the newest request wins), remember the turn (its end arms the park), clear
+        // the box. An empty box does nothing; a missing claude.exe shows the "Claude not detected" notice. Never throws.
+        void _SidePanelAiAsk();
+        // The request box got keyboard focus in AI mode: start the search's process and read its index in the background
+        // (SessionSearchAgent::Prewarm) — the "a click into the box starts it" rule; nothing when claude.exe is missing (the
+        // request itself shows the notice). Never throws.
+        void _SidePanelAiPrewarm();
+        // Arm the process's park (SessionSearchAgent::ParkProcessAfter, _SessionsAiParkDelayMs) — unless a Sessions page shows
+        // the AI search (its rule holds the process then) or the conversation is answering now (its end arms it again).
+        //   why - the cause, for the [ai-search] line ("request ended", "box left").
+        // Never throws.
+        void _SidePanelAiArmPark(std::wstring_view why) noexcept;
+        // One agent event on this window's UI thread: keep the epoch, take a preview / a pick / a reset into the list, end a
+        // preview the request did not turn into a pick, arm the park when THIS window's request ended, repaint the strip, the
+        // count line and (when the list changed) the result cards.
+        //   e - the event, with the conversation's state after it.
+        // Throws what the rebuild throws (hresult_error); the dispatched caller logs it.
+        void _OnSidePanelAiEvent(const ::Agentmaster::SessionSearchEvent& e);
+        // Take the conversation's shown list as the view's list (AI on, a reset, an answer that ends a preview): its ids, its
+        // whys, and the index entries the agent's index holds for them (EntriesFor); ids neither the registry nor that index
+        // knows are fetched from disk off the UI thread (_SidePanelAiFetchMissingEntries).
+        //   snapshot - the conversation's state.
+        // Throws std::bad_alloc; what SharedSessionSearchAgent() throws on its first call.
+        void _SidePanelAiAdoptSnapshot(const ::Agentmaster::SessionSearchSnapshot& snapshot);
+        // Read the index entries of `ids` from disk on a pool thread (LoadSessionIndexEntryById), then — back on the UI thread,
+        // when the view still shows the same list (`listSeq`) — keep them and rebuild the cards that lacked them. A
+        // terminate-netted fire_and_forget that holds the page only weakly across the pool hop (the page-teardown rule).
+        winrt::fire_and_forget _SidePanelAiFetchMissingEntries(std::vector<std::wstring> ids, uint64_t listSeq);
+        // Repaint the strip (dot, request, plan / status / answer, thinking level, context size, the reset's enabled state)
+        // from the conversation's state. A no-op before the view exists. Throws what XAML throws.
+        void _SidePanelAiUpdateStrip(const ::Agentmaster::SessionSearchSnapshot& snapshot);
+        // Write the count line for AI mode ("3 sessions found", "4 candidates, choosing…", the idle hint) — only when its text
+        // changed. A no-op outside AI mode (the card list owns the line then). Throws what XAML throws.
+        void _SidePanelAiUpdateCountLine(const ::Agentmaster::SessionSearchSnapshot& snapshot);
+        // Rebuild the result cards from the list (_sidePanelAiShownIds): shut the old cards' status icons down, then one new
+        // card per listed session, in the model's order, its model computed from the registry (an open or a closed record)
+        // or its index entry. Never throws: a failure is logged and leaves the list empty until the next event.
+        void _SidePanelAiRebuildResults();
+        // Re-derive every result card's model from the registry (a listed session opened, closed, renamed or changed state;
+        // the "ago" texts aged) and write only the cards whose model moved. Called by the registry drain and the periodic
+        // tick while the AI view shows. Never throws (a failure rebuilds the cards on the next list event).
+        void _SidePanelAiRefreshResults();
+        // Shut down and drop every result card (their status icons first: motions stop, the ring's clock hold is given back).
+        // Never throws.
+        void _SidePanelAiClearResultCards() noexcept;
+        // Compute ONE result card's model and facts: from the registry record when it has one (an open session: its live state;
+        // a closed one: "closed"), else from its index entry, else a placeholder ("reading…") whose entry the disk fetch brings.
+        //   id          - the session.
+        //   lean        - its registry record (GetWithoutQueue), or nullopt.
+        //   dirColors   - this pass's one LoadDirColorIndex snapshot (every card's band color resolves against it).
+        //   tagColors   - this pass's LoadAllTagColors() (empty when no listed session is tagged).
+        //   tags        - the session's bookmark tags (GetSessionTags), in add order.
+        //   out         - the facts the card's gestures need (open, known, dir, title, hasMessages, whyText) — written here.
+        //   returns     - the card model (the session card's AgentSidePanelCardModel: band, title, state, timing, folder, tags, tip).
+        //   throws      - std::bad_alloc.
+        AgentSidePanelCardModel _SidePanelAiResultModelFor(const std::wstring& id,
+                                                           const std::optional<::Agentmaster::SessionInfo>& lean,
+                                                           const ::Agentmaster::DirColorIndex& dirColors,
+                                                           const std::map<std::wstring, std::wstring>& tagColors,
+                                                           const std::vector<std::wstring>& tags,
+                                                           AgentSidePanelAiResultView& out);
+        // Build ONE result card: the shared skeleton (_SidePanelBuildCardSkeleton), the why row, and the result gestures —
+        // hover ring, click (select + summary peek, or the transcript for a session the registry never knew), double-click
+        // (jump to its tab, or resume it as a new tab here), right-click (the shared session menu for an open session, the
+        // closed-session menu otherwise). Every handler reaches the card through `sender` and the view through
+        // _sidePanelAiResultViews, never by capture (the element -> handler -> element leak rule).
+        //   id      - the session.
+        //   returns - the view (the caller writes its model with _SidePanelAiApplyResultModel and appends the card).
+        //   throws  - winrt::hresult_error when XAML refuses an element.
+        AgentSidePanelAiResultView _SidePanelAiCreateResultView(const std::wstring& id);
+        // Write a result card's model and why: every value when `fresh`, else only the values that moved (the periodic
+        // refresh). The state label reads "closed" for a session with no live tab. Throws winrt::hresult_error when XAML
+        // refuses an edit (the callers contain it).
+        void _SidePanelAiApplyResultModel(AgentSidePanelAiResultView& view, AgentSidePanelCardModel model, const std::wstring& id, bool fresh);
+        // Paint the selection ring of the result cards after the side panel's selection moved from `previous` to `current`
+        // (_SidePanelSelectSession calls it), so a result card highlights like the session card of the same session. Never
+        // throws (a refused write is logged).
+        void _SidePanelAiRestyleSelection(const std::wstring& previous, const std::wstring& current) noexcept;
+        // A result card's click: a session the registry knows is SELECTED (the summary area peeks it, the Manager lens follows
+        // an open one, and the tab strip reveals it on the Agent Manager page); one it never knew opens its transcript in the
+        // reading view instead (no summary record exists). Never throws.
+        void _SidePanelAiClickResult(const std::wstring& id);
+        // A result card's double-click, on a clean tick: an open session's tab is activated (cross-window); a closed one is
+        // resumed as a new tab in this window (_ResumeSessionFromDisk: transcript-gated, the "Claude not detected" gate
+        // included). A session whose folder is not known yet opens its transcript instead. Never throws.
+        void _SidePanelAiOpenResult(const std::wstring& id);
+        // The right-click menu of a CLOSED result: Resume here · Fork here ▸ (the launch models) · Open New Session Here ▸ ·
+        // Show Transcript · Copy ▸ (Session Id, Folder Path). Lazily filled on Opening, so it reflects the session at open
+        // time (a resume elsewhere since the list was drawn jumps instead). Throws what XAML throws (the caller contains it).
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout _SidePanelAiMakeClosedResultMenu(const std::wstring& id);
 
         std::wstring _evaluatePathForCwd(std::wstring_view path);
 
