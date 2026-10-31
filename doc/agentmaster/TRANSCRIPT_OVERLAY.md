@@ -6,7 +6,8 @@ second pass: 85% wide, folded tool calls (§3b), the remembered level (§3a) —
 (third ask, same day, not built). 2026-10-05: the ↵ line-wrap toggle (§3c, fourth ask) — not built; then
 the Session chain links (§3d, fifth ask, same day) — not built; then a fork with no messages yet shows the
 transcript it was forked from (§3e, a sixth report, same day) — not built. 2026-10-31: the (i) level guide and
-the tabs' cheat-sheet tooltips (§3f, the seventh ask) — not built.
+the tabs' cheat-sheet tooltips (§3f, the seventh ask), Compact's reason lines (§3g, the eighth) and plain dashes
+(§3h, the ninth) — not built.
 
 ## 1. The ask (verbatim)
 
@@ -374,6 +375,25 @@ The eighth ask (2026-10-31):
 - The level guide (§3f) gained the row, and its Default rows say "each call's arguments and outcome" and "when
   background tasks finished" (an agent's calls show at Compact now, as reason lines).
 
+### 3h. Plain dashes (transcript_turns v11)
+
+The ninth ask (2026-10-31): "In the transcripts, use regular dash, not em".
+
+- **Every dash the turns view writes ITSELF is now the plain hyphen**, at every level (`TurnsOptions::plainDashes`,
+  not a ladder feature): ``**Bash** - why: `cmd` ``, `**Agent** - what for (type)`, `**AskUserQuestion** - which?`,
+  `rejected - the user said: …`, `no answer - …`, the notes' `10:00 - the user ran …`,
+  `(no text - the turn ended on a tool call)`, the Session chain list's ``session 2 · `id` - forked …`` and its
+  gone-parent row, and a read's range `lines 10-14` (the en dash went too: "regular dash").
+- **The session's own text is never rewritten**: a prompt, a reply, a remark, a description or a tool's output
+  keeps whatever it holds, em dashes included (a v11 render of this session keeps them in Claude's replies and in
+  the first output lines).
+- The overlay's own texts in the reading view follow: the cut note (`… (cut here - the header's Copy button …)`),
+  "Nothing to show yet - …", "Nothing to show - …", "The view stops here - …", and the Copy / Refresh tooltips.
+- Where it comes from: the reference `transcript_turns.py` v11 (feature `plain-dashes`, `Renderer.dash` /
+  `range_dash`), ported as `Renderer::Dash()` / `RangeDash()`; the port's goldens moved to `--preset v11` (42 of
+  the 55 changed, every changed line a dash). Telegram's own texts (the card, the bot's lines) are not
+  transcripts and keep theirs.
+
 ## 4. Rendering
 
 1. **Off the UI thread** (`AgentTranscriptOverlay::_LoadLevelAsync`, holding only a weak reference): the
@@ -585,3 +605,6 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
     has the lines; 📜 All Screen ▸ Compact draws them (with File Diffs, each diff under its reason line); the
     picker's Compact button reads "+ call reasons & answers". The Sessions page's AI search still reads compact
     sessions without them.
+14. Plain dashes (§3h): at every tab, a call line reads "Bash - <description>: `<command>`", a note
+    "10:00 - the user ran …", a chain row "session 2 · `<id>` - forked …"; Claude's replies keep their own em
+    dashes. Copy ▸ Transcript copies the same. A pathological level's closing note reads "The view stops here - …".

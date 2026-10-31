@@ -14,7 +14,7 @@
 > backtest the strategy
 
 **● Claude**
-- **Bash** — Run the backtest: `python backtest.py` · ok
+- **Bash** - Run the backtest: `python backtest.py` · ok
 - 🗜 context compacted (auto) · 800.0k → 15.0k tokens · took 5m 00s at Jan 10 08:55
 
 > Backtest done: Sharpe 1.4.

@@ -3,7 +3,7 @@
 
 // Plain C++ engine TU — no WinRT, no precompiled header (the vcxproj marks it NotUsing and the
 // standalone test harness compiles it directly). See TranscriptTurns.h for what it renders and how
-// it relates to its reference, the am-agentmaster-cli skill's transcript_turns.py (v10).
+// it relates to its reference, the am-agentmaster-cli skill's transcript_turns.py (v11).
 //
 // Layout — every section mirrors the reference's section of the same name, function for function,
 // and each ported function names its Python original, so a change to the reference is easy to find
@@ -4579,6 +4579,21 @@ namespace Agentmaster
                 std::wstring _tmpRoot; // the first shortened prefix, remembered for the legend
                 std::vector<std::wstring> _tmpRoots; // every distinct shortened prefix (a chain has one per session)
 
+                // (plain-dashes, v11) The SEPARATOR the view writes itself between the parts of a line ("**Bash** - why",
+                // "10:00 - the user ran", "session 2 · id - forked …"): the plain hyphen, or the em dash v10 and earlier wrote.
+                // Text the session holds is never built from it. Returns a static string, never null; never throws.
+                const wchar_t* Dash() const noexcept
+                {
+                    return _opt.plainDashes ? L"-" : L"—";
+                }
+
+                // (plain-dashes, v11) The RANGE sign of a read's line span ("lines 10-14"): the plain hyphen, or the en dash v10
+                // and earlier wrote. Returns a static string, never null; never throws.
+                const wchar_t* RangeDash() const noexcept
+                {
+                    return _opt.plainDashes ? L"-" : L"–";
+                }
+
                 // when(): 'Mon DD HH:MM' in local time (or UTC); '?' when unknown.
                 std::wstring When(std::wstring_view ts) const
                 {
@@ -4705,7 +4720,7 @@ namespace Agentmaster
                     {
                         const std::wstring cmd = Code(OneLine(Short(JGet(inp, L"command")->str)));
                         const Value* desc = JGet(inp, L"description");
-                        const std::wstring line = Truthy(desc) ? L"**Bash** — " + PyStr(desc) + L": " + cmd : L"**Bash** " + cmd;
+                        const std::wstring line = Truthy(desc) ? L"**Bash** " + std::wstring{ Dash() } + L" " + PyStr(desc) + L": " + cmd : L"**Bash** " + cmd;
                         std::vector<std::wstring> flags;
                         if (Truthy(JGet(inp, L"run_in_background")))
                         {
@@ -4732,7 +4747,7 @@ namespace Agentmaster
                             const auto offset = SafeInt(JGet(inp, L"offset"));
                             const int64_t start = (offset && *offset != 0) ? *offset : 1; // safe_int(...) or 1
                             const auto limit = SafeInt(JGet(inp, L"limit"));
-                            range = (limit && *limit != 0) ? L" lines " + std::to_wstring(start) + L"–" + std::to_wstring(start + *limit - 1) : L" from line " + std::to_wstring(start);
+                            range = (limit && *limit != 0) ? L" lines " + std::to_wstring(start) + RangeDash() + std::to_wstring(start + *limit - 1) : L" from line " + std::to_wstring(start);
                         }
                         return L"**Read** " + Code(Short(ArgText(inp, L"file_path"))) + range;
                     }
@@ -4776,7 +4791,7 @@ namespace Agentmaster
                     {
                         const Value* subagentType = JGet(inp, L"subagent_type");
                         const std::wstring kind = Truthy(subagentType) ? L" (" + PyStr(subagentType) + L")" : L"";
-                        return L"**" + name + L"** — " + ArgText(inp, L"description") + kind;
+                        return L"**" + name + L"** " + Dash() + L" " + ArgText(inp, L"description") + kind;
                     }
                     if (name == L"Skill")
                     {
@@ -4795,7 +4810,7 @@ namespace Agentmaster
                     {
                         const auto questions = QuestionTexts(inp);
                         const std::wstring first = questions.empty() ? std::wstring{} : OneLine(questions[0], 100);
-                        return L"**AskUserQuestion** — " + first + (questions.size() > 1 ? L" (+" + std::to_wstring(questions.size() - 1) + L" more)" : std::wstring{});
+                        return L"**AskUserQuestion** " + std::wstring{ Dash() } + L" " + first + (questions.size() > 1 ? L" (+" + std::to_wstring(questions.size() - 1) + L" more)" : std::wstring{});
                     }
                     if (name == L"SendMessage" && _opt.peerMessages)
                     {
@@ -5196,7 +5211,7 @@ namespace Agentmaster
                 // question of an answered AskUserQuestion; their words when they rejected a call; how an
                 // unanswered question ended. `standalone`: printed WITHOUT its call's line (ops off), so
                 // each reply names what it answers.
-                static std::vector<std::wstring> UserAnswers(const TurnOp& op, bool standalone)
+                std::vector<std::wstring> UserAnswers(const TurnOp& op, bool standalone)
                 {
                     if (op.resultTs.empty())
                     {
@@ -5224,7 +5239,7 @@ namespace Agentmaster
                     }
                     else if (!words.empty())
                     {
-                        reply = L"rejected — the user said: **" + Flat(words, 400) + L"**";
+                        reply = L"rejected " + std::wstring{ Dash() } + L" the user said: **" + Flat(words, 400) + L"**";
                     }
                     else if (op.name != L"AskUserQuestion")
                     {
@@ -5236,12 +5251,12 @@ namespace Agentmaster
                     }
                     else if (StartsWith(result, kSessionEnded))
                     {
-                        reply = L"no answer — the session ended before one was recorded";
+                        reply = L"no answer " + std::wstring{ Dash() } + L" the session ended before one was recorded";
                     }
                     else
                     {
                         const std::wstring flat = Flat(op.resultText, 120);
-                        reply = L"no answer — " + (flat.empty() ? std::wstring{ L"none recorded" } : flat);
+                        reply = L"no answer " + std::wstring{ Dash() } + L" " + (flat.empty() ? std::wstring{ L"none recorded" } : flat);
                     }
                     if (!standalone)
                     {
@@ -5312,7 +5327,7 @@ namespace Agentmaster
                     std::vector<std::wstring> parts;
                     for (const TurnNote* note : shown)
                     {
-                        parts.push_back(_opt.times ? When(note->ts) + L" — " + note->text : note->text);
+                        parts.push_back(_opt.times ? When(note->ts) + L" " + Dash() + L" " + note->text : note->text);
                     }
                     return Join(parts, L"; ");
                 }
@@ -5551,7 +5566,7 @@ namespace Agentmaster
                     }
                     else if (!turn.events.empty())
                     {
-                        out.push_back(L"> (no text — the turn ended on a tool call)\n");
+                        out.push_back(L"> (no text " + std::wstring{ Dash() } + L" the turn ended on a tool call)\n");
                     }
                     else
                     {
@@ -5691,14 +5706,14 @@ namespace Agentmaster
                     std::vector<std::wstring> rows{ L"**Session chain**, oldest first (the last one is this session):" };
                     if (!links[0].missingParent.empty())
                     {
-                        rows.push_back(L"- `" + links[0].missingParent + L"` — its transcript is gone; session 1 was restarted from it to implement its plan");
+                        rows.push_back(L"- `" + links[0].missingParent + L"` " + Dash() + L" its transcript is gone; session 1 was restarted from it to implement its plan");
                     }
                     for (size_t index = 0; index < links.size(); ++index)
                     {
                         const ChainLink& link = links[index];
                         const std::wstring title = link.title.empty() ? std::wstring{} : L" · “" + Flat(link.title, 80) + L"”";
                         const std::wstring self = index + 1 == links.size() ? L" · this session" : L"";
-                        rows.push_back(L"- session " + std::to_wstring(index + 1) + L" · `" + link.sessionId + L"`" + title + L" — " + LinkOrigin(links, index) + self);
+                        rows.push_back(L"- session " + std::to_wstring(index + 1) + L" · `" + link.sessionId + L"`" + title + L" " + Dash() + L" " + LinkOrigin(links, index) + self);
                     }
                     return Join(rows, L"\n") + L"\n";
                 }
@@ -6070,7 +6085,7 @@ namespace Agentmaster
 
     TurnsOptions TurnsOptionsForLevel(TurnsLevel level) noexcept
     {
-        TurnsOptions opt; // the latest preset (v10) as it stands at its default level
+        TurnsOptions opt; // the latest preset (v11) as it stands at its default level
         const int value = static_cast<int>(level);
         const int rank = (value < 0 || value >= kTurnsLevelCount) ? static_cast<int>(TurnsLevel::Default) : value;
         // The reference's LEVELS table: cumulative sets over the twelve LADDER features.

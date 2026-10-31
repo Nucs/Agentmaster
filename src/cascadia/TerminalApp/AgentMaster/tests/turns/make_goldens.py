@@ -5,7 +5,7 @@ TranscriptTurns.{h,cpp} is a C++ port of transcript_turns.py, the "turns view" r
 am-agentmaster-cli skill (~/.claude/skills/am-agentmaster-cli/scripts/transcript_turns.py). That
 script is the reference: the port must print exactly what it prints. This generator renders every
 fixture in this folder at each of the five detail levels the app's Copy > Transcript submenu offers,
-under the version the port implements (--preset v10), in UTC, and writes the results to
+under the version the port implements (--preset v11), in UTC, and writes the results to
 expected/<fixture>-<level>.md. The harness (tests_turns.cpp) renders the same fixtures through the
 port and compares byte for byte.
 
@@ -21,7 +21,7 @@ test suites cover the same cases:
 Usage:
     python make_goldens.py [--script <path to transcript_turns.py>]
 
-Run it again after the skill's renderer changes the v10 output (or when the port moves to a newer
+Run it again after the skill's renderer changes the v11 output (or when the port moves to a newer
 version), review the diff of expected/, then fix the port until the harness passes.
 
 Exit codes: 0 written · 1 the reference script can't be found or loaded.
@@ -41,7 +41,7 @@ DEFAULT_SCRIPT = Path.home() / ".claude" / "skills" / "am-agentmaster-cli" / "sc
 
 # The version the C++ port implements. Pinned, so a newer skill version can't change the goldens
 # silently: moving the port to a new version is a deliberate edit here AND in TranscriptTurns.cpp.
-PRESET = "v10"
+PRESET = "v11"
 
 # The app's menu levels -> the reference script's level flag (Default = the steps level, which has no flag).
 LEVELS: dict[str, list[str]] = {

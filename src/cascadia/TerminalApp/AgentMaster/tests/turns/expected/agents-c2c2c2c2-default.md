@@ -4,7 +4,7 @@
 > find word lists
 
 **● Claude**
-- **Task** — Find word lists (general-purpose) · ok · → ● general-purpose
+- **Task** - Find word lists (general-purpose) · ok · → ● general-purpose
 
 > The agent recommends wordfreq.
 

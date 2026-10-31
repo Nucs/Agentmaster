@@ -4,7 +4,7 @@
 > plan the next batch
 
 **● Claude**
-- **AskUserQuestion** — Which island first? (+1 more) · 55s · ✗ error
+- **AskUserQuestion** - Which island first? (+1 more) · 55s · ✗ error
   - ❯ chose to clarify the question instead of answering it
 
 > What would you like to clarify?
@@ -15,12 +15,12 @@
 > no need, ask me again
 
 **● Claude**
-- **AskUserQuestion** — Which island first? (+1 more) · 57s · ok
+- **AskUserQuestion** - Which island first? (+1 more) · 57s · ok
   - ❯ Which island first? → **A**
   - ❯ How many trials? → **8**
-- **AskUserQuestion** — Run all four islands? · 25s · ✗ error
+- **AskUserQuestion** - Run all four islands? · 25s · ✗ error
   - ❯ dismissed the question without answering
-- **AskUserQuestion** — Export the results when done? · 25s · ✗ error
+- **AskUserQuestion** - Export the results when done? · 25s · ✗ error
   - ❯ dismissed the question without answering
 
 > Stopping here until you say how to proceed.

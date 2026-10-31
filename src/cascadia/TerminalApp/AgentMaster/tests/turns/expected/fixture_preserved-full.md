@@ -15,7 +15,7 @@
 
 **● Claude**
 - 💬 Running the long job.
-- **Bash** — Run the long job: `python long_job.py` · 9m 56s · ok
+- **Bash** - Run the long job: `python long_job.py` · 9m 56s · ok
   - ```bash
     python long_job.py
     ```

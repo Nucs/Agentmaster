@@ -19,7 +19,7 @@ _This transcript opens mid-turn: the prompt that started this work is not in the
 > second task
 
 **● Claude**
-> (no text — the turn ended on a tool call)
+> (no text - the turn ended on a tool call)
 
 ### Turn 3 · Jan 03 09:40 → last reply Jan 03 09:40
 

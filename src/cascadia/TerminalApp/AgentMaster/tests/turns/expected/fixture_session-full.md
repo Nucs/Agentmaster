@@ -1,4 +1,4 @@
-Before the first turn: Jan 02 10:00 — the user ran `/model opus`; it replied: Set model to Opus.
+Before the first turn: Jan 02 10:00 - the user ran `/model opus`; it replied: Set model to Opus.
 
 Paths like `scratchpad\…` and `tasks\…` are inside the session's temp folder `C:\Users\dev\AppData\Local\Temp\claude\C--work\11111111-2222-3333-4444-555555555555\`.
 
@@ -12,7 +12,7 @@ Paths like `scratchpad\…` and `tasks\…` are inside the session's temp folder
 
 **● Claude**
 - 💬 Let me look first.
-- **Bash** — List files: `ls -la … (+1 line)` · 1.0s · ok
+- **Bash** - List files: `ls -la … (+1 line)` · 1.0s · ok
   - ```bash
     ls -la
     pwd
@@ -20,12 +20,12 @@ Paths like `scratchpad\…` and `tasks\…` are inside the session's temp folder
   - ⇢ `file1.txt` (+2 lines)
 - **Write** `scratchpad\scan.py` (2 lines) · 0.1s · created
 - 💬 Running it.
-- **Bash** — Run the scan: `python "scratchpad/scan.py"` (timeout 120s) · 14s · ✗ exit 1
+- **Bash** - Run the scan: `python "scratchpad/scan.py"` (timeout 120s) · 14s · ✗ exit 1
   - ```bash
     python "C:/Users/dev/AppData/Local/Temp/claude/C--work/11111111-2222-3333-4444-555555555555/scratchpad/scan.py"
     ```
   - ⇢ `Traceback (most recent call last):` (+1 line)
-- **Bash** — Slow job: `python slow.py` (in background) · 0.3s · → background `bgjob01`
+- **Bash** - Slow job: `python slow.py` (in background) · 0.3s · → background `bgjob01`
   - ```bash
     python slow.py
     ```
@@ -45,7 +45,7 @@ Paths like `scratchpad\…` and `tasks\…` are inside the session's temp folder
 
 > Answer to the second try.
 
-_Before this turn: Jan 02 10:08 — the user ran `/cost`; it replied: Total cost: $0.12._
+_Before this turn: Jan 02 10:08 - the user ran `/cost`; it replied: Total cost: $0.12._
 
 ### Turn 3 · Jan 02 10:10 → last reply Jan 02 10:10 · the user interrupted it
 
@@ -54,8 +54,8 @@ _Before this turn: Jan 02 10:08 — the user ran `/cost`; it replied: Total cost
 
 **● Claude**
 - 💬 Reading it.
-- **Read** `C:/work/app.cfg` lines 10–14 · 0.1s · 5 of 40 lines
-- **Bash** — Show the cache: `cat cache.txt` · 11s · ✗ error
+- **Read** `C:/work/app.cfg` lines 10-14 · 0.1s · 5 of 40 lines
+- **Bash** - Show the cache: `cat cache.txt` · 11s · ✗ error
   - ```bash
     cat cache.txt
     ```

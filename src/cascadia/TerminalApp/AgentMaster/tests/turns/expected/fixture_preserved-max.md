@@ -17,7 +17,7 @@ _0 tool calls · 5.0s · 1 API call · claude-test-6 · context 9.1k · out 40 t
 **● Claude**
 _1 tool call · 14m 10s · 2 API calls · claude-test-6 · context 9.1k · out 80 tokens_
 - 💬 Running the long job.
-- **Bash** — Run the long job: `python long_job.py` · 9m 56s · ok
+- **Bash** - Run the long job: `python long_job.py` · 9m 56s · ok
   - ```bash
     python long_job.py
     ```

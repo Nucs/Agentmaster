@@ -5,9 +5,9 @@
 
 **● Claude**
 - 💬 Spawning two finders and an Explore agent.
-- **Agent** — Finder A: scan the diff (general-purpose) · 1.0s · ok · → ● finder-a
-- **Agent** — Find the loader (Explore) · 1m 55s · ok · → ● Explore
-- **Agent** — Finder B: audit (general-purpose) · no result · → ● finder-b
+- **Agent** - Finder A: scan the diff (general-purpose) · 1.0s · ok · → ● finder-a
+- **Agent** - Find the loader (Explore) · 1m 55s · ok · → ● Explore
+- **Agent** - Finder B: audit (general-purpose) · no result · → ● finder-b
 
 > finder-a and finder-b are running; Explore found loader.py.
 
@@ -25,7 +25,7 @@
 - ❯ Find the canonical loader.
 - **Grep** `def load_` in `src` · 1.0s · ok
   - ⇢ `src/loader.py`
-- **Agent** — Read the loader (general-purpose) · 1m 10s · ok · → ● Explore › general-purpose
+- **Agent** - Read the loader (general-purpose) · 1m 10s · ok · → ● Explore › general-purpose
 
 > Found it: loader.py.
 
@@ -38,7 +38,7 @@
 **● finder-b** · teammate · Finder B: audit · Jan 13 10:00 → Jan 13 10:06
 - ✉ **team-lead** (Finder B: audit): You are finder B.
 - **Read** `b.cpp` · 1.0s · 1 lines
-- **Bash** — Show the build script: `cat build.sh` · 1.0s · ok
+- **Bash** - Show the build script: `cat build.sh` · 1.0s · ok
   - ```bash
     cat build.sh
     ```

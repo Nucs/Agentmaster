@@ -1,4 +1,4 @@
-Before the first turn: Jan 02 10:00 — the user ran `/model opus`; it replied: Set model to Opus.
+Before the first turn: Jan 02 10:00 - the user ran `/model opus`; it replied: Set model to Opus.
 
 ### Turn 1 · Jan 02 10:00 → last reply Jan 02 10:01
 
@@ -26,7 +26,7 @@ Before the first turn: Jan 02 10:00 — the user ran `/model opus`; it replied: 
 **● Claude**
 > Answer to the second try.
 
-_Before this turn: Jan 02 10:08 — the user ran `/cost`; it replied: Total cost: $0.12._
+_Before this turn: Jan 02 10:08 - the user ran `/cost`; it replied: Total cost: $0.12._
 
 ### Turn 3 · Jan 02 10:10 → last reply Jan 02 10:10 · the user interrupted it
 

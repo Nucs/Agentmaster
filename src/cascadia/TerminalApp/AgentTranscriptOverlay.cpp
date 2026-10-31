@@ -91,7 +91,7 @@ namespace
     constexpr double kBulletMarkerWidth = 16.0;
 
     // The text appended where a block was cut at kMaxBlockChars.
-    constexpr const wchar_t* kCutNote = L"\n\x2026 (cut here \x2014 the header's Copy button copies the whole text)";
+    constexpr const wchar_t* kCutNote = L"\n\x2026 (cut here - the header's Copy button copies the whole text)";
 
     // A FOLD's summary row (a folded tool area): the chevron glyphs (Segoe Fluent Icons ChevronRight /
     // ChevronDown), the row text size, and where the row's text starts — the button's left padding (2)
@@ -747,7 +747,7 @@ namespace winrt::TerminalApp::implementation
             });
             buttons.Children().Append(_wrapButton);
             _UpdateWrapButton(); // the default look (ON) until Show reads the remembered state
-            auto copyButton = makeIconButton(L"\xE8C8", L"Copy this level's whole transcript as Markdown \x2014 everything, even past where a very long view stops", L"Copy transcript");
+            auto copyButton = makeIconButton(L"\xE8C8", L"Copy this level's whole transcript as Markdown - everything, even past where a very long view stops", L"Copy transcript");
             copyButton.Click([weak = get_weak()](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 try
                 {
@@ -762,7 +762,7 @@ namespace winrt::TerminalApp::implementation
                 }
             });
             buttons.Children().Append(copyButton);
-            auto refreshButton = makeIconButton(L"\xE72C", L"Render the transcript again \x2014 a working session keeps adding to it", L"Refresh transcript");
+            auto refreshButton = makeIconButton(L"\xE72C", L"Render the transcript again - a working session keeps adding to it", L"Refresh transcript");
             refreshButton.Click([weak = get_weak()](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 try
                 {
@@ -1413,8 +1413,8 @@ namespace winrt::TerminalApp::implementation
             if (out.path.empty())
             {
                 out.message = source.codex ?
-                                  L"Nothing to show yet \x2014 this Codex session has not been prompted, so it has no rollout." :
-                                  L"Nothing to show yet \x2014 this session has not been prompted, so it has no transcript.";
+                                  L"Nothing to show yet - this Codex session has not been prompted, so it has no rollout." :
+                                  L"Nothing to show yet - this session has not been prompted, so it has no transcript.";
                 return;
             }
             // The SAME text the Copy menu's level copies (CopyTranscriptTurnsAsync): the turns view for
@@ -1432,7 +1432,7 @@ namespace winrt::TerminalApp::implementation
             }
             if (text.empty())
             {
-                out.message = L"Nothing to show \x2014 the transcript could not be read, or it holds no messages at this level.";
+                out.message = L"Nothing to show - the transcript could not be read, or it holds no messages at this level.";
                 return;
             }
             if (!out.forkSourceId.empty())
@@ -1676,7 +1676,7 @@ namespace winrt::TerminalApp::implementation
             note.FontStyle(winrt::Windows::UI::Text::FontStyle::Italic);
             note.Margin(Thickness{ 0, 16, 0, 0 });
             note.Text(view.failed ? winrt::hstring{ L"The rest of this level could not be rendered (the details are in hooks.log). The header's Copy button still copies the whole text." } :
-                                    winrt::hstring{ L"The view stops here \x2014 this level is too long to show in full. The header's Copy button copies the whole text." });
+                                    winrt::hstring{ L"The view stops here - this level is too long to show in full. The header's Copy button copies the whole text." });
             _AppendElement(view, note);
         }
     }

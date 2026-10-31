@@ -14,7 +14,7 @@
 > backtest the strategy
 
 **● Claude**
-- **Bash** — Run the backtest: `python backtest.py` · 19m 55s · ok
+- **Bash** - Run the backtest: `python backtest.py` · 19m 55s · ok
   - ```bash
     python backtest.py
     ```

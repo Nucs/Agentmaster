@@ -4,8 +4,8 @@
 > read the log
 
 **● Claude**
-- **Read** `C:/logs/app.log` lines 1025–1064 · 40 of 2000 lines
-- **Bash** — Tail the log: `tail -5 app.log` · ok
+- **Read** `C:/logs/app.log` lines 1025-1064 · 40 of 2000 lines
+- **Bash** - Tail the log: `tail -5 app.log` · ok
 - **Bash** input=`echo not-an-object` · ✗ error
 
 > The log started cleanly.

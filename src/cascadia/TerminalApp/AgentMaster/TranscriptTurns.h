@@ -7,14 +7,15 @@
 // "Transcript Followup" items.
 //
 // It is a C++ PORT of transcript_turns.py, the "turns view" of the am-agentmaster-cli skill
-// (~/.claude/skills/am-agentmaster-cli/scripts/transcript_turns.py, version v10). That script is the
+// (~/.claude/skills/am-agentmaster-cli/scripts/transcript_turns.py, version v11). That script is the
 // reference: for every transcript the port is meant to print exactly what the script prints with
-// `--preset v10 --utc` (or local time) and the matching level flag. The harness pins it byte for
+// `--preset v11 --utc` (or local time) and the matching level flag. The harness pins it byte for
 // byte on the skill's own synthetic fixtures (tests/turns/, goldens written by
 // tests/turns/make_goldens.py from the script itself — TestTranscriptTurns). A change to the
-// script's v10 output must be regenerated there and ported here; a NEW script version is a
-// deliberate move of both (the goldens pin --preset v10). v10 is v9 plus `reasons`: Compact lists
-// every tool call as one line with the reason Claude gave for it.
+// script's v11 output must be regenerated there and ported here; a NEW script version is a
+// deliberate move of both (the goldens pin --preset v11). v10 is v9 plus `reasons`: Compact lists
+// every tool call as one line with the reason Claude gave for it. v11 is v10 plus `plainDashes`:
+// every separator the view writes itself is the plain hyphen (the session's own text keeps its own).
 //
 // What a render shows, per turn (the levels pick how much of it):
 //     ### Turn N · <start> → last reply <time>
@@ -95,10 +96,10 @@ namespace Agentmaster
     inline constexpr int kTurnsLevelCount = 5;
 
     // Every output feature and correctness rule of the reference, one flag each (the script's
-    // --<feature> / --no-<feature>). The member initializers are the reference's LATEST preset (v10)
+    // --<feature> / --no-<feature>). The member initializers are the reference's LATEST preset (v11)
     // at its default level — exactly what `transcript_turns.py <session>` prints. Use
     // TurnsOptionsForLevel to get a level; flip a flag afterwards to inspect one feature (the
-    // harness does). Features that are on in every v10 level (times, shortPaths, opMeta, bgEvents,
+    // harness does). Features that are on in every v11 level (times, shortPaths, opMeta, bgEvents,
     // nestedBlocks, compactedHistory, chain, peerMessages) still have both code paths, ported as
     // the script has them.
     struct TurnsOptions
@@ -129,6 +130,11 @@ namespace Agentmaster
         // like every ladder feature, but only SHOWN at Compact: with ops on, each call's full line already carries its
         // description. On by default because the latest preset's steps level has it on (silently, for the same reason).
         bool reasons = true;
+        // (v11) The separators the view writes ITSELF use the plain hyphen '-' - "**Bash** - why: `cmd`", "10:00 - the user
+        // ran …", "session 2 · `id` - forked …", "(no text - the turn ended on a tool call)", "lines 10-14" - where v10 and
+        // earlier wrote the em dash (and the en dash in a read's range). Claude's and the user's own text keep whatever they
+        // hold: no session text is ever rewritten. On in every level (not a ladder feature).
+        bool plainDashes = true;
         bool fullWrite = false; // the full content written by each Write call, in a code block
         // --- Agentmaster-only (NOT in the reference: off in every level, so the goldens never see it) ---
         // The change each file-changing call made (Edit, MultiEdit, Write, NotebookEdit), as a unified-diff block under its
@@ -153,7 +159,7 @@ namespace Agentmaster
         bool keepPrePromptWork = true; // show work done before the file's first prompt instead of dropping it
     };
 
-    // The options a detail level stands for, on top of the latest preset (v10). A level sets the
+    // The options a detail level stands for, on top of the latest preset (v11). A level sets the
     // reference's twelve LADDER features absolutely (notes, ops, fullBash, stats, opDuration, opOutput,
     // narration, compactions, answers, agents, fullWrite, reasons) and leaves every other feature at the
     // preset's value, exactly like `transcript_turns.py --minimal|--compact|(none)|--full|--max`.

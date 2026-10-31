@@ -1,6 +1,6 @@
 **Session chain**, oldest first (the last one is this session):
-- session 1 · `b1b1b1b1-0000-4000-8000-000000000001` — started Jan 11 08:00
-- session 2 · `b2b2b2b2-0000-4000-8000-000000000002` — restarted from session 1 to implement its plan on Jan 11 08:06 · this session
+- session 1 · `b1b1b1b1-0000-4000-8000-000000000001` - started Jan 11 08:00
+- session 2 · `b2b2b2b2-0000-4000-8000-000000000002` - restarted from session 1 to implement its plan on Jan 11 08:06 · this session
 
 ## Session 1 of 2 · `b1b1b1b1` · started Jan 11 08:00
 

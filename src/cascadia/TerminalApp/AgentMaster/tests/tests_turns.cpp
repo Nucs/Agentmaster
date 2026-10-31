@@ -3,7 +3,7 @@
 //
 // Agentmaster - M5 standalone test harness: TRANSCRIPT TURNS — the session copy menus' "Copy > Transcript >
 // Default / Max / Full / Compact / Minimal" (AgentCopyActions.h codes 9-13). TranscriptTurns.{h,cpp} is a C++
-// port of the am-agentmaster-cli skill's transcript_turns.py (v9), so its contract is the reference's own
+// port of the am-agentmaster-cli skill's transcript_turns.py (v11), so its contract is the reference's own
 // output: every fixture in turns\ (copies of the skill's synthetic test transcripts — a session with a rewind
 // and a background job, a file that opens with a compaction, junk tool arguments, every way an AskUserQuestion
 // ends, a compaction a parentUuid-only walk can't cross, a fork + plan-restart family, a team lead with its
@@ -175,7 +175,7 @@ namespace
 
 void TestTranscriptTurns()
 {
-    std::wprintf(L"\n[TranscriptTurns] Copy > Transcript levels vs the transcript_turns.py v10 goldens\n");
+    std::wprintf(L"\n[TranscriptTurns] Copy > Transcript levels vs the transcript_turns.py v11 goldens\n");
 
     // ---- the level ladder: what each menu item turns on (the reference's LEVELS table) ----
     {
@@ -225,6 +225,32 @@ void TestTranscriptTurns()
         CHECK(std::wstring{ TurnsLevelName(TurnsLevel::Minimal) } == L"minimal" && std::wstring{ TurnsLevelName(TurnsLevel::Default) } == L"default" &&
                   std::wstring{ TurnsLevelName(TurnsLevel::Max) } == L"max",
               "TranscriptTurns: level names");
+        CHECK(def.plainDashes == latest.plainDashes && minimal.plainDashes && TurnsOptionsForLevel(TurnsLevel::Max).plainDashes,
+              "TranscriptTurns: plain dashes (v11) are on at every level - not a ladder feature");
+    }
+
+    // ---- plain dashes (v11): the view's OWN separators become hyphens; the session's own text keeps its em dashes ----
+    {
+        const std::string bytes =
+            R"J({"type":"user","uuid":"p01","parentUuid":null,"isSidechain":false,"sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:00:00.000Z","message":{"role":"user","content":"Run it \u2014 now"}})J"
+            "\n"
+            R"J({"type":"assistant","uuid":"p02","parentUuid":"p01","isSidechain":false,"sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:00:01.000Z","message":{"id":"pm1","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"pb1","name":"Bash","input":{"command":"ls","description":"List \u2014 quickly"}}]}})J"
+            "\n"
+            R"J({"type":"user","uuid":"p03","parentUuid":"p02","isSidechain":false,"sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:00:02.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"pb1","content":"a.txt"}]}})J"
+            "\n"
+            R"J({"type":"assistant","uuid":"p04","parentUuid":"p03","isSidechain":false,"sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:00:03.000Z","message":{"id":"pm2","role":"assistant","model":"claude-test-1","stop_reason":"end_turn","content":[{"type":"text","text":"Done \u2014 1 file."}]}})J"
+            "\n";
+        const auto lines = ParseTranscriptJsonl(bytes);
+        const std::wstring plain = RenderTranscriptTurns(lines, TurnsOptionsForLevel(TurnsLevel::Default), /*utc*/ true);
+        TurnsOptions legacy = TurnsOptionsForLevel(TurnsLevel::Default);
+        legacy.plainDashes = false;
+        const std::wstring dashed = RenderTranscriptTurns(lines, legacy, /*utc*/ true);
+        CHECK(plain.find(L"- **Bash** - List \x2014 quickly: `ls` \x00B7 ok") != std::wstring::npos,
+              "TranscriptTurns: v11 writes its own separator as a hyphen and keeps the description's em dash");
+        CHECK(plain.find(L"> Run it \x2014 now") != std::wstring::npos && plain.find(L"> Done \x2014 1 file.") != std::wstring::npos,
+              "TranscriptTurns: v11 keeps the em dashes of the user's prompt and Claude's reply");
+        CHECK(dashed.find(L"- **Bash** \x2014 List \x2014 quickly: `ls` \x00B7 ok") != std::wstring::npos,
+              "TranscriptTurns: plainDashes off writes v10's em dash separator");
     }
 
     // ---- the timestamp reader (aware_ts) ----

@@ -5,7 +5,7 @@
 
 **● Claude**
 _1 tool call · 1m 04s · 2 API calls · claude-test-4 · context 1.2k · out 90 tokens_
-- **AskUserQuestion** — Which island first? (+1 more) · 55s · ✗ error
+- **AskUserQuestion** - Which island first? (+1 more) · 55s · ✗ error
   - ❯ chose to clarify the question instead of answering it
 
 > What would you like to clarify?
@@ -17,12 +17,12 @@ _1 tool call · 1m 04s · 2 API calls · claude-test-4 · context 1.2k · out 90
 
 **● Claude**
 _3 tool calls · 2m 04s · 4 API calls · claude-test-4 · context 1.5k · out 155 tokens_
-- **AskUserQuestion** — Which island first? (+1 more) · 57s · ok
+- **AskUserQuestion** - Which island first? (+1 more) · 57s · ok
   - ❯ Which island first? → **A**
   - ❯ How many trials? → **8**
-- **AskUserQuestion** — Run all four islands? · 25s · ✗ error
+- **AskUserQuestion** - Run all four islands? · 25s · ✗ error
   - ❯ dismissed the question without answering
-- **AskUserQuestion** — Export the results when done? · 25s · ✗ error
+- **AskUserQuestion** - Export the results when done? · 25s · ✗ error
   - ❯ dismissed the question without answering
 
 > Stopping here until you say how to proceed.

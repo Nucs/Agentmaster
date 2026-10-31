@@ -4,8 +4,8 @@
 > read the log
 
 **● Claude**
-- **Read** `C:/logs/app.log` lines 1025–1064 · 0.1s · 40 of 2000 lines
-- **Bash** — Tail the log: `tail -5 app.log` · 1.0s · ok
+- **Read** `C:/logs/app.log` lines 1025-1064 · 0.1s · 40 of 2000 lines
+- **Bash** - Tail the log: `tail -5 app.log` · 1.0s · ok
   - ```bash
     tail -5 app.log
     ```

@@ -6,9 +6,9 @@
 **● Claude**
 _3 tool calls · 2m 05s · 2 API calls · claude-test-7 · context 9.1k · out 80 tokens_
 - 💬 Spawning two finders and an Explore agent.
-- **Agent** — Finder A: scan the diff (general-purpose) · 1.0s · ok · → ● finder-a
-- **Agent** — Find the loader (Explore) · 1m 55s · ok · → ● Explore
-- **Agent** — Finder B: audit (general-purpose) · no result · → ● finder-b
+- **Agent** - Finder A: scan the diff (general-purpose) · 1.0s · ok · → ● finder-a
+- **Agent** - Find the loader (Explore) · 1m 55s · ok · → ● Explore
+- **Agent** - Finder B: audit (general-purpose) · no result · → ● finder-b
 
 > finder-a and finder-b are running; Explore found loader.py.
 
@@ -28,7 +28,7 @@ _2 tool calls · 1m 48s · 3 API calls · claude-test-7 · context 9.1k · out 1
 - ❯ Find the canonical loader.
 - **Grep** `def load_` in `src` · 1.0s · ok
   - ⇢ `src/loader.py`
-- **Agent** — Read the loader (general-purpose) · 1m 10s · ok · → ● Explore › general-purpose
+- **Agent** - Read the loader (general-purpose) · 1m 10s · ok · → ● Explore › general-purpose
 
 > Found it: loader.py.
 
@@ -43,7 +43,7 @@ _1 tool call · 1m 04s · 2 API calls · claude-test-7 · context 9.1k · out 80
 _2 tool calls · 5m 54s · 2 API calls · claude-test-7 · context 9.1k · out 80 tokens_
 - ✉ **team-lead** (Finder B: audit): You are finder B.
 - **Read** `b.cpp` · 1.0s · 1 lines
-- **Bash** — Show the build script: `cat build.sh` · 1.0s · ok
+- **Bash** - Show the build script: `cat build.sh` · 1.0s · ok
   - ```bash
     cat build.sh
     ```

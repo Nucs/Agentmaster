@@ -16,7 +16,7 @@ _0 tool calls · 10s · 1 API call · claude-test-6 · context 9.1k · out 40 to
 
 **● Claude**
 _1 tool call · 25m 10s · 2 API calls · claude-test-6 · context 9.1k · out 80 tokens_
-- **Bash** — Run the backtest: `python backtest.py` · 19m 55s · ok
+- **Bash** - Run the backtest: `python backtest.py` · 19m 55s · ok
   - ```bash
     python backtest.py
     ```

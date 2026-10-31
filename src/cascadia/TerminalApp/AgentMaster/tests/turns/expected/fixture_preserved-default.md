@@ -15,7 +15,7 @@
 
 **● Claude**
 - 💬 Running the long job.
-- **Bash** — Run the long job: `python long_job.py` · ok
+- **Bash** - Run the long job: `python long_job.py` · ok
 - 🗜 context compacted (auto) · 900.0k → 20.0k tokens · took 4m 00s at Jan 06 09:24
 
 > Second task done: 42 rows.
