@@ -27,6 +27,9 @@
 //     `agentmaster show ...` prints to the caller's console and the shell waits for it. That REQUIRES
 //     this launcher to be CONSOLE subsystem (set in wt.vcxproj) — a GUI-subsystem exe cannot own
 //     stdout (the reason `wt.exe` never returned output);
+//   * help or the version first (`--help`, `-h`, `-?`, `/?`, `--version`, `-v`) from a caller that can read text (a
+//     terminal, a script, a pipe) -> agentmaster-cli.exe too, which prints its usage or version: the app could only
+//     answer with a message box (CliDispatch.h IsCliCallFor). From the Run box or a shortcut they still reach the app;
 //   * ANY other commandline -> forward to Agentmaster.exe (the GUI binary) EXACTLY as the original shim did (bare
 //     launch, `-w`/`-s` reopen, etc.). Defterm/COM handoff and Start-menu activation never hit the
 //     alias (they target Agentmaster.exe directly), so they are unaffected.
@@ -48,8 +51,23 @@ int __cdecl wmain(int /*argc*/, wchar_t** /*argv*/)
     // GUI forward below passes on exactly what the caller typed.
     const std::wstring_view tail = ::Agentmaster::CliDispatch::CommandlineTail(GetCommandLineW());
 
+    // Agentmaster (CliDispatch.h IsCliCallFor; CLI.md §2): whether the caller can read the CLI's text decides where help
+    // and the version (`--help`, `-v`, ...) go; verbs and CLI-only flags go to the CLI either way. The caller can read
+    // text when it shares this console (a terminal, a script running in one) or passed standard handles this shim really
+    // inherited (a pipe or a file: `$(...)`, a redirect, pythonw's captured output). Started with neither (the Run box,
+    // a shortcut, our reopen ShellExecute), this shim is alone on a console Windows made for it, which closes when it
+    // exits: the app's message box is then the only answer anyone can read, so such a line still goes to the app.
+    STARTUPINFOW caller{};
+    caller.cb = sizeof(caller);
+    GetStartupInfoW(&caller);
+    DWORD consolePids[2]{};
+    const bool callerSharesConsole = GetConsoleProcessList(consolePids, 2) > 1;
+    const bool callerPassedHandles = (caller.dwFlags & STARTF_USESTDHANDLES) != 0 &&
+                                     (::Agentmaster::CallerSink::detail::IsInheritedWritable(caller.hStdOutput) ||
+                                      ::Agentmaster::CallerSink::detail::IsInheritedWritable(caller.hStdError));
+
     // --- a CLI invocation -> the console introspection tool, on this console ---
-    if (::Agentmaster::CliDispatch::IsCliInvocation(tail))
+    if (::Agentmaster::CliDispatch::IsCliCallFor(tail, callerSharesConsole || callerPassedHandles))
     {
         std::filesystem::path cli{ module };
         cli.replace_filename(::Agentmaster::CliDispatch::kCliExeLeaf);

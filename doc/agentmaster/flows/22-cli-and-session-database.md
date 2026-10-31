@@ -37,7 +37,12 @@ database tools from the next start; the CLI verbs `search`, `sql`, `sessdb`; a s
 4. **Errors.** *Expect:* an unknown ref → exit 1; an ambiguous ref → exit 1 listing the candidates; a bad flag → exit 2.
 
 **Edge cases**
-- **E1 `agentmaster --help` as the first token** → forwarded to the GUI (a message box): put a verb first.
+- **E1 `agentmaster --help` as the first token** → forwarded to the GUI (a message box): put a verb first. *Since the
+  2026-10-31 rule (NOT BUILT; CLI.md §2c):* `--help`, `-h`, `-?`, `/?`, `--version` and `-v` first are answered by the CLI
+  for every caller that reads text (Git Bash, Python's subprocess, a redirect, a console without handles): assert the
+  usage (or `agentmaster-cli schema 2`, then the app's version line), exit 0, and no window and no dialog. Only a caller
+  with no console and no handles (the Run box) still gets the app's box — not run on the workstation, it shows on the
+  user's screen. `-H` and `nt --help` stay the app's; `--archived sessions` is a CLI call.
 - **E2 A session whose claude is busy with a background shell** → reads Idle (known gap, CLI.md §11).
 - **E3 "Waiting for you"** → reads Idle in the CLI (known gap).
 - **E4 Hebrew titles** → printed correctly in a UTF-8 console and in `--json`.

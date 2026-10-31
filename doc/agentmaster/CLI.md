@@ -66,7 +66,9 @@ deps never load on a plain window launch.
 
 Since 2026-10-23 the rule above (the verbs, the CLI-only flags, the argv[0] split) lives in ONE
 header-only file, `AgentMaster/CliDispatch.h`, which the shim and the app exe both include (§2a):
-add a new verb there, and both route it.
+add a new verb there, and both route it. Since 2026-10-31 (NOT BUILT) the rule also sends help and the
+version (`--help -h -? /? --version -v` first) to the CLI when the caller can read text, and `--archived`
+is a CLI-only flag (§2c).
 
 ## 2a. The app exe answers a CLI call too (unpackaged installs; 2026-10-23, NOT BUILT)
 
@@ -245,6 +247,58 @@ The facts the design rests on, each measured with a probe:
   did, before the app writes. A hand-over naming that one process lost every line, hence the list of
   processes attached to the console.
 
+## 2c. Help and the version go to the CLI (2026-10-31, NOT BUILT)
+
+**The incident (2026-10-31).** §2a's "Agentmaster — profile in use" dialog came back, for
+`~\.agentmaster-dev`. A Claude session in a dev tab ran `agentmaster sessions --instance dev --json` at
+15:55. The dialog waited on the user's screen until 15:59, and the command then returned empty output
+with exit 0. The all-users copy in `C:\Program Files\Agentmaster` was still v0.8.0, from before §2a's
+fix. The name found that copy's `Agentmaster.exe`, which started as a second app on the profile the
+tab exported (`AGENTMASTER_PROFILE`), held by the running dev instance. The user chose to keep that copy
+and install on top of it: `tools\Install-Agentmaster.ps1 -Scope Machine -Version 0.8.1`, with one UAC
+prompt; its PATH entry, Apps & Features entry and icons stayed. The same command then answered in
+1.5 s.
+
+**What was left.** With the all-users copy first on PATH, every first token that is not the CLI's
+starts that copy as a second app, and "profile in use" opens before anything else. Most such lines are
+launches (bare, `-w 0 nt`) and belong to the app. But `--help`, `-h`, `-?`, `/?`, `--version` and `-v`
+are what anyone types to learn about a command, and the app answers each with a message box (Windows
+Terminal's help or version box): in the running app through the package's alias, and after the profile
+dialog through an unpackaged copy. The user's rule: no UI and no message boxes from the CLI.
+
+**The rule** (`CliDispatch::IsCliCallFor(tail, callerReadsText)`):
+
+- A verb or a CLI-only flag first is a CLI call whoever asks (§2).
+- Help or the version first (`kHelpOrVersionTokens`) is a CLI call when the caller can read text. The
+  match is exact: `-H` and `-V` are Windows Terminal's split-pane flags.
+- The launcher shim reads "can read text" as a console it shares with its caller
+  (`GetConsoleProcessList` > 1), or standard handles it really inherited (a pipe or a file). The app exe
+  reads it from its launch plan: the caller's handles, or `AttachConsole(ATTACH_PARENT_PROCESS)`.
+- A caller with neither (the Run box, a shortcut) keeps the app's box: a console the CLI opened for it
+  would close before anyone read it.
+- A help or version token that is not first (`agentmaster nt --help`) stays the app's: it asks the app
+  for a new tab's help by name.
+- `--archived` (the `sessions` filter, which the app's parser refused with an error box) is a CLI-only
+  flag.
+
+**What the CLI prints.** `--help`, `-h`, `-?` and `/?` print the usage, which now also says where any
+other first word goes. `--version` and `-v` print `agentmaster-cli schema 2` as before, then the app's
+version when the CLI can tell it: the package's name and version when packaged, else `Agentmaster` and
+the `.am-version` beside the exe (every portable zip and install ships one). The file is read with
+Win32 calls, never an iostream: the first iostream creates the facet whose teardown ends a Debug build
+of the CLI (§11).
+
+**Measured** (`tools/cli-dispatch-probe`, 37 of 37 checks; the kit now also builds the REAL shim):
+
+- From bash, from a file without a console and from a console without handles, through the GUI
+  stand-in and through the shim, every help and version token was answered by the CLI.
+- A caller with no console and no handles (`launcher none`, the Run box) got the app, through both.
+- `-H`, `nt --help`, `-w new` and a capitalised verb still started the app, and every earlier case
+  passed unchanged.
+- The CLI, compiled alone, answered `--version` and `-v` (with and without an `.am-version`), `/?`, `-?`,
+  `-h` and `--help`, and still refused an unknown flag.
+- Not run: a packaged CLI's version line (it needs a build).
+
 ## 3. Data sources: read from state that already exists
 
 The Fleet Observer already proved the entire live picture is derivable **purely out-of-band** — PEB
@@ -324,10 +378,11 @@ whether `AppSettings::sessionDbMode` is Off or not (a service started this way s
 (All reads are already offline-style — persisted + OS-observable state only — so there is no
 distinct online mode; `--offline` is reserved as a shim dispatch token, not yet a parsed flag.)
 
-`--help` and `--version` reach the CLI only behind a verb or a CLI-only flag (`agentmaster tabs
---help`, `agentmaster --json --version` → `agentmaster-cli schema 2`). As the FIRST token they are
-an ordinary non-CLI commandline, so the launcher forwards them to the running GUI (§7), which shows
-a message box.
+`--help` and `--version` reach the CLI behind a verb or a CLI-only flag (`agentmaster tabs
+--help`, `agentmaster --json --version` → `agentmaster-cli schema 2`). As the FIRST token they were
+an ordinary non-CLI commandline, so the launcher forwarded them to the running GUI (§7), which showed
+a message box. Since 2026-10-31 (NOT BUILT) they and `-h`, `-?`, `/?`, `-v` are the CLI's as the first
+token too, for every caller that reads text (§2c); only the Run box and a shortcut still get the box.
 
 - **`<ref>`** resolves a conversation UUID / unique id-prefix / title substring (`ResolveSessionRef`;
   a live claude managed by the *other* instance also matches by id/prefix — see below); ambiguity prints
@@ -443,8 +498,9 @@ The flags exist only to cross-target another install on purpose.
 
 **Dispatch** (`shim.cpp`): the launcher routes to the CLI when the first commandline token is a verb
 (the standard verb-first form, `agentmaster show …`) OR a CLI-only global flag (`--json` / `--self` /
-`--offline` / `--tail` / `--instance` / `--state` / `--dir` — none collide with a WindowsTerminal
-token), so `agentmaster --instance dev show …` dispatches too. Anything else (`-w`, `-s`, `nt`,
+`--offline` / `--tail` / `--instance` / `--state` / `--dir`, and `--archived` since 2026-10-31 — none
+collide with a WindowsTerminal token), so `agentmaster --instance dev show …` dispatches too. Help and
+the version first go to the CLI for a caller that reads text (§2c). Anything else (`-w`, `-s`, `nt`,
 `-Embedding`, bare) forwards to the GUI unchanged.
 
 **The all-users copy hands every call to the user's own install** (2026-10-22, NOT BUILT; PROFILES.md §2b
@@ -508,6 +564,9 @@ beats none).
   defterm (`-Embedding`), reopen (`-w -s`), and bare launch must all behave exactly as before.
 - **A CLI call never starts the app**, from the shim or from the app exe itself (§2a), also when the
   CLI cannot be started; every other command line reaches the app exactly as before.
+- **Help and the version never become a message box for a caller that reads text** (§2c): from a
+  terminal, a script, a pipe or a file the CLI answers them; only the Run box and a shortcut get the
+  app's box.
 - **Every dialog goes through `DialogEcho.h`** (§2b), so it is echoed to the console or pipe of the
   command that caused it while the startup lasts; `TestDialogEchoCoverage` fails on a direct dialog
   call. The sink is released when the startup ends (or when the last echoed dialog was answered), so
@@ -559,7 +618,9 @@ list when `agentcli.cpp` changes, and drop a gap once it is fixed.
 - **Not in the CLI at all:** unsent drafts, tags, favorites, API errors (an errored session reads
   Idle or WaitingForInput), and a background shell job (heartbeat `shell` → Idle).
 - **`--help` / `--version` as the first token go to the GUI** (§5): the running app shows a
-  message box. Put a verb or a CLI-only flag first.
+  message box. Put a verb or a CLI-only flag first. (FIXED in code 2026-10-31, NOT BUILT: §2c. Until a
+  build with the fix is installed, the text above holds; through an unpackaged copy first on PATH, the
+  box comes after a "profile in use" dialog.)
 
 ### Found 2026-10-09 (release 0.6.8.18, dev 0.0.1.4, schema 2)
 
@@ -626,13 +687,20 @@ on both installs. Each item says how it is known: **measured** (run on the live 
   new-tab option there), `--window <w>` first (the parser's window target), `--archived` first,
   a mistyped verb and a verb in capitals (the match is exact) all act on the user's running app
   and print nothing. Put the verb first, always. Since 2026-10-23 (NOT BUILT) the app exe applies
-  the same rule to a command line that reaches it directly (§2a).
+  the same rule to a command line that reaches it directly (§2a). Since 2026-10-31 (NOT BUILT)
+  `--archived` first is a CLI-only flag, and help and the version first go to the CLI for a caller
+  that reads text (§2c); `--profile`, `--window`, a typo and capitals still reach the app.
 - **An unpackaged install's `agentmaster` was the app itself.** (measured 2026-10-23; FIXED in code,
   NOT BUILT) Where an unpackaged install's folder is on PATH, `agentmaster <verb>` ran
   `Agentmaster.exe <verb>`: a second app on the user's profile, stopped by "profile in use" while
   the package ran (§2a has the incident and the fix). Until a build with the fix is in that folder,
   type `agentmaster-cli <verb>` there, or the CLI's full path; `type -a agentmaster` (bash) or
-  `where agentmaster` (cmd) shows which file the name finds.
+  `where agentmaster` (cmd) shows which file the name finds. On the user's PC that folder got v0.8.1,
+  which has the fix, on 2026-10-31 (§2c), and stays first on PATH. A bare `agentmaster <verb>` there
+  runs that copy's UNPACKAGED CLI, which reads the profile of the inherited `AGENTMASTER_PROFILE` (in a
+  dev tab: the dev profile), not the release package's by identity (§7 steps 2-3): pass `--instance
+  release|dev` to choose. Any first token that is not the CLI's (a launch, `--profile`, a typo) starts
+  that copy as a second app, stopped by "profile in use" while the package holds the profile.
 - **`show` reads only the last 512 KiB for the conversation.** (measured) `conversation`,
   `lastUserPrompt` and `lastAssistantReply` come from the text blocks inside that window. A long
   turn made of tool calls leaves none there: the studying session's own `show --self` had 0

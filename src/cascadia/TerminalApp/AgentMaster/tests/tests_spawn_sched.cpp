@@ -6669,6 +6669,9 @@ void TestHookInvocation()
 // started a second app on the user's profile instead of the CLI. CliDispatch.h is now the ONE rule the console launcher
 // shim and the app exe's wWinMain share. This covers the pure rule and the launch plan; TryRunCliCall's real launch (a
 // GUI-subsystem exe starting the CLI from bash, Python, cmd.exe and PowerShell) was checked end to end outside the suite.
+// Since 2026-10-31 (the same dialog from `agentmaster --help` through the kept all-users copy) help and the version are
+// the CLI's when the caller reads text (IsCliCallFor), and `--archived` is a CLI-only flag; tools/cli-dispatch-probe runs
+// both through the real shim and a GUI stand-in.
 void TestCliDispatch()
 {
     std::wprintf(L"CLI dispatch (the CLI-call rule shared by the launcher shim and the app exe):\n");
@@ -6686,8 +6689,10 @@ void TestCliDispatch()
     CHECK(!IsCliVerb(L"Show") && !IsCliVerb(L"SHOW") && !IsCliVerb(L"shows") && !IsCliVerb(L"sho") && !IsCliVerb(L""),
           "verbs: an exact match only (capitals, a longer or shorter word, empty)");
     CHECK(!IsCliOnlyFlag(L"--profile") && !IsCliOnlyFlag(L"--window") && !IsCliOnlyFlag(L"--version") && !IsCliOnlyFlag(L"--help") &&
-              !IsCliOnlyFlag(L"--archived") && !IsCliOnlyFlag(L"-w"),
-          "flags: the CLI's other flags and the app's flags do not route (CLI.md section 11)");
+              !IsCliOnlyFlag(L"-w"),
+          "flags: --profile and --window (the app's too), help, the version and the app's own flags are no CLI-only flags");
+    CHECK(IsCliOnlyFlag(L"--archived") && IsCliInvocation(L"--archived sessions"),
+          "flags: --archived is the CLI's alone (2026-10-31: first, the app's parser refused it with an error box)");
 
     // --- CommandlineTail: the C runtime's lpCmdLine rule ---
     CHECK(CommandlineTail(LR"("C:\Program Files\Agentmaster\Agentmaster.exe" show a77419cf)") == L"show a77419cf",
@@ -6720,7 +6725,26 @@ void TestCliDispatch()
               !IsCliInvocation(L"-d . pwsh"),
           "route: the install flags and Windows Terminal's own command lines stay the app's");
     CHECK(!IsCliInvocation(L"Show x") && !IsCliInvocation(L"\"show\" x") && !IsCliInvocation(LR"(--profile C:\p show x)") && !IsCliInvocation(L"--version"),
-          "route: a capitalised or quoted verb, a leading --profile and --version stay the app's (CLI.md section 11)");
+          "route: a capitalised or quoted verb, a leading --profile and --version are no CLI call for every caller (CLI.md section 11)");
+
+    // --- help and the version (2026-10-31): the CLI's for a caller that reads text, the app's message box otherwise ---
+    for (const auto token : kHelpOrVersionTokens)
+    {
+        CHECK(IsHelpOrVersionToken(token) && !IsCliInvocation(token) && IsCliCallFor(token, true) && !IsCliCallFor(token, false),
+              "help/version: every token is the CLI's when the caller reads text, the app's when it cannot (the Run box)");
+    }
+    CHECK(!IsHelpOrVersionToken(L"-H") && !IsHelpOrVersionToken(L"-V") && !IsHelpOrVersionToken(L"--Help") && !IsHelpOrVersionToken(L"-help") &&
+              !IsHelpOrVersionToken(L"--versions") && !IsHelpOrVersionToken(L"/h") && !IsHelpOrVersionToken(L""),
+          "help/version: exact matches only (-H and -V are Windows Terminal's split-pane flags)");
+    CHECK(IsCliCallFor(L"--help sessions", true) && IsCliCallFor(L"-v\tx", true) && IsCliCallFor(L"/? x", true),
+          "help/version: the FIRST token decides, whatever follows it");
+    CHECK(!IsCliCallFor(L"nt --help", true) && !IsCliCallFor(L"-w 0 -v", true) && !IsCliCallFor(L"\"--help\"", true),
+          "help/version: a later or a quoted one stays the app's (`nt --help` asks the app for a new tab's help by name)");
+    CHECK(IsCliCallFor(L"show x", false) && IsCliCallFor(L"--archived", false) && IsCliCallFor(L"sessions --help", false),
+          "route: a verb or a CLI-only flag is the CLI's whoever asks, the Run box included");
+    CHECK(!IsCliCallFor(L"", true) && !IsCliCallFor(L"-w new -s 0", true) && !IsCliCallFor(L"-Embedding", true) &&
+              !IsCliCallFor(L"--register-user", true) && !IsCliCallFor(L"Show x", true) && !IsCliCallFor(LR"(--profile C:\p show x)", true),
+          "route: the app's command lines, a capitalised verb and a leading --profile stay the app's whoever asks");
 
     // --- the CLI's path and command line ---
     CHECK(CliExePathBeside(LR"(C:\Program Files\Agentmaster\Agentmaster.exe)") == LR"(C:\Program Files\Agentmaster\agentmaster-cli.exe)",

@@ -247,6 +247,77 @@ namespace
         return ::GetCurrentPackageFamilyName(&len, nullptr) != APPMODEL_ERROR_NO_PACKAGE;
     }
 
+    // Which Agentmaster this CLI ships with, for `--version`: "<name> <a.b.c.d>". Help and the version reach this CLI
+    // instead of the app's message box (CliDispatch.h IsCliCallFor, CLI.md §2), and that box named the app's version, so
+    // `agentmaster --version` must still say which build is installed. Packaged: the package's own name and version
+    // ("AgentmasterDev 0.0.1.40"). Unpackaged: "Agentmaster" and the first line of the `.am-version` beside this exe, which
+    // every portable zip and every per-user or all-users install ships. A build's bin folder has neither: no line.
+    // ⚠ Win32 file reads only, never std::ifstream: `--version` returns before any state is read, and the first iostream
+    // creates the codecvt facet whose teardown ends a Debug build of this CLI with 0xC0000409 (CLI.md §11).
+    //   returns — the line, or "" when this CLI cannot tell its app's version.
+    //   throws  — std::bad_alloc only.
+    std::wstring AppVersionLine()
+    {
+        UINT32 bytes = 0;
+        if (::GetCurrentPackageId(&bytes, nullptr) == ERROR_INSUFFICIENT_BUFFER && bytes >= sizeof(PACKAGE_ID))
+        {
+            std::vector<BYTE> buffer(bytes);
+            if (::GetCurrentPackageId(&bytes, buffer.data()) == ERROR_SUCCESS)
+            {
+                // The PACKAGE_ID sits at the buffer's start; its name points into the same buffer, alive until return.
+                const auto* id = reinterpret_cast<const PACKAGE_ID*>(buffer.data());
+                const PACKAGE_VERSION& v = id->version;
+                return std::wstring{ id->name ? id->name : L"Agentmaster" } + L" " + std::to_wstring(v.Major) + L"." +
+                       std::to_wstring(v.Minor) + L"." + std::to_wstring(v.Build) + L"." + std::to_wstring(v.Revision);
+            }
+        }
+
+        // Unpackaged: <this exe's folder>\.am-version. GetModuleFileNameW truncates silently, so grow until it fits.
+        std::wstring path(MAX_PATH, L'\0');
+        for (;;)
+        {
+            const DWORD length = ::GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+            if (length == 0)
+            {
+                return {};
+            }
+            if (length < path.size())
+            {
+                path.resize(length);
+                break;
+            }
+            if (path.size() >= 32768)
+            {
+                return {};
+            }
+            path.resize(path.size() * 2);
+        }
+        path.resize(path.find_last_of(L"\\/") + 1); // npos + 1 == 0: no folder leaves just the leaf below
+        path += L".am-version";
+
+        const HANDLE file = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE)
+        {
+            return {};
+        }
+        char text[64]{};
+        DWORD got = 0;
+        const BOOL read = ::ReadFile(file, text, sizeof(text) - 1, &got, nullptr);
+        ::CloseHandle(file);
+        if (!read)
+        {
+            return {};
+        }
+        // The version is the leading run of digits and dots ("0.8.1.0", then a line break or nothing); anything else
+        // in the file (a BOM, a stray word) means it is not one this CLI can vouch for.
+        std::wstring version;
+        for (DWORD i = 0; i < got && ((text[i] >= '0' && text[i] <= '9') || text[i] == '.'); ++i)
+        {
+            version.push_back(static_cast<wchar_t>(text[i]));
+        }
+        return version.empty() ? std::wstring{} : L"Agentmaster " + version;
+    }
+
     // The owning-instance GUID prefix of an AM_SESSION stamp ("<guid>" or "<guid>:<windowId>").
     std::wstring AmGuidPrefix(std::wstring_view am)
     {
@@ -1773,7 +1844,12 @@ namespace
         OutLn(L"  sql \"<SELECT ...>\"      one read-only query over the database's views (v_sessions, v_messages, ...)");
         OutLn(L"  sessdb [status|stop|resync|rebuild]  the session database service");
         OutLn(L"");
-        OutLn(L"global: --json  --self  --profile <dir>  --instance dev|release  --help");
+        OutLn(L"global: --json  --self  --profile <dir>  --instance dev|release  --help (-h -? /?)  --version (-v)");
+        OutLn(L"");
+        // The rule the launcher and the app apply (CliDispatch.h): this text is what `agentmaster --help` prints now, so
+        // it says where every other command line goes, as Windows Terminal's help box did.
+        OutLn(L"Put the verb first: any other first word goes to the app as Windows Terminal's command line");
+        OutLn(L"(`agentmaster` opens a window, `agentmaster nt -d <dir>` a tab).");
         return 0;
     }
 }
@@ -1838,13 +1914,20 @@ int wmain(int argc, wchar_t** argv)
         {
             instance = next();
         }
-        else if (arg == L"--help" || arg == L"-h" || arg == L"-?")
+        else if (arg == L"--help" || arg == L"-h" || arg == L"-?" || arg == L"/?")
         {
+            // Every help token the launcher and the app send here (CliDispatch.h kHelpOrVersionTokens). `/?` has no
+            // leading '-', so without this test it would pass the unknown-flag check below and be read as a verb.
             return Usage();
         }
-        else if (arg == L"--version")
+        else if (arg == L"--version" || arg == L"-v")
         {
+            // Line 1 stays exactly what scripts have read since schema 1; the app's version follows when it is known.
             OutLn(L"agentmaster-cli schema " + std::to_wstring(kSchemaVersion));
+            if (const auto app = AppVersionLine(); !app.empty())
+            {
+                OutLn(app);
+            }
             return 0;
         }
         else if (!arg.empty() && arg[0] == L'-')

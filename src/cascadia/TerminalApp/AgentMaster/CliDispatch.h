@@ -23,6 +23,14 @@
 // still runs, and its output reaches the console after the prompt. bash (Git Bash, Claude Code's Bash tool), Python,
 // Node and `cmd /c` wait, and get the output and the exit code. `agentmaster-cli <verb>`, a console program in the same
 // folder, has no such limit.
+//
+// HELP AND THE VERSION (2026-10-31, the user's "we can't have UI or message boxes appearing with the CLI"): `--help`,
+// `-h`, `-?`, `/?`, `--version` and `-v` are Windows Terminal's own first tokens, and the app answers each with a MESSAGE
+// BOX: in the running app when the line is handed over to it (the package's alias), and after a "profile in use" dialog
+// when the name finds an unpackaged copy beside a running package (that copy is a second app). A caller that can read
+// text (a terminal, a script, a pipe or a file) now gets the CLI's usage or version instead (IsCliCallFor). Only a caller
+// with nowhere to read text (the Run box, a shortcut) still gets the app's box: a console the CLI opened for it would
+// close before anyone could read it.
 
 #pragma once
 
@@ -46,9 +54,19 @@ namespace Agentmaster::CliDispatch
 
     // The leading flags that only the CLI knows, so `agentmaster --instance dev show …` is a CLI call too. None is a
     // Windows Terminal command-line token, so a GUI launch (`-w`, `-s`, `nt`, `-Embedding`, bare) is never routed to
-    // the CLI. Every OTHER leading flag (`--profile`, `--window`, `--version`, `--help`) still goes to the app.
+    // the CLI. `--profile` and `--window` are the CLI's AND Windows Terminal's (a new tab's profile, the target window),
+    // so a leading one still goes to the app; help and the version are kHelpOrVersionTokens, routed by the caller.
     inline constexpr std::wstring_view kCliOnlyFlags[] = {
-        L"--json", L"--self", L"--offline", L"--tail", L"--instance", L"--state", L"--dir"
+        L"--json", L"--self", L"--offline", L"--tail", L"--instance", L"--state", L"--dir",
+        L"--archived" // `sessions --archived`; first, the app's parser refused it with a command-line error box
+    };
+
+    // The leading tokens that ask for help or for the version: Windows Terminal's own (`-h` / `--help`, `-?` and `/?`,
+    // `-v` / `--version`), which the app can only answer with a message box (the header comment, HELP AND THE VERSION).
+    // They are a CLI call when the caller can read the CLI's text (IsCliCallFor), never otherwise. Exact matches, case
+    // included: `-H` and `-V` are Windows Terminal's split-pane flags, and `--Help` is no help request of either program.
+    inline constexpr std::wstring_view kHelpOrVersionTokens[] = {
+        L"--help", L"-h", L"-?", L"/?", L"--version", L"-v"
     };
 
     // The CLI's file name. It ships beside the app exe and the launcher shim in every layout, package and zip.
@@ -83,6 +101,23 @@ namespace Agentmaster::CliDispatch
         for (const auto flag : kCliOnlyFlags)
         {
             if (token == flag)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // PURE: whether a token asks for help or for the version (kHelpOrVersionTokens, exact match).
+    //   token   — the first command-line token (FirstToken).
+    //   returns — true for one of Windows Terminal's help and version tokens; false for anything else (`-H`, `-V`, a
+    //             token in other capitals included).
+    //   throws  — nothing.
+    inline bool IsHelpOrVersionToken(std::wstring_view token) noexcept
+    {
+        for (const auto helpOrVersion : kHelpOrVersionTokens)
+        {
+            if (token == helpOrVersion)
             {
                 return true;
             }
@@ -137,6 +172,20 @@ namespace Agentmaster::CliDispatch
     {
         const auto token = FirstToken(tail);
         return IsCliVerb(token) || IsCliOnlyFlag(token);
+    }
+
+    // PURE: THE rule once the caller is known, used by the launcher shim and by TryRunCliCall. A CLI call
+    // (IsCliInvocation) whoever asks; a request for help or for the version (IsHelpOrVersionToken first) when the caller
+    // can read the CLI's text, since the app could only answer it with a message box on the user's screen. A caller with
+    // nowhere to read text keeps the app's box: the console the CLI would get closes as soon as the CLI ends.
+    //   tail            — the command line after argv[0] (CommandlineTail).
+    //   callerReadsText — the caller shares its console with the asking exe or passed it standard handles (a pipe, a
+    //                     file): a terminal, a script, `$(...)`, a redirect. False for the Run box and a shortcut.
+    //   returns         — true when agentmaster-cli.exe must answer the command line.
+    //   throws          — nothing.
+    inline bool IsCliCallFor(std::wstring_view tail, bool callerReadsText) noexcept
+    {
+        return IsCliInvocation(tail) || (callerReadsText && IsHelpOrVersionToken(FirstToken(tail)));
     }
 
     // PURE: the path of the agentmaster-cli.exe that ships beside an exe: the same folder, kCliExeLeaf as the file name.
@@ -306,19 +355,22 @@ namespace Agentmaster::CliDispatch
     }
 
     // The APP exe's first step (WindowsTerminal/main.cpp, before the architecture check, COM, the single-instance
-    // hand-off, the install question and the profile): when the command line is a CLI call, run the agentmaster-cli.exe
-    // beside the exe on the caller's handles or console (PlanCliLaunch), wait for it, and give back its exit code. The
-    // app is NEVER started for a CLI call, also when the CLI cannot be started: then one line on the caller's error
-    // handle says why, and the exit code is kCliStartFailedExitCode.
-    //   returns — std::nullopt when the command line is not a CLI call (the caller goes on as the app); otherwise the
-    //             exit code for this process (the CLI's, any value a crash's NTSTATUS included, or
+    // hand-off, the install question and the profile): when the command line is a CLI call for this caller
+    // (IsCliCallFor: a verb or a CLI-only flag always, help or the version when the caller reads text), run the
+    // agentmaster-cli.exe beside the exe on the caller's handles or console (PlanCliLaunch), wait for it, and give back
+    // its exit code. The app is NEVER started for a CLI call, also when the CLI cannot be started: then one line on the
+    // caller's error handle says why, and the exit code is kCliStartFailedExitCode.
+    //   returns — std::nullopt when the command line is not a CLI call for this caller (the caller goes on as the app:
+    //             help or the version asked from the Run box or a shortcut is the app's message box, as before);
+    //             otherwise the exit code for this process (the CLI's, any value a crash's NTSTATUS included, or
     //             kCliStartFailedExitCode).
     //   throws  — nothing: a std::bad_alloc after the decision ends in kCliStartFailedExitCode with a fixed note.
     inline std::optional<int> TryRunCliCall() noexcept
     {
-        // Views only, so nothing above the try can throw, and the decision is made before anything can fail.
+        // Views only, so nothing above the try can throw. A line that is the CLI's for NO caller returns here, before
+        // anything is read or attached: every launch of the app passes this check untouched.
         const std::wstring_view tail = CommandlineTail(::GetCommandLineW());
-        if (!IsCliInvocation(tail))
+        if (!IsCliInvocation(tail) && !IsHelpOrVersionToken(FirstToken(tail)))
         {
             return std::nullopt;
         }
@@ -340,6 +392,14 @@ namespace Agentmaster::CliDispatch
             // harmlessly when the caller has no console (pythonw, a scheduled task, Explorer).
             const bool attached = ::AttachConsole(ATTACH_PARENT_PROCESS) != FALSE;
             const CliLaunchPlan plan = PlanCliLaunch(callerPassedHandles, attached);
+
+            // Help or the version from a caller with no console and no handles (the Run box, a shortcut): the app's
+            // message box is the only answer that caller can read, so the app goes on as before. Nothing was attached
+            // (OwnConsole means AttachConsole failed) and nothing allocated, so the app starts from an untouched state.
+            if (!IsCliCallFor(tail, plan.output != CliOutput::OwnConsole))
+            {
+                return std::nullopt;
+            }
 
             STARTUPINFOW si{};
             si.cb = sizeof(si);

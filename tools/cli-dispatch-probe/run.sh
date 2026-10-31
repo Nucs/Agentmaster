@@ -12,17 +12,28 @@ OUT="$(cygpath -u "${1:-Q:/tmp/cli-dispatch-probe}")"
 OUT_WIN="$(cygpath -w "$OUT")"
 GUI="$OUT/fakegui.exe"
 GUI_WIN="$(cygpath -w "$GUI")"
-if [ ! -x "$GUI" ] || [ ! -x "$OUT/agentmaster-cli.exe" ] || [ ! -x "$OUT/launcher.exe" ]; then
+SHIM="$OUT/shim/wtd.exe" # the REAL launcher shim, beside shim/Agentmaster.exe (fakegui) and shim/agentmaster-cli.exe (fakecli)
+SHIM_WIN="$(cygpath -w "$SHIM")"
+if [ ! -x "$GUI" ] || [ ! -x "$OUT/agentmaster-cli.exe" ] || [ ! -x "$OUT/launcher.exe" ] || [ ! -x "$SHIM" ] ||
+    [ ! -x "$OUT/shim/Agentmaster.exe" ] || [ ! -x "$OUT/shim/agentmaster-cli.exe" ]; then
     echo "build first: cmd //c \"$(cygpath -w "$(dirname "$0")")\\build.cmd $OUT_WIN\""
     exit 100
 fi
-rm -f "$OUT/fakecli.log" "$OUT/app-would-start.txt" "$OUT/out-file.txt" "$OUT/out-detached.txt" "$OUT/nocli/app-would-start.txt"
+rm -f "$OUT/fakecli.log" "$OUT/app-would-start.txt" "$OUT/out-file.txt" "$OUT/out-detached.txt" "$OUT/nocli/app-would-start.txt" \
+    "$OUT/shim/fakecli.log" "$OUT/shim/app-would-start.txt" "$OUT/shim/out-detached.txt"
 
 failed=0
 check() { # check <0 = ok> <description>
     if [ "$1" = "0" ]; then echo "PASS  $2"; else echo "FAIL  $2"; failed=$((failed + 1)); fi
 }
 has() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
+# wait_for <file>: up to 5 s, in 0.1 s steps, for a marker the stand-in writes when the shim FORWARDED a line to it: the
+# shim starts the app and exits at once, so the marker can land after the shim returned. Status 0 = it appeared.
+wait_for() {
+    local i=0
+    while [ ! -f "$1" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+    [ -f "$1" ]
+}
 
 # 1-6: bash passes standard handles (pipes or a file) and waits for the GUI exe.
 out=$("$GUI" show a77419cf --json 2>/dev/null); rc=$?
@@ -80,7 +91,68 @@ err=$("$OUT/nocli/fakegui.exe" show x 2>&1 >/dev/null); rc=$?
 has "$err" "could not start"; r1=$?
 [ ! -f "$OUT/nocli/app-would-start.txt" ]; check $(( r1 || $? || rc != 1 )) "no agentmaster-cli.exe: a message, exit 1, and the app is not started"
 
-# 16: across every CLI call above, the app never started and no console window was ever made.
+# 17-23: help and the version (2026-10-31: `agentmaster --help` through the kept all-users copy opened "profile in use").
+# Git Bash passes handles, so it reads text: the CLI answers each token. '-?' is quoted (a glob otherwise), and '/?' runs
+# with MSYS_NO_PATHCONV=1 (Git Bash would turn it into a path).
+for t in --help -h '-?' --version -v; do
+    out=$("$GUI" "$t" 2>/dev/null); rc=$?
+    has "$out" "cmdline=[agentmaster-cli $t]"; check $(( $? || rc != 42 )) "bash: '$t' first runs the CLI (help and the version are the CLI's for a caller that reads text)"
+done
+out=$(MSYS_NO_PATHCONV=1 "$GUI" '/?' 2>/dev/null); rc=$?
+has "$out" "cmdline=[agentmaster-cli /?]"; check $(( $? || rc != 42 )) "bash: '/?' first runs the CLI too"
+out=$("$GUI" --archived sessions 2>/dev/null); rc=$?
+has "$out" "cmdline=[agentmaster-cli --archived sessions]"; check $(( $? || rc != 42 )) "bash: --archived first is a CLI-only flag"
+
+# 24-25: still the app's: Windows Terminal's split-pane flag -H (an exact match decides) and a help asked after a verb of
+# the app (a new tab's help box, asked for by name).
+"$GUI" -H; rc=$?
+[ -f "$OUT/app-would-start.txt" ]; check $(( $? || rc != 7 )) "not a CLI call: '-H' (split-pane, not help) starts the app"
+rm -f "$OUT/app-would-start.txt"
+"$GUI" nt --help; rc=$?
+[ -f "$OUT/app-would-start.txt" ]; check $(( $? || rc != 7 )) "not a CLI call: 'nt --help' starts the app"
+rm -f "$OUT/app-would-start.txt"
+
+# 26-28: the launches a shell cannot make. A console without handles and a file without a console both read text, so the
+# CLI answers; with neither (the Run box, a shortcut) the app's message box is the only answer that caller can read.
+out=$("$OUT/launcher.exe" console "$GUI_WIN" --version)
+has "$out" "child exit=42"; r1=$?
+has "$(cat "$OUT/fakecli.log")" "[agentmaster-cli --version] stdout=console"; check $(( r1 || $? )) "no handles + a console: '--version' runs the CLI on that console"
+out=$("$OUT/launcher.exe" detached "$GUI_WIN" -h)
+has "$out" "child exit=42"; r1=$?
+has "$(cat "$OUT/out-detached.txt" 2>/dev/null)" "cmdline=[agentmaster-cli -h] stdout=file"; check $(( r1 || $? )) "handles + no console: '-h' runs the CLI into the caller's file, no window"
+out=$("$OUT/launcher.exe" none "$GUI_WIN" --help)
+has "$out" "child exit=7"; r1=$?
+has "$(cat "$OUT/app-would-start.txt" 2>/dev/null)" "--help"; check $(( r1 || $? )) "no handles + no console (the Run box): '--help' goes to the app, whose box is the only readable answer"
+rm -f "$OUT/app-would-start.txt"
+
+# 29-35: the REAL launcher shim (shim/wtd.exe, the execution alias's target). It runs the CLI beside it and waits; it
+# forwards anything else to shim/Agentmaster.exe (fakegui) and exits at once, so a forwarded line is seen by its marker.
+out=$("$SHIM" --help 2>/dev/null); rc=$?
+has "$out" "cmdline=[agentmaster-cli --help]"; check $(( $? || rc != 42 )) "shim, bash: '--help' runs the CLI and returns its exit code"
+out=$("$SHIM" sessions --json 2>/dev/null); rc=$?
+has "$out" "cmdline=[agentmaster-cli sessions --json]"; check $(( $? || rc != 42 )) "shim, bash: a verb runs the CLI, as before"
+[ ! -f "$OUT/shim/app-would-start.txt" ]; check $? "shim, bash: neither started the app"
+"$SHIM" -w new >/dev/null 2>&1
+wait_for "$OUT/shim/app-would-start.txt"; r1=$?
+has "$(cat "$OUT/shim/app-would-start.txt" 2>/dev/null)" "-w new"; check $(( r1 || $? )) "shim, bash: '-w new' is forwarded to the app, as before"
+rm -f "$OUT/shim/app-would-start.txt"
+out=$("$OUT/launcher.exe" none "$SHIM_WIN" --help)
+wait_for "$OUT/shim/app-would-start.txt"; r1=$?
+has "$(cat "$OUT/shim/app-would-start.txt" 2>/dev/null)" "--help"; check $(( r1 || $? )) "shim, no handles + no console (the Run box): '--help' is forwarded to the app"
+rm -f "$OUT/shim/app-would-start.txt"
+out=$("$OUT/launcher.exe" detached "$SHIM_WIN" -v)
+has "$out" "child exit=42"; r1=$?
+has "$(cat "$OUT/shim/out-detached.txt" 2>/dev/null)" "cmdline=[agentmaster-cli -v] stdout=file"; check $(( r1 || $? )) "shim, handles + no console: '-v' runs the CLI into the caller's file"
+# The shim SHARES the launcher's console (its decision: callerSharesConsole) and is passed no handles. Unlike the GUI
+# stand-in it opens no CONOUT$: a console child keeps the standard handles it inherited, here the launcher's own, which
+# Git Bash made pipes (measured: stdout=pipe). So the check is the routing, not where the text lands.
+out=$("$OUT/launcher.exe" console "$SHIM_WIN" '-?' 2>/dev/null)
+has "$out" "child exit=42"; r1=$?
+has "$(cat "$OUT/shim/fakecli.log" 2>/dev/null)" "[agentmaster-cli -?]"; check $(( r1 || $? )) "shim, a shared console without handles: '-?' runs the CLI"
+echo "INFO  shim CLI runs: $(tr '\n' ' ' < "$OUT/shim/fakecli.log" 2>/dev/null)"
+
+# 36-37: across every CLI call above, the app never started (each app-path check removed its own marker) and no console
+# window was ever made.
 [ ! -f "$OUT/app-would-start.txt" ]; check $? "no CLI call started the app"
 has "$(cat "$OUT/fakecli.log")" "consoleWindow=yes"; check $(( ! $? )) "no CLI run got a console window"
 
