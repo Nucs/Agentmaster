@@ -4180,6 +4180,11 @@ namespace Agentmaster
         // confirming read needs what the user asked and what Claude answered.
         opts.chain = false;
         opts.agents = false;
+        // Compact WITHOUT the calls' reason lines (transcript_turns v10 added them to the level): the model reads what its
+        // eval-scored prompt describes ("compact adds compactions, the user's answers and slash commands"), and the
+        // default 6,000 characters per session keep covering as much of each conversation as before. Turning them on is
+        // a prompt change - a new eval first (tools/ai-search-eval, SESSIONS.md 9.15).
+        opts.reasons = false;
 
         std::vector<KnownSession> facts(ids.size());
         for (size_t i = 0; i < ids.size(); ++i)

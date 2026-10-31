@@ -108,6 +108,11 @@ namespace Agentmaster
     {
         int cols{ kConversationImageCols }; // the sheet's width in cells (20..kScreenSnapshotMaxCols; a narrower value is raised to 20)
         int maxRows{ 0 }; // 0 = keep every row; else the sheet keeps only its LAST rows, at most this many (a note on top says what was left out)
+        // Whether each tool call's line says how it ended (the turns view's "· ok" / "· ✗ exit 1" / "· no result": true at every
+        // level with the call list on, TurnsOptions::ops). False for a level that lists its calls WITHOUT an outcome - Compact's
+        // one-line reasons ("**Bash**: why", transcript_turns v10): their bullets are then the neutral dim gray, never the green
+        // that would claim a call went well when the line cannot say (red / gray / green are Claude Code's outcome colors).
+        bool callOutcomes{ true };
     };
 
     /// <summary>A conversation laid out on the grid.</summary>

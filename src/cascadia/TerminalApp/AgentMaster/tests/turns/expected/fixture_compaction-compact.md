@@ -13,6 +13,7 @@ _This transcript opens mid-turn: the prompt that started this work is not in the
 > run the long job
 
 **● Claude**
+- **Bash**: Run the job
 - 🗜 context compacted (auto) · 900.0k → 15.0k tokens · took 6m 40s at Jan 03 09:10
 - ❯ Which option? → **Option B**
 
@@ -36,7 +37,8 @@ _Before this turn: Jan 03 09:20 — the user ran `/compact`; it replied: Compact
 > third task
 
 **● Claude**
-- ❯ **Bash** call rejected — the user said: **use new.py instead**
+- **Bash**: Run the old script
+  - ❯ rejected — the user said: **use new.py instead**
 
 > Switching to new.py.
 

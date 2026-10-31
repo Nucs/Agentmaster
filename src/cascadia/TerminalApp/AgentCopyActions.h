@@ -42,7 +42,7 @@ namespace winrt::TerminalApp::implementation
     //                              code = kCopyFieldTranscriptLevelBase + the TurnsLevel value, i.e. 9 Minimal ·
     //                              10 Compact · 11 Default · 12 Full · 13 Max. The conversation as Markdown, turn by
     //                              turn (AgentMaster/TranscriptTurns.h — a C++ port of the am-agentmaster-cli
-    //                              skill's transcript_turns.py, so the app and the skill copy the SAME text),
+    //                              skill's transcript_turns.py v10, so the app and the skill copy the SAME text),
     //                              including the sessions it was forked / plan-restarted from and the subagents it
     //                              spawned; rendered OFF-thread, times in local time. A Codex rollout has no turns
     //                              view: Minimal / Compact copy code 8's per-turn brief, Default / Full / Max code
@@ -111,7 +111,7 @@ namespace winrt::TerminalApp::implementation
           L"Everything in Default, plus the exact command under each Bash call, the first line each call returned, and how long each call took",
           kCopyFieldTranscriptLevelBase + 3 },
         { L"Compact",
-          L"Your messages and each turn's final reply, plus where the context was compacted, your answers to the agent's questions, the slash commands you ran, and each subagent's brief and final report",
+          L"Your messages and each turn's final reply, plus every tool call on one line with the reason the agent gave for it, where the context was compacted, your answers to the agent's questions, the slash commands you ran, and each subagent's brief and final report",
           kCopyFieldTranscriptLevelBase + 1 },
         { L"Minimal",
           L"Only your messages and each turn's final reply",

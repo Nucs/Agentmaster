@@ -1505,7 +1505,9 @@ namespace Agentmaster
                         switch (kind)
                         {
                         case ItemKind::ToolCall:
-                            bullet = ToolCallColor(b);
+                            // A level whose call lines state no outcome (Compact's reason lines) gets the neutral bullet:
+                            // ToolCallColor reads green for "no failure written", which there would only mean "not written".
+                            bullet = options.callOutcomes ? ToolCallColor(b) : kConvDim;
                             break;
                         case ItemKind::Remark:
                             bullet = kConvBright;
@@ -1651,6 +1653,8 @@ namespace Agentmaster
             ConversationSheetOptions sheetOptions;
             sheetOptions.cols = cols;
             sheetOptions.maxRows = static_cast<int>((std::min)(rowCap, static_cast<int64_t>(kTallSnapshotMaxRows)));
+            // Compact lists its calls as reason lines with no outcome (the call list, ops, is off there): neutral bullets.
+            sheetOptions.callOutcomes = turns.ops;
             const ConversationSheet sheet = BuildConversationSheet(parsed.blocks, sheetOptions);
             out.layoutMs = now() - layoutStarted;
             out.rows = sheet.snapshot.rows;

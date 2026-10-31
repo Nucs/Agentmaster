@@ -19,6 +19,7 @@
 > backtest the strategy
 
 **● Claude**
+- **Bash**: Run the backtest
 - 🗜 context compacted (auto) · 800.0k → 15.0k tokens · took 5m 00s at Jan 10 08:55
 
 > Backtest done: Sharpe 1.4.
@@ -39,6 +40,8 @@
 > fork: try MSFT
 
 **● Claude**
+- **Bash**: Backtest on MSFT
+
 > MSFT: Sharpe 0.9.
 
 ## Session 3 of 3 · `a4a4a4a4` · forked from session 2 on Jan 10 12:00 · this session

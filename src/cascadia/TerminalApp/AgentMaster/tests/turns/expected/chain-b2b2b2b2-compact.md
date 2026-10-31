@@ -10,6 +10,8 @@
 > plan the export feature
 
 **● Claude**
+- **ExitPlanMode**
+
 > Here is the plan.
 
 ## Session 2 of 2 · `b2b2b2b2` · restarted from session 1 to implement its plan on Jan 11 08:06 · this session
@@ -26,5 +28,7 @@
 > If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: C:\Users\someone\.claude\projects\K--fake\b1b1b1b1-0000-4000-8000-000000000001.jsonl
 
 **● Claude**
+- **Write**: `export.py`
+
 > Export added and tested.
 

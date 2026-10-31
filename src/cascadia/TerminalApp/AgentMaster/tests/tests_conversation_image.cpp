@@ -259,9 +259,11 @@ namespace
     /// <param name="markdown">The document.</param>
     /// <param name="cols">The sheet's width.</param>
     /// <param name="maxRows">The row cap (0 = none).</param>
+    /// <param name="callOutcomes">ConversationSheetOptions::callOutcomes: false lays the calls out as a level whose call lines state no
+    /// outcome (Compact's reason lines) - neutral bullets.</param>
     /// <returns>The sheet.</returns>
     /// <exception cref="std::bad_alloc">If the sheet cannot be allocated.</exception>
-    ConversationSheet ConvLayout(std::wstring_view markdown, int cols, int maxRows = 0)
+    ConversationSheet ConvLayout(std::wstring_view markdown, int cols, int maxRows = 0, bool callOutcomes = true)
     {
         MdParseOptions parse;
         parse.softBreaksAsLineBreaks = true;
@@ -270,6 +272,7 @@ namespace
         ConversationSheetOptions options;
         options.cols = cols;
         options.maxRows = maxRows;
+        options.callOutcomes = callOutcomes;
         return BuildConversationSheet(parsed.blocks, options);
     }
 #endif
@@ -590,6 +593,18 @@ void TestConversationImage()
         CHECK(!lines.empty() && fits, "layout: a 40-column sheet keeps every row within 40 columns");
         const int failed = ConvFindRow(sheet, L"run: make");
         CHECK(failed > 0 && lines[static_cast<size_t>(failed)][0].fg == kConvFail, "layout: a call that failed wears the red bullet");
+        // Compact's reason lines (transcript_turns v10) state no outcome: laid out as such (callOutcomes off, what
+        // RenderConversationImages passes at a level without the call list), a call's bullet is the neutral gray - never the
+        // green that would claim it went well. With outcomes stated, a line naming no failure keeps reading as green.
+        const std::wstring reasons = L"**\x25CF Claude**\n- **Bash**: List the files\n- **Read**: `app.cfg`\n\n> done\n";
+        const ConversationSheet neutral = ConvLayout(reasons, cols, 0, false);
+        const int neutralRow = ConvFindRow(neutral, L"List the files");
+        CHECK(neutralRow >= 0 && neutral.snapshot.lines[static_cast<size_t>(neutralRow)][0].fg == kConvDim,
+              "layout: a reason line at a level without outcomes wears the neutral gray bullet");
+        const ConversationSheet stated = ConvLayout(reasons, cols);
+        const int statedRow = ConvFindRow(stated, L"List the files");
+        CHECK(statedRow >= 0 && stated.snapshot.lines[static_cast<size_t>(statedRow)][0].fg == kConvOk,
+              "layout: with outcomes stated, a call line naming no failure keeps the green bullet");
         const int result = ConvFindRow(sheet, L"error: something failed");
         CHECK(result > failed && lines[static_cast<size_t>(result)].size() > 3 && lines[static_cast<size_t>(result)][2].text == L"\x23BF" && lines[static_cast<size_t>(result)][2].fg == kConvDim,
               "layout: what a call returned hangs under it after the result corner, dimmed");

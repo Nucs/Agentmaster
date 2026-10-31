@@ -383,8 +383,12 @@ void TestMarkdownBlocks()
             CHECK(agentsDefault[2].prompts == 1 && agentsDefault[2].toolCalls == 2, "md golden areas: Explore - its brief (a top-level prompt) + 2 calls");
             CHECK(agentsDefault[6].empty && agentsDefault[7].empty && agentsDefault[8].empty, "md golden areas: the three (no tool calls) turns are empty areas");
         }
+        // Since transcript_turns v10 Compact lists every call as a reason line ("**Bash**: why"), so its lists hold calls and
+        // read as foldable CONTENT - which is why the overlay itself never folds Compact or Minimal: it looks for fold areas only
+        // from Default up (AgentTranscriptOverlay::_RenderLevel). Here: 6 lists (the lead's two turns with calls, four agents).
         const auto agentsCompact = GoldenToolAreas(L"agents-c1c1c1c1-compact.md");
-        CHECK(agentsCompact.size() == 4 && CountFoldable(agentsCompact) == 0, "md golden areas: agents compact - 4 agent lists (messages / briefs), none folds");
+        CHECK(agentsCompact.size() == 6 && CountFoldable(agentsCompact) == 6,
+              "md golden areas: agents compact (v10) - 6 lists of reason lines (2 lead turns + 4 agents), each with calls");
         const auto sessionMax = GoldenToolAreas(L"fixture_session-max.md");
         CHECK(sessionMax.size() == 3 && CountFoldable(sessionMax) == 2, "md golden areas: session max - the stats line inside the header does not hide the list");
         if (sessionMax.size() == 3)

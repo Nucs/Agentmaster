@@ -3,7 +3,7 @@
 
 // Plain C++ engine TU — no WinRT, no precompiled header (the vcxproj marks it NotUsing and the
 // standalone test harness compiles it directly). See TranscriptTurns.h for what it renders and how
-// it relates to its reference, the am-agentmaster-cli skill's transcript_turns.py (v9).
+// it relates to its reference, the am-agentmaster-cli skill's transcript_turns.py (v10).
 //
 // Layout — every section mirrors the reference's section of the same name, function for function,
 // and each ported function names its Python original, so a change to the reference is easy to find
@@ -1114,6 +1114,27 @@ namespace Agentmaster
                     return L"`` " + std::wstring{ text } + L" ``";
                 }
                 return L"`" + std::wstring{ text } + L"`";
+            }
+
+            // base_name() (v10, the reasons feature): the last component of a path written with either separator - a
+            // transcript written on Windows names files with '\', one written elsewhere with '/', and the reference splits on
+            // both. Trailing separators are ignored; a path that is nothing but separators stays itself ("/" stays "/"), and
+            // "" stays "".
+            //   path - a file path as a tool call wrote it.
+            // Returns the component. Throws std::bad_alloc only.
+            std::wstring BaseName(std::wstring_view path)
+            {
+                size_t end = path.size();
+                while (end > 0 && (path[end - 1] == L'\\' || path[end - 1] == L'/'))
+                {
+                    --end; // path.rstrip("\\/")
+                }
+                if (end == 0)
+                {
+                    return std::wstring{ path }; // re.split of "" gives [""]: the reference returns the path itself
+                }
+                const size_t separator = path.find_last_of(L"\\/", end - 1);
+                return std::wstring{ separator == std::wstring_view::npos ? path.substr(0, end) : path.substr(separator + 1, end - separator - 1) };
             }
 
             // indented_block(): a fenced code block inside a dash-list item, content verbatim. The
@@ -4814,6 +4835,94 @@ namespace Agentmaster
                     return L"**" + name + L"** " + Join(parts, L", ");
                 }
 
+                // op_subject() (v10, the reasons feature): what a call acted on, in a few words - the fallback line of a call
+                // that gave no reason. A file's NAME (not its path), a pattern, a query, a skill, a URL as a code span; "N items"
+                // for a to-do list; "→ <to>: <what>" for a message. Only string arguments count (a model-written non-string is
+                // no subject), exactly as the reference reads them.
+                //   op - the call.
+                // Returns the fragment, or "" when the tool has nothing that short to say (MCP tools and the rest). Throws
+                // std::bad_alloc only.
+                std::wstring OpSubject(const TurnOp& op)
+                {
+                    const std::wstring& name = op.name;
+                    const Value* inp = op.inp;
+                    const auto text = [inp](std::wstring_view key) {
+                        const Value* value = JGet(inp, key);
+                        return IsStr(value) ? value->str : std::wstring{};
+                    };
+                    if (name == L"Read" || name == L"Write" || name == L"Edit" || name == L"MultiEdit" || name == L"NotebookEdit")
+                    {
+                        const std::wstring path = text(name == L"NotebookEdit" ? L"notebook_path" : L"file_path");
+                        return path.empty() ? std::wstring{} : Code(BaseName(path));
+                    }
+                    if (name == L"Bash")
+                    {
+                        const std::wstring command = text(L"command");
+                        return command.empty() ? std::wstring{} : Code(OneLine(Short(command), 80));
+                    }
+                    if (name == L"Grep" || name == L"Glob" || name == L"ToolSearch")
+                    {
+                        const std::wstring value = text(name == L"ToolSearch" ? L"query" : L"pattern");
+                        return value.empty() ? std::wstring{} : Code(OneLine(value, 60));
+                    }
+                    if (name == L"WebFetch" || name == L"WebSearch")
+                    {
+                        const std::wstring value = text(name == L"WebFetch" ? L"url" : L"query");
+                        return value.empty() ? std::wstring{} : Code(OneLine(value, 80));
+                    }
+                    if (name == L"Skill")
+                    {
+                        const std::wstring skill = text(L"skill");
+                        return skill.empty() ? std::wstring{} : Code(skill);
+                    }
+                    if (name == L"TodoWrite")
+                    {
+                        // len(todos) only for a real list: a string `todos` (malformed) counts as none, not its length.
+                        const Value* todos = JGet(inp, L"todos");
+                        const size_t count = IsArr(todos) ? todos->arr.size() : 0;
+                        return std::to_wstring(count) + (count != 1 ? L" items" : L" item");
+                    }
+                    if (name == L"SendMessage")
+                    {
+                        std::wstring to = text(L"to");
+                        if (to.empty())
+                        {
+                            to = text(L"recipient");
+                        }
+                        std::wstring what = text(L"summary");
+                        if (what.empty())
+                        {
+                            what = text(L"message");
+                        }
+                        return L"→ " + (to.empty() ? std::wstring{ L"?" } : to) + (what.empty() ? std::wstring{} : L": " + OneLine(what, 120));
+                    }
+                    return {};
+                }
+
+                // op_reason() (v10, the reasons feature): a call's line with the call list off - the tool and why it ran. The
+                // reason is the call's own `description` (what Claude wrote to explain it: Bash, Agent / Task, any tool that
+                // takes one), flattened and capped at 200; a call without one shows what it acted on instead (OpSubject), so
+                // every call keeps a line. (The reference guards this like op_summary; here every argument is read through
+                // total accessors, so there is nothing to guard - the header's divergence note.)
+                //   op - the call.
+                // Returns "**Bash**: List the files", "**Read**: `app.cfg`" or the bare "**mcp__srv__tool**" (without the
+                // "- "); "" for a call that gets no line of its own - AskUserQuestion, whose answer line names the question.
+                // Throws std::bad_alloc only.
+                std::wstring OpReason(const TurnOp& op)
+                {
+                    if (op.name == L"AskUserQuestion")
+                    {
+                        return {};
+                    }
+                    const Value* description = JGet(op.inp, L"description");
+                    if (IsStr(description) && !PyStrip(description->str).empty())
+                    {
+                        return L"**" + op.name + L"**: " + Flat(description->str, 200);
+                    }
+                    const std::wstring subject = OpSubject(op);
+                    return subject.empty() ? L"**" + op.name + L"**" : L"**" + op.name + L"**: " + subject;
+                }
+
                 // op_outcome(): how a call ended, in a word or two ("ok", "✗ exit 1", "timed out →
                 // background `id`", "created", "40 of 120 lines"; "no result" when none arrived).
                 static std::wstring OpOutcome(const TurnOp& op)
@@ -5234,24 +5343,52 @@ namespace Agentmaster
                     std::vector<std::wstring> lines;
                     if (ev.kind == TurnEvent::Kind::Op && !_opt.ops)
                     {
-                        if (_opt.answers)
+                        const TurnOp& op = *ev.op;
+                        // (reasons, v10) The call list is off, but the call keeps one line: the tool and why it ran. The user's
+                        // reply to it nests under that line, which names the call - exactly as under a full call line.
+                        const std::wstring reason = _opt.reasons ? OpReason(op) : std::wstring{};
+                        if (!reason.empty())
                         {
-                            // Calls hidden: the user's answers still show, each naming what it answers.
-                            for (auto& said : UserAnswers(*ev.op, true))
+                            const std::wstring pointer = (_opt.agents && op.agent) ? L" · → ● " + op.agent->label : std::wstring{};
+                            lines.push_back(L"- " + reason + pointer);
+                            // Agentmaster (editDiffs, not in the reference): the call's change nests under its reason line, in the
+                            // full call line's order (the diff, then the user's reply) - the call already HAS a line, so the
+                            // OpSummary line the branch below adds for a level without one would only say it twice.
+                            if (_opt.editDiffs)
                             {
-                                lines.push_back(L"- " + said);
+                                if (auto diff = EditDiffText(op))
+                                {
+                                    lines.push_back(IndentedBlock(*diff, L"diff", _opt.nestedBlocks));
+                                }
+                            }
+                            if (_opt.answers)
+                            {
+                                for (auto& said : UserAnswers(op, false))
+                                {
+                                    lines.push_back(L"  - " + said);
+                                }
                             }
                         }
-                        if (_opt.editDiffs)
+                        else
                         {
-                            // Agentmaster (editDiffs, not in the reference): the level hides the calls, but the file changes show
-                            // anyway - each file-changing call's own line, then its diff - since the option means "whatever else the
-                            // level hides".
-                            if (auto diff = EditDiffText(*ev.op))
+                            if (_opt.answers)
                             {
-                                const TurnOp& op = *ev.op;
-                                lines.push_back(L"- " + OpSummary(op) + (_opt.opMeta ? OpMeta(op) : std::wstring{}));
-                                lines.push_back(IndentedBlock(*diff, L"diff", _opt.nestedBlocks));
+                                // Calls hidden: the user's answers still show, each naming what it answers.
+                                for (auto& said : UserAnswers(op, true))
+                                {
+                                    lines.push_back(L"- " + said);
+                                }
+                            }
+                            if (_opt.editDiffs)
+                            {
+                                // Agentmaster (editDiffs, not in the reference): the level hides the calls, but the file changes show
+                                // anyway - each file-changing call's own line, then its diff - since the option means "whatever else the
+                                // level hides".
+                                if (auto diff = EditDiffText(op))
+                                {
+                                    lines.push_back(L"- " + OpSummary(op) + (_opt.opMeta ? OpMeta(op) : std::wstring{}));
+                                    lines.push_back(IndentedBlock(*diff, L"diff", _opt.nestedBlocks));
+                                }
                             }
                         }
                     }
@@ -5358,6 +5495,9 @@ namespace Agentmaster
                     bool hasAnswers = false;
                     bool hasInputs = false;
                     bool hasDiffs = false; // Agentmaster (editDiffs): a file change to show, so a timeline even at a level without calls
+                    // (reasons, v10) With the call list off, a call that gets a reason line opens the timeline too - only such a
+                    // call, so a turn with none prints no list (never an empty one).
+                    bool hasReasons = false;
                     for (const TurnEvent& ev : turn.events)
                     {
                         hasCompaction = hasCompaction || ev.kind == TurnEvent::Kind::Compact;
@@ -5366,6 +5506,10 @@ namespace Agentmaster
                         {
                             hasAnswers = true;
                         }
+                        if (_opt.reasons && !_opt.ops && !hasReasons && ev.kind == TurnEvent::Kind::Op && !OpReason(*ev.op).empty())
+                        {
+                            hasReasons = true;
+                        }
                         // The exact test (EditDiffText, not just the tool's name): a change with nothing to show must not open an
                         // empty timeline, which would print "(no remarks)" where the level shows nothing.
                         if (_opt.editDiffs && !hasDiffs && ev.kind == TurnEvent::Kind::Op && IsFileChangeCall(*ev.op) && EditDiffText(*ev.op))
@@ -5373,7 +5517,7 @@ namespace Agentmaster
                             hasDiffs = true;
                         }
                     }
-                    if (_opt.ops || _opt.narration || (_opt.compactions && hasCompaction) || hasAnswers || hasInputs || hasDiffs)
+                    if (_opt.ops || _opt.narration || (_opt.compactions && hasCompaction) || hasAnswers || hasInputs || hasDiffs || hasReasons)
                     {
                         std::vector<std::wstring> timeline;
                         for (const TurnEvent& ev : turn.events)
@@ -5926,10 +6070,10 @@ namespace Agentmaster
 
     TurnsOptions TurnsOptionsForLevel(TurnsLevel level) noexcept
     {
-        TurnsOptions opt; // the latest preset (v9) as it stands at its default level
+        TurnsOptions opt; // the latest preset (v10) as it stands at its default level
         const int value = static_cast<int>(level);
         const int rank = (value < 0 || value >= kTurnsLevelCount) ? static_cast<int>(TurnsLevel::Default) : value;
-        // The reference's LEVELS table: cumulative sets over the eleven LADDER features.
+        // The reference's LEVELS table: cumulative sets over the twelve LADDER features.
         const bool compact = rank >= static_cast<int>(TurnsLevel::Compact);
         const bool steps = rank >= static_cast<int>(TurnsLevel::Default);
         const bool full = rank >= static_cast<int>(TurnsLevel::Full);
@@ -5938,6 +6082,8 @@ namespace Agentmaster
         opt.compactions = compact;
         opt.answers = compact;
         opt.agents = compact;
+        // (v10) From Compact up, like the reference's _COMPACT set; only Compact shows it (ops prints full lines above).
+        opt.reasons = compact;
         opt.ops = steps;
         opt.narration = steps;
         opt.fullBash = full;

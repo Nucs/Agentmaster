@@ -7,13 +7,14 @@
 // "Transcript Followup" items.
 //
 // It is a C++ PORT of transcript_turns.py, the "turns view" of the am-agentmaster-cli skill
-// (~/.claude/skills/am-agentmaster-cli/scripts/transcript_turns.py, version v9). That script is the
+// (~/.claude/skills/am-agentmaster-cli/scripts/transcript_turns.py, version v10). That script is the
 // reference: for every transcript the port is meant to print exactly what the script prints with
-// `--preset v9 --utc` (or local time) and the matching level flag. The harness pins it byte for
+// `--preset v10 --utc` (or local time) and the matching level flag. The harness pins it byte for
 // byte on the skill's own synthetic fixtures (tests/turns/, goldens written by
 // tests/turns/make_goldens.py from the script itself — TestTranscriptTurns). A change to the
-// script's v9 output must be regenerated there and ported here; a NEW script version is a
-// deliberate move of both (the goldens pin --preset v9).
+// script's v10 output must be regenerated there and ported here; a NEW script version is a
+// deliberate move of both (the goldens pin --preset v10). v10 is v9 plus `reasons`: Compact lists
+// every tool call as one line with the reason Claude gave for it.
 //
 // What a render shows, per turn (the levels pick how much of it):
 //     ### Turn N · <start> → last reply <time>
@@ -81,7 +82,8 @@ namespace Agentmaster
     enum class TurnsLevel : int
     {
         Minimal = 0, // the user's messages and each turn's final reply, nothing else
-        Compact = 1, // + compaction markers, the user's answers, slash-command notes, each agent's brief + report
+        Compact = 1, // + compaction markers, the user's answers, slash-command notes, each agent's brief + report, and
+                     //   every tool call as one line: the tool and the reason Claude gave for it (TurnsOptions::reasons)
         Default = 2, // + every tool call on one line (how it ended) and the remarks between calls — the
                      //   reference's "steps" level, what it prints with no level flag
         Full = 3, // + the verbatim command under each Bash call, the first line each call returned, and
@@ -93,10 +95,10 @@ namespace Agentmaster
     inline constexpr int kTurnsLevelCount = 5;
 
     // Every output feature and correctness rule of the reference, one flag each (the script's
-    // --<feature> / --no-<feature>). The member initializers are the reference's LATEST preset (v9)
+    // --<feature> / --no-<feature>). The member initializers are the reference's LATEST preset (v10)
     // at its default level — exactly what `transcript_turns.py <session>` prints. Use
     // TurnsOptionsForLevel to get a level; flip a flag afterwards to inspect one feature (the
-    // harness does). Features that are on in every v9 level (times, shortPaths, opMeta, bgEvents,
+    // harness does). Features that are on in every v10 level (times, shortPaths, opMeta, bgEvents,
     // nestedBlocks, compactedHistory, chain, peerMessages) still have both code paths, ported as
     // the script has them.
     struct TurnsOptions
@@ -120,6 +122,13 @@ namespace Agentmaster
         bool chain = true; // the sessions this one was forked or plan-restarted from, back to the first, rendered as one history
         bool agents = true; // an entry per subagent / teammate a call spawned, read from its own transcript
         bool peerMessages = true; // a message from a teammate or another session is shown as theirs (✉ <name>), not the user's
+        // (v10) With the call list off (Compact), each tool call still gets ONE line: "**Bash**: <reason>", the reason being
+        // the description Claude gave for the call (Bash, Agent / Task, any tool that takes one), else what the call acted on
+        // ("**Read**: `app.cfg`" - a file's name, a pattern, a query; OpSubject), else the bare tool. AskUserQuestion gets no
+        // line (its answer line names the question), and the user's reply to a call nests under its line. On from Compact up,
+        // like every ladder feature, but only SHOWN at Compact: with ops on, each call's full line already carries its
+        // description. On by default because the latest preset's steps level has it on (silently, for the same reason).
+        bool reasons = true;
         bool fullWrite = false; // the full content written by each Write call, in a code block
         // --- Agentmaster-only (NOT in the reference: off in every level, so the goldens never see it) ---
         // The change each file-changing call made (Edit, MultiEdit, Write, NotebookEdit), as a unified-diff block under its
@@ -144,9 +153,9 @@ namespace Agentmaster
         bool keepPrePromptWork = true; // show work done before the file's first prompt instead of dropping it
     };
 
-    // The options a detail level stands for, on top of the latest preset (v9). A level sets the
-    // reference's eleven LADDER features absolutely (notes, ops, fullBash, stats, opDuration, opOutput,
-    // narration, compactions, answers, agents, fullWrite) and leaves every other feature at the
+    // The options a detail level stands for, on top of the latest preset (v10). A level sets the
+    // reference's twelve LADDER features absolutely (notes, ops, fullBash, stats, opDuration, opOutput,
+    // narration, compactions, answers, agents, fullWrite, reasons) and leaves every other feature at the
     // preset's value, exactly like `transcript_turns.py --minimal|--compact|(none)|--full|--max`.
     //   level — the level; an out-of-range value is treated as Default.
     // Returns the options. Never throws.

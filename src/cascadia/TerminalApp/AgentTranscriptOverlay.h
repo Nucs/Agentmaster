@@ -26,13 +26,14 @@
 // reader on the same passage (_SyncWrapMode), and a level that was hidden at the switch catches up — with
 // its own passage kept — when it is shown again.
 //
-// FOLDED TOOL CALLS: in every turn the list of tool calls and remarks under "**● Claude**" (and under an
-// agent entry's header) — the part Compact leaves out — is folded into ONE summary row ("▸ 4 tool calls:
+// FOLDED TOOL CALLS: at Default, Full and Max, in every turn the list of tool calls and remarks under
+// "**● Claude**" (and under an agent entry's header) is folded into ONE summary row ("▸ 4 tool calls:
 // Bash ×3, Write · 2 remarks", AgentMaster/MarkdownBlocks.h MdFindToolAreas); the reply under it stays
-// open, so the Default / Full / Max views read like Compact with every call one click away. A click on
-// the row opens / closes that list; "Expand all" opens every list of the level (and the lists built after
-// it). A list with only Compact's own content (answers, compactions, an agent's messages) stays open, and
-// a "(no tool calls)" list becomes a one-line note.
+// open, so those views read like Compact with every call one click away. A click on the row opens /
+// closes that list; "Expand all" opens every list of the level (and the lists built after it). A list
+// with no call or remark (answers, compactions, an agent's messages) stays open, and a "(no tool calls)"
+// list becomes a one-line note. Compact and Minimal never fold: Compact's lists ARE its point - each
+// call's one-line reason (transcript_turns v10) - so the fold areas are found only from Default up.
 //
 // SESSION CHAIN LINKS: a transcript that continues earlier sessions (a fork, a plan restart) opens with
 // the "Session chain" list — "session 1 · <id> — started …", "session 2 · <id> — forked from session 1 …"

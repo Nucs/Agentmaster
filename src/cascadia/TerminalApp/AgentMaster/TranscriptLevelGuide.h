@@ -68,19 +68,25 @@ namespace Agentmaster
           L"each agent's brief and final report",
           TurnsLevel::Compact,
           &TurnsOptions::agents },
-        { L"Every tool call on one line: its main arguments and how it ended (ok, \x2717 exit 1, 40 of 120 lines, created)",
-          L"every tool call, with its arguments and outcome",
+        // transcript_turns v10: Compact lists every call as "Tool: <reason>". Shown from Compact up - from Default on,
+        // each call's full line carries the same description - which is exactly the option's own ladder.
+        { L"Every tool call on one line with the reason Claude gave for it (Bash: List the files), else what it acted on "
+          L"(Read: app.cfg) - the agents' calls too",
+          L"every tool call, with the reason Claude gave",
+          TurnsLevel::Compact,
+          &TurnsOptions::reasons },
+        { L"Every tool call's main arguments and how it ended (ok, \x2717 exit 1, 40 of 120 lines, created)",
+          L"each call's arguments and outcome",
           TurnsLevel::Default,
           &TurnsOptions::ops },
         { L"Claude's remarks between calls (the first 200 characters of each)",
           L"Claude's remarks between calls",
           TurnsLevel::Default,
           &TurnsOptions::narration },
-        // Background completions are on in every level (bgEvents), but they print under their call's line,
-        // so they appear exactly where the calls do - which is what the harness checks (ops). An agent's own
-        // calls follow the same switch inside its entry.
-        { L"When background tasks finished, and each agent's own tool calls",
-          L"background-task ends and agents' own calls",
+        // Background completions are on in every level (bgEvents), but they print under their call's FULL line,
+        // so they appear exactly where those lines do - which is what the harness checks (ops).
+        { L"When each background task finished, under the call that started it",
+          L"when background tasks finished",
           TurnsLevel::Default,
           &TurnsOptions::ops },
         { L"The exact Bash command, in a code block",
@@ -175,7 +181,7 @@ namespace Agentmaster
     //       <check> slash commands you ran outside a turn
     //       ...
     //     Leaves out:
-    //       <dot> every tool call, with its arguments and outcome (from Default)
+    //       <dot> each call's arguments and outcome (from Default)
     //       ...
     //     The (i) after the tabs compares every level.
     // Minimal says "Shows:" instead of "Everything in ..., plus:"; Max, which leaves nothing out, says so in

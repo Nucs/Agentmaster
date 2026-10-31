@@ -12,6 +12,7 @@
 > second task
 
 **● Claude**
+- **Bash**: Run the long job
 - 🗜 context compacted (auto) · 900.0k → 20.0k tokens · took 4m 00s at Jan 06 09:24
 
 > Second task done: 42 rows.

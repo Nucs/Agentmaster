@@ -110,8 +110,8 @@ Labels, tooltip and glyph (`\xE736` ReadingMode) are shared constants in `AgentC
 In the turns view every speaker part is a header (`**● Claude**`, or an agent entry's
 `**● finder-a** · teammate · …`), then ONE bullet list — the tool calls, the remarks between them, the
 messages that reached an agent, its brief, compaction markers, with each call's output / background /
-answer lines nested under it — then the reply quote. Compact leaves out the calls and the remarks, so the
-overlay **folds each such list into one summary row** and keeps the reply open:
+answer lines nested under it — then the reply quote. At Default, Full and Max the overlay **folds each such
+list into one summary row** and keeps the reply open (Compact and Minimal never fold — below):
 
     ● Claude
       ▸ 4 tool calls: Bash ×3, Write · 2 remarks
@@ -126,9 +126,12 @@ overlay **folds each such list into one summary row** and keeps the reply open:
   compaction, a `❯` nested under a call an answer. `MdToolAreaSummary` names every non-zero count —
   "N tool calls: Bash ×3, Write, … +N more · 2 remarks · 1 answer · 1 compaction" (5 tool names at most,
   most-called first, a name over 40 characters cut with an ellipsis).
-- **Folded** (`MdToolAreaFoldable`): a list holding at least one call or remark — what Compact drops. A list
-  of only messages / prompts / compactions / answers IS Compact's content (the Compact level's own lists)
-  and stays open; so the Compact and Minimal levels never fold anything.
+- **Folded** (`MdToolAreaFoldable`): a list holding at least one call or remark. A list of only messages /
+  prompts / compactions / answers stays open.
+- **Only from Default up** (`_RenderLevel` looks for areas at Default, Full and Max only, 2026-10-31): since
+  `transcript_turns` v10 Compact lists every call as a one-line REASON (`**Bash**: List the files`) — calls by
+  the rule above, but the very thing that level exists to show at a glance — so Compact never folds, and
+  Minimal has no lists. (Before v10 Compact's lists held no call, so it never folded by content.)
 - A list that is only "(no tool calls)" becomes a one-line dim note ("no tool calls"), lined up with the
   fold rows' text.
 - A click on a row (or Enter / Space) opens / closes that list (chevron ▸ / ▾). **Expand all** opens every
@@ -301,8 +304,9 @@ A transcript that continues earlier sessions (a fork, a plan restart — `Transc
         ✓ compaction markers
         ✓ your answers to Claude's questions
         ✓ each agent's brief and final report
+        ✓ every tool call, with the reason Claude gave
       Leaves out:
-        · every tool call, with its arguments and outcome (from Default)
+        · each call's arguments and outcome (from Default)
         · … (each with the level that first shows it)
       The ⓘ after the tabs compares every level.
 
@@ -324,6 +328,51 @@ A transcript that continues earlier sessions (a fork, a plan restart — `Transc
   guide (the focus guard lets a move into a popup through) and back to the (i) when it closes.
 - Unlogged, like the folds and the wrap toggle — a pure view action; a failed build of the panel or a failed
   hide is an `[exc]` line (`AgentTranscriptOverlay level guide` / `… dismiss level guide`).
+
+### 3g. Compact lists every tool call with its reason (transcript_turns v10)
+
+The eighth ask (2026-10-31):
+
+> I want to improve Compact level to include 'reason' column for tool calls and having "* Bash: <reason>". On
+> >Compact level, show as we do now.
+
+- **What Compact shows now**, in every turn and every agent entry, in order with the answers and compactions:
+
+      ● Claude
+      - **Bash**: Count lines of transcript sources and grep messaging doc
+      - **Read**: `TRANSCRIPT_OVERLAY.md`
+      - **Agent**: Finder A: scan the diff · → ● finder-a
+      - **Bash**: Run the old script
+        - ❯ rejected — the user said: **use new.py instead**
+      - ❯ Which island first? → **A**
+      > the final reply
+
+  - The reason is the call's own `description` — what Claude wrote to explain it (Bash, Agent / Task, any tool
+    that takes one), whitespace-collapsed, at most 200 characters.
+  - A call without one shows what it acted on: a file's NAME (Read / Write / Edit / MultiEdit / NotebookEdit;
+    the path is in Default), a pattern (Grep, Glob), a query (ToolSearch, WebSearch), a URL, a skill, "N items"
+    (TodoWrite), "→ to: what" (SendMessage), the command's first 80 characters (a Bash without a
+    description); else the bare tool (`**mcp__catalog__catalog_whereis**`).
+  - AskUserQuestion gets no line of its own: its answer line names the question, as before. A reply to any other
+    call (a rejection with words) nests under that call's line, as it does under a full call line.
+  - Default, Full and Max are unchanged, byte for byte: a full call line already carries the description.
+- **Where it comes from**: the reference `transcript_turns.py` v10 (feature `reasons`, on the ladder from
+  `--compact` up, shown only while the call list is off; a level never turns on a feature newer than its
+  `--preset`, so `--preset v9 --compact` is v9's view), ported to `TranscriptTurns` (`TurnsOptions::reasons`,
+  `OpReason` / `OpSubject` / `BaseName`); the port's goldens moved to `--preset v10` (only the 9 Compact
+  goldens with calls changed).
+- **Every surface follows the level**: Copy ▸ Transcript ▸ Compact, Show Transcript's Compact tab (which never
+  folds, §3b), Telegram's `/transcript compact` and All Screen's Compact (with File Diffs, each diff nests under
+  its reason line; the picker hint reads "+ call reasons & answers"). **Except the AI search's `read`**
+  (`SessionSearchTools`, Compact by default): it keeps `reasons` off — its eval-scored prompt describes the v9
+  compact view, and its 6,000 characters per session would cover less of each conversation; turning them on is a
+  prompt change, which needs a new eval (SESSIONS.md §9.15).
+- **Size** (lines · KB, v9 → v10; Default for scale): a 14-turn session 444 · 32 → 1,021 · 62 (1,148 · 136); a
+  2-turn one 110 · 12 → 606 · 36 (618 · 84); a 6-turn one 329 · 29 → 1,125 · 67 (1,199 · 137). About as many
+  lines as Default (one per call), about half its bytes. In the overlay Compact can be the LONGER view: Default
+  folds its calls (§3b), Compact shows every reason line.
+- The level guide (§3f) gained the row, and its Default rows say "each call's arguments and outcome" and "when
+  background tasks finished" (an agent's calls show at Compact now, as reason lines).
 
 ## 4. Rendering
 
@@ -530,3 +579,9 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
     close together. Keyboard only: Tab to the (i), Enter → the panel opens. Hover each tab → its cheat sheet
     (Minimal "Shows:", Max "Leaves out nothing another level shows.", the others "Everything in …, plus:"
     and "Leaves out:" with "(from <level>)"), dark, wrapped inside the tip's width.
+13. Compact's reason lines (§3g): open a session with Bash, Read and Edit calls at the Compact tab → every turn
+    lists "Bash: <its description>", "Read: `<file name>`", … unfolded (no "▸ N tool calls" row), then the
+    reply; Default still folds. Copy ▸ Transcript ▸ Compact → the same text. Telegram: `/transcript compact`
+    has the lines; 📜 All Screen ▸ Compact draws them (with File Diffs, each diff under its reason line); the
+    picker's Compact button reads "+ call reasons & answers". The Sessions page's AI search still reads compact
+    sessions without them.

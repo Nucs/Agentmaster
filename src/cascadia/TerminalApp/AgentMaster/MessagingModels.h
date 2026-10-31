@@ -4897,7 +4897,7 @@ namespace Agentmaster::Msg
     /// </summary>
     inline constexpr AllScreenLevelChoice kAllScreenLevels[] = {
         { TurnsLevel::Minimal, L"minimal", L"Minimal", L"prompts & replies" },
-        { TurnsLevel::Compact, L"compact", L"Compact", L"+ answers & agents" },
+        { TurnsLevel::Compact, L"compact", L"Compact", L"+ call reasons & answers" },
         { TurnsLevel::Default, L"default", L"Default", L"+ every tool call" },
         { TurnsLevel::Full, L"full", L"Full", L"+ commands & output" },
         { TurnsLevel::Max, L"max", L"Max", L"+ written files" },

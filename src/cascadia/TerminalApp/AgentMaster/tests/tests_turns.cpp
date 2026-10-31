@@ -175,7 +175,7 @@ namespace
 
 void TestTranscriptTurns()
 {
-    std::wprintf(L"\n[TranscriptTurns] Copy > Transcript levels vs the transcript_turns.py v9 goldens\n");
+    std::wprintf(L"\n[TranscriptTurns] Copy > Transcript levels vs the transcript_turns.py v10 goldens\n");
 
     // ---- the level ladder: what each menu item turns on (the reference's LEVELS table) ----
     {
@@ -186,19 +186,19 @@ void TestTranscriptTurns()
                   def.opOutput == latest.opOutput && def.bgEvents == latest.bgEvents && def.narration == latest.narration &&
                   def.compactions == latest.compactions && def.answers == latest.answers && def.nestedBlocks == latest.nestedBlocks &&
                   def.compactedHistory == latest.compactedHistory && def.chain == latest.chain && def.agents == latest.agents &&
-                  def.peerMessages == latest.peerMessages && def.fullWrite == latest.fullWrite,
+                  def.peerMessages == latest.peerMessages && def.fullWrite == latest.fullWrite && def.reasons == latest.reasons,
               "TranscriptTurns: Default is exactly the latest preset's own defaults (the steps level)");
         CHECK(def.ops && def.narration && def.opMeta && !def.opDuration && !def.opOutput && !def.fullBash && !def.fullWrite && !def.stats,
               "TranscriptTurns: Default = calls on one line with their outcome, no durations / output / blocks / stats");
         const TurnsOptions minimal = TurnsOptionsForLevel(TurnsLevel::Minimal);
         CHECK(!minimal.notes && !minimal.ops && !minimal.narration && !minimal.compactions && !minimal.answers && !minimal.agents &&
-                  !minimal.fullBash && !minimal.opOutput && !minimal.opDuration && !minimal.fullWrite && !minimal.stats,
+                  !minimal.fullBash && !minimal.opOutput && !minimal.opDuration && !minimal.fullWrite && !minimal.stats && !minimal.reasons,
               "TranscriptTurns: Minimal turns every ladder feature off");
         CHECK(minimal.times && minimal.chain && minimal.peerMessages && minimal.liveBranch && minimal.compactedHistory,
               "TranscriptTurns: Minimal keeps the non-ladder features and every rule");
         const TurnsOptions compact = TurnsOptionsForLevel(TurnsLevel::Compact);
-        CHECK(compact.notes && compact.compactions && compact.answers && compact.agents && !compact.ops && !compact.narration,
-              "TranscriptTurns: Compact = notes + compactions + answers + agents, no calls or remarks");
+        CHECK(compact.notes && compact.compactions && compact.answers && compact.agents && compact.reasons && !compact.ops && !compact.narration,
+              "TranscriptTurns: Compact = notes + compactions + answers + agents + each call's reason line (v10), no full call lines or remarks");
         const TurnsOptions full = TurnsOptionsForLevel(TurnsLevel::Full);
         CHECK(full.ops && full.fullBash && full.opOutput && full.opDuration && !full.fullWrite && !full.stats,
               "TranscriptTurns: Full = Default + Bash blocks, first output lines, per-call durations");
@@ -540,6 +540,16 @@ void TestTranscriptTurnsEditDiffs()
         expect(!has(on, L"(no remarks)") && has(on, L"**\x25CF Claude**\n> (no text"), "TurnsEditDiffs: on, a Minimal turn with no change to show opens no timeline", on);
     }
 
+    // ---- Compact (transcript_turns v10): each call already has its reason line, so a diff nests under THAT line ----
+    {
+        const std::wstring off = render(TurnsLevel::Compact, false);
+        const std::wstring on = render(TurnsLevel::Compact, true);
+        expect(has(off, L"- **Edit**: `app.py`\n") && !has(off, L"```diff"), "TurnsEditDiffs: off, Compact lists the Edit as its reason line, no diff", off);
+        expect(has(on, L"- **Edit**: `app.py`\n  - ```diff\n    @@ -3,2 +3,3 @@\n"), "TurnsEditDiffs: on, Compact nests the Edit's diff under its reason line", on);
+        expect(has(on, L"- **Write**: `notes.txt`\n  - ```diff\n    @@ -0,0 +1,2 @@\n"), "TurnsEditDiffs: on, Compact nests a created file's diff under its reason line", on);
+        expect(!has(on, L"- **Edit** `C:/w/app.py` \x00B7 ok"), "TurnsEditDiffs: on, Compact never repeats a call as its full line (the reason line names it)", on);
+    }
+
     // ---- Max: a Write's diff takes the place of its content block ----
     {
         const std::wstring plainWrite = L"  - ```\n    one\n    two\n    ```\n";
@@ -796,9 +806,10 @@ void TestTranscriptLevelGuide()
             previous = static_cast<int>(row.firstLevel);
         }
         CHECK(ordered, "LevelGuide: rows run from the least detailed level to the most (the panel's check marks rise as a staircase)");
-        // The eleven LADDER features (the ones a level sets, TurnsOptionsForLevel): each must have a row,
+        // The twelve LADDER features (the ones a level sets, TurnsOptionsForLevel): each must have a row,
         // or the guide would hide a difference between two levels.
         const std::pair<bool TurnsOptions::*, const char*> ladder[] = {
+            { &TurnsOptions::reasons, "reasons" },
             { &TurnsOptions::notes, "notes" },
             { &TurnsOptions::ops, "ops" },
             { &TurnsOptions::fullBash, "fullBash" },
@@ -865,7 +876,9 @@ void TestTranscriptLevelGuide()
               "LevelGuide: Compact's tip checks the rows Compact adds");
         CHECK(compact.find(L"\x2713 your messages and each turn's final reply") == std::wstring::npos,
               "LevelGuide: Compact's tip lists only what it ADDS (Minimal's row is in Minimal's tip)");
-        CHECK(compact.find(L"\nLeaves out:\n  \x00B7 every tool call, with its arguments and outcome (from Default)") != std::wstring::npos &&
+        CHECK(compact.find(L"\n  \x2713 every tool call, with the reason Claude gave") != std::wstring::npos,
+              "LevelGuide: Compact's tip checks its calls' reason lines (transcript_turns v10)");
+        CHECK(compact.find(L"\nLeaves out:\n  \x00B7 each call's arguments and outcome (from Default)") != std::wstring::npos &&
                   compact.find(L"\x00B7 a stats line per turn (tokens, model, context) (from Max)") != std::wstring::npos,
               "LevelGuide: Compact's tip lists what it leaves out, each with the level that first shows it");
         CHECK(compact.size() >= 4 && compact.substr(compact.size() - std::wstring_view{ L"compares every level." }.size()) == L"compares every level.",

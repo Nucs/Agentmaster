@@ -5516,7 +5516,7 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
   | ⬜ File Diffs · the level's default | (a box, not a drawing: a tap checks it, below) |
   | ⬜ Last Turn · the whole conversation | (a box: a tap checks it, below) |
   | 📜 Minimal · prompts & replies | your messages and each turn's final reply |
-  | 📜 Compact · + answers & agents | + compactions, your answers, the slash commands you ran, each agent's brief and report |
+  | 📜 Compact · + call reasons & answers | + every tool call as one line with its reason (v10, 2026-10-31), compactions, your answers, the slash commands you ran, each agent's brief and report |
   | 📜 Default · + every tool call | + every tool call on one line, and Claude's remarks between calls |
   | ⭐ Full · + commands & output | + each Bash call's exact command, the first line each call returned, how long each took |
   | 📜 Max · + written files | + every written file's content and a stats line per turn |
@@ -5540,8 +5540,10 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
   opens unchecked, the user's "by default false" (and a pick leaves the picker, above). The box's label was "File diffs"
   until the Last Turn box came: both are title case now, as the card's other buttons and the user's 'Last Turn'.
   - **Unchecked:** each level draws its own default. No level draws diffs by itself; Max shows each Write's whole content.
-  - **Checked:** every level draws each file change as a diff under its call (`TurnsOptions::editDiffs`, below). Minimal and
-    Compact hide the calls, so there the file-changing calls are listed for it, each with its diff, and nothing else.
+  - **Checked:** every level draws each file change as a diff under its call (`TurnsOptions::editDiffs`, below). Minimal
+    hides the calls, so there the file-changing calls are listed for it, each with its diff, and nothing else. Compact lists
+    every call as a one-line reason since transcript_turns v10 (2026-10-31, TRANSCRIPT_OVERLAY.md §3g), so there each diff
+    nests under its call's reason line.
   - A level button on the checked page carries the box in its data (`c:allscreen-<word>+d:<sid>`, 58 bytes) and runs
     `/allscreen <word> diffs`: what the card showed is what is drawn. The page flip logs
     `[nav] remote telegram card-page <sid8> allscreen+diffs`.
@@ -5597,7 +5599,9 @@ cell in Cascadia Mono, on Campbell's colors, 1,232 px wide.
 - **The user's message** is Claude Code's prompt: `❯` and the text on a gray band across the row. A teammate's message looks
   the same, with its `❯` in cyan under its `✉ name` line. "❯ User, typed while it worked (time)" keeps its line, dim italic.
 - **Claude's work:** `●` before each remark (white) and each tool call. A call's bullet is green when it went well, red when it
-  failed (`✗`), gray when no result came. The tool's name is bold and inline code lavender. `⎿` before what a call returned
+  failed (`✗`), gray when no result came. At Compact, whose call lines state no outcome (each call's one-line reason,
+  transcript_turns v10, 2026-10-31), every call's bullet is that neutral gray (`ConversationSheetOptions::callOutcomes`), never a
+  green that would claim success. The tool's name is bold and inline code lavender. `⎿` before what a call returned
   (Full level) or the user's answer, dimmed. A compaction is an orange `✻`. The turns view's "(no tool calls)" is left out:
   Claude Code shows nothing there.
 - **The reply** follows a white `●`, its Markdown kept: bold, italic, lists with their markers, headings bold, links

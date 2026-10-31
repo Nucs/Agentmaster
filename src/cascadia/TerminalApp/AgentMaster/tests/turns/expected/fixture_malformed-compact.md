@@ -4,6 +4,10 @@
 > read the log
 
 **● Claude**
+- **Read**: `app.log`
+- **Bash**: Tail the log
+- **Bash**
+
 > The log started cleanly.
 
 ### Turn 2 · Jan 04 08:01 → last reply Jan 04 08:01

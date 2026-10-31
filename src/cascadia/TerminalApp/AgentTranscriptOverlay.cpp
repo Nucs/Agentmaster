@@ -1460,8 +1460,13 @@ namespace winrt::TerminalApp::implementation
             out.failed = parsed.failed;
             out.markdown = std::move(text); // after the parse — `toParse` viewed it
             // The tool-call lists the build folds (here, off the UI thread, with the parse: one linear pass
-            // over the blocks, and the UI thread then only follows the indices).
-            out.areas = ::Agentmaster::MdFindToolAreas(out.blocks);
+            // over the blocks, and the UI thread then only follows the indices). Only from Default up: Compact's
+            // lists hold its calls' REASON lines (transcript_turns v10) - the very thing that level exists to show
+            // at a glance, so folding them would hide its point - and Minimal has no lists at all.
+            if (turnsLevel >= ::Agentmaster::TurnsLevel::Default)
+            {
+                out.areas = ::Agentmaster::MdFindToolAreas(out.blocks);
+            }
             // The Session chain list and the session headings its links point to (one more linear pass;
             // an ordinary one-session transcript yields an empty chain).
             out.chain = ::Agentmaster::MdFindSessionChain(out.blocks);
