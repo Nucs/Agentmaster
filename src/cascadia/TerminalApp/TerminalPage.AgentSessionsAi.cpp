@@ -27,7 +27,9 @@
 // the request, what happens ("Searching: ..."), then the model's one-sentence answer; the table
 // shows exactly the sessions the model picked, in its order. A follow-up ("only the open ones")
 // refines the list, because the conversation keeps its context. The crossed circle beside the
-// toggle throws the conversation away and brings the normal list back. The strip's right end
+// toggle throws the conversation away and brings the normal list back. The box keeps its text
+// through the toggle (both ways) and the crossed circle; the page empties it only when Enter
+// sends it. The strip's right end
 // reads "thinking off  ctx 15k / 200k": a click on "thinking off" moves to the next thinking
 // level (off -> low -> medium -> high -> xhigh -> max), kept for every window and after a restart.
 //
@@ -233,7 +235,7 @@ namespace winrt::TerminalApp::implementation
         _sessAiResetBtn.Margin(Thickness{ 6, 0, 0, 0 });
         _sessAiResetBtn.VerticalAlignment(VerticalAlignment::Center);
         _sessAiResetBtn.Visibility(Visibility::Collapsed); // AI mode only
-        SessSetTip(_sessAiResetBtn, L"New conversation", L"Throw the AI search's conversation away and start a new one: the model forgets what you asked and what it showed, and the list goes back to normal. Use it when you start looking for something else \x2014 a follow-up refers to the list before it.\n\nIt clears the conversation in every window. Your sessions are not touched.");
+        SessSetTip(_sessAiResetBtn, L"New conversation", L"Throw the AI search's conversation away and start a new one: the model forgets what you asked and what it showed, and the list goes back to normal. Use it when you start looking for something else \x2014 a follow-up refers to the list before it. What you typed in the box stays: Enter sends it to the new conversation.\n\nIt clears the conversation in every window. Your sessions are not touched.");
         _sessAiResetBtn.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
             Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
                 const auto self = weak.get();
@@ -243,11 +245,17 @@ namespace winrt::TerminalApp::implementation
                 }
                 try
                 {
-                    ::Agentmaster::LogNav(L"sessions ai-reset");
+                    // A reset throws the CONVERSATION away, never the box's text: what is typed there
+                    // is often the new request itself, written before the user saw that it would read
+                    // as a follow-up. ⚠ So neither this handler nor the Reset event's
+                    // (_OnSessionsAiEvent, in every window) writes the box. The nav line says how much
+                    // the box kept — its length only, the words stay out of the nav trail.
+                    const uint32_t boxChars = self->_sessionsSearchBox ? self->_sessionsSearchBox.Text().size() : 0u;
+                    ::Agentmaster::LogNav(L"sessions ai-reset box=" + std::to_wstring(boxChars));
                     ::Agentmaster::SharedSessionSearchAgent().Reset(); // the Reset event clears this page's list (and every other window's)
                     if (self->_sessionsSearchBox)
                     {
-                        self->_sessionsSearchBox.Focus(FocusState::Programmatic); // the user who resets is about to ask again
+                        self->_sessionsSearchBox.Focus(FocusState::Programmatic); // the user who resets is about to ask again: Enter sends the kept text to the new conversation
                     }
                 }
                 catch (...)
@@ -492,8 +500,11 @@ namespace winrt::TerminalApp::implementation
     //        show, the agent is warmed up (its process starts, its index is read), and the
     //        conversation's last list — when it has one — replaces the table's rows.
     //        false: back to the filter box and the normal list; the conversation is kept.
+    // Either way the box KEEPS its text; only its placeholder changes. On, the text waits as the
+    // request — it filters nothing, and only Enter sends it (_SessionsAiAsk). Off, it filters the
+    // list at once, as if just typed. ⚠ Never empty the box here: that loses what the user typed.
     // "On" is refused, with the page's "Claude not found" notice, when there is no native
-    // claude.exe: the AI search runs through it.
+    // claude.exe: the AI search runs through it. A refused or failed switch leaves the box as it is.
     // Never throws: a failure is logged and leaves the mode off.
     void TerminalPage::_SetSessionsAiMode(bool on)
     {
@@ -525,19 +536,35 @@ namespace winrt::TerminalApp::implementation
                 _SessionsAiAttach();
             }
             _sessionsAiMode = on;
-            ::Agentmaster::LogNav(on ? L"sessions ai on" : L"sessions ai off");
+            // The box keeps its text across the switch: what the user typed is theirs, whichever way
+            // the box reads it, and emptying it would make a filter typed first be typed again as
+            // the request. The switch itself sends nothing: a kept text reaches the model only
+            // through Enter (_SessionsAiAsk). The nav line says how much the box kept — its length
+            // only, the words stay out of the nav trail (the agent's own line has a request's words).
+            const std::wstring boxText = _sessionsSearchBox ? std::wstring{ _sessionsSearchBox.Text() } : std::wstring{};
+            ::Agentmaster::LogNav(std::wstring{ on ? L"sessions ai on" : L"sessions ai off" } + L" box=" + std::to_wstring(boxText.size()));
             if (_sessAiBtn)
             {
                 _sessAiBtn.IsChecked(on);
             }
-            // The box changes its meaning, so it starts empty either way: a half-typed filter
-            // must not be sent as a request, and a half-typed request must not filter the list.
-            // (TextChanged does nothing while _sessionsAiMode is set, so clear the query here.)
-            _sessionsQueryText.clear();
+            // The filter query follows the box's MEANING, not its text:
+            //   - on: the text is a request and filters nothing. TextChanged ignores the box while
+            //     the mode is on, so a query left set here would keep narrowing the normal list
+            //     (shown until the model shows one) by a text the user can no longer edit as a filter.
+            //   - off: the text is a filter again and narrows the list at once, as if just typed.
+            //     TextChanged did not follow the box while the mode was on, so the query is read
+            //     from the box here.
+            if (on)
+            {
+                _sessionsQueryText.clear();
+            }
+            else
+            {
+                _sessionsQueryText = boxText;
+            }
             if (_sessionsSearchBox)
             {
-                _sessionsSearchBox.Text(L"");
-                _sessionsSearchBox.PlaceholderText(on ? kSessionsAiPlaceholder : kSessionsFilterPlaceholder);
+                _sessionsSearchBox.PlaceholderText(on ? kSessionsAiPlaceholder : kSessionsFilterPlaceholder); // seen only while the box is empty
             }
             ::Agentmaster::SessionSearchSnapshot snapshot;
             if (on)
@@ -564,9 +591,11 @@ namespace winrt::TerminalApp::implementation
                 _SessionsAiMergeExtraRows(); // removes the list's extra rows
             }
             _UpdateSessionsAiStrip(snapshot);
-            _RunSessionsSearch(); // the (now empty) filter query, then the render — which applies the AI list when there is one
+            _RunSessionsSearch(); // the filter query (none while the mode is on, the box's kept text when it goes off), then the render — which applies the AI list when there is one
             if (_sessionsSearchBox)
             {
+                // A programmatic focus selects nothing: the caret stays where the user left it, so
+                // the kept text is edited on, not replaced by the first keystroke.
                 _sessionsSearchBox.Focus(FocusState::Programmatic);
             }
         }
@@ -796,6 +825,8 @@ namespace winrt::TerminalApp::implementation
         switch (e.kind)
         {
         case Kind::Reset:
+            // ⚠ The search box is left alone: a reset keeps what the user typed there, in every
+            // window (the reset button's note in _BuildSessionsAiHeader).
             _SessionsAiAdoptSnapshot(e.snapshot); // an empty conversation: no list, the normal rows come back
             _sessionsSelectedId.clear();
             render = true;

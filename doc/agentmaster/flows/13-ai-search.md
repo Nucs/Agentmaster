@@ -34,6 +34,8 @@ partial, every session searched by default.
 **Phases**
 1. **Toggle.** *Do:* Sessions page → click **AI** inside the box. *Expect:* the toggle accent-filled; the box is a
    request line (typing filters nothing); ⊘ appears right of the box; the strip shows `thinking off  ctx …`.
+   NOT BUILT (2026-10-31): a filter typed before the click stays in the box, unsent, and no longer narrows the list;
+   Enter sends it as the request. [LOG] `[nav] sessions ai on box=N` (N = its length).
 2. **Request.** *Do:* `the session where I fixed the tab drag crash` + the script, Enter. *Expect:* the strip shows the
    request, then the agent's plan line while it works ("Searching: …"); a preview of the search rows ("choosing…"),
    replaced about a second later by EXACTLY the shown sessions, best first, the first row selected (its detail pane
@@ -44,11 +46,13 @@ partial, every session searched by default.
    ([MOCK] the history grows).
 4. **Sort.** *Do:* click a column. *Expect:* the list re-sorts; the model's order returns when the sort is set back.
 5. **Off.** *Do:* turn AI off. *Expect:* the normal filter box and list; the conversation kept (back on → the strip
-   shows it).
+   shows it). NOT BUILT (2026-10-31): a text left in the box stays and filters the list at once, as if just typed
+   ([LOG] `[nav] sessions ai off box=N`, then `sessions search q=…`).
 
 **Edge cases**
 - **E1 Esc during a request** → stopped; a new request also stops the previous one.
-- **E2 ⊘** → the conversation thrown away; the normal list returns.
+- **E2 ⊘** → the conversation thrown away; the normal list returns; a text typed in the box stays there, and Enter
+  sends it to the new conversation ([LOG] `[nav] sessions ai-reset box=N`, NOT BUILT).
 - **E3 A listed session outside the page's date window** → a real row (detail, resume, fork, rename, favorite, tags
   work on it).
 - **E4 Two windows** → a request in one shows its list in the other's AI-on page too.

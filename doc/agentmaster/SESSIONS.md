@@ -532,6 +532,12 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
 > 3."), which the page and the Telegram topic show, and answers descriptively instead of in one
 > sentence. Both conversations take the session database's tools when it is On and its service can
 > start.
+>
+> **2026-10-31 (the user's request; NOT BUILT): the box keeps its text** (9.1). Turning the AI
+> toggle on or off no longer empties the search box (until then it did, both ways): on, the text
+> waits as the request and only Enter sends it; off, it filters the list at once. The ⊘ reset never
+> wrote the box; its tooltip now says that the text stays. The nav lines carry the box's length
+> (`box=N`, 9.10).
 
 ### 9.1 What the user sees
 
@@ -572,11 +578,18 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
 - A **follow-up refines the list** ("only the open ones", "older than that"): the conversation
   keeps its context.
 - The **crossed circle** (⊘) right of the box throws the conversation away. The model forgets
-  everything, and the normal list comes back. It shows only while the AI search is on.
+  everything, and the normal list comes back. It shows only while the AI search is on. **The box
+  keeps its text**: a request typed before the click waits there, and Enter sends it to the new
+  conversation.
 - **Escape** in the box stops a request that runs. A new request also stops the one before it
   (the newest wins).
 - Typing filters nothing in AI mode. Turning the toggle off brings back the filter box and the
   normal list; the conversation is kept.
+- **The box keeps its text through the toggle, both ways** (2026-10-31, the user's request): only
+  its placeholder changes. Turned on, what was typed (a filter, say) stays as the request: it
+  filters nothing, and nothing is sent until Enter. Turned off, what is left in the box filters the
+  list at once, as if just typed. The page empties the box only when Enter sends a request (the
+  strip then shows it).
 
 ### 9.2 One conversation for the whole process
 
@@ -852,8 +865,10 @@ above.
 
 ### 9.10 Logs
 
-- `[nav] sessions ai on | off | ai-ask turn=N chars=M | ai-stop | ai-reset` (hooks.log): what the
-  user did. The request's words are in the agent's line, not in the nav trail.
+- `[nav] sessions ai on box=N | off box=N | ai-ask turn=N chars=M | ai-stop | ai-reset box=N`
+  (hooks.log): what the user did. `box=N` (2026-10-31) is how many characters the box kept through
+  the switch or the reset, untrimmed (`ai-ask`'s `chars=` counts the request after trimming). The
+  request's words are in the agent's line, not in the nav trail.
 - `[ai-search] ask[N]: … | shown N session(s) | reset | the session index is being built … | the
   session index is complete: …` (hooks.log).
 - `[harness] sessions-search: process up … | permission mode bypassPermissions (at start) | init: …
