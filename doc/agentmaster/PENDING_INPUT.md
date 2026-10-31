@@ -127,6 +127,9 @@ so a lone block cursor is never mistaken for a rule. An empty box (`❯ ` + curs
 draft**. (Reconstruction is best-effort for display; the load-bearing output is "is there any content".)
 If a future build's cursor is some other glyph, the `[pending] … cp: <hex> …` log names it (the appear-log
 prints the draft's leading code points), so the strip set can be widened without guessing.
+Each body row is read **as the person typed it**: text the box draws **faint** (a suggestion, a
+placeholder) is blanked first, with Claude's reverse-video cursor when it rests on the first letter of
+that text, so a suggestion in an empty box reads as an empty box (§2d).
 
 The buffer position is independent of the user's **scroll**: Claude renders inline, so the box always sits
 at the bottom of the buffer (`GetLastNonSpaceCharacter`), and the adapter reads a bounded window of the
@@ -284,6 +287,71 @@ the two is a quote and nothing tells which).
 clipboard handler) and pastes made before the journal existed (i.e. before this build) are not journaled —
 they fall to the cache tier. A user's own Ctrl+S stash→unstash cycle clears the box long enough for the prune.
 
+## 2d. What the box draws DIM is not a draft — suggestions (built 2026-10-31)
+
+Claude Code puts text nobody typed into an **empty** box: a **suggestion**, Tab to take — a mod's through
+`$.prompt.suggest` (the `next-prompt` mod's guess after every turn, and its loading icon `⠋ next prompt…`
+while it thinks) or Claude's own after a turn, which goes through the same event. Until Tab takes it, it is
+a picture, not input. Read as text it is indistinguishable from a draft, and with `next-prompt` installed
+it sat in the box of every idle tab, so every one of them:
+
+- showed the dots, though nothing was typed;
+- was remembered (`sessions.json`, the session-store mirror) and, after a restart, **typed back** into the
+  new box by the §10 re-fill as if the user had written it;
+- had it **carried into a fork's box** (§11) and offered by Copy Current Prompt, the compose-box pull and the
+  mail button;
+- had it treated as the user's draft by a send (the §9 swap stashes and restores it around the prompt).
+
+Seen in `hooks.log` on 2026-10-31: `[pending] a67d04d0 draft (chars=14 cp: 2838 0020 006E …): ⠸ next prompt…`
+(the loading icon, read as a draft) and guesses appearing whole in one read
+(`draft (chars=123 …): Looks good. Go ahead with the plan: …`), where a typed draft appears as its first
+word or two.
+
+**Measured** (Claude Code 2.1.310 under ConPTY, both renderers, 2026-10-31: a scratch mod's
+`$.prompt.suggest` in the empty box, then typing, a paste and a slash command, nothing ever submitted).
+The suggestion row is the caret, NBSP, then `ESC[7m C ESC[27m ESC[2m ommit the fix and push it to origin ESC[22m`:
+
+| the box shows | the caret `❯` | its first letter | the rest |
+|---|---|---|---|
+| a suggestion in the empty box (and again each time the box is emptied) | plain | **reverse video** (Claude's cursor), not faint | **faint** (SGR 2) |
+| a typed draft, cursor after it | plain | plain | plain; the cursor a reverse-video space after the text |
+| a typed draft after Home / Ctrl+A | plain | reverse video (the cursor on a TYPED letter) | plain |
+| `[Pasted text #1 +39 lines] tail` | plain | plain | plain |
+| `/add-dir  <path>` (a command waiting for its argument) | plain | plain (the command in its color) | the `<path>` hint in a gray **color**, not faint |
+
+The rules are plain in every state.
+
+**The rule.** The detector still finds the box on the **text** alone (facts 1 and 2 above, unchanged). The
+adapter also hands it each row's **renditions**, one flag per UTF-16 unit of the row's text
+(`kPendingUnitFaint`, `kPendingUnitReverse`), and the extraction reads each body row with
+`WithoutDimUnits`: every faint unit is blanked to a space, and so is a **reverse-video run directly followed
+by a faint unit** — the cursor resting on the first letter of dim text. A reverse run followed by plain text
+or by nothing stays (the cursor on a typed letter, the cell after a draft). Blanking keeps every unit at its
+index, so the rest of the extraction is unchanged, and a row that was all dim collapses to whitespace:
+the verdict is **Empty**.
+
+- **Where.** `PendingInput.h`: `kPendingUnitFaint` / `kPendingUnitReverse`, `PendingRowRenditions`,
+  `pending_detail::WithoutDimUnits`, and `DetectPendingInput(rows, renditions)` (the second argument
+  defaults to none, which reads exactly as before). `ControlCore.cpp`: `PendingRenditionsOf(row)` walks the
+  row's attribute runs and maps them to the text through `ROW::GetCharOffset` (a wide glyph's two columns
+  and a surrogate pair's two units map to their units), allocating only for a row with a faint or reversed
+  cell. Both buffer reads pass them: `ReadPendingInputDraft` (the scan: dots, memory, copy, pull, fork
+  carry) and `ReadInputBoxProbe` (the delivery: the empty-box check before a paste and a fill's read-back).
+- **Tab, then the dots.** Taking the suggestion with Tab makes it typed text (plain), so it is a draft from
+  then on, as it should be.
+- **Not covered.** The AttachConsole probe (`tests/pending_probe.cpp`) reads text only, so it still reads a
+  suggestion as text. A suggestion of ONE letter (under the cursor, nothing faint after it) reads as a
+  one-letter draft: the cells cannot tell it from a typed letter. A command's argument hint rides along in
+  the draft's text, as it always has (it is a color, not faint).
+- **Drafts remembered before this build.** A live tab clears its remembered suggestion within the two-read
+  debounce (the box now reads Empty). A **dormant** tab keeps its memory until it starts; the §10 re-fill
+  then types it back once, because a remembered text no longer says what it was drawn as.
+- **Pinned** by `TestPendingInput` case 30: the suggestion and the loading icon read Empty (and the same rows
+  without renditions still read as a Draft); a typed draft with its cursor after it, on its first letter,
+  a paste placeholder and `/add-dir  <path>` keep their text; a suggestion wrapped onto a continuation row;
+  typed text before a dim tail; a surrogate pair under the cursor, blanked or kept whole; faint rules still
+  wrap the box; renditions shorter than the rows; `WithoutDimUnits` never touches the marker.
+
 ## 3. Architecture (one pure brain, a thin adapter, a UI-lane poll)
 
 ```
@@ -292,7 +360,8 @@ TerminalPage::_ScanPendingInput()      (TerminalApp; UI thread, ticked by the sh
        ├─ TermControl::ReadPendingInputDraft()                                     TerminalControl
        │    └─ ControlCore::ReadPendingInputDraft()   (read-only, under the read-lock)
        │         ├─ copy the last ~120 rows' text of the ACTIVE buffer — main OR alt (§12)
-       │         └─ Agentmaster::DetectPendingInput(rows)   ◄── PendingInput.h (PURE, header-only)
+       │         │    + each row's cell renditions: faint / reverse video (§2d)
+       │         └─ Agentmaster::DetectPendingInput(rows, renditions)   ◄── PendingInput.h (PURE, header-only)
        ├─ clear-debounce (eager show / lazy hide) → effectiveDraft
        ├─ SessionRegistry::SetPendingInput(id, effectiveDraft)
        │    └─ _notify ONLY on the empty<->non-empty FLIP  ─► every window's board card rebuilds
@@ -305,12 +374,14 @@ TerminalPage::_ScanPendingInput()      (TerminalApp; UI thread, ticked by the sh
   Header-only like `PromptAnchor.h` / `ProfileBootstrap.h`, so it is shared by the `ControlCore` adapter
   (a separate `Microsoft.Terminal.Control` DLL) AND the test harness with no cross-project source/link.
   Source stays **pure-ASCII** (markers as `\u` escapes, code-point notation in comments) — the
-  `PromptAnchor.h` convention, since this TU compiles without `/utf-8`. `DetectPendingInput(rows)` +
-  `IsPendingRuleRow(row)`. Unit-tested in `AgentMaster/tests/m5_tests.cpp` (`TestPendingInput`).
+  `PromptAnchor.h` convention, since this TU compiles without `/utf-8`. `DetectPendingInput(rows,
+  renditions)` (the renditions default to none, §2d) + `IsPendingRuleRow(row)`. Unit-tested in
+  `AgentMaster/tests/m5_tests.cpp` (`TestPendingInput`).
 - **`ControlCore::ReadPendingInputDraft()`** (`ControlCore.{idl,h,cpp}`) — **read-only**. Guards on
   `_initializedTerminal` (a restored-but-never-shown tab has a null `TextBuffer`; same guard as
-  `ResolveConversationPromptRows`), locks for reading, copies the last `kPendingScanRows` (120) row texts,
-  and runs the pure detector. Returns the draft (`""` = empty box / no box / not-yet-initialized).
+  `ResolveConversationPromptRows`), locks for reading, copies the last `kPendingScanRows` (120) row texts
+  with each row's cell renditions (`PendingRenditionsOf`: its faint and reverse-video units, §2d), and runs
+  the pure detector. Returns the draft (`""` = empty box / no box / not-yet-initialized).
   **Mutation-id cache gate** (`_pendingInputScanValid` / `_pendingInputScanMutationId` /
   `_pendingInputScanResult`): the poll is keyed on `TextBuffer::GetLastMutationId()` — an unchanged
   buffer returns the cached answer without the 120-row read + parse. Sound because a draft being typed
@@ -407,13 +478,10 @@ tab/board pulses run **only while a tab is actually pending** — an idle fleet 
 
 - **Claude only.** Codex's TUI has no `❯`-in-a-box input; only managed Claude sessions are monitored.
   (The detector itself is agent-agnostic — only the wiring gates on `kind == Claude`.)
-- **Placeholder text.** v1 detects any non-whitespace content after `❯ `. If a Claude build shows a **dim
-  placeholder** inside an empty box (e.g. a first-launch suggestion), it would read as a draft. This is
-  rare during an active session (an empty box is just `❯ ` + cursor) and self-clears the moment the user
-  types or sends, so v1 does **not** guess at placeholder strings (which would risk suppressing a real
-  message). The robust fix — read the cells' **faint/dim attribute** and treat dim post-marker text as a
-  placeholder — is a documented follow-up; `PendingInputDraft` already returns `caretRow`/`bottomRuleRow`
-  as the seam for it.
+- **Dim text.** Text the box draws **faint** after `❯ ` (a suggestion, Tab to take: a mod's or Claude's
+  own) is not a draft: the cells' faint attribute leaves it out, with the reverse-video cursor resting on
+  its first letter (§2d). No placeholder string is ever guessed at. A caller without cell attributes (the
+  AttachConsole probe) still reads it as text, and a one-letter suggestion reads as a one-letter draft.
 - **Split panes.** `_ControlForSession` returns the first terminal control in a tab's pane tree; a Claude
   pane split beside a shell could read the wrong pane (a missed detection, never a false positive). The
   single-pane case (the norm) is correct.
@@ -1235,8 +1303,8 @@ delivery + pump are WinRT (verified live on the next deploy).
   the journal.
 
 - **Off-switch**: an `AppSettings` flag to disable the pulse (like `showTabOverlay`); v1 is always-on.
-- **Placeholder/dim filtering** (§4) — read the cells' faint attribute so a dim placeholder never reads as
-  a draft.
+- ~~**Placeholder/dim filtering**~~ — **built as §2d** (the cells' faint attribute: a suggestion in the empty
+  box reads Empty).
 - **The out-of-band probe** (`tests/pending_probe.cpp` + `tests/_run-pending-probe.bat`): the
   AttachConsole ground-truth oracle used for the live verification + the fleet capture sweeps — run it
   against any live claude pid to see exactly what the shipped detector would extract, without the app.

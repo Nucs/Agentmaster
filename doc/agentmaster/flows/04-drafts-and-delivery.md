@@ -60,6 +60,10 @@ side-panel card — in the background too — and they clear when the box emptie
 - **E6 Dot colors** (cog → Tabs: Pending dots on dark / light) → applied live; dots never invisible on an
   amber tab.
 - **E7 Codex tab** → no draft detection (by design).
+- **E8 A suggestion in the empty box** (a mod's `$.prompt.suggest`, e.g. `next-prompt`'s guess or its
+  loading icon; Claude's own suggestion): drawn faint with the cursor on its first letter → NO dots, nothing
+  remembered, `pendingBoxState` Empty (PENDING_INPUT.md §2d). *Then:* Tab takes it → it is typed text →
+  the dots appear, as for any draft.
 
 ---
 
@@ -100,6 +104,8 @@ type into the middle of it.
 - **E7 Draft text == prompt text** (Shift-kept mail) → the end state is correct: the prompt sent once, the
   identical draft stays.
 - **E8 A user's own read-only** (pane already read-only) → not released by the swap.
+- **E9 Only a suggestion in the box** (DRF-01 E8) → the box reads Empty: no swap, the prompt is placed
+  straight in (the suggestion gives way to it); [LOG] no `[draft-swap] … holding an unsent draft` line.
 
 ---
 
@@ -239,6 +245,8 @@ pasted block, re-pasted so Claude makes its own placeholder — never sent; the 
   unique, else refused.
 - **E6 Interrupted-turn fork question** (NOT BUILT, INT-06) → a "Fork interrupted" stop watch holds the
   fill until it ends, then re-anchors it.
+- **E7 The source's box shows only a suggestion** (DRF-01 E8) → nothing is carried: the fork's box stays
+  empty.
 
 ---
 

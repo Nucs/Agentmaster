@@ -1845,6 +1845,129 @@ void TestPendingInput()
             CHECK(!d.boxFound && d.state == InputBoxState::NoBox && d.text.empty(), "pending child-app: a PASTED Claude box shown in Edit is not mistaken for the input box (gutter)");
         }
     }
+    // 30. REAL CAPTURE: what the box draws DIM is not a draft (PENDING_INPUT.md §2d). Claude Code 2.1.310
+    // under ConPTY, both renderers, 2026-10-31: a mod's $.prompt.suggest put a suggestion in the EMPTY box
+    // (next-prompt's case), then the box was typed into, pasted into and emptied, with nothing ever
+    // submitted. The suggestion row is the caret, NBSP, ESC[7m C ESC[27m ESC[2m ommit ... ESC[22m: its first
+    // letter in REVERSE video (Claude's cursor) and not faint, the rest FAINT. Typed text, the paste
+    // placeholder, the rules and the caret are plain; /add-dir's "<path>" hint is a gray color, not
+    // faint. The renditions are one flag per UTF-16 unit of the row, as ControlCore's
+    // PendingRenditionsOf builds them from the cells.
+    {
+        const std::wstring rule120(120, DASH);
+        const std::wstring caret = std::wstring(1, MARK) + NBSPs; // units 0 (the caret) and 1 (the NBSP)
+        const uint8_t F = kPendingUnitFaint;
+        const uint8_t RV = kPendingUnitReverse;
+        struct Span
+        {
+            size_t from;
+            size_t to; // exclusive
+            uint8_t flag;
+        };
+        // One row's renditions: `size` plain units, then each span set to its flag.
+        auto R = [](size_t size, std::initializer_list<Span> spans) {
+            PendingRowRenditions flags(size, 0);
+            for (const auto& s : spans)
+            {
+                for (size_t i = s.from; i < s.to && i < size; ++i)
+                {
+                    flags[i] = s.flag;
+                }
+            }
+            return flags;
+        };
+        // (a) The suggestion in the EMPTY box (S1; the box shows it again whenever it is emptied, S4/S7).
+        {
+            const std::wstring row = caret + L"Commit the fix and push it to origin";
+            const auto rows = V({ rule120, row, rule120 });
+            const auto d = DetectPendingInput(rows, { {}, R(row.size(), { { 2, 3, RV }, { 3, row.size(), F } }), {} });
+            CHECK(d.boxFound && d.state == InputBoxState::Empty && d.text.empty(), "pending dim: a suggestion in the empty box (cursor on its first letter, the rest faint) reads Empty");
+            const auto plain = DetectPendingInput(rows);
+            CHECK(plain.state == InputBoxState::Draft && plain.text == L"Commit the fix and push it to origin",
+                  "pending dim: WITHOUT renditions the same rows still read as the text-only detector always did (a Draft)");
+        }
+        // (b) next-prompt's loading icon, a suggestion too: a braille spinner frame, a space, "next prompt", an ellipsis.
+        {
+            const std::wstring row = caret + std::wstring(1, static_cast<wchar_t>(0x2838)) + L" next prompt" + std::wstring(1, static_cast<wchar_t>(0x2026));
+            const auto d = DetectPendingInput(V({ rule120, row, rule120 }), { {}, R(row.size(), { { 2, 3, RV }, { 3, row.size(), F } }), {} });
+            CHECK(d.boxFound && d.state == InputBoxState::Empty && d.text.empty(), "pending dim: next-prompt's loading icon in the empty box reads Empty");
+        }
+        // (c) A TYPED draft, the cursor (a reverse-video space) right after it (S2).
+        {
+            const std::wstring row = caret + L"fix the tests" + L" ";
+            const auto d = DetectPendingInput(V({ rule120, row, rule120 }), { {}, R(row.size(), { { 15, 16, RV } }), {} });
+            CHECK(d.state == InputBoxState::Draft && d.text == L"fix the tests", "pending dim: a typed draft with the cursor after it is kept whole");
+        }
+        // (d) The same draft after Ctrl+A: the cursor rests on its typed first letter, plain text after it (S3).
+        {
+            const std::wstring row = caret + L"fix the tests";
+            const auto d = DetectPendingInput(V({ rule120, row, rule120 }), { {}, R(row.size(), { { 2, 3, RV } }), {} });
+            CHECK(d.state == InputBoxState::Draft && d.text == L"fix the tests", "pending dim: the cursor on a TYPED first letter (plain after it) keeps that letter");
+        }
+        // (e) A paste placeholder with typed text after it: plain, never faint (S5).
+        {
+            const std::wstring row = caret + L"[Pasted text #1 +39 lines] tail" + L" ";
+            const auto d = DetectPendingInput(V({ rule120, row, rule120 }), { {}, R(row.size(), { { 33, 34, RV } }), {} });
+            CHECK(d.state == InputBoxState::Draft && d.text == L"[Pasted text #1 +39 lines] tail", "pending dim: a paste placeholder is typed text (plain), kept for the paste journal");
+        }
+        // (f) A slash command waiting for its argument (S6): the typed command, a typed space, the cursor
+        // cell, then the hint in a gray COLOR (not faint), so the hint stays in the text, as before.
+        {
+            const std::wstring row = caret + L"/add-dir" + L" " + L" " + L"<path>";
+            const auto d = DetectPendingInput(V({ rule120, row, rule120 }), { {}, R(row.size(), { { 11, 12, RV } }), {} });
+            CHECK(d.state == InputBoxState::Draft && d.text == L"/add-dir  <path>", "pending dim: a slash command's gray argument hint is not faint and stays in the text");
+        }
+        // (g) A suggestion long enough to wrap: its continuation row is faint after the 2-column indent.
+        {
+            const std::wstring first = caret + L"Commit the fix, push it to origin";
+            const std::wstring second = L"  and open the pull request";
+            const auto d = DetectPendingInput(V({ rule120, first, second, rule120 }),
+                                              { {}, R(first.size(), { { 2, 3, RV }, { 3, first.size(), F } }), R(second.size(), { { 2, second.size(), F } }), {} });
+            CHECK(d.state == InputBoxState::Empty && d.text.empty(), "pending dim: a suggestion wrapped onto a continuation row reads Empty");
+            CHECK(d.caretRow == 1 && d.bottomRuleRow == 3, "pending dim: the wrapped suggestion's box spans both rows");
+        }
+        // (h) Typed text, then a DIM tail with the cursor on its first letter (the shape of an inline
+        // completion, not a capture): the typed part alone is the draft.
+        {
+            const std::wstring row = caret + L"/rev" + L"iew";
+            const auto d = DetectPendingInput(V({ rule120, row, rule120 }), { {}, R(row.size(), { { 6, 7, RV }, { 7, 9, F } }), {} });
+            CHECK(d.state == InputBoxState::Draft && d.text == L"/rev", "pending dim: typed text keeps, the dim tail and the cursor resting on it go");
+        }
+        // (i) The cursor cell is TWO units (a surrogate pair): blanked whole before faint text, kept whole
+        // before plain text -- never split into a lone half.
+        {
+            const std::wstring pair = std::wstring(1, static_cast<wchar_t>(0xD83D)) + std::wstring(1, static_cast<wchar_t>(0xDE00));
+            const std::wstring dimRow = caret + pair + L" ship it";
+            const auto dim = DetectPendingInput(V({ rule120, dimRow, rule120 }), { {}, R(dimRow.size(), { { 2, 4, RV }, { 4, dimRow.size(), F } }), {} });
+            CHECK(dim.state == InputBoxState::Empty && dim.text.empty(), "pending dim: a two-unit cursor letter before faint text is blanked whole");
+            const std::wstring typedRow = caret + pair + L" ship it";
+            const auto typed = DetectPendingInput(V({ rule120, typedRow, rule120 }), { {}, R(typedRow.size(), { { 2, 4, RV } }), {} });
+            CHECK(typed.state == InputBoxState::Draft && typed.text == pair + L" ship it", "pending dim: a two-unit cursor letter before plain text is kept whole");
+        }
+        // (j) FAINT RULES (a theme that draws them dim): the box is found on the text alone, so it is still
+        // found, and its typed draft still read.
+        {
+            const std::wstring row = caret + L"x";
+            const auto d = DetectPendingInput(V({ rule120, row, rule120 }), { R(120, { { 0, 120, F } }), {}, R(120, { { 0, 120, F } }) });
+            CHECK(d.boxFound && d.state == InputBoxState::Draft && d.text == L"x", "pending dim: faint rules still wrap the box (renditions never decide WHERE the box is)");
+        }
+        // (k) Renditions SHORTER than the rows, and a flags vector shorter than its row: what is missing is
+        // plain, so the typed draft on the uncovered rows is read in full.
+        {
+            const std::wstring row = caret + L"line one";
+            const auto missing = DetectPendingInput(V({ rule120, row, L"  line two", rule120 }), { {} });
+            CHECK(missing.state == InputBoxState::Draft && missing.text == (L"line one" + NL + L"line two"), "pending dim: rows past the renditions read as plain text");
+            const auto shortFlags = DetectPendingInput(V({ rule120, row, rule120 }), { {}, R(3, { { 2, 3, RV } }) });
+            CHECK(shortFlags.state == InputBoxState::Draft && shortFlags.text == L"line one", "pending dim: units past a short flags vector read as plain");
+        }
+        // (l) WithoutDimUnits never touches the units before `from` (the caret row's marker), whatever
+        // their flags say, and blanks rather than erases (every index stays where it was).
+        {
+            const std::wstring row = caret + L"Cab";
+            const auto out = pending_detail::WithoutDimUnits(row, R(row.size(), { { 0, 1, F }, { 2, 3, RV }, { 3, 5, F } }), 2);
+            CHECK(out.size() == row.size() && out[0] == MARK && out.substr(2) == L"   ", "pending dim: the marker before `from` survives, the dim text and its cursor are blanked in place");
+        }
+    }
 }
 
 // Agentmaster (PENDING_INPUT.md §2b): the paste-cache resolver — marker grammar, the two counting

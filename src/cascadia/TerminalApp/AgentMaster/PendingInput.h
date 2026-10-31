@@ -63,9 +63,21 @@
 //     separator with content after it. A row shaped like that is rejected as a candidate even when
 //     rule-wrapped (a real draft starting "2. " is only rejected if it ALSO carries a mid-row U+2502
 //     column separator on its FIRST line -- deliberately narrow, documented in the tests).
+//
+// WHAT THE BOX DRAWS DIM IS NOT A DRAFT (PENDING_INPUT.md section 2d). Claude Code puts text nobody
+// typed into an EMPTY box: a SUGGESTION, Tab to take -- a mod's (next-prompt's guess and its loading
+// icon, through $.prompt.suggest) or Claude's own after a turn, which goes through the same event. It
+// is drawn FAINT (SGR 2), with Claude's reverse-video cursor on its first letter (measured, see
+// kPendingUnitFaint); the text alone reads exactly like a typed draft. The buffer adapter therefore
+// also passes each row's cell RENDITIONS (one flag byte per UTF-16 unit) and the extraction step leaves
+// the dim units out; any other text the box draws faint (a placeholder) is left out the same way. The
+// box itself is still found on the text alone, so a caller with no attributes (the AttachConsole
+// probe) reads exactly as before.
 
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -112,11 +124,36 @@ namespace Agentmaster
         bool boxFound{ false }; // the bottom-most U+276F input box (rule-wrapped) was located at all
         InputBoxState state{ InputBoxState::NoBox }; // the tri-state verdict (see above); callers with no rows at all report Unknown themselves
         std::wstring text; // the UNSENT draft (empty => the box is empty, or no box was found)
-        // Indices INTO the rows passed to DetectPendingInput -- diagnostic, and the seam for an
-        // attribute-aware refinement (reading the prompt line's cells to skip a DIM placeholder).
+        // Indices INTO the rows passed to DetectPendingInput -- diagnostic, and the span whose cell
+        // renditions the extraction reads (section 2d: the dim units of rows [caretRow, bottomRuleRow)
+        // are left out of `text`).
         int caretRow{ -1 }; // the U+276F prompt line
         int bottomRuleRow{ -1 }; // the box's bottom rule
     };
+
+    // ---- Cell renditions: the units the box draws DIM (PENDING_INPUT.md section 2d) ----
+    //
+    // One flag byte per UTF-16 unit of a row's text, at the same index as that unit in the row string
+    // DetectPendingInput reads. The buffer adapter (ControlCore) fills them from the cells' attributes;
+    // a test builds them by hand. Measured on Claude Code 2.1.310 under ConPTY, both renderers
+    // (2026-10-31, a mod's $.prompt.suggest in an empty box, nothing submitted):
+    //   * a SUGGESTION row is the marker, NBSP, then ESC[7m + its first letter + ESC[27m, then ESC[2m +
+    //     the rest + ESC[22m: the first letter in REVERSE video and NOT faint (Claude's own cursor
+    //     resting on it), every other letter FAINT. Emptied again, the box shows the suggestion again;
+    //   * TYPED text is plain, its cursor a reverse-video cell (a space after the text, or the typed
+    //     letter it rests on after Home / Ctrl+A);
+    //   * a "[Pasted text #1 +39 lines]" placeholder is plain;
+    //   * a slash command's argument hint ("/add-dir  <path>") is a gray COLOR, not faint, so it stays
+    //     in the text, as it always has;
+    //   * the rules and the marker are plain.
+    inline constexpr uint8_t kPendingUnitFaint = 0x01; // drawn faint (SGR 2): text nobody typed
+    inline constexpr uint8_t kPendingUnitReverse = 0x02; // drawn in reverse video (SGR 7): Claude's own cursor
+
+    // One row's flags. EMPTY means nothing is known (every unit plain): what a caller without cell
+    // attributes passes, and what the adapter passes for a row with no faint or reverse cell (it
+    // allocates only for the rows that have one). A vector SHORTER than its row leaves the units past
+    // its end plain.
+    using PendingRowRenditions = std::vector<uint8_t>;
 
     namespace pending_detail
     {
@@ -271,6 +308,63 @@ namespace Agentmaster
             }
             return true;
         }
+
+        // A unit Claude drew as its CURSOR: reverse video, and not faint itself.
+        inline constexpr bool IsCursorUnit(uint8_t flags) noexcept
+        {
+            return (flags & kPendingUnitReverse) != 0 && (flags & kPendingUnitFaint) == 0;
+        }
+
+        // The row as the person TYPED it (section 2d): `row` with every unit at or after `from` that is
+        // drawn FAINT blanked to a space, and with the CURSOR run directly before a faint unit blanked
+        // too -- Claude's cursor resting on the first letter of dim text (a suggestion's first letter,
+        // reverse video and not faint). A cursor run followed by a plain unit or by nothing is kept:
+        // the cursor on a typed letter, or the cell after a draft. Blanking (never erasing) keeps every
+        // unit at its index, so the extraction reads the result exactly as it reads a plain row, and a
+        // row whose text is all dim collapses to whitespace, which the trims already drop.
+        //   row   = one body row's text, as DetectPendingInput got it
+        //   flags = that row's renditions (empty or short => the units without a flag are plain)
+        //   from  = the first unit to consider: the unit after the marker on the caret row (the marker
+        //           and anything before it are never blanked), 0 on the continuation rows
+        // Returns the blanked copy (the row itself, copied, when no unit is dim).
+        // CAVEAT: a suggestion of ONE letter (its only letter under the cursor, nothing faint after it)
+        // still reads as a one-letter draft: nothing in the cells tells it from a typed letter.
+        inline std::wstring WithoutDimUnits(std::wstring_view row, const PendingRowRenditions& flags, size_t from)
+        {
+            std::wstring out{ row };
+            const size_t n = (std::min)(out.size(), flags.size());
+            for (size_t i = from; i < n; ++i)
+            {
+                if ((flags[i] & kPendingUnitFaint) != 0)
+                {
+                    out[i] = L' ';
+                }
+            }
+            // The cursor is one cell, but a cell can be two units (a surrogate pair), so the RUN of
+            // cursor units is judged by the unit right after it, and blanked whole or not at all.
+            for (size_t i = from; i < n;)
+            {
+                if (!IsCursorUnit(flags[i]))
+                {
+                    ++i;
+                    continue;
+                }
+                size_t end = i;
+                while (end < n && IsCursorUnit(flags[end]))
+                {
+                    ++end;
+                }
+                if (end < n && (flags[end] & kPendingUnitFaint) != 0)
+                {
+                    for (size_t k = i; k < end; ++k)
+                    {
+                        out[k] = L' ';
+                    }
+                }
+                i = end;
+            }
+            return out;
+        }
     }
 
     // Is `row` one of the input box's U+2500 rule borders? A rule is DOMINATED by box-drawing
@@ -316,7 +410,14 @@ namespace Agentmaster
     // buffer (`rows`, top-to-bottom -- each entry is one buffer row's text). The adapter passes a
     // bounded window of the last rows (the box always sits at the buffer bottom, independent of the
     // user's scroll position). Returns the draft text (empty => empty box or no box). PURE.
-    inline PendingInputDraft DetectPendingInput(const std::vector<std::wstring>& rows)
+    //   rows       = the rows' texts, top to bottom
+    //   renditions = per row, its cell renditions (section 2d; index i belongs to rows[i]). The box is
+    //                found on the TEXT alone; the renditions are read only to leave the dim units of
+    //                the box's body out of the draft, so a suggestion in an empty box reads Empty, not
+    //                Draft. Absent (the default), shorter than `rows`, or an empty entry: those rows
+    //                are read as plain text, exactly as before renditions existed.
+    // Returns the verdict, the draft text and where the box sits (PendingInputDraft).
+    inline PendingInputDraft DetectPendingInput(const std::vector<std::wstring>& rows, const std::vector<PendingRowRenditions>& renditions = {})
     {
         using namespace pending_detail;
         PendingInputDraft out;
@@ -438,12 +539,18 @@ namespace Agentmaster
         // the cross-version-safe form of "the single space after the marker") from the first line and
         // the 2-char continuation indent (space or NBSP) from the rest, then join with '\n'. (This is
         // a best-effort reconstruction for display/preview -- exact fidelity is not load-bearing; the
-        // load-bearing output is "is there any non-whitespace content".)
+        // load-bearing output is "is there any non-whitespace content".) Each body row is read as the
+        // person TYPED it (section 2d): its dim units, and the cursor resting on the first of them, are
+        // blanked first, so a suggestion -- dim from its second letter on -- leaves only whitespace.
         std::vector<std::wstring> lines;
         lines.reserve(static_cast<size_t>(bottom - caret));
         for (int k = caret; k < bottom; ++k)
         {
-            const auto t = RTrim(rows[k]);
+            const bool hasRenditions = k < static_cast<int>(renditions.size()) && !renditions[static_cast<size_t>(k)].empty();
+            // The caret row keeps its marker and everything before it (markerPos + 1 on); the blanked
+            // copy lives in `typed` so the views below stay valid for the whole iteration.
+            const std::wstring typed = hasRenditions ? WithoutDimUnits(rows[k], renditions[static_cast<size_t>(k)], k == caret ? markerPos + 1 : 0) : std::wstring{};
+            const auto t = RTrim(hasRenditions ? std::wstring_view{ typed } : std::wstring_view{ rows[k] });
             if (k == caret)
             {
                 size_t p = markerPos + 1; // past leading ws (+ a framed border) + the marker glyph

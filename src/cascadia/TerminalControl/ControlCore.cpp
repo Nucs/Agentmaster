@@ -57,6 +57,46 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
     }
 
+    // Agentmaster (PENDING_INPUT.md §2d): one row's cell RENDITIONS for the draft detector -- one flag per
+    // UTF-16 unit of `row.GetText()`, at the same index: faint (SGR 2) and reverse video (SGR 7). Claude
+    // draws text nobody typed (a mod's or its own suggestion) faint, with its cursor in reverse video on
+    // the first letter; the text alone reads like a draft, so DetectPendingInput reads these flags to
+    // leave that text out (the "3 dots" otherwise light on every tab whose box shows a suggestion).
+    //   row = a buffer row; the caller holds the terminal's read lock for as long as it is read
+    // Returns the flags, or an EMPTY vector when no cell of the row is faint or reversed (the common case
+    // costs no allocation; the detector reads an empty entry as all plain).
+    // Walks the row's attribute RUNS, not its columns: a run maps to the text through the column's char
+    // offset (ROW::GetCharOffset), which also covers a wide glyph's two columns and a surrogate pair's
+    // two units. Offsets past the readable columns clamp to the text's end, so a run over the blank
+    // tail of the row writes nothing.
+    static std::vector<uint8_t> PendingRenditionsOf(const ::ROW& row)
+    {
+        std::vector<uint8_t> flags;
+        const auto size = row.GetText().size();
+        til::CoordType x = 0;
+        for (const auto& [attr, length] : row.Attributes().runs())
+        {
+            const auto next = gsl::narrow_cast<til::CoordType>(x + length);
+            const auto flag = static_cast<uint8_t>((attr.IsFaint() ? ::Agentmaster::kPendingUnitFaint : 0) |
+                                                   (attr.IsReverseVideo() ? ::Agentmaster::kPendingUnitReverse : 0));
+            if (flag != 0)
+            {
+                const size_t begin = row.GetCharOffset(x);
+                const size_t end = (std::min)(size, static_cast<size_t>(row.GetCharOffset(next)));
+                if (begin < end)
+                {
+                    if (flags.empty())
+                    {
+                        flags.assign(size, 0);
+                    }
+                    std::fill(flags.begin() + gsl::narrow_cast<ptrdiff_t>(begin), flags.begin() + gsl::narrow_cast<ptrdiff_t>(end), flag);
+                }
+            }
+            x = next;
+        }
+        return flags;
+    }
+
     // Agentmaster (RENDERING.md): the process-wide "draw every terminal on the CPU" override behind
     // ControlCore::SetSoftwareRenderingOverride. One copy per binary that links this file — which is
     // what we want: every window of the WindowEmperor lives in this one process and loads this one
@@ -1002,12 +1042,19 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         constexpr til::CoordType kPendingScanRows = 120;
         const auto startRow = (std::max)(static_cast<til::CoordType>(0), static_cast<til::CoordType>(lastRow + 1 - kPendingScanRows));
         std::vector<std::wstring> rows;
+        // §2d: each row's faint / reverse-video cells beside its text, so a suggestion Claude draws dim in
+        // an EMPTY box (next-prompt's guess, Claude's own) reads Empty instead of lighting the dots,
+        // being remembered, carried into a fork and typed back after a restart as if the user wrote it.
+        std::vector<::Agentmaster::PendingRowRenditions> renditions;
         rows.reserve(static_cast<size_t>(lastRow - startRow + 1));
+        renditions.reserve(static_cast<size_t>(lastRow - startRow + 1));
         for (til::CoordType y = startRow; y <= lastRow; ++y)
         {
-            rows.emplace_back(tb.GetRowByOffset(y).GetText()); // GetText() => wstring_view; copied while the lock is held
+            const auto& row = tb.GetRowByOffset(y);
+            rows.emplace_back(row.GetText()); // GetText() => wstring_view; copied while the lock is held
+            renditions.emplace_back(PendingRenditionsOf(row)); // also read under the lock, from the same row
         }
-        const auto draft = ::Agentmaster::DetectPendingInput(rows);
+        const auto draft = ::Agentmaster::DetectPendingInput(rows, renditions);
         _pendingInputScanMutationId = mutationId;
         _pendingInputScanValid = true;
         _pendingInputScanResult = winrt::hstring{ draft.text };
@@ -1075,12 +1122,20 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         {
             const auto startRow = (std::max)(static_cast<til::CoordType>(0), static_cast<til::CoordType>(lastRow + 1 - rowBudget));
             std::vector<std::wstring> rows;
+            // §2d, as in ReadPendingInputDraft: the delivery reads the box through this probe (the
+            // empty-box check before a paste, a fill's read-back), and a dim suggestion is no text the
+            // user typed, so it reads Empty here too. Read as a Draft, a send would take Claude's
+            // suggestion for the user's draft and swap it around the prompt (stash, send, restore).
+            std::vector<::Agentmaster::PendingRowRenditions> renditions;
             rows.reserve(static_cast<size_t>(lastRow - startRow + 1));
+            renditions.reserve(static_cast<size_t>(lastRow - startRow + 1));
             for (til::CoordType y = startRow; y <= lastRow; ++y)
             {
-                rows.emplace_back(tb.GetRowByOffset(y).GetText());
+                const auto& row = tb.GetRowByOffset(y);
+                rows.emplace_back(row.GetText());
+                renditions.emplace_back(PendingRenditionsOf(row));
             }
-            auto draft = ::Agentmaster::DetectPendingInput(rows);
+            auto draft = ::Agentmaster::DetectPendingInput(rows, renditions);
             state = draft.state;
             text = std::move(draft.text);
         }
