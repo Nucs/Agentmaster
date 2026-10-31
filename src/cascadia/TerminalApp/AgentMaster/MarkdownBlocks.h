@@ -25,6 +25,10 @@
 //   - Images are NOT fetched: they render as "[image: <alt>]" linked to their URL. A transcript can
 //     quote any URL a user pasted; loading it unasked would be a network request nobody made.
 //   - Ordered lists keep their numbers (MarkdownToXaml renders them as bullets).
+//   - GITHUB-STYLE PIPE TABLES (opt-in, MdParseOptions::tables) become Table blocks: cmark alone is CommonMark,
+//     which has no tables, and Claude writes its comparisons as them. They are found in each paragraph's RAW
+//     source lines (the walker gets the document and cmark's line ranges), because the merged text nodes could
+//     not tell an escaped "\|" from a cell border; each cell's inline Markdown is then parsed on its own.
 //
 // Plain C++ + Win32 (UTF-8 <-> UTF-16 conversion) + cmark, no WinRT and no PCH. cmark comes from the
 // repo's vcpkg manifest (the "terminal" feature UIMarkdown already uses); the msbuild links it into
@@ -108,6 +112,28 @@ namespace Agentmaster
         Heading, // wrapped text from `runs`, larger and SemiBold by `headingLevel`
         Code, // a fenced or indented code block: `code`, monospace, on a dark panel
         Rule, // a thematic break ("---"): a thin horizontal line
+        Table, // a GitHub-style pipe table (MdParseOptions::tables): `tableAlign` + `tableRows`, header first
+    };
+
+    // A table column's alignment, from its delimiter cell: ":--" Left, ":-:" Center, "--:" Right, "---" Default (the
+    // renderer's own default, left for text).
+    enum class MdAlign : uint8_t
+    {
+        Default,
+        Left,
+        Center,
+        Right,
+    };
+
+    // One table cell: its inline Markdown parsed into styled runs, exactly like a paragraph's (bold, italic, code,
+    // links). Empty for an empty cell.
+    using MdTableCell = std::vector<MdRun>;
+
+    // One table row. Every row of a table has exactly as many cells as the table has columns (GFM: a short row is
+    // padded with empty cells, the excess of a long one is dropped).
+    struct MdTableRow
+    {
+        std::vector<MdTableCell> cells;
     };
 
     // One render block: the unit the overlay turns into one XAML element (plus the wrappers its
@@ -130,8 +156,14 @@ namespace Agentmaster
         std::wstring code;
         // Code only: the first word of the fence's info string (the language, e.g. "bash"), or empty.
         std::wstring info;
+        // Table only: one alignment per column (the delimiter row's), so its size is the column count (>= 1).
+        std::vector<MdAlign> tableAlign;
+        // Table only: the rows, the HEADER row first (always present), then the body rows (possibly none). Each row
+        // holds exactly tableAlign.size() cells.
+        std::vector<MdTableRow> tableRows;
         // The block's text was cut at MdParseOptions::maxBlockChars. The renderer appends a note
-        // saying so — the full text is still in the Markdown the overlay's Copy button copies.
+        // saying so — the full text is still in the Markdown the overlay's Copy button copies. (A
+        // table cut there keeps its header and the body rows that fit.)
         bool truncated = false;
     };
 
@@ -148,6 +180,14 @@ namespace Agentmaster
         // `truncated`. A 5 MB written file inside a Max-level code block would otherwise be one
         // TextBlock whose layout alone stalls the UI thread.
         size_t maxBlockChars = 0;
+        // Recognize GitHub-style PIPE TABLES (a header row, a "|---|:-:|" delimiter row, body rows) and emit them as
+        // MdBlockKind::Table blocks. cmark itself is CommonMark only: without this a table is a paragraph of pipe-
+        // separated lines. Off by default, so a caller that draws no tables (📜 All Screen's ConversationImage)
+        // keeps its blocks byte-identical; the transcript overlay turns it on. The rules, GFM's: the delimiter
+        // row's cell count must equal the header's; "\|" is a literal pipe (inside a code span too); a short body
+        // row is padded, a long one cut; lines of the paragraph above the header row stay a paragraph; a table
+        // inside a quote or list item ("> | a | b |", the turns view's quoted replies) is found the same way.
+        bool tables = false;
     };
 
     // What ParseMarkdownBlocks produced.

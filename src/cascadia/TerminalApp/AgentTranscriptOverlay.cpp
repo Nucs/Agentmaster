@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cwctype> // iswspace / towlower
+#include <limits> // std::numeric_limits - a table cell measured at an unbounded size (_BuildTable)
 
 // Every XAML event handler below (clicks, key presses, pointer presses, focus changes) and every
 // dispatcher item contains its own exceptions: one escaping a routed-event handler comes back as a
@@ -92,6 +93,15 @@ namespace
 
     // The text appended where a block was cut at kMaxBlockChars.
     constexpr const wchar_t* kCutNote = L"\n\x2026 (cut here - the header's Copy button copies the whole text)";
+
+    // A Markdown TABLE (MdBlockKind::Table, _BuildTable): each cell's padding, the narrowest a column shrinks to when
+    // the view is narrower than the table (a column whose own content is narrower keeps its natural width), and how
+    // many rows are measured to size the columns - a table longer than that is sized by its first rows (a measure is
+    // a text layout; a pathological table must not cost one per cell).
+    constexpr double kTableCellPadX = 10.0;
+    constexpr double kTableCellPadY = 4.0;
+    constexpr double kTableMinColumnWidth = 96.0;
+    constexpr size_t kTableMeasuredRows = 300;
 
     // A FOLD's summary row (a folded tool area): the chevron glyphs (Segoe Fluent Icons ChevronRight /
     // ChevronDown), the row text size, and where the row's text starts — the button's left padding (2)
@@ -1454,6 +1464,9 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::MdParseOptions options;
             options.maxBlocks = kMaxBlocks;
             options.maxBlockChars = kMaxBlockChars;
+            // GitHub-style pipe tables become Table blocks (drawn by _BuildTable) instead of paragraphs of '|' lines -
+            // Claude writes its comparisons that way, and cmark alone is CommonMark only.
+            options.tables = true;
             auto parsed = ::Agentmaster::ParseMarkdownBlocks(toParse, options);
             out.blocks = std::move(parsed.blocks);
             out.truncated = out.truncated || parsed.truncatedBlocks;
@@ -2024,6 +2037,177 @@ namespace winrt::TerminalApp::implementation
         return text;
     }
 
+    void AgentTranscriptOverlay::_AppendCellRuns(const TextBlock& text, const std::vector<::Agentmaster::MdRun>& runs) const
+    {
+        for (const auto& source : runs)
+        {
+            if (source.text.empty())
+            {
+                continue;
+            }
+            Run run;
+            run.Text(winrt::hstring{ source.text });
+            if (source.style & ::Agentmaster::kMdBold)
+            {
+                run.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+            }
+            if (source.style & ::Agentmaster::kMdItalic)
+            {
+                run.FontStyle(winrt::Windows::UI::Text::FontStyle::Italic);
+            }
+            if (source.style & ::Agentmaster::kMdCode)
+            {
+                run.FontFamily(_monoFont);
+                run.Foreground(_inlineCodeBrush);
+            }
+            if (source.style & ::Agentmaster::kMdLink)
+            {
+                // Only plain web links are clickable, as in a paragraph (IsWebUrl); any other scheme is link-colored text.
+                winrt::Windows::Foundation::Uri uri{ nullptr };
+                if (IsWebUrl(source.url))
+                {
+                    try
+                    {
+                        uri = winrt::Windows::Foundation::Uri{ winrt::hstring{ source.url } };
+                    }
+                    catch (...)
+                    {
+                        // A malformed URL in a quoted table: logged (throttled), rendered as plain link text.
+                        ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay table link uri");
+                    }
+                }
+                if (uri)
+                {
+                    Hyperlink link;
+                    link.NavigateUri(uri);
+                    link.Foreground(_linkBrush);
+                    link.Inlines().Append(run);
+                    text.Inlines().Append(link);
+                    continue;
+                }
+                if ((source.style & ::Agentmaster::kMdCode) == 0)
+                {
+                    run.Foreground(_linkBrush);
+                }
+            }
+            text.Inlines().Append(run);
+        }
+    }
+
+    FrameworkElement AgentTranscriptOverlay::_BuildTable(const ::Agentmaster::MdBlock& block)
+    {
+        const size_t columns = block.tableAlign.size();
+        Grid grid;
+        // Left-aligned and capped at its natural width (set below): a short table stays as narrow as its content
+        // instead of stretching across the view.
+        grid.HorizontalAlignment(HorizontalAlignment::Left);
+        for (size_t row = 0; row < block.tableRows.size() + (block.truncated ? 1 : 0); ++row)
+        {
+            RowDefinition definition;
+            definition.Height(GridLength{ 0, GridUnitType::Auto });
+            grid.RowDefinitions().Append(definition);
+        }
+        // Each row first gets one childless background band spanning every column (no composition node, the
+        // rounded-element gotcha does not apply to a plain rectangle either way): the header a shade lighter, the
+        // body rows alternating with a faint wash, every row with a hairline under it.
+        const auto headerBrush = MakeBrush(0xFF, 0x2A, 0x2A, 0x2A);
+        const auto stripeBrush = MakeBrush(0x0D, 0xFF, 0xFF, 0xFF);
+        for (size_t row = 0; row < block.tableRows.size(); ++row)
+        {
+            Border band;
+            band.Background(row == 0 ? Brush{ headerBrush } : row % 2 == 0 ? Brush{ stripeBrush } : Brush{ _transparentBrush });
+            band.BorderBrush(_ruleBrush);
+            band.BorderThickness(Thickness{ 0, 0, 0, 1 });
+            Grid::SetRow(band, static_cast<int32_t>(row));
+            Grid::SetColumnSpan(band, static_cast<int32_t>(std::max<size_t>(columns, 1)));
+            grid.Children().Append(band);
+        }
+        // The cells. Each column's NATURAL width - its widest cell laid out on one line - is measured here, on detached
+        // text blocks (a measure needs no tree), from the first kTableMeasuredRows rows.
+        std::vector<double> natural(columns, 0.0);
+        const winrt::Windows::Foundation::Size unbounded{ std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity() };
+        for (size_t row = 0; row < block.tableRows.size(); ++row)
+        {
+            const auto& cells = block.tableRows[row].cells;
+            for (size_t column = 0; column < columns && column < cells.size(); ++column)
+            {
+                auto text = _MakeTextBlock(kBodyFontSize);
+                if (row == 0)
+                {
+                    text.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+                }
+                switch (block.tableAlign[column])
+                {
+                case ::Agentmaster::MdAlign::Center:
+                    text.TextAlignment(TextAlignment::Center);
+                    break;
+                case ::Agentmaster::MdAlign::Right:
+                    text.TextAlignment(TextAlignment::Right);
+                    break;
+                case ::Agentmaster::MdAlign::Left:
+                case ::Agentmaster::MdAlign::Default:
+                default:
+                    break;
+                }
+                text.Margin(Thickness{ kTableCellPadX, kTableCellPadY, kTableCellPadX, kTableCellPadY });
+                _AppendCellRuns(text, cells[column]);
+                if (row < kTableMeasuredRows)
+                {
+                    // Measured on ONE line (NoWrap at an unbounded size: the desired width is the whole line), then
+                    // set back to wrapping for the layout, where a narrow view wraps the cell instead of cutting it.
+                    text.TextWrapping(TextWrapping::NoWrap);
+                    text.Measure(unbounded);
+                    natural[column] = std::max(natural[column], static_cast<double>(text.DesiredSize().Width));
+                    text.TextWrapping(TextWrapping::Wrap);
+                }
+                Grid::SetRow(text, static_cast<int32_t>(row));
+                Grid::SetColumn(text, static_cast<int32_t>(column));
+                grid.Children().Append(text);
+            }
+        }
+        // The columns: STAR widths weighted by each column's natural width, never below the column's own width or
+        // kTableMinColumnWidth (whichever is smaller), and the whole grid capped at the sum of the natural widths.
+        // So a view wide enough shows every column at its natural width (each star share == its weight), and a
+        // narrower one shrinks the columns in proportion and wraps their text - the long text column gives way, the
+        // narrow ones (a check mark, a level name) keep their width through MinWidth. With line wrap OFF the view
+        // measures at an unbounded width, where star columns size to their content: the table keeps its natural
+        // width and the part past the right edge is hidden, like every other block.
+        double total = 0.0;
+        for (size_t column = 0; column < columns; ++column)
+        {
+            const double width = std::max(natural[column], 1.0);
+            ColumnDefinition definition;
+            definition.Width(GridLength{ width, GridUnitType::Star });
+            definition.MinWidth(std::min(width, kTableMinColumnWidth));
+            grid.ColumnDefinitions().Append(definition);
+            total += width;
+        }
+        if (total > 0.0)
+        {
+            grid.MaxWidth(total);
+        }
+        if (block.truncated)
+        {
+            // Rows past the block's character cap were left out (the Copy button still copies them).
+            auto note = _MakeTextBlock(kBodyFontSize);
+            note.Text(winrt::hstring{ kCutNote });
+            note.Foreground(_dimBrush);
+            note.FontStyle(winrt::Windows::UI::Text::FontStyle::Italic);
+            note.Margin(Thickness{ kTableCellPadX, kTableCellPadY, kTableCellPadX, kTableCellPadY });
+            Grid::SetRow(note, static_cast<int32_t>(block.tableRows.size()));
+            Grid::SetColumnSpan(note, static_cast<int32_t>(std::max<size_t>(columns, 1)));
+            grid.Children().Append(note);
+        }
+        // The frame: a hairline around the whole table. Square corners - the frame holds children, and a rounded
+        // element with children is a composition node every frame walks.
+        Border frame;
+        frame.BorderBrush(_ruleBrush);
+        frame.BorderThickness(Thickness{ 1, 1, 1, 1 });
+        frame.HorizontalAlignment(HorizontalAlignment::Left);
+        frame.Child(grid);
+        return frame;
+    }
+
     FrameworkElement AgentTranscriptOverlay::_BuildBlockContent(LevelView& view, const ::Agentmaster::MdBlock& block, const std::vector<::Agentmaster::MdSessionRef>* sessionRefs)
     {
         switch (block.kind)
@@ -2051,6 +2235,8 @@ namespace winrt::TerminalApp::implementation
             box.Child(text);
             return box;
         }
+        case ::Agentmaster::MdBlockKind::Table:
+            return _BuildTable(block);
         case ::Agentmaster::MdBlockKind::Heading:
         case ::Agentmaster::MdBlockKind::Paragraph:
         default:
@@ -2243,8 +2429,9 @@ namespace winrt::TerminalApp::implementation
                     marker.FontSize(kBodyFontSize);
                     marker.Foreground(_markerBrush);
                     marker.VerticalAlignment(VerticalAlignment::Top);
-                    // A code panel's text starts below its padding: line the marker up with that text.
-                    marker.Margin(Thickness{ 0, block.kind == ::Agentmaster::MdBlockKind::Code ? 7.0 : 0.0, 0, 0 });
+                    // A code panel's text starts below its padding, a table's first row below its cell padding: line the
+                    // marker up with that text.
+                    marker.Margin(Thickness{ 0, block.kind == ::Agentmaster::MdBlockKind::Code ? 7.0 : block.kind == ::Agentmaster::MdBlockKind::Table ? kTableCellPadY + 1.0 : 0.0, 0, 0 });
                     Grid::SetColumn(marker, 0);
                     row.Children().Append(marker);
                     Grid::SetColumn(element, 1);

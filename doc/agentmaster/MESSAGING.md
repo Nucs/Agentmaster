@@ -5685,6 +5685,8 @@ this Debug run took 1,125 ms for 631.
 
 **Not changed, still open.**
 - Like `/screen` and 🖼 Screen Image, the pictures are NOT redacted (§9.6's redactor is not built).
+- A Markdown table in a message draws as its pipe lines: the pictures parse without `MdParseOptions::tables` (the transcript
+  overlay draws tables as grids since 2026-10-31, TRANSCRIPT_OVERLAY.md §3i). Drawing them on the terminal grid is open.
 - The picture shows the turns view's content in Claude Code's look, not Claude Code's own screen. A call reads as the turns
   view writes it ("Bash — what it does: `the command` · ok"), not as Claude Code's "Bash(command)" with its output's first
   lines under it; a call's output shows only at the Full level (its first line).

@@ -6,8 +6,8 @@ second pass: 85% wide, folded tool calls (§3b), the remembered level (§3a) —
 (third ask, same day, not built). 2026-10-05: the ↵ line-wrap toggle (§3c, fourth ask) — not built; then
 the Session chain links (§3d, fifth ask, same day) — not built; then a fork with no messages yet shows the
 transcript it was forked from (§3e, a sixth report, same day) — not built. 2026-10-31: the (i) level guide and
-the tabs' cheat-sheet tooltips (§3f, the seventh ask), Compact's reason lines (§3g, the eighth) and plain dashes
-(§3h, the ninth) — not built.
+the tabs' cheat-sheet tooltips (§3f, the seventh ask), Compact's reason lines (§3g, the eighth), plain dashes
+(§3h, the ninth) and Markdown tables (§3i, the tenth) — not built.
 
 ## 1. The ask (verbatim)
 
@@ -394,6 +394,37 @@ The ninth ask (2026-10-31): "In the transcripts, use regular dash, not em".
   the 55 changed, every changed line a dash). Telegram's own texts (the card, the bot's lines) are not
   transcripts and keep theirs.
 
+### 3i. Markdown tables
+
+The tenth ask (2026-10-31), about a comparison table in one of Claude's replies in session `9ca8c828`:
+
+> This did not plot into a table if we support markdown tables rendering in the transcript ui
+
+- **What was wrong**: cmark is CommonMark only — no GFM tables — so a pipe table reached the view as a paragraph
+  of `| a | b |` lines.
+- **Now**: `MarkdownBlocks` finds GitHub-style pipe tables (`MdParseOptions::tables`, which the overlay turns on)
+  and emits `MdBlockKind::Table` blocks (`tableAlign` + `tableRows`, the header first); the overlay draws each as a
+  grid (`_BuildTable`):
+  - a hairline frame (square: a framed element with children must not be rounded), the header row SemiBold on a
+    lighter band, the body rows striped faintly, a hairline under every row;
+  - each cell a selectable text block (the shared Copy / Select All menu) with its inline styles — bold, italic,
+    code, http(s) links (`_AppendCellRuns`) — and its column's alignment (`:--` / `:-:` / `--:`);
+  - columns as STAR widths weighted by their natural one-line widths (measured once per cell of the first 300
+    rows, detached), the grid capped at their sum: a wide view shows the table at its natural size, a narrow one
+    shrinks the columns in proportion and wraps their text, a column never going below 96 DIPs (or its own width
+    when smaller) — so the long text column of a comparison gives way and the check-mark columns keep theirs;
+  - with line wrap OFF (§3c) the table keeps its natural width and the part past the right edge is hidden, like
+    every other block; a table cut at the block cap ends with the cut note as a last row.
+- **GFM's rules**, read from each paragraph's RAW source lines (cmark keeps a block's line range; the merged text
+  nodes could not tell an escaped `\|` from a border): the header row is the first line followed by a delimiter
+  row (`|---|:-:|`) of the SAME cell count, one of the two holding an unescaped `|`; lines above the header stay a
+  paragraph; every later line of the paragraph is a body row, padded or cut to the header's cell count; `\|` is a
+  literal pipe, inside a code span too; a cell that would read as a block on its own (`- x`, `# x`, `<div>`) shows
+  as written. A table inside a quote — every reply in the turns view is one — or a list item is found the same way
+  (the continuation lines' `>` markers and item indents are stripped).
+- **Opt-in** (`MdParseOptions::tables`, default off): 📜 All Screen's pictures (ConversationImage) still draw a
+  table as its pipe lines, byte for byte as before.
+
 ## 4. Rendering
 
 1. **Off the UI thread** (`AgentTranscriptOverlay::_LoadLevelAsync`, holding only a weak reference): the
@@ -427,6 +458,9 @@ renders to 345 KB / 3.7 k lines at Default and 1.5 MB / 22.6 k lines / 619 code 
 - **Lists**: a marker column whose width fits the list's widest marker, so wrapped and continuation text
   hangs aligned. Bullets •, ◦, ▪ by depth; **ordered lists keep their numbers**. Tight lists are packed.
 - **Code blocks**: a dark rounded panel, monospace, wrapping while line wrap is ON (§3c), selectable.
+- **Tables** (GitHub-style pipe tables, §3i): a framed grid, the header bold on a lighter band, rows striped,
+  cells selectable with their inline styles and alignment; star columns weighted by natural width, capped at
+  their sum, shrinking and wrapping in a narrow view.
 - **Raw HTML is kept as text** (inline: plain; block: monospace dim) — `List<int>` or a quoted
   `<system-reminder>` would otherwise vanish.
 - **Soft line breaks are real line breaks** (a prompt typed on three lines shows as three lines), kept as
@@ -477,7 +511,8 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
 ## 7. Files
 
 - `src/cascadia/TerminalApp/AgentMaster/MarkdownBlocks.{h,cpp}` — the pure flattener (cmark; plain C++,
-  no PCH). cmark comes from the vcpkg manifest's `terminal` feature (UIMarkdown's port) and is auto-linked
+  no PCH), with the GFM pipe-table finder (`MdParseOptions::tables`, §3i; harness: `tests_markdown.cpp`'s "md
+  tables" checks — the rules, a quoted table, an item's table, the cap, the user's own comparison table). cmark comes from the vcpkg manifest's `terminal` feature (UIMarkdown's port) and is auto-linked
   into TerminalApp.dll.
 - `src/cascadia/TerminalApp/AgentTranscriptOverlay.{h,cpp}` — the overlay (`winrt::implements`).
 - `src/cascadia/TerminalApp/AgentMaster/TranscriptLevelGuide.h` — the level guide's one table (§3f): the
@@ -608,3 +643,8 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
 14. Plain dashes (§3h): at every tab, a call line reads "Bash - <description>: `<command>`", a note
     "10:00 - the user ran …", a chain row "session 2 · `<id>` - forked …"; Claude's replies keep their own em
     dashes. Copy ▸ Transcript copies the same. A pathological level's closing note reads "The view stops here - …".
+15. Tables (§3i): open session `9ca8c828` (this feature's own session) → the comparison reply shows a framed
+    table: "Content" bold on the lighter header band, the five level columns centered with their ✓ / ·, the rows
+    striped. Narrow the window → the Content column wraps while the level columns keep their width; turn ↵ wrap
+    OFF → the table keeps its full width, cut at the right edge. Select a cell's text → Copy works. A code span
+    or a link inside a cell keeps its style.

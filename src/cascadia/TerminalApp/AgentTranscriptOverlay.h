@@ -433,9 +433,27 @@ namespace winrt::TerminalApp::implementation
         // Parameters: view / block / prev — the level, the block, the block drawn above it (nullptr for none);
         //   sessionRefs — the block's "session N" mentions to draw as links (a Session chain row), or nullptr.
         winrt::Windows::UI::Xaml::FrameworkElement _BuildBlockElement(LevelView& view, const ::Agentmaster::MdBlock& block, const ::Agentmaster::MdBlock* prev, const std::vector<::Agentmaster::MdSessionRef>* sessionRefs = nullptr);
-        // Build the bare content of a block (TextBlock / code panel / rule), without containers.
+        // Build the bare content of a block (TextBlock / code panel / rule / table), without containers.
         // Parameters: view / block — the level and the block; sessionRefs — as for _BuildBlockElement.
         winrt::Windows::UI::Xaml::FrameworkElement _BuildBlockContent(LevelView& view, const ::Agentmaster::MdBlock& block, const std::vector<::Agentmaster::MdSessionRef>* sessionRefs = nullptr);
+        // Build a Markdown TABLE block (MdBlockKind::Table - a GitHub-style pipe table, which MarkdownBlocks finds with
+        // MdParseOptions::tables): a Grid in a hairline frame, the header row bold on a lighter band, body rows striped,
+        // each cell a selectable text block with its inline styles and its column's alignment. Columns are STAR widths
+        // weighted by their natural (one-line) widths and the grid is capped at their sum, so a wide view shows the
+        // table at its natural size and a narrow one shrinks it and wraps its cells; a column never shrinks below
+        // kTableMinColumnWidth (or its own width, when smaller). The natural widths come from measuring each cell of the
+        // first kTableMeasuredRows rows once, detached, on the UI thread - the cost of a table is one text layout per
+        // cell, paid only for tables. A table cut at the block cap gets the cut note as a last row.
+        // Parameters: block - the Table block (tableAlign gives the column count; every row holds that many cells).
+        // Returns the framed table. Throws winrt::hresult_error / std::bad_alloc (the build's catch contains it).
+        winrt::Windows::UI::Xaml::FrameworkElement _BuildTable(const ::Agentmaster::MdBlock& block);
+        // Append a table cell's runs to its text block: bold, italic, monospace code and links exactly as a paragraph
+        // draws them (only http(s) links are clickable), without what only a paragraph has (a speaker label's tint, a
+        // Session chain row's links, raw HTML's dimming).
+        // Parameters: text - the cell's text block; runs - the cell's styled runs (MdTableCell).
+        // Throws winrt::hresult_error / std::bad_alloc (the build's catch contains it); a malformed link URL is logged
+        // and drawn as link-colored text.
+        void _AppendCellRuns(const winrt::Windows::UI::Xaml::Controls::TextBlock& text, const std::vector<::Agentmaster::MdRun>& runs) const;
         // Append run `source` of a Session chain row to `text` with its "session N" mentions as hyperlinks
         // (each a Hyperlink whose Click calls _JumpToSession) and the text around them as plain runs in the
         // run's own bold / italic style. A row is never a speaker label, so no label tint is involved.

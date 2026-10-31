@@ -306,6 +306,102 @@ void TestMarkdownBlocks()
         CHECK(c.blocks.size() == 1 && c.blocks[0].code == L"01234" && c.blocks[0].truncated, "md: maxBlockChars cuts a code block too");
     }
 
+    // ---- GitHub-style pipe tables (MdParseOptions::tables): off by default, GFM's rules when on ----
+    {
+        // The cell text of row `r`, column `c` (its runs joined), or "<missing>" past the table's edge.
+        const auto cell = [](const MdBlock& table, size_t r, size_t c) {
+            if (r >= table.tableRows.size() || c >= table.tableRows[r].cells.size())
+            {
+                return std::wstring{ L"<missing>" };
+            }
+            std::wstring text;
+            for (const auto& run : table.tableRows[r].cells[c])
+            {
+                text += run.text;
+            }
+            return text;
+        };
+        MdParseOptions tables;
+        tables.tables = true;
+        const std::wstring simple = L"| Name | Count | Note |\n|:--|:-:|--:|\n| **a** | `1` | x |\n| b | 2 |\n";
+
+        const auto off = ParseMarkdownBlocks(simple);
+        CHECK(off.blocks.size() == 1 && off.blocks[0].kind == MdBlockKind::Paragraph,
+              "md tables: off (the default), a table stays one paragraph - every other caller's blocks are unchanged");
+
+        const auto on = ParseMarkdownBlocks(simple, tables);
+        CHECK(on.blocks.size() == 1 && on.blocks[0].kind == MdBlockKind::Table, "md tables: on, the paragraph becomes one Table block");
+        if (on.blocks.size() == 1 && on.blocks[0].kind == MdBlockKind::Table)
+        {
+            const auto& t = on.blocks[0];
+            CHECK(t.tableAlign.size() == 3 && t.tableAlign[0] == MdAlign::Left && t.tableAlign[1] == MdAlign::Center && t.tableAlign[2] == MdAlign::Right,
+                  "md tables: the delimiter row's colons give each column's alignment");
+            CHECK(t.tableRows.size() == 3 && cell(t, 0, 0) == L"Name" && cell(t, 0, 2) == L"Note", "md tables: the header row comes first, trimmed");
+            CHECK(cell(t, 1, 0) == L"a" && !t.tableRows[1].cells[0].empty() && (t.tableRows[1].cells[0][0].style & kMdBold) != 0 &&
+                      cell(t, 1, 1) == L"1" && (t.tableRows[1].cells[1][0].style & kMdCode) != 0,
+                  "md tables: a cell's inline Markdown is parsed (bold, code)");
+            CHECK(t.tableRows[2].cells.size() == 3 && cell(t, 2, 1) == L"2" && cell(t, 2, 2).empty(), "md tables: a short body row is padded with empty cells");
+        }
+
+        // Inside a quote (the turns view quotes every reply), with an escaped pipe and a long row.
+        const auto quoted = ParseMarkdownBlocks(L"> | a | b |\n> |---|---|\n> | x \\| y | `p \\| q` | extra |\n", tables);
+        CHECK(quoted.blocks.size() == 1 && quoted.blocks[0].kind == MdBlockKind::Table && quoted.blocks[0].containers.size() == 1 &&
+                  quoted.blocks[0].containers[0].kind == MdContainerKind::Quote,
+              "md tables: a quoted table is found, and keeps its quote container");
+        if (quoted.blocks.size() == 1 && quoted.blocks[0].kind == MdBlockKind::Table)
+        {
+            const auto& t = quoted.blocks[0];
+            CHECK(t.tableRows.size() == 2 && t.tableRows[1].cells.size() == 2, "md tables: a long body row's extra cells are dropped");
+            CHECK(cell(t, 1, 0) == L"x | y" && cell(t, 1, 1) == L"p | q", "md tables: \\| is a literal pipe, inside a code span too (GFM)");
+        }
+
+        // Lines above the header row stay a paragraph; a table inside a list item; not-tables stay paragraphs.
+        const auto lead = ParseMarkdownBlocks(L"Here it is:\n| a | b |\n| - | - |\n| 1 | 2 |\n", tables);
+        CHECK(lead.blocks.size() == 2 && lead.blocks[0].kind == MdBlockKind::Paragraph && BlockText(lead.blocks[0]) == L"Here it is:" &&
+                  lead.blocks[1].kind == MdBlockKind::Table && lead.blocks[1].tableRows.size() == 2,
+              "md tables: the paragraph's lines above the header stay a paragraph, the rest is the table");
+        const auto item = ParseMarkdownBlocks(L"- | a | b |\n  |---|---|\n  | 1 | 2 |\n", tables);
+        CHECK(item.blocks.size() == 1 && item.blocks[0].kind == MdBlockKind::Table && item.blocks[0].containers.size() == 1 &&
+                  item.blocks[0].containers[0].kind == MdContainerKind::Item && !item.blocks[0].containers[0].marker.empty(),
+              "md tables: a table as a list item's first block carries the item's marker");
+        const auto mismatch = ParseMarkdownBlocks(L"| a | b |\n|---|\n| 1 | 2 |\n", tables);
+        CHECK(mismatch.blocks.size() == 1 && mismatch.blocks[0].kind == MdBlockKind::Paragraph,
+              "md tables: a delimiter row with another cell count than the header is no table");
+        const auto noDelimiter = ParseMarkdownBlocks(L"| a | b |\n| 1 | 2 |\n", tables);
+        CHECK(noDelimiter.blocks.size() == 1 && noDelimiter.blocks[0].kind == MdBlockKind::Paragraph, "md tables: no delimiter row, no table");
+        const auto noPipe = ParseMarkdownBlocks(L"Ratio\n:--\n", tables);
+        CHECK(noPipe.blocks.size() == 1 && noPipe.blocks[0].kind == MdBlockKind::Paragraph, "md tables: a header and delimiter without any pipe are no table");
+        const auto code = ParseMarkdownBlocks(L"```\n| a | b |\n|---|---|\n```\n", tables);
+        CHECK(code.blocks.size() == 1 && code.blocks[0].kind == MdBlockKind::Code, "md tables: a table inside a code block stays code");
+
+        // The character cap keeps the header and the rows that fit.
+        MdParseOptions cappedTables = tables;
+        cappedTables.maxBlockChars = 6;
+        const auto capped = ParseMarkdownBlocks(L"| h |\n|---|\n| aaaa |\n| bbbb |\n", cappedTables);
+        CHECK(capped.blocks.size() == 1 && capped.blocks[0].kind == MdBlockKind::Table && capped.blocks[0].tableRows.size() == 2 && capped.blocks[0].truncated,
+              "md tables: maxBlockChars keeps the header and the body rows that fit, and flags the block");
+
+        // The user's own table (this session's comparison, 2026-10-31), as the turns view quotes it in a reply.
+        const std::wstring comparison =
+            L"> | Content | Minimal | Compact | Default | Full | Max |\n"
+            L"> |---|:-:|:-:|:-:|:-:|:-:|\n"
+            L"> | Your messages and each turn's final reply | \x2713 | \x2713 | \x2713 | \x2713 | \x2713 |\n"
+            L"> | Every tool call on one line: its main arguments and how it ended (ok, \x2717 exit 1, 40 of 120 lines, created) | \x00B7 | \x00B7 | \x2713 | \x2713 | \x2713 |\n"
+            L"> | A stats line per turn | \x00B7 | \x00B7 | \x00B7 | \x00B7 | \x2713 |\n";
+        const auto real = ParseMarkdownBlocks(comparison, tables);
+        CHECK(real.blocks.size() == 1 && real.blocks[0].kind == MdBlockKind::Table && real.blocks[0].tableAlign.size() == 6 &&
+                  real.blocks[0].tableAlign[0] == MdAlign::Default && real.blocks[0].tableAlign[5] == MdAlign::Center &&
+                  real.blocks[0].tableRows.size() == 4 && cell(real.blocks[0], 2, 0).find(L"ok, \x2717 exit 1") != std::wstring::npos &&
+                  cell(real.blocks[0], 3, 5) == L"\x2713",
+              "md tables: the user's comparison table (a quoted reply) parses to 6 columns x 4 rows, its alignments and marks kept");
+
+        // The gap: a table gets a code block's extra air.
+        if (lead.blocks.size() == 2)
+        {
+            CHECK(MdGapAbove(&lead.blocks[0], lead.blocks[1]) == 6.0, "md tables: a table sits a code block's gap below a paragraph");
+        }
+    }
+
     // ---- tool areas: what the overlay folds (every item kind, the empty note, a list that is NOT an area) ----
     {
         // Blocks: 0 heading · 1 user label · 2 its quote · 3 Claude label · 4..10 the first area (4 remark,

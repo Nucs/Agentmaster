@@ -202,17 +202,194 @@ namespace Agentmaster
             return true;
         }
 
+        // ---- GitHub-style pipe tables (MdParseOptions::tables) -----------------------------------------
+        // cmark is CommonMark only, so a table reaches the walker as a PARAGRAPH whose lines are its rows. The
+        // walker reads that paragraph's RAW source lines (cmark keeps each block's line range) and applies GFM's
+        // table rules to them here - the merged TEXT nodes could not tell an escaped "\|" from a cell border.
+        // Everything below works on UTF-8 bytes: every byte the rules look at ('|', '\\', ':', '-', ' ', '\t',
+        // '>') is ASCII, and in UTF-8 no byte of a multi-byte character is ever an ASCII byte.
+
+        // `text` without leading and trailing spaces / tabs.
+        std::string_view TrimAsciiSpace(std::string_view text) noexcept
+        {
+            while (!text.empty() && (text.front() == ' ' || text.front() == '\t'))
+            {
+                text.remove_prefix(1);
+            }
+            while (!text.empty() && (text.back() == ' ' || text.back() == '\t'))
+            {
+                text.remove_suffix(1);
+            }
+            return text;
+        }
+
+        // Whether the '|' that ends `row` is escaped: an odd number of backslashes right before it.
+        // Parameters: row - a row whose last byte is '|'.
+        bool EndsWithEscapedPipe(std::string_view row) noexcept
+        {
+            size_t backslashes = 0;
+            for (size_t i = row.size() - 1; i-- > 0 && row[i] == '\\';)
+            {
+                ++backslashes;
+            }
+            return backslashes % 2 == 1;
+        }
+
+        // Whether `line` holds a cell border: a '|' that no backslash escapes.
+        bool HasUnescapedPipe(std::string_view line) noexcept
+        {
+            for (size_t i = 0; i < line.size(); ++i)
+            {
+                if (line[i] == '\\')
+                {
+                    ++i; // the escaped byte is literal, whatever it is
+                }
+                else if (line[i] == '|')
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // A table row split into its cells' raw Markdown, each trimmed (GFM): one leading and one trailing
+        // border '|' are optional and dropped; every other unescaped '|' separates two cells. "\|" becomes a
+        // literal '|' in its cell - GFM's rule, which holds inside a code span too (cmark alone would keep the
+        // backslash there); any other backslash escape is left for cmark to read.
+        // Parameters: line - one row, container prefixes already stripped.
+        // Returns at least one cell (an empty row gives one empty cell). Throws std::bad_alloc only.
+        std::vector<std::string> SplitTableRow(std::string_view line)
+        {
+            std::string_view row = TrimAsciiSpace(line);
+            if (!row.empty() && row.front() == '|')
+            {
+                row.remove_prefix(1);
+            }
+            if (!row.empty() && row.back() == '|' && !EndsWithEscapedPipe(row))
+            {
+                row.remove_suffix(1);
+            }
+            std::vector<std::string> cells;
+            std::string cell;
+            for (size_t i = 0; i < row.size(); ++i)
+            {
+                const char c = row[i];
+                if (c == '\\' && i + 1 < row.size())
+                {
+                    if (row[i + 1] == '|')
+                    {
+                        cell += '|';
+                    }
+                    else
+                    {
+                        cell += c;
+                        cell += row[i + 1];
+                    }
+                    ++i;
+                    continue;
+                }
+                if (c == '|')
+                {
+                    cells.emplace_back(TrimAsciiSpace(cell));
+                    cell.clear();
+                    continue;
+                }
+                cell += c;
+            }
+            cells.emplace_back(TrimAsciiSpace(cell));
+            return cells;
+        }
+
+        // Read `line` as a table's DELIMITER row ("|---|:-:|--:|"): every cell is dashes, optionally with a colon
+        // at either end, and at least one dash.
+        // Parameters:
+        //   line  - the candidate row, container prefixes already stripped.
+        //   align - receives one alignment per cell ("--" Default, ":-" Left, ":-:" Center, "-:" Right) on success.
+        // Returns true when it is a delimiter row. Throws std::bad_alloc only.
+        bool ParseDelimiterRow(std::string_view line, std::vector<MdAlign>& align)
+        {
+            align.clear();
+            for (const std::string& cell : SplitTableRow(line))
+            {
+                std::string_view body{ cell };
+                if (body.empty())
+                {
+                    return false;
+                }
+                const bool left = body.front() == ':';
+                const bool right = body.back() == ':';
+                if (left)
+                {
+                    body.remove_prefix(1);
+                }
+                if (right && !body.empty())
+                {
+                    body.remove_suffix(1);
+                }
+                if (body.empty() || body.find_first_not_of('-') != std::string_view::npos)
+                {
+                    return false;
+                }
+                align.push_back(left && right ? MdAlign::Center : right ? MdAlign::Right : left ? MdAlign::Left : MdAlign::Default);
+            }
+            return !align.empty();
+        }
+
+        // A paragraph's continuation line without the markers of the containers around it, so a quoted table's
+        // "> | a | b |" reads "| a | b |". For each container, outermost first: a quote takes up to three spaces,
+        // its '>' and one optional space or tab; a list item takes the line's leading whitespace. A line that
+        // lacks a quote's '>' is a LAZY continuation (CommonMark lets a paragraph run on without it): nothing more
+        // is stripped from it. Over-stripping whitespace is harmless - a table row is trimmed anyway.
+        // Parameters: line - the raw source line; stack - the containers around the paragraph, outermost first.
+        // Returns the rest of the line. Never throws.
+        std::string_view StripContainerPrefixes(std::string_view line, const std::vector<MdContainer>& stack) noexcept
+        {
+            size_t pos = 0;
+            for (const auto& container : stack)
+            {
+                if (container.kind == MdContainerKind::Quote)
+                {
+                    size_t p = pos;
+                    for (int spaces = 0; spaces < 3 && p < line.size() && line[p] == ' '; ++spaces)
+                    {
+                        ++p;
+                    }
+                    if (p >= line.size() || line[p] != '>')
+                    {
+                        break; // a lazy continuation line: no further markers on it
+                    }
+                    ++p;
+                    if (p < line.size() && (line[p] == ' ' || line[p] == '\t'))
+                    {
+                        ++p;
+                    }
+                    pos = p;
+                }
+                else
+                {
+                    while (pos < line.size() && (line[pos] == ' ' || line[pos] == '\t'))
+                    {
+                        ++pos;
+                    }
+                }
+            }
+            return line.substr(pos);
+        }
+
         // The walker: one instance per parse, fed every iterator event in order. Not thread-safe
         // (one parse == one thread), never shared.
         class BlockWalker
         {
         public:
             // Parameters:
-            //   options — the caps and the soft-break rule (borrowed: must outlive the walker).
+            //   options — the caps, the soft-break rule and the table switch (borrowed: must outlive the walker).
             //   out     — where blocks are appended (borrowed: the caller's result).
-            BlockWalker(const MdParseOptions& options, MdParseResult& out) noexcept :
+            //   source  — the UTF-8 document cmark parsed (borrowed: must outlive the walker). Read only to find
+            //             tables (MdParseOptions::tables): a paragraph's raw lines. Empty = no tables are found.
+            BlockWalker(const MdParseOptions& options, MdParseResult& out, std::string_view source = {}) noexcept :
                 _options{ options },
-                _out{ out }
+                _out{ out },
+                _source{ source }
             {
             }
 
@@ -283,6 +460,21 @@ namespace Agentmaster
                     if (entering)
                     {
                         const bool heading = type == CMARK_NODE_HEADING;
+                        if (!heading && _options.tables)
+                        {
+                            // A paragraph that IS a pipe table becomes a Table block (plus a Paragraph for any lines
+                            // above its header row). Its inline children still arrive as events, but _inInline stays
+                            // false, so _Append drops them; emphasis / link nesting counts stay balanced on their own.
+                            const TableOutcome table = _TryTable(node);
+                            if (table == TableOutcome::Stop)
+                            {
+                                return false;
+                            }
+                            if (table == TableOutcome::Emitted)
+                            {
+                                break;
+                            }
+                        }
                         auto* block = _Begin(heading ? MdBlockKind::Heading : MdBlockKind::Paragraph);
                         if (!block)
                         {
@@ -433,6 +625,227 @@ namespace Agentmaster
             }
 
         private:
+            // What _TryTable made of a paragraph.
+            enum class TableOutcome : uint8_t
+            {
+                NotTable, // no table in it: the caller builds the Paragraph as usual
+                Emitted, // the table (and the paragraph above its header, if any) was appended
+                Stop, // MdParseOptions::maxBlocks was reached while appending: the walk must stop
+            };
+
+            // Index the source's line starts once (cmark numbers lines from 1, and ends a line at "\n", "\r\n" or a
+            // lone "\r" - the same three counted here, so a line number means the same line on both sides).
+            // Throws std::bad_alloc only.
+            void _EnsureLineStarts()
+            {
+                if (!_lineStarts.empty())
+                {
+                    return;
+                }
+                _lineStarts.push_back(0);
+                for (size_t i = 0; i < _source.size(); ++i)
+                {
+                    if (_source[i] == '\r')
+                    {
+                        if (i + 1 < _source.size() && _source[i + 1] == '\n')
+                        {
+                            ++i; // "\r\n" is one line end
+                        }
+                        _lineStarts.push_back(i + 1);
+                    }
+                    else if (_source[i] == '\n')
+                    {
+                        _lineStarts.push_back(i + 1);
+                    }
+                }
+            }
+
+            // Source line `line` (1-based, cmark's numbering), without its line end. Empty past the end.
+            // Requires _EnsureLineStarts. Never throws.
+            std::string_view _SourceLine(int line) const noexcept
+            {
+                if (line <= 0 || static_cast<size_t>(line) > _lineStarts.size())
+                {
+                    return {};
+                }
+                const size_t begin = _lineStarts[static_cast<size_t>(line) - 1];
+                size_t end = static_cast<size_t>(line) < _lineStarts.size() ? _lineStarts[static_cast<size_t>(line)] : _source.size();
+                while (end > begin && (_source[end - 1] == '\n' || _source[end - 1] == '\r'))
+                {
+                    --end;
+                }
+                return _source.substr(begin, end - begin);
+            }
+
+            // A cell's (or a few lines') inline Markdown as styled runs: parsed by cmark as a little document of its
+            // own and walked by a fresh walker, so bold, italic, code and links come out exactly as a paragraph's
+            // would. A text that does not read as ONE plain paragraph (a cell "- x" is a list item, "# x" a heading,
+            // "<div>" an HTML block) is kept as written in one plain run instead - GFM shows such cells literally.
+            // Parameters: markdown - the raw UTF-8 Markdown (a cell's text, "\|" already made a literal pipe).
+            // Returns the runs; empty for an empty or blank text. Throws std::bad_alloc only.
+            std::vector<MdRun> _InlineRuns(std::string_view markdown)
+            {
+                const std::string_view trimmed = TrimAsciiSpace(markdown);
+                if (trimmed.empty())
+                {
+                    return {};
+                }
+                MdParseOptions sub;
+                sub.softBreaksAsLineBreaks = _options.softBreaksAsLineBreaks; // no caps, no tables: one cell's text
+                MdParseResult parsed;
+                std::unique_ptr<cmark_node, CmarkNodeDeleter> document{ cmark_parse_document(trimmed.data(), trimmed.size(), CMARK_OPT_DEFAULT | CMARK_OPT_VALIDATE_UTF8) };
+                if (document)
+                {
+                    cmark_consolidate_text_nodes(document.get());
+                    std::unique_ptr<cmark_iter, CmarkIterDeleter> iter{ cmark_iter_new(document.get()) };
+                    if (iter)
+                    {
+                        BlockWalker walker{ sub, parsed };
+                        for (auto ev = cmark_iter_next(iter.get()); ev != CMARK_EVENT_DONE; ev = cmark_iter_next(iter.get()))
+                        {
+                            walker.Visit(cmark_iter_get_node(iter.get()), ev);
+                        }
+                    }
+                }
+                if (parsed.blocks.size() == 1 && parsed.blocks.front().kind == MdBlockKind::Paragraph && !parsed.blocks.front().rawHtml)
+                {
+                    return std::move(parsed.blocks.front().runs);
+                }
+                MdRun plain;
+                plain.text = FromUtf8(std::string{ trimmed }.c_str());
+                std::vector<MdRun> runs;
+                runs.push_back(std::move(plain));
+                return runs;
+            }
+
+            // How many UTF-16 units `runs` hold - a table's share of MdParseOptions::maxBlockChars.
+            static size_t _RunChars(const std::vector<MdRun>& runs) noexcept
+            {
+                size_t chars = 0;
+                for (const auto& run : runs)
+                {
+                    chars += run.text.size();
+                }
+                return chars;
+            }
+
+            // If paragraph `node` holds a GFM pipe table, append it as a Table block - preceded by a Paragraph for the
+            // paragraph's lines above the header row, if any - and say so. The rows are the paragraph's RAW source
+            // lines (the first from the paragraph's own start column, the others without their container prefixes),
+            // so an escaped "\|" is told from a cell border. The header row is the first line followed by a
+            // delimiter row of the same cell count, and at least one of the two must hold an unescaped '|' (a lone
+            // ":--" under a word is no table). Every later line of the paragraph is a body row (GFM: a table runs to
+            // the end of its paragraph), padded or cut to the header's cell count. maxBlockChars keeps the header and
+            // the body rows that fit, flagging the block truncated.
+            // Parameters: node - a PARAGRAPH node, on its ENTER event.
+            // Returns NotTable (nothing appended), Emitted, or Stop (the block cap was hit; the result is flagged).
+            // Throws std::bad_alloc only.
+            TableOutcome _TryTable(cmark_node* node)
+            {
+                const int startLine = cmark_node_get_start_line(node);
+                const int endLine = cmark_node_get_end_line(node);
+                if (_source.empty() || startLine <= 0 || endLine <= startLine)
+                {
+                    return TableOutcome::NotTable; // a table needs a header and a delimiter row: two lines at least
+                }
+                _EnsureLineStarts();
+                std::vector<std::string_view> lines;
+                lines.reserve(static_cast<size_t>(endLine - startLine + 1));
+                for (int line = startLine; line <= endLine; ++line)
+                {
+                    std::string_view raw = _SourceLine(line);
+                    if (line == startLine)
+                    {
+                        // The first line from the paragraph's own start (cmark's 1-based byte column): every container
+                        // marker before it is already behind us.
+                        const size_t column = static_cast<size_t>(std::max(cmark_node_get_start_column(node), 1)) - 1;
+                        raw = raw.substr(std::min(column, raw.size()));
+                    }
+                    else
+                    {
+                        raw = StripContainerPrefixes(raw, _stack);
+                    }
+                    lines.push_back(raw);
+                }
+                size_t header = std::string_view::npos;
+                std::vector<MdAlign> align;
+                for (size_t i = 0; i + 1 < lines.size(); ++i)
+                {
+                    std::vector<MdAlign> candidate;
+                    if (!ParseDelimiterRow(lines[i + 1], candidate))
+                    {
+                        continue;
+                    }
+                    if (!HasUnescapedPipe(lines[i]) && !HasUnescapedPipe(lines[i + 1]))
+                    {
+                        continue;
+                    }
+                    if (SplitTableRow(lines[i]).size() != candidate.size())
+                    {
+                        continue; // GFM: the header and the delimiter row must agree on the column count
+                    }
+                    header = i;
+                    align = std::move(candidate);
+                    break;
+                }
+                if (header == std::string_view::npos)
+                {
+                    return TableOutcome::NotTable;
+                }
+                if (header > 0)
+                {
+                    // The paragraph's lines above the header row stay a paragraph (GFM ends a paragraph where a table
+                    // starts), their line breaks kept.
+                    std::string above;
+                    for (size_t i = 0; i < header; ++i)
+                    {
+                        if (i > 0)
+                        {
+                            above += '\n';
+                        }
+                        above.append(lines[i]);
+                    }
+                    auto* paragraph = _Begin(MdBlockKind::Paragraph);
+                    if (!paragraph)
+                    {
+                        return TableOutcome::Stop;
+                    }
+                    paragraph->runs = _InlineRuns(above);
+                }
+                auto* table = _Begin(MdBlockKind::Table);
+                if (!table)
+                {
+                    return TableOutcome::Stop;
+                }
+                table->tableAlign = align;
+                const size_t columns = align.size();
+                size_t chars = 0;
+                for (size_t i = header; i < lines.size(); ++i)
+                {
+                    if (i == header + 1)
+                    {
+                        continue; // the delimiter row: its alignments are already read
+                    }
+                    const std::vector<std::string> cells = SplitTableRow(lines[i]);
+                    MdTableRow row;
+                    row.cells.resize(columns); // a short row's missing cells stay empty; a long row's excess is dropped
+                    size_t rowChars = 0;
+                    for (size_t c = 0; c < columns && c < cells.size(); ++c)
+                    {
+                        row.cells[c] = _InlineRuns(cells[c]);
+                        rowChars += _RunChars(row.cells[c]);
+                    }
+                    if (_options.maxBlockChars != 0 && i != header && chars + rowChars > _options.maxBlockChars)
+                    {
+                        table->truncated = true; // the header always stays; the body rows past the cap go
+                        break;
+                    }
+                    chars += rowChars;
+                    table->tableRows.push_back(std::move(row));
+                }
+                return TableOutcome::Emitted;
+            }
+
             // Per open list: what its items need to know when they open.
             struct ListFrame
             {
@@ -622,6 +1035,8 @@ namespace Agentmaster
 
             const MdParseOptions& _options;
             MdParseResult& _out;
+            std::string_view _source; // the UTF-8 document (tables read a paragraph's raw lines from it); may be empty
+            std::vector<size_t> _lineStarts; // byte offset of each source line's start, built on the first table check
             std::vector<MdContainer> _stack; // the quotes / items around the current position, outermost first
             std::vector<ListFrame> _lists; // the open lists, outermost first
             std::vector<std::wstring> _links; // the open links' / images' URLs, innermost last
@@ -664,7 +1079,7 @@ namespace Agentmaster
                 AppendStateLog(L"hooks.log", L"[transcript] markdown parse failed: cmark returned no iterator\n");
                 return result;
             }
-            BlockWalker walker{ options, result };
+            BlockWalker walker{ options, result, utf8 }; // the source is read only to find tables (options.tables)
             for (auto ev = cmark_iter_next(iter.get()); ev != CMARK_EVENT_DONE; ev = cmark_iter_next(iter.get()))
             {
                 if (!walker.Visit(cmark_iter_get_node(iter.get()), ev))
@@ -756,8 +1171,10 @@ namespace Agentmaster
         {
             return kGapAfterLabel;
         }
+        // A table is a framed panel like a code block: it gets the same little extra air on both sides.
         const bool codeInvolved = cur.kind == MdBlockKind::Code || prev->kind == MdBlockKind::Code ||
-                                  cur.kind == MdBlockKind::Rule || prev->kind == MdBlockKind::Rule;
+                                  cur.kind == MdBlockKind::Rule || prev->kind == MdBlockKind::Rule ||
+                                  cur.kind == MdBlockKind::Table || prev->kind == MdBlockKind::Table;
         const size_t shared = MdSharedContainerDepth(*prev, cur);
         bool tight = false;
         if (shared < cur.containers.size())
