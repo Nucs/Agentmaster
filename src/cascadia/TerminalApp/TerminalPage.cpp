@@ -2305,7 +2305,12 @@ namespace winrt::TerminalApp::implementation
         if (transcriptOpen && e.OriginalKey() == Windows::System::VirtualKey::Escape &&
             !_commandPaletteIs(Visibility::Visible) && !_suggestionsControlIs(Visibility::Visible))
         {
-            _CloseTranscriptOverlay(L"esc");
+            // The topmost thing first: an open level guide (the overlay's (i) panel) closes alone, and the
+            // next Esc closes the overlay.
+            if (!_DismissTranscriptLevelGuide())
+            {
+                _CloseTranscriptOverlay(L"esc");
+            }
             e.Handled(true);
             return;
         }

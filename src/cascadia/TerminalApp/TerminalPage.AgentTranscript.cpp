@@ -148,4 +148,11 @@ namespace winrt::TerminalApp::implementation
     {
         return _transcriptOverlay && _transcriptOverlay->IsOpen();
     }
+
+    bool TerminalPage::_DismissTranscriptLevelGuide() noexcept
+    {
+        // The overlay owns the guide and its open state; DismissLevelGuide is noexcept and answers false
+        // when the overlay is closed or no guide is open.
+        return _transcriptOverlay && _transcriptOverlay->DismissLevelGuide();
+    }
 }

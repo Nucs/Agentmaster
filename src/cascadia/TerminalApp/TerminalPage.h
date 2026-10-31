@@ -2931,6 +2931,7 @@ namespace winrt::TerminalApp::implementation
         void _ShowTranscriptOverlayForSession(const std::wstring& sessionId, std::wstring_view origin); // the managed-session form: kind / Codex rollout id / title resolved from the registry (an id it doesn't know opens as a Claude transcript). Never throws
         void _CloseTranscriptOverlay(std::wstring_view reason) noexcept; // close it if open (no-op otherwise) and hand focus back to the current tab / the Manager page — the overlay's focus guard refused the focus move the closing tab switch itself made
         bool _TranscriptOverlayIsOpen() const noexcept; // is the overlay up? (_ManagerPaneNavPreviewKeyDown routes Esc + the tab-switch chords to it while it is)
+        bool _DismissTranscriptLevelGuide() noexcept; // Esc while the overlay is up closes its level guide (the (i) panel) FIRST: true when one was open and is now closing (the key is used up), false when none was (the Esc then closes the overlay). Never throws
         winrt::com_ptr<implementation::AgentTranscriptOverlay> _transcriptOverlay{ nullptr }; // the overlay (null until first use)
 
         // --- Agentmaster SIDE PANEL (TerminalPage.AgentSidePanel.cpp) ---------------------------------

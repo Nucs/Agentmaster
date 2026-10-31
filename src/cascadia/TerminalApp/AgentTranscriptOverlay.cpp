@@ -28,6 +28,7 @@
 #include "AgentMaster/ClaudeSpawn.h" // ResolveClaudeDisplayTranscript / ForkSourceTranscriptNote / LogNav / ShortId / AppendStateLog
 #include "AgentMaster/Persistence.h" // Load/SaveAppSettings — the remembered level (AppSettings::transcriptOverlayLevel)
 #include "AgentMaster/ProcessInspect.h" // ReadConversationText / ReadConversationFollowupText / the Codex rollout resolve
+#include "AgentMaster/TranscriptLevelGuide.h" // kTranscriptLevelGuide / TranscriptLevelTip — the (i) panel and the tabs' cheat-sheet tooltips
 #include "AgentMaster/TranscriptTurns.h" // RenderTranscriptTurnsFile / TurnsOptionsForLevel / TurnsLevelName
 
 #include <winrt/Windows.UI.Xaml.Automation.h> // AutomationProperties (button names for screen readers)
@@ -122,6 +123,23 @@ namespace
     // dark card that reads as "pressed / on" without a solid accent block next to the plain icon buttons.
     constexpr uint8_t kToggleOnFillAlpha = 0x47;
     constexpr uint8_t kToggleOnBorderAlpha = 0xB3;
+
+    // The LEVEL GUIDE (the (i) right after the level tabs; TRANSCRIPT_OVERLAY.md 3f). The glyph is Segoe
+    // Fluent Icons' Info, a circled i. The panel is wider than a Flyout's default 456 DIPs (its table holds a
+    // text column and five level columns) and as tall as the guide needs before it scrolls; the Flyout's own
+    // placement keeps it inside the window either way. Each level column fits its head ("Compact") and the
+    // "key 4" line under it.
+    constexpr const wchar_t* kGuideGlyph = L"\xE946";
+    constexpr const wchar_t* kGuideTip = L"What each level shows - click to compare every level, and to see what no level shows";
+    constexpr double kGuideMaxWidth = 780.0;
+    constexpr double kGuideMaxHeight = 640.0;
+    constexpr double kGuideLevelColumnWidth = 68.0;
+    constexpr double kGuideTextFontSize = 13.0;
+    constexpr double kGuideSmallFontSize = 11.5;
+    // The current level's column is a light accent tint behind its cells (~15%), and every other row a faint
+    // white wash (~5%) - both translucent, so where they cross both still show.
+    constexpr uint8_t kGuideCurrentColumnAlpha = 0x26;
+    constexpr uint8_t kGuideStripeAlpha = 0x0D;
 
     // How deep the reading-position anchor descends: the level's content stack -> a chunk -> an open fold
     // panel -> that fold's chunk -> the element (4). A guard, never reached by the overlay's own tree.
@@ -811,7 +829,10 @@ namespace winrt::TerminalApp::implementation
             inner.Children().Append(label);
             inner.Children().Append(underline);
             tab.Content(inner);
-            AgentSetTip(tab, winrt::hstring{ std::wstring{ item.tip } + L"\n\nShortcut: " + std::to_wstring(position + 1) });
+            // The tab's tooltip is that level's CHEAT SHEET (what it adds over the level below, what it
+            // still leaves out and where each of those first shows), built from the same table as the (i)
+            // panel - not the Copy menu's one-line description - so the two can never disagree.
+            AgentSetTip(tab, winrt::hstring{ ::Agentmaster::TranscriptLevelTip(static_cast<::Agentmaster::TurnsLevel>(level), position + 1) });
             winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(tab, winrt::hstring{ std::wstring{ item.label } + L" transcript" });
             tab.Click([weak = get_weak(), position](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 try
@@ -832,6 +853,79 @@ namespace winrt::TerminalApp::implementation
             _tabUnderlines.push_back(underline);
             _tabLevels.push_back(level);
             ++position;
+        }
+        // The LEVEL GUIDE: an (i) right after the last tab - inside the tabs' own stack, so it always follows
+        // them - whose Flyout compares every level side by side (_BuildLevelGuidePanel). It is the button's
+        // own Flyout, so a click, Enter or Space opens it with no handler of ours, and keyboard focus moves
+        // into it (the focus guard below lets a move into a popup through).
+        {
+            FontIcon guideGlyph;
+            guideGlyph.FontFamily(FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            guideGlyph.Glyph(kGuideGlyph);
+            guideGlyph.FontSize(14);
+            guideGlyph.Foreground(_dimBrush);
+            guideGlyph.IsHitTestVisible(false); // the button must be the only target (the badge's mkIconBtn lesson)
+            _guideButton = Button{};
+            _guideButton.Background(_transparentBrush); // transparent (not null) — hit-testable, hover still highlights
+            _guideButton.BorderThickness(Thickness{ 0, 0, 0, 0 });
+            // On the tab labels' line: a tab is 5 DIPs of padding over its 13 DIP label (the underline below
+            // it), so the glyph's 14 DIP box starts 2 DIPs lower to sit level with the words.
+            _guideButton.Padding(Thickness{ 8, 7, 8, 7 });
+            _guideButton.MinWidth(0);
+            _guideButton.MinHeight(0);
+            _guideButton.VerticalAlignment(VerticalAlignment::Top);
+            _guideButton.Content(guideGlyph);
+            AgentSetTip(_guideButton, winrt::hstring{ kGuideTip });
+            winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(_guideButton, winrt::hstring{ L"What each level shows" });
+
+            _guideFlyout = Flyout{};
+            _guideFlyout.Placement(Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
+            // The presenter: wider and taller than a Flyout's defaults (the table needs the room), and dark
+            // with explicit brushes - a Flyout renders in the popup root, where the overlay's RequestedTheme
+            // does not reach, and theme inheritance into popups is unreliable under XAML Islands (the reason
+            // AgentSetTip pins its tips dark).
+            Style presenter{ winrt::xaml_typename<FlyoutPresenter>() };
+            const auto setters = presenter.Setters();
+            setters.Append(Setter{ FrameworkElement::MaxWidthProperty(), winrt::box_value(kGuideMaxWidth) });
+            setters.Append(Setter{ FrameworkElement::MaxHeightProperty(), winrt::box_value(kGuideMaxHeight) });
+            setters.Append(Setter{ FrameworkElement::RequestedThemeProperty(), winrt::box_value(ElementTheme::Dark) });
+            setters.Append(Setter{ Control::BackgroundProperty(), MakeBrush(0xFF, 0x25, 0x25, 0x26) });
+            setters.Append(Setter{ Control::BorderBrushProperty(), MakeBrush(0xFF, 0x48, 0x48, 0x48) });
+            setters.Append(Setter{ Control::BorderThicknessProperty(), winrt::box_value(Thickness{ 1, 1, 1, 1 }) });
+            setters.Append(Setter{ Control::PaddingProperty(), winrt::box_value(Thickness{ 18, 14, 18, 16 }) });
+            _guideFlyout.FlyoutPresenterStyle(presenter);
+            // Refilled on EVERY open, so the highlighted column is always the level on screen (a tab switch
+            // between two opens changes it). A failed build keeps whatever the guide showed last.
+            _guideFlyout.Opening([weak = get_weak()](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::Foundation::IInspectable&) {
+                try
+                {
+                    if (const auto self = weak.get(); self && self->_guideFlyout)
+                    {
+                        self->_guideFlyout.Content(self->_BuildLevelGuidePanel());
+                    }
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: the guide opens with its previous content (empty on a first open).
+                    ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay level guide");
+                }
+            });
+            // Kept from the events rather than read off the Flyout, so DismissLevelGuide and Close know
+            // whether a hide is needed without asking a popup that may be mid-animation.
+            _guideFlyout.Opened([weak = get_weak()](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::Foundation::IInspectable&) {
+                if (const auto self = weak.get())
+                {
+                    self->_guideOpen = true;
+                }
+            });
+            _guideFlyout.Closed([weak = get_weak()](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::Foundation::IInspectable&) {
+                if (const auto self = weak.get())
+                {
+                    self->_guideOpen = false;
+                }
+            });
+            _guideButton.Flyout(_guideFlyout);
+            tabs.Children().Append(_guideButton);
         }
         Grid::SetColumn(tabs, 0);
         _tabsRow.Children().Append(tabs);
@@ -905,7 +999,11 @@ namespace winrt::TerminalApp::implementation
                 if (key == VirtualKey::Escape)
                 {
                     e.Handled(true);
-                    self->Close(L"esc", true);
+                    // The topmost thing first: an open level guide closes alone, the overlay on the next Esc.
+                    if (!self->DismissLevelGuide())
+                    {
+                        self->Close(L"esc", true);
+                    }
                     return;
                 }
                 // Plain digits only: a Ctrl / Alt chord with a digit belongs to the app (switchToTab).
@@ -1035,6 +1133,12 @@ namespace winrt::TerminalApp::implementation
             {
                 AgentCloseTipsIn(_tabsRow);
             }
+            // The level guide is a popup of its own, so collapsing the host would leave it floating over
+            // the page with nothing under it: hide it with the overlay.
+            if (_guideFlyout && _guideOpen)
+            {
+                _guideFlyout.Hide();
+            }
             if (_host)
             {
                 _host.Visibility(Visibility::Collapsed);
@@ -1068,6 +1172,28 @@ namespace winrt::TerminalApp::implementation
             {
                 ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay closed handler");
             }
+        }
+    }
+
+    bool AgentTranscriptOverlay::DismissLevelGuide() noexcept
+    {
+        if (!_open || !_guideFlyout || !_guideOpen)
+        {
+            return false;
+        }
+        try
+        {
+            // Hide starts the close; Closed clears _guideOpen. Keyboard focus goes back to the (i) button,
+            // inside the card, so the next Esc reaches the overlay's own handlers and closes it.
+            _guideFlyout.Hide();
+            return true;
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: report "nothing was open", so this Esc closes the overlay instead - and
+            // Close hides the guide (or the guide closes with its popup's owner).
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay dismiss level guide");
+            return false;
         }
     }
 
@@ -2264,6 +2390,151 @@ namespace winrt::TerminalApp::implementation
             // failed scroll must never cost the rest of the transcript.
             ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay session jump");
         }
+    }
+
+    FrameworkElement AgentTranscriptOverlay::_BuildLevelGuidePanel() const
+    {
+        using ::Agentmaster::TurnsLevel;
+        StackPanel panel;
+        panel.RequestedTheme(ElementTheme::Dark);
+
+        // A plain text line of the panel: explicit brush (the popup root is not themed by the card) and
+        // wrapping, so a narrow window folds the guide's sentences instead of cutting them off.
+        const auto addText = [&panel](std::wstring_view text, double size, const Brush& brush, const Thickness& margin) {
+            TextBlock line;
+            line.Text(winrt::hstring{ text });
+            line.FontSize(size);
+            line.Foreground(brush);
+            line.TextWrapping(TextWrapping::Wrap);
+            line.Margin(margin);
+            panel.Children().Append(line);
+            return line;
+        };
+
+        const auto title = addText(L"What each level shows", 15.0, _bodyBrush, Thickness{ 0, 0, 0, 0 });
+        title.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+        addText(L"Each level shows everything the level to its left shows, and more. \x2713 marks what a level shows.",
+                12.5,
+                _dimBrush,
+                Thickness{ 0, 4, 0, 10 });
+
+        // --- the comparison table: a text column, then one column per level, least detailed first ---
+        constexpr int levelCount = ::Agentmaster::kTurnsLevelCount;
+        const int current = std::clamp(_current, 0, levelCount - 1);
+        const auto rowCount = static_cast<int32_t>(std::size(::Agentmaster::kTranscriptLevelGuide));
+        Grid table;
+        {
+            ColumnDefinition textColumn;
+            textColumn.Width(GridLength{ 1, GridUnitType::Star });
+            table.ColumnDefinitions().Append(textColumn);
+            for (int level = 0; level < levelCount; ++level)
+            {
+                ColumnDefinition column;
+                column.Width(GridLength{ kGuideLevelColumnWidth, GridUnitType::Pixel });
+                table.ColumnDefinitions().Append(column);
+            }
+            for (int32_t row = 0; row <= rowCount; ++row) // the head row + one per guide row
+            {
+                RowDefinition definition;
+                definition.Height(GridLength{ 0, GridUnitType::Auto });
+                table.RowDefinitions().Append(definition);
+            }
+        }
+        // The current level's column: one tinted band behind its head and every cell (added first, so the
+        // text draws over it). Childless, so it costs no composition node (the rounded-element gotcha).
+        {
+            const auto accent = _accentBrush.Color();
+            Border band;
+            band.Background(SolidColorBrush{ ColorHelper::FromArgb(kGuideCurrentColumnAlpha, accent.R, accent.G, accent.B) });
+            Grid::SetColumn(band, 1 + current);
+            Grid::SetRowSpan(band, rowCount + 1);
+            table.Children().Append(band);
+        }
+        // The heads: each level's label, and under it the digit that picks its tab. The tabs run in the Copy
+        // menu's order (Default first), so the key is looked up by level rather than derived from the column.
+        for (int level = 0; level < levelCount; ++level)
+        {
+            const bool isCurrent = level == current;
+            StackPanel head;
+            head.Margin(Thickness{ 0, 4, 0, 6 });
+            TextBlock label;
+            label.Text(::Agentmaster::TranscriptLevelLabel(static_cast<TurnsLevel>(level)));
+            label.FontSize(12.5);
+            label.Foreground(isCurrent ? static_cast<Brush>(_accentBrush) : static_cast<Brush>(_bodyBrush));
+            label.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+            label.HorizontalAlignment(HorizontalAlignment::Center);
+            head.Children().Append(label);
+            const auto tab = std::find(_tabLevels.begin(), _tabLevels.end(), level);
+            if (tab != _tabLevels.end())
+            {
+                TextBlock key;
+                key.Text(L"key " + winrt::to_hstring(static_cast<int64_t>(tab - _tabLevels.begin()) + 1));
+                key.FontSize(kGuideSmallFontSize);
+                key.Foreground(_dimBrush);
+                key.HorizontalAlignment(HorizontalAlignment::Center);
+                head.Children().Append(key);
+            }
+            Grid::SetColumn(head, 1 + level);
+            table.Children().Append(head);
+        }
+        // The rows: the text, a faint wash on every other row (easier to follow a row across), and a check
+        // mark or a dim dot under each level.
+        const auto stripeBrush = MakeBrush(kGuideStripeAlpha, 0xFF, 0xFF, 0xFF);
+        int32_t gridRow = 1;
+        for (const auto& row : ::Agentmaster::kTranscriptLevelGuide)
+        {
+            if (gridRow % 2 == 0)
+            {
+                Border stripe;
+                stripe.Background(stripeBrush);
+                Grid::SetRow(stripe, gridRow);
+                Grid::SetColumnSpan(stripe, 1 + levelCount);
+                table.Children().Append(stripe);
+            }
+            TextBlock text;
+            text.Text(row.text);
+            text.FontSize(kGuideTextFontSize);
+            text.Foreground(_bodyBrush);
+            text.TextWrapping(TextWrapping::Wrap);
+            text.Margin(Thickness{ 8, 5, 12, 5 });
+            text.VerticalAlignment(VerticalAlignment::Center);
+            Grid::SetRow(text, gridRow);
+            table.Children().Append(text);
+            for (int level = 0; level < levelCount; ++level)
+            {
+                const bool shows = ::Agentmaster::TranscriptLevelShows(row, static_cast<TurnsLevel>(level));
+                TextBlock mark;
+                mark.Text(shows ? L"\x2713" : L"\x00B7");
+                mark.FontSize(kGuideTextFontSize);
+                mark.Foreground(shows ? _bodyBrush : _dimBrush);
+                mark.HorizontalAlignment(HorizontalAlignment::Center);
+                mark.VerticalAlignment(VerticalAlignment::Center);
+                Grid::SetRow(mark, gridRow);
+                Grid::SetColumn(mark, 1 + level);
+                table.Children().Append(mark);
+            }
+            ++gridRow;
+        }
+        panel.Children().Append(table);
+
+        // --- what every level shows beyond the first row, and what no level shows ---
+        const auto addList = [&](const wchar_t* heading, const auto& items) {
+            const auto head = addText(heading, kGuideTextFontSize, _bodyBrush, Thickness{ 0, 14, 0, 2 });
+            head.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+            for (const wchar_t* item : items)
+            {
+                addText(std::wstring{ L"\x2022  " } + item, 12.5, _bodyBrush, Thickness{ 8, 2, 0, 0 });
+            }
+        };
+        addList(L"Also in every level", ::Agentmaster::kTranscriptLevelGuideEveryLevel);
+        addList(L"In no level", ::Agentmaster::kTranscriptLevelGuideNoLevel);
+        addText(::Agentmaster::kTranscriptLevelGuideCodexNote, 12.0, _dimBrush, Thickness{ 0, 14, 0, 0 });
+        addText(L"Keys 1-5 pick a tab. The level you pick is the one the transcript opens at next time, in every window. "
+                L"Hover a tab for its own list.",
+                12.0,
+                _dimBrush,
+                Thickness{ 0, 6, 0, 0 });
+        return panel;
     }
 
     void AgentTranscriptOverlay::_UpdateStatus()

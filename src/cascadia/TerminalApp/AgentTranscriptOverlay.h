@@ -11,8 +11,8 @@
 // Shape: a card 90% of the window wide and 80% tall, centered over a dimmed backdrop that covers the
 // page (the terminal, the Agent Manager page, or the Sessions page — "wherever you are"). The card has a
 // header (title · Wrap · Copy · Refresh · Close), one TAB per transcript detail level in the Copy menu's
-// order (Default · Max · Full · Compact · Minimal), an "Expand all" switch for the level's folded tool
-// calls, and a scrolling body. It opens at the level the user LAST PICKED, in any window: every tab pick
+// order (Default · Max · Full · Compact · Minimal) followed by the (i) level guide, an "Expand all" switch
+// for the level's folded tool calls, and a scrolling body. It opens at the level the user LAST PICKED, in any window: every tab pick
 // is remembered in settings.json (AppSettings::transcriptOverlayLevel, a freshest-disk read-modify-write
 // done here) and every open reads it back fresh — Default until a first pick.
 //
@@ -42,6 +42,14 @@
 // moment the heading exists. Only a session with a heading gets a link (a one-session chain has none).
 // The list, the headings and the mentions come from AgentMaster/MarkdownBlocks.h (MdFindSessionChain /
 // MdFindSessionRefs / MdSessionHeadingNumber), found off the UI thread with the parse.
+//
+// THE LEVEL GUIDE: an (i) button right after the level tabs opens a panel (a Flyout) comparing every level
+// side by side - a row per thing a transcript can show, a check mark under each level that shows it, the
+// current level's column highlighted - plus what every level shows and what no level shows. Each level
+// tab's tooltip is that level's cheat sheet: what it adds over the level below and what it still leaves
+// out. Both are drawn from ONE table, AgentMaster/TranscriptLevelGuide.h, whose rows the m5 harness checks
+// against TurnsOptionsForLevel - the guide can never disagree with what a level renders. Esc closes an
+// open guide first (DismissLevelGuide), the overlay on the next Esc.
 //
 // A FORK WITH NO MESSAGES YET: a fork has no transcript of its own until its first message, and until
 // then its conversation is the one it was forked from. The overlay shows that source's transcript, under
@@ -174,6 +182,16 @@ namespace winrt::TerminalApp::implementation
         // The page's "give focus back" callback, run after a self-initiated close (see Close). The
         // page wires TerminalPage::_FocusCurrentTab — the active terminal, or the Agent Manager page.
         void SetClosedHandler(std::function<void()> handler);
+
+        // Esc closes the TOPMOST thing first: when the level guide (the (i) panel after the tabs) is open,
+        // close it and report that the key was used, so the caller does not also close the overlay. Both Esc
+        // paths call it first - the card's own KeyDown and the page's tunneling handler
+        // (TerminalPage::_DismissTranscriptLevelGuide), since which of them sees a key pressed while the
+        // guide is up depends on where keyboard focus sits (inside the guide's popup, or still on the (i)).
+        // Returns true when a guide was open and is now closing; false when none was open (the caller then
+        // closes the overlay as before). UI thread. Never throws: a failed hide is logged (Rule #18) and
+        // reported as "nothing was open", so the Esc still closes the overlay - which hides the guide too.
+        bool DismissLevelGuide() noexcept;
 
     private:
         // The lifecycle of one level's view. Only the CURRENT level's view builds; a level left
@@ -450,6 +468,17 @@ namespace winrt::TerminalApp::implementation
         // A selectable, wrapping TextBlock with the shared text context menu — the base of every text
         // element the overlay draws.
         winrt::Windows::UI::Xaml::Controls::TextBlock _MakeTextBlock(double fontSize) const;
+        // Build the level guide's panel (the (i) Flyout's content) for the CURRENT level: a title, the
+        // comparison table from AgentMaster/TranscriptLevelGuide.h (a row per kTranscriptLevelGuide entry; a
+        // column per level, least detailed first so the check marks rise as a staircase, each headed by its
+        // label and the digit key that picks its tab; the current level's column tinted and its head in the
+        // accent), then "Also in every level", "In no level", the Codex note and a keyboard footer. Rebuilt
+        // on every open (the Flyout's Opening), so the highlighted column always follows the tab on screen;
+        // ~100 small elements, built only when the user asks for the guide.
+        // Returns the panel's root element (a StackPanel), its brushes explicit (the overlay is always dark).
+        // Throws winrt::hresult_error on a XAML failure and std::bad_alloc (the Opening handler contains both:
+        // the guide then opens with whatever content it last had).
+        winrt::Windows::UI::Xaml::FrameworkElement _BuildLevelGuidePanel() const;
         // The status line under the tabs, from the current level's state.
         void _UpdateStatus();
         // The header's session line (title · short id · Codex).
@@ -488,6 +517,14 @@ namespace winrt::TerminalApp::implementation
         std::vector<winrt::Windows::UI::Xaml::Controls::TextBlock> _tabLabels; // each tab's label (dim / bright)
         std::vector<winrt::Windows::UI::Xaml::Controls::Border> _tabUnderlines; // each tab's underline (accent when current)
         std::vector<int> _tabLevels; // the TurnsLevel value behind each tab position
+        // The level guide: the (i) button right after the last level tab, and the Flyout it opens (its
+        // Button::Flyout, so a click or Enter / Space opens it with no handler of ours). The Flyout is built
+        // once with the overlay and refills its content on every Opening (_BuildLevelGuidePanel).
+        winrt::Windows::UI::Xaml::Controls::Button _guideButton{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Flyout _guideFlyout{ nullptr };
+        // Whether that Flyout is open, kept from its Opened / Closed events (DismissLevelGuide reads it to let
+        // Esc close the guide before the overlay; Close hides an open guide).
+        bool _guideOpen = false;
         winrt::Windows::UI::Xaml::Controls::TextBlock _statusText{ nullptr }; // right of the tabs: progress / size / timing
         winrt::Windows::UI::Xaml::Controls::Button _expandAllButton{ nullptr }; // far right of the tabs row: "Expand all" / "Collapse all" (only while the level has folds)
         winrt::Windows::UI::Xaml::Controls::TextBlock _expandAllLabel{ nullptr }; // that switch's text

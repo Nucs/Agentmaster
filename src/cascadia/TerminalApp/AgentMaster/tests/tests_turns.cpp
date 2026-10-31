@@ -17,14 +17,16 @@
 #include "m5_tests.h"
 
 #include "../SummaryConversation.h" // BuildSummaryConversation / CodexSummaryConversation / SummarySeparatorLabel (TestSummaryConversation, TestConversationUpstream)
+#include "../TranscriptLevelGuide.h" // kTranscriptLevelGuide / TranscriptLevelTip (TestTranscriptLevelGuide)
 #include "../TranscriptTurns.h"
 
-#include <algorithm> // std::find (the conversation-chain tests)
+#include <algorithm> // std::find (the conversation-chain tests), std::any_of (the level guide's coverage)
 #include <cwchar> // std::swprintf
 #include <fstream>
 #include <iterator> // std::size
 #include <map>
 #include <stdexcept> // std::runtime_error (a throwing recorded-predecessor lookup)
+#include <string_view> // the level guide's em-dash scan
 #include <utility>
 #include <vector>
 
@@ -752,6 +754,152 @@ void TestTranscriptTurnsLastTurn()
               "TurnsLastTurn: at Minimal, turn 2's prompt and its ending, nothing else");
         const std::wstring none = RenderTranscriptTurns({}, opts, /*utc*/ true);
         CHECK(none.find(L"### Turn") == std::wstring::npos, "TurnsLastTurn: a transcript with no turn renders no turn");
+    }
+}
+
+void TestTranscriptLevelGuide()
+{
+    std::wprintf(L"\n[TranscriptLevelGuide] the transcript overlay's (i) panel and tab cheat sheets vs the levels\n");
+    constexpr TurnsLevel kLevels[] = { TurnsLevel::Minimal, TurnsLevel::Compact, TurnsLevel::Default, TurnsLevel::Full, TurnsLevel::Max };
+
+    // ---- every row agrees with the level ladder: its option is on from its first level up, and off below ----
+    // This is the whole point of the guide being one table: a level that changes without its row (or the
+    // reverse) fails here instead of shipping a cheat sheet that lies.
+    {
+        for (const auto& row : kTranscriptLevelGuide)
+        {
+            for (const TurnsLevel level : kLevels)
+            {
+                const bool promised = TranscriptLevelShows(row, level);
+                const bool rendered = row.feature == nullptr ? true : (TurnsOptionsForLevel(level).*row.feature);
+                const std::string label = std::string{ "LevelGuide: \"" } + NarrowAsciiForCheck(row.brief) + "\" at " +
+                                          NarrowAsciiForCheck(TurnsLevelName(level)) + (promised ? " is shown" : " is left out");
+                CHECK(promised == rendered, label.c_str());
+            }
+        }
+        // A row with no option is one that EVERY level shows, so it must start at Minimal.
+        bool optionlessRowsStartAtMinimal = true;
+        for (const auto& row : kTranscriptLevelGuide)
+        {
+            optionlessRowsStartAtMinimal = optionlessRowsStartAtMinimal && (row.feature != nullptr || row.firstLevel == TurnsLevel::Minimal);
+        }
+        CHECK(optionlessRowsStartAtMinimal, "LevelGuide: a row no option decides is shown at every level (it starts at Minimal)");
+    }
+
+    // ---- the table reads as a staircase, and covers every switch the levels flip ----
+    {
+        bool ordered = true;
+        int previous = static_cast<int>(TurnsLevel::Minimal);
+        for (const auto& row : kTranscriptLevelGuide)
+        {
+            ordered = ordered && static_cast<int>(row.firstLevel) >= previous;
+            previous = static_cast<int>(row.firstLevel);
+        }
+        CHECK(ordered, "LevelGuide: rows run from the least detailed level to the most (the panel's check marks rise as a staircase)");
+        // The eleven LADDER features (the ones a level sets, TurnsOptionsForLevel): each must have a row,
+        // or the guide would hide a difference between two levels.
+        const std::pair<bool TurnsOptions::*, const char*> ladder[] = {
+            { &TurnsOptions::notes, "notes" },
+            { &TurnsOptions::ops, "ops" },
+            { &TurnsOptions::fullBash, "fullBash" },
+            { &TurnsOptions::stats, "stats" },
+            { &TurnsOptions::opDuration, "opDuration" },
+            { &TurnsOptions::opOutput, "opOutput" },
+            { &TurnsOptions::narration, "narration" },
+            { &TurnsOptions::compactions, "compactions" },
+            { &TurnsOptions::answers, "answers" },
+            { &TurnsOptions::agents, "agents" },
+            { &TurnsOptions::fullWrite, "fullWrite" },
+        };
+        for (const auto& [feature, name] : ladder)
+        {
+            const bool covered = std::any_of(std::begin(kTranscriptLevelGuide), std::end(kTranscriptLevelGuide), [feature](const TranscriptLevelGuideRow& row) {
+                return row.feature == feature;
+            });
+            const std::string label = std::string{ "LevelGuide: the ladder feature " } + name + " has a row";
+            CHECK(covered, label.c_str());
+        }
+        // Every level shows at least one row the level below it does not - else two tabs would look alike in
+        // the panel, and a tooltip's "plus:" list would be empty.
+        for (const TurnsLevel level : kLevels)
+        {
+            const bool adds = std::any_of(std::begin(kTranscriptLevelGuide), std::end(kTranscriptLevelGuide), [level](const TranscriptLevelGuideRow& row) {
+                return row.firstLevel == level;
+            });
+            const std::string label = std::string{ "LevelGuide: " } + NarrowAsciiForCheck(TurnsLevelName(level)) + " is the first level of at least one row";
+            CHECK(adds, label.c_str());
+        }
+    }
+
+    // ---- the guide's own words: no em dash, every list non-empty ----
+    {
+        bool plainDashes = true;
+        const auto noEmDash = [&plainDashes](const wchar_t* text) {
+            plainDashes = plainDashes && std::wstring_view{ text }.find(L'\x2014') == std::wstring_view::npos;
+        };
+        for (const auto& row : kTranscriptLevelGuide)
+        {
+            noEmDash(row.text);
+            noEmDash(row.brief);
+        }
+        for (const wchar_t* item : kTranscriptLevelGuideEveryLevel)
+        {
+            noEmDash(item);
+        }
+        for (const wchar_t* item : kTranscriptLevelGuideNoLevel)
+        {
+            noEmDash(item);
+        }
+        noEmDash(kTranscriptLevelGuideCodexNote);
+        CHECK(plainDashes, "LevelGuide: every text uses the plain hyphen, never an em dash");
+        CHECK(std::size(kTranscriptLevelGuideEveryLevel) > 0 && std::size(kTranscriptLevelGuideNoLevel) > 0,
+              "LevelGuide: the panel has an 'Also in every level' and an 'In no level' list");
+    }
+
+    // ---- each tab's cheat sheet: its key, what it adds, what it leaves out and where each of those shows ----
+    {
+        const std::wstring compact = TranscriptLevelTip(TurnsLevel::Compact, 4);
+        CHECK(compact.rfind(L"Compact (key 4)\nEverything in Minimal, plus:\n", 0) == 0, "LevelGuide: Compact's tip opens with its key and what it builds on");
+        CHECK(compact.find(L"\n  \x2713 slash commands you ran outside a turn") != std::wstring::npos &&
+                  compact.find(L"\n  \x2713 each agent's brief and final report") != std::wstring::npos,
+              "LevelGuide: Compact's tip checks the rows Compact adds");
+        CHECK(compact.find(L"\x2713 your messages and each turn's final reply") == std::wstring::npos,
+              "LevelGuide: Compact's tip lists only what it ADDS (Minimal's row is in Minimal's tip)");
+        CHECK(compact.find(L"\nLeaves out:\n  \x00B7 every tool call, with its arguments and outcome (from Default)") != std::wstring::npos &&
+                  compact.find(L"\x00B7 a stats line per turn (tokens, model, context) (from Max)") != std::wstring::npos,
+              "LevelGuide: Compact's tip lists what it leaves out, each with the level that first shows it");
+        CHECK(compact.size() >= 4 && compact.substr(compact.size() - std::wstring_view{ L"compares every level." }.size()) == L"compares every level.",
+              "LevelGuide: every tip ends by pointing at the (i) panel");
+
+        const std::wstring minimal = TranscriptLevelTip(TurnsLevel::Minimal, 5);
+        CHECK(minimal.rfind(L"Minimal (key 5)\nShows:\n  \x2713 your messages and each turn's final reply\nLeaves out:\n", 0) == 0,
+              "LevelGuide: Minimal's tip says what it shows, then leaves out every other row");
+
+        const std::wstring max = TranscriptLevelTip(TurnsLevel::Max, 2);
+        CHECK(max.rfind(L"Max (key 2)\nEverything in Full, plus:\n", 0) == 0 && max.find(L"Leaves out:") == std::wstring::npos &&
+                  max.find(L"\nLeaves out nothing another level shows.") != std::wstring::npos,
+              "LevelGuide: Max's tip adds its rows and leaves nothing out");
+
+        // Every tip names every row exactly once: as an addition of this level, an earlier level's row (not
+        // listed: it is in that level's tip), or something left out.
+        for (const TurnsLevel level : kLevels)
+        {
+            const std::wstring tip = TranscriptLevelTip(level, 0);
+            bool rowsPlaced = tip.find(L"(key ") == std::wstring::npos; // shortcut 0 leaves the key out
+            for (const auto& row : kTranscriptLevelGuide)
+            {
+                const bool added = row.firstLevel == level;
+                const bool leftOut = static_cast<int>(row.firstLevel) > static_cast<int>(level);
+                const bool listed = tip.find(std::wstring{ L"  \x2713 " } + row.brief) != std::wstring::npos;
+                const bool listedOut = tip.find(std::wstring{ L"  \x00B7 " } + row.brief) != std::wstring::npos;
+                rowsPlaced = rowsPlaced && listed == added && listedOut == leftOut;
+            }
+            const std::string label = std::string{ "LevelGuide: " } + NarrowAsciiForCheck(TurnsLevelName(level)) + "'s tip places every row once (added / left out / earlier)";
+            CHECK(rowsPlaced, label.c_str());
+        }
+        CHECK(TranscriptLevelTip(static_cast<TurnsLevel>(42), 1).rfind(L"Default (key 1)\n", 0) == 0, "LevelGuide: an out-of-range level's tip reads as Default's");
+        CHECK(std::wstring{ TranscriptLevelLabel(TurnsLevel::Compact) } == L"Compact" && std::wstring{ TranscriptLevelLabel(static_cast<TurnsLevel>(-3)) } == L"Default",
+              "LevelGuide: level labels (an out-of-range one reads Default)");
     }
 }
 

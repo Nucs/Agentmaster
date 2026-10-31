@@ -5,7 +5,8 @@ A session's conversation, rendered as Markdown, in a reading view laid over the 
 second pass: 85% wide, folded tool calls (§3b), the remembered level (§3a) — also not built; then 90% wide
 (third ask, same day, not built). 2026-10-05: the ↵ line-wrap toggle (§3c, fourth ask) — not built; then
 the Session chain links (§3d, fifth ask, same day) — not built; then a fork with no messages yet shows the
-transcript it was forked from (§3e, a sixth report, same day) — not built.
+transcript it was forked from (§3e, a sixth report, same day) — not built. 2026-10-31: the (i) level guide and
+the tabs' cheat-sheet tooltips (§3f, the seventh ask) — not built.
 
 ## 1. The ask (verbatim)
 
@@ -47,6 +48,12 @@ And a sixth, a report (2026-10-05), about the release tab "sidemenu tooltip (for
 > If I fork a session and don't send a prompt and try to see a summary (requires session id) or open Show
 > Transcript then nothing shows: "this one!" in the title so you can find the tab
 
+And the seventh (2026-10-31), after a session compared the five levels in a table (what each shows, what every
+level shows, what no level shows):
+
+> add a (i) after the levels tabs so user can see what each tab and the comparison you did
+> and tooltips showing info of each level tab that will show like a cheatsheet.
+
 ## 2. Where it opens
 
 Every entry opens the overlay over **whatever is on screen** (a terminal tab, the Agent Manager page, the
@@ -72,8 +79,8 @@ Labels, tooltip and glyph (`\xE736` ReadingMode) are shared constants in `AgentC
 - **Header**: reading-mode icon · "Transcript" · the session line (title · short id · "Codex") · then, at
   the top-right, **↵ Wrap** (§3c) · Copy · Refresh · Close (✕).
 - **Tabs**, one per level in the Copy menu's order — **Default · Max · Full · Compact · Minimal** — the
-  current one bright with an accent underline. Tooltips are the levels' descriptions
-  (`kTranscriptCopyMenu`) plus the digit shortcut. A status line to the right shows progress, then
+  current one bright with an accent underline, then the **(i) level guide** (§3f). Each tab's tooltip is that
+  level's cheat sheet (§3f), with its digit key. A status line to the right shows progress, then
   "N lines · rendered in X". At the far right, **Expand all / Collapse all** (link-colored) — shown only
   while the current level has folded tool calls (§3b).
 - **Body**: one scroll view per level (each keeps its own scroll position; switching back is instant).
@@ -263,6 +270,61 @@ A transcript that continues earlier sessions (a fork, a plan restart — `Transc
   <src8>'s transcript (this fork has no messages yet)`, and `… copy <level>: chars=N rendered in Xms from the
   fork source <src8>'s transcript`.
 
+### 3f. The level guide (i) and the tab cheat sheets
+
+- **The (i)** sits right after the last level tab (inside the tabs' own stack, so it always follows them):
+  Segoe Fluent Icons' Info glyph (`\xE946`), dim, lined up with the tab labels. Its tooltip says what it
+  opens; its screen-reader name is "What each level shows". A click, Enter or Space opens its **Flyout** (the
+  button's own `Button::Flyout`, placed `BottomEdgeAlignedLeft`).
+- **The panel** (`_BuildLevelGuidePanel`, rebuilt on every `Opening`, so it always follows the tab on screen):
+  - "What each level shows" and one line on reading it (each level shows everything to its left, and more).
+  - **The comparison table**: a row per thing a transcript can show, a column per level LEAST detailed first
+    (Minimal · Compact · Default · Full · Max — the check marks rise as a staircase), each column headed by
+    its label and "key N" (the digit that picks its tab: the tabs run in the Copy menu's order, so the key
+    is looked up, not derived from the column). ✓ where the level shows the row, a dim · where it does not.
+    The current level's column is tinted with the accent (~15%) and its head drawn in the accent; every
+    other row carries a faint wash (~5%), so a row is easy to follow across.
+  - **Also in every level** (the turn headers, what was typed while Claude worked, teammates' messages, the
+    sessions it was forked or restarted from, the history before each compaction) and **In no level**
+    (Claude's thinking, tool output past its first line, an Edit's text, images, reminders / skill text /
+    hook output / the compaction summary, rewound prompts and filler lines, long arguments of other tools).
+  - A note on Codex (no turns view), and a footer: keys 1–5, the remembered level, "hover a tab".
+  - Sizes: up to 780 × 640 DIPs (a Flyout's default 456 is too narrow for six columns); it scrolls past that,
+    and the Flyout keeps it inside the window. Dark with explicit brushes through `FlyoutPresenterStyle` —
+    a Flyout renders in the popup root, where the card's `RequestedTheme` does not reach.
+- **Each tab's tooltip** is that level's cheat sheet (`TranscriptLevelTip`), through the shared tip host
+  (`AgentSetTip`) like every other tip:
+
+      Compact (key 4)
+      Everything in Minimal, plus:
+        ✓ slash commands you ran outside a turn
+        ✓ compaction markers
+        ✓ your answers to Claude's questions
+        ✓ each agent's brief and final report
+      Leaves out:
+        · every tool call, with its arguments and outcome (from Default)
+        · … (each with the level that first shows it)
+      The ⓘ after the tabs compares every level.
+
+  Minimal says "Shows:" instead of "Everything in …, plus:"; Max says "Leaves out nothing another level
+  shows." The Copy menu keeps its one-line descriptions (`kTranscriptCopyMenu`); the tabs no longer use them.
+- **One table** behind both, `AgentMaster/TranscriptLevelGuide.h` (pure, harness-tested):
+  `kTranscriptLevelGuide` — each row's panel text, its tooltip brief, its FIRST level (the levels are
+  cumulative, so one level places a row in all five columns) and the `TurnsOptions` member that decides it —
+  plus `kTranscriptLevelGuideEveryLevel`, `kTranscriptLevelGuideNoLevel` and the Codex note.
+  `TestTranscriptLevelGuide` requires `TurnsOptionsForLevel` to turn each row's option on at exactly its first
+  level and above, every ladder feature to have a row, and every level to add one — so the guide can never
+  promise what a level does not render. ⚠ A level label lives twice (the menu table for the tabs, the guide
+  for the tooltips and the column heads): rename both.
+- **Esc closes the guide first.** An open guide closes alone (`DismissLevelGuide`), and the next Esc closes
+  the overlay — on both Esc paths, the card's `KeyDown` and the page's tunneling handler
+  (`TerminalPage::_DismissTranscriptLevelGuide`), since which one sees the key depends on where focus sits.
+  A click outside the guide closes only the guide (a light-dismiss flyout eats the press that dismisses it).
+  `Close` hides an open guide (a popup outlives its collapsed owner otherwise). Keyboard focus moves into the
+  guide (the focus guard lets a move into a popup through) and back to the (i) when it closes.
+- Unlogged, like the folds and the wrap toggle — a pure view action; a failed build of the panel or a failed
+  hide is an `[exc]` line (`AgentTranscriptOverlay level guide` / `… dismiss level guide`).
+
 ## 4. Rendering
 
 1. **Off the UI thread** (`AgentTranscriptOverlay::_LoadLevelAsync`, holding only a weak reference): the
@@ -310,7 +372,7 @@ renders to 345 KB / 3.7 k lines at Default and 1.5 MB / 22.6 k lines / 619 code 
 | Trigger | Where |
 |---|---|
 | Click on the backdrop (outside the card) | the backdrop's `PointerPressed` (a sibling of the card, so presses inside never reach it); the close is deferred one tick (no tree mutation inside a pointer handler) |
-| Esc | the card's `KeyDown`, AND page-wide in `TerminalPage::_ManagerPaneNavPreviewKeyDown` (tunneling, on Root) — an Esc must never fall through to a terminal behind the overlay, where it would interrupt claude's turn. An open command palette / suggestions box keeps its own Esc |
+| Esc | the card's `KeyDown`, AND page-wide in `TerminalPage::_ManagerPaneNavPreviewKeyDown` (tunneling, on Root) — an Esc must never fall through to a terminal behind the overlay, where it would interrupt claude's turn. An open command palette / suggestions box keeps its own Esc. An open level guide (§3f) closes first, on either path; the next Esc closes the overlay |
 | ✕ | the header button |
 | Any tab switch, close successor, Agent Manager page shown / left | `_ApplyAgentTabSelection` → `_CloseTranscriptOverlay` |
 | Tab move (moveTab action, Move to start/end, a drag's commit) | `_TryMoveTab` — explicit, because moving the already-selected tab raises no SelectionChanged |
@@ -349,6 +411,12 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
   no PCH). cmark comes from the vcpkg manifest's `terminal` feature (UIMarkdown's port) and is auto-linked
   into TerminalApp.dll.
 - `src/cascadia/TerminalApp/AgentTranscriptOverlay.{h,cpp}` — the overlay (`winrt::implements`).
+- `src/cascadia/TerminalApp/AgentMaster/TranscriptLevelGuide.h` — the level guide's one table (§3f): the
+  (i) panel's rows, every-level and no-level lists, the Codex note, `TranscriptLevelTip` (a tab's cheat sheet).
+  Harness: `tests/tests_turns.cpp` (`TestTranscriptLevelGuide`: each row's option against
+  `TurnsOptionsForLevel`, the ladder covered, the order, no em dash, the tips' shape). The page's Esc seam:
+  `TerminalPage::_DismissTranscriptLevelGuide` (`TerminalPage.AgentTranscript.cpp`, called from
+  `_ManagerPaneNavPreviewKeyDown`).
 - `src/cascadia/TerminalApp/TerminalPage.AgentTranscript.cpp` — the page side (build, open, close; reads
   the fork link for §3e).
 - `src/cascadia/TerminalApp/AgentMaster/ClaudeSpawn.{h,cpp}` — `ResolveClaudeDisplayTranscript` +
@@ -452,3 +520,13 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
     summary panel all show the source's messages. Send the fork a message, then ↻ Refresh the overlay → the
     fork's own transcript (with its Session chain), no note. hooks.log: the `[transcript] … from the fork
     source …` lines.
+12. The level guide (§3f): an (i) right after "Minimal", level with the tab labels. Hover it → its tooltip.
+    Click it → the panel opens below it, dark, wider than a normal flyout: the table's five columns run
+    Minimal → Max with "key 5", "key 4", "key 1", "key 3", "key 2" under them, the current level's column
+    tinted and its head in the accent, the check marks rising as a staircase, every other row washed; then
+    "Also in every level", "In no level", the Codex note and the footer. Switch to another tab, reopen → the
+    tint follows. Esc → only the panel closes, focus back on the (i); Esc again → the overlay closes. Click
+    outside the panel → only the panel closes. With the panel open press Ctrl+Tab → the overlay and the panel
+    close together. Keyboard only: Tab to the (i), Enter → the panel opens. Hover each tab → its cheat sheet
+    (Minimal "Shows:", Max "Leaves out nothing another level shows.", the others "Everything in …, plus:"
+    and "Leaves out:" with "(from <level>)"), dark, wrapped inside the tip's width.

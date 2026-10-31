@@ -201,6 +201,7 @@
     <ClInclude Include="AgentMaster\ProcessObserver.h" />
     <ClInclude Include="AgentMaster\TranscriptStore.h" />
     <ClInclude Include="AgentMaster\TranscriptTurns.h" />
+    <ClInclude Include="AgentMaster\TranscriptLevelGuide.h" />
     <ClInclude Include="AgentMaster\MarkdownBlocks.h" />
     <ClInclude Include="AgentMaster\SessionSearch.h" />
     <ClInclude Include="AgentMaster\SessionSearchTools.h" />
