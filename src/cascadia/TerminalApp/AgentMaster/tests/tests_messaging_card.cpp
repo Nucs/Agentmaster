@@ -18,7 +18,10 @@
 //      the Esc gap;
 //   1d. §21.42's screenshot in the card (MessagingCardPicture.h, the user's request of 2026-10-27): the screen's hash, the plan
 //      (upload / reuse / keep / none), the caption's clock, the rich figure block, the media list, the photo read back from
-//      Telegram's answer, the picture's record across a restart, and the cog's switch;
+//      Telegram's answer, the picture's record across a restart, and the cog's switch; and since 2026-11-01 (the picture follows
+//      the status) the card's LOOKS at its screen (CardPictureTrack): a look's unchanged plan, the backoff, the settle look after a
+//      change into a state at rest, the look a read that got no screen in time owes, a page flip's look, a look an update
+//      overtakes, and the give-up after 8 looks;
 //   2. 🖼 Screen Image: the terminal's live screen drawn as a picture — the styled snapshot's format (ScreenSnapshot.h, shared
 //      with ControlCore.cpp) and the renderer (ScreenImage.h), which draws a REAL PNG here with Direct2D + DirectWrite + WIC; the
 //      test decodes it again and reads its pixels.
@@ -822,6 +825,138 @@ void TestMessagingCard()
         // The wait for a picture is bounded, and below a tapped button's hold limit: a tap that waits for its card change (Restart,
         // a page flip that met a post) is still answered after the change lands, never by the limit alone.
         CHECK(kCardPictureWaitMs > 0 && kCardPictureWaitMs + 2000 < kTapAnswerHoldMaxMs, "picture: a card waits at most 4 s for its picture, well inside the 9 s tap hold");
+
+        // ----- 2026-11-01, the picture follows the status: the card's LOOKS at its screen (CardPictureTrack) -----
+        // The user's report: "When status changes, we update the message but I think we don't update the image". Production that
+        // day: a window answered a card's read 5-9 s late, past the 4 s bound - the card went with its old picture, the late one
+        // was dropped, and a card at rest is never edited again.
+
+        // A look's plan: compared with the picture the card CARRIES, a screen that is that one is Unchanged (nothing drawn or sent).
+        const auto lookSame = PlanCardPicture(true, h, now, L"FILE1", h + 1, now - 60'000, h);
+        const auto lookChanged = PlanCardPicture(true, h + 7, now, L"FILE1", h, now - 60'000, h);
+        const auto lookBackToStored = PlanCardPicture(true, h, now, L"FILE1", h, now - 60'000, h + 9);
+        const auto lookParked = PlanCardPicture(false, 0, now, L"FILE1", h, now - 60'000, h);
+        const auto noBasis = PlanCardPicture(true, h, now, L"FILE1", h, now - 60'000, 0);
+        CHECK(lookSame.source == CardPictureSource::Unchanged, "look plan: the screen the card carries (an upload maybe still on its way) is Unchanged - nothing drawn, nothing sent");
+        CHECK(lookChanged.source == CardPictureSource::Upload && lookChanged.shotAtMs == now, "look plan: a screen that changed since the card's picture is drawn and uploaded");
+        CHECK(lookBackToStored.source == CardPictureSource::Reuse && lookBackToStored.shotAtMs == now,
+              "look plan: a screen that is the stored photo's while the card carries another reuses the photo by file_id");
+        CHECK(lookParked.source == CardPictureSource::Reuse && lookParked.shotAtMs == now - 60'000, "look plan: no screen keeps the stored picture with its own moment");
+        CHECK(noBasis.source == CardPictureSource::Reuse, "look plan: no basis (0) never reads as unchanged");
+
+        // The backoff and the schedule's merge.
+        CHECK(CardPictureLookDelayMs(0) == 5000 && CardPictureLookDelayMs(1) == 10000 && CardPictureLookDelayMs(2) == 20000 && CardPictureLookDelayMs(3) == 40000 &&
+                  CardPictureLookDelayMs(4) == 60000 && CardPictureLookDelayMs(1000) == 60000 && CardPictureLookDelayMs(-3) == 5000,
+              "look backoff: 5, 10, 20, 40, then 60 s at most (a negative count reads as none)");
+        CHECK(EarlierCardPictureLook(0, 900) == 900 && EarlierCardPictureLook(500, 900) == 500 && EarlierCardPictureLook(1500, 900) == 900,
+              "look schedule: a new rule fills an empty schedule and never pushes an earlier look back");
+        CHECK(kCardPictureSettleMs == 3000 && kCardPictureLookWaitMs == 30000 && kCardPictureLookTriesMax == 8 && kCardPictureLookWaitMs > kCardPictureWaitMs,
+              "look constants: the settle look 3 s after a change, a look waits 30 s (no text waits for it), 8 looks in a row at most");
+
+        // The production case: a status update's read got no screen in time (the 4 s wait ran out).
+        {
+            CardPictureTrack t;
+            CardPictureStepDecided(t, true, true, false, now); // waiting -> running: a read, and no settle look (a running card re-reads)
+            CHECK(t.stepPending && t.stepReads && t.lookAtMs == 0 && t.lookTries == 0, "track: a status update into Running reads the screen and owes no settle look");
+            CHECK(!CardPictureLookDue(t, now + 999'999), "track: nothing is due while no look is owed");
+            CardPictureStepSettled(t, h, CardPictureRead::Stale, now + 4000); // the card went with its stored picture
+            CHECK(!t.stepPending && t.handedShotHash == h && t.lookAtMs == now + 4000 + 5000, "track: a read that got no screen in time owes a look 5 s later");
+            CHECK(!CardPictureLookDue(t, now + 8999) && CardPictureLookDue(t, now + 9000), "track: the look is due at its moment, not before");
+            CardPictureLookStarted(t, 77, 41);
+            CHECK(t.lookPending && t.lookAtMs == 0 && t.lookSeq == 77 && t.lookBase == 41 && !CardPictureLookDue(t, now + 99'000), "track: one look at a time");
+            const auto step = CardPictureLookSettled(t, 77, 41, true, h + 5, CardPictureRead::Fresh, now + 15'000);
+            CHECK(step == CardPictureLookStep::Send && !t.lookPending && t.handedShotHash == h + 5 && t.lookTries == 0 && t.lookAtMs == 0,
+                  "track: the window answered the look with a changed screen - the card is edited with it, and the looks end");
+        }
+
+        // The early read: a change into a state at rest owes the settle look, whatever the update's own read found.
+        {
+            CardPictureTrack t;
+            CardPictureStepDecided(t, true, true, true, now); // running -> waiting for you
+            CHECK(t.lookAtMs == now + kCardPictureSettleMs, "track: a change into a state at rest owes the settle look 3 s later");
+            CHECK(!CardPictureLookDue(t, now + kCardPictureSettleMs), "track: never while the update's own read is pending (a look never overtakes it)");
+            CardPictureStepSettled(t, h, CardPictureRead::Fresh, now + 200);
+            CHECK(t.lookAtMs == now + kCardPictureSettleMs && CardPictureLookDue(t, now + kCardPictureSettleMs),
+                  "track: a fresh read keeps the settle look - Claude Code may still have been drawing the new state");
+            CardPictureLookStarted(t, 90, 12);
+            CHECK(CardPictureLookSettled(t, 90, 12, false, 0, CardPictureRead::Unchanged, now + 3100) == CardPictureLookStep::Done && t.lookAtMs == 0 && !t.lookPending,
+                  "track: the settle look found the screen the card carries - nothing is sent, nothing more is owed");
+            CardPictureTrack again;
+            CardPictureStepDecided(again, true, true, true, now);
+            CardPictureStepDecided(again, true, true, false, now + 1000); // the session runs again before the settle look
+            CHECK(again.lookAtMs == 0, "track: a change into Running cancels a settle look still owed (its own read covers it)");
+        }
+
+        // A page flip (Kept) that overtakes a read still running, or that puts an older picture back, owes a look.
+        {
+            CardPictureTrack t;
+            CardPictureStepDecided(t, true, false, false, now); // a text change (the draft): a read, no state change
+            CHECK(t.lookAtMs == 0, "track: a text change without a state change owes no settle look");
+            CardPictureStepDecided(t, false, false, false, now + 50); // a page flip 50 ms later overtakes that read
+            CHECK(t.stepPending && !t.stepReads && t.lookAtMs == now + 50 + kCardPictureSettleMs, "track: a page flip that overtakes a read still running owes the look that read was");
+            CardPictureStepSettled(t, h, CardPictureRead::Kept, now + 60);
+            CHECK(!CardPictureLookDue(t, now + 50 + kCardPictureSettleMs - 1) && CardPictureLookDue(t, now + 50 + kCardPictureSettleMs), "track: ...due 3 s after the flip");
+
+            CardPictureTrack older;
+            CardPictureStepDecided(older, true, false, false, now);
+            CardPictureStepSettled(older, h + 1, CardPictureRead::Fresh, now + 100); // a new upload is handed (still on its way)
+            CHECK(older.lookAtMs == 0 && older.handedShotHash == h + 1, "track: a fresh read with no state change owes nothing");
+            CardPictureStepDecided(older, false, false, false, now + 500); // a page flip carries the stored picture, older than that upload
+            CardPictureStepSettled(older, h, CardPictureRead::Kept, now + 500);
+            CHECK(older.handedShotHash == h && older.lookAtMs == now + 500 + kCardPictureSettleMs, "track: a page flip that puts an older picture back owes a look");
+
+            CardPictureTrack same;
+            CardPictureStepDecided(same, false, false, false, now);
+            CardPictureStepSettled(same, h, CardPictureRead::Kept, now); // the first step of a run: nothing handed before
+            CardPictureStepDecided(same, false, false, false, now + 10);
+            CardPictureStepSettled(same, h, CardPictureRead::Kept, now + 10); // the same picture again
+            CHECK(same.lookAtMs == 0, "track: a page flip that keeps the picture the card carries - or the first step of a run - owes nothing");
+        }
+
+        // A post or edit decided while a look runs wins; a look that got no screen in time backs off and gives up after 8.
+        {
+            CardPictureTrack t;
+            CardPictureStepDecided(t, true, true, true, now);
+            CardPictureStepSettled(t, h, CardPictureRead::Stale, now + 4000);
+            CHECK(t.lookAtMs == now + kCardPictureSettleMs, "track: a read that got no screen in time keeps an earlier settle look (never pushed back)");
+            CardPictureLookStarted(t, 5, 100);
+            CardPictureStepDecided(t, true, true, false, now + 5000); // the session runs again while the look waits for the window
+            CHECK(t.lookPending && t.lookAtMs == 0, "track: a status update while a look runs leaves the look to settle and owes no new one (Running)");
+            CHECK(CardPictureLookSettled(t, 5, 101, true, h + 3, CardPictureRead::Fresh, now + 6000) == CardPictureLookStep::Dropped && !t.lookPending,
+                  "track: ...and that look is dropped when it settles - the update owns the card, an older text is never edited back over it");
+            CHECK(CardPictureLookSettled(t, 5, 101, true, h + 3, CardPictureRead::Fresh, now + 6000) == CardPictureLookStep::Dropped, "track: a look that is not running is dropped");
+
+            CardPictureTrack b;
+            CardPictureStepDecided(b, true, true, true, now);
+            CardPictureStepSettled(b, h, CardPictureRead::Stale, now);
+            int64_t atMs = now; // the simulated clock (not `clock`: <ctime>'s function of that name)
+            CardPictureLookStep last = CardPictureLookStep::Done;
+            bool everyLookDue = true;
+            std::vector<int64_t> pauses;
+            for (int i = 0; i < kCardPictureLookTriesMax; ++i)
+            {
+                atMs = b.lookAtMs;
+                everyLookDue = everyLookDue && CardPictureLookDue(b, atMs);
+                CardPictureLookStarted(b, 1000 + static_cast<uint64_t>(i), 7);
+                atMs += kCardPictureLookWaitMs; // the window never answers: each look's wait runs out
+                last = CardPictureLookSettled(b, 1000 + static_cast<uint64_t>(i), 7, false, 0, CardPictureRead::Stale, atMs);
+                if (last == CardPictureLookStep::Again)
+                {
+                    pauses.push_back(b.lookAtMs - atMs);
+                }
+            }
+            const std::vector<int64_t> expectedPauses{ 10'000, 20'000, 40'000, 60'000, 60'000, 60'000, 60'000 };
+            CHECK(everyLookDue && last == CardPictureLookStep::GiveUp && b.lookTries == kCardPictureLookTriesMax && pauses == expectedPauses,
+                  "track: each look that gets no screen in time waits longer for the next (10, 20, 40, then 60 s), and the 8th gives up");
+            CHECK(!CardPictureLookDue(b, atMs + 100'000'000), "track: after giving up, no look is due until the next status update");
+            CardPictureStepDecided(b, true, true, true, atMs);
+            CHECK(b.lookTries == 0 && b.lookAtMs == atMs + kCardPictureSettleMs, "track: the next status update starts the looks over");
+            CardPictureStepSettled(b, h, CardPictureRead::NoScreen, atMs + 10);
+            CHECK(b.lookAtMs == atMs + kCardPictureSettleMs, "track: a parked tab's update (NoScreen) owes no retry, only the settle look it had");
+            CardPictureLookStarted(b, 3000, 7);
+            CHECK(CardPictureLookSettled(b, 3000, 7, true, h, CardPictureRead::NoScreen, atMs + 3500) == CardPictureLookStep::Done && b.lookAtMs == 0 && b.lookTries == 0,
+                  "track: a look at a tab with no screen ends the looks (never retried forever)");
+        }
     }
 
     // ===== 2. the card's line for the state's action =====

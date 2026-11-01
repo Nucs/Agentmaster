@@ -6151,7 +6151,7 @@ fail. `cl /Zs` of all 111 TerminalAppLib units over a shadow tree passes. No dat
    no row.
 8. `/interrupt` and `/deactivate` typed: the same outcomes, as lines in the thread.
 
-### 21.42 The card carries the screen: a fresh screenshot at every card update (2026-10-27; in dev since 0.0.1.38, in production since 0.8.0.1)
+### 21.42 The card carries the screen: a fresh screenshot at every card update (2026-10-27; in dev since 0.0.1.38, in production since 0.8.0.1; the picture follows the status - the card's looks - 2026-11-01, NOT BUILT)
 
 > The user's request (2026-10-27): "the running since messgae, called also i think status message that is pinned to the
 > bottom - whenever it updates, have it produce a screenshot (if possible) and have it shown and so every update we produce a
@@ -6190,12 +6190,71 @@ takes a new picture every ~20 s). Pure half: `AgentMaster/MessagingCardPicture.h
 - **Every post** (the first card, a re-post below newer messages, a ping with sound, a re-sort) reads the screen: each is a
   moment the screen belongs on the card. The post marks the card in flight (-1) at once, so no second post starts while the
   screen is read and drawn, and queues the old card's delete and the new card when the picture is settled.
+- **A look** (2026-11-01, below): the card reads its screen again when its picture is owed one - 3 s after a change of state
+  into a state at rest, and after a read that got no screen in time - and is edited only when the screen changed.
+
+**The picture follows the status (2026-11-01; NOT BUILT).**
+
+> The user's report (2026-11-01): "We have for the telegram bot a image in the bottom-pinned status message that has the latest
+> screenshot of the app. When status changes, we update the message but I think we don't update the image - we should."
+
+*What it was.* A status update read the screen ONCE, at the moment the bot learned of the change, and three things made that
+one read miss:
+- **The window answered too late.** Production, 2026-11-01 12:03 (`hooks.log`): this session's card turned "running", its read
+  waited in a window whose UI thread spent 3-4 s per Agent Manager rebuild (797 live sessions), the window answered 5 and 9 s
+  later, past the 4 s bound - `[msg] def01459 card picture not ready within 4 s` - so the card went with its old picture and
+  the late one was dropped. The same that day for 7bc49f4b, a24e35b2 and 1103bae9, and for ~1,300 card steps in the four minutes
+  after the 08:19 start (the windows still restoring).
+- **The read came before the new state was drawn.** A Stop hook's line reaches the engine while the hook still runs - Claude
+  Code ends the turn, and draws its idle prompt, only once its Stop hooks exited (one may block the stop) - and the bot reads the
+  screen within milliseconds of that line, so the picture can still show the turn's spinner. (Inferred from that order; no early
+  picture was captured.)
+- **A page flip took the picture's place.** A flip that overtook a status update's read dropped it (its step keeps the picture);
+  a flip that replaced an upload still in the outbox, or that landed after it, put the older stored picture back.
+
+And nothing read the screen again: a card's text names clock times, never spans ("since 12:03"), so a card at rest is never
+edited again, and `CardState::pictureTextHash` already said "this text has its picture". The card kept the old picture for good.
+
+*Now* (the pure half: `CardPictureTrack` and its rules in `AgentMaster/MessagingCardPicture.h`; the service:
+`MessagingService::_lookAtCardPicture`, the steps' sends in `_refreshCard`, `_withCardPicture`):
+- **Every picture step says how it settled** (`CardPictureRead`): `Fresh` (the window answered in time, the screen was read for
+  this step), `NoScreen` (it answered: the tab shows none - a parked tab), `Kept` (a page flip, no read asked), `Stale` (no screen
+  in time: the wait ran out, no window answered, the read or the drawing failed) and, for a look, `Unchanged`. Only `Stale` owes
+  a retry, so a parked tab is never asked forever.
+- **The card LOOKS at its screen again** when a look is owed and due:
+  - the **settle look**, 3 s after every post or edit that shows a new STATE at rest (anything but Running;
+    `kCardPictureSettleMs`) - whatever that update's own read found, since Claude Code may still have been drawing. A change into
+    Running cancels a settle look still owed: a running card reads its screen at every edit of its text.
+  - a **retry**, 5 s after a post or edit whose read was `Stale` (`CardPictureLookDelayMs`), then 10, 20, 40 and 60 s after each
+    look that was `Stale` too (each look waits up to 30 s for the window, `kCardPictureLookWaitMs` - no text waits for it); after
+    8 such looks in a row (~9 min, `kCardPictureLookTriesMax`) the card stops looking until its next status update (one log line).
+  - a **page flip's look**, 3 s after a flip that overtook a read still running (a status update's or a look's), or that carries
+    an OLDER picture than the one handed before (`CardPictureTrack::handedShotHash`).
+- **A look runs only while the card shows its current text and buttons** in the wanted form (`_refreshCard` asks for it exactly
+  where it would otherwise return "the topic shows this very card already"), while no post or edit of the card waits for its
+  picture (a look never overtakes one) and while no other look runs. It reads the screen and compares it with the picture the
+  card's newest post or edit CARRIED (maybe still in the outbox - not the stored one, or a look racing an upload would draw and
+  upload that same screen again): the same → nothing is sent (`unchanged` in the census); changed → drawn on the worker (or the
+  held photo reused by `file_id` when the screen is the stored one's) and the card is edited with its same text and buttons and
+  the new picture, at the cards' own priority (`SendPriority::CardEdit`). The look's edit holds no tapped button, does not move
+  the card's 20 s edit gap (`lastEditMs`) and leaves its hashes as they are; its answer records the photo
+  (`_noteCardPictureShown`) and reaches the same handlers as an update's edit (`_cardEditDeletedHandler`: a card the user deleted
+  is posted anew; `_cardEditFormHandler`: the form Telegram shows).
+- **A post or edit decided while a look runs wins**: the look is dropped when it settles (`CardPictureTrack::lookBase`), because
+  the newer one carries its own read, and an older text must never be edited back over it.
+- **Every card step's generation is run-wide unique** (`MessagingService::_cardPictureGen`; it counted per card before): a card
+  state is made anew when its topic is rebound or recreated, and a late step of the old one must never match the new one's
+  number by chance.
+
+*The cost.* One more screen read per change into a state at rest (0.3-0.6 ms on the window's UI thread, a hash compare), and one
+more edit with its upload only where the screen changed in those 3 s (a turn's end whose first read showed the spinner) or where
+a read came late. A window that never answers costs at most 8 more dispatcher items per status update.
 
 **Order and races.** The picture step is asynchronous, so each picture-carrying post or edit stamps a generation
 (`CardState::pictureSeq`); an EDIT whose step a newer post or edit of the same card overtook is dropped when its picture is
 settled — finishing last, it would put an older text back (its taps go; the newer change carries what they waited for). One
-consequence: a page flip within the few hundred ms of a status update's step drops that update's new screenshot (the card shows
-the newest text and buttons with its previous picture until its next update). The card's send runs exactly once whatever
+consequence: a page flip within the few hundred ms of a status update's step drops that update's new screenshot - since
+2026-11-01 the flip owes the card a look, so the screen reaches it 3 s later instead of at its next update (above). The card's send runs exactly once whatever
 settles the picture (`CardPictureOnce`: the window's answer, the worker, the guard of a read no window answered —
 `CardPictureReadGuard` — or a failure), and a card change is never lost to its picture: every failure sends it without one.
 The drawing worker is ONE thread with a queue, started by the first job and ending when the queue is empty; a job a newer
@@ -6203,7 +6262,8 @@ update overtook is not drawn. **A card never waits more than 4 s for its picture
 the deadlines every pass, `_expireCardPictureWaits`): before this change a card's edits did not depend on any window, and a
 FROZEN window (a UI stall) holds its copy of the screen read unanswered — without the bound its cards would not change for as
 long as the freeze lasts, which is when the phone is needed most. Past it the card goes with the picture it shows
-(`[msg] <sid8> card picture not ready within 4 s …`), and a late picture is dropped.
+(`[msg] <sid8> card picture not ready within 4 s … and looks at the screen again in a few seconds`), a late picture is dropped,
+and since 2026-11-01 the card owes a look (`Stale`), so the screen still reaches it once the window answers.
 
 **Refusals.** A post or edit WITH its picture that Telegram refuses (a 400 about the message) goes once more WITHOUT it in the
 next outbox slot of the same sequence number and with no key (the card's text and title chip still land; a fresh slot could
@@ -6223,11 +6283,15 @@ calls: production edited its cards 66–126 times per 10 minutes on 2026-10-27 (
 running cards, whose context size changes with every reply and edits them at the 20 s gap), and a new picture is ~0.1–0.6 MB
 — so several running sessions mean roughly 100–250 MB of uploads an hour, ~1 s per upload call (the outbox's 1.05 s pacing
 already spaces calls). The census line measures it: `[msg] traffic (10 min): … pictures(drawn=N kept=N none=N reused=N
-skipped=N, K KB drawn)`.
+skipped=N late=N looked=N unchanged=N, K KB drawn)` - `late` a step or look whose wait ran out, `looked` the looks started,
+`unchanged` the looks that found the screen the card carries (2026-11-01; a kind with no count is left out).
 
 **Logs.** Only exceptions are logged per picture: `[msg] <sid8> card picture: the screen's snapshot did not parse …`, `… could
 not be drawn: …`, `[msg] Telegram refused a card with its screen picture (400: …); it goes again without the picture`, `[msg] 3
-card pictures refused in a row: …`; the 10-minute census counts the rest.
+card pictures refused in a row: …`, `[msg] <sid8> card picture not ready within 4 s (…): the card goes with the picture it shows
+and looks at the screen again in a few seconds`, `[msg] <sid8> card picture look not answered within 30 s (…): the card keeps its
+picture and looks again later`, `[msg] <sid8> card picture: 8 looks in a row got no screen in time; the card keeps its picture
+until its next status update`; the 10-minute census counts the rest.
 
 **Not changed, still open.**
 - The picture is NOT redacted (§9.6 is not built), like 🖼 Screen Image's: the terminal's text goes to Telegram as it shows.
@@ -6245,6 +6309,11 @@ and an older file, the switch's round trip and default, the refusal limit. The r
 10,335 checks, only the 3 known `TestTaskbarBadge` failures. ⚠ `SessionModels.h` (AppSettings), `AgentManagerContent.h`,
 `Messaging.h` (MessagingService, OutItem, CardState) and `MessagingModels.h` (TopicRecord) changed: a build over older intermediates must purge
 (dev 0.0.1.38's was a clean build).
+2026-11-01 (the picture follows the status): section 1d also pins a look's `Unchanged` plan, the backoff, the settle look after a
+change into a state at rest (and its cancel by a change into Running), the look a `Stale` read owes, a page flip's two looks, a
+look an update overtakes (dropped), the give-up after 8 looks and `NoScreen` ending the looks. ⚠ `Messaging.h` changed again
+(CardState gained `CardPictureTrack`, MessagingService `_cardPictureGen`, the picture step's send its `CardPictureRead`): the
+next build must purge.
 
 **Check after the build** (dev, the bot; watch messaging.log's census):
 1. A running session's card: the screenshot under its text, "🖥 the screen at …" advancing every ~20 s with the turn; the card's
@@ -6255,6 +6324,14 @@ and an older file, the switch's round trip and default, the refusal limit. The r
 5. The cog's switch off: the next update of each card goes without the picture; on again: the next update brings one.
 6. A new message in the topic: the card re-posts below it WITH the picture (by file_id when the screen did not change).
 7. The census after 10 minutes: `pictures(drawn=…, … KB drawn)`, and no `refused` lines.
+8. (2026-11-01) A turn ends: the card turns "Waiting for you"; a few seconds later (the settle look, 3 s, then the drawing and the
+   edit) its picture shows the input box with no spinner, its caption a few seconds after the state line's moment when the first
+   read was early.
+9. (2026-11-01) A status change while the hosting window is busy (the Agent Manager page shown with many sessions, or a tab
+   switch storm): `[msg] <sid8> card picture not ready within 4 s … looks at the screen again in a few seconds`, and the card's
+   picture changes to the new screen once the window answers (the census counts `late` and `looked`).
+10. (2026-11-01) A card whose screen is already final at its change into a state at rest: one `looked` and one `unchanged` in
+    the census for that change, and no edit of the card after its state line's own.
 
 ### 21.43 🎤 Voice notes: a voice note in a session's topic is read as the prompt it says (2026-10-27; in dev since 0.0.1.38, in production since 0.8.0.1; a note in a NEW thread since dev 0.0.1.39)
 
