@@ -2840,14 +2840,16 @@ namespace Agentmaster
         bool transcriptOverlayWrapLines{ true };
         // Agentmaster (SESSIONS.md §9.1): the THINKING LEVEL of the Sessions page's AI search — the
         // strip's "thinking <level>" toggle, left of "ctx N / M" (the user's request of 2026-10-14).
-        // The word of an AgentHarnessCore HarnessThinkingLevel: "off" (no thinking, effort low — the
-        // fastest, and the only setting before the toggle existed) or adaptive thinking at "low" /
-        // "medium" / "high" / "xhigh" / "max" effort. GLOBAL + persisted like transcriptOverlayLevel:
-        // each click is a freshest-disk RMW written by the page itself (never the cog form — so both
-        // cog-Save preserve blocks restore it), and the page reads it from disk when the AI search is
-        // turned on; the process's one search agent applies it, so every window shows the same level.
-        // The engine stores the word opaquely; an unknown or empty word reads as "off". Default "off".
-        std::wstring sessionsAiThinkingLevel{ L"off" };
+        // The word of an AgentHarnessCore HarnessThinkingLevel: adaptive thinking at "low" /
+        // "medium" / "high" / "xhigh" / "max" effort. ⚠ No "off": every request at off fails on
+        // Claude Code 2.1.310, so the toggle never writes it, and a stored "off" (the default until
+        // 2026-11-01) runs as "low" (OfferedHarnessThinkingLevel, in the agent). GLOBAL + persisted
+        // like transcriptOverlayLevel: each click is a freshest-disk RMW written by the page itself
+        // (never the cog form — so both cog-Save preserve blocks restore it), and the page reads it
+        // from disk when the AI search is turned on; the process's one search agent applies it, so
+        // every window shows the same level. The engine stores the word opaquely; an unknown or
+        // empty word reads as "low". Default "low", the fastest level that works.
+        std::wstring sessionsAiThinkingLevel{ L"low" };
         // Agentmaster (SESSIONS.md §9.6, SIDE_PANEL.md §2h): how long the AI search's idle claude.exe lives after its last
         // use, in MINUTES — its PARK delay. Two surfaces arm the park: the Sessions page when the last page showing the AI
         // search leaves it, and the side panel's AI search when one of its requests ends (or its request box loses focus with
@@ -3184,8 +3186,9 @@ namespace Agentmaster
         //  - messagingIdleGraceMinutes: how long an Idle session's topic stays (with the Idle card and its
         //    Pin / Wake buttons) before it is DELETED, with its messages (Telegram cannot hide or close a
         //    private-chat topic) — D25, default 10; 0 deletes at once.
-        //  - messagingSearchThinking: the Search topic's agent thinking level word (off / low / medium / high /
-        //    xhigh / max), default "high" (the user's rule); an unknown word reads as high.
+        //  - messagingSearchThinking: the Search topic's agent thinking level word (low / medium / high / xhigh /
+        //    max), default "high" (the user's rule); an unknown word reads as high. No "off" (every request at off
+        //    fails on Claude Code 2.1.310): the cog does not list it, and a stored "off" runs as low.
         //  - messagingVerbose (MESSAGING.md §21.11): the DEFAULT mode of every topic — true = verbose (the assistant's
         //    remarks, a work log of the tool calls, compactions: the whole session as it runs), false = the
         //    conversation only (the user's posts and each turn's final reply, plus the questions, plans, interrupts and

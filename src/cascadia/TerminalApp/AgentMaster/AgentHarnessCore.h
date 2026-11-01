@@ -313,6 +313,15 @@ namespace Agentmaster
     //     organization's policy"). "Off" then runs as the API's default (adaptive thinking).
     //     On a model that TAKES "disabled" (the older models Claude Code lists), "off" is the
     //     first change alone: Claude Code sends "disabled" itself, and the variable stays empty.
+    //     ⚠ BROKEN on Claude Code 2.1.310 (seen 2026-11-01 in the dev install's hooks.log): a
+    //     request at "off" carries Claude Code's clear_thinking_20251015 context strategy next to
+    //     between_tools, and the API refuses every one with HTTP 400 "`clear_thinking_20251015`
+    //     strategy requires `thinking` to be enabled or adaptive", so the AI search answers
+    //     nothing. (2.1.291 ran it, measured above.) No AI search OFFERS "off" any more: the agent
+    //     runs it as Low (OfferedHarnessThinkingLevel), the toggle's rotation skips it
+    //     (NextHarnessThinkingLevel), and the cog does not list it. The machinery above stays: the
+    //     live test's scenario T drives it, and that is the check that tells when a Claude Code
+    //     takes "off" again.
     //
     // The functions below are the DECISIONS; AgentHarness.cpp carries them out
     // (StartOnce, EnsureProcess, ApplyThinkingLive).
@@ -324,6 +333,10 @@ namespace Agentmaster
         // refuses "disabled" this is the API's own "between_tools" off, the policy above: per the
         // API, the short updates the model writes BETWEEN tool calls may come back as thinking
         // blocks — the search agent's 4-request turn measured none, its notes came as text.)
+        // ⚠ NOT OFFERED: every request at Off fails on Claude Code 2.1.310 (the policy above), so
+        // no AI search runs it — OfferedHarnessThinkingLevel turns it into Low. It stays a level
+        // so that a stored "off" (every install's default before) still parses and round-trips;
+        // the harness's own off (HarnessThinking::Disabled) is what the live test's scenario T drives.
         Off,
         Low, // adaptive thinking at effort "low"
         Medium, // adaptive thinking at effort "medium"
@@ -334,13 +347,16 @@ namespace Agentmaster
 
     // The level's word: "off", "low", "medium", "high", "xhigh" or "max". It is the persisted
     // form (AppSettings::sessionsAiThinkingLevel) and the word a page shows; for every level but
-    // Off it is also Claude Code's effort word.
+    // Off it is also Claude Code's effort word. A page never shows "off": it shows the agent's
+    // level, which is never Off (OfferedHarnessThinkingLevel).
     const wchar_t* HarnessThinkingLevelWord(HarnessThinkingLevel level) noexcept;
 
     // Read a level word back.
     //   word    — compared without regard to ASCII case; spaces and tabs around it are ignored.
     //   returns — the level; nullopt for any other word (a hand-edited or a future setting), which
-    //             a caller treats as Off.
+    //             a caller treats as its own default (the Sessions page's agent: Low; the Telegram
+    //             Search topic: High). "off" still reads as Off — an honest parse, so a stored
+    //             "off" round-trips — and the agent then runs it as Low (OfferedHarnessThinkingLevel).
     std::optional<HarnessThinkingLevel> ParseHarnessThinkingLevel(std::wstring_view word) noexcept;
 
     // True for every level but Off: the level runs adaptive thinking.
@@ -351,15 +367,29 @@ namespace Agentmaster
     // only setting before the levels existed.
     const wchar_t* HarnessThinkingLevelEffort(HarnessThinkingLevel level) noexcept;
 
-    // The level after `level` in the toggle's rotation, Off -> Low -> Medium -> High -> XHigh ->
-    // Max -> Off, skipping a level whose effort the model does not support.
+    // The level after `level` in the toggle's rotation, Low -> Medium -> High -> XHigh -> Max ->
+    // Low, skipping a level whose effort the model does not support. Off is NEVER offered (it fails
+    // every request on Claude Code 2.1.310, the policy above): from Off — a level stored before it
+    // was retired — the rotation starts at Low.
     //   level            — the current level.
     //   supportedEfforts — the model's effort words as Claude Code reports them
     //                      (HarnessModelReasoning::supportedEfforts). EMPTY = not known yet
-    //                      (no process answered): every level counts as supported. Off is
-    //                      always offered, so the rotation always ends.
-    //   returns          — the next offered level; Off after the last one.
+    //                      (no process answered): every level but Off counts as supported.
+    //   returns          — the next offered level; the same level when it is the only one the
+    //                      model supports; Low when the model supports none of them (a list of
+    //                      words that are not ours) — the floor that still thinks, since Claude
+    //                      Code steps an effort the model lacks to one it has. Never Off.
     HarnessThinkingLevel NextHarnessThinkingLevel(HarnessThinkingLevel level, const std::vector<std::wstring>& supportedEfforts) noexcept;
+
+    // The level a search conversation RUNS at when `level` is asked for: Low to Max are
+    // themselves; Off runs as Low — the fastest level that works (Off fails every request on
+    // Claude Code 2.1.310, the policy above) — and so does a value outside the enum. The search
+    // agent passes every level that comes from outside through it (its start level from
+    // settings.json or the cog, SetThinkingLevel), so no stored word, cog value or caller can put
+    // a conversation back at Off.
+    //   level   — the asked level, Off included.
+    //   returns — the level to run: Low, Medium, High, XHigh or Max; never Off.
+    HarnessThinkingLevel OfferedHarnessThinkingLevel(HarnessThinkingLevel level) noexcept;
 
     // True when `effort` is one of Claude Code's effort words ("low", "medium", "high", "xhigh",
     // "max"). Anything else must not reach the command line or a control request: Claude Code

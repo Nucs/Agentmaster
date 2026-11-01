@@ -326,6 +326,17 @@ version of this policy reported "off" and the model still thought):
 - ⚠ Under an organization policy that turns experimental betas off, Claude Code ignores
   `CLAUDE_CODE_EXTRA_BODY` ("ignored: experimental betas are disabled by your organization's
   policy"): "off" then runs as the API's default, adaptive thinking.
+- ⚠ **Broken on Claude Code 2.1.310** (2026-11-01, the dev install's hooks.log: `thinking
+  between_tools, effort low in effect (changed live before turn 3)`, then `turn 3 FAILED: 739 ms, 1
+  request(s) … API Error: 400 clear_thinking_20251015 strategy requires thinking to be enabled or
+  adaptive`). The order above was kept, and the request still carried Claude Code's `clear_thinking`
+  strategy next to `between_tools`, so the API refuses every request at off and the AI search answers
+  nothing. (2.1.291 ran it: measured above, and production's search at between_tools showed 16
+  sessions.) The user's call: **the AI search no longer offers off.** The agent runs an asked off as
+  low (`OfferedHarnessThinkingLevel`), the toggle's rotation skips it (`NextHarnessThinkingLevel`),
+  and the cog's Search topic level lists no off (SESSIONS.md 9.1). `SetThinking(Disabled, …)` and the
+  machinery above stay: scenario T of the live test (`harness_live.exe --only-thinking`) drives them,
+  and it is the check for a Claude Code that takes off again.
 
 So:
 

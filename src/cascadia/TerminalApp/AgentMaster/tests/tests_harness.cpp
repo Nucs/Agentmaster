@@ -396,27 +396,37 @@ void TestAgentHarnessCore()
         }
         CHECK(roundTrip, "thinking: every level's word reads back as that level (the persisted form)");
         CHECK(std::wstring{ HarnessThinkingLevelWord(TL::Off) } == L"off" && std::wstring{ HarnessThinkingLevelWord(TL::XHigh) } == L"xhigh" && std::wstring{ HarnessThinkingLevelWord(TL::Max) } == L"max", "thinking: the words are 'off' and Claude Code's effort words");
-        CHECK(ParseHarnessThinkingLevel(L"  HIGH\t") == TL::High && ParseHarnessThinkingLevel(L"Off") == TL::Off, "thinking: a word is read without regard to case and surrounding spaces");
-        CHECK(!ParseHarnessThinkingLevel(L"").has_value() && !ParseHarnessThinkingLevel(L"ultra").has_value() && !ParseHarnessThinkingLevel(L"hi gh").has_value(), "thinking: any other word is no level (the caller reads it as off)");
+        CHECK(ParseHarnessThinkingLevel(L"  HIGH\t") == TL::High && ParseHarnessThinkingLevel(L"Off") == TL::Off, "thinking: a word is read without regard to case and surrounding spaces (a stored \"off\" still parses honestly; the agent runs it as low)");
+        CHECK(!ParseHarnessThinkingLevel(L"").has_value() && !ParseHarnessThinkingLevel(L"ultra").has_value() && !ParseHarnessThinkingLevel(L"hi gh").has_value(), "thinking: any other word is no level (the caller keeps its default)");
         CHECK(!HarnessThinkingLevelThinks(TL::Off) && HarnessThinkingLevelThinks(TL::Low) && HarnessThinkingLevelThinks(TL::Max), "thinking: only Off runs without thinking");
         CHECK(std::wstring{ HarnessThinkingLevelEffort(TL::Off) } == L"low" && std::wstring{ HarnessThinkingLevelEffort(TL::Medium) } == L"medium" && std::wstring{ HarnessThinkingLevelEffort(TL::Max) } == L"max", "thinking: Off runs at effort low (the fastest), every other level at its own effort");
 
-        // The rotation. An empty list = no process reported yet: every level is offered.
+        // Off is not offered (every request at Off fails on Claude Code 2.1.310): a search conversation runs it as Low.
+        bool offeredKeeps = true;
+        for (const TL level : { TL::Low, TL::Medium, TL::High, TL::XHigh, TL::Max })
+        {
+            offeredKeeps = offeredKeeps && OfferedHarnessThinkingLevel(level) == level;
+        }
+        CHECK(OfferedHarnessThinkingLevel(TL::Off) == TL::Low && offeredKeeps, "thinking: Off runs as low; low to max run as themselves");
+        CHECK(OfferedHarnessThinkingLevel(static_cast<TL>(42)) == TL::Low, "thinking: a value outside the enum runs as low (its word would be \"off\", no effort word of Claude Code's)");
+
+        // The rotation. An empty list = no process reported yet: every level but Off is offered.
         const std::vector<std::wstring> unknown;
         bool rotation = true;
-        TL at = TL::Off;
-        for (const TL expected : { TL::Low, TL::Medium, TL::High, TL::XHigh, TL::Max, TL::Off })
+        TL at = TL::Low;
+        for (const TL expected : { TL::Medium, TL::High, TL::XHigh, TL::Max, TL::Low, TL::Medium })
         {
             at = NextHarnessThinkingLevel(at, unknown);
             rotation = rotation && at == expected;
         }
-        CHECK(rotation, "thinking: the toggle rotates off -> low -> medium -> high -> xhigh -> max -> off");
+        CHECK(rotation, "thinking: the toggle rotates low -> medium -> high -> xhigh -> max -> low (never off)");
+        CHECK(NextHarnessThinkingLevel(TL::Off, unknown) == TL::Low && NextHarnessThinkingLevel(TL::Max, unknown) == TL::Low, "thinking: from a stored off the rotation starts at low, and max wraps to low, not to off");
         const std::vector<std::wstring> noXHighNoMax{ L"low", L"medium", L"high" };
-        CHECK(NextHarnessThinkingLevel(TL::High, noXHighNoMax) == TL::Off && NextHarnessThinkingLevel(TL::Medium, noXHighNoMax) == TL::High, "thinking: a level whose effort the model lacks is skipped (Claude Code would step it down anyway)");
+        CHECK(NextHarnessThinkingLevel(TL::High, noXHighNoMax) == TL::Low && NextHarnessThinkingLevel(TL::Medium, noXHighNoMax) == TL::High, "thinking: a level whose effort the model lacks is skipped (Claude Code would step it down anyway), and the wrap lands on low");
         const std::vector<std::wstring> onlyMax{ L"MAX" };
-        CHECK(NextHarnessThinkingLevel(TL::Off, onlyMax) == TL::Max && NextHarnessThinkingLevel(TL::Max, onlyMax) == TL::Off, "thinking: Off is always offered, so the rotation ends; the model's words are compared caselessly");
+        CHECK(NextHarnessThinkingLevel(TL::Off, onlyMax) == TL::Max && NextHarnessThinkingLevel(TL::Max, onlyMax) == TL::Max, "thinking: a model with one level keeps it (no off to fall back to); the model's words are compared caselessly");
         const std::vector<std::wstring> none{ L"auto" };
-        CHECK(NextHarnessThinkingLevel(TL::Off, none) == TL::Off, "thinking: a model with no known effort word leaves only Off");
+        CHECK(NextHarnessThinkingLevel(TL::Off, none) == TL::Low && NextHarnessThinkingLevel(TL::High, none) == TL::Low, "thinking: a model with no known effort word gets the floor, low (never off)");
 
         // The live-change plan (the process was started --thinking adaptive). St(thinks,
         // betweenTools, effort) builds one side.

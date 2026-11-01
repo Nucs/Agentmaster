@@ -38,7 +38,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [10-telegram-questions-and-menus.md](10-telegram-questions-and-menus.md) | Telegram: question cards, /add-dir menu cards (TGQ) | 6 | 3 / 3 / 0 | 24 | 21 | — |
 | [11-telegram-search-and-new-threads.md](11-telegram-search-and-new-threads.md) | Telegram: 🔎 Search, fleet commands, the new-thread wizard, the pick menu (TGS) | 5 | 2 / 1 / 1 (+1 NOT BUILT) | 25 | 29 | — |
 | [12-telegram-file-links.md](12-telegram-file-links.md) | Telegram: file links and the file server (TGF) | 4 | 0 / 3 / 1 | 7 | 6 | — |
-| [13-ai-search.md](13-ai-search.md) | The Sessions page's AI search (AIS) | 5 | 2 / 3 / 0 | 19 | 10 | — |
+| [13-ai-search.md](13-ai-search.md) | The Sessions page's AI search (AIS) | 5 | 2 / 3 / 0 | 20 | 10 | — |
 | [14-presets.md](14-presets.md) | Presets: other models and providers (PRE) | 5 | 3 / 2 / 0 | 15 | 11 | — |
 | [15-handover-family.md](15-handover-family.md) | /handover, /handover-here, /handover-standby (HND) | 8 | 1 / 6 / 1 | 29 | 28 | — |
 | [16-transcripts-and-summaries.md](16-transcripts-and-summaries.md) | Show Transcript, Copy ▸ Transcript, the summary (TRN) | 7 | 4 / 3 / 0 | 26 | 21 | 2 |
@@ -50,7 +50,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [22-cli-and-session-database.md](22-cli-and-session-database.md) | The `agentmaster` CLI and the session database (CLI, SDB) | 6 | 0 / 1 / 5 | 18 | 7 | 2 (1 fixed in code) |
 | [23-tab-context-menu.md](23-tab-context-menu.md) | The tab's context menu: what it shows where, and what each item does (TCM) | 9 | 5 / 4 / 0 | 36 | 27 | 2 (1 fixed in code) |
 | [24-claude-lifecycle.md](24-claude-lifecycle.md) | Claude Code's life cycle in a tab: launch, `/exit`, a kill, Close and Resume here, a claude typed by hand, a restart, `/clear` (LIF) | 7 | 4 / 3 / 0 | 22 | 2 | — (its two are filed in 03 and 05: PQR-K8, fixed in code, and STA-K1) |
-| **Total** | | **194** | **82 / 80 / 26** (+7 NOT BUILT) | **≈ 706** | **≈ 577** | **31** (9 fixed in code) |
+| **Total** | | **194** | **82 / 80 / 26** (+7 NOT BUILT) | **≈ 707** | **≈ 577** | **31** (9 fixed in code) |
 
 ---
 

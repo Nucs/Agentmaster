@@ -61,7 +61,7 @@ model's answer and its list of sessions instead of the session cards; the summar
 │ 3 sessions found              │ ▌│                                  │  ← the count line speaks for the AI view
 │ ╭───────────────────────────╮ │ ▌│                                  │
 │ │● ❯ the tab drag crash  [⊘]│ │ ▌│                                  │  ← the strip: request, plan / answer,
-│ │  Three sessions are about…│ │ ▌│                                  │    "thinking off  ctx 18K / 200K", ⊘ = start over
+│ │  Three sessions are about…│ │ ▌│                                  │    "thinking low  ctx 18K / 200K", ⊘ = start over
 │ ╰───────────────────────────╯ │ ▌│                                  │
 │ ┌ result card ──────────────┐ │ ▌│                                  │  ← the side panel's own card + the model's
 │ │ ▏You asked: "dragging a…" │ │ ▌│                                  │    "why" under it (closed sessions read "closed")
@@ -957,7 +957,8 @@ shifts the box's own clear button (the template part `DeleteButton`) left by the
 - **The strip** — the Sessions page's strip for a narrow panel: the state dot (blue working, green answered / ready, red
   failed, gray idle), "❯ the request" (one line), then the model's plan and what runs now (busy), or its answer, or the
   failure, or how to start (selectable, wrapping, scrolling inside 150 DIP), and a footer "thinking <level>  ctx 18K / 200K"
-  (the thinking toggle is the Sessions page's own rotation, `_CycleSessionsAiThinking`). ⊘ (`am.side.ai.reset`) throws the
+  (the thinking toggle is the Sessions page's own rotation, `_CycleSessionsAiThinking`: low → medium → high → xhigh → max →
+  low, no off since 2026-11-01, SESSIONS.md 9.1). ⊘ (`am.side.ai.reset`) throws the
   conversation away everywhere. Its rounded look is a childless back Border behind the content (no composition node).
 - **The results** — one card per listed session, in the model's order: the side panel's card skeleton
   (`_SidePanelBuildCardSkeleton`, the same builder as the session cards, so the two can never drift apart) — folder-color

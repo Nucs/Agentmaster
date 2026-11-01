@@ -1268,11 +1268,13 @@ namespace winrt::TerminalApp::implementation
         panel.Children().Append(_setMsgGrace);
         _setMsgThinking = ComboBox{};
         _setMsgThinking.Header(winrt::box_value(L"Search topic thinking level"));
-        for (const auto* w : { L"off", L"low", L"medium", L"high", L"xhigh", L"max" })
+        // No "off": every request at off fails on Claude Code 2.1.310 (AgentHarnessCore.h, the thinking policy). The items'
+        // order is the one the load and the save below index by.
+        for (const auto* w : { L"low", L"medium", L"high", L"xhigh", L"max" })
         {
             _setMsgThinking.Items().Append(winrt::box_value(w));
         }
-        AgentSetTip(_setMsgThinking, L"How much the Search topic's agent (the Sessions page's search agent, Sonnet 5.5, in a conversation of its own) thinks before it answers. High by default. Applies to the next Search process.");
+        AgentSetTip(_setMsgThinking, L"How much the Search topic's agent (the Sessions page's search agent, Sonnet 5.5, in a conversation of its own) thinks before it answers. High by default; low is the fastest. There is no off: with thinking off, every request fails. Applies to the next Search process.");
         panel.Children().Append(_setMsgThinking);
         // §21.11: what a topic shows by default (/verbose in a topic sets its own), and how Claude's Markdown goes.
         _setMsgVerbose = ToggleSwitch{};
@@ -3311,14 +3313,22 @@ namespace winrt::TerminalApp::implementation
             _setMsgOwner.Text(winrt::hstring{ _appSettings.messagingTelegramOwnerId });
             _setMsgGrace.Text(winrt::hstring{ std::to_wstring(::Agentmaster::ClampMessagingIdleGraceMinutes(_appSettings.messagingIdleGraceMinutes)) });
             {
-                const std::wstring words[] = { L"off", L"low", L"medium", L"high", L"xhigh", L"max" };
-                int32_t idx = 3;
-                for (int32_t i = 0; i < 6; ++i)
+                // The combo's items, in order (the build above). An unknown word shows "high", the level the agent reads it
+                // as (ThinkingLevelFromWord); a stored "off" shows "low", the level the agent runs it at
+                // (OfferedHarnessThinkingLevel), so the form shows what runs and a Save writes a level that works.
+                const std::wstring words[] = { L"low", L"medium", L"high", L"xhigh", L"max" };
+                const int32_t thinkingCount = static_cast<int32_t>(std::size(words));
+                int32_t idx = 2; // high
+                for (int32_t i = 0; i < thinkingCount; ++i)
                 {
                     if (words[i] == _appSettings.messagingSearchThinking)
                     {
                         idx = i;
                     }
+                }
+                if (_appSettings.messagingSearchThinking == L"off")
+                {
+                    idx = 0; // low
                 }
                 _setMsgThinking.SelectedIndex(idx);
             }
@@ -4206,9 +4216,11 @@ namespace winrt::TerminalApp::implementation
                 }
             }
             _appSettings.messagingIdleGraceMinutes = any ? ::Agentmaster::ClampMessagingIdleGraceMinutes(grace) : 10u;
-            const std::wstring words[] = { L"off", L"low", L"medium", L"high", L"xhigh", L"max" };
+            // The combo's items, in order (no "off": it fails every request on Claude Code 2.1.310); no selection saves "high".
+            const std::wstring words[] = { L"low", L"medium", L"high", L"xhigh", L"max" };
+            const int32_t thinkingCount = static_cast<int32_t>(std::size(words));
             const int32_t idx = _setMsgThinking.SelectedIndex();
-            _appSettings.messagingSearchThinking = (idx >= 0 && idx < 6) ? words[idx] : L"high";
+            _appSettings.messagingSearchThinking = (idx >= 0 && idx < thinkingCount) ? words[idx] : L"high";
             _appSettings.messagingVerbose = _setMsgVerbose.IsOn(); // §21.11
             _appSettings.messagingRichMessages = _setMsgRich.IsOn();
             if (_setMsgCardScreens)

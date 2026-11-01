@@ -30,11 +30,12 @@
 // toggle throws the conversation away and brings the normal list back. The box keeps its text
 // through the toggle (both ways) and the crossed circle; the page empties it only when Enter
 // sends it. The strip's right end
-// reads "thinking off  ctx 15k / 200k": a click on "thinking off" moves to the next thinking
-// level (off -> low -> medium -> high -> xhigh -> max), kept for every window and after a restart.
+// reads "thinking low  ctx 15k / 200k": a click on "thinking low" moves to the next thinking
+// level (low -> medium -> high -> xhigh -> max -> low), kept for every window and after a restart.
+// There is no "off": every request at off fails on Claude Code 2.1.310 (AgentHarnessCore.h).
 //
 // What is behind it: ONE conversation per process (SharedSessionSearchAgent, SessionSearchAgent.h)
-// -- a hosted Sonnet 5.5 (thinking off, unless the strip's toggle picks a level), started through the Claude agent SDK, with two tool
+// -- a hosted Sonnet 5.5 (thinking low, unless the strip's toggle picks a deeper level), started through the Claude agent SDK, with two tool
 // servers: one searches (the page's own search, SessionSearchTools.h), one shows. This file is
 // only the VIEW of that conversation for one window:
 //   - it sends requests (Ask), resets (Reset), and tells the agent when no page uses it;
@@ -339,7 +340,7 @@ namespace winrt::TerminalApp::implementation
         Grid::SetColumn(lines, 1);
         inner.Children().Append(lines);
 
-        // The right end reads "thinking off  ctx 15k / 200k": the thinking toggle, then the context
+        // The right end reads "thinking low  ctx 15k / 200k": the thinking toggle, then the context
         // size, side by side and centered on each other.
         StackPanel rightEnd;
         rightEnd.Orientation(Orientation::Horizontal);
@@ -349,8 +350,9 @@ namespace winrt::TerminalApp::implementation
         // The thinking toggle: a FLAT button (no fill, no border at rest — local values that only
         // the rest state uses, so the stock hover and pressed fills still show), as small as the
         // strip's text, so the row keeps its height. A click moves to the next level; the change
-        // itself runs on a clean tick (the page's pointer-handler rule).
-        _sessAiThinkingText = SessText(L"thinking off", 11, false, 0.6);
+        // itself runs on a clean tick (the page's pointer-handler rule). The label here is a
+        // placeholder: the strip shows the agent's level as soon as the mode is on.
+        _sessAiThinkingText = SessText(L"thinking low", 11, false, 0.6);
         _sessAiThinkingBtn = Button{};
         _sessAiThinkingBtn.Content(_sessAiThinkingText);
         _sessAiThinkingBtn.Padding(Thickness{ 5, 0, 5, 1 });
@@ -360,7 +362,7 @@ namespace winrt::TerminalApp::implementation
         _sessAiThinkingBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
         _sessAiThinkingBtn.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 3, 3, 3, 3 });
         _sessAiThinkingBtn.VerticalAlignment(VerticalAlignment::Center);
-        SessSetTip(_sessAiThinkingBtn, L"Thinking", L"How much the model thinks before it searches. Click for the next level: off \x2192 low \x2192 medium \x2192 high \x2192 xhigh \x2192 max \x2192 off.\n\nOff is the fastest: the model does not think before it answers (at most, the short notes it writes between two searches can count as thinking). The other levels turn on adaptive thinking (the model decides when to think), and the level (Claude Code\x2019s effort) sets how deep. A deeper level answers harder requests better and takes longer.\n\nIt applies from your next request, in every window, and is kept after a restart. The conversation keeps its context.");
+        SessSetTip(_sessAiThinkingBtn, L"Thinking", L"How much the model thinks before it searches. Click for the next level: low \x2192 medium \x2192 high \x2192 xhigh \x2192 max \x2192 low.\n\nEvery level runs adaptive thinking (the model decides when to think), and the level (Claude Code\x2019s effort) sets how deep. Low is the fastest; a deeper level answers harder requests better and takes longer. There is no off: with thinking off, every request fails.\n\nIt applies from your next request, in every window, and is kept after a restart. The conversation keeps its context.");
         _sessAiThinkingBtn.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
             Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
                 if (auto self = weak.get())
@@ -1156,8 +1158,9 @@ namespace winrt::TerminalApp::implementation
         _sessAiStatusText.Opacity(inkOpacity);
         _sessAiDot.Background(SolidColorBrush{ dot });
         // The thinking level the next request runs with — the agent's, so a click in another
-        // window shows here too. Off stays dim like the context size; a level that thinks reads
-        // brighter, since it changes how long a request takes.
+        // window shows here too. A level that thinks reads brighter than the context size, since
+        // it changes how long a request takes; the agent never runs Off (the one level that would
+        // read dim), so every level shown reads bright.
         if (_sessAiThinkingText)
         {
             const bool thinks = ::Agentmaster::HarnessThinkingLevelThinks(snapshot.thinkingLevel);
@@ -1183,8 +1186,10 @@ namespace winrt::TerminalApp::implementation
 
     // The strip's thinking toggle was clicked: move the AI search to the next thinking level.
     //   - The next level comes from the AGENT's level (not this page's label), so two windows that
-    //     click in turn walk one rotation; it skips a level whose effort the model does not have
-    //     (the model's list, once its process reported one).
+    //     click in turn walk one rotation, low -> medium -> high -> xhigh -> max -> low; it skips a
+    //     level whose effort the model does not have (the model's list, once its process reported
+    //     one), and it never offers off, which fails every request on Claude Code 2.1.310
+    //     (NextHarnessThinkingLevel). The side panel's toggle runs this same rotation.
     //   - It is persisted first (a freshest-disk read-modify-write of one field, the transcript
     //     overlay's idiom: never a stale in-memory copy over a cog Save or another window's change),
     //     then given to the agent, whose StateChanged event repaints every window's strip.

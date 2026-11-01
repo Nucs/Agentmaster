@@ -833,7 +833,7 @@ void TestAppSettings()
         in.tabColorPickerAdvancedOpen = false; // non-default (default true = ... and its More/Less "advanced" inputs expanded)
         in.transcriptOverlayLevel = L"compact"; // non-default (default "default") — the transcript overlay's last-picked level tab
         in.transcriptOverlayWrapLines = false; // non-default (default true = long lines wrap) — the transcript overlay's line-wrap toggle
-        in.sessionsAiThinkingLevel = L"xhigh"; // non-default (default "off") — the Sessions AI search's strip toggle
+        in.sessionsAiThinkingLevel = L"xhigh"; // non-default (default "low") — the Sessions AI search's strip toggle
         in.sessionsAiParkMinutes = 45; // non-default (default 120) — the AI search's park delay (the cog's SESSIONS tab, "AI SEARCH")
         in.showTabCloseButton = false; // non-default (default true = show the X / theme-driven)
         in.closeTabOnMiddleClick = false; // non-default (default true = middle-click closes a tab)
@@ -1035,7 +1035,7 @@ void TestAppSettings()
         CHECK(out.tabColorPickerCustomOpen == true && out.tabColorPickerAdvancedOpen == true, "settings tab color picker opens with Custom + advanced expanded by default on empty");
         CHECK(out.transcriptOverlayLevel == L"default", "settings transcriptOverlayLevel default \"default\" (the overlay opens at Default) on empty");
         CHECK(out.transcriptOverlayWrapLines == true, "settings transcriptOverlayWrapLines default true (long lines wrap) on empty");
-        CHECK(out.sessionsAiThinkingLevel == L"off", "settings sessionsAiThinkingLevel default \"off\" (no thinking, the agent's setting before the toggle) on empty");
+        CHECK(out.sessionsAiThinkingLevel == L"low", "settings sessionsAiThinkingLevel default \"low\" (the fastest level that works: off fails every request on Claude Code 2.1.310) on empty");
         CHECK(out.sessionsAiParkMinutes == 120, "settings sessionsAiParkMinutes default 120 (2 hours) on empty");
         CHECK(out.showTabCloseButton == true, "settings showTabCloseButton default true (show X) on empty");
         CHECK(out.closeTabOnMiddleClick == true, "settings closeTabOnMiddleClick default true (middle-click closes) on empty");

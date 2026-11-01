@@ -5704,7 +5704,7 @@ namespace winrt::TerminalApp::implementation
         // has no room beside it).
         StackPanel footer{};
         footer.Orientation(Orientation::Horizontal);
-        _sidePanelAiThinkingText = Text(L"thinking off", 10, false, 0.6);
+        _sidePanelAiThinkingText = Text(L"thinking low", 10, false, 0.6); // a placeholder: the footer shows the agent's level once the AI view is on
         _sidePanelAiThinkingBtn = Button{};
         _sidePanelAiThinkingBtn.Content(_sidePanelAiThinkingText);
         _sidePanelAiThinkingBtn.Padding(ThicknessHelper::FromLengths(4, 0, 4, 1));
@@ -5716,7 +5716,7 @@ namespace winrt::TerminalApp::implementation
         _sidePanelAiThinkingBtn.BorderThickness(ThicknessHelper::FromUniformLength(0));
         _sidePanelAiThinkingBtn.CornerRadius(CornerRadiusHelper::FromUniformRadius(3));
         _sidePanelAiThinkingBtn.IsTabStop(false);
-        AgentSetTitledTip(_sidePanelAiThinkingBtn, L"Thinking", winrt::hstring{ L"How much the model thinks before it searches. Click for the next level: off \x2192 low \x2192 medium \x2192 high \x2192 xhigh \x2192 max \x2192 off.\nOff is the fastest; the other levels turn on adaptive thinking at that effort \x2014 deeper answers harder requests better and takes longer.\nIt applies from your next request, in every window and on the Sessions page (one conversation), and is kept after a restart." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        AgentSetTitledTip(_sidePanelAiThinkingBtn, L"Thinking", winrt::hstring{ L"How much the model thinks before it searches. Click for the next level: low \x2192 medium \x2192 high \x2192 xhigh \x2192 max \x2192 low.\nEvery level runs adaptive thinking at that effort; low is the fastest, and deeper answers harder requests better and takes longer. There is no off: with thinking off, every request fails.\nIt applies from your next request, in every window and on the Sessions page (one conversation), and is kept after a restart." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
         _sidePanelAiThinkingBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
             const auto self = weakThis.get();
             if (!self)
@@ -6230,8 +6230,9 @@ namespace winrt::TerminalApp::implementation
         _sidePanelAiStatusText.Foreground(SolidColorBrush{ ink });
         _sidePanelAiStatusText.Opacity(inkOpacity);
         _sidePanelAiDot.Background(SolidColorBrush{ dot });
-        // The thinking level the next request runs with — the agent's, so a click in another window shows here too. Off stays
-        // dim like the context size; a level that thinks reads brighter (it changes how long a request takes).
+        // The thinking level the next request runs with — the agent's, so a click in another window shows here too. A level that
+        // thinks reads brighter than the context size (it changes how long a request takes); the agent never runs Off, the one
+        // level that would read dim, so every level shown reads bright.
         if (_sidePanelAiThinkingText)
         {
             const bool thinks = ::Agentmaster::HarnessThinkingLevelThinks(snapshot.thinkingLevel);

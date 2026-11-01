@@ -33,7 +33,8 @@ partial, every session searched by default.
 
 **Phases**
 1. **Toggle.** *Do:* Sessions page → click **AI** inside the box. *Expect:* the toggle accent-filled; the box is a
-   request line (typing filters nothing); ⊘ appears right of the box; the strip shows `thinking off  ctx …`.
+   request line (typing filters nothing); ⊘ appears right of the box; the strip shows `thinking low  ctx …` (NOT BUILT,
+   2026-11-01: `thinking off  ctx …` on a build without the change, where the default is off).
    NOT BUILT (2026-10-31): a filter typed before the click stays in the box, unsent, and no longer narrows the list;
    Enter sends it as the request. [LOG] `[nav] sessions ai on box=N` (N = its length).
 2. **Request.** *Do:* `the session where I fixed the tab drag crash` + the script, Enter. *Expect:* the strip shows the
@@ -67,12 +68,18 @@ partial, every session searched by default.
 > **Since** 0.8.0 · **P1** · **Needs** mock (it logs the request's `thinking` and `output_config.effort`) · **Spec** SESSIONS.md §9.1; SDK_HARNESS.md §5.3
 
 **Phases**
-1. **Rotate.** *Do:* click `thinking off` repeatedly. *Expect:* off → low → medium → high → xhigh → max → off; every window's
-   strip follows; the setting survives a restart (`sessionsAiThinkingLevel`).
+1. **Rotate.** *Do:* click `thinking low` repeatedly. *Expect:* low → medium → high → xhigh → max → low, never off
+   (NOT BUILT, 2026-11-01; before it: off → low → … → max → off); every window's strip and the side panel's footer
+   follow; the setting survives a restart (`sessionsAiThinkingLevel`).
 2. **Applied live.** *Do:* at `high`, send a request. *Expect:* the SAME process (no restart, context kept); [MOCK] the
-   request carries adaptive thinking at effort high; at `off`, the request body carries `{"thinking": {"type":
-   "between_tools"}}` and effort low.
-3. **Unsupported level** (a model reporting fewer levels via the mock's `initialize` answer) → skipped.
+   request carries adaptive thinking at effort high; at `low`, adaptive thinking at effort low. No request carries
+   `{"thinking": {"type": "between_tools"}}` any more (NOT BUILT): on Claude Code 2.1.310 it failed every request with
+   `API Error: 400 clear_thinking_20251015 strategy requires thinking to be enabled or adaptive`.
+3. **Unsupported level** (a model reporting fewer levels via the mock's `initialize` answer) → skipped; a model
+   reporting none of the five words gets low.
+4. **A stored "off"** (NOT BUILT) — `"sessionsAiThinkingLevel": "off"` in settings.json (every install's default before),
+   or `"messagingSearchThinking": "off"`. *Expect:* the strip shows `thinking low` and requests answer (the agent runs
+   off as low, `OfferedHarnessThinkingLevel`); the cog's Search topic level shows `low` and lists no `off`.
 
 ---
 

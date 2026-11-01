@@ -156,11 +156,12 @@ namespace Agentmaster
 
         std::wstring name{ L"sessions-search" }; // the conversation key (file names, the child's AM_HARNESS mark)
         std::wstring model{ L"claude-sonnet-5-5" };
-        // The thinking level the agent STARTS with (SetThinkingLevel changes it). Off = no
-        // thinking at effort low: the fastest answer, and the agent's only setting before the
-        // levels existed. The app seeds the persisted level right after the agent exists
-        // (AppSettings::sessionsAiThinkingLevel), before its first process starts.
-        HarnessThinkingLevel thinkingLevel{ HarnessThinkingLevel::Off };
+        // The thinking level the agent STARTS with (SetThinkingLevel changes it). Low = adaptive
+        // thinking at effort low: the fastest level that works. ⚠ Off is not offered: the agent
+        // runs it as Low (OfferedHarnessThinkingLevel, in the constructor), because every request
+        // at Off fails on Claude Code 2.1.310. The app seeds the persisted level right after the
+        // agent exists (AppSettings::sessionsAiThinkingLevel), before its first process starts.
+        HarnessThinkingLevel thinkingLevel{ HarnessThinkingLevel::Low };
         int64_t autoCompactTokens{ 500000 };
 
         // SESSIONS_DB.md §8.2: the profile whose SESSION DATABASE the agent searches, or empty for the
@@ -267,9 +268,9 @@ namespace Agentmaster
         std::wstring model; // the model that answers (known after the first request)
         int compactions{ 0 };
         HarnessUsage usage;
-        // The thinking level the next request runs with (SetThinkingLevel). A page shows it as
-        // "thinking <word>" and rotates it on a click.
-        HarnessThinkingLevel thinkingLevel{ HarnessThinkingLevel::Off };
+        // The thinking level the next request runs with (SetThinkingLevel) — never Off
+        // (OfferedHarnessThinkingLevel). A page shows it as "thinking <word>" and rotates it on a click.
+        HarnessThinkingLevel thinkingLevel{ HarnessThinkingLevel::Low };
         // The model's effort words as its process reported them (HarnessInventory::
         // supportedEfforts); empty until a process answered. The page's rotation skips a level
         // that is not in a non-empty list (NextHarnessThinkingLevel).
@@ -350,11 +351,13 @@ namespace Agentmaster
         // Set how much the model thinks, from the next request on (a request that runs now keeps
         // its level). The running process is changed live, so the conversation keeps its context
         // (HarnessConversation::SetThinking); a process that is not up starts with the level.
-        //   level — Off, or adaptive thinking at one of the effort levels.
+        //   level — adaptive thinking at one of the effort levels, Low to Max. Off is taken as Low
+        //           (OfferedHarnessThinkingLevel): every request at Off fails on Claude Code
+        //           2.1.310, so no caller can turn the search's thinking off.
         // Listeners get a StateChanged event whose snapshot carries the new level, so every
         // window's strip shows it. Setting the level the agent already has does nothing (no event,
-        // no log line). The caller persists the level (AppSettings::sessionsAiThinkingLevel): the
-        // agent keeps it in memory only.
+        // no log line) — Off while the agent runs at Low included. The caller persists the level
+        // (AppSettings::sessionsAiThinkingLevel): the agent keeps it in memory only.
         // Never throws.
         void SetThinkingLevel(HarnessThinkingLevel level) noexcept;
 
@@ -424,8 +427,8 @@ namespace Agentmaster
     // The process's one agent, created on first use and never destroyed (like the engine: the
     // app ends with TerminateProcess, and the child process is ended by its job object). It
     // takes the open sessions from the shared engine's registry and its start thinking level
-    // from settings.json (AppSettings::sessionsAiThinkingLevel, read once, here); the claude.exe
-    // path is pushed by the pages (SetClaudeExePath).
+    // from settings.json (AppSettings::sessionsAiThinkingLevel, read once, here; a stored "off"
+    // runs as low); the claude.exe path is pushed by the pages (SetClaudeExePath).
     //   throws — what the constructor throws, on the first call only.
     // ⚠ Do not call it from the standalone test harness or the CLI: the first call touches
     //   SharedEngine(), which starts the hooks bridge and the observers. Tests construct their

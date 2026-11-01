@@ -63,8 +63,9 @@ namespace Agentmaster::Msg
         }
 
         /// <summary>The thinking level a word names; the Search topic's default (high, the user's rule D24) for an empty or unknown word.</summary>
-        /// <param name="word">"off" … "max" (AppSettings::messagingSearchThinking).</param>
-        /// <returns>The level.</returns>
+        /// <param name="word">"low" … "max" (AppSettings::messagingSearchThinking). A stored "off" — the cog no longer lists it — parses
+        /// as Off, which the agent runs as Low (OfferedHarnessThinkingLevel): every request at off fails on Claude Code 2.1.310.</param>
+        /// <returns>The level, Off included: the agent turns Off into Low itself, so this does not.</returns>
         HarnessThinkingLevel ThinkingLevelFromWord(std::wstring_view word) noexcept
         {
             if (const auto level = ParseHarnessThinkingLevel(word))

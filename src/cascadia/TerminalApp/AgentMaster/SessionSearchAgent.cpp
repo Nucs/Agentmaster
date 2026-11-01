@@ -1326,6 +1326,10 @@ namespace Agentmaster
     {
         Impl* const impl = _impl.get();
         impl->options = std::move(options);
+        // The start level comes from outside (settings.json, the cog, a test): Off would fail every request on Claude
+        // Code 2.1.310, so it runs as Low. Done first, so the command line and the snapshot below both get the level
+        // that runs.
+        impl->options.thinkingLevel = OfferedHarnessThinkingLevel(impl->options.thinkingLevel);
         if (!IsValidHarnessName(impl->options.name))
         {
             throw std::invalid_argument("SessionSearchAgentOptions::name must be 1 to 48 characters of a-z, 0-9 and '-'.");
@@ -1387,8 +1391,9 @@ namespace Agentmaster
             return impl->claudeExePath;
         } };
         h.model = impl->options.model;
-        // The start level (SetThinkingLevel changes it later, live). Off = no thinking blocks
-        // before a tool call, at effort low: the fastest answer.
+        // The start level (SetThinkingLevel changes it later, live): never Off (the constructor's
+        // first step), so adaptive thinking at the level's effort. The Disabled arm stays the
+        // rule's other half; no offered level reaches it.
         h.thinking = HarnessThinkingLevelThinks(impl->options.thinkingLevel) ? HarnessThinking::Adaptive : HarnessThinking::Disabled;
         h.effort = HarnessThinkingLevelEffort(impl->options.thinkingLevel);
         // The eval's prompt when it gives one (SessionSearchAgentOptions::systemPrompt), else the built-in one.
@@ -1531,6 +1536,9 @@ namespace Agentmaster
 
     void SessionSearchAgent::SetThinkingLevel(HarnessThinkingLevel level) noexcept
     {
+        // Before the comparison below: Off runs as Low (it fails every request on Claude Code 2.1.310), so asking for Off
+        // while the agent is at Low changes nothing and raises no event.
+        level = OfferedHarnessThinkingLevel(level);
         try
         {
             {
@@ -1677,7 +1685,9 @@ namespace Agentmaster
         static SessionSearchAgent* const agent = [] {
             SessionSearchAgentOptions options;
             // The persisted thinking level (the Sessions page's strip toggle): the agent STARTS with
-            // it, so its first process has it on the command line. An unknown word reads as Off.
+            // it, so its first process has it on the command line. An unknown word keeps the
+            // default, Low; a stored "off" (every install's default before) parses as Off, which
+            // the constructor runs as Low.
             try
             {
                 const AppSettings settings = LoadAppSettings();
@@ -1694,7 +1704,7 @@ namespace Agentmaster
             }
             catch (...)
             {
-                // Rule #18. Recovery: the agent starts at Off with the page search; the page's toggle still sets a level.
+                // Rule #18. Recovery: the agent starts at Low with the page search; the page's toggle still sets a level.
                 LogSwallowedException(L"SharedSessionSearchAgent: read the settings");
             }
             // SESSIONS.md §9.14: the window and tab tools over the app's windows (list, resume, fork, deactivate).

@@ -658,26 +658,42 @@ namespace Agentmaster
 
     HarnessThinkingLevel NextHarnessThinkingLevel(HarnessThinkingLevel level, const std::vector<std::wstring>& supportedEfforts) noexcept
     {
-        const auto supported = [&supportedEfforts](HarnessThinkingLevel candidate) noexcept {
-            if (candidate == HarnessThinkingLevel::Off || supportedEfforts.empty())
+        const auto offered = [&supportedEfforts](HarnessThinkingLevel candidate) noexcept {
+            if (candidate == HarnessThinkingLevel::Off)
             {
-                return true; // Off needs no effort level; an unknown list hides nothing
+                return false; // never offered: every request at Off fails on Claude Code 2.1.310 (the header's thinking policy)
+            }
+            if (supportedEfforts.empty())
+            {
+                return true; // an unknown list hides nothing
             }
             const std::wstring_view effort = HarnessThinkingLevelEffort(candidate);
             return std::any_of(supportedEfforts.begin(), supportedEfforts.end(), [effort](const std::wstring& s) noexcept { return EqualsAsciiNoCase(s, effort); });
         };
         constexpr size_t count = std::size(kThinkingLevels);
         const size_t from = static_cast<size_t>(level) < count ? static_cast<size_t>(level) : 0;
-        // At most one full turn: Off is always supported, so the loop always finds a level.
+        // At most one full turn, ending at `level` itself, so a model that supports one level only
+        // keeps it. The table still holds Off (index == the enum's value), and the walk steps over
+        // it: from Off, a level stored before it was retired, the first step is Low.
         for (size_t step = 1; step <= count; ++step)
         {
             const HarnessThinkingLevel candidate = kThinkingLevels[(from + step) % count];
-            if (supported(candidate))
+            if (offered(candidate))
             {
                 return candidate;
             }
         }
-        return HarnessThinkingLevel::Off;
+        // The model reported effort words and none is one of ours: Low, the floor. Claude Code steps an
+        // effort the model lacks to one it has, and Low still thinks, so a request still works.
+        return HarnessThinkingLevel::Low;
+    }
+
+    HarnessThinkingLevel OfferedHarnessThinkingLevel(HarnessThinkingLevel level) noexcept
+    {
+        // Off fails every request on Claude Code 2.1.310 (the header's thinking policy): it runs as the fastest level that
+        // works. A value outside the enum (a bad cast) runs as Low too: it would read as "off" in HarnessThinkingLevelWord
+        // and hand Claude Code the effort word "off", which is none of its words.
+        return level >= HarnessThinkingLevel::Low && level <= HarnessThinkingLevel::Max ? level : HarnessThinkingLevel::Low;
     }
 
     bool IsHarnessEffortWord(std::wstring_view effort) noexcept

@@ -546,6 +546,13 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
 > rule — the process starts only at a click into its box or a request — and the park is now a setting for both surfaces:
 > `AppSettings::sessionsAiParkMinutes` (Settings ▸ Sessions ▸ AI SEARCH; 120 minutes by default, 1–1440; a fixed 10 minutes
 > before) — 9.6.
+>
+> **2026-11-01 (the user's request; NOT BUILT): no "thinking off" any more.** With thinking off the AI search answered
+> nothing: on Claude Code 2.1.310 every request at off fails with `API Error: 400 clear_thinking_20251015 strategy requires
+> thinking to be enabled or adaptive` (dev's hooks.log; Claude Code sends its clear_thinking context strategy next to the
+> API's `between_tools`; 2.1.291 ran it). The toggle now rotates **low → medium → high → xhigh → max → low** on the page and
+> in the side panel, the default is low, a stored "off" runs as low (`OfferedHarnessThinkingLevel`), and the cog's Search
+> topic level lists no off (9.1; `SDK_HARNESS.md` 5.3).
 
 ### 9.1 What the user sees
 
@@ -554,28 +561,29 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
   **request line**: write what you remember ("the session where I fixed the tab drag crash") and
   press **Enter**.
 - A **strip** under the header shows the request, what happens now ("Searching: …"), then the
-  model's one-sentence answer. Its right end reads **"thinking off  ctx 15k / 200k"**: the
+  model's one-sentence answer. Its right end reads **"thinking low  ctx 15k / 200k"**: the
   thinking toggle, then the size of the conversation (of the most it can hold before Claude Code
   compacts it: the model's own window or 500K, whichever is smaller).
 - **The thinking toggle** (the user's request of 2026-10-14; in dev and production) sets how much the
-  model thinks before it searches. A click moves to the next level: **off → low → medium → high →
-  xhigh → max → off**.
-  - **Off** (the default) is the fastest: no thinking before the answer, at effort low — the
-    setting the AI search was meant to have before the toggle. On Sonnet 5.5 it is the API's own
-    off, `{"thinking": {"type": "between_tools"}}`, which the harness sends itself (Claude Code
-    leaves the `thinking` field out for this model, and the API then thinks by default: the AI
-    search's "thinking off" of 2026-10-10 to 10-14 still thought, `SDK_HARNESS.md` 5.3). Per the
-    API, the short notes the model writes between two searches may come back as thinking blocks
-    (the first measured search had none: its notes came as text).
-  - The other levels turn on Claude Code's **adaptive thinking** (the model decides when and how
-    much to think), at that **effort** level: on Sonnet 5.5 the effort is what defines the
-    thinking level. Deeper is slower.
+  model thinks before it searches. A click moves to the next level: **low → medium → high → xhigh →
+  max → low** (off → low → … → max → off until 2026-11-01).
+  - Every level runs Claude Code's **adaptive thinking** (the model decides when and how much to
+    think), at that **effort** level: on Sonnet 5.5 the effort is what defines the thinking level.
+    **Low** (the default) is the fastest; deeper is slower.
+  - **There is no off** (2026-11-01, the user's request: with it, the AI search answered nothing).
+    On Sonnet 5.5, off was the API's own off, `{"thinking": {"type": "between_tools"}}`, which the
+    harness sends itself (Claude Code leaves the `thinking` field out for this model, and the API
+    then thinks by default: the AI search's "thinking off" of 2026-10-10 to 10-14 still thought,
+    `SDK_HARNESS.md` 5.3). On Claude Code 2.1.310 every request at off fails: `API Error: 400
+    clear_thinking_20251015 strategy requires thinking to be enabled or adaptive`. The rotation
+    skips it (`NextHarnessThinkingLevel`), and a stored "off" — every install's default until then —
+    runs as low (`OfferedHarnessThinkingLevel`, in the agent) until the next click writes a level.
   - A level the model does not support is skipped, once its process reported the model's levels
-    (Sonnet 5.5 has all five).
+    (Sonnet 5.5 has all five); a model that reports none of the five words gets low.
   - It applies from the **next request**, to the running process (the conversation keeps its
     whole context; 9.2), in **every window**, and it is kept after a restart
     (`AppSettings::sessionsAiThinkingLevel`, written by the toggle itself).
-  - Off reads dim like the context size; a level that thinks reads brighter.
+  - Every level reads brighter than the context size (only off read dim).
 - The **table shows exactly the sessions that the model picked**, best match first. The first
   row is selected, so its detail pane is there without a click.
 - **Each row carries the model's evidence** (9.12, 2026-10-17; in dev and production): a thin-barred

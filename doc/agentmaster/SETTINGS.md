@@ -181,7 +181,8 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
   (`Agentmaster:messaging:telegram:<profile leaf>`), never in a file; `messagingTelegramOwnerId` is the
   user's id.
 - `messagingIdleGraceMinutes` (10): an idle, unpinned session's topic is deleted after this.
-- `messagingSearchThinking` (`high`): the Search topic agent's thinking level.
+- `messagingSearchThinking` (`high`): the Search topic agent's thinking level, `low` to `max`. No `off`: every request at
+  off fails on Claude Code 2.1.310, so the cog does not list it, and a stored `off` runs as `low` (SESSIONS.md 9.1).
 - `messagingVerbose` (false): new topics show the whole session (true) or the conversation only; a topic
   overrides it (`/verbose`).
 - `messagingRichMessages` (true): Claude's Markdown goes as Telegram rich messages.
@@ -299,7 +300,9 @@ Every color surface — tabs, board bands, Sessions chips, the pending dots — 
   `summaryPanelTruncate` (true), `summaryPanelShowHistory` (true), `summaryPanelWidthFraction` /
   `summaryPanelHeightFraction` (0 = the default size).
 - The transcript view: `transcriptOverlayLevel` (`default`), `transcriptOverlayWrapLines` (true).
-- `sessionsAiThinkingLevel` (`off`): the AI search's thinking level.
+- `sessionsAiThinkingLevel` (`low`): the AI search's thinking level, `low` to `max` (the strip's and the side panel's
+  toggle write it). No `off`: every request at off fails on Claude Code 2.1.310; a stored `off` (the default until
+  2026-11-01) runs as `low` until the next click writes a level (SESSIONS.md 9.1).
 - The side panel: `sidePanelOnLeft` (true), `sidePanelScrollToSelectedTab` (true), and the seeds for new
   windows `sidePanelWidthFraction` (0.22), `sidePanelSplitFraction` (0.5), `sidePanelCollapsed` (false),
   `sidePanelSummaryHidden` (false), `sidePanelAiMode` (false: the filter box's AI toggle, SIDE_PANEL.md §2h).

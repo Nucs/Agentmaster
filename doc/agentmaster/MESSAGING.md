@@ -139,7 +139,7 @@ configurable, backfill, the activity draft → P4 the Search agent and revive �
 | Queue and run | The Prompt Queue + `Scheduler::DecideAdvance` (dormant gate, settle hold, question guard with `kAnswersQuestionOk`, global pause, interrupt hold) | DELIVERY.md §14–§17 |
 | Read the box or a menu | `ControlCore::ReadPendingInputDraft`, `IsMenuOptionCaret`, `pendingBoxState`, the remembered draft `pendingInput` | PENDING_INPUT.md |
 | The tab's right-click actions | The tab menu (Rename, Change tab color, Copy ▸, Mark Unread, Move to Waiting-for-you / Idle, Favorite, Tags, Activate, Fork session ▸, New Session Here ▸, Restart session, Deactivate ▸, Close ▸, …) and the per-window sinks that reach the hosting window | `Tab.cpp`, `Engine.h` |
-| Search every session | `SessionSearchAgent` on the agent harness (the Sessions page's AI search; thinking levels off → max) and, when On, the session database's tools | SESSIONS.md §9, SDK_HARNESS.md, SESSIONS_DB.md |
+| Search every session | `SessionSearchAgent` on the agent harness (the Sessions page's AI search; thinking levels low → max — no off since 2026-11-01: it fails every request on Claude Code 2.1.310) and, when On, the session database's tools | SESSIONS.md §9, SDK_HARNESS.md, SESSIONS_DB.md |
 | Resume, fork, start | `_RestoreArchivedSession`, `_ResumeSessionFromDisk`, `_ForkSessionFromDisk`, `_ForkManagedSessionById`, the launch seam | `TerminalPage.AgentSessions.cpp` |
 | Durable per-session flags | `SessionStore` (the `favorite`, `tags` keys) | `SessionStore.h` |
 | Secrets, HTTPS, JSON | Credential Manager helpers (`LaunchPresetsOs.h`), WinHTTP (`Updater.h` `HttpsGet`, already in `TerminalApp.dll`), nlohmann-json | |

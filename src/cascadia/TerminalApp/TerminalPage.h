@@ -1259,10 +1259,11 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBlock _sessAiStatusText{ nullptr }; // the strip's second line: the activity, the answer, or the hint
         winrt::Windows::UI::Xaml::Controls::TextBlock _sessAiUsageText{ nullptr }; // the strip's right end: context tokens of the conversation
         // The strip's "thinking <level>" toggle, left of the context size: a click moves the AI
-        // search to the next thinking level (off -> low -> ... -> max -> off), persisted for every
-        // window (AppSettings::sessionsAiThinkingLevel). Shown in AI mode only, with the strip.
+        // search to the next thinking level (low -> ... -> max -> low; no off, which fails every
+        // request on Claude Code 2.1.310), persisted for every window
+        // (AppSettings::sessionsAiThinkingLevel). Shown in AI mode only, with the strip.
         winrt::Windows::UI::Xaml::Controls::Button _sessAiThinkingBtn{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::TextBlock _sessAiThinkingText{ nullptr }; // the toggle's label, "thinking off" ... "thinking max"
+        winrt::Windows::UI::Xaml::Controls::TextBlock _sessAiThinkingText{ nullptr }; // the toggle's label, "thinking low" ... "thinking max"
 
         // Agentmaster: IN-PLACE TITLE EDITING in the Sessions browser (the Manager's Explorer-tree
         // rename idiom, here over the Title cell). Two entry points — the row right-click "Edit

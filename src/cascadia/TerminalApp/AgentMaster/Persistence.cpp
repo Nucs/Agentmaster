@@ -1179,10 +1179,12 @@ namespace Agentmaster
         // The transcript overlay's ↵ line-wrap toggle (absent => ON: long lines wrap, the view as it was
         // before the toggle existed).
         s.transcriptOverlayWrapLines = v.BoolAt(L"transcriptOverlayWrapLines", true);
-        // The Sessions AI search's thinking level, kept verbatim: the page parses the word and reads
-        // an unknown one as "off", so a hand-edited value can never break a request (absent => "off",
-        // the agent's only setting before the toggle existed).
-        s.sessionsAiThinkingLevel = v.StrAt(L"sessionsAiThinkingLevel", L"off");
+        // The Sessions AI search's thinking level, kept verbatim: the agent parses the word and reads
+        // an unknown one as "low", so a hand-edited value can never break a request (absent => "low",
+        // the fastest level that works). A stored "off" — the default until 2026-11-01 — is kept as
+        // it is too: the agent runs it as low (every request at off fails on Claude Code 2.1.310),
+        // and the toggle's next click writes a real level.
+        s.sessionsAiThinkingLevel = v.StrAt(L"sessionsAiThinkingLevel", L"low");
         // The AI search's park delay: absent => the 120-minute default; 0 or a value past a day is clamped by the one rule
         // every reader shares, so a hand-edited 0 can never end the process after every answer.
         s.sessionsAiParkMinutes = ClampSessionsAiParkMinutes(v.U32At(L"sessionsAiParkMinutes", 120));

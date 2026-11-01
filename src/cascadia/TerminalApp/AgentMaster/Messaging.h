@@ -137,7 +137,8 @@ namespace Agentmaster::Msg
     };
 
     // Makes a bridge to the process's one Search conversation (the conversation itself is made on first use and never
-    // destroyed). thinkingWord = "off" … "max" (AppSettings::messagingSearchThinking), applied to the conversation.
+    // destroyed). thinkingWord = "low" … "max" (AppSettings::messagingSearchThinking), applied to the conversation; a stored
+    // "off" runs as low (the agent's OfferedHarnessThinkingLevel: every request at off fails on Claude Code 2.1.310).
     using SearchBridgeFactory = std::function<std::unique_ptr<SearchBridge>(std::function<void(const SearchBridgeEvent&)> sink, std::wstring thinkingWord)>;
 
     // ===== the launch-model menu, behind a seam (§21.25) =====================================

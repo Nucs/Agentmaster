@@ -43,7 +43,9 @@
 //
 // Usage: harness_live.exe [--claude <path to claude.exe>] [--model <id>] [--agent "<request>"]
 //                         [--only-agent] [--only-permissions] [--only-thinking]
-//                         [--agent-thinking off|low|medium|high|xhigh|max] [--verbose]
+//                         [--agent-thinking low|medium|high|xhigh|max] [--verbose]
+//                         (the agent runs "off" as low, like the app: every request at off fails on
+//                         Claude Code 2.1.310; scenario T still drives the harness's own off)
 //        harness_live.exe --index [days]     measure the session index alone (no model call; no days = every session)
 //        harness_live.exe --tool <search|grep|read> '<arguments JSON>' [--tool-out <file>]
 //                         one finding tool's call over this machine's sessions, timed, with no model (a grep
@@ -86,8 +88,9 @@ namespace
     int g_checks = 0;
     bool g_verbose = false;
     // --agent-thinking <level>: the thinking level the search agent of scenario 9 starts with
-    // (the Sessions page's strip toggle; off by default, like the app's default).
-    HarnessThinkingLevel g_agentThinking = HarnessThinkingLevel::Off;
+    // (the Sessions page's strip toggle; low by default, like the app's default). The agent runs
+    // an asked "off" as low (OfferedHarnessThinkingLevel), so the printed level is what runs.
+    HarnessThinkingLevel g_agentThinking = HarnessThinkingLevel::Low;
 
     double Seconds()
     {
@@ -1939,8 +1942,9 @@ int wmain(int argc, wchar_t** argv)
         }
         else if (a == L"--agent-thinking" && i + 1 < argc)
         {
-            // An unknown word keeps Off, as the app reads an unknown persisted level.
-            g_agentThinking = ParseHarnessThinkingLevel(argv[++i]).value_or(HarnessThinkingLevel::Off);
+            // An unknown word keeps Low, as the app reads an unknown persisted level; "off" becomes Low here
+            // already, so the "thinking level:" line and the eval's record name the level the agent runs.
+            g_agentThinking = OfferedHarnessThinkingLevel(ParseHarnessThinkingLevel(argv[++i]).value_or(HarnessThinkingLevel::Low));
         }
         else if (a == L"--verbose")
         {
