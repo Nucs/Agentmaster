@@ -21,7 +21,10 @@
 //      Telegram's answer, the picture's record across a restart, and the cog's switch; and since 2026-11-01 (the picture follows
 //      the status) the card's LOOKS at its screen (CardPictureTrack): a look's unchanged plan, the backoff, the settle look after a
 //      change into a state at rest, the look a read that got no screen in time owes, a page flip's look, a look an update
-//      overtakes, and the give-up after 8 looks;
+//      overtakes, and the give-up after 8 looks; and the tab's start (the LAUNCH WATCH, the user's request of 2026-11-01): the blank
+//      screen test (ScreenSnapshotShowsNothing), an edit that keeps the picture while the watch waits, the ask and its gate, the
+//      watch from a blank screen to ONE picture once claude's screen held still, a screen that never holds still, the timeout,
+//      one watch per update, a tab parked meanwhile, an edit that overtakes a watch look, and a look that begins the watch;
 //   2. 🖼 Screen Image: the terminal's live screen drawn as a picture — the styled snapshot's format (ScreenSnapshot.h, shared
 //      with ControlCore.cpp) and the renderer (ScreenImage.h), which draws a REAL PNG here with Direct2D + DirectWrite + WIC; the
 //      test decodes it again and reads its pixels.
@@ -856,13 +859,13 @@ void TestMessagingCard()
         // The production case: a status update's read got no screen in time (the 4 s wait ran out).
         {
             CardPictureTrack t;
-            CardPictureStepDecided(t, true, true, false, now); // waiting -> running: a read, and no settle look (a running card re-reads)
+            CardPictureStepDecided(t, true, true, false, true, now); // waiting -> running: a read, and no settle look (a running card re-reads)
             CHECK(t.stepPending && t.stepReads && t.lookAtMs == 0 && t.lookTries == 0, "track: a status update into Running reads the screen and owes no settle look");
             CHECK(!CardPictureLookDue(t, now + 999'999), "track: nothing is due while no look is owed");
             CardPictureStepSettled(t, h, CardPictureRead::Stale, now + 4000); // the card went with its stored picture
             CHECK(!t.stepPending && t.handedShotHash == h && t.lookAtMs == now + 4000 + 5000, "track: a read that got no screen in time owes a look 5 s later");
             CHECK(!CardPictureLookDue(t, now + 8999) && CardPictureLookDue(t, now + 9000), "track: the look is due at its moment, not before");
-            CardPictureLookStarted(t, 77, 41);
+            CardPictureLookStarted(t, 77, 41, true);
             CHECK(t.lookPending && t.lookAtMs == 0 && t.lookSeq == 77 && t.lookBase == 41 && !CardPictureLookDue(t, now + 99'000), "track: one look at a time");
             const auto step = CardPictureLookSettled(t, 77, 41, true, h + 5, CardPictureRead::Fresh, now + 15'000);
             CHECK(step == CardPictureLookStep::Send && !t.lookPending && t.handedShotHash == h + 5 && t.lookTries == 0 && t.lookAtMs == 0,
@@ -872,43 +875,43 @@ void TestMessagingCard()
         // The early read: a change into a state at rest owes the settle look, whatever the update's own read found.
         {
             CardPictureTrack t;
-            CardPictureStepDecided(t, true, true, true, now); // running -> waiting for you
+            CardPictureStepDecided(t, true, true, true, true, now); // running -> waiting for you
             CHECK(t.lookAtMs == now + kCardPictureSettleMs, "track: a change into a state at rest owes the settle look 3 s later");
             CHECK(!CardPictureLookDue(t, now + kCardPictureSettleMs), "track: never while the update's own read is pending (a look never overtakes it)");
             CardPictureStepSettled(t, h, CardPictureRead::Fresh, now + 200);
             CHECK(t.lookAtMs == now + kCardPictureSettleMs && CardPictureLookDue(t, now + kCardPictureSettleMs),
                   "track: a fresh read keeps the settle look - Claude Code may still have been drawing the new state");
-            CardPictureLookStarted(t, 90, 12);
+            CardPictureLookStarted(t, 90, 12, true);
             CHECK(CardPictureLookSettled(t, 90, 12, false, 0, CardPictureRead::Unchanged, now + 3100) == CardPictureLookStep::Done && t.lookAtMs == 0 && !t.lookPending,
                   "track: the settle look found the screen the card carries - nothing is sent, nothing more is owed");
             CardPictureTrack again;
-            CardPictureStepDecided(again, true, true, true, now);
-            CardPictureStepDecided(again, true, true, false, now + 1000); // the session runs again before the settle look
+            CardPictureStepDecided(again, true, true, true, true, now);
+            CardPictureStepDecided(again, true, true, false, true, now + 1000); // the session runs again before the settle look
             CHECK(again.lookAtMs == 0, "track: a change into Running cancels a settle look still owed (its own read covers it)");
         }
 
         // A page flip (Kept) that overtakes a read still running, or that puts an older picture back, owes a look.
         {
             CardPictureTrack t;
-            CardPictureStepDecided(t, true, false, false, now); // a text change (the draft): a read, no state change
+            CardPictureStepDecided(t, true, false, false, true, now); // a text change (the draft): a read, no state change
             CHECK(t.lookAtMs == 0, "track: a text change without a state change owes no settle look");
-            CardPictureStepDecided(t, false, false, false, now + 50); // a page flip 50 ms later overtakes that read
+            CardPictureStepDecided(t, false, false, false, true, now + 50); // a page flip 50 ms later overtakes that read
             CHECK(t.stepPending && !t.stepReads && t.lookAtMs == now + 50 + kCardPictureSettleMs, "track: a page flip that overtakes a read still running owes the look that read was");
             CardPictureStepSettled(t, h, CardPictureRead::Kept, now + 60);
             CHECK(!CardPictureLookDue(t, now + 50 + kCardPictureSettleMs - 1) && CardPictureLookDue(t, now + 50 + kCardPictureSettleMs), "track: ...due 3 s after the flip");
 
             CardPictureTrack older;
-            CardPictureStepDecided(older, true, false, false, now);
+            CardPictureStepDecided(older, true, false, false, true, now);
             CardPictureStepSettled(older, h + 1, CardPictureRead::Fresh, now + 100); // a new upload is handed (still on its way)
             CHECK(older.lookAtMs == 0 && older.handedShotHash == h + 1, "track: a fresh read with no state change owes nothing");
-            CardPictureStepDecided(older, false, false, false, now + 500); // a page flip carries the stored picture, older than that upload
+            CardPictureStepDecided(older, false, false, false, true, now + 500); // a page flip carries the stored picture, older than that upload
             CardPictureStepSettled(older, h, CardPictureRead::Kept, now + 500);
             CHECK(older.handedShotHash == h && older.lookAtMs == now + 500 + kCardPictureSettleMs, "track: a page flip that puts an older picture back owes a look");
 
             CardPictureTrack same;
-            CardPictureStepDecided(same, false, false, false, now);
+            CardPictureStepDecided(same, false, false, false, true, now);
             CardPictureStepSettled(same, h, CardPictureRead::Kept, now); // the first step of a run: nothing handed before
-            CardPictureStepDecided(same, false, false, false, now + 10);
+            CardPictureStepDecided(same, false, false, false, true, now + 10);
             CardPictureStepSettled(same, h, CardPictureRead::Kept, now + 10); // the same picture again
             CHECK(same.lookAtMs == 0, "track: a page flip that keeps the picture the card carries - or the first step of a run - owes nothing");
         }
@@ -916,18 +919,18 @@ void TestMessagingCard()
         // A post or edit decided while a look runs wins; a look that got no screen in time backs off and gives up after 8.
         {
             CardPictureTrack t;
-            CardPictureStepDecided(t, true, true, true, now);
+            CardPictureStepDecided(t, true, true, true, true, now);
             CardPictureStepSettled(t, h, CardPictureRead::Stale, now + 4000);
             CHECK(t.lookAtMs == now + kCardPictureSettleMs, "track: a read that got no screen in time keeps an earlier settle look (never pushed back)");
-            CardPictureLookStarted(t, 5, 100);
-            CardPictureStepDecided(t, true, true, false, now + 5000); // the session runs again while the look waits for the window
+            CardPictureLookStarted(t, 5, 100, true);
+            CardPictureStepDecided(t, true, true, false, true, now + 5000); // the session runs again while the look waits for the window
             CHECK(t.lookPending && t.lookAtMs == 0, "track: a status update while a look runs leaves the look to settle and owes no new one (Running)");
             CHECK(CardPictureLookSettled(t, 5, 101, true, h + 3, CardPictureRead::Fresh, now + 6000) == CardPictureLookStep::Dropped && !t.lookPending,
                   "track: ...and that look is dropped when it settles - the update owns the card, an older text is never edited back over it");
             CHECK(CardPictureLookSettled(t, 5, 101, true, h + 3, CardPictureRead::Fresh, now + 6000) == CardPictureLookStep::Dropped, "track: a look that is not running is dropped");
 
             CardPictureTrack b;
-            CardPictureStepDecided(b, true, true, true, now);
+            CardPictureStepDecided(b, true, true, true, true, now);
             CardPictureStepSettled(b, h, CardPictureRead::Stale, now);
             int64_t atMs = now; // the simulated clock (not `clock`: <ctime>'s function of that name)
             CardPictureLookStep last = CardPictureLookStep::Done;
@@ -937,7 +940,7 @@ void TestMessagingCard()
             {
                 atMs = b.lookAtMs;
                 everyLookDue = everyLookDue && CardPictureLookDue(b, atMs);
-                CardPictureLookStarted(b, 1000 + static_cast<uint64_t>(i), 7);
+                CardPictureLookStarted(b, 1000 + static_cast<uint64_t>(i), 7, true);
                 atMs += kCardPictureLookWaitMs; // the window never answers: each look's wait runs out
                 last = CardPictureLookSettled(b, 1000 + static_cast<uint64_t>(i), 7, false, 0, CardPictureRead::Stale, atMs);
                 if (last == CardPictureLookStep::Again)
@@ -949,13 +952,194 @@ void TestMessagingCard()
             CHECK(everyLookDue && last == CardPictureLookStep::GiveUp && b.lookTries == kCardPictureLookTriesMax && pauses == expectedPauses,
                   "track: each look that gets no screen in time waits longer for the next (10, 20, 40, then 60 s), and the 8th gives up");
             CHECK(!CardPictureLookDue(b, atMs + 100'000'000), "track: after giving up, no look is due until the next status update");
-            CardPictureStepDecided(b, true, true, true, atMs);
+            // A PARKED tab (its claude not started: tabStarted false) - no screen there is final.
+            CardPictureStepDecided(b, true, true, true, false, atMs);
             CHECK(b.lookTries == 0 && b.lookAtMs == atMs + kCardPictureSettleMs, "track: the next status update starts the looks over");
-            CardPictureStepSettled(b, h, CardPictureRead::NoScreen, atMs + 10);
+            CHECK(!CardPictureStepSettled(b, h, CardPictureRead::NoScreen, atMs + 10) && b.launchUntilMs == 0,
+                  "track: a parked tab's update (NoScreen) begins no launch watch");
             CHECK(b.lookAtMs == atMs + kCardPictureSettleMs, "track: a parked tab's update (NoScreen) owes no retry, only the settle look it had");
-            CardPictureLookStarted(b, 3000, 7);
+            CardPictureLookStarted(b, 3000, 7, false);
             CHECK(CardPictureLookSettled(b, 3000, 7, true, h, CardPictureRead::NoScreen, atMs + 3500) == CardPictureLookStep::Done && b.lookAtMs == 0 && b.lookTries == 0,
-                  "track: a look at a tab with no screen ends the looks (never retried forever)");
+                  "track: a look at a parked tab with no screen ends the looks (never retried forever)");
+        }
+
+        // ----- 2026-11-01, the tab's start: the LAUNCH WATCH (the user's request: "when a tab activates, we should update once the
+        // screenshot when the tab launched and claude is showing and no longer black screen") -----
+
+        // A screen that shows nothing: every row blank (the format writes no cell of a blank row), however it was built.
+        {
+            const auto serialize = [](int cols, int rows, const std::vector<std::vector<ScreenCell>>& lines) {
+                ScreenSnapshot s;
+                s.cols = cols;
+                s.rows = rows;
+                s.defaultFg = 0xC0C0C0;
+                s.defaultBg = 0x101010;
+                s.fontFace = L"Cascadia Mono";
+                s.lines = lines;
+                s.lines.resize(static_cast<size_t>(rows));
+                return SerializeScreenSnapshot(s);
+            };
+            const std::wstring empty = serialize(80, 24, {});
+            const std::wstring spaces = serialize(80, 24, { { Cell(L" ", 0xC0C0C0, 0x101010), Cell(L" ", 0xC0C0C0, 0x101010), Cell(L"", 0xC0C0C0, 0x101010) } });
+            const std::wstring text = serialize(80, 24, { {}, {}, { Cell(L" ", 0xC0C0C0, 0x101010), Cell(L">", 0xC0C0C0, 0x101010) } });
+            const std::wstring lastRow = [&] {
+                std::vector<std::vector<ScreenCell>> lines(24);
+                lines[23] = { Cell(L"\x2500", 0x808080, 0x101010) }; // a rule on the bottom row only (claude's input box draws first)
+                return serialize(80, 24, lines);
+            }();
+            const std::wstring colored = serialize(80, 24, { { Cell(L" ", 0xC0C0C0, 0x303080), Cell(L" ", 0xC0C0C0, 0x303080) } });
+            const std::wstring underlined = serialize(80, 24, { { Cell(L" ", 0xC0C0C0, 0x101010, kScreenCellUnderline) } });
+            CHECK(ScreenSnapshotShowsNothing(empty) && ScreenSnapshotShowsNothing(spaces), "blank screen: no cell at all, or only default spaces, shows nothing");
+            CHECK(!ScreenSnapshotShowsNothing(text) && !ScreenSnapshotShowsNothing(lastRow), "blank screen: one glyph anywhere (the bottom row too) shows something");
+            CHECK(!ScreenSnapshotShowsNothing(colored) && !ScreenSnapshotShowsNothing(underlined),
+                  "blank screen: spaces in a color of their own, or under a line, show something (a program that paints with colors alone)");
+            CHECK(!ScreenSnapshotShowsNothing(L"") && !ScreenSnapshotShowsNothing(L"AMSS1 80") && !ScreenSnapshotShowsNothing(empty.substr(0, empty.size() - 1)) &&
+                      !ScreenSnapshotShowsNothing(empty + L"\n"),
+                  "blank screen: \"\", a cut-off header, a missing or an extra row is not known blank (the drawing's own parse reports it)");
+        }
+
+        // The plan treats a blank screen as no screen: the stored picture is kept with its own moment, nothing is drawn.
+        CHECK(PlanCardPicture(false, 0, now, L"FILE1", h, now - 60'000).source == CardPictureSource::Reuse, "launch: a blank screen (unreadable) keeps the stored picture");
+
+        // An edit reads the screen only for a status update, never for the slow form upgrade, and never while the watch waits.
+        {
+            CardPictureTrack t;
+            CHECK(CardPictureEditReads(t, true, false) && !CardPictureEditReads(t, false, false) && !CardPictureEditReads(t, true, true),
+                  "launch: an edit reads for a changed text, not for the same text or the form upgrade");
+            CardPictureLaunchBegin(t, now);
+            CHECK(!CardPictureEditReads(t, true, false), "launch: while the watch waits, an edit keeps the card's picture (the watch sends claude's screen once)");
+            CHECK(t.launchUntilMs == now + kCardPictureLaunchWatchMs && t.launchSpent && t.lookAtMs == now + kCardPictureLaunchPollMs,
+                  "launch: the watch waits 120 s, its first look one poll later, and it counts for this status update");
+            CHECK(!CardPictureLaunchExpire(t, now + kCardPictureLaunchWatchMs - 1) && t.launchUntilMs != 0 && CardPictureLaunchExpire(t, now + kCardPictureLaunchWatchMs) &&
+                      t.launchUntilMs == 0 && CardPictureEditReads(t, true, false),
+                  "launch: a watch past its deadline ends at the next decision, and edits read again");
+        }
+
+        // The look's ask and the gate.
+        {
+            CardPictureTrack t;
+            t.handedShotHash = h;
+            const auto plain = CardPictureLookAskFor(t, now);
+            CHECK(plain.unchangedShotHash == h && !plain.launchGate, "launch ask: a look's basis is the picture the card carries; no gate without a watch");
+            CardPictureLaunchBegin(t, now);
+            t.launchShotHash = h + 2;
+            const auto gated = CardPictureLookAskFor(t, now + 1500);
+            CHECK(gated.launchGate && gated.launchShotHash == h + 2, "launch ask: the watch gates its looks with the screen it saw last");
+            t.launchShows = kCardPictureLaunchSettleLooks;
+            CHECK(!CardPictureLookAskFor(t, now + 1500).launchGate, "launch ask: after 3 changing looks the gate opens (a screen that never holds still still goes)");
+            t.launchShows = 0;
+            CHECK(!CardPictureLookAskFor(t, now + kCardPictureLaunchWatchMs - kCardPictureLaunchPollMs).launchGate, "launch ask: the watch's last look is never gated");
+            CHECK(!CardPictureLaunchGateHolds(nullptr, true, h) && !CardPictureLaunchGateHolds(&plain, true, h), "launch gate: a post, an edit or a look outside a watch is never held");
+            CardPictureLookAsk first = gated;
+            first.launchShotHash = 0;
+            CHECK(CardPictureLaunchGateHolds(&first, true, h) && !CardPictureLaunchGateHolds(&first, false, 0),
+                  "launch gate: the watch's first screen with text waits for the next look; a blank one is not held (it is Blank)");
+            CHECK(CardPictureLaunchGateHolds(&gated, true, h + 3) && !CardPictureLaunchGateHolds(&gated, true, h + 2),
+                  "launch gate: a screen that changed since the last look is held; one that held still passes");
+        }
+
+        // The watch from start to picture: blank, blank, the screen drawing, then the same screen again -> ONE edit.
+        {
+            CardPictureTrack t;
+            CardPictureStepDecided(t, true, false, false, true, now); // the activation's edit: the "not running" line went (a read)
+            CHECK(CardPictureStepSettled(t, h, CardPictureRead::Blank, now + 100) && t.launchUntilMs == now + 100 + kCardPictureLaunchWatchMs &&
+                      t.handedShotHash == h && t.lookAtMs == now + 100 + kCardPictureLaunchPollMs,
+                  "launch: an update whose read is blank keeps its picture and begins the watch (first look one poll later)");
+            CHECK(!CardPictureStepSettled(t, h, CardPictureRead::Blank, now + 200), "launch: a second blank read of the same update begins no second watch");
+            int64_t at = t.lookAtMs;
+            CardPictureLookStarted(t, 50, 9, true);
+            CHECK(CardPictureLookSettled(t, 50, 9, false, 0, CardPictureRead::Blank, at) == CardPictureLookStep::Again && t.lookAtMs == at + kCardPictureLaunchPollMs,
+                  "launch: still blank - look again one poll later");
+            at = t.lookAtMs;
+            CardPictureLookStarted(t, 51, 9, true);
+            CHECK(CardPictureLookSettled(t, 51, 9, true, h + 10, CardPictureRead::Moving, at) == CardPictureLookStep::Again && t.launchShotHash == h + 10 && t.launchShows == 1,
+                  "launch: claude is drawing - the screen is remembered, nothing is sent");
+            const auto ask = CardPictureLookAskFor(t, at + kCardPictureLaunchPollMs);
+            CHECK(ask.launchGate && ask.launchShotHash == h + 10 && !CardPictureLaunchGateHolds(&ask, true, h + 10), "launch: the same screen at the next look passes the gate");
+            at = t.lookAtMs;
+            CardPictureLookStarted(t, 52, 9, true);
+            CHECK(CardPictureLookSettled(t, 52, 9, true, h + 10, CardPictureRead::Fresh, at) == CardPictureLookStep::Send && t.launchUntilMs == 0 && t.handedShotHash == h + 10 &&
+                      t.lookAtMs == 0,
+                  "launch: claude's screen held still - the card is edited with it ONCE, and the watch is over");
+            CHECK(!CardPictureLookDue(t, at + 999'999), "launch: nothing more is owed after the watch's picture");
+        }
+
+        // A screen that never holds still is taken after 3 changing looks; a screen the card carries already ends the watch silently.
+        {
+            CardPictureTrack t;
+            CardPictureStepDecided(t, true, false, false, true, now);
+            CardPictureStepSettled(t, 0, CardPictureRead::Blank, now); // a new tab: no picture yet, the card went as text
+            int64_t at = now;
+            for (uint64_t i = 0; i < static_cast<uint64_t>(kCardPictureLaunchSettleLooks); ++i)
+            {
+                at = t.lookAtMs;
+                CardPictureLookStarted(t, 60 + i, 3, true);
+                CardPictureLookSettled(t, 60 + i, 3, true, h + 20 + static_cast<uint32_t>(i), CardPictureRead::Moving, at);
+            }
+            CHECK(t.launchShows == kCardPictureLaunchSettleLooks && !CardPictureLookAskFor(t, t.lookAtMs).launchGate,
+                  "launch: after 3 changing looks the next one is drawn whatever it shows (a spinner, a clock)");
+            at = t.lookAtMs;
+            CardPictureLookStarted(t, 70, 3, true);
+            CHECK(CardPictureLookSettled(t, 70, 3, true, h + 30, CardPictureRead::Fresh, at) == CardPictureLookStep::Send && t.launchUntilMs == 0, "launch: ...and sent");
+
+            CardPictureTrack u;
+            CardPictureStepDecided(u, true, false, false, true, now);
+            CardPictureStepSettled(u, h, CardPictureRead::Blank, now);
+            CardPictureLookStarted(u, 80, 4, true);
+            CardPictureLookSettled(u, 80, 4, true, h, CardPictureRead::Moving, now + 1500);
+            CardPictureLookStarted(u, 81, 4, true);
+            CHECK(CardPictureLookSettled(u, 81, 4, false, h, CardPictureRead::Unchanged, now + 3000) == CardPictureLookStep::Done && u.launchUntilMs == 0,
+                  "launch: claude's screen is the one the card carries already - the watch ends with no edit");
+        }
+
+        // The watch that never sees claude's screen, a tab parked meanwhile, the session running meanwhile, a look that finds it.
+        {
+            CardPictureTrack t;
+            CardPictureStepDecided(t, true, false, false, true, now);
+            CardPictureStepSettled(t, h, CardPictureRead::NoScreen, now); // a started tab whose terminal is not up yet
+            CHECK(t.launchUntilMs == now + kCardPictureLaunchWatchMs, "launch: no screen on a STARTED tab is a terminal not up yet - the watch begins");
+            CardPictureLookStarted(t, 90, 2, true);
+            CHECK(CardPictureLookSettled(t, 90, 2, false, 0, CardPictureRead::Stale, now + 31'500) == CardPictureLookStep::Again && t.lookAtMs == now + 31'500 + kCardPictureLaunchPollMs,
+                  "launch: a look the window did not answer in time looks again at the poll (the watch's deadline rules, not the backoff)");
+            CardPictureLookStarted(t, 91, 2, true);
+            CHECK(CardPictureLookSettled(t, 91, 2, false, 0, CardPictureRead::Blank, now + kCardPictureLaunchWatchMs) == CardPictureLookStep::WatchTimedOut && t.launchUntilMs == 0,
+                  "launch: still blank at the deadline - the watch gives up");
+            CHECK(!CardPictureStepSettled(t, h, CardPictureRead::Blank, now + kCardPictureLaunchWatchMs + 10) && t.launchUntilMs == 0,
+                  "launch: one watch per status update - a later blank read of the same update waits for the next one");
+            CardPictureStepDecided(t, true, false, false, true, now + kCardPictureLaunchWatchMs + 20);
+            CHECK(!t.launchSpent && CardPictureStepSettled(t, h, CardPictureRead::Blank, now + kCardPictureLaunchWatchMs + 30), "launch: a new status update may watch again");
+
+            CardPictureTrack p;
+            CardPictureStepDecided(p, true, false, false, true, now);
+            CardPictureStepSettled(p, h, CardPictureRead::Blank, now);
+            CardPictureStepDecided(p, false, false, true, false, now + 500); // the tab is parked again while the watch waits
+            CHECK(p.launchUntilMs == 0, "launch: a tab that no longer runs its claude ends the watch");
+            CardPictureTrack q;
+            CardPictureStepDecided(q, true, false, false, true, now);
+            CardPictureStepSettled(q, h, CardPictureRead::Blank, now);
+            CardPictureLookStarted(q, 95, 6, false);
+            CHECK(q.launchUntilMs == 0 && CardPictureLookSettled(q, 95, 6, false, 0, CardPictureRead::NoScreen, now + 1500) == CardPictureLookStep::Done,
+                  "launch: ...also when a look finds it parked");
+
+            CardPictureTrack r;
+            CardPictureStepDecided(r, true, false, false, true, now);
+            CardPictureStepSettled(r, h, CardPictureRead::Blank, now);
+            CardPictureLookStarted(r, 97, 8, true);
+            CardPictureStepDecided(r, CardPictureEditReads(r, true, false), true, false, true, now + 700); // a status update while the watch looks
+            CHECK(!r.stepReads && r.lookAtMs == now + 700 + kCardPictureSettleMs, "launch: an edit during the watch keeps the picture and owes the look it overtook");
+            CardPictureStepSettled(r, h, CardPictureRead::Kept, now + 710);
+            CHECK(r.launchUntilMs != 0 && r.lookAtMs == now + 710 + kCardPictureLaunchPollMs, "launch: ...and the watch's next look comes at the poll");
+            // The edit took a new generation (CardState::pictureSeq 8 -> 9): the look that started on 8 settles after it.
+            CHECK(CardPictureLookSettled(r, 97, 9, true, h + 1, CardPictureRead::Moving, now + 800) == CardPictureLookStep::Dropped && r.launchUntilMs != 0,
+                  "launch: the overtaken look is dropped, the watch goes on");
+
+            CardPictureTrack s;
+            CardPictureStepDecided(s, true, true, true, true, now); // running -> waiting: a fresh read, then the settle look
+            CardPictureStepSettled(s, h, CardPictureRead::Fresh, now + 100);
+            CardPictureLookStarted(s, 99, 1, true);
+            CHECK(CardPictureLookSettled(s, 99, 1, false, 0, CardPictureRead::Blank, now + 3000) == CardPictureLookStep::Watch && s.launchUntilMs == now + 3000 + kCardPictureLaunchWatchMs &&
+                      s.lookAtMs == now + 3000 + kCardPictureLaunchPollMs,
+                  "launch: a look that finds the tab's claude starting (blank) begins the watch");
         }
     }
 

@@ -6151,7 +6151,7 @@ fail. `cl /Zs` of all 111 TerminalAppLib units over a shadow tree passes. No dat
    no row.
 8. `/interrupt` and `/deactivate` typed: the same outcomes, as lines in the thread.
 
-### 21.42 The card carries the screen: a fresh screenshot at every card update (2026-10-27; in dev since 0.0.1.38, in production since 0.8.0.1; the picture follows the status - the card's looks - 2026-11-01, NOT BUILT)
+### 21.42 The card carries the screen: a fresh screenshot at every card update (2026-10-27; in dev since 0.0.1.38, in production since 0.8.0.1; the picture follows the status - the card's looks - and the tab's start - the launch watch - 2026-11-01, NOT BUILT)
 
 > The user's request (2026-10-27): "the running since messgae, called also i think status message that is pinned to the
 > bottom - whenever it updates, have it produce a screenshot (if possible) and have it shown and so every update we produce a
@@ -6191,7 +6191,8 @@ takes a new picture every ~20 s). Pure half: `AgentMaster/MessagingCardPicture.h
   moment the screen belongs on the card. The post marks the card in flight (-1) at once, so no second post starts while the
   screen is read and drawn, and queues the old card's delete and the new card when the picture is settled.
 - **A look** (2026-11-01, below): the card reads its screen again when its picture is owed one - 3 s after a change of state
-  into a state at rest, and after a read that got no screen in time - and is edited only when the screen changed.
+  into a state at rest, after a read that got no screen in time, and every 1.5 s while a starting tab's claude has not shown its
+  screen (the launch watch: a blank screen is never sent) - and is edited only when the screen changed.
 
 **The picture follows the status (2026-11-01; NOT BUILT).**
 
@@ -6250,6 +6251,41 @@ edited again, and `CardState::pictureTextHash` already said "this text has its p
 more edit with its upload only where the screen changed in those 3 s (a turn's end whose first read showed the spinner) or where
 a read came late. A window that never answers costs at most 8 more dispatcher items per status update.
 
+**The tab's start: one picture, once claude shows (2026-11-01; NOT BUILT).**
+
+> The user's request (2026-11-01): "Also when a tab activates, we should update once the screenshot when the tab launched and
+> claude is showing and no longer black screen."
+
+*What it was.* A tab that starts - a parked or restored tab activated (`_ActivateDormantSession`: the control initialized in
+place, then `SetStarted`), a new tab launched, a tab restarted - shows a BLANK screen for its first seconds, while claude starts
+and draws. The status update of that moment (the "💤 not running" line goes; a new tab's first card) read the screen then: the
+blank screen was drawn and uploaded as a BLACK picture, and since the card's text changed no more, it stayed.
+
+*Now* (`ScreenSnapshotShowsNothing` in `AgentMaster/ScreenSnapshot.h`; the launch watch's rules in `MessagingCardPicture.h`):
+- **A blank screen is never sent.** A read whose snapshot shows nothing at all - every row blank, which the format writes as an
+  empty line, so the test reads no cell - settles as `Blank`: nothing is drawn, the card keeps its last real picture with that
+  picture's own moment (a new tab's first card goes as text). A row of spaces in a color of their own, or under a line, counts as
+  showing something.
+- **The LAUNCH WATCH.** A read of a claude still starting - `Blank`, or no screen at all while the tab runs its claude (`NoScreen`
+  on a started tab: the terminal not up yet; on a parked tab no screen is final) - begins the watch, once per status update
+  (`CardPictureTrack::launchSpent`): the card looks every 1.5 s (`kCardPictureLaunchPollMs`, the bot's tick) for up to 120 s
+  (`kCardPictureLaunchWatchMs`).
+  - Still blank, or no answer in time: look again at the next poll.
+  - The screen shows text: the GATE (`CardPictureLaunchGateHolds`) holds it until a look sees the SAME screen as the look before
+    it - claude finished drawing - and only then is it drawn and the card edited, ONCE. A screen still changing is `Moving`:
+    nothing drawn, its hash remembered.
+  - A screen that never holds still (a turn resumed mid-way with its spinner, a clock in a status line) is taken after 3 changing
+    looks (`kCardPictureLaunchSettleLooks`), and the watch's last look before its deadline is never gated.
+  - The screen the card carries already ends the watch with no edit; a tab parked meanwhile ends it; 120 s of nothing end it
+    (one log line), and the card keeps its picture until its next status update.
+- **While the watch waits, an edit keeps the card's picture** (`CardPictureEditReads`: no read), so a status change during the
+  start (the SessionStart hook's) shows its new text at once and the watch's one picture follows. A post (a re-post below a new
+  message) still reads - and still never sends a blank screen. A watch past its deadline ends at the next post or edit's
+  decision too (`CardPictureLaunchExpire`), should the card have kept changing so that no look got its turn.
+
+*The cost.* For a start: one screen read per 1.5 s until claude has drawn and held still (typically 2-4 reads), one drawing and
+one edit with its upload. Before, the start cost one upload of a black picture.
+
 **Order and races.** The picture step is asynchronous, so each picture-carrying post or edit stamps a generation
 (`CardState::pictureSeq`); an EDIT whose step a newer post or edit of the same card overtook is dropped when its picture is
 settled — finishing last, it would put an older text back (its taps go; the newer change carries what they waited for). One
@@ -6283,15 +6319,22 @@ calls: production edited its cards 66–126 times per 10 minutes on 2026-10-27 (
 running cards, whose context size changes with every reply and edits them at the 20 s gap), and a new picture is ~0.1–0.6 MB
 — so several running sessions mean roughly 100–250 MB of uploads an hour, ~1 s per upload call (the outbox's 1.05 s pacing
 already spaces calls). The census line measures it: `[msg] traffic (10 min): … pictures(drawn=N kept=N none=N reused=N
-skipped=N late=N looked=N unchanged=N, K KB drawn)` - `late` a step or look whose wait ran out, `looked` the looks started,
-`unchanged` the looks that found the screen the card carries (2026-11-01; a kind with no count is left out).
+skipped=N late=N looked=N unchanged=N blank=N moving=N, K KB drawn)` - `late` a step or look whose wait ran out, `looked` the
+looks started, `unchanged` the looks that found the screen the card carries, `blank` the reads that found a screen showing nothing
+(a starting claude: never sent), `moving` the launch watch's looks that saw claude still drawing (2026-11-01; a kind with no count
+is left out).
 
 **Logs.** Only exceptions are logged per picture: `[msg] <sid8> card picture: the screen's snapshot did not parse …`, `… could
 not be drawn: …`, `[msg] Telegram refused a card with its screen picture (400: …); it goes again without the picture`, `[msg] 3
 card pictures refused in a row: …`, `[msg] <sid8> card picture not ready within 4 s (…): the card goes with the picture it shows
 and looks at the screen again in a few seconds`, `[msg] <sid8> card picture look not answered within 30 s (…): the card keeps its
 picture and looks again later`, `[msg] <sid8> card picture: 8 looks in a row got no screen in time; the card keeps its picture
-until its next status update`; the 10-minute census counts the rest.
+until its next status update`; for the launch watch `[msg] <sid8> card picture: the tab's claude is starting (its screen shows
+nothing yet | its screen is not up yet); the card keeps its picture and sends claude's screen once it shows (at most 120 s)`,
+`[msg] <sid8> card picture: the tab's claude shows its screen N s after the watch began; the card's picture follows it | the card
+carries it already`, `[msg] <sid8> card picture: the tab's screen showed nothing for 120 s after its claude started; …` and
+`[msg] <sid8> card picture: the launch watch's 120 s ran out while the card kept changing …`; the 10-minute census counts the
+rest.
 
 **Not changed, still open.**
 - The picture is NOT redacted (§9.6 is not built), like 🖼 Screen Image's: the terminal's text goes to Telegram as it shows.
@@ -6314,6 +6357,13 @@ change into a state at rest (and its cancel by a change into Running), the look 
 look an update overtakes (dropped), the give-up after 8 looks and `NoScreen` ending the looks. ⚠ `Messaging.h` changed again
 (CardState gained `CardPictureTrack`, MessagingService `_cardPictureGen`, the picture step's send its `CardPictureRead`): the
 next build must purge.
+The tab's start (2026-11-01, same section): the blank screen test (no cell, default spaces → blank; one glyph anywhere, colored
+or underlined spaces → not; "", a cut header, a missing or extra row → not known blank), an edit that keeps the picture while
+the watch waits, the deadline's belt, the ask and its gate, the watch from a blank screen to ONE picture once the screen held
+still, a screen that never holds still taken after 3 looks, the card already carrying it, no screen on a started tab, a look
+the window did not answer, the timeout, one watch per update, a tab parked meanwhile (by a decision, by a look), an edit that
+overtakes a watch look, and a look that begins the watch. `ScreenSnapshot.h` changed (TerminalControl's ControlCore.cpp
+includes it: an added inline function, no layout change).
 
 **Check after the build** (dev, the bot; watch messaging.log's census):
 1. A running session's card: the screenshot under its text, "🖥 the screen at …" advancing every ~20 s with the turn; the card's
@@ -6332,6 +6382,13 @@ next build must purge.
    picture changes to the new screen once the window answers (the census counts `late` and `looked`).
 10. (2026-11-01) A card whose screen is already final at its change into a state at rest: one `looked` and one `unchanged` in
     the census for that change, and no edit of the card after its state line's own.
+11. (2026-11-01, the tab's start) ▶ Reactivate a parked tab from its card (or send a message to it): the card's "not running"
+    line goes at once with its OLD picture (never a black one); a few seconds later, once claude has drawn, ONE edit brings its
+    screen; `hooks.log`: `the tab's claude is starting …`, then `the tab's claude shows its screen N s after the watch began`.
+12. (2026-11-01) A new session from the topic's wizard: its first card goes as text (or with no black picture), then claude's
+    first screen arrives in one edit.
+13. (2026-11-01) A turn resumed mid-way by the restore wake: the spinner never holds still, so the picture comes after ~3 looks
+    (`moving=3` in the census for it), not after 120 s.
 
 ### 21.43 🎤 Voice notes: a voice note in a session's topic is read as the prompt it says (2026-10-27; in dev since 0.0.1.38, in production since 0.8.0.1; a note in a NEW thread since dev 0.0.1.39)
 

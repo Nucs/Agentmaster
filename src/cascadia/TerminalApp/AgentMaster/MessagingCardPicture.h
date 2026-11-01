@@ -46,6 +46,7 @@
 #include <string_view>
 
 #include "Json.h"
+#include "ScreenSnapshot.h" // ScreenSnapshotShowsNothing: a blank screen (a tab whose claude is still starting) is never sent
 
 namespace Agentmaster::Msg
 {
@@ -114,6 +115,11 @@ namespace Agentmaster::Msg
         Kept, // no read was asked for (a page flip of the buttons, the slow form upgrade): the card keeps the picture it shows
         Stale, // no screen in time: the window did not answer within the step's wait (a busy or frozen UI thread), no window
                // answered, or the read or the drawing failed - the card goes with its held picture at best and looks again later
+        Blank, // the hosting window answered with a screen that shows NOTHING (ScreenSnapshotShowsNothing: a tab whose claude is
+               // still starting) - never drawn or sent: the card keeps its last picture with its own moment, and watches for the
+               // real screen (the LAUNCH WATCH, CardPictureTrack::launchUntilMs)
+        Moving, // a launch watch's look only: the screen shows text but differs from the one the watch's previous look saw - claude
+                // is still drawing; nothing is drawn or sent (the picture handed over carries only its screen hash)
     };
 
     /// <summary>The decision for one card post or edit: where its picture comes from, and the moment its caption names.</summary>
@@ -369,6 +375,32 @@ namespace Agentmaster::Msg
     /// </summary>
     inline constexpr int kCardPictureLookTriesMax = 8;
 
+    // ----- The tab's start: the LAUNCH WATCH (the user's request of 2026-11-01: "when a tab activates, we should update once the
+    // screenshot when the tab launched and claude is showing and no longer black screen") -----
+
+    /// <summary>
+    /// How often the launch watch looks at a starting tab's screen: a tab that was just launched, activated (a parked or restored
+    /// tab whose claude starts) or restarted shows a BLANK screen for the first seconds, and the card waits for claude's own. The
+    /// bot's tick runs every 1.5 s, so a look cannot come sooner anyway; each look is one screen read on the window's UI thread
+    /// (0.3-0.6 ms) and a cheap blank test (ScreenSnapshotShowsNothing).
+    /// </summary>
+    inline constexpr int64_t kCardPictureLaunchPollMs = 1500;
+
+    /// <summary>
+    /// How long the launch watch waits for a starting tab's claude to show its screen. A resume of a long conversation takes
+    /// seconds; a claude that shows nothing for 2 minutes is stuck (or the tab is a program that keeps its screen empty), and the
+    /// card keeps its last picture until its next status update (one log line).
+    /// </summary>
+    inline constexpr int64_t kCardPictureLaunchWatchMs = 120 * 1000;
+
+    /// <summary>
+    /// How many of the watch's looks may see claude's screen still CHANGING (CardPictureRead::Moving) before the watch takes the
+    /// screen as it is: the picture goes once a look sees the same screen as the look before it (claude finished drawing), or
+    /// after this many changing ones - a screen that never holds still (a turn resumed mid-way with its spinner, a clock in a
+    /// status line) must not wait out the whole watch.
+    /// </summary>
+    inline constexpr int kCardPictureLaunchSettleLooks = 3;
+
     /// <summary>
     /// The pause before the next look after `tries` looks in a row got no screen in time: kCardPictureLookFirstDelayMs doubled
     /// `tries` times, at most kCardPictureLookMaxDelayMs (0 tries = 5 s, then 10, 20, 40, 60, 60, ...). Pure.
@@ -421,23 +453,154 @@ namespace Agentmaster::Msg
         bool lookPending{ false }; // a look's read or drawing runs (one look at a time)
         uint64_t lookSeq{ 0 }; // the running look's generation (service-wide unique, like CardState::pictureSeq)
         uint64_t lookBase{ 0 }; // CardState::pictureSeq when that look started: a post or edit decided since makes it stale
+        // ----- the tab's start (the LAUNCH WATCH) -----
+        bool tabStarted{ false }; // the session's tab ran its claude (SessionInfo live and started) when the newest post, edit or
+                                  // look was decided: "no screen" then means "not drawn yet", not "parked"
+        int64_t launchUntilMs{ 0 }; // the launch watch's deadline (WallMs; 0 = no watch): the card waits for its claude's screen
+        uint32_t launchShotHash{ 0 }; // the screen the watch's previous look saw showing text (0 = none yet)
+        int launchShows{ 0 }; // the watch's looks that saw that screen still changing (CardPictureRead::Moving)
+        bool launchSpent{ false }; // a watch ran for the newest status update already (one watch per update; a reading update resets it)
     };
 
     /// <summary>
+    /// What a LOOK asks of its screen read (MessagingService::_withCardPicture): the basis it compares with, and - while the launch
+    /// watch waits for a starting claude - the gate that keeps a screen still changing from being drawn. Posts and edits ask
+    /// nothing (they pass none). Plain data, made by CardPictureLookAskFor.
+    /// </summary>
+    struct CardPictureLookAsk
+    {
+        uint32_t unchangedShotHash{ 0 }; // the screen the card carries: a look at it is Unchanged (0 = the card carries none)
+        bool launchGate{ false }; // the launch watch is on: a screen that shows text is drawn only once it held still since the
+                                  // previous look (CardPictureLaunchGateHolds)
+        uint32_t launchShotHash{ 0 }; // the screen the watch's previous look saw (0 = none yet: the first screen with text waits)
+    };
+
+    /// <summary>
+    /// Starts the LAUNCH WATCH: the card waits up to kCardPictureLaunchWatchMs for its starting claude's screen, looking every
+    /// kCardPictureLaunchPollMs (the first look after one poll). Pure.
+    /// </summary>
+    /// <param name="t">The card's looks.</param>
+    /// <param name="nowMs">Now (WallMs).</param>
+    inline void CardPictureLaunchBegin(CardPictureTrack& t, int64_t nowMs) noexcept
+    {
+        t.launchUntilMs = nowMs + kCardPictureLaunchWatchMs;
+        t.launchShotHash = 0;
+        t.launchShows = 0;
+        t.launchSpent = true; // one watch per status update: a later blank read of the same update waits for the next one
+        t.lookAtMs = EarlierCardPictureLook(t.lookAtMs, nowMs + kCardPictureLaunchPollMs);
+    }
+
+    /// <summary>Ends the launch watch (its picture went, it timed out, or the tab was parked again). Pure.</summary>
+    /// <param name="t">The card's looks.</param>
+    inline void CardPictureLaunchEnd(CardPictureTrack& t) noexcept
+    {
+        t.launchUntilMs = 0;
+        t.launchShotHash = 0;
+        t.launchShows = 0;
+    }
+
+    /// <summary>
+    /// Ends a launch watch whose deadline passed - the belt for a card whose text kept changing so that no look could run (a look
+    /// runs only while the card shows its current text); its edits then read the screen again. Called at every post or edit's
+    /// decision. Pure.
+    /// </summary>
+    /// <param name="t">The card's looks.</param>
+    /// <param name="nowMs">Now (WallMs).</param>
+    /// <returns>True when a watch ended here (the caller logs it).</returns>
+    inline bool CardPictureLaunchExpire(CardPictureTrack& t, int64_t nowMs) noexcept
+    {
+        if (t.launchUntilMs != 0 && nowMs >= t.launchUntilMs)
+        {
+            CardPictureLaunchEnd(t);
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Whether a card EDIT reads the screen: a status update (its text changed since the card's last update) that is not the slow
+    /// form upgrade, unless the launch watch is on - then the edit keeps the card's picture (Kept) and the watch's own look sends
+    /// claude's screen ONCE, when it shows and held still (the user's "update once ... when claude is showing"). A POST always
+    /// reads (it is a new message; a blank screen still never goes, Blank). Pure.
+    /// </summary>
+    /// <param name="t">The card's looks.</param>
+    /// <param name="textChanged">The card's text differs from its last status update's (CardState::pictureTextHash).</param>
+    /// <param name="formOnly">The edit is the slow form upgrade (§21.15): never a read.</param>
+    /// <returns>True when the edit reads the screen.</returns>
+    inline bool CardPictureEditReads(const CardPictureTrack& t, bool textChanged, bool formOnly) noexcept
+    {
+        return textChanged && !formOnly && t.launchUntilMs == 0;
+    }
+
+    /// <summary>
+    /// What a look asks of its read: the picture the card carries as the basis (an unchanged screen sends nothing), and while the
+    /// launch watch is on, the gate - open for the watch's last look (its deadline within a poll) and after
+    /// kCardPictureLaunchSettleLooks changing looks, so a screen that never holds still still goes. Pure.
+    /// </summary>
+    /// <param name="t">The card's looks.</param>
+    /// <param name="nowMs">Now (WallMs).</param>
+    /// <returns>The ask.</returns>
+    inline CardPictureLookAsk CardPictureLookAskFor(const CardPictureTrack& t, int64_t nowMs) noexcept
+    {
+        CardPictureLookAsk ask;
+        ask.unchangedShotHash = t.handedShotHash;
+        if (t.launchUntilMs != 0)
+        {
+            ask.launchGate = t.launchShows < kCardPictureLaunchSettleLooks && nowMs + kCardPictureLaunchPollMs < t.launchUntilMs;
+            ask.launchShotHash = t.launchShotHash;
+        }
+        return ask;
+    }
+
+    /// <summary>
+    /// Whether the launch watch's gate HOLDS a screen back: the look asked for the gate, the screen shows text, and it is not the
+    /// one the watch's previous look saw (or no look saw one yet) - claude is still drawing, so nothing is drawn or sent and the
+    /// watch looks again (CardPictureRead::Moving). A screen that held still since the previous look passes. Pure.
+    /// </summary>
+    /// <param name="ask">The look's ask (null for a post or an edit: never gated).</param>
+    /// <param name="showsText">The read found a screen that shows something (not "", not blank).</param>
+    /// <param name="shotHash">That screen's CardPictureShotHash.</param>
+    /// <returns>True when the screen is held back as still changing.</returns>
+    inline bool CardPictureLaunchGateHolds(const CardPictureLookAsk* ask, bool showsText, uint32_t shotHash) noexcept
+    {
+        return ask && ask->launchGate && showsText && (ask->launchShotHash == 0 || shotHash != ask->launchShotHash);
+    }
+
+    /// <summary>
+    /// Whether a read says the tab's claude is STILL STARTING: its screen shows nothing yet (Blank), or there is none at all while
+    /// the tab runs its claude (NoScreen on a started tab: the terminal is not up yet). NoScreen on a tab that does not run
+    /// (parked, restored dormant) is final - nothing will show until it starts. Pure.
+    /// </summary>
+    /// <param name="t">The card's looks (tabStarted: as of the step's or the look's decision).</param>
+    /// <param name="read">How the read settled.</param>
+    /// <returns>True when the read is a starting claude's.</returns>
+    inline bool CardPictureReadIsStarting(const CardPictureTrack& t, CardPictureRead read) noexcept
+    {
+        return read == CardPictureRead::Blank || (read == CardPictureRead::NoScreen && t.tabStarted);
+    }
+
+    /// <summary>
     /// Records a post or edit WITH a picture step that was just decided - the caller stamped CardState::pictureSeq for it under
-    /// the same lock. A step that READS the screen (a status update) starts the look backoff over, and a change of the state
-    /// schedules the settle look (kCardPictureSettleMs) when the new state is at rest, or cancels a look still owed when the
-    /// session runs (a running card is edited with a fresh read whenever its text changes). A step that only KEEPS the picture (a
-    /// page flip) and overtakes a read that has not settled - a status update's or a look's - owes the card the look that read
-    /// was: the overtaken read's picture is dropped with it. Pure.
+    /// the same lock. A step that READS the screen (a status update) starts the look backoff over (and, with no watch on, allows
+    /// a new launch watch), and a change of the state schedules the settle look (kCardPictureSettleMs) when the new state is at
+    /// rest, or cancels a look still owed when the session runs (a running card is edited with a fresh read whenever its text
+    /// changes). A step that only KEEPS the picture (a page flip, an edit while the launch watch waits) and overtakes a read that
+    /// has not settled - a status update's or a look's - owes the card the look that read was: the overtaken read's picture is
+    /// dropped with it. A tab that no longer runs its claude ends a launch watch (nothing will show). Pure.
     /// </summary>
     /// <param name="t">The card's looks.</param>
     /// <param name="reads">The step reads the screen (a status update) rather than keeping the picture it shows.</param>
     /// <param name="stateChanged">The session's state differs from the one the card showed last (CardState::lastState).</param>
     /// <param name="atRest">The new state is not Running (Waiting, Idle, Needs approval, Error, Done).</param>
+    /// <param name="tabStarted">The session's tab runs its claude (SessionInfo live and started).</param>
     /// <param name="nowMs">Now (WallMs).</param>
-    inline void CardPictureStepDecided(CardPictureTrack& t, bool reads, bool stateChanged, bool atRest, int64_t nowMs) noexcept
+    inline void CardPictureStepDecided(CardPictureTrack& t, bool reads, bool stateChanged, bool atRest, bool tabStarted, int64_t nowMs) noexcept
     {
+        t.tabStarted = tabStarted;
+        if (!tabStarted && t.launchUntilMs != 0)
+        {
+            CardPictureLaunchEnd(t); // the tab was parked (or its session closed) while the watch waited
+        }
         if (!reads && (t.lookPending || (t.stepPending && t.stepReads)))
         {
             // The page flip goes at once with the picture the card shows, and the read it overtook is dropped when it settles: look
@@ -449,6 +612,10 @@ namespace Agentmaster::Msg
         if (reads)
         {
             t.lookTries = 0;
+            if (t.launchUntilMs == 0)
+            {
+                t.launchSpent = false; // a new status update may watch a starting claude again
+            }
             if (stateChanged)
             {
                 t.lookAtMs = atRest ? nowMs + kCardPictureSettleMs : 0;
@@ -458,21 +625,35 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// Records how the card's NEWEST post or edit settled its picture (the caller checked that the step is still the newest:
-    /// CardState::pictureSeq) - the picture it carries is now what the card shows, or will once the outbox delivered it. A step
-    /// that got no screen in time (Stale) owes the card a look after CardPictureLookDelayMs; a step that kept an OLDER picture
-    /// than the one handed before (a page flip whose stored picture predates an upload still on its way, or that lands after
-    /// it) owes one after kCardPictureSettleMs. Pure.
+    /// CardState::pictureSeq) - the picture it carries is now what the card shows, or will once the outbox delivered it. A read of
+    /// a claude still starting (CardPictureReadIsStarting) begins the LAUNCH WATCH, once per status update; while a watch is on,
+    /// its next look comes within kCardPictureLaunchPollMs whatever this step was. Otherwise a step that got no screen in time
+    /// (Stale) owes the card a look after CardPictureLookDelayMs, and a step that kept an OLDER picture than the one handed before
+    /// (a page flip whose stored picture predates an upload still on its way, or that lands after it) owes one after
+    /// kCardPictureSettleMs. Pure.
     /// </summary>
     /// <param name="t">The card's looks.</param>
     /// <param name="handedShotHash">The screen hash of the picture the step carries (0 = it goes without one).</param>
     /// <param name="read">How the step's picture settled.</param>
     /// <param name="nowMs">Now (WallMs).</param>
-    inline void CardPictureStepSettled(CardPictureTrack& t, uint32_t handedShotHash, CardPictureRead read, int64_t nowMs) noexcept
+    /// <returns>True when this step began a launch watch (the caller logs it).</returns>
+    inline bool CardPictureStepSettled(CardPictureTrack& t, uint32_t handedShotHash, CardPictureRead read, int64_t nowMs) noexcept
     {
         t.stepPending = false;
         const uint32_t before = t.handedShotHash;
         t.handedShotHash = handedShotHash;
-        if (read == CardPictureRead::Stale)
+        bool began = false;
+        if (CardPictureReadIsStarting(t, read) && t.launchUntilMs == 0 && !t.launchSpent)
+        {
+            CardPictureLaunchBegin(t, nowMs);
+            began = true;
+        }
+        if (t.launchUntilMs != 0)
+        {
+            // The watch looks every poll; a post that read the screen meanwhile (or overtook a look) does not stop it.
+            t.lookAtMs = EarlierCardPictureLook(t.lookAtMs, nowMs + kCardPictureLaunchPollMs);
+        }
+        else if (read == CardPictureRead::Stale)
         {
             t.lookAtMs = EarlierCardPictureLook(t.lookAtMs, nowMs + CardPictureLookDelayMs(t.lookTries));
         }
@@ -480,6 +661,7 @@ namespace Agentmaster::Msg
         {
             t.lookAtMs = EarlierCardPictureLook(t.lookAtMs, nowMs + kCardPictureSettleMs);
         }
+        return began;
     }
 
     /// <summary>
@@ -495,16 +677,25 @@ namespace Agentmaster::Msg
         return t.lookAtMs != 0 && nowMs >= t.lookAtMs && !t.stepPending && !t.lookPending;
     }
 
-    /// <summary>Records a look that starts (CardPictureLookDue said so): one at a time, owed no more, stale once a post or edit is decided.</summary>
+    /// <summary>
+    /// Records a look that starts (CardPictureLookDue said so): one at a time, owed no more, stale once a post or edit is decided.
+    /// A tab that no longer runs its claude ends a launch watch here too (the look then reads no screen and is done).
+    /// </summary>
     /// <param name="t">The card's looks.</param>
     /// <param name="lookSeq">The look's generation (service-wide unique).</param>
     /// <param name="pictureSeq">CardState::pictureSeq now: the newest post or edit the look builds on.</param>
-    inline void CardPictureLookStarted(CardPictureTrack& t, uint64_t lookSeq, uint64_t pictureSeq) noexcept
+    /// <param name="tabStarted">The session's tab runs its claude (SessionInfo live and started).</param>
+    inline void CardPictureLookStarted(CardPictureTrack& t, uint64_t lookSeq, uint64_t pictureSeq, bool tabStarted) noexcept
     {
         t.lookPending = true;
         t.lookAtMs = 0;
         t.lookSeq = lookSeq;
         t.lookBase = pictureSeq;
+        t.tabStarted = tabStarted;
+        if (!tabStarted && t.launchUntilMs != 0)
+        {
+            CardPictureLaunchEnd(t);
+        }
     }
 
     /// <summary>What a card's look does once its read settled (CardPictureLookSettled).</summary>
@@ -513,21 +704,28 @@ namespace Agentmaster::Msg
         Dropped, // a post or edit was decided while the look ran (it carries its own picture), or this is not the card's look any more
         Send, // the screen changed: edit the card - its same text and buttons - with the new picture
         Done, // nothing to send: the screen is the one the card carries, or the tab shows none
-        Again, // no screen in time: the next look is scheduled (CardPictureTrack::lookAtMs)
+        Again, // no screen in time, or the launch watch looks again (blank, still changing): the next look is scheduled (lookAtMs)
         GiveUp, // no screen in time for kCardPictureLookTriesMax looks in a row: no more looks until the next status update
+        Watch, // the look found the tab's claude still starting: the launch watch began (its first look is scheduled)
+        WatchTimedOut, // the launch watch's deadline passed with nothing on the screen: the card keeps its picture
     };
 
     /// <summary>
     /// Records how a look settled and says what to do with it. A look that a post or edit overtook (CardState::pictureSeq moved
-    /// since it started) is dropped. A changed screen (Fresh, with a picture) is sent, and the picture it carries becomes the next
-    /// look's basis at once; an unchanged screen or none ends the looks; a look that got no screen in time schedules the next one
-    /// after CardPictureLookDelayMs - until kCardPictureLookTriesMax of them missed in a row. Pure.
+    /// since it started) is dropped. While the LAUNCH WATCH is on, a screen still changing (Moving) is remembered and looked at
+    /// again, a blank screen (or none on a started tab, or no answer in time) is looked at again until the watch's deadline, and a
+    /// screen that held still ends the watch - sent when it differs from the picture the card carries. Without a watch, a read of
+    /// a claude still starting begins one (once per status update); a changed screen (Fresh, with a picture) is sent, and the
+    /// picture it carries becomes the next look's basis at once; an unchanged screen or none ends the looks; a look that got no
+    /// screen in time schedules the next one after CardPictureLookDelayMs - until kCardPictureLookTriesMax of them missed in a
+    /// row. Pure.
     /// </summary>
     /// <param name="t">The card's looks.</param>
     /// <param name="lookSeq">The look's generation (CardPictureLookStarted's).</param>
     /// <param name="pictureSeq">CardState::pictureSeq now.</param>
     /// <param name="hasPicture">The look's read brought a picture (a drawing, or the held photo of the screen read now).</param>
-    /// <param name="shotHash">That picture's screen hash.</param>
+    /// <param name="shotHash">The screen hash of what the read saw: the picture's for Fresh, the screen's for Moving, the look's
+    /// basis for Unchanged (0 when it saw no screen).</param>
     /// <param name="read">How the look's read settled.</param>
     /// <param name="nowMs">Now (WallMs).</param>
     /// <returns>What the look does.</returns>
@@ -540,8 +738,42 @@ namespace Agentmaster::Msg
         t.lookPending = false;
         if (pictureSeq != t.lookBase)
         {
-            // A post or edit decided meanwhile owns the card now; it scheduled whatever look it owes (CardPictureStepDecided).
+            // A post or edit decided meanwhile owns the card now; it scheduled whatever look it owes (CardPictureStepDecided, and
+            // CardPictureStepSettled keeps a launch watch looking).
             return CardPictureLookStep::Dropped;
+        }
+        const bool starting = CardPictureReadIsStarting(t, read);
+        if (starting && t.launchUntilMs == 0 && !t.launchSpent)
+        {
+            // A look (the settle look, a retry) found the tab's claude still starting: wait for its screen.
+            t.lookTries = 0;
+            CardPictureLaunchBegin(t, nowMs);
+            return CardPictureLookStep::Watch;
+        }
+        if (t.launchUntilMs != 0)
+        {
+            if (read == CardPictureRead::Moving)
+            {
+                // Claude is drawing: remember this screen; the next look passes the gate when it sees the same one (or once the
+                // watch stops gating - its deadline near, or kCardPictureLaunchSettleLooks of these).
+                t.launchShotHash = shotHash;
+                ++t.launchShows;
+                t.lookAtMs = nowMs + kCardPictureLaunchPollMs;
+                return CardPictureLookStep::Again;
+            }
+            if (starting || read == CardPictureRead::Stale)
+            {
+                if (nowMs >= t.launchUntilMs)
+                {
+                    CardPictureLaunchEnd(t);
+                    return CardPictureLookStep::WatchTimedOut;
+                }
+                t.lookAtMs = nowMs + kCardPictureLaunchPollMs;
+                return CardPictureLookStep::Again;
+            }
+            // The screen shows text and held still (or the watch took it as it was), or the tab shows none any more: the watch
+            // is over, and the rules below send it when it is new.
+            CardPictureLaunchEnd(t);
         }
         if (read == CardPictureRead::Stale)
         {

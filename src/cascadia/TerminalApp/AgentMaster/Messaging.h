@@ -945,9 +945,12 @@ namespace Agentmaster::Msg
         /// reuses the card's stored picture with no read (Kept); else the hosting window reads the screen ("screen-snapshot"): a
         /// screen that changed is drawn on the worker and uploaded by `then`'s call, an unchanged one reuses the stored file_id
         /// captioned with now (both Fresh), an unreadable one (a parked tab) keeps the stored picture with its own moment, or none
-        /// (NoScreen), and no answer in time - or none at all, or a failure - keeps the stored picture too (Stale: the card owes a
-        /// look, CardPictureStepSettled). A LOOK (`look`) waits kCardPictureLookWaitMs instead of kCardPictureWaitMs, and a screen
-        /// whose hash is `unchangedShotHash` settles as Unchanged with no picture, without drawing.
+        /// (NoScreen), a screen that shows NOTHING (ScreenSnapshotShowsNothing: a claude still starting) is never drawn and keeps
+        /// the stored picture the same way (Blank: the launch watch follows), and no answer in time - or none at all, or a failure -
+        /// keeps the stored picture too (Stale: the card owes a look, CardPictureStepSettled). A LOOK (`look` set) waits
+        /// kCardPictureLookWaitMs instead of kCardPictureWaitMs, settles a screen that is its basis as Unchanged without drawing, and
+        /// while the launch watch gates it (CardPictureLaunchGateHolds) settles a screen still changing as Moving without drawing
+        /// (the picture handed over then carries only that screen's hash).
         /// </summary>
         /// <remarks>
         /// ⚠ `then` must be callable from any thread and must not throw past its own catch (it runs in a window's dispatcher item,
@@ -961,9 +964,9 @@ namespace Agentmaster::Msg
         /// <param name="sessionId">The card's session (its topic's stored picture; the window that hosts its tab reads the screen).</param>
         /// <param name="readScreen">True for a status update or a look (read the screen); false to keep the stored picture as it is.</param>
         /// <param name="then">Sends the card with the picture (null = without one), given how the picture settled.</param>
-        /// <param name="look">The step is one of the card's looks (_lookAtCardPicture): the longer wait, and the log's words.</param>
-        /// <param name="unchangedShotHash">A look's basis: the screen hash of the picture the card carries (0 = none; posts and edits pass 0).</param>
-        void _withCardPicture(const std::wstring& sessionId, bool readScreen, std::function<void(std::shared_ptr<const CardPicture>, CardPictureRead)> then, bool look = false, uint32_t unchangedShotHash = 0) noexcept;
+        /// <param name="look">Set for one of the card's looks (_lookAtCardPicture): its basis and the launch watch's gate
+        /// (CardPictureLookAskFor), the longer wait and the log's words. Posts and edits pass none.</param>
+        void _withCardPicture(const std::wstring& sessionId, bool readScreen, std::function<void(std::shared_ptr<const CardPicture>, CardPictureRead)> then, std::optional<CardPictureLookAsk> look = std::nullopt) noexcept;
         /// <summary>
         /// §21.42: a card post or edit that waits for its picture (_withCardPicture registers it before the screen read), with the
         /// deadline after which it goes without a new one (kCardPictureWaitMs): a frozen window must not stop its cards from
@@ -988,13 +991,15 @@ namespace Agentmaster::Msg
         void _expireCardPictureWaits() noexcept;
         /// <summary>
         /// §21.42, the picture follows the status (2026-11-01): the card LOOKS at its screen when a look is owed and due
-        /// (CardPictureLookDue) - the settle look kCardPictureSettleMs after a change into a state at rest, or a look after a read
-        /// that got no screen in time or that a page flip overtook. The hosting window reads the screen (kCardPictureLookWaitMs at
-        /// most); a screen that is the one the card's newest post or edit carried sends nothing, a changed one is drawn (or the held
-        /// photo reused by file_id) and the card is edited - its same text and buttons, so the picture alone changes - at the cards'
-        /// own priority. A post or edit decided meanwhile wins (the look is dropped); a look that got no screen in time schedules the
-        /// next (CardPictureLookSettled). Called by _refreshCard only while the card shows its current text and buttons in the wanted
-        /// form; the common case (no look owed) is one map lookup under `_mtx`.
+        /// (CardPictureLookDue) - the settle look kCardPictureSettleMs after a change into a state at rest, a look after a read that
+        /// got no screen in time or that a page flip overtook, and the LAUNCH WATCH's looks every kCardPictureLaunchPollMs while a
+        /// starting tab's claude has not shown its screen (a tab launched, activated or restarted: the user's request of the same
+        /// day). The hosting window reads the screen (kCardPictureLookWaitMs at most); a screen that is the one the card's newest
+        /// post or edit carried sends nothing, a blank one waits, one the watch sees still changing waits for the next look, and a
+        /// changed one is drawn (or the held photo reused by file_id) and the card is edited - its same text and buttons, so the
+        /// picture alone changes - at the cards' own priority. A post or edit decided meanwhile wins (the look is dropped); a look
+        /// that got no screen in time schedules the next (CardPictureLookSettled). Called by _refreshCard only while the card shows
+        /// its current text and buttons in the wanted form; the common case (no look owed) is one map lookup under `_mtx`.
         /// </summary>
         /// <remarks>
         /// The look's edit takes no tapped button (none waits for a picture alone), does not move the card's edit gap
@@ -1009,10 +1014,26 @@ namespace Agentmaster::Msg
         /// <param name="hash">The card's hash (CardTextHash of the classic text and the buttons), for the form handler.</param>
         /// <param name="wantRich">The form the card is wanted in (title chips; §21.15), for the form handler.</param>
         /// <param name="wantLinked">Whether its title links to its topic (§21.17), for the form handler.</param>
+        /// <param name="tabStarted">The session's tab runs its claude (SessionInfo live and started): no screen then means "not
+        /// drawn yet" (the launch watch waits), not "parked" (the look is done).</param>
         /// <param name="nowMs">Now (WallMs).</param>
         /// <exception cref="std::system_error">If the service's lock cannot be taken (std::mutex::lock). Anything that fails after
         /// the look was taken (no memory for its handlers) is caught, logged and the look released for a later try (Rule #18).</exception>
-        void _lookAtCardPicture(const std::wstring& sessionId, const TopicRecord& topic, const std::wstring& text, const json::Value& markup, uint32_t hash, bool wantRich, bool wantLinked, int64_t nowMs);
+        void _lookAtCardPicture(const std::wstring& sessionId, const TopicRecord& topic, const std::wstring& text, const json::Value& markup, uint32_t hash, bool wantRich, bool wantLinked, bool tabStarted, int64_t nowMs);
+        /// <summary>
+        /// §21.42, the tab's start: logs that a card's launch watch began - a read found the tab's claude still starting (its screen
+        /// blank, or not up yet on a started tab), so the card keeps its picture and sends claude's screen once it shows. One line
+        /// per watch (one watch per status update). Any thread; call it outside `_mtx` (the log takes its own lock).
+        /// </summary>
+        /// <param name="sessionId">The card's session.</param>
+        /// <param name="read">The read that began it (Blank, or NoScreen on a started tab): the line says which.</param>
+        void _logCardLaunchWatch(const std::wstring& sessionId, CardPictureRead read) noexcept;
+        /// <summary>
+        /// §21.42, the tab's start: logs that a launch watch ran out at a post's or an edit's decision (CardPictureLaunchExpire) - the
+        /// card's text kept changing, so no look got its turn; its updates read the screen again from now on. Any thread; outside `_mtx`.
+        /// </summary>
+        /// <param name="sessionId">The card's session.</param>
+        void _logCardLaunchWatchExpired(const std::wstring& sessionId) noexcept;
         /// <summary>
         /// The answer handler every card EDIT gets: Telegram's "message to edit not found" (the user deleted the card on the phone)
         /// makes the topic record - matched by thread and card id, so a Rekey or a newer card meanwhile is left alone - forget its
@@ -1486,7 +1507,8 @@ namespace Agentmaster::Msg
             // none yet (after a restart the first update reads the screen).
             uint32_t pictureTextHash{ 0 };
             // §21.42, the picture follows the status (2026-11-01): the card's LOOKS at its screen - a settle look after a change
-            // into a state at rest, and looks with a backoff after a read that got no screen in time or that a page flip overtook
+            // into a state at rest, looks with a backoff after a read that got no screen in time or that a page flip overtook, and
+            // the LAUNCH WATCH that waits for a starting tab's claude to show its screen and then sends it once
             // (MessagingCardPicture.h, CardPictureTrack's rules; _lookAtCardPicture runs them).
             CardPictureTrack picture;
         };
@@ -2818,8 +2840,8 @@ namespace Agentmaster::Msg
         // (_expireCardPictureWaits sends a late one without a new picture).
         std::vector<PendingCardPicture> _pendingCardPictures;
         // §21.42, under `_mtx`: the card picture decisions since the last traffic census line (uploaded / reused / kept / none /
-        // skipped, and since 2026-11-01 late / looked / unchanged) and the bytes uploaded - the bandwidth the pictures cost, logged
-        // with the call census (_countCardPicture).
+        // skipped, and since 2026-11-01 late / looked / unchanged / blank / moving) and the bytes uploaded - the bandwidth the
+        // pictures cost, logged with the call census (_countCardPicture).
         std::map<std::wstring, uint32_t> _cardPicturesByKind;
         uint64_t _cardPictureBytes{ 0 };
         // §21.42, under `_mtx`: the last generation handed to a card's post, edit or look (CardState::pictureSeq,

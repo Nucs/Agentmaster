@@ -440,4 +440,75 @@ namespace Agentmaster
         }
         return s;
     }
+
+    /// <summary>
+    /// Whether a serialized snapshot SHOWS NOTHING at all: a valid version-1 snapshot every row of which is blank - no glyph, no
+    /// color but the default background, no line under or through a cell. That is a terminal whose program has drawn nothing
+    /// yet: a tab whose claude is still starting (MESSAGING.md section 21.42, "The tab's start" - the Telegram card never sends
+    /// such a black picture and waits for the real screen). Cheap and allocation-free: the format writes no cell of a blank row
+    /// (SerializeScreenSnapshot drops every row's trailing blank cells), so after the header and the style lines it only checks
+    /// that each row is an empty line - it reads no cell at all.
+    /// </summary>
+    /// <param name="text">The serialized snapshot.</param>
+    /// <returns>True for a valid snapshot whose every row is blank; false for a screen that shows anything, and for "" or a text
+    /// that is not a valid snapshot (not known to be blank: the caller's own ParseScreenSnapshot reports it).</returns>
+    /// <remarks>
+    /// A row of nothing but spaces in a non-default background counts as showing something (its cells are written): a program
+    /// that paints with colors alone is not mistaken for one that has not started. Only the header and the style table are
+    /// validated as ParseScreenSnapshot does; a row that holds any cell ends the check at once, so a damaged cell is never read.
+    /// </remarks>
+    inline bool ScreenSnapshotShowsNothing(std::wstring_view text) noexcept
+    {
+        if (text.empty() || text.size() > kScreenSnapshotMaxChars)
+        {
+            return false;
+        }
+        detail::SnapReader r{ text, 0 };
+        size_t cols = 0;
+        size_t rows = 0;
+        size_t faceLen = 0;
+        uint32_t defaultFg = 0;
+        uint32_t defaultBg = 0;
+        std::wstring_view magic;
+        std::wstring_view face;
+        if (!(r.Raw(6, magic) && magic == L"AMSS1 " && r.Decimal(cols) && r.Take(L' ') && r.Decimal(rows) && r.Take(L' ') &&
+              r.Hex(6, defaultFg) && r.Take(L' ') && r.Hex(6, defaultBg) && r.Take(L' ') && r.Decimal(faceLen) && r.Take(L':')))
+        {
+            return false;
+        }
+        if (cols == 0 || rows == 0 || cols > static_cast<size_t>(kScreenSnapshotMaxCols) || rows > static_cast<size_t>(kScreenSnapshotMaxRows) || faceLen > 256 ||
+            !(r.Raw(faceLen, face) && r.Take(L'\n')))
+        {
+            return false;
+        }
+        size_t styleCount = 0;
+        if (!(r.Decimal(styleCount) && r.Take(L'\n')) || styleCount > cols * rows)
+        {
+            return false;
+        }
+        for (size_t i = 0; i < styleCount; ++i)
+        {
+            uint32_t fg = 0;
+            uint32_t bg = 0;
+            uint32_t flags = 0;
+            if (!(r.Hex(6, fg) && r.Hex(6, bg) && r.Hex(2, flags) && r.Take(L'\n')))
+            {
+                return false;
+            }
+        }
+        // Every row must be an empty line, and nothing may follow the last one: exactly `rows` line breaks are left. A row with a
+        // cell in it is a screen that shows something (or a damaged text, which the drawing's own parse refuses).
+        if (text.size() - r.pos != rows)
+        {
+            return false;
+        }
+        for (size_t i = r.pos; i < text.size(); ++i)
+        {
+            if (text[i] != L'\n')
+            {
+                return false;
+            }
+        }
+        return true;
+    }
 }

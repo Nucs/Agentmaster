@@ -7009,6 +7009,7 @@ namespace Agentmaster::Msg
                 // (the old card's delete, then the new card) when the picture is settled. A post always reads the screen: it is the
                 // first card, a re-post below newer messages, a ping or a re-sort, each a moment the screen belongs on the card.
                 uint64_t pictureSeq = 0;
+                bool launchExpired = false; // a launch watch ran out at this decision (logged outside the lock)
                 {
                     std::lock_guard lk{ _mtx };
                     if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
@@ -7023,14 +7024,21 @@ namespace Agentmaster::Msg
                     pictureSeq = card.pictureSeq = ++_cardPictureGen;
                     card.pictureTextHash = textHash;
                     // §21.42, the picture follows the status: a post reads the screen, so a new state owes its settle look (at rest)
-                    // and every earlier look is overtaken (CardPictureStepDecided).
-                    CardPictureStepDecided(card.picture, true, stateChanged, s->state != SessionState::Running, now);
+                    // and every earlier look is overtaken (CardPictureStepDecided). A launch watch past its deadline ends here (a
+                    // card that kept changing gave its looks no turn), and a tab that does not run its claude ends one.
+                    launchExpired = CardPictureLaunchExpire(card.picture, now);
+                    CardPictureStepDecided(card.picture, true, stateChanged, s->state != SessionState::Running, s->live && s->started, now);
+                }
+                if (launchExpired)
+                {
+                    _logCardLaunchWatchExpired(sessionId);
                 }
                 auto self = weak_from_this();
                 const int64_t thread = topic.threadId;
                 _withCardPicture(sessionId, true, [self, sessionId, pictureSeq, thread, text, markup, deleteFirst, pingWanted, hash, prio](std::shared_ptr<const CardPicture> picture, CardPictureRead read) {
                     if (const auto me = self.lock())
                     {
+                        bool watchBegan = false; // §21.42: this post's read began the launch watch (logged outside the lock)
                         {
                             // A step of a run the bot was stopped in (a cog Save that restarts it): the new run cleared the card
                             // states and the in-flight mark, and posts its own card - this late post would make a second one.
@@ -7041,8 +7049,16 @@ namespace Agentmaster::Msg
                                 return;
                             }
                             // §21.42: the picture this post carries is what the card shows from now on; a read that got no screen in
-                            // time owes the card a look (CardPictureStepSettled).
-                            CardPictureStepSettled(it->second.picture, picture ? picture->shotHash : 0u, read, WallMs());
+                            // time owes the card a look, and one that found its claude still starting begins the launch watch
+                            // (CardPictureStepSettled).
+                            if (CardPictureStepSettled(it->second.picture, picture ? picture->shotHash : 0u, read, WallMs()))
+                            {
+                                watchBegan = true;
+                            }
+                        }
+                        if (watchBegan)
+                        {
+                            me->_logCardLaunchWatch(sessionId, read);
                         }
                         // _postCard queues the old card's delete and the new card (with the picture, or without one when none
                         // could be had) and its answer clears the in-flight mark. Contained: `then` runs on a window's UI thread,
@@ -7065,11 +7081,12 @@ namespace Agentmaster::Msg
             if (topic.cardRich == wantRich && topic.cardLinked == wantLinked)
             {
                 // §21.42, the picture follows the status: the card's text and buttons are what it shows, but its screenshot may be
-                // owed a LOOK - the settle look after a change into a state at rest, or a look after a read that got no screen in
-                // time. Only here, where an edit would change the picture alone; a changed text reads the screen by itself below.
+                // owed a LOOK - the settle look after a change into a state at rest, a look after a read that got no screen in
+                // time, or the launch watch's while a starting tab's claude has not shown its screen. Only here, where an edit
+                // would change the picture alone; a changed text reads the screen by itself below.
                 if (pictured)
                 {
-                    _lookAtCardPicture(sessionId, topic, text, markup, hash, wantRich, wantLinked, now);
+                    _lookAtCardPicture(sessionId, topic, text, markup, hash, wantRich, wantLinked, s->live && s->started, now);
                 }
                 return; // the topic shows this very card already, in the wanted form (also after a restart: both are persisted)
             }
@@ -7088,6 +7105,7 @@ namespace Agentmaster::Msg
         // read again (a page flip of the buttons and the slow form upgrade keep the card's picture without a read).
         uint64_t pictureSeq = 0;
         bool readScreen = false;
+        bool launchExpired = false; // §21.42: a launch watch ran out at this decision (logged outside the lock)
         {
             std::lock_guard lk{ _mtx };
             auto& card = _cards[sessionId];
@@ -7100,14 +7118,18 @@ namespace Agentmaster::Msg
                 {
                     // A picture step of an older edit still running is overtaken: it is dropped (the run-wide counter: CardState::pictureSeq).
                     pictureSeq = card.pictureSeq = ++_cardPictureGen;
-                    readScreen = !formOnly && card.pictureTextHash != textHash;
+                    // §21.42, the tab's start: a launch watch past its deadline ends here (a card that kept changing gave its looks no
+                    // turn); while one waits for a starting claude, the edit keeps the card's picture and the watch sends claude's
+                    // screen once, when it shows (CardPictureEditReads).
+                    launchExpired = CardPictureLaunchExpire(card.picture, now);
+                    readScreen = CardPictureEditReads(card.picture, card.pictureTextHash != textHash, formOnly);
                     if (readScreen)
                     {
                         card.pictureTextHash = textHash;
                     }
                     // §21.42, the picture follows the status: a status update reads the screen (a new state at rest owes its settle
                     // look); a page flip that overtakes a read still running owes the look that read was (CardPictureStepDecided).
-                    CardPictureStepDecided(card.picture, readScreen, stateChanged, s->state != SessionState::Running, now);
+                    CardPictureStepDecided(card.picture, readScreen, stateChanged, s->state != SessionState::Running, s->live && s->started, now);
                 }
                 if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
                 {
@@ -7124,6 +7146,10 @@ namespace Agentmaster::Msg
                     waiting.swap(card.tapHolds);
                 }
             }
+        }
+        if (launchExpired)
+        {
+            _logCardLaunchWatchExpired(sessionId);
         }
         if (send)
         {
@@ -7153,6 +7179,7 @@ namespace Agentmaster::Msg
                     {
                         return;
                     }
+                    bool watchBegan = false; // §21.42: this edit's read began the launch watch (logged outside the lock)
                     {
                         std::lock_guard lk{ me->_mtx };
                         const auto it = me->_cards.find(sessionId);
@@ -7161,8 +7188,13 @@ namespace Agentmaster::Msg
                             return; // overtaken by a newer post or edit of this card
                         }
                         // §21.42, the picture follows the status: the picture this edit carries is what the card shows from now on; a
-                        // read that got no screen in time, or a page flip that puts an older picture back, owes the card a look.
-                        CardPictureStepSettled(it->second.picture, picture ? picture->shotHash : 0u, read, WallMs());
+                        // read that got no screen in time, or a page flip that puts an older picture back, owes the card a look, and a
+                        // read that found its claude still starting begins the launch watch.
+                        watchBegan = CardPictureStepSettled(it->second.picture, picture ? picture->shotHash : 0u, read, WallMs());
+                    }
+                    if (watchBegan)
+                    {
+                        me->_logCardLaunchWatch(sessionId, read);
                     }
                     std::function<void(const TgResult&)> done = onDeleted;
                     if (picture)
@@ -7323,7 +7355,7 @@ namespace Agentmaster::Msg
         return _cardPictures.load() && !_cardPicturesStopped.load() && _titleChipsWanted() && static_cast<bool>(_hooks.sessionAction);
     }
 
-    void MessagingService::_withCardPicture(const std::wstring& sessionId, bool readScreen, std::function<void(std::shared_ptr<const CardPicture>, CardPictureRead)> then, bool look, uint32_t unchangedShotHash) noexcept
+    void MessagingService::_withCardPicture(const std::wstring& sessionId, bool readScreen, std::function<void(std::shared_ptr<const CardPicture>, CardPictureRead)> then, std::optional<CardPictureLookAsk> look) noexcept
     {
         // The card's send runs EXACTLY ONCE, whichever path below settles the picture first (CardPictureOnce); a failure anywhere
         // here still runs it, without a picture, so a card change is never lost to its picture (a post would otherwise stay "in
@@ -7402,7 +7434,7 @@ namespace Agentmaster::Msg
                 wait.deadlineTickMs = static_cast<int64_t>(::GetTickCount64()) + waitMs;
                 wait.sessionId = sessionId;
                 wait.waitMs = waitMs;
-                wait.look = look;
+                wait.look = look.has_value();
                 wait.settled = [once]() { return once->Ran(); };
                 wait.expire = [once, stored, taps]() {
                     const TapScope tapScope{ taps };
@@ -7415,7 +7447,7 @@ namespace Agentmaster::Msg
             // The hosting window reads the live screen with its colors on its UI thread (one pass over the viewport's cells under the
             // terminal's read lock: 0.3-0.6 ms optimized, measured for §21.24) and answers with the serialized snapshot ("" for a parked
             // tab, whose claude shows nothing, or a control that is not up).
-            _hooks.sessionAction(sessionId, L"screen-snapshot", L"", [self, sessionId, seq, once, stored, storedId, storedAt, storedHash, unchangedShotHash, taps, guard](std::wstring snapshot) {
+            _hooks.sessionAction(sessionId, L"screen-snapshot", L"", [self, sessionId, seq, once, stored, storedId, storedAt, storedHash, look, taps, guard](std::wstring snapshot) {
                 if (!guard->Claim())
                 {
                     return;
@@ -7430,8 +7462,27 @@ namespace Agentmaster::Msg
                 try
                 {
                     const int64_t now = WallMs();
-                    const uint32_t shotHash = snapshot.empty() ? 0u : CardPictureShotHash(snapshot);
-                    const CardPicturePlan plan = PlanCardPicture(!snapshot.empty(), shotHash, now, storedId, storedHash, storedAt, unchangedShotHash);
+                    // §21.42, the tab's start: a screen that shows NOTHING is a claude still starting (a tab just launched, activated or
+                    // restarted). It is never drawn or sent - the card keeps its last real picture, as for a tab with no screen - and
+                    // the step settles as Blank, so the launch watch waits for claude's own screen. The test reads no cell
+                    // (ScreenSnapshotShowsNothing: only empty rows), so it costs this UI thread next to nothing.
+                    const bool blank = !snapshot.empty() && ScreenSnapshotShowsNothing(snapshot);
+                    const bool readable = !snapshot.empty() && !blank;
+                    const uint32_t shotHash = readable ? CardPictureShotHash(snapshot) : 0u;
+                    const CardPictureLookAsk* ask = look ? &*look : nullptr;
+                    if (CardPictureLaunchGateHolds(ask, readable, shotHash))
+                    {
+                        // The launch watch: claude's screen shows text but changed since the watch's previous look - it is still being
+                        // drawn. Nothing is drawn now; the look remembers this screen (its hash, in a picture that carries nothing else)
+                        // and looks again, and the picture goes once a look sees the same screen twice.
+                        auto seen = std::make_shared<CardPicture>();
+                        seen->shotHash = shotHash;
+                        seen->shotAtMs = now;
+                        me->_countCardPicture(L"moving", 0);
+                        once->Run(std::move(seen), CardPictureRead::Moving);
+                        return;
+                    }
+                    const CardPicturePlan plan = PlanCardPicture(readable, shotHash, now, storedId, storedHash, storedAt, ask ? ask->unchangedShotHash : 0u);
                     if (plan.source == CardPictureSource::Unchanged)
                     {
                         // A look at the screen the card already carries: nothing is drawn, nothing is sent.
@@ -7455,21 +7506,24 @@ namespace Agentmaster::Msg
                         me->_queueCardPictureRender(std::move(job));
                         return;
                     }
+                    // The read's outcome when it found no screen to draw: Blank (a starting claude: the launch watch follows) or NoScreen
+                    // (a parked tab, a control not up).
+                    const CardPictureRead unreadable = blank ? CardPictureRead::Blank : CardPictureRead::NoScreen;
                     if (plan.source == CardPictureSource::Reuse)
                     {
-                        // The screen is the one the card shows (read now: captioned now - Fresh), or it could not be read (a parked tab:
-                        // the last picture with its own moment - NoScreen, nothing newer to look for). Either way the held photo, by
-                        // file_id: no upload.
+                        // The screen is the one the card shows (read now: captioned now - Fresh), or it could not be read (a parked tab, a
+                        // blank screen: the last picture with its own moment - NoScreen or Blank). Either way the held photo, by file_id: no
+                        // upload.
                         auto reused = std::make_shared<CardPicture>();
                         reused->fileId = storedId;
                         reused->shotAtMs = plan.shotAtMs;
                         reused->shotHash = storedHash;
-                        me->_countCardPicture(shotHash != 0 ? L"reused" : L"kept", 0);
-                        once->Run(std::move(reused), shotHash != 0 ? CardPictureRead::Fresh : CardPictureRead::NoScreen);
+                        me->_countCardPicture(shotHash != 0 ? L"reused" : (blank ? L"blank" : L"kept"), 0);
+                        once->Run(std::move(reused), shotHash != 0 ? CardPictureRead::Fresh : unreadable);
                         return;
                     }
-                    me->_countCardPicture(L"none", 0); // no screen and no picture yet: the card goes as text
-                    once->Run(nullptr, CardPictureRead::NoScreen);
+                    me->_countCardPicture(blank ? L"blank" : L"none", 0); // no screen to show and no picture yet: the card goes as text
+                    once->Run(nullptr, unreadable);
                 }
                 catch (...)
                 {
@@ -7537,12 +7591,12 @@ namespace Agentmaster::Msg
         }
     }
 
-    void MessagingService::_lookAtCardPicture(const std::wstring& sessionId, const TopicRecord& topic, const std::wstring& text, const json::Value& markup, uint32_t hash, bool wantRich, bool wantLinked, int64_t nowMs)
+    void MessagingService::_lookAtCardPicture(const std::wstring& sessionId, const TopicRecord& topic, const std::wstring& text, const json::Value& markup, uint32_t hash, bool wantRich, bool wantLinked, bool tabStarted, int64_t nowMs)
     {
         // Take the look under the lock - the check and the mark together, since a tap's refresh may run this beside the tick's. The
         // common case leaves here: no look owed, not due yet, or a read of this card still runs.
         uint64_t lookSeq = 0;
-        uint32_t basis = 0;
+        CardPictureLookAsk ask;
         {
             std::lock_guard lk{ _mtx };
             const auto it = _cards.find(sessionId);
@@ -7552,11 +7606,14 @@ namespace Agentmaster::Msg
             }
             auto& card = it->second;
             lookSeq = ++_cardPictureGen;
+            CardPictureLookStarted(card.picture, lookSeq, card.pictureSeq, tabStarted);
             // The look's basis is the picture the card's newest post or edit CARRIED (maybe still in the outbox), not the stored one
-            // Telegram last confirmed: a look racing an upload on its way must not draw and upload that same screen again.
-            basis = card.picture.handedShotHash;
-            CardPictureLookStarted(card.picture, lookSeq, card.pictureSeq);
+            // Telegram last confirmed: a look racing an upload on its way must not draw and upload that same screen again. While the
+            // launch watch waits for a starting claude, the ask also gates a screen still changing (CardPictureLookAskFor).
+            ask = CardPictureLookAskFor(card.picture, nowMs);
         }
+        // The screen hash an Unchanged answer stands for (the basis itself): the launch watch compares it with the screen it saw before.
+        const uint32_t basis = ask.unchangedShotHash;
         try
         {
             _countCardPicture(L"looked", 0);
@@ -7570,7 +7627,7 @@ namespace Agentmaster::Msg
             _withCardPicture(
                 sessionId,
                 true,
-                [self, sessionId, lookSeq, cardId, thread, text, markup, onDeleted, onForm](std::shared_ptr<const CardPicture> picture, CardPictureRead read) {
+                [self, sessionId, lookSeq, basis, cardId, thread, text, markup, onDeleted, onForm](std::shared_ptr<const CardPicture> picture, CardPictureRead read) {
                     const auto me = self.lock();
                     if (!me)
                     {
@@ -7578,6 +7635,10 @@ namespace Agentmaster::Msg
                     }
                     CardPictureLookStep step = CardPictureLookStep::Dropped;
                     int tries = 0;
+                    // §21.42, the tab's start: whether this look ended a launch watch, and when that watch began (for the log line).
+                    bool watchEnded = false;
+                    int64_t watchBeganMs = 0;
+                    const int64_t now = WallMs();
                     {
                         std::lock_guard lk{ me->_mtx };
                         const auto it = me->_cards.find(sessionId);
@@ -7585,14 +7646,38 @@ namespace Agentmaster::Msg
                         {
                             return; // the card state went with its topic (rebound, recreated or deleted): its new card reads anew
                         }
-                        step = CardPictureLookSettled(it->second.picture, lookSeq, it->second.pictureSeq, picture != nullptr, picture ? picture->shotHash : 0u, read, WallMs());
-                        tries = it->second.picture.lookTries;
+                        auto& track = it->second.picture;
+                        const int64_t watchUntil = track.launchUntilMs;
+                        // What the read saw: the picture's screen (Fresh), the screen still changing (Moving), or the basis (Unchanged).
+                        const uint32_t seenHash = read == CardPictureRead::Unchanged ? basis : (picture ? picture->shotHash : 0u);
+                        step = CardPictureLookSettled(track, lookSeq, it->second.pictureSeq, picture != nullptr, seenHash, read, now);
+                        tries = track.lookTries;
+                        watchEnded = watchUntil != 0 && track.launchUntilMs == 0;
+                        watchBeganMs = watchUntil - kCardPictureLaunchWatchMs;
                     }
                     if (step == CardPictureLookStep::GiveUp)
                     {
                         me->_log(L"[msg] " + ShortId(sessionId) + L" card picture: " + std::to_wstring(tries) +
                                  L" looks in a row got no screen in time; the card keeps its picture until its next status update");
                         return;
+                    }
+                    if (step == CardPictureLookStep::Watch)
+                    {
+                        me->_logCardLaunchWatch(sessionId, read);
+                        return;
+                    }
+                    if (step == CardPictureLookStep::WatchTimedOut)
+                    {
+                        me->_log(L"[msg] " + ShortId(sessionId) + L" card picture: the tab's screen showed nothing for " + std::to_wstring(kCardPictureLaunchWatchMs / 1000) +
+                                 L" s after its claude started; the card keeps its picture until its next status update");
+                        return;
+                    }
+                    if (watchEnded && (step == CardPictureLookStep::Send || step == CardPictureLookStep::Done))
+                    {
+                        // The launch watch's one outcome: claude shows its screen (held still, or taken as it was) - the picture follows it,
+                        // or the card carries that very screen already.
+                        me->_log(L"[msg] " + ShortId(sessionId) + L" card picture: the tab's claude shows its screen " + std::to_wstring((now - watchBeganMs) / 1000) + L" s after the watch began" +
+                                 (step == CardPictureLookStep::Send ? std::wstring{ L"; the card's picture follows it" } : std::wstring{ L"; the card carries it already" }));
                     }
                     if (step != CardPictureLookStep::Send || !picture)
                     {
@@ -7618,8 +7703,7 @@ namespace Agentmaster::Msg
                     };
                     me->_editText(cardId, text, SendPriority::CardEdit, L"card:" + sessionId, markup, std::move(done), onForm, std::move(picture));
                 },
-                true,
-                basis);
+                ask);
         }
         catch (...)
         {
@@ -7632,6 +7716,36 @@ namespace Agentmaster::Msg
                 it->second.picture.lookPending = false;
                 it->second.picture.lookAtMs = WallMs() + CardPictureLookDelayMs(it->second.picture.lookTries);
             }
+        }
+    }
+
+    void MessagingService::_logCardLaunchWatch(const std::wstring& sessionId, CardPictureRead read) noexcept
+    {
+        try
+        {
+            // Blank: the terminal is up and shows nothing yet; NoScreen on a started tab: the terminal itself is not up yet.
+            _log(L"[msg] " + ShortId(sessionId) + L" card picture: the tab's claude is starting (" +
+                 std::wstring{ read == CardPictureRead::Blank ? L"its screen shows nothing yet" : L"its screen is not up yet" } +
+                 L"); the card keeps its picture and sends claude's screen once it shows (at most " + std::to_wstring(kCardPictureLaunchWatchMs / 1000) + L" s)");
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the line is lost; the watch itself runs on (its state was set before this call).
+            LogSwallowedException(L"MessagingService::_logCardLaunchWatch");
+        }
+    }
+
+    void MessagingService::_logCardLaunchWatchExpired(const std::wstring& sessionId) noexcept
+    {
+        try
+        {
+            _log(L"[msg] " + ShortId(sessionId) + L" card picture: the launch watch's " + std::to_wstring(kCardPictureLaunchWatchMs / 1000) +
+                 L" s ran out while the card kept changing (no look got its turn); the card's updates read the screen again");
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the line is lost; the watch ended already (its state was cleared before this call).
+            LogSwallowedException(L"MessagingService::_logCardLaunchWatchExpired");
         }
     }
 
