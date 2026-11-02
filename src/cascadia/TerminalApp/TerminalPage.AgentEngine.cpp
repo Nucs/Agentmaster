@@ -44,6 +44,7 @@
 #include "AgentToastActivator.h" // System notifications: the toast COM activator (registered once, process-wide, from the engine init below)
 #include "TabHeaderControl.h" // Agentmaster: SetTabRenameCommitMode (push the GLOBAL rename-commit mode to tab headers)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / AgentmasterStateDir / MaterializeSharedHookFiles
+#include "AgentMaster/BundledMods.h" // BUNDLED_MODS.md — BundledModPluginArgs, the spawn builders' bundled-mods provider (set below)
 #include "AgentMaster/Engine.h" // SharedEngine / ClaimWindowRecord / Register-UnregisterLiveWindow
 #include "AgentMaster/SessionDbRefresher.h" // SESSIONS_DB.md §7.6 — the cog Save re-applies the session database settings
 #include "AgentMaster/Messaging.h" // MESSAGING.md — the Telegram bot: the cog Save re-applies its settings; its Search factory + version word are set here
@@ -1324,6 +1325,17 @@ namespace winrt::TerminalApp::implementation
                     ::Agentmaster::AgentLogCaughtException(L"messaging: set the Search factory");
                 }
             });
+        }
+
+        // Agentmaster (BUNDLED_MODS.md): the Claude Code mods this build ships (file-links, better-verbose-bash) load into
+        // every Claude tab launched from here on, through the spawn builders' provider. Set in this layer, not in
+        // Engine.cpp, so the other programs that compile ClaudeSpawn.cpp (the CLI, the session database, the test
+        // harness, the probes) never link BundledMods.cpp and never load a mod. Once per process: the provider is
+        // process-wide, and a second window has nothing to add. The mods' folders are written at the first launch that
+        // loads one (EnsureBundledModsMaterialized), never at startup.
+        {
+            static std::once_flag bundledModsOnce;
+            std::call_once(bundledModsOnce, [] { ::Agentmaster::SetBundledModArgsProvider(&::Agentmaster::BundledModPluginArgs); });
         }
 
         // Agentmaster (System notifications; NOTIFICATIONS.md §4a): register the TOAST COM ACTIVATOR

@@ -1,0 +1,4 @@
+{
+  "description": "file-links: a ui.render hook on AssistantMessage that hands the engine the reply's markdown with each span that names an existing file wrapped in a file:/// link (display only); a tool.call hook on Read, Edit, Write and NotebookEdit that notes the files the session touches, so a bare file name links to the one the conversation is about; session.start and turn.complete hooks that keep a git ls-files index of the session's repository; and the /file-links command, which reports what the mod knows",
+  "modules": ["./register.ts"]
+}

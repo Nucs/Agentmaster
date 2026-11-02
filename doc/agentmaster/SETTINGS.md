@@ -21,7 +21,7 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
 | Notifications | Which state changes notify, the focused-tab skip, the sound. |
 | Messaging | The Telegram bot ([MESSAGING.md](MESSAGING.md) §21). |
 | Tabs & Overlay | Close affordances, tab size, the rename key and title naming, the favorite marker, tab colors, the status-flash color, overlay opacity. |
-| Claude | Which native `claude.exe`, how long Claude keeps session history. |
+| Claude | Which native `claude.exe`, how long Claude keeps session history, the mods Agentmaster loads into its Claude tabs. |
 | About | Version and build, updates, the active profile folder, Debug Mode, uninstall. |
 
 - GLOBAL settings apply live in every window on Save through the settings broadcast; per-window state
@@ -279,6 +279,11 @@ Every color surface — tabs, board bands, Sessions chips, the pending dots — 
   it; Browse…); re-resolved live on Save (`RefreshClaudeExe`).
 - `claudeCleanupDaysSeeded`: whether `cleanupPeriodDays=36500` was written once into the global
   `~/.claude/settings.json` (only when the user had not set it), so Claude never purges session history.
+- `bundledModsOff` (empty): the bundled Claude Code mods ([BUNDLED_MODS.md](BUNDLED_MODS.md)) turned off under
+  **MODS IN CLAUDE TABS**, one switch per mod (file-links, better-verbose-bash), all on by default; empty, as in every
+  older `settings.json`, loads them all. A name this build does not ship is kept on Save. The status line under the
+  switches says what the next launch does with each (loads · stands aside for your own copy · needs a newer Claude Code
+  · off), from the switches' positions before Save. Applies to the next launch, resume or restart.
 
 ## About
 

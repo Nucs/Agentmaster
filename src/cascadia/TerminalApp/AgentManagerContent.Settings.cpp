@@ -31,6 +31,7 @@
 // (settings-typed ids are printable), so it can never collide with something a user configured.
 static constexpr std::wstring_view kSpecifyModelSentinel = L"" "specify-model";
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
+#include "AgentMaster/BundledMods.h" // BUNDLED_MODS.md — the Claude tab's MODS IN CLAUDE TABS switches and their status line
 #include "AgentMaster/LaunchPresetsOs.h" // PRESETS (HARNESSES.md): the Presets tab (config, keys, placeholders) + the successor combos' preset entries
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
 #include "AgentMaster/RegexUtil.h" // COMMANDS.md §6b — live validation of the Commands tab's regex boxes
@@ -1527,6 +1528,37 @@ namespace winrt::TerminalApp::implementation
             }
         });
         panel.Children().Append(_setClaudeInstallBtn);
+
+        // MODS IN CLAUDE TABS (BUNDLED_MODS.md): a switch per Claude Code mod this build ships, ON by default; each one
+        // that is on loads into every Claude tab Agentmaster starts (--plugin-dir). The status line below says what the
+        // next launch does with each, from the switches' CURRENT positions (each flip recomputes it), before Save.
+        panel.Children().Append(SettingsSeparator(L"MODS IN CLAUDE TABS"));
+        {
+            auto intro = Text(L"Claude Code mods that ship with Agentmaster and load into every Claude tab it starts: a new tab, a resume, a restart. A tab already open keeps what it started with. A mod of the same name that you installed in Claude Code yourself loads instead.", 11, false, 0.75);
+            intro.TextWrapping(TextWrapping::Wrap);
+            panel.Children().Append(intro);
+        }
+        _setBundledMods.clear();
+        for (const auto& mod : ::Agentmaster::BundledModCatalog())
+        {
+            ToggleSwitch modSwitch;
+            modSwitch.Header(winrt::box_value(winrt::hstring{ mod.name + L" " + mod.version }));
+            AgentSetTip(modSwitch, winrt::hstring{ mod.summary + L"\n\nNeeds Claude Code " + mod.minClaudeCode + L" or later. Off: Claude tabs started from now on run without it." });
+            // The status line follows the switch at once (through the page's weak reference: the switch lives in the
+            // overlay this page owns, and a handler holding the page strongly would keep it alive).
+            modSwitch.Toggled([weak = get_weak()](const IInspectable&, const RoutedEventArgs&) {
+                if (auto self = weak.get())
+                {
+                    self->_RefreshBundledModsStatus();
+                }
+            });
+            panel.Children().Append(modSwitch);
+            _setBundledMods.emplace_back(mod.name, modSwitch);
+        }
+        _setBundledModsStatus = Text(L"", 11, false, 0.75);
+        _setBundledModsStatus.TextWrapping(TextWrapping::Wrap);
+        AgentSetTitledTip(_setBundledModsStatus, L"What the next Claude tab does with each mod", L"Read from the switches above, the detected claude.exe and your own Claude Code settings (~/.claude/settings.json and the managed settings). Each launch also reads the project's own .claude\\settings.json and .claude\\settings.local.json: a project that enables its own copy of a mod gets that copy instead. hooks.log has a [mods] line for every launch.");
+        panel.Children().Append(_setBundledModsStatus);
 
         // === PROMPT QUEUE RUNNER tab === (named "Tests Autorunner" until 2026-10-09; the panel variable and
         // the settings keys keep the old "autorunner" word)
@@ -3163,6 +3195,17 @@ namespace winrt::TerminalApp::implementation
                 break;
             }
         }
+        // BUNDLED_MODS.md: each switch is on unless the stored off list names its mod (without case, as the launch reads it).
+        for (auto& [modName, modSwitch] : _setBundledMods)
+        {
+            bool off = false;
+            for (const auto& name : _appSettings.bundledModsOff)
+            {
+                off = off || ::CompareStringOrdinal(name.c_str(), -1, modName.c_str(), -1, TRUE) == CSTR_EQUAL;
+            }
+            modSwitch.IsOn(!off);
+        }
+        _RefreshBundledModsStatus();
         if (_setDefaultMode)
         {
             // Index contract (see where the combo is built): 0 == Off ("Paused"), 1 == Full ("Auto").
@@ -3953,6 +3996,60 @@ namespace winrt::TerminalApp::implementation
         _settingsLocalTip.Hide();
     }
 
+    std::vector<std::wstring> AgentManagerContent::_BundledModsOffFromSwitches() const
+    {
+        std::vector<std::wstring> off;
+        // Keep the stored names this build does not ship (no switch here stands for them): a mod a newer build ships and
+        // the user turned off there stays off when an older build's cog is saved (PERSISTENCE.md §17's rule for state).
+        for (const auto& name : _appSettings.bundledModsOff)
+        {
+            bool shipped = false;
+            for (const auto& [modName, modSwitch] : _setBundledMods)
+            {
+                shipped = shipped || ::CompareStringOrdinal(name.c_str(), -1, modName.c_str(), -1, TRUE) == CSTR_EQUAL;
+            }
+            if (!shipped)
+            {
+                off.push_back(name);
+            }
+        }
+        for (const auto& [modName, modSwitch] : _setBundledMods)
+        {
+            if (!modSwitch.IsOn())
+            {
+                off.push_back(modName);
+            }
+        }
+        return off;
+    }
+
+    void AgentManagerContent::_RefreshBundledModsStatus()
+    {
+        if (!_setBundledModsStatus)
+        {
+            return;
+        }
+        try
+        {
+            // A preview, not a launch: the switches' positions over a copy of the settings, the user and managed scopes
+            // only (no folder), and nothing written (the mods' folders are made by the first launch that loads them).
+            auto preview = _appSettings;
+            preview.bundledModsOff = _BundledModsOffFromSwitches();
+            const auto choices = ::Agentmaster::ChooseBundledMods(::Agentmaster::AgentmasterStateDir(), preview, ::Agentmaster::SharedEngine().claudeExePath, {}, false);
+            std::wstring text;
+            for (const auto& choice : choices)
+            {
+                text += (text.empty() ? L"" : L"\n") + ::Agentmaster::DescribeBundledModChoice(choice);
+            }
+            _setBundledModsStatus.Text(winrt::hstring{ text });
+        }
+        catch (...)
+        {
+            // The status line is only a description: the switches still save, and every launch decides for itself.
+            AgentLogCaughtException(L"cog: the bundled mods' status line");
+        }
+    }
+
     void AgentManagerContent::_SaveSettings()
     {
         if (_setSkipPermissions)
@@ -3996,6 +4093,11 @@ namespace winrt::TerminalApp::implementation
             const auto a = p.find_first_not_of(L" \t");
             const auto b = p.find_last_not_of(L" \t");
             _appSettings.claudeExePath = (a == std::wstring::npos) ? std::wstring{} : p.substr(a, b - a + 1);
+        }
+        // BUNDLED_MODS.md: the switches' off list (unknown names from a newer build kept); the next launch reads it.
+        if (!_setBundledMods.empty())
+        {
+            _appSettings.bundledModsOff = _BundledModsOffFromSwitches();
         }
         if (_setCleanupDays)
         {
@@ -4703,7 +4805,16 @@ namespace winrt::TerminalApp::implementation
                                   L" pauseHidden=" + (_appSettings.pauseHiddenTerminals ? L"1" : L"0") + /* RENDERING.md §4c */
                                   L" releaseHidden=" + (_appSettings.releaseHiddenTerminalDevices ? std::to_wstring(_appSettings.releaseHiddenTerminalDevicesAfterSeconds) + L"s" : std::wstring{ L"off" }) +
                                   L" handover=" + (_appSettings.commandHandoverEnabled ? (L"/" + _appSettings.commandHandoverName) : std::wstring{ L"off" }) +
-                                  L" here=" + (_appSettings.commandHandoverHereEnabled ? (L"/" + _appSettings.commandHandoverHereName) : std::wstring{ L"off" }) /* both apply at next start (COMMANDS.md §6a) */);
+                                  L" here=" + (_appSettings.commandHandoverHereEnabled ? (L"/" + _appSettings.commandHandoverHereName) : std::wstring{ L"off" }) /* both apply at next start (COMMANDS.md §6a) */ +
+                                  L" modsOff=" + [this] {
+                                      // BUNDLED_MODS.md: which bundled mods new Claude tabs start without ("none" = all load).
+                                      std::wstring names;
+                                      for (const auto& name : _appSettings.bundledModsOff)
+                                      {
+                                          names += (names.empty() ? L"" : L",") + name;
+                                      }
+                                      return names.empty() ? std::wstring{ L"none" } : names;
+                                  }());
             _settingsSink(_appSettings); // page persists + applies to future spawns
         }
         // Native-exe-only policy: re-resolve the claude.exe now, so a changed/cleared override (or a

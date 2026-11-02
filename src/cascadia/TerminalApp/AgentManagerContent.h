@@ -804,6 +804,12 @@ namespace winrt::TerminalApp::implementation
         void _ShowSettings(); // populate controls from _appSettings, then reveal the overlay
         void _HideSettings();
         void _SaveSettings(); // read controls -> _appSettings -> _settingsSink, then hide
+        // BUNDLED_MODS.md: the bundled mods' off list the Claude tab's switches stand for: every switched-off mod, plus
+        // each name of the stored list this build does not ship (a newer build's mod stays off). Throws std::bad_alloc only.
+        std::vector<std::wstring> _BundledModsOffFromSwitches() const;
+        // BUNDLED_MODS.md: rewrite the status line under the switches from their current positions (not yet saved): one
+        // line per mod saying what the next launch does with it. A no-op before the overlay is built. UI thread.
+        void _RefreshBundledModsStatus();
         // Agentmaster: the cog's TOP TAB strip — Sessions · Autorunner · Behavior · Tabs & Overlay ·
         // Claude · About. A button-tab swaps one scrollable panel per group (the _SwitchEnvTab idiom;
         // NOT a Pivot — themes unreliably under XAML Islands). _settingsTabButtons / _settingsTabPanels
@@ -1718,6 +1724,13 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBox _setClaudeExePath{ nullptr }; // Agentmaster: explicit claude.exe override (blank = auto-detect; must be an .exe)
         winrt::Windows::UI::Xaml::Controls::Button _setClaudeInstallBtn{ nullptr }; // Agentmaster: one-click install/migrate — shown only when no native claude.exe is detected (label from ClaudeInstallKind())
         winrt::Windows::UI::Xaml::Controls::TextBox _setCleanupDays{ nullptr }; // ENV_VARS.md §8: cleanupPeriodDays in the user's GLOBAL ~/.claude/settings.json (history retention; read/written via the ClaudeUserSettings repo, NOT AppSettings)
+        // BUNDLED_MODS.md: the Claude tab's MODS IN CLAUDE TABS switches, one per bundled mod (BundledModCatalog order),
+        // each paired with its mod's name; on = it loads into new Claude tabs (AppSettings::bundledModsOff holds the off
+        // ones). Built once with the overlay; seeded on every open, read back on Save.
+        std::vector<std::pair<std::wstring, winrt::Windows::UI::Xaml::Controls::ToggleSwitch>> _setBundledMods;
+        // BUNDLED_MODS.md: the line under those switches: what the next launch does with each mod (loads / stands aside
+        // for the user's own copy / needs a newer Claude Code / off), recomputed on open and on every flip.
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setBundledModsStatus{ nullptr };
         // ---- UPDATES (Agentmaster updater; Updater.h) ----
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setAllowPrerelease{ nullptr }; // include GitHub pre-releases in the update check (default OFF; INSTANT-APPLY — the switch RMWs settings.json on flip, no Save needed)
         bool _seedingAllowPrerelease{ false }; // latch: a cog-open programmatic IsOn seed must not re-fire the switch's instant-apply RMW

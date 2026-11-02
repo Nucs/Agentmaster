@@ -109,6 +109,7 @@ from an empty folder. The probes: `tools/mod-link-probe/`.
 | F12 | **No network API of the mod's own:** `fetch`, `WebSocket`, `XMLHttpRequest` and `EventSource` are absent, and so are `Worker`, `MessageChannel`, `WebAssembly`, `ReadableStream`, `CompressionStream`, `Blob`, `SharedArrayBuffer`, `process`, `require`, `Bun`. Present: `crypto` (incl. `subtle.digest`), `TextEncoder`/`TextDecoder`, `URL`, `AbortController`, `structuredClone`, `performance`, `console`, `Intl`, `Uint8Array.fromBase64` / `toBase64`. | Every byte to Agentmaster goes through `$.http.fetch`. Client libraries that open their own sockets (gRPC, WebSocket, Socket.IO, SignalR, ZeroMQ, NATS, MQTT, Redis) cannot run in a mod. |
 | F13 | Code generation throws at run time (`EvalError: Code generation from strings disallowed for this context`, for `eval` and `new Function`). A module whose source merely contains them loads. | A library is usable only if the paths the mod calls never compile strings (schema compilers and template engines usually do). |
 | F14 | `setTimeout` / `setInterval` exist and fire (51 ms for a 50 ms timer; 3 ticks at 30 ms in 92 ms) although the API declares no timers. They are host stand-ins: their prototype is not `Function.prototype`, and converting one to a string throws `TypeError: No default value`. | Library code that debounces or retries works today, but this is undocumented: the mod's own waits use `$.clock`. |
+| F15 | (2.1.310, 2026-11-02, [`BUNDLED_MODS.md`](BUNDLED_MODS.md) §6) An interactive TUI with two `--plugin-dir` folders starts with no dialog; a `--plugin-dir` plugin **replaces an installed plugin of the same name** (`Plugin "file-links" from --plugin-dir overrides installed version`); Claude Code watches the folders and writes `.claude-plugin\types\` and a `tsconfig.json` into them. | A shipped mod must stand aside when the user runs their own copy, or it silently replaces it; its folder must be writable (the profile, not the package). |
 
 Verified earlier, live, by `prompt-queue` (SPEC §14, Claude Code 2.1.287 and 2.1.296):
 - `$.prompt.submit({ text, asUser: true })` starts a turn of its own after the running turn **and its Stop hooks**
@@ -128,7 +129,9 @@ Verified earlier, live, by `prompt-queue` (SPEC §14, Claude Code 2.1.287 and 2.
 - **`agentmaster-link`** — one hooks module, observe-only. Every hook returns `next(e)`, none gates anything, and
   it draws no UI unless a feature asks (§4.5, the band). Shipped inside the Agentmaster package, materialized at
   engine init into an immutable `<profile>\mods\agentmaster-link\<version>-<hash>\` (the `launch-settings`
-  idiom).
+  idiom). That machinery exists: the bundled mods ([`BUNDLED_MODS.md`](BUNDLED_MODS.md); `BundledMods.{h,cpp}`, the
+  spawn builders' `SetBundledModArgsProvider` seam) embed, write and load file-links and better-verbose-bash this way,
+  so the link would be one more catalog entry, plus its `AM_LINK` / `AM_LINK_TOKEN` env.
 - **`LinkServer`** (engine, one per process like `HooksBridge`) — HTTP/1.1 over an AF_UNIX socket
   `<profile>\link\am.sock`, and over `127.0.0.1:<ephemeral port>` when the socket path is too long (F2) or the bind
   fails. A small Winsock IOCP server: request line, headers, `Content-Length` bodies, keep-alive. It writes

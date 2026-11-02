@@ -1,0 +1,4 @@
+{
+  "description": "better-verbose-bash: one ui.render hook on the terminal's ToolUse rows of Bash and PowerShell calls that Claude Code draws in full (--verbose, Verbose output, the ctrl+o transcript): the call's description becomes the row's bulleted header, with Claude Code's own Bash(command) row and its output under it (display only)",
+  "modules": ["./register.ts"]
+}

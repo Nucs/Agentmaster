@@ -729,7 +729,7 @@ exit 0
         return json;
     }
 
-    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher, std::wstring_view modelOverride, std::wstring_view initialPrompt, std::wstring_view extraArgs)
+    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher, std::wstring_view modelOverride, std::wstring_view initialPrompt, std::wstring_view extraArgs, std::wstring_view pluginArgs)
     {
         // When skipPermissions is ON (the cog default), spawn with --dangerously-skip-permissions:
         // the app drives claude programmatically (Autorunner + injected prompts) and gates risky
@@ -794,6 +794,14 @@ exit 0
         else
         {
             cmd = exe + L" " + flag + L"--settings \"" + std::wstring{ settingsPath } + L"\" --session-id " + std::wstring{ sessionId };
+        }
+
+        // Bundled mods (Agentmaster, BUNDLED_MODS.md): one ` --plugin-dir "<folder>"` per mod, already rendered with its
+        // leading space. Every form (fresh / resume / fork) carries them the same way, and a flag's place among the
+        // others does not matter to claude; only the positional prompt below must stay last.
+        if (!pluginArgs.empty())
+        {
+            cmd += pluginArgs;
         }
 
         // Launch-model picker (Agentmaster): the per-LAUNCH model from an "Open New Session Here"
@@ -4835,6 +4843,28 @@ send - nothing is submitted until the user presses Enter in that tab.
         }
     }
 
+    // Agentmaster (BUNDLED_MODS.md): the bundled mods' provider, set once per process by the app (nullptr in every other
+    // program that compiles this file, which then loads no mod). Atomic: windows launch from their own UI threads.
+    static std::atomic<BundledModArgsProvider> g_bundledModArgsProvider{ nullptr };
+
+    void SetBundledModArgsProvider(BundledModArgsProvider provider) noexcept
+    {
+        g_bundledModArgsProvider.store(provider);
+    }
+
+    // The bundled mods' --plugin-dir arguments for one launch: the provider's answer, or "" when none is set.
+    //   stateDir       - the ACTIVE profile folder (where the mods' folders live).
+    //   settings       - the launch's cog settings (a mod turned off there does not load).
+    //   claudeLauncher - the claude.exe the launch runs (each mod needs a minimum version).
+    //   workingDir     - the launch's working folder (its .claude\ settings may already load the user's own copy).
+    //   sessionId      - the launch's session id (for the provider's [mods] log line).
+    // Returns the rendered arguments with a leading space, or "". Never throws (the provider must not either).
+    static std::wstring BundledModArgsFor(const std::wstring& stateDir, const AppSettings& settings, std::wstring_view claudeLauncher, std::wstring_view workingDir, std::wstring_view sessionId) noexcept
+    {
+        const auto provider = g_bundledModArgsProvider.load();
+        return provider ? provider(stateDir, settings, claudeLauncher, workingDir, sessionId) : std::wstring{};
+    }
+
     // Agentmaster (PRESETS): apply a compiled launch to a spec whose plain parts are already built — the
     // launch settings file (when the launch carries env values), the process env additions and the
     // key-carrier name. Shared by BuildClaudeSpawn and BuildClaudeRestartSpec so a restart applies a preset
@@ -4906,9 +4936,12 @@ send - nothing is submitted until the user presses Enter in that tab.
         }
 
         const auto settingsFwd = ToForwardSlashes(spec.settingsPath);
+        // BUNDLED_MODS.md: decided per launch (the cog's switches, the claude version, the user's own copies in this
+        // folder's settings), never stored with the session: a resume always gets the current build's mods.
+        const std::wstring modArgs = BundledModArgsFor(stateDir, settings, claudeLauncher, spec.workingDir, spec.sessionId);
         spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFromSessionId, claudeLauncher,
                                                   launch ? std::wstring_view{ launch->model } : modelOverride, initialPrompt,
-                                                  launch ? RenderLaunchExtraArgs(*launch) : std::wstring{});
+                                                  launch ? RenderLaunchExtraArgs(*launch) : std::wstring{}, modArgs);
         return spec;
     }
 
@@ -4961,9 +4994,11 @@ send - nothing is submitted until the user presses Enter in that tab.
             ApplyCompiledLaunch(spec, stateDir, settings, claudeLauncher, *launch); // the session's own preset/model, again
         }
         const auto settingsFwd = ToForwardSlashes(spec.settingsPath);
+        // BUNDLED_MODS.md: the restart decides its mods afresh, exactly like the first launch (BuildClaudeSpawn).
+        const std::wstring modArgs = BundledModArgsFor(stateDir, settings, claudeLauncher, spec.workingDir, spec.sessionId);
         spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFrom, claudeLauncher,
                                                   launch ? std::wstring_view{ launch->model } : std::wstring_view{}, {},
-                                                  launch ? RenderLaunchExtraArgs(*launch) : std::wstring{});
+                                                  launch ? RenderLaunchExtraArgs(*launch) : std::wstring{}, modArgs);
         return spec;
     }
 }

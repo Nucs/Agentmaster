@@ -1,0 +1,8 @@
+{
+  "name": "file-links",
+  "version": "0.4.1",
+  "description": "Draws the file paths and file names in Claude's replies as clickable file:/// links on Windows and macOS, the form a CLAUDE.md rule may ask replies to use, so the model need not write them. A span is linked only when it names a file or folder the mod finds: a full path that exists, a relative path under the session's folder, a file the session's tools read or wrote, a file in the session's scratchpad, or the file of the session's git repository with that name (the shortest path when several folders hold one). Code blocks and existing links stay as written, and so does every reply in a terminal that draws no hyperlinks (Apple Terminal; FORCE_HYPERLINK=1 overrides, as it does for Claude Code). Display only: the stored reply and what the model reads back do not change.",
+  "author": {
+    "name": "Eli Belash"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "better-verbose-bash",
+  "version": "0.1.1",
+  "author": { "name": "Eli Belash" },
+  "description": "In the views where Claude Code draws a shell call in full (--verbose, Verbose output in /config, and the ctrl+o transcript), the reason the model gave for the call (its description) becomes the row's bulleted header, and Bash(command) and the output follow under it: '● Show working tree status' over 'Bash(git status)'. The bullet keeps Claude Code's colors (dim while the call runs or waits, green when it succeeded, red when it failed). Bash and PowerShell calls that carry a description; every other row, and every row of the compact view, stays as Claude Code draws it, and so does a row that another plugin seated beneath it drew its own way (chat-view's hidden calls and its '# …' lines), so it works in any seat. Display only: the transcript and what the model reads do not change."
+}

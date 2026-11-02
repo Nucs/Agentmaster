@@ -971,6 +971,14 @@ namespace Agentmaster
             hidden.Push(json::Value::MkStr(id));
         }
         o.Set(L"hiddenSessionIds", std::move(hidden));
+        // BUNDLED_MODS.md: the bundled mods turned off in the cog's Claude tab (names, as written: one this build does not
+        // ship stays, so a newer build's mod turned off there stays off).
+        auto modsOff = json::Value::MkArr();
+        for (const auto& name : s.bundledModsOff)
+        {
+            modsOff.Push(json::Value::MkStr(name));
+        }
+        o.Set(L"bundledModsOff", std::move(modsOff));
         // Slash commands (COMMANDS.md §6a — the cog's "Commands" tab): the /handover family's
         // configured names + enables (cog-owned), plus the ENGINE-owned materialized-name markers
         // (which name's definition file the last engine init wrote; "" == none — disabled/failed).
@@ -1276,6 +1284,18 @@ namespace Agentmaster
                 if (e.type == json::Value::Type::Str && !e.str.empty())
                 {
                     s.hiddenSessionIds.push_back(e.str);
+                }
+            }
+        }
+        // BUNDLED_MODS.md: absent in every settings.json from before the feature, so missing => empty => every bundled mod
+        // loads (the cog's Claude tab turns each one off). An entry that is not a non-empty string is skipped.
+        if (const auto* off = v.Find(L"bundledModsOff"); off && off->type == json::Value::Type::Arr)
+        {
+            for (const auto& e : off->arr)
+            {
+                if (e.type == json::Value::Type::Str && !e.str.empty())
+                {
+                    s.bundledModsOff.push_back(e.str);
                 }
             }
         }

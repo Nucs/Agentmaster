@@ -926,6 +926,11 @@ namespace Agentmaster
     // the box legitimately does NOT read as the prompt after a big fill — exactly the handover
     // paste-tier injections. A naive equality would refuse every one of them; the marker arithmetic
     // below accepts a box that is provably the COLLAPSED render of this prompt and nothing else.
+    // A fill with NO line break collapses into the BARE "[Pasted text #N]" (claude drops the count when
+    // it is 0) once it is longer than 800 characters — a long Telegram message, a voice note's
+    // transcript. Its zero count says almost nothing (every one-line prompt has it), so the bare form
+    // verifies only when claude would really render THIS fill that way (PromptFillCollapsesToBareMarker,
+    // DELIVERY.md §19); before that rule existed, every such prompt failed as Foreign twice.
     enum class FillVerify
     {
         Verified, // the box reads exactly the prompt (whitespace-tolerant) — commit the CR
@@ -956,6 +961,27 @@ namespace Agentmaster
             }
             return out;
         }
+    }
+
+    // Agentmaster (DELIVERY.md §19 — the BARE placeholder): would claude show OUR fill of `promptText`
+    // in its box as the bare "[Pasted text #N]"? Claude collapses a paste into a placeholder when it is
+    // longer than 800 characters or has more than min(rows - 10, 2) line breaks, and writes the
+    // "+M lines" count only when the paste has line breaks. A paste without one can therefore collapse
+    // on its LENGTH alone, so the bare form stands for our fill exactly when that fill, as claude stores
+    // it (PromptFillBody, then claude's own normalization: CRLF/CR -> LF, TAB -> four spaces), has no
+    // line break and is longer than 800 characters. The read-back verify and the Foreign undo both ask
+    // this before they treat a bare marker as ours. A SHORT one-line prompt never collapses, so a bare
+    // marker beside one is the user's own earlier paste (one the reads missed): submitting it would send
+    // their draft, and deleting it would destroy it.
+    //   promptText — the queued text exactly as BuildPromptFill receives it (unsanitized: this applies
+    //                PromptFillBody itself, so the answer matches what is actually pasted).
+    //   returns    — true when claude renders that fill as the bare "[Pasted text #N]".
+    //   throws     — std::bad_alloc on allocation failure only (the sanitize's and the copies' only
+    //                failure mode).
+    inline bool PromptFillCollapsesToBareMarker(std::wstring_view promptText)
+    {
+        const std::wstring pasted = NormalizePastedTextLikeClaude(PromptFillBody(promptText));
+        return ClaudePasteNewlineCount(pasted) == 0 && ClaudeWouldCollapsePaste(pasted);
     }
 
     inline FillVerify VerifyFillAgainstPrompt(std::wstring_view boxText, std::wstring_view promptText)
@@ -990,7 +1016,9 @@ namespace Agentmaster
             {
                 // WHOLE-COLLAPSE: the marker must be the box's ONLY visible content (fragments /
                 // other lines would be content the prompt does not explain), and its M must match
-                // the prompt under either observed counting convention (PendingPaste.h).
+                // the prompt under either observed counting convention (PendingPaste.h). A BARE marker
+                // (M == 0) matches every one-line prompt by count, so it also needs claude to render
+                // THIS fill bare: no line break and over 800 characters (§19) — never a short prompt.
                 bool onlyContent = WsStripped(m.headFragment).empty() && WsStripped(m.tailFragment).empty();
                 for (size_t li = 0; onlyContent && li < boxLines.size(); ++li)
                 {
@@ -1001,7 +1029,8 @@ namespace Agentmaster
                 }
                 if (onlyContent &&
                     (static_cast<size_t>(m.lines) == paste_detail::NewlineCount(prompt) ||
-                     static_cast<size_t>(m.lines) == promptSegs.size()))
+                     static_cast<size_t>(m.lines) == promptSegs.size()) &&
+                    (m.lines != 0 || PromptFillCollapsesToBareMarker(promptText)))
                 {
                     return FillVerify::VerifiedCollapsed;
                 }
@@ -2456,6 +2485,15 @@ namespace Agentmaster
         // pure-Node `claude` (no native binary) is deliberately unsupported (the Fleet Observer + PEB
         // enrichment are all claude.exe-keyed).
         std::wstring claudeExePath{};
+        // Agentmaster (BUNDLED_MODS.md): the bundled mods (BundledModCatalog: file-links, better-verbose-bash) the user
+        // turned OFF in the cog's Claude tab. Every other bundled mod loads into each Claude tab Agentmaster launches
+        // (--plugin-dir), unless the claude.exe is too old for it or the user's Claude Code settings already load a copy of
+        // their own (which ours would replace: a --plugin-dir plugin overrides an installed one of its name). Empty — the
+        // default, and every settings.json from before the feature — loads them all: the feature appears for existing
+        // installs too, with the switches to turn each one off. A name this build does not ship (a newer build's mod)
+        // is kept as written by the cog's Save, so turning it off sticks across versions. Applies at the next launch,
+        // resume or restart; a running tab keeps what it started with.
+        std::vector<std::wstring> bundledModsOff{};
 
         // --- Autorunner defaults ---
         // The MODE seeds every NEW session — launched, forked, a /clear or /handover successor, adopted,

@@ -1,0 +1,16 @@
+{
+  "$comment": "The Claude Code mods Agentmaster ships inside TerminalApp.dll and loads into every Claude tab it launches (doc/agentmaster/BUNDLED_MODS.md). Listed in --plugin-dir order. After editing a mod here, or this file, run `python tools/bundled-mods/bundled_mods.py gen`; to take a newer copy from the source folder, `sync` first. minClaudeCode is the oldest Claude Code that runs the mod (Agentmaster passes it only to a claude.exe at least that new); summary is the line the cog's Claude tab shows.",
+  "source": "~/.claude/mods",
+  "mods": [
+    {
+      "name": "file-links",
+      "minClaudeCode": "2.1.287",
+      "summary": "Draws the file paths and file names in Claude's replies as clickable file:/// links (only names it finds on disk)."
+    },
+    {
+      "name": "better-verbose-bash",
+      "minClaudeCode": "2.1.308",
+      "summary": "In verbose views (--verbose, Verbose output, ctrl+o), the reason given for a shell call becomes its row's header."
+    }
+  ]
+}

@@ -228,7 +228,25 @@ namespace Agentmaster
     //   --append-system-prompt, the preset's own extra arguments), inserted AFTER --model and BEFORE the
     //   positional initial prompt — claude's parser takes the positional after every flag, so a flag after
     //   it would become part of the prompt. Empty => byte-identical to the pre-parameter commandline.
-    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {}, std::wstring_view modelOverride = {}, std::wstring_view initialPrompt = {}, std::wstring_view extraArgs = {});
+    // pluginArgs (Agentmaster, BUNDLED_MODS.md): the bundled mods' pre-rendered ` --plugin-dir "<folder>"` arguments
+    //   (RenderPluginDirArgs, WITH their leading space), appended right after the fresh / resume / fork form and
+    //   before --model, with the other built-in flags. Empty (the default, and every launch whose provider loads no
+    //   mod) => byte-identical to the pre-parameter commandline.
+    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {}, std::wstring_view modelOverride = {}, std::wstring_view initialPrompt = {}, std::wstring_view extraArgs = {}, std::wstring_view pluginArgs = {});
+
+    // Agentmaster (BUNDLED_MODS.md): what renders the bundled mods' --plugin-dir arguments for one managed launch.
+    // BuildClaudeSpawn and BuildClaudeRestartSpec call it with the launch's profile folder, cog settings, claude.exe,
+    // working folder and session id, and hand its answer to BuildClaudeCommandline as pluginArgs. The app sets it to
+    // BundledModPluginArgs (BundledMods.h) once per process from TerminalPage.AgentEngine.cpp; the other programs that
+    // compile this file (the CLI, the session database, the m5 harness, the probes) leave it unset, so they never link
+    // BundledMods.cpp and never load a mod. It must not throw: a launch that cannot get its mods goes on without them.
+    using BundledModArgsProvider = std::wstring (*)(const std::wstring& stateDir, const AppSettings& settings, std::wstring_view claudeLauncher, std::wstring_view workingDir, std::wstring_view sessionId) noexcept;
+
+    // Set (or clear, with nullptr) the bundled mods' provider; later launches use it, earlier specs keep their command
+    // lines. Thread-safe (an atomic pointer: every window's UI thread launches).
+    //   provider - BundledModPluginArgs, or nullptr for no bundled mods.
+    // Never throws.
+    void SetBundledModArgsProvider(BundledModArgsProvider provider) noexcept;
 
     // Agentmaster (PRESETS): render a compiled launch's command-line additions — `--effort <level>`, then
     // `--append-system-prompt "<note>"` (PsDoubleQuote: the managed command line runs under the pwsh host's
