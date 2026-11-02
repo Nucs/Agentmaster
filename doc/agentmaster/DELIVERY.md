@@ -404,7 +404,8 @@ the aftermath honestly).
 
 Invariant addendum (extends §5): **no submit CR is committed into a box that has not been read
 back as exactly-the-prompt** (or provably collapse-equal — claude re-collapses a large pasted
-fill into a `[Pasted text #N +M lines]` placeholder), and **a box that cannot be read refuses
+fill into a `[Pasted text #N +M lines]` placeholder, or into the bare `[Pasted text #N]` when the
+fill has no line break, §19), and **a box that cannot be read refuses
 placement instead of defaulting to "empty"**. The implementing plan — **R4 verified placement
 (fill → read-back → commit) · R5 the tri-state box read · R6 TUI-channel hygiene · R7 the merge
 classifier · R8 the live-read watchdog press** — is [`DELIVERY_PLAN.md`](DELIVERY_PLAN.md)
@@ -1212,3 +1213,74 @@ judged once it closed.
 
 **Live check after the build:** `/model sonnet` (or `/add-dir <new folder>`) from a Telegram topic: the
 reaction turns 👨‍💻, no `[lost-send]` line follows, and the runner stays on.
+
+## 19. A long one-line prompt never verified — claude's bare `[Pasted text #N]` (2026-11-02, NOT BUILT yet)
+
+**The report (2026-11-02, the release instance, Telegram topic "Install vscode app" = session `17462199`):** a large
+prompt sent through Telegram "turned after pasting to '[Pasted text #1]'", and the topic got 👎 "not delivered — the
+prompt never became a message (lost send or a refused delivery); the runner paused".
+
+**The trail** (release `hooks.log`; the prompt was a voice note's transcript, 1050 characters on one line):
+```
+06:02:18.381  [msg] 17462199 queued from topic (message 15918, 1050 chars)
+06:02:26.403  [send-verify] 17462199 FOREIGN read-back after the fill (box chars=16 head="[Pasted text #1]") - the merge this would have submitted is refused; undoing our insertion
+06:02:26.421  [send-verify] 17462199 prompt 160de28e NOT delivered: foreign content in the box (merge refused, our insertion undone) (strike 1/2 - prompt rolls back to Pending)
+06:02:27.059  [draft-swap] 17462199 holding an unsent draft (chars=16) - input locked, clearing the box via Ctrl+S stash
+06:02:29.461  [send-verify] 17462199 FOREIGN read-back after the fill (box chars=16 head="[Pasted text #2]") - ...
+06:02:29.462  [send-verify] 17462199 prompt 160de28e FAILED after 2 unverifiable deliveries (...) - not resent; the autorunner keeps its mode ...
+06:02:31.375  [draft-swap] 17462199 restore: the un-stash rung recovered the draft (slot=consumed)
+```
+
+**Claude's rule** (read from 2.1.310's `claude.exe`): a paste collapses into a placeholder when it is longer than 800
+characters or has more than `min(rows - 10, 2)` line breaks, and the placeholder carries a count only when there is
+one — `M == 0 ? "[Pasted text #N]" : "[Pasted text #N +M lines]"`. A paste without a line break collapses on its
+length alone, and shows bare.
+
+**What went wrong.** The verified send (§11) reads the box back after its fill, and it accepts a collapsed render
+only through `FindPasteMarkers` (PendingPaste.h), whose grammar required ` +M lines`. To it the bare marker was
+text that is neither the prompt nor a prefix of it: `Foreign`. The Foreign undo (`DecideSendUndo`) saw no marker
+either and pressed nothing, so OUR placeholder stayed in the box and was recorded as the user's draft. The second
+attempt's draft swap stashed it (Ctrl+S), pasted again (`[Pasted text #2]`), was refused again, and the strike ledger
+failed the prompt; the swap's restore then put `[Pasted text #1]` back. Claude's stash keeps a paste's content
+(`stash()` saves `pastedContents`, `popStash()` restores them), so that box still held the note, one Enter away.
+Every queued prompt longer than 800 characters without a line break failed this way: a long Telegram message, every
+voice note. (`DraftCarry.h`'s own parser already knew the bare form, PENDING_INPUT.md §2c; the verify and the undo
+read the older grammar.)
+
+The Telegram reply was wrong as well: it said "the runner paused" for every Failed prompt, while this verdict keeps
+the runner's mode (§12).
+
+**The fix.**
+- `PendingPaste.h` `ParseMarkerAt` reads `[Pasted text #N]` as a collapsed marker with `M == 0`. Every
+  `FindPasteMarkers` reader gains it: the verify and the undo below; the draft swap's re-type guard (a bare-marker
+  draft comes back only through the stash, never re-typed as its literal label); the pending scan's annotation
+  (`paste #N (no line break) -> unresolved`); the restore expansion (`ExpandPendingDraftPastesIn` refuses it).
+- Claude's paste rules (`kClaudePasteInlineMaxChars`, `kClaudePasteInlineMaxNewlines`,
+  `NormalizePastedTextLikeClaude`, `ClaudePasteNewlineCount`, `ClaudeWouldCollapsePaste`) live in `PendingPaste.h`,
+  under `SessionModels.h`, so the verify and the draft carry share one copy of them.
+- `PromptFillCollapsesToBareMarker(text)` (SessionModels.h): claude renders OUR fill bare exactly when the fill as
+  claude stores it (`PromptFillBody`, then CR/CRLF → LF and TAB → four spaces) has no line break and is longer than
+  800 characters. `VerifyFillAgainstPrompt` accepts a bare marker (as the box's only content) only then, and
+  `DecideSendUndo` deletes a trailing bare marker only then. The zero count alone matches every one-line prompt, so
+  without the rule a SHORT prompt's eaten fill beside the user's own bare paste would submit their draft, and the
+  undo would delete it.
+- The paste-cache tier never answers a zero count (`PasteCacheCanAnswer`: every one-line cache file would "match"),
+  so the annotation reads the cache only when some marker could resolve from it, and the expansion refuses a bare
+  marker without reading.
+- The 👎 reply states the runner's mode from the snapshot that carries the Failed prompt: "the runner is **Paused**."
+  or "the runner stays **Auto**.". The verdicts that pause it (the lost send, the Enter-retry give-up, the merge)
+  set Off in the same registry update that sets Failed.
+
+**Still open:** the Enter-retry rescue (`DecideEnterRetry`'s draft guard and `_PressEnterForWatchedPrompt`) compares
+the box with `DraftMatchesPromptText`, so it never presses into ANY collapsed render of our prompt, counted or bare: a
+verified fill whose Enter claude then eats ends in the lost-send verdict instead of the rescue. Loosening that guard
+trades against its RC3 protection of the user's own draft, so it is a decision of its own.
+
+**Tests:** `TestPendingPaste` (tests_summary_anchor.cpp: the bare grammar with its fragments, no bare truncated form,
+the cache never answering a zero count, the annotation, the refused expansion) and `TestVerifiedPlacement`
+(tests_spawn_sched.cpp: the incident's 1050-character prompt against `[Pasted text #1]`, a short prompt, 800 vs 801
+characters, a fill with a line break, other content beside the marker, TAB expansion, dropped invisible characters,
+and the undo's press or refusal).
+
+**Live check after the build:** a Telegram message longer than 800 characters with no line break (or a voice note)
+→ `[delivered] <sid8> prompt <id8> (chars=…, verified=collapsed)`, the reaction 👨‍💻, and no `[send-verify] FOREIGN`.

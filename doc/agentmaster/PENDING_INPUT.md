@@ -197,6 +197,12 @@ forms backed by the SAME cache file (both observed live on one draft):
   ## The user[...Truncated text #2 +258 lines...]es).
 ```
 
+A paste with **no line break** collapses on its length alone (over 800 characters) and renders **bare**,
+`[Pasted text #1]` — claude writes the count only when it is not 0 (`DraftCarry.h`'s table in §2c). The grammar
+reads it as a collapsed marker with `M == 0` (DELIVERY.md §19: the verified send once took its own long one-line
+fill for foreign text). The cache tier below never answers it: a zero count would "match" every one-line file
+(`PasteCacheCanAnswer`), so only the §2c journal can back a bare marker.
+
 So the detector extracts a draft whose text *names* content it does not contain. **`PendingPaste.h`**
 (pure, header-only — the `PendingInput.h` idiom) resolves the markers back to the real file,
 **content-anchored, never by mtime** (the cache is global across sessions — a time window races), and
@@ -223,7 +229,8 @@ So the detector extracts a draft whose text *names* content it does not contain.
 The impure half lives in `ClaudeSpawn.cpp`: `ClaudePasteCacheDir()` (the `ClaudeProjectsDir` resolution)
 + `ResolvePendingPasteRefs(draft)` — enumerate + read the cache (2 MiB/file, 64 MiB, 4096-file caps),
 run the pure resolver, render one annotation line per marker
-(`truncated #2 (+258 lines) -> bf8eefafa3e80676.txt` / `paste #3 (+99 lines) -> unresolved`). The UI
+(`truncated #2 (+258 lines) -> bf8eefafa3e80676.txt` / `paste #3 (+99 lines) -> unresolved` /
+`paste #4 (no line break) -> unresolved`; the cache is read only when some marker could resolve from it). The UI
 lane resolves **off-thread** on a draft-text change (`_ResolvePendingPasteRefsFor` — detached
 fire_and_forget; the registry takes the verdict QUIETLY via `SetPendingPasteRefs`, which drops a late
 resolve whose draft meanwhile cleared), logs it (`[pending] <sid8> paste-refs: …`), and the board card's
@@ -237,15 +244,16 @@ can resolve a fresh `[Pasted text #N +M lines]`. But every paste passes through 
 terminal — so the registry now keeps a per-session **journal** of what was pasted:
 `SessionRegistry::NotePastedText` / `PasteJournal` / `ClearPasteJournal` / `MovePasteJournal`.
 
-**What claude does with a paste** (read from its 2.1.280 bundle — the prompt input's paste handler), which
-the journal mirrors exactly (`DraftCarry.h`):
+**What claude does with a paste** (read from its 2.1.280 bundle — the prompt input's paste handler, unchanged in
+2.1.310), which the journal mirrors exactly (the rules live in `PendingPaste.h`, shared by `DraftCarry.h` and the
+verified send's read-back, DELIVERY.md §19):
 
 | step | claude's code | mirrored by |
 |---|---|---|
 | normalize | `Bun.stripANSI(t).replace(/\r\n\|\r/g,"\n").replaceAll("\t","    ")` (after WT's paste filter dropped C0/C1 and folded line ends) | `NormalizePastedTextLikeClaude` |
 | count | `M = (t.match(/\r\n\|\r\|\n/g) \|\| []).length` — newline SEQUENCES | `ClaudePasteNewlineCount` |
 | collapse | `t.length > 800 \|\| M > min(rows-10, 2)` | `ClaudeWouldCollapsePaste` (2 on any usable terminal) |
-| render | `M == 0 ? "[Pasted text #N]" : "[Pasted text #N +M lines]"` — the bare form §2b's grammar never knew | `FindDraftPlaceholders` |
+| render | `M == 0 ? "[Pasted text #N]" : "[Pasted text #N +M lines]"` — the bare form, which §2b's grammar reads too | `FindDraftPlaceholders`, `FindPasteMarkers` |
 | id | minted past every id already referenced in the input — ids grow with time | the chronological assignment below |
 
 **Feeds** (everything that puts a paste into a Claude box):

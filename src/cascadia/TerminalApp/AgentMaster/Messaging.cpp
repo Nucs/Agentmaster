@@ -8810,7 +8810,21 @@ namespace Agentmaster::Msg
                         thread = it->second.threadId;
                     }
                 }
-                _sendText(thread, L"\U0001F44E <b>not delivered</b> \x2014 the prompt never became a message (lost send or a refused delivery); the runner paused. Look at the terminal, then /sendnow or send it again.", true, SendPriority::Final, L"", json::Value{}, nullptr, msgId);
+                // The runner's mode as THIS snapshot holds it, never assumed. The verdicts that pause it (the lost send,
+                // the Enter-retry give-up, the merge) set Off in the same registry update that sets Failed, so the
+                // snapshot already shows it; the verified send's refusal (DELIVERY.md §11, §19) fails the prompt and
+                // leaves the mode alone, and saying "paused" then sent the user looking for a pause that never happened.
+                const bool runnerAuto = s.autorunner.mode == AutorunnerMode::Full;
+                _sendText(thread,
+                          std::wstring{ L"\U0001F44E <b>not delivered</b> \x2014 the prompt never became a message (lost send or a refused delivery); " } +
+                              (runnerAuto ? L"the runner stays <b>Auto</b>." : L"the runner is <b>Paused</b>.") +
+                              L" Look at the terminal, then /sendnow or send it again.",
+                          true,
+                          SendPriority::Final,
+                          L"",
+                          json::Value{},
+                          nullptr,
+                          msgId);
             }
         }
     }

@@ -2019,6 +2019,16 @@ void TestPendingPaste()
         CHECK(FindPasteMarkers(L"[Image #3]").empty(), "paste grammar: image marker ignored");
         CHECK(FindPasteMarkers(L"[Pasted text #1 +5 linesX]").empty(), "paste grammar: unterminated marker ignored");
         CHECK(FindPasteMarkers(L"a [Pasted text #1 +5 lines] b [Pasted text #2 +9 lines]").size() == 2, "paste grammar: two markers on one line");
+
+        // The BARE collapsed form (DELIVERY.md 19): claude 2.1.310 leaves the count out for a paste with no
+        // line break, so a long one-line paste (a voice note's transcript) renders "[Pasted text #N]".
+        const auto mb = FindPasteMarkers(L"typed [Pasted text #12] more");
+        CHECK(mb.size() == 1 && !mb[0].truncated && mb[0].index == 12 && mb[0].lines == 0, "paste grammar: the bare form parses as a collapsed marker with M == 0");
+        CHECK(mb.size() == 1 && mb[0].headFragment == L"typed " && mb[0].tailFragment == L" more", "paste grammar: the bare form keeps the typed text around it as fragments");
+        CHECK(FindPasteMarkers(L"[Pasted text #1][Pasted text #2 +3 lines]").size() == 2, "paste grammar: a bare marker right before a counted one");
+        CHECK(FindPasteMarkers(L"[...Truncated text #2...]").empty(), "paste grammar: a truncated marker without its count is not claude's");
+        CHECK(FindPasteMarkers(L"[Pasted text #]").empty(), "paste grammar: a bare form without its id is ignored");
+        CHECK(FindPasteMarkers(L"[Pasted text #1 ]").empty(), "paste grammar: a space before the bracket is not the bare form");
     }
     // 2. Counting conventions + collapsed validation. The live file proved M == the NEWLINE count of
     // an unterminated 274-segment file; a terminated file's M == its segment count. Both accepted.
@@ -2033,6 +2043,11 @@ void TestPendingPaste()
         CHECK(!ValidatePasteFile(m, paste), "paste collapsed: off-by-two refused");
         m.lines = 3;
         CHECK(ValidatePasteFile(m, L"a" + NL + L"b" + NL + L"c" + NL), "paste collapsed: terminated 3-liner matches +3");
+        CHECK(PasteCacheCanAnswer(m), "paste collapsed: a positive count can be answered by the cache");
+        // A bare marker's zero count would "match" every one-line cache file: never validated from the cache.
+        m.lines = 0;
+        CHECK(!PasteCacheCanAnswer(m), "paste collapsed: the cache cannot answer the bare form's zero count");
+        CHECK(!ValidatePasteFile(m, L"one long line with no break"), "paste collapsed: a bare marker never validates against a one-line file");
     }
     // 3. Truncated validation — the REAL arithmetic: head "## The user" prefixes segment 8, tail
     // "es)." suffixes segment 266, and 266 - 8 == 258 == M. Refusals: wrong M, thin anchors.
@@ -2104,6 +2119,18 @@ void TestPendingPaste()
         CHECK(ResolvePendingPasteRefsIn(L"no markers here", dir.wstring()).empty(), "paste adapter: no markers -> empty");
         CHECK(ResolvePendingPasteRefsIn(L"[Pasted text #1 +3 lines]", (dir / L"missing").wstring()) == L"paste #1 (+3 lines) -> unresolved",
               "paste adapter: missing cache dir -> unresolved, never a throw");
+        // The bare form (DELIVERY.md 19): named as claude draws it, never resolved from the cache, even with a
+        // one-line file there that its zero count would "match".
+        {
+            std::ofstream f(dir / L"0011223344556677.txt", std::ios::binary);
+            const std::string utf8 = "one long line with no break";
+            f.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
+        }
+        CHECK(ResolvePendingPasteRefsIn(L"[Pasted text #4]", dir.wstring()) == L"paste #4 (no line break) -> unresolved",
+              "paste adapter: a bare marker reads (no line break) -> unresolved");
+        CHECK(ResolvePendingPasteRefsIn(L"[Pasted text #1 +3 lines]" + NL + L"[Pasted text #2]", dir.wstring()) ==
+                  L"paste #1 (+3 lines) -> aabbccdd00112233.txt (by line count)" + NL + L"paste #2 (no line break) -> unresolved",
+              "paste adapter: beside a counted marker the cache is read, and the bare one still stays unresolved");
         // The §10 whole-draft expansion adapter against the same temp cache (the restore re-fill's
         // fill-text source): all-resolvable expands, any unresolvable refuses the WHOLE draft, a
         // marker-free draft passes through verbatim, a missing dir refuses rather than throws.
@@ -2123,6 +2150,11 @@ void TestPendingPaste()
         {
             const auto ex = ExpandPendingDraftPastesIn(L"[Pasted text #1 +3 lines]", (dir / L"missing").wstring());
             CHECK(!ex.complete && ex.text.empty(), "expand adapter: missing cache dir -> refused, never a throw");
+        }
+        {
+            // Before the bare form was parsed, this draft read as marker-free and was re-typed as its literal label.
+            const auto ex = ExpandPendingDraftPastesIn(L"x" + NL + L"[Pasted text #1]", dir.wstring());
+            CHECK(!ex.complete && ex.text.empty(), "expand adapter: a bare marker refuses the WHOLE draft (never re-typed as its label)");
         }
         fs::remove_all(dir, ec);
     }

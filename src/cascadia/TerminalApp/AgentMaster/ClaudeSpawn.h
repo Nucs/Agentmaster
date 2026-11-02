@@ -684,7 +684,10 @@ namespace Agentmaster
     //   "paste #1 (+273 lines) -> bf8eefafa3e80676.txt"
     //   "truncated #2 (+258 lines) -> bf8eefafa3e80676.txt"
     //   "paste #3 (+99 lines) -> unresolved"
-    // "" when the draft carries no markers at all. Never throws (I/O failures read as unresolved).
+    //   "paste #4 (no line break) -> unresolved"   (the bare "[Pasted text #N]": the cache can never answer it)
+    // "" when the draft carries no markers at all. The cache is read only when at least one marker could
+    // resolve from it (PasteCacheCanAnswer), so a draft holding only bare markers costs no IO on each edit.
+    // Never throws (I/O failures read as unresolved).
     // The no-suffix overload resolves against ClaudePasteCacheDir(). [Agentmaster]
     std::wstring ResolvePendingPasteRefsIn(const std::wstring& draft, const std::wstring& cacheDir);
     std::wstring ResolvePendingPasteRefs(const std::wstring& draft);
@@ -692,8 +695,9 @@ namespace Agentmaster
     // The impure half of the WHOLE-DRAFT expansion (PENDING_INPUT.md §10 — the restore re-fill's
     // fill text): read the cache under `cacheDir` (same enumeration + caps as the annotation
     // resolver above) and run the pure all-or-refuse ExpandDraftPasteMarkers. A marker-free draft
-    // is trivially complete with NO cache IO; any unresolved/ambiguous/refused marker refuses the
-    // WHOLE draft (complete=false, empty text) — the caller must then keep the placeholder form
+    // is trivially complete with NO cache IO; a draft holding a marker the cache can never answer (the
+    // bare "[Pasted text #N]") is refused with NO cache IO too; any unresolved/ambiguous/refused marker
+    // refuses the WHOLE draft (complete=false, empty text) — the caller must then keep the placeholder form
     // rather than re-type a literal "[Pasted text #N]" label that would silently drop the content
     // behind it on submit (the §9 draft-swap rule). Never throws (a throw reads as refused). The
     // no-suffix overload expands against ClaudePasteCacheDir(). [Agentmaster]

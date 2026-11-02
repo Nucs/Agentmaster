@@ -714,7 +714,9 @@ in the session's queue with the origin `Remote`, sanitized like any paste (DELIV
   the input box (the user's draft at the PC is safe); the `ack` marks it sent. An unlinked session gets the
   typed path (`SubmitPrompt`, the draft swap). A message with a photo keeps the typed path.
 - **Its status is a reaction on your message** (no extra message): ✍ queued → 👨‍💻 sent, the turn started
-  (its echo arrived) → 👎 failed, with a reply giving the reason (lost send, refused, closed).
+  (its echo arrived) → 👎 failed, with a reply giving the reason (lost send, refused, closed) and the runner's mode as
+  it then is ("the runner is **Paused**." / "the runner stays **Auto**.": a refused delivery keeps the mode,
+  DELIVERY.md §19).
 - **Editing** your message while it is still queued replaces the queued text (`edited_message`); once
   sent, the bot answers "already sent — send the change as a new message".
 - Removing a queued message: `/unqueue <n>` (Telegram tells a bot nothing about a deleted message).

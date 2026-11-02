@@ -1457,7 +1457,16 @@ exit 0
         {
             return {};
         }
-        const auto files = ReadPasteCacheFileTexts(cacheDir);
+        // The pending scan calls this on every edit of a draft that holds a marker, and the read below
+        // walks the whole cache (up to 64 MiB). A bare "[Pasted text #N]" can never resolve from it
+        // (PasteCacheCanAnswer), so read only when at least one marker could; otherwise every marker
+        // simply reads "unresolved" against an empty file set.
+        bool cacheCouldAnswer = false;
+        for (const auto& m : markers)
+        {
+            cacheCouldAnswer = cacheCouldAnswer || PasteCacheCanAnswer(m);
+        }
+        const auto files = cacheCouldAnswer ? ReadPasteCacheFileTexts(cacheDir) : std::vector<PasteFileText>{};
         const auto res = ResolvePasteMarkers(markers, files);
         std::wstring out;
         for (size_t i = 0; i < markers.size() && i < res.size(); ++i)
@@ -1468,7 +1477,14 @@ exit 0
             }
             out += markers[i].truncated ? L"truncated #" : L"paste #";
             out += std::to_wstring(markers[i].index);
-            out += L" (+" + std::to_wstring(markers[i].lines) + L" lines) -> ";
+            if (!markers[i].truncated && markers[i].lines == 0)
+            {
+                out += L" (no line break) -> "; // the bare form: "+0 lines" would name a label claude never draws
+            }
+            else
+            {
+                out += L" (+" + std::to_wstring(markers[i].lines) + L" lines) -> ";
+            }
             out += res[i].resolved ? res[i].fileName : L"unresolved";
             // Honesty tier: a TRUNCATED marker is CONTENT-anchored (head prefix + tail suffix + the
             // exact segment offset — practically collision-proof), while a COLLAPSED one can only be
@@ -1503,6 +1519,16 @@ exit 0
             out.complete = true;
             out.text = draft;
             return out;
+        }
+        for (const auto& m : markers)
+        {
+            if (!PasteCacheCanAnswer(m))
+            {
+                // All-or-refuse: one marker the cache can never answer (the bare "[Pasted text #N]")
+                // refuses the whole draft, whatever the cache holds, so skip the read. The caller keeps
+                // the placeholder form, never re-typing the literal label.
+                return DraftPasteExpansion{};
+            }
         }
         return ExpandDraftPasteMarkers(draft, ReadPasteCacheFileTexts(cacheDir));
     }

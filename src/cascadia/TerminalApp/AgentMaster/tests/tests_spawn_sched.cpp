@@ -4257,6 +4257,37 @@ void TestVerifiedPlacement()
               "verify: an elided render with an EMPTY prefix never verifies");
         CHECK(VerifyFillAgainstPrompt(L"zzz\nbra[...Truncated text #2 +4 lines...]trot\ngolf", big) == FV::Foreign,
               "verify: an elided render whose prefix does not anchor reads Foreign");
+
+        // The BARE placeholder (DELIVERY.md 19, the 2026-11-02 incident): claude shows a paste over 800
+        // characters with NO line break as "[Pasted text #N]". It verifies only for a fill claude renders bare.
+        std::wstring voice; // a voice note's one-line transcript, 1050 characters like the incident's
+        while (voice.size() < 1050)
+        {
+            voice += L"Install the vscode app on the phone and check that it starts. ";
+        }
+        voice.resize(1050);
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #1]", voice) == FV::VerifiedCollapsed, "verify: a long one-line fill's bare placeholder verifies (the incident)");
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #2]", voice) == FV::VerifiedCollapsed, "verify: the bare placeholder verifies under any paste id");
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #1]", L"fix the tests") == FV::Foreign, "verify: a bare placeholder beside a SHORT prompt is the user's, never ours");
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #1]", std::wstring(800, L'x')) == FV::Foreign, "verify: 800 characters stay inline in claude, so a bare marker is not ours");
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #1]", std::wstring(801, L'x')) == FV::VerifiedCollapsed, "verify: 801 characters collapse into the bare marker");
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #1]", voice + L"\nsecond line") == FV::Foreign, "verify: a fill with a line break renders +1 lines, never bare");
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #1 +1 lines]", voice + L"\nsecond line") == FV::VerifiedCollapsed, "verify: that fill's own counted render still verifies");
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #1]\ntyped by the user", voice) == FV::Foreign, "verify: a bare marker with other content beside it reads Foreign");
+        CHECK(VerifyFillAgainstPrompt(L"typed [Pasted text #1]", voice) == FV::Foreign, "verify: typed text before a bare marker reads Foreign");
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #1] [Pasted text #2]", voice) == FV::Foreign, "verify: two bare markers read Foreign");
+        // What claude measures is OUR fill as it stores it: TAB -> four spaces counts toward the 800, and an
+        // invisible character the sanitize removes does not.
+        std::wstring tabbed(786, L'y');
+        tabbed += L"\t\t\t\t"; // 790 characters here, 802 in claude's box
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #1]", tabbed) == FV::VerifiedCollapsed, "verify: claude's TAB expansion counts toward the 800");
+        std::wstring zw(795, L'z');
+        zw += std::wstring(10, L'\x200B'); // 805 here, 795 once PromptFillBody drops the zero-width spaces
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #1]", zw) == FV::Foreign, "verify: invisible characters the fill drops do not count toward the 800");
+        CHECK(PromptFillCollapsesToBareMarker(voice), "bare rule: a long one-line fill renders bare");
+        CHECK(!PromptFillCollapsesToBareMarker(L"fix the tests"), "bare rule: a short fill stays inline");
+        CHECK(!PromptFillCollapsesToBareMarker(voice + L"\r\nmore"), "bare rule: a fill with a CRLF renders with a count");
+        CHECK(!PromptFillCollapsesToBareMarker(voice + L"\r"), "bare rule: a lone CR is a line break too");
     }
 
     // ---- R4: DecideSendUndo ----
@@ -4272,6 +4303,15 @@ void TestVerifiedPlacement()
         CHECK(plan.action == SendUndoAction::Press && plan.presses == 1, "undo: a trailing collapsed marker that is arithmetically OURS deletes in one press");
         plan = DecideSendUndo(L"user typed\n[Pasted text #3 +9 lines]", p5);
         CHECK(plan.action == SendUndoAction::Done, "undo: a trailing marker that is NOT ours (wrong arithmetic) is never deleted");
+        // The bare form (DELIVERY.md 19): our own long one-line fill's marker deletes in one press; beside a
+        // SHORT prompt the same marker is the user's paste and is never deleted.
+        const std::wstring longLine(1050, L'v');
+        plan = DecideSendUndo(L"user typed\n[Pasted text #3]", longLine);
+        CHECK(plan.action == SendUndoAction::Press && plan.presses == 1, "undo: OUR trailing bare marker deletes in one press");
+        plan = DecideSendUndo(L"user typed\n[Pasted text #3]", L"fix the tests");
+        CHECK(plan.action == SendUndoAction::Done, "undo: a bare marker beside a SHORT prompt is the user's and is never deleted");
+        plan = DecideSendUndo(L"user typed\n[Pasted text #3]", longLine + L"\nmore");
+        CHECK(plan.action == SendUndoAction::Done, "undo: a bare marker is not a fill that has a line break");
     }
 
     // ---- R7: PromptSwallowedByMessage ----
