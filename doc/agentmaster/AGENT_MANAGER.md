@@ -399,6 +399,11 @@ tags, queue and runner mode, and the conversation resumes when the tab is entere
 - The board and tree rebuild from registry snapshots, and only while the page is on screen
   (`SetLensVisible`, driven from the tab-switch funnel; a hidden lens marks itself dirty and catches up
   once on show). Every lens trigger goes through `_Refresh`.
+- ⚠ Opening the page pays that catch-up synchronously, with the root already in the live tree: every card and
+  row is destroyed and made again, ~5 ms per session in scope (583 cards + 583 rows ≈ 3.2 s, most of it destroying
+  the old ones; 5–11 s at times), and each element that enters, leaves or dies also walks XAML's 32-slot event
+  table (UI_THREAD.md §15). `SetExternalClaudes` rebuilds a page that is up at once, unpaced, and a
+  minimized window's page counts as up.
 - Live sessions only (`SessionRegistry::SnapshotLive()`); menus are built lazily (`_MakeLazySessionMenu`,
   `_MakeLazyExternalMenu`, filled in `Opening`); `LoadDirColors` is cached by the file's (size, mtime);
   `AgentmasterStateDir()` re-asserts its folder at most every 2 s; the package family name is memoized;

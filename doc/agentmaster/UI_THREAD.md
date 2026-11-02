@@ -1313,3 +1313,127 @@ Done on 2026-10-20: the Debug and Release builds of af3d40b5e were purged by for
 SIDE_PANEL.md §2f's list, and the numbers of §13 again (§13h): `xamltree.py nodes` on a snapshot dump (no node on
 a side-panel card), `stacksnap sample` + `uiclass.py` (the frame walk's ms/s), and `wakes.py` (the frame rate,
 which this change should not move: frames follow property changes, §13b).
+
+## 15. Home freezes the app for 2–11 s: the Agent Manager page's catch-up rebuild (2026-11-02)
+
+The report (production 0.8.0.2, the build of b9780db43, pid 95532, up since 2026-11-01 08:14; 4 windows of
+584 + 163 + 47 + 7 tabs, 799 live sessions): "When pressing home button (that opens agent manager tab/page), the
+app/ui freezes for 2-4 seconds, sometimes 10s". Investigated read-only: production's hooks.log and window records,
+the code, two `stacksnap sample` runs on the UI thread (60 s and 270 s at 3 ms; nothing suspended; the build's PDBs
+from `amb fetch b20261101-1 --kind symbols-zip`) and the WinUI source of XAML's event manager. Nothing is fixed yet.
+
+### 15a. What a click on Home runs, on the one UI thread of all four windows
+
+1. `_OnManagerHomeButtonClick` → `_ShowManagerPage(L"home")`: the page's root goes into `_tabContent`, still holding
+   the cards and rows of the last time the page was up (they enter the live tree); the strip is deselected and
+   `_updateThemeColors()` runs.
+2. `_ApplyAgentTabSelection(nullptr)` → `AgentManagerContent::SetLensVisible(true)`. While the page was hidden,
+   every registry change only set `_refreshDirty`, so ONE `_Refresh()` runs now, synchronously: `SnapshotLive()`
+   (all 799 live sessions), `_RebuildBoard` (each column's cards cleared, then `_MakeCard` for every session in
+   scope), `_RebuildTree` (`_treeHost` cleared, then every folder header and row), `_RebuildPlan`, the tag chips and
+   the toolbar counts. The `[nav] manager-page show (home)` line is written after it.
+3. `BringSelectedIntoView` queues `_boardHost.UpdateLayout()` at Low priority: a synchronous measure and arrange of
+   every new card, then `StartBringIntoView` on the selected card and row.
+4. Then the first frame can show the page. Steps 1, 3 and 4 are in no logged number.
+
+The 584-tab window's page shows the window's own sessions (LOCAL), so it builds 583 cards and 583 rows, where a
+column has room for about ten.
+
+### 15b. What the rebuild costs (production hooks.log)
+
+`[manager] slow rebuild` times step 2 alone, and only a rebuild of 1 s or more, at most once a minute per page:
+
+| Cards = rows | Logged rebuilds | Median | Range |
+|---|---|---|---|
+| 583 | 60 | 3.2 s | 2.8–11.1 s |
+| 582 | 28 | 5.3 s | 1.1–10.2 s |
+| 576 | 6 | 6.3 s | 4.3–6.9 s |
+| 544–574 | 6 | ~2 s | 1.2–2.9 s |
+| 162 | 1 | 1.1 s | — |
+| 47 | 158 | 1.1 s | 1.0–7.1 s |
+
+- **Right before a `show (home)`** in the 584-tab window: 2.5, 5.0, 6.5 and 6.9 s. Its other 36 shows logged nothing:
+  each came within a minute of a logged rebuild of the same page, which silences the line.
+- **The run since 2026-11-01 08:23:** the FIRST rebuild of the 582-card page, at the reopen, took 1.06 s, with no old
+  cards to destroy (and the fewest objects registered, §15c). Every later one took 2.9–3.5 s, for 17 hours. So most
+  of a rebuild is the teardown of the old cards, which the sample of §15c agrees with.
+- **Two windows of 5–11 s rebuilds,** each about an hour, then back to ~3.2 s: 2026-11-01 07:55–08:12 with 62 of
+  our claudes running (`census claudes=66 ours=62`), and 11:06–12:02 with 9–10 running and no build-server request
+  (`amb list`). Their cause is NOT proven: contention from the rest of the machine (the work below is memory-bound),
+  or a bigger event table at that time (§15c). §15e item 4 tells the two apart.
+
+### 15c. Why it is that expensive: XAML's event table is 32 linked lists for the whole process
+
+The 270 s sample caught background rebuilds of the 47-tab window's page (§15d): 57 samples inside `_Refresh`.
+
+| Where the time went | Share |
+|---|---|
+| `Children().Clear()` of the old cards (`CUIElementCollection::RemoveAllElements`: each element's `LeaveImpl` and destructor) | 46% |
+| XAML's event table, here and in the other rows (`CEventManager::RemoveObject` / `RemoveRequest` / `AddRequest` → `xchainedmap::Get` / `Remove` → `xpairlist` scans); its leaf `DataStructureFunctionProvider<CDependencyObject*>::AreEqual` alone | 42% (35%) |
+| `_RebuildTree` | 26% |
+| `_MakeCard` | 16% |
+| `SessionRegistry::SnapshotLive` (799 sessions copied for a 47-card page) | 14% |
+
+- **The event table.** The in-box `Windows.UI.Xaml.dll` keeps one map of every object with event requests; its
+  symbols show WinUI 1.5's design (`dxaml/xcp/core/dll/eventmgr.cpp`, which WinUI 3's main branch replaced in
+  2026-05, PR 15612015 "Simplify CEventManager"): `m_pRequest = new CEventRequestMap()`, an
+  `xchainedmap<CDependencyObject*, xvector<REQUEST*>*>` with its default table of 32 slots (`dxaml/xcp/inc/xmap.h`:
+  `DefaultTableSize = 32`). The table never grows; each slot is a linked list searched entry by entry. So every
+  lookup or removal walks about 1/32 of all the objects registered in the process.
+- **A rebuild pays one walk per element it touches:** an element entering a live tree adds its handlers' requests
+  (`CUIElement::EnterImpl` → `AddRequestsInOrder` → `AddRequest`: a `Get`, then a `ContainsKey`), one leaving removes
+  them (`LeaveImpl` → `RemoveRequest`), and a destroyed one is removed from the map (`~CUIElement` →
+  `RemoveObject`). The page rebuilds IN the live tree (step 1 put the root there first), so the old cards pay the
+  leave and the destruction, and the new ones the enter.
+- **What one session costs:** a card is about 26 objects (16 elements, two of them `Button`s whose templates apply at
+  layout; 6 brushes; 2 `MenuFlyout`s; a `ScalarTransition`) and about 25 handler registrations (6 tipped elements ×
+  3 pointer handlers through `AgentSetTip`, 4 hover handlers, `Click`, 2 `Opening`); a tree row is about 10 objects
+  and 14 registrations. At 583 sessions a rebuild makes about 21,000 objects and 23,000 registrations, and releases
+  as many.
+- **The walks are memory-bound** (a cache line per entry), which fits a cost that moves with the rest of the machine
+  and with how many objects the four windows hold at that moment.
+
+### 15d. What makes it worse
+
+- **While the page is up, every registry change rebuilds it again,** paced at twice the last cost, at most 5 s
+  (`ManagerRefreshGapMs`): with the 584-tab page up and the fleet busy, ~3.2 s of every ~8 s. The page freezes again
+  a few seconds after it opened.
+- **`SetExternalClaudes` rebuilds a page that is up at once, unpaced:** any change in the External census (a pid, a
+  title, a branch, a recap, an outside codex turning running ↔ waiting) calls `_Refresh()` directly, past
+  `_RefreshFromRegistryEvent`. 41 of the 57 rebuild samples of §15c came this way.
+- **A minimized window's page counts as up.** The 47-tab window sits on its Agent Manager page (its record names no
+  focused tab), so it rebuilds in the background (158 logged rebuilds of 1.0–7.1 s), on the thread every other
+  window's click waits for.
+- **A window's activation re-themes all its tabs.** The dark theme's tab row has an unfocused color (`#333333FF`),
+  so each activation change (`_activated` → `_updateThemeColors`) gives every tab a new tab-row color, and each
+  colored tab (583 of the 584) rewrites its color dictionaries and runs `_RefreshVisualState` (three
+  `RequestedTheme` flips, two `GoToState`), eight tabs per Low-priority step: ~10% of the UI thread's busy time in
+  the 60 s sample.
+  A click on Home in an inactive window starts both passes at once.
+
+### 15e. Fix directions
+
+1. **Keep the cards and rows, and edit them in place** (the side panel's recipe, §10j: a model per row,
+   `PlanKeyedListOps` for the order, a changed card rewrites its texts and brushes): a show then touches only the
+   sessions that changed while the page was hidden, and builds and destroys nothing else.
+2. **Virtualize the board's columns and the tree** (§14, `AgentMaster/VirtualListWindow.h`): only the cards and rows
+   near each viewport exist, about 10–20 per column and 30–40 rows instead of 583 each, which also shrinks the event
+   table, the frame walk and the DirectWrite memory for every window.
+3. **Cheap, independent of 1 and 2:** route `SetExternalClaudes` through `_RefreshFromRegistryEvent`; treat a
+   minimized window's page as hidden; copy only the sessions in scope; and in `_ShowManagerPage` run the catch-up
+   before the root enters the live tree, so the old cards are destroyed detached instead of entering the tree first.
+4. **To prove the spikes' cause:** log the UI thread's CPU time for the rebuild (`GetThreadTimes`) beside its wall
+   time in the `[manager] slow rebuild` line. CPU ≈ wall means more work; CPU ≪ wall means the thread waited.
+
+Recommended: 1 with 2, as the side panel did (§10j, §14), and the first two items of 3 at once.
+
+### 15f. How it was measured
+
+```bash
+amb fetch b20261101-1 --kind symbols-zip            # the production build's PDBs, into Q:\buildserver\out\b20261101-1
+cd <scratch> && cp tools/stacksnap.exe "<SDK>/Debuggers/x64/dbghelp.dll" "<SDK>/Debuggers/x64/symsrv.dll" .
+export STACKSNAP_SYMSRV='Q:\buildserver\out\b20261101-1\syms;srv*Q:\tmp\symcache*https://msdl.microsoft.com/download/symbols'
+./stacksnap.exe top <pid> 10                        # the UI thread starts at Agentmaster!wWinMainCRTStartup
+./stacksnap.exe sample <pid> 270 3 <uiTid>          # then grep the .folded file for AgentManagerContent::_Refresh
+rg "slow rebuild|manager-page show" <profile>/hooks.log
+```
