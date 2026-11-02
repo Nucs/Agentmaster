@@ -5,9 +5,13 @@
 //
 // Claude Code spills a large paste to disk AT PASTE TIME -- <CLAUDE_CONFIG_DIR | ~/.claude>/
 // paste-cache/<16-hex>.txt (content-addressed leaf; observed stable since 2026-01) -- and renders the
-// draft's input box with a PLACEHOLDER instead of the content, in one of two forms:
+// draft's input box with a PLACEHOLDER instead of the content, in one of these forms:
 //
 //   [Pasted text #N +M lines]                the whole paste COLLAPSED to one marker line
+//   [Pasted text #N]                         the same for a paste with NO line break (M == 0): claude
+//                                            leaves the count out (2.1.310: M == 0 ? "[Pasted text #N]"
+//                                            : "[Pasted text #N +M lines]") -- a long one-line text such
+//                                            as a voice note's transcript
 //   head[...Truncated text #N +M lines...]tail   the paste EXPANDED with its MIDDLE elided in place
 //
 // The pending-input detector (PendingInput.h) therefore extracts a draft whose text names content it
@@ -19,7 +23,9 @@
 //     conventions are accepted -- M == newline count (proven live: a 274-segment file whose last
 //     segment is unterminated carried "+273 lines") or M == segment count -- and the match must be
 //     UNIQUE across the cache under whichever convention hit; ambiguity refuses (a wrong 273-line
-//     expansion is far worse than a placeholder).
+//     expansion is far worse than a placeholder). The BARE form (M == 0) is never matched against the
+//     cache: every one-line file in it would "match" a zero count (PasteCacheCanAnswer), so only the
+//     paste journal (DraftCarry.h) can back one.
 //   * TRUNCATED:  the draft itself carries real paste content around the marker. The text just
 //     before the marker is a PREFIX of file segment i (the head-cut line), the text just after is a
 //     SUFFIX of segment j (the tail-resume line), and j - i == M exactly. Proven live on the fixture
@@ -42,9 +48,10 @@ namespace Agentmaster
     // One paste/truncation marker found in a draft's text.
     struct PasteMarker
     {
-        bool truncated{ false }; // [...Truncated text #N +M lines...] vs [Pasted text #N +M lines]
+        bool truncated{ false }; // [...Truncated text #N +M lines...] vs [Pasted text #N +M lines] / [Pasted text #N]
         int index{ 0 }; // N -- Claude's per-conversation paste counter (opaque; not interpreted)
-        int lines{ 0 }; // M -- collapsed: the paste's total line count; truncated: the HIDDEN middle
+        int lines{ 0 }; // M -- collapsed: the paste's total line count (0 for the bare "[Pasted text #N]",
+                        // claude's render of a paste with no line break); truncated: the HIDDEN middle
         size_t draftLine{ 0 }; // which draft line (0-based, '\n'-split) carries the marker
         size_t charBegin{ 0 }; // the marker's [ .. ] span within that line (begin inclusive)
         size_t charEnd{ 0 }; // (end exclusive)
@@ -67,6 +74,120 @@ namespace Agentmaster
         std::wstring fileName; // the winning cache leaf ("" when unresolved)
         int fileSegments{ 0 }; // the winning file's segment count (diagnostic)
     };
+
+    // ---- Claude's own paste rules -------------------------------------------------------------------
+    //
+    // What claude does with a bracketed paste before its box shows it (read from the 2.1.280 bundle,
+    // unchanged in 2.1.310): normalize it, count its line breaks, and collapse it into a placeholder when
+    // it is long or has many lines. These live here, under SessionModels.h, so the two readers that must
+    // agree with claude share ONE copy: the verified send's read-back (SessionModels.h,
+    // PromptFillCollapsesToBareMarker) and the draft carry's journal and piecewise fill (DraftCarry.h).
+
+    // Claude's inline-vs-collapse threshold, CHARACTERS (JS UTF-16 length == wchar_t count). A paste
+    // longer than this is always collapsed into a placeholder. A piecewise fill keeps every TYPED
+    // chunk at or below it so claude inserts the chunk as visible text, never as a placeholder.
+    inline constexpr size_t kClaudePasteInlineMaxChars = 800;
+    // Claude's inline-vs-collapse threshold, NEWLINES: min(terminal rows - 10, 2). A Claude tab shorter
+    // than 12 rows would collapse even a 2-newline chunk -- not a realistic working setup, and the
+    // failure is cosmetic (the content still lands, just collapsed), so the common value is used.
+    inline constexpr size_t kClaudePasteInlineMaxNewlines = 2;
+
+    // Normalize a pasted text EXACTLY as it ends up in claude's pastedContents: Windows Terminal's
+    // paste filter first (FilterStringForPaste with CarriageReturnNewline|ControlCodes -- CRLF and a
+    // lone LF become CR, every C0/C1 control except TAB/CR/LF is dropped), then claude's paste handler
+    // (stripANSI -- a no-op once ESC is gone -- CRLF/CR -> LF, TAB -> four spaces). Journal entries are
+    // stored in this form so a placeholder's "+M lines" and the entry's newline count agree by
+    // construction, and so the expansion is byte-identical to what claude itself would submit.
+    //   raw     -- the text as it was pasted (the clipboard text, or the body of one of our fills).
+    //   returns -- the normalized text ("" for an all-control input).
+    //   throws  -- std::bad_alloc on allocation failure only.
+    inline std::wstring NormalizePastedTextLikeClaude(std::wstring_view raw)
+    {
+        std::wstring out;
+        out.reserve(raw.size());
+        for (size_t i = 0; i < raw.size(); ++i)
+        {
+            const wchar_t c = raw[i];
+            if (c == L'\r')
+            {
+                out.push_back(L'\n');
+                if (i + 1 < raw.size() && raw[i + 1] == L'\n')
+                {
+                    ++i; // CRLF -> one LF (WT folds it to CR, claude folds that CR to LF)
+                }
+                continue;
+            }
+            if (c == L'\n')
+            {
+                out.push_back(L'\n');
+                continue;
+            }
+            if (c == L'\t')
+            {
+                out.append(4, L' '); // claude's replaceAll("\t", "    ")
+                continue;
+            }
+            if (c < 0x20 || (c >= 0x7F && c <= 0x9F))
+            {
+                continue; // WT's ControlCodes filter: C0 + DEL + C1 never reach claude
+            }
+            out.push_back(c);
+        }
+        return out;
+    }
+
+    // Claude's "+M lines" arithmetic: the number of newline SEQUENCES (CRLF counts once, a lone CR or
+    // LF counts once) -- claude's own gM(). On a normalized text this is simply the LF count.
+    //   text    -- any text (normalized or raw).
+    //   returns -- the newline-sequence count.
+    //   throws  -- nothing.
+    inline size_t ClaudePasteNewlineCount(std::wstring_view text) noexcept
+    {
+        size_t n = 0;
+        for (size_t i = 0; i < text.size(); ++i)
+        {
+            if (text[i] == L'\r')
+            {
+                ++n;
+                if (i + 1 < text.size() && text[i + 1] == L'\n')
+                {
+                    ++i;
+                }
+            }
+            else if (text[i] == L'\n')
+            {
+                ++n;
+            }
+        }
+        return n;
+    }
+
+    // Would claude collapse this (already normalized) paste into a placeholder rather than insert it
+    // as visible text? Only such pastes can ever back a placeholder, so the journal records only these,
+    // the resolver only matches against these (a small inline paste can never be what a
+    // "[Pasted text ...]" stands for), and the verified send accepts a bare "[Pasted text #N]" as its
+    // own fill only when this holds for that fill.
+    //   normalized -- a NormalizePastedTextLikeClaude output.
+    //   returns    -- true when claude renders it as a placeholder.
+    //   throws     -- nothing.
+    inline bool ClaudeWouldCollapsePaste(std::wstring_view normalized) noexcept
+    {
+        return normalized.size() > kClaudePasteInlineMaxChars || ClaudePasteNewlineCount(normalized) > kClaudePasteInlineMaxNewlines;
+    }
+
+    // Can the PASTE-CACHE tier answer this marker at all? Both of its tests need a line count: a
+    // collapsed marker is matched by its count alone, a truncated one by its content anchors exactly M
+    // segments apart. A zero count gives neither test anything honest to check -- every one-line cache
+    // file would "match" a bare "[Pasted text #N]" -- so such a marker is never resolved from the cache
+    // (ValidatePasteFile refuses it), and the adapters that would read the whole cache only to be
+    // refused skip the read (ClaudeSpawn.cpp). Only the paste journal can back a bare marker.
+    //   m       -- a marker from FindPasteMarkers (or one built by DraftCarry.h).
+    //   returns -- true when its count is positive, i.e. a cache file could validate against it.
+    //   throws  -- nothing.
+    inline bool PasteCacheCanAnswer(const PasteMarker& m) noexcept
+    {
+        return m.lines > 0;
+    }
 
     namespace paste_detail
     {
@@ -114,7 +235,16 @@ namespace Agentmaster
         // Parse ONE marker starting at `pos` (which must point at '['). Returns true + fills m
         // (except draftLine/fragments -- the caller owns line context) on an exact grammar match:
         //   [Pasted text #N +M lines]      /  [Pasted text #N +M line]
+        //   [Pasted text #N]               -- the BARE form, read as M == 0 (a paste with no line break)
         //   [...Truncated text #N +M lines...]
+        // The bare form matters to every reader of a box: without it a long one-line paste reads as
+        // plain typed text -- the verified send called its OWN collapsed fill foreign and refused it,
+        // and a draft holding one was re-typed as its literal label.
+        //   line -- one '\n'-free line of a draft.
+        //   pos  -- the offset of the candidate '['.
+        //   m    -- receives truncated/index/lines/charBegin/charEnd on success; untouched otherwise.
+        //   returns -- true on an exact match of one of the forms above.
+        //   throws  -- nothing.
         inline bool ParseMarkerAt(std::wstring_view line, size_t pos, PasteMarker& m) noexcept
         {
             const auto starts = [&](std::wstring_view what, size_t at) noexcept {
@@ -143,7 +273,23 @@ namespace Agentmaster
                 ++p;
                 ++digits;
             }
-            if (digits == 0 || !starts(L" +", p))
+            if (digits == 0)
+            {
+                return false;
+            }
+            // The BARE collapsed form ends right after N. Claude writes the count only for a paste that
+            // has line breaks, and a truncated marker always carries its count, so only the collapsed kind
+            // may close here.
+            if (!trunc && p < line.size() && line[p] == L']')
+            {
+                m.truncated = false;
+                m.index = idx;
+                m.lines = 0;
+                m.charBegin = pos;
+                m.charEnd = p + 1;
+                return true;
+            }
+            if (!starts(L" +", p))
             {
                 return false;
             }
@@ -233,9 +379,9 @@ namespace Agentmaster
     inline bool ValidatePasteFile(const PasteMarker& m, std::wstring_view fileText, size_t* ioHeadSeg = nullptr)
     {
         using namespace paste_detail;
-        if (m.lines <= 0)
+        if (!PasteCacheCanAnswer(m))
         {
-            return false;
+            return false; // a zero count (the bare form included) validates nothing honestly
         }
         if (!m.truncated)
         {

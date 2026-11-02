@@ -41,7 +41,7 @@
 #include <string_view>
 #include <vector>
 
-#include "PendingPaste.h" // PasteMarker / PasteFileText / ValidatePasteFile / paste_detail::SplitSegments
+#include "PendingPaste.h" // PasteMarker / PasteFileText / ValidatePasteFile / paste_detail::SplitSegments + claude's paste rules (NormalizePastedTextLikeClaude, ClaudeWouldCollapsePaste, the thresholds)
 #include "SessionModels.h" // FoldTrimPromptText + verify_detail::WsStripped -- the compare key every fill verify shares
 
 namespace Agentmaster
@@ -59,14 +59,10 @@ namespace Agentmaster
         int64_t unixMs{ 0 }; // when it was pasted (system clock); journal order is arrival order, this is for diagnostics/eviction
     };
 
-    // Claude's inline-vs-collapse threshold, CHARACTERS (JS UTF-16 length == wchar_t count). A paste
-    // longer than this is always collapsed into a placeholder. A piecewise fill keeps every TYPED
-    // chunk at or below it so claude inserts the chunk as visible text, never as a placeholder.
-    inline constexpr size_t kClaudePasteInlineMaxChars = 800;
-    // Claude's inline-vs-collapse threshold, NEWLINES: min(terminal rows - 10, 2). A Claude tab shorter
-    // than 12 rows would collapse even a 2-newline chunk -- not a realistic working setup, and the
-    // failure is cosmetic (the content still lands, just collapsed), so the common value is used.
-    inline constexpr size_t kClaudePasteInlineMaxNewlines = 2;
+    // Claude's own paste rules this header builds on -- kClaudePasteInlineMaxChars,
+    // kClaudePasteInlineMaxNewlines, NormalizePastedTextLikeClaude, ClaudePasteNewlineCount and
+    // ClaudeWouldCollapsePaste -- live in PendingPaste.h, so the verified send's read-back
+    // (SessionModels.h, which this header includes) applies the very same rule.
 
     // Journal caps. A session keeps its most recent pastes only (placeholders resolve against recent
     // pastes -- the journal is pruned when the draft clears, so older entries are dead weight anyway);
@@ -77,88 +73,6 @@ namespace Agentmaster
     inline constexpr size_t kPasteJournalMaxEntryChars = 4u * 1024u * 1024u;
     inline constexpr size_t kPasteJournalMaxSessionChars = 16u * 1024u * 1024u;
     inline constexpr size_t kPasteJournalMaxTotalChars = 64u * 1024u * 1024u;
-
-    // Normalize a pasted text EXACTLY as it ends up in claude's pastedContents: Windows Terminal's
-    // paste filter first (FilterStringForPaste with CarriageReturnNewline|ControlCodes -- CRLF and a
-    // lone LF become CR, every C0/C1 control except TAB/CR/LF is dropped), then claude's paste handler
-    // (stripANSI -- a no-op once ESC is gone -- CRLF/CR -> LF, TAB -> four spaces). Journal entries are
-    // stored in this form so a placeholder's "+M lines" and the entry's newline count agree by
-    // construction, and so the expansion is byte-identical to what claude itself would submit.
-    //   raw     -- the text as it was pasted (the clipboard text, or the body of one of our fills).
-    //   returns -- the normalized text ("" for an all-control input).
-    //   throws  -- std::bad_alloc on allocation failure only.
-    inline std::wstring NormalizePastedTextLikeClaude(std::wstring_view raw)
-    {
-        std::wstring out;
-        out.reserve(raw.size());
-        for (size_t i = 0; i < raw.size(); ++i)
-        {
-            const wchar_t c = raw[i];
-            if (c == L'\r')
-            {
-                out.push_back(L'\n');
-                if (i + 1 < raw.size() && raw[i + 1] == L'\n')
-                {
-                    ++i; // CRLF -> one LF (WT folds it to CR, claude folds that CR to LF)
-                }
-                continue;
-            }
-            if (c == L'\n')
-            {
-                out.push_back(L'\n');
-                continue;
-            }
-            if (c == L'\t')
-            {
-                out.append(4, L' '); // claude's replaceAll("\t", "    ")
-                continue;
-            }
-            if (c < 0x20 || (c >= 0x7F && c <= 0x9F))
-            {
-                continue; // WT's ControlCodes filter: C0 + DEL + C1 never reach claude
-            }
-            out.push_back(c);
-        }
-        return out;
-    }
-
-    // Claude's "+M lines" arithmetic: the number of newline SEQUENCES (CRLF counts once, a lone CR or
-    // LF counts once) -- claude's own gM(). On a normalized text this is simply the LF count.
-    //   text    -- any text (normalized or raw).
-    //   returns -- the newline-sequence count.
-    //   throws  -- nothing.
-    inline size_t ClaudePasteNewlineCount(std::wstring_view text) noexcept
-    {
-        size_t n = 0;
-        for (size_t i = 0; i < text.size(); ++i)
-        {
-            if (text[i] == L'\r')
-            {
-                ++n;
-                if (i + 1 < text.size() && text[i + 1] == L'\n')
-                {
-                    ++i;
-                }
-            }
-            else if (text[i] == L'\n')
-            {
-                ++n;
-            }
-        }
-        return n;
-    }
-
-    // Would claude collapse this (already normalized) paste into a placeholder rather than insert it
-    // as visible text? Only such pastes can ever back a placeholder, so the journal records only these
-    // and the resolver only matches against these (a small inline paste can never be what a
-    // "[Pasted text ...]" stands for).
-    //   normalized -- a NormalizePastedTextLikeClaude output.
-    //   returns    -- true when claude renders it as a placeholder.
-    //   throws     -- nothing.
-    inline bool ClaudeWouldCollapsePaste(std::wstring_view normalized) noexcept
-    {
-        return normalized.size() > kClaudePasteInlineMaxChars || ClaudePasteNewlineCount(normalized) > kClaudePasteInlineMaxNewlines;
-    }
 
     // ---- Placeholders (wrap-tolerant) -------------------------------------------------------------
 
