@@ -3434,6 +3434,10 @@ Each was read in the code at a7bb5a577; the ones marked "seen" also show in a lo
 > The user's request (2026-10-18): "We have two color circles, the title has a status circle in icon, a status circle in
 > topic title and a color square. remove the status circle in the title when we have status circle in topic icon."
 
+> **Since §21.46 (2026-11-02):** Running is ✍️ and Waiting for you is 🔥, and the topics made with ⚡️ / 💬 are re-iconed
+> quietly. A correction to the next paragraph: Telegram Desktop draws an icon-less topic's first LETTER (emoji skipped,
+> `ExtractNonEmojiLetter`). The name's first character is what the phone and Web draw.
+
 **Why the state showed twice.** Every topic so far was made with an `icon_color` and no icon of its own, and the Telegram
 apps draw such a topic as a bubble in that color with the NAME'S FIRST CHARACTER inside (Telegram Android's current source:
 `ForumUtilities.createTopicDrawable`, a `LetterDrawable` of the name's first character). Every name started with the state
@@ -6637,6 +6641,124 @@ A close of a session in any other state takes the same path; only its state diff
    the "💤 … leaves the list at …" card, and it leaves after the grace.
 3. Close a window holding a Waiting session, then Reopen Windows: the tab comes back Waiting for you, as before.
 4. Close a split pane that holds a Waiting session: `[pane-close] archived <id> (waiting for you -> idle)`.
+
+### 21.46 The state icons the user picked — ✍️ Running, 🔥 Waiting for you — and 🔎 on the Search topic (2026-11-02; NOT BUILT)
+
+> The user's request (2026-11-02): "In agentmaster we use circle with color but in telegram we put in icons for each topic.
+> Could we use a colored circle matching status color of agentmaster's circle?" Shown that Telegram has no circle a bot may
+> set, they kept the icons with changes: "change lightning to blue man running emoji, Waiting for you is 🤌. if we can make all
+> non animated, its better"; then "Give me more options, like 3 dots or something resembling loading" (they picked ✍️ for
+> Running), "Not good enough, show me a dump of all icons i can use", and at last "Use fire icon. And have magnifier the icon
+> for search topic. And can we stop the animations somehow?"
+
+**What Telegram allows (read and measured 2026-11-02).**
+- **Only 112 icons.** A bot may set only the 112 custom emoji that `getForumTopicIconStickers` lists: the set "Topics", the same
+  ids as on 2026-10-18, read again with the dev bot. Telegram's own words (core.telegram.org/api/forum): "Telegram Premium users
+  can pass any custom emoji to icon_emoji_id, while other users can only use the custom emojis contained in the
+  inputStickerSetEmojiDefaultTopicIcons emoji pack". A bot has no Premium. Bot API 10.3 is unchanged: `icon_color` is one of
+  six and is set at creation only; `editForumTopic` changes the name and the icon.
+- **No circle, no 🏃, no 🤌.** None of the 112 is a colored circle, a person running or pinched fingers. The round ones are a
+  silver coin 🪙, a basketball 🏀, a mirror ball 🪩, a crystal ball 🔮 and a soccer ball ⚽.
+- **All 112 are animated.** Each is a TGS sticker (Lottie, 3 s at 60 fps), so a bot cannot set a still icon, and only the
+  apps decide whether an icon moves:
+  - On the phone, Settings › Power Saving switches animated emoji off (Telegram's blog post "Power Saving Mode and More").
+  - Telegram Desktop has Settings › Advanced › Battery and Animations › Animated Emoji, but its source (the dev branch, read
+    2026-11-02) does not apply it to the topic list. `ForumTopic::paintUserpic` draws the icon with `.paused =
+    context.paused`, and the list's `paused` is `isGifPausedAtLeastFor(GifPauseReason::Any)`: a menu or layer is open, or the
+    window is inactive.
+- **A topic with no icon.** The apps draw it from its NAME. Android, iOS and Web take the first grapheme (§21.22). Telegram
+  Desktop takes the first LETTER or digit and skips emoji (`ExtractNonEmojiLetter`), so:
+  - a state glyph at the start of a name never showed in Desktop's icon (the "two circles" of §21.22 were the phone's);
+  - the Search topic, named "🔎 Search" with no icon, was a blue "S" bubble on Desktop.
+
+**How the icons were chosen.** All 112 were rendered from their TGS (rlottie) and shown to the user as pages of the design-ask
+mod, with their real animation:
+- **Running ✍️** (#104, "Claude is writing"), picked from the candidates that look like loading or like work: 💬 three dots,
+  🪩, 🪙, 💱 circling arrows, ✍️ and 🧠.
+- **Waiting for you 🔥** (#13), picked from the sheet of all 112.
+- **Unchanged:** Needs approval ❓, Error ‼️, Done 🏁 and Idle ☕️.
+
+⚠ The design-ask helper serves nothing outside a page's own folder. Assets linked as `../x` were broken pages.
+
+**What changed.**
+- **The table.** `StateTopicIcon` (MessagingModels.h): Running ✍️ `5238156910363950406`, Waiting for you 🔥
+  `5312241539987020022`. The six stay distinct; none is a mark of the prompt line (✅ answered, ⏹ ended), and none is the Search
+  topic's 🔎.
+- **The topics already made follow.**
+  - `TopicRecord::stateIconId` records which icon the last create or rename set. It is persisted as `stateIconId` and omitted
+    in the glyph form.
+  - `PickNameRename` makes a quiet RE-ICON (`NameRenamePick::icon`) of an icon-form topic whose icon is not its state's
+    current one. It has the rank of a quiet re-square and the same conditions: a settled state, the per-topic gap, room in the
+    call window (§21.11.3).
+  - `_renameTopic` makes it: the same single `editForumTopic`, with the name unchanged, and it records the new id.
+- **Files saved before this build** have no `stateIconId`.
+  - An icon-form topic then reads as the icon §21.22's table gave its state (`LegacyStateTopicIconId`). So the Running (⚡️) and
+    Waiting (💬) topics are re-iconed once each, and the other four states cost nothing.
+  - The key is VOLATILE in the bot's repair (PERSISTENCE.md §17). An older build re-icons a topic at every state change from
+    its own table without updating the key, so the shadow's value may be wrong. With the key absent, the reader takes what
+    that build set.
+- **The Search topic** gets Telegram's 🔎 (`SearchTopicIcon`, `5309965701241379366`) and the name "Search" (`SearchTopicName`).
+  The magnifier is not repeated beside its icon (§21.22's rule).
+  - A new Search topic is created that way. The existing one is edited once (`_setSearchTopicIcon`: one `editForumTopic`;
+    Telegram's "topic edited" notice is deleted, as a rename's is).
+  - `MessagingState::searchIconThreadId` (persisted) names the Search topic that has the icon. A topic made again — after the
+    user deleted it, by an older build, or for another bot (the identity gate resets the field) — gets the icon again.
+  - If Telegram refuses the icon (`TopicIconRefused`), the Search topic stays "🔎 Search" without an icon for the rest of the
+    run (`_searchIconRefused`, kept apart from the state icons' refusal).
+  - A 429, no answer or another refusal waits `kSearchCreateRetryMs` (60 s).
+  - A deleted Search topic is forgotten, as the start note forgets it (§21.18), and made again with the icon.
+  - ⚠ The edit writes the name "Search" over any name the user gave the topic: no call reads a topic's name back.
+- **Logs** (hooks.log):
+  - `[msg] topic created: Search (thread N, icon 🔎)`
+  - `[msg] Search topic (thread N): icon 🔎, name “Search”`
+  - a re-icon, as any rename: `[msg] topic renamed <sid8> → 🔥 “🟦 title”`
+
+**Cost.** A re-icon costs two calls: the edit and the delete of Telegram's notice. Only the Running and Waiting topics re-icon,
+within the rename budget (~9 renames a minute at most). They run after the start-up hold, behind every state and color rename.
+The history replay yields to them, as it does to any rename.
+
+**Tests and checks** (2026-11-02, nothing built):
+- **`TestMessaging`'s §21.22 block:**
+  - It checks the new ids.
+  - Its fixture records the icon id the way `_renameTopic` does.
+- **A new §21.46 block:**
+  - The icons:
+    - the two new icons;
+    - §21.22's ids for Running and Waiting, and the four unchanged;
+    - the Search topic's icon (no state's) and its two names.
+  - The picker:
+    - an older table's icon is a quiet re-icon;
+    - with the glyph form wanted it is a re-form, never a re-icon;
+    - an unsettled state waits;
+    - a state change goes first and is no re-icon;
+    - nothing is due once every icon is current.
+  - The record: the icon id and the Search topic's thread round-trip; the glyph form writes no icon id.
+  - An older file:
+    - the lightning and the balloon;
+    - an unchanged state reads as current;
+    - a stray id in the glyph form is ignored;
+    - no Search icon yet.
+  - Its convergence: exactly the Running and Waiting topics are re-iconed, once each.
+- **The harness, on an isolated copy** (HEAD 53eec1c74 plus this change alone, its own profile): 11,442 checks, with only the 3
+  known `TestTaskbarBadge` failures.
+- **Its negative control** (the re-icon rule switched off, in a second copy) failed exactly the two convergence checks: "a
+  topic that shows the older table's icon is re-iconed" and "exactly the running and waiting topics are re-iconed".
+- **`cl /Zs` with the last Debug build's recorded lines** passed every unit that includes the changed headers:
+  - on the isolated copy: Messaging.cpp, Messaging.Inbound.cpp, .Questions.cpp, .Menus.cpp, .Status.cpp, .Files.cpp,
+    .Voice.cpp and Engine.cpp;
+  - against the build's PCH: AgentManagerContent.Settings.cpp and TerminalPage.AgentEngine.cpp;
+  - and MessagingSearchBridge.cpp.
+- **The `/Zs` control:** a probe on the two new members, appended to a copy of Messaging.cpp, failed with C2338 at both lines.
+- ⚠ **The next build must purge:** `Messaging.h` (two `MessagingService` members) and `MessagingModels.h` (`TopicRecord`,
+  `MessagingState`) changed their layouts.
+
+**Check after the build** (each install, on the phone and in the desktop app):
+1. After the start-up hold, the Running topics turn ✍️ and the Waiting ones 🔥, one by one (hooks.log `[msg] topic renamed
+   <sid8> → ✍️ …` / `→ 🔥 …`). No "changed the title" line appears, and the other topics are left alone.
+2. The Search topic shows the 🔎 icon and the name "Search" (hooks.log `[msg] Search topic (thread …): icon 🔎, name
+   “Search”`), and keeps its pin.
+3. A session that starts a turn: its icon turns ✍️ about 8 s later, and 🔥 after the turn.
+4. hooks.log holds neither `Telegram refused the Search topic's icon` nor `Telegram refused a topic icon`.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

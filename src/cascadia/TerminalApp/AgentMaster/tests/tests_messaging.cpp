@@ -2057,13 +2057,13 @@ void TestMessaging()
                 allDigits = allDigits && id.size() >= 15 && std::all_of(id.begin(), id.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; });
             }
             CHECK(ids.size() == 6 && shown.size() == 6 && allDigits, "six states, six distinct icons, each a custom emoji id of digits");
-            CHECK(std::wstring{ StateTopicIcon(SessionState::Running).customEmojiId } == L"5312016608254762256" &&
-                      std::wstring{ StateTopicIcon(SessionState::WaitingForInput).customEmojiId } == L"5417915203100613993" &&
+            CHECK(std::wstring{ StateTopicIcon(SessionState::Running).customEmojiId } == L"5238156910363950406" &&
+                      std::wstring{ StateTopicIcon(SessionState::WaitingForInput).customEmojiId } == L"5312241539987020022" &&
                       std::wstring{ StateTopicIcon(SessionState::NeedsApproval).customEmojiId } == L"5377316857231450742" &&
                       std::wstring{ StateTopicIcon(SessionState::Error).customEmojiId } == L"5377498341074542641" &&
                       std::wstring{ StateTopicIcon(SessionState::Done).customEmojiId } == L"5408906741125490282" &&
                       std::wstring{ StateTopicIcon(SessionState::Idle).customEmojiId } == L"5350392020785437399",
-                  "the ids getForumTopicIconStickers listed (2026-10-18): running, waiting, needs approval, error, done, idle");
+                  "the ids getForumTopicIconStickers listed (2026-10-18, again 2026-11-02): running (§21.46), waiting (§21.46), needs approval, error, done, idle");
             CHECK(std::wstring{ StateTopicIcon(SessionState::Done).emoji } != L"\x2705" && std::wstring{ StateTopicIcon(SessionState::Done).emoji } != L"\x23F9",
                   "done is none of the prompt line's marks (answered, ended)");
 
@@ -2108,6 +2108,8 @@ void TestMessaging()
                 t.nameColor = blue;
                 t.nameColorMode = static_cast<int>(TabColorMode::WorkingDirectory);
                 t.stateIcon = stateIcon;
+                // §21.46: what _createTopic / _renameTopic record — the current table's icon in the icon form, none in the glyph form.
+                t.stateIconId = stateIcon ? std::wstring{ StateTopicIcon(st).customEmojiId } : std::wstring{};
                 return t;
             };
             std::map<std::wstring, TopicRecord> topics;
@@ -2125,8 +2127,11 @@ void TestMessaging()
             topics[L"n"] = topic(L"n", 3, SessionState::Running, true);
             pick = PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory, true);
             CHECK(pick.sessionId == L"n" && pick.state && !pick.form, "a state change (needs approval) goes before a quiet re-form");
+            // The two renames made, as _renameTopic records them (§21.46: with the icon each one set).
             topics[L"g"].stateIcon = true;
+            topics[L"g"].stateIconId = StateTopicIcon(SessionState::Running).customEmojiId;
             topics[L"n"].nameState = static_cast<int>(SessionState::NeedsApproval);
+            topics[L"n"].stateIconId = StateTopicIcon(SessionState::NeedsApproval).customEmojiId;
             CHECK(PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory, true).sessionId.empty(), "every topic in the icon form, its state shown: nothing is due");
 
             // The record keeps the form; an older file reads as the glyph form (re-formed once, quietly).
@@ -2136,6 +2141,158 @@ void TestMessaging()
             CHECK(back && back->topics.count(L"i") && back->topics.at(L"i").stateIcon, "the form round-trips");
             const auto old = StateFromJson(ParseLine(L"{\"topics\":[{\"sessionId\":\"o\",\"threadId\":5}]}"));
             CHECK(old && old->topics.count(L"o") && !old->topics.at(L"o").stateIcon, "an older file: the glyph form");
+        }
+
+        // §21.46 — the icons the user picked from a sheet of all 112 (Running ✍️, Waiting for you 🔥), the Search topic's 🔎, and
+        // how the topics §21.22's table iconed (⚡️ / 💬) are re-iconed: TopicRecord::stateIconId — read from an older file as that
+        // table's id — and PickNameRename's quiet icon rule, so exactly the topics whose icon changed cost a call, once.
+        {
+            const SessionState states[] = { SessionState::Running, SessionState::WaitingForInput, SessionState::NeedsApproval,
+                                            SessionState::Error, SessionState::Done, SessionState::Idle };
+            CHECK(std::wstring{ StateTopicIcon(SessionState::Running).emoji } == L"\x270D\xFE0F" &&
+                      std::wstring{ StateTopicIcon(SessionState::WaitingForInput).emoji } == L"\U0001F525",
+                  "running is the writing hand, waiting for you the fire");
+            CHECK(std::wstring{ LegacyStateTopicIconId(SessionState::Running) } == L"5312016608254762256" &&
+                      std::wstring{ LegacyStateTopicIconId(SessionState::WaitingForInput) } == L"5417915203100613993",
+                  "the §21.22 table: running was the lightning, waiting for you the speech balloon");
+            bool othersKept = true;
+            for (const SessionState st : states)
+            {
+                if (st != SessionState::Running && st != SessionState::WaitingForInput)
+                {
+                    othersKept = othersKept && std::wstring{ LegacyStateTopicIconId(st) } == StateTopicIcon(st).customEmojiId;
+                }
+            }
+            CHECK(othersKept, "the other four icons did not change, so no topic of theirs is re-iconed");
+
+            // The Search topic: Telegram's magnifier as its icon, no state's, and the name without the glyph beside it.
+            const TopicStateIcon search = SearchTopicIcon();
+            CHECK(std::wstring{ search.customEmojiId } == L"5309965701241379366" && std::wstring{ search.emoji } == L"\U0001F50E",
+                  "the Search topic's icon: Telegram's magnifying glass");
+            bool searchIsNoState = true;
+            for (const SessionState st : states)
+            {
+                searchIsNoState = searchIsNoState && std::wstring{ StateTopicIcon(st).customEmojiId } != search.customEmojiId;
+            }
+            CHECK(searchIsNoState, "the magnifier is no state's icon");
+            CHECK(std::wstring{ SearchTopicName(true) } == L"Search" && std::wstring{ SearchTopicName(false) } == L"\U0001F50E Search",
+                  "the Search topic's name: bare beside its icon, the old glyph name without one");
+
+            // The picker: an icon from the older table is a quiet re-icon, under a re-form's conditions.
+            const int64_t now = 3000000;
+            const auto fact = [](const wchar_t* id, SessionState st, int64_t stateSince) {
+                TabFact f;
+                f.sessionId = id;
+                f.state = st;
+                f.live = true;
+                f.inTab = true;
+                f.claude = true;
+                f.colorHex = L"#61AFEF";
+                f.stateSinceMs = stateSince;
+                return f;
+            };
+            const auto iconTopic = [](const wchar_t* id, int64_t thread, SessionState st, const wchar_t* iconId) {
+                TopicRecord t;
+                t.sessionId = id;
+                t.threadId = thread;
+                t.nameState = static_cast<int>(st);
+                t.nameColor = L"\U0001F7E6";
+                t.nameColorMode = static_cast<int>(TabColorMode::WorkingDirectory);
+                t.stateIcon = true;
+                t.stateIconId = iconId;
+                return t;
+            };
+            std::map<std::wstring, TopicRecord> topics;
+            topics[L"r"] = iconTopic(L"r", 1, SessionState::Running, LegacyStateTopicIconId(SessionState::Running)); // still shows ⚡️
+            topics[L"q"] = iconTopic(L"q", 2, SessionState::NeedsApproval, StateTopicIcon(SessionState::NeedsApproval).customEmojiId);
+            std::vector<TabFact> facts{ fact(L"r", SessionState::Running, 0), fact(L"q", SessionState::NeedsApproval, 0) };
+            auto pick = PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory, true);
+            CHECK(pick.sessionId == L"r" && pick.icon && !pick.state && !pick.form && !pick.color, "a topic that shows the older table's icon is re-iconed, quietly");
+            pick = PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory);
+            CHECK(pick.form && !pick.icon, "with the glyph form wanted (a refused icon) it is a re-form, never a re-icon");
+            facts[0].stateSinceMs = now - 2000;
+            CHECK(PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory, true).sessionId.empty(), "a re-icon waits for a settled state");
+            facts[0].stateSinceMs = 0;
+            facts.push_back(fact(L"w", SessionState::WaitingForInput, 0));
+            topics[L"w"] = iconTopic(L"w", 3, SessionState::Running, StateTopicIcon(SessionState::Running).customEmojiId); // its session waits now
+            pick = PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory, true);
+            CHECK(pick.sessionId == L"w" && pick.state && !pick.icon, "a state change goes before a re-icon, and is no re-icon itself (its rename sets the current icon)");
+            topics[L"w"].nameState = static_cast<int>(SessionState::WaitingForInput);
+            topics[L"w"].stateIconId = StateTopicIcon(SessionState::WaitingForInput).customEmojiId;
+            topics[L"r"].stateIconId = StateTopicIcon(SessionState::Running).customEmojiId;
+            CHECK(PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory, true).sessionId.empty(), "every icon from the current table: nothing is due");
+
+            // The record: the icon id and the Search topic's icon thread round-trip; the glyph form writes no icon id.
+            MessagingState st;
+            st.searchThreadId = 25027;
+            st.searchIconThreadId = 25027;
+            st.topics[L"r"] = topics[L"r"];
+            TopicRecord glyph = iconTopic(L"g", 4, SessionState::Error, L"");
+            glyph.stateIcon = false;
+            st.topics[L"g"] = glyph;
+            const json::Value doc = StateToJson(st);
+            const auto back = StateFromJson(doc);
+            CHECK(back && back->topics.count(L"r") && back->topics.count(L"g") &&
+                      back->topics.at(L"r").stateIconId == StateTopicIcon(SessionState::Running).customEmojiId && back->topics.at(L"g").stateIconId.empty() &&
+                      back->searchIconThreadId == 25027,
+                  "the icon id and the Search topic's icon thread round-trip");
+            bool glyphOmits = false;
+            if (const auto* arr = doc.Find(L"topics"); arr && arr->type == json::Value::Type::Arr)
+            {
+                for (const auto& to : arr->arr)
+                {
+                    if (to.StrAt(L"sessionId") == L"g")
+                    {
+                        glyphOmits = to.Find(L"stateIconId") == nullptr;
+                    }
+                }
+            }
+            CHECK(glyphOmits, "the glyph form writes no icon id");
+
+            // An older file (saved before §21.46, or by an older build: the key is volatile in the bot's repair): its icon-form
+            // topics show §21.22's icons, the glyph form shows none, and the Search topic has no icon yet.
+            const auto num = [](SessionState s) { return std::to_wstring(static_cast<int>(s)); };
+            const std::wstring olderJson = L"{\"searchThreadId\":7,\"topics\":["
+                                           L"{\"sessionId\":\"r\",\"threadId\":1,\"stateIcon\":true,\"nameState\":" + num(SessionState::Running) + L"},"
+                                           L"{\"sessionId\":\"w\",\"threadId\":2,\"stateIcon\":true,\"nameState\":" + num(SessionState::WaitingForInput) + L"},"
+                                           L"{\"sessionId\":\"e\",\"threadId\":3,\"stateIcon\":true,\"nameState\":" + num(SessionState::Error) + L"},"
+                                           L"{\"sessionId\":\"g\",\"threadId\":4,\"stateIcon\":false,\"stateIconId\":\"123\",\"nameState\":" + num(SessionState::Error) + L"}]}";
+            const auto older = StateFromJson(ParseLine(olderJson.c_str()));
+            const bool olderHasAll = older && older->topics.count(L"r") && older->topics.count(L"w") && older->topics.count(L"e") && older->topics.count(L"g");
+            CHECK(olderHasAll && older->topics.at(L"r").stateIconId == LegacyStateTopicIconId(SessionState::Running) &&
+                      older->topics.at(L"w").stateIconId == LegacyStateTopicIconId(SessionState::WaitingForInput),
+                  "an older file's running and waiting topics show the lightning and the balloon");
+            CHECK(olderHasAll && older->topics.at(L"e").stateIconId == StateTopicIcon(SessionState::Error).customEmojiId,
+                  "an unchanged state's icon reads as current");
+            CHECK(olderHasAll && older->topics.at(L"g").stateIconId.empty(), "the glyph form reads no icon id, even a stray one");
+            CHECK(older && older->searchThreadId == 7 && older->searchIconThreadId == 0, "an older file: the Search topic has no icon yet (it is given once)");
+            if (olderHasAll)
+            {
+                // The convergence: re-icon what the picker says until nothing is due, recording what _renameTopic records. The
+                // facts carry no color (the older records have no square either), so only the icons can be due.
+                std::map<std::wstring, TopicRecord> olderTopics = older->topics;
+                olderTopics.erase(L"g");
+                std::vector<TabFact> olderFacts{ fact(L"r", SessionState::Running, 0), fact(L"w", SessionState::WaitingForInput, 0),
+                                                 fact(L"e", SessionState::Error, 0) };
+                for (auto& f : olderFacts)
+                {
+                    f.colorHex.clear();
+                }
+                std::set<std::wstring> reIconed;
+                for (int round = 0; round < 4; ++round)
+                {
+                    const NameRenamePick p = PickNameRename(olderFacts, olderTopics, now, TabColorMode::WorkingDirectory, true);
+                    if (p.sessionId.empty())
+                    {
+                        break;
+                    }
+                    reIconed.insert(p.sessionId);
+                    TopicRecord& t = olderTopics[p.sessionId];
+                    t.stateIconId = StateTopicIcon(static_cast<SessionState>(t.nameState)).customEmojiId;
+                }
+                // Parenthesized: the braced set's comma would split the CHECK macro's arguments.
+                CHECK((reIconed == std::set<std::wstring>{ L"r", L"w" }), "exactly the running and waiting topics are re-iconed, once each, then nothing is due");
+            }
         }
 
         // §21.15 — the title CHIP: in a rich message a title is an in-text copy_text button in the Telegram look nearest the

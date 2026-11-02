@@ -1106,6 +1106,8 @@ namespace Agentmaster::Msg
             _startNoteRetryAtMs.store(0);
             _appClosingAtMs.store(0);
             _searchCreateRetryAtMs = 0;
+            _searchIconRetryAtMs = 0; // §21.46: every start may give the Search topic its icon at once
+            _searchIconRefused = false; // §21.46: and tries the 🔎 again after a refusal in the previous run
             _versionWord.clear();
             if (_hooks.versionWord)
             {
@@ -1512,12 +1514,16 @@ namespace Agentmaster::Msg
         // PERSISTENCE.md §17, before anything of this bot start writes the file: a state.json an OLDER Agentmaster saved since a
         // build that keeps unknown fields wrote it (no writer stamp, newer than its shadow) gets back the members that build
         // did not know. The volatile ones — a change line held for the history replay, the replay's last prompt line — are
-        // cleared by the bot once it acted, so they are never brought back.
+        // cleared by the bot once it acted, so they are never brought back. §21.46: so is a topic's `stateIconId` — an older build
+        // re-icons a topic at every state change (its own table) without updating the key, so the shadow's id may name an icon
+        // the topic no longer shows; absent, the reader takes the §21.22 table's id (LegacyStateTopicIconId), which is what that
+        // build set.
         static const std::set<std::wstring, std::less<>> kVolatile = {
             L"topics[].changeLineHeld",
             L"topics[].changeLineFromTitle",
             L"topics[].changeLineFromSquare",
             L"topics[].historyPromptMessageId",
+            L"topics[].stateIconId",
         };
         RepairStateFileWrittenByOlderBuild(profileDir, stateFile, L"messaging\\telegram\\state.json", &MessagingStateRoundTrip, true, &kVolatile);
         MessagingStateFileLoad out;
@@ -2269,6 +2275,7 @@ namespace Agentmaster::Msg
                                     previousBot = _state.botUsername.empty() ? std::to_wstring(_state.botId) : _state.botUsername;
                                     _state.updateOffset = 0;
                                     _state.searchThreadId = 0;
+                                    _state.searchIconThreadId = 0; // §21.46: the old bot's Search topic had it, not the new one's
                                     _state.setupNoticeMs = 0;
                                     _state.topics.clear();
                                     // A business connection (secretary mode) is made to ONE bot: the new bot has none
@@ -3719,9 +3726,11 @@ namespace Agentmaster::Msg
     void MessagingService::_ensureSearchTopic()
     {
         int64_t thread = 0;
+        int64_t iconThread = 0; // §21.46: the Search topic that shows the 🔎 icon (0 = none yet)
         {
             std::lock_guard lk{ _mtx };
             thread = _state.searchThreadId;
+            iconThread = _state.searchIconThreadId;
         }
         if (thread == 0)
         {
@@ -3733,11 +3742,37 @@ namespace Agentmaster::Msg
             {
                 return;
             }
-            auto p = json::Value::MkObj();
-            p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
-            p.Set(L"name", json::Value::MkStr(L"\U0001F50E Search"));
-            p.Set(L"icon_color", json::Value::MkNum(static_cast<double>(kTelegramTopicColors[0])));
-            const TgResult r = _api->Call(L"createForumTopic", p, 20000);
+            // §21.46: made with Telegram's 🔎 as its ICON and the bare name "Search" (the magnifier is not repeated in the name),
+            // unless Telegram refused that icon earlier in this run; then — and when this create's icon is refused — the name
+            // "🔎 Search" without an icon, the form before §21.46. The creation color stays blue: it is what Telegram shows
+            // whenever the topic has no icon, and the directory's Search button wears it.
+            bool withIcon = !_searchIconRefused;
+            const auto params = [this](bool icon) {
+                auto p = json::Value::MkObj();
+                p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+                p.Set(L"name", json::Value::MkStr(SearchTopicName(icon)));
+                p.Set(L"icon_color", json::Value::MkNum(static_cast<double>(kTelegramTopicColors[0])));
+                if (icon)
+                {
+                    p.Set(L"icon_custom_emoji_id", json::Value::MkStr(SearchTopicIcon().customEmojiId));
+                }
+                return p;
+            };
+            TgResult r = _api->Call(L"createForumTopic", params(withIcon), 20000);
+            if (!r.ok && withIcon && TopicIconRefused(r.httpStatus, r.description))
+            {
+                // Telegram did not take the 🔎 (its words are logged): no icon for the Search topic in this run, and the create
+                // again without it — the user still gets the Search topic, under its old name. The state icons are not touched:
+                // a refusal of this one id says nothing about the others (they have their own refusal, §21.22).
+                _searchIconRefused = true;
+                withIcon = false;
+                _log(L"[msg] Telegram refused the Search topic's icon (" + r.description + L"): it is made as \x201C" + SearchTopicName(false) + L"\x201D without one");
+                if (!_awaitCallSlot(L"createForumTopic"))
+                {
+                    return;
+                }
+                r = _api->Call(L"createForumTopic", params(false), 20000);
+            }
             if (!r.ok)
             {
                 _handleTickFlood(L"createForumTopic", r); // a 429: a short verdict waited out here, a long one parks the method
@@ -3749,9 +3784,10 @@ namespace Agentmaster::Msg
             {
                 std::lock_guard lk{ _mtx };
                 _state.searchThreadId = thread;
+                _state.searchIconThreadId = withIcon ? thread : 0; // §21.46: made with the icon, or due for it at a later start
                 _stateDirty = true;
             }
-            _log(L"[msg] topic created: Search (thread " + std::to_wstring(thread) + L")");
+            _log(L"[msg] topic created: Search (thread " + std::to_wstring(thread) + (withIcon ? L", icon \U0001F50E)" : L", no icon)"));
             _sendText(thread,
                       L"<b>\U0001F50E Search</b> \x2014 ask for a session in plain words (\x201Cthe session where I fixed the tab drag crash\x201D) and the Sessions page's search agent finds it. Tap a result's number to pick it: Resume a closed one into a tab, Activate a deactivated tab where it is, Wake an idle one, or Fork it.\n\n"
                       L"This is one conversation for the whole app: it carries on after a restart, and /clear (or \x2298 Clear under an answer) starts it over.\n\n"
@@ -3762,6 +3798,13 @@ namespace Agentmaster::Msg
                       L"",
                       json::Value{},
                       nullptr);
+        }
+        else if (iconThread != thread && !_searchIconRefused && WallMs() >= _searchIconRetryAtMs)
+        {
+            // §21.46: a Search topic made before the icon — or made again without it, by an older build after the user deleted
+            // the old one — gets the 🔎 and the bare name now, once (one editForumTopic; Telegram's "topic edited" notice is
+            // deleted like a state rename's).
+            _setSearchTopicIcon(thread);
         }
         if (!_startNotePosted)
         {
@@ -3872,6 +3915,72 @@ namespace Agentmaster::Msg
             _startNoteState.store(kStartNoteDue);
         }
         _pumpStartNote();
+    }
+
+    void MessagingService::_setSearchTopicIcon(int64_t thread)
+    {
+        if (!_awaitCallSlot(L"editForumTopic"))
+        {
+            return; // stopping, or a long 429 parks the renames: the icon stays due, and a later tick (or run) gives it
+        }
+        auto p = json::Value::MkObj();
+        p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+        p.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(thread)));
+        p.Set(L"name", json::Value::MkStr(SearchTopicName(true)));
+        p.Set(L"icon_custom_emoji_id", json::Value::MkStr(SearchTopicIcon().customEmojiId));
+        const TgResult r = _api->Call(L"editForumTopic", p, 20000);
+        if (r.ok || r.TopicNotModified())
+        {
+            // Done (TOPIC_NOT_MODIFIED: the topic shows this icon and name already — a call whose answer was lost, made again).
+            // Recorded only for the topic the call went to: the user may have deleted it, and a new one been made, meanwhile.
+            {
+                std::lock_guard lk{ _mtx };
+                if (_state.searchThreadId == thread)
+                {
+                    _state.searchIconThreadId = thread;
+                    _stateDirty = true;
+                }
+            }
+            _log(L"[msg] Search topic (thread " + std::to_wstring(thread) + L"): icon \U0001F50E, name \x201C" + SearchTopicName(true) + L"\x201D");
+            return;
+        }
+        if (_handleTickFlood(L"editForumTopic", r))
+        {
+            // Flood control: a short wait was waited out, a long one parks the method; either way not again before the gap.
+            _searchIconRetryAtMs = WallMs() + kSearchCreateRetryMs;
+            return;
+        }
+        if (TopicIconRefused(r.httpStatus, r.description))
+        {
+            // Telegram does not take the 🔎 here: the Search topic keeps its old name and no icon for this run (the next start
+            // tries once more — one refused call per run while Telegram refuses). The state icons are not affected.
+            _searchIconRefused = true;
+            _log(L"[msg] Telegram refused the Search topic's icon (" + r.description + L"): it keeps \x201C" + SearchTopicName(false) + L"\x201D for this run");
+            return;
+        }
+        if (r.ThreadNotFound())
+        {
+            // The user deleted the Search topic in Telegram: forget it, as the start note does (§21.18), so the next tick makes a
+            // new one — with the icon — and its intro. Only if it is still the topic this call went to.
+            bool forgot = false;
+            {
+                std::lock_guard lk{ _mtx };
+                if (_state.searchThreadId == thread)
+                {
+                    _state.searchThreadId = 0;
+                    _stateDirty = true;
+                    forgot = true;
+                }
+            }
+            _log(L"[msg] Search topic (thread " + std::to_wstring(thread) + L") is gone in Telegram" +
+                 (forgot ? std::wstring{ L"; a new one is made, with the icon" } : std::wstring{ L"; it was replaced already" }));
+            return;
+        }
+        // Anything else — no answer at all (Telegram may never have seen the call), or another refusal: tried again
+        // kSearchCreateRetryMs later, never on every tick.
+        _searchIconRetryAtMs = WallMs() + kSearchCreateRetryMs;
+        const std::wstring why = r.description.empty() ? (r.transportFailed ? std::wstring{ L"no answer from Telegram" } : L"HTTP " + std::to_wstring(r.httpStatus)) : r.description;
+        _log(L"[msg] Search topic icon not set (" + why + L"); tried again in " + std::to_wstring(kSearchCreateRetryMs / 1000) + L" s");
     }
 
     void MessagingService::_appNote(const std::wstring& html, bool sound)
@@ -4616,6 +4725,7 @@ namespace Agentmaster::Msg
         t.nameColor = square; // §21.13: the square the name shows, and the mode it was resolved under
         t.nameColorMode = static_cast<int>(_currentColorMode());
         t.stateIcon = stateIcon; // §21.22: the icon shows the state (the name has no glyph), or the glyph form after a refusal
+        t.stateIconId = stateIcon ? std::wstring{ icon.customEmojiId } : std::wstring{}; // §21.46: and which icon (the current table's)
         t.verbose = verbose; // §21.11: -1 follows the default; a topic recreated in a mode keeps that mode
         if (s)
         {
@@ -6128,6 +6238,10 @@ namespace Agentmaster::Msg
                 it->second.nameColor = color.square; // §21.13: and the square, with the mode it stands for
                 it->second.nameColorMode = color.mode;
                 it->second.stateIcon = wantIcon; // §21.22: the icon shows the state, or the glyph form (after a refused icon)
+                // §21.46: which icon — the current table's, so a re-icon (PickNameRename's icon rule) is not due again; "" in the
+                // glyph form (a refused removal leaves the old icon on Telegram's side, but the record is the glyph form either
+                // way, and the next run's re-form sets the icon anew).
+                it->second.stateIconId = wantIcon ? std::wstring{ icon.customEmojiId } : std::wstring{};
                 _stateDirty = true;
             }
         }
@@ -6215,7 +6329,8 @@ namespace Agentmaster::Msg
                 // §21.13: the state glyph AND the color square (PickNameRename: PickStateRename's rule, then the tabs whose
                 // color changed, then the quiet re-squares of topics named before the square or under another mode). §21.22:
                 // the state is the topic's ICON while Telegram takes the icons, and a topic that still shows its state the other
-                // way (a glyph-form name made before §21.22, or an icon after a refusal in this run) is a quiet re-form.
+                // way (a glyph-form name made before §21.22, or an icon after a refusal in this run) is a quiet re-form. §21.46: one
+                // whose icon comes from an older table (⚡️ / 💬 before ✍️ / 🔥, TopicRecord::stateIconId) is a quiet re-icon.
                 sid = PickNameRename(_lastFacts, _state.topics, WallMs(), _currentColorMode(), _stateIconsWanted()).sessionId;
                 if (sid.empty())
                 {

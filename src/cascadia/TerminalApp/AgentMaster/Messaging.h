@@ -1122,7 +1122,45 @@ namespace Agentmaster::Msg
         void _rekeyTopic(const std::wstring& fromSessionId, const std::wstring& toSessionId, const std::wstring& title);
 
         // ----- topics = tabs (Messaging.cpp) -----
+        /// <summary>
+        /// The 🔎 SEARCH topic and the per-start chat set-up, once per tick while topics are on.
+        /// - No Search topic (the first connect, or after the user deleted it): creates it with Telegram's 🔎 as its icon and the
+        ///   bare name "Search" (§21.46), or as "🔎 Search" without an icon while Telegram refuses that icon in this run. Records
+        ///   it, with the thread that has the icon, and posts its intro.
+        /// - A Search topic without the icon (made before §21.46, or again by an older build): _setSearchTopicIcon gives it once.
+        /// - Once per start: the chat's "/" menu (setMyCommands) and the START NOTE's facts (§21.18: the previous run's marker and
+        ///   close stamp, read and removed). Then _pumpStartNote sends the note when it is due.
+        /// </summary>
+        /// <remarks>
+        /// Paced like every topic call: _awaitCallSlot, _handleTickFlood. A refused create is tried again after
+        /// kSearchCreateRetryMs, never on every 1.5 s tick (§21.18). Tick thread only: _searchCreateRetryAtMs, _searchIconRetryAtMs,
+        /// _searchIconRefused and _startNotePosted are the tick thread's.
+        /// </remarks>
+        /// <exception cref="std::bad_alloc">A call's parameters, a log line or the start note's facts may fail to allocate; the
+        /// tick loop's catch logs it (Rule #18), and the next tick tries again.</exception>
         void _ensureSearchTopic();
+        /// <summary>
+        /// §21.46: gives an EXISTING Search topic Telegram's 🔎 as its icon and the bare name "Search" (SearchTopicIcon,
+        /// SearchTopicName) in one editForumTopic — the user's "have magnifier the icon for search topic"; Telegram Desktop drew
+        /// the icon-less "🔎 Search" as a blue "S". Called by _ensureSearchTopic while MessagingState::searchIconThreadId does not
+        /// name the current Search topic (one made before §21.46, or again by an older build), so at most once per Search topic
+        /// when it works. Telegram's "topic edited" notice comes back from the bot and is deleted like a state rename's.
+        /// </summary>
+        /// <remarks>
+        /// Outcomes: done (or TOPIC_NOT_MODIFIED: it shows them already) → recorded for that thread only, since the user may have
+        /// deleted and the bot re-made the topic meanwhile; a 429 → _handleTickFlood, then not before _searchIconRetryAtMs; the icon
+        /// refused (TopicIconRefused) → _searchIconRefused for the rest of the run, the old name kept, and the state icons left
+        /// alone (a refusal of this one id says nothing about theirs); the topic gone (ThreadNotFound) → forgotten as the start
+        /// note forgets it (§21.18), so the next tick makes a new one with the icon; anything else, no answer included → tried
+        /// again after kSearchCreateRetryMs. ⚠ Overwrites a name the user gave the Search topic (no Bot API call reads a topic's
+        /// name back) — once, the same as every state rename overwrites a session topic's. Tick thread only (the retry time and the
+        /// refusal flag are the tick thread's).
+        /// </remarks>
+        /// <param name="thread">The Search topic's message_thread_id (MessagingState::searchThreadId when the tick read it).</param>
+        /// <exception cref="std::bad_alloc">The call's parameters or a log line may fail to allocate; the tick loop's catch logs it
+        /// (Rule #18). A throw before the answer is recorded leaves the icon due (a later tick makes the call again, and
+        /// TOPIC_NOT_MODIFIED counts as done).</exception>
+        void _setSearchTopicIcon(int64_t thread);
         /// <summary>
         /// §21.18: sends the START NOTE when it is due — its first send (the facts gathered by _ensureSearchTopic) or a new
         /// attempt after a failed one (_onStartNoteSent set its time) — into the Search topic, built with this attempt's clock
@@ -1148,9 +1186,9 @@ namespace Agentmaster::Msg
         /// (_stateIconsWanted); else the glyph form (§21.11). The creation color (`icon_color`) is still the tab's: it is what
         /// Telegram shows if the icon is ever removed. A create Telegram refuses for its icon is made again in the glyph form
         /// (and the state icons go off for the run); one refused for its color, without it. Seeded from the transcript (its
-        /// history replayed first, §21.9), its card posted. The record keeps the square, the tab-color mode it stands for and
-        /// the form (TopicRecord::nameColor / nameColorMode / stateIcon). `verbose` is the new topic's TopicRecord::verbose
-        /// (-1 = the default for all; a topic recreated in a mode passes 0 or 1). Tick thread.
+        /// history replayed first, §21.9), its card posted. The record keeps the square, the tab-color mode it stands for, the
+        /// form and which icon it shows (TopicRecord::nameColor / nameColorMode / stateIcon / stateIconId, §21.46). `verbose` is
+        /// the new topic's TopicRecord::verbose (-1 = the default for all; a topic recreated in a mode passes 0 or 1). Tick thread.
         /// </summary>
         /// <param name="sessionId">The session.</param>
         /// <param name="title">Its tab title ("" = the short id).</param>
@@ -1193,8 +1231,9 @@ namespace Agentmaster::Msg
         /// <summary>
         /// Updates a session's topic in ONE editForumTopic: its ICON to the state's (StateTopicIcon) and its name to
         /// TopicDisplayName(state, square, title, true) while state icons are wanted (§21.22) — a state change then changes only
-        /// the icon —, else the glyph form with any state icon the topic shows removed. Records the title, the state, the square
-        /// and the form (a refused rename is recorded too, so it is not retried every tick — except a refusal of Telegram's flood
+        /// the icon —, else the glyph form with any state icon the topic shows removed. Records the title, the state, the square,
+        /// the form and the icon's id (§21.46: what makes a re-icon after a change of StateTopicIcon's table not due again) (a
+        /// refused rename is recorded too, so it is not retried every tick — except a refusal of Telegram's flood
         /// control, a refused ICON, which turns the state icons off for the run and leaves the topic due in the glyph form, and a
         /// call that got NO ANSWER at all, which stays due and is made again at the next tick, §21.29).
         /// The square is ChooseNameColor's: the tab's color once it has held, else the one the name shows. When the TITLE
@@ -1224,8 +1263,8 @@ namespace Agentmaster::Msg
         /// <summary>
         /// The topics' states (their icons, §21.22 — or their names' glyphs in the glyph form, §21.11) and color squares
         /// (§21.13), once per tick after the sync: at most one rename (PickNameRename over the sync's facts with
-        /// _stateIconsWanted: the states that need the user, then a tab's color change, then the quiet re-squares and
-        /// re-forms) and only while the last minute's calls leave room for its two calls (NameRenameFits), no 429 pause runs
+        /// _stateIconsWanted: the states that need the user, then a tab's color change, then the quiet re-squares, re-forms and
+        /// §21.46's re-icons) and only while the last minute's calls leave room for its two calls (NameRenameFits), no 429 pause runs
         /// and no long 429 parks editForumTopic, the start-up hold is over and no recreation is under way. A due rename that
         /// finds no room stamps _renameWaitingSinceMs, and the history replay holds until it went (HistoryYieldsToRename):
         /// renames come after the live traffic and BEFORE the replay. Tick thread; never throws (Rule #18 inside).
@@ -2519,6 +2558,17 @@ namespace Agentmaster::Msg
         /// not become a createForumTopic call on every tick.
         /// </summary>
         int64_t _searchCreateRetryAtMs{ 0 };
+        /// <summary>
+        /// §21.46, tick thread only: a Search topic icon edit that failed for a passing reason (a 429, no answer, another refusal)
+        /// is tried again only from this time on (kSearchCreateRetryMs later), never on every 1.5 s tick. Reset at every start.
+        /// </summary>
+        int64_t _searchIconRetryAtMs{ 0 };
+        /// <summary>
+        /// §21.46, tick thread only: Telegram refused the Search topic's 🔎 icon in this run (TopicIconRefused), so the Search topic
+        /// is made — and kept — as "🔎 Search" without an icon until the next start, which tries once more. Separate from
+        /// _stateIconRefused: one refused id must not send every session topic back to the glyph form.
+        /// </summary>
+        bool _searchIconRefused{ false };
         /// <summary>
         /// How many mirrored sessions have a turn open (counted by the tick loop each pass). The work log's edit
         /// gap grows with it (`kWorkLogEditGapMs` × 1 at one turn, ~2 s × N at N turns), so N busy sessions never

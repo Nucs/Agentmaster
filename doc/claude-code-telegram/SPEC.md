@@ -178,8 +178,8 @@ Each row is a fact of the platform and what the design does about it. "Measured"
 | `getMe` reports `has_topics_enabled` and `allows_users_to_create_topics`. With users allowed to create topics, every message typed in the main view **opens a new topic** with that message ("Type any message to create a new thread"). | A thread the user opens starts a new session (§15). Commands typed in the main view arrive in their own new thread too (§15.5). |
 | A new topic named after its first message carries `is_name_implicit: true` in its `forum_topic_created`. | An implicit name waits for the first message; an explicit name becomes the new session's title. |
 | `createForumTopic`: name 1–128 characters; `icon_color` one of **six** (0x6FB9F0, 0xFFD67E, 0xCB86DB, 0x8EEE98, 0xFF93B2, 0xFB6F5F), set ONLY at creation; `icon_custom_emoji_id` optional. `editForumTopic` changes the name and the custom-emoji icon at any time, never the color. `deleteForumTopic` deletes the topic **with all its messages**. A private chat's topic cannot be closed or hidden. | A topic's color is the nearest of the six to the tab's color, fixed at creation. The STATE is shown as the editable icon (§8.5). An idle session's topic is DELETED (there is no other way to take it off the list). |
-| A topic with no icon of its own is drawn by the apps as a bubble in its creation color with the **name's first character** inside (Android: `ForumUtilities.createTopicDrawable`). | A name that starts with a state glyph showed the state twice; hence the state icon, and the name starts with the color square. |
-| `getForumTopicIconStickers` lists **112** custom emoji a bot may set as a topic icon (the same list for every bot); **none is a colored circle** (colored circles are custom emoji only a Premium owner's bot may send). | The six state icons (§8.5) are chosen from that list by distinct shapes. |
+| A topic with no icon of its own is drawn by the apps as a bubble in its creation color, with a character of the NAME inside. Android, iOS and Web draw the **first grapheme** (Android: `ForumUtilities.createTopicDrawable`). Telegram Desktop draws the **first letter or digit**, skipping emoji (`ExtractNonEmojiLetter`), so a name `🔎 Search` is an "S" bubble there. | A name that starts with a state glyph showed the state twice on the phone; hence the state icon, and the name starts with the color square. A glyph in a name never reaches Desktop's icon. |
+| `getForumTopicIconStickers` lists **112** custom emoji, the ONLY ones a bot may set as a topic icon (the same list for every bot). Telegram's words: "Telegram Premium users can pass any custom emoji to icon_emoji_id, while other users can only use the custom emojis contained in the inputStickerSetEmojiDefaultTopicIcons emoji pack". **None is a colored circle**, and **every one is an ANIMATED sticker** (TGS). Measured 2026-10-18 and 2026-11-02. | The six state icons (§8.5) and the Search topic's 🔎 come from that list; the owner picked them from a sheet of all 112. A still icon is impossible for a bot. The apps decide the motion: the phone's Settings › Power Saving stops animated emoji. Telegram Desktop's topic list ignores its Animated Emoji switch: it pauses a topic icon only while a menu or layer is open or the window is inactive. |
 | No method lists a chat's topics or reads one back; no update tells a bot a topic was deleted; deleting a message sends no update either. | The bridge's **topic map** (session → thread, card, cursors) is its only record and is persisted atomically with a backup (§22). A deleted message is detected only when a call on it fails ("message to edit not found", "message to react not found", `MESSAGE_ID_INVALID`). |
 | The bot's own service messages come back through `getUpdates` with the BOT as the sender: `forum_topic_created`, `forum_topic_edited` (every rename / icon change), the "pinned a message" note. | Own-id messages are skipped silently before the foreign-sender test. A `forum_topic_edited` and a pin note the bot caused are **deleted** (they would sit in the topic / above the main view). A rename therefore costs **two calls**. |
 | `editForumTopic` that changes nothing answers `400 TOPIC_NOT_MODIFIED`. | Counted as a rename that took (its change line and card follow). |
@@ -488,7 +488,7 @@ the secretary's state (§9.5).
 | Place | What lands there |
 |---|---|
 | **Main view ("All")** | The pinned directory (§16); the idle notices (§8.8); the line a cancelled new thread leaves (§15.5); the answers to `/start`, `/help`, `/status` typed there. Any other text typed there opens a new thread by Telegram's own rule (§15); where it does not (users may not create topics), the answer is "This is {app}'s bot. Each working session has its own topic; the 🔎 Search topic finds old ones (/search &lt;words&gt; asks it from anywhere, /search_tab puts it first in the list); a new thread starts a new session (you pick its folder). Send /help for the commands." |
-| **🔎 Search** | Created by the bot at its first connect with topics on (name `🔎 Search`, the blue creation color), with an intro; the user pins it at the top. The start note of every launch (§23.2), the recreation and replay notes, every search request and answer (§14). |
+| **🔎 Search** | Created by the bot at its first connect with topics on, with an intro; the user pins it at the top. Its icon is Telegram's own 🔎 topic icon (custom emoji id `5309965701241379366`) and its name the bare `Search`: the magnifier is not repeated beside its icon. It keeps the blue creation color, which shows only while it has no icon. While Telegram refuses that icon (in one run), it is `🔎 Search` without one. A Search topic made before the icon got it is given it once, by one rename. The record names the thread that has the icon, so a Search topic made again gets it too. The start note of every launch (§23.2), the recreation and replay notes, every search request and answer (§14). |
 | **A session's topic** | The session's conversation (§9), its sticky card (§10), its question and menu cards (§12), the answers to its commands. |
 | **A thread the user opened** | Its new-session wizard until the session is bound to it (§15), then it IS that session's topic. |
 | **A recreation's old topic** | Told it is about to be deleted ("This topic is from before the recreation and is deleted in a moment …"); nothing else runs there. |
@@ -573,14 +573,24 @@ session in that tab gets no topic of its own. A topic with no recorded tab is ne
 
   | State | Icon | Custom emoji id |
   |---|---|---|
-  | Running | ⚡️ | 5312016608254762256 |
-  | Waiting for you | 💬 | 5417915203100613993 |
+  | Running | ✍️ | 5238156910363950406 |
+  | Waiting for you | 🔥 | 5312241539987020022 |
   | Needs approval | ❓ | 5377316857231450742 |
   | Error | ‼️ | 5377498341074542641 |
   | Done (claude exited) | 🏁 | 5408906741125490282 |
   | Idle | ☕️ | 5350392020785437399 |
 
-  None of them is a mark of the prompt line's status (✅ answered, ⏹ ended, §9.4), so Done never reads as "answered".
+  - None of them is a mark of the prompt line's status (✅ answered, ⏹ ended, §9.4), so Done never reads as "answered". None is
+    the Search topic's 🔎.
+  - The first table had Running ⚡️ `5312016608254762256` and Waiting for you 💬 `5417915203100613993`.
+- **Which icon a topic shows** is recorded with its form (`stateIconId`: the id the last create or rename set; none in the
+  glyph form).
+  - A topic whose icon is not its state's current one is re-iconed QUIETLY. It is the same one rename, at the rank of a quiet
+    re-square, once its state has held.
+  - So a changed table reaches the topics whose state does not change, and costs a call only for the states whose icon
+    changed.
+  - A record saved before the key existed reads as the first table's id for its state.
+  - The key is volatile across versions: an older version re-icons without it.
 - **Fallback**: when Telegram refuses an icon (a 400 whose description names the icon, the emoji or the document), the
   icons go off for the rest of the run: every name carries a state GLYPH first — 🔵 Running · 🟡 Waiting · 🟠 Needs
   approval · 🔴 Error · 🟢 Done · ⚪ Idle — (`🟡 🟦 title`), a state icon a topic still shows is removed
@@ -589,8 +599,8 @@ session in that tab gets no topic of its own. A topic with no recorded tab is ne
   quietly, once its state has held.
 - **When the name follows the state** (the NAME TICK, every tick): at most **one** rename per tick; only a state that has
   held **8 s** (a short turn's Running ↔ Waiting flicker renames nothing); at least **30 s** after the topic's last rename;
-  urgency order — Needs approval, Error, Waiting for you, then the rest; then real color changes; then quiet re-squares and
-  re-forms; only when the call window leaves room for its **two** calls (the edit and the delete of Telegram's notice:
+  urgency order — Needs approval, Error, Waiting for you, then the rest; then real color changes; then quiet re-squares,
+  re-forms and re-icons; only when the call window leaves room for its **two** calls (the edit and the delete of Telegram's notice:
   calls + 2 ≤ 18 in the last minute); never during the start-up hold or a recreation. While a due rename waits for room,
   the history replay yields to it for up to **90 s**. A rename refused by flood control, or one that got no answer, stays
   due; any other refusal is recorded (a name Telegram will not take must not be retried every tick).

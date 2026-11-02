@@ -1949,6 +1949,16 @@ namespace Agentmaster::Msg
         /// </summary>
         bool stateIcon{ false };
         /// <summary>
+        /// WHICH icon the topic shows (§21.46): the custom emoji id the last create or rename set (StateTopicIcon(nameState) when
+        /// the call carried the icon), "" in the glyph form. `stateIcon` says THAT the icon shows the state; this says with which
+        /// table, so a changed icon table (§21.46: Running ⚡️ → ✍️, Waiting for you 💬 → 🔥) reaches the topics whose state did
+        /// not change: PickNameRename's icon rule re-icons them quietly. Without it a topic kept the old icon until its session's
+        /// next state change — a Waiting topic for hours, with an icon that no longer meant anything. Persisted as `stateIconId`
+        /// (omitted in the glyph form); a file without it (saved before §21.46, or by an older build: the key is volatile in the
+        /// bot's repair) reads as LegacyStateTopicIconId(nameState) for an icon-form topic.
+        /// </summary>
+        std::wstring stateIconId;
+        /// <summary>
         /// The LAST PROMPT the user sent in this topic's session (§21.12) — the one whose line carries the turn's status and
         /// whose message the turn's final reply answers. `promptMessageId`: the bot's prompt line, or the user's own message
         /// (a prompt from the phone, or one sent as the user by the secretary bot); 0 = not known yet (the send has not
@@ -2118,6 +2128,14 @@ namespace Agentmaster::Msg
     {
         int64_t updateOffset{ 0 }; // Telegram's getUpdates offset: the next update id to ask for
         int64_t searchThreadId{ 0 }; // the pinned "Search" topic (0 until created)
+        /// <summary>
+        /// The Search topic (a thread id) that shows the 🔎 ICON and the bare name "Search" (§21.46: SearchTopicIcon,
+        /// SearchTopicName); 0 = none yet. Kept as the THREAD it was done for, not as a flag, so the Search topic it describes is
+        /// unambiguous: a topic made before §21.46 (0), one made again after the user deleted the old one — also by an older
+        /// build, which makes it without the icon — or a different bot (the identity gate resets both) all read as "not done",
+        /// and MessagingService::_setSearchTopicIcon gives that topic the icon once. Persisted as `searchIconThreadId`.
+        /// </summary>
+        int64_t searchIconThreadId{ 0 };
         int64_t setupNoticeMs{ 0 }; // when the "turn Threaded Mode on" notice was last sent (0 = never)
         /// <summary>
         /// The bot this state belongs to (getMe's user id; 0 = written before the key existed, or never connected).
@@ -2206,6 +2224,7 @@ namespace Agentmaster::Msg
         o.Set(L"version", json::Value::MkNum(1));
         o.Set(L"updateOffset", json::Value::MkNum(static_cast<double>(s.updateOffset)));
         o.Set(L"searchThreadId", json::Value::MkNum(static_cast<double>(s.searchThreadId)));
+        o.Set(L"searchIconThreadId", json::Value::MkNum(static_cast<double>(s.searchIconThreadId))); // §21.46
         o.Set(L"setupNoticeMs", json::Value::MkNum(static_cast<double>(s.setupNoticeMs)));
         o.Set(L"botId", json::Value::MkNum(static_cast<double>(s.botId)));
         o.Set(L"botUsername", json::Value::MkStr(s.botUsername));
@@ -2276,6 +2295,11 @@ namespace Agentmaster::Msg
             to.Set(L"nameColorMode", json::Value::MkNum(static_cast<double>(t.nameColorMode)));
             // §21.22: the state is the topic's icon, and the name carries no glyph.
             to.Set(L"stateIcon", json::Value::MkBool(t.stateIcon));
+            if (t.stateIcon && !t.stateIconId.empty())
+            {
+                // §21.46: which icon it shows (omitted in the glyph form, where no state icon shows).
+                to.Set(L"stateIconId", json::Value::MkStr(t.stateIconId));
+            }
             if (t.promptMessageId != 0 || !t.promptText.empty())
             {
                 // §21.12: the last prompt's line (omitted when the live mirror has seen none).
@@ -2305,6 +2329,9 @@ namespace Agentmaster::Msg
         return o;
     }
 
+    // §21.46: defined with the state icons below (StateTopicIcon's table); StateFromJson fills an older file's icon ids from it.
+    inline const wchar_t* LegacyStateTopicIconId(SessionState s) noexcept;
+
     /// <summary>Reads the connector's state file; tolerant of missing members (a fresh file).</summary>
     /// <param name="v">The parsed document.</param>
     /// <returns>The state; nullopt when the document is not an object.</returns>
@@ -2318,6 +2345,7 @@ namespace Agentmaster::Msg
         MessagingState s;
         s.updateOffset = v.I64At(L"updateOffset", 0);
         s.searchThreadId = v.I64At(L"searchThreadId", 0);
+        s.searchIconThreadId = v.I64At(L"searchIconThreadId", 0); // §21.46 (absent: the Search topic has no icon yet — given once)
         s.setupNoticeMs = v.I64At(L"setupNoticeMs", 0);
         s.botId = v.I64At(L"botId", 0); // absent in a file written before the key: 0 = "take the first bot seen"
         s.botUsername = v.StrAt(L"botUsername");
@@ -2397,6 +2425,17 @@ namespace Agentmaster::Msg
                 t.nameColorMode = std::clamp(static_cast<int>(to.I64At(L"nameColorMode", -1)), -1, static_cast<int>(TabColorMode::NoColor));
                 // §21.22 (absent in an older file: the glyph form — renamed once into the icon form, quietly).
                 t.stateIcon = to.BoolAt(L"stateIcon", false);
+                // §21.46: which icon an icon-form topic shows. Absent (a file saved before §21.46, or by an older build — the bot's
+                // repair never restores the key) = the icon §21.22's table gave its state, which is what that build set; the glyph
+                // form shows no state icon at all.
+                if (t.stateIcon)
+                {
+                    t.stateIconId = to.StrAt(L"stateIconId");
+                    if (t.stateIconId.empty() && t.nameState >= 0)
+                    {
+                        t.stateIconId = LegacyStateTopicIconId(static_cast<SessionState>(t.nameState));
+                    }
+                }
                 // §21.12 (absent in an older file: no prompt tracked yet — the next live prompt starts it).
                 t.promptMessageId = to.I64At(L"promptMessageId", 0);
                 t.promptBotLine = to.BoolAt(L"promptBotLine", false);
@@ -2873,16 +2912,23 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
-    /// A state's topic ICON (§21.22): one of Telegram's forum-topic icons — the 112 custom emoji that getForumTopicIconStickers
-    /// lists and any bot may set without Premium (read 2026-10-18; both bots got the same ids). Why the state moved into the
-    /// icon: Telegram draws a topic that has no icon of its own as a bubble in its creation color with the NAME'S FIRST
-    /// CHARACTER inside (Telegram iOS and Web take the first grapheme), so a name that starts with the state glyph showed the
-    /// state twice, in the icon and in the name — the user's "two color circles" (2026-10-18). The icon is set apart from the
-    /// name, and editForumTopic can change it at any time (a topic's `icon_color` is fixed at creation), so the state goes
-    /// there and the name keeps the color square and the title (TopicDisplayName's stateIcon form). None of the 112 icons is a
-    /// colored circle (the circles are custom emoji only a Premium owner's bot may use), so the states read as shapes:
-    /// Running ⚡️, Waiting for you 💬, Needs approval ❓, Error ‼️, Done (claude exited) 🏁, Idle ☕️ — six distinct icons, and
-    /// none of the marks of the prompt line's status (§21.12.3: ✅ answered, ⏹ ended), so "done" never reads as "answered".
+    /// A state's topic ICON (§21.22, §21.46): one of Telegram's forum-topic icons — the 112 custom emoji that
+    /// getForumTopicIconStickers lists, the ONLY ones a bot may set ("Telegram Premium users can pass any custom emoji to
+    /// icon_emoji_id, while other users can only use the custom emojis contained in the inputStickerSetEmojiDefaultTopicIcons
+    /// emoji pack", core.telegram.org/api/forum; a bot has no Premium). Read 2026-10-18 with both bots and again 2026-11-02:
+    /// the same 112 ids, every one an ANIMATED sticker (TGS) — a bot cannot set a still icon, and only each Telegram app can stop
+    /// the animation (§21.46). Why the state is the icon: Telegram draws a topic that has no icon of its own as a bubble in its
+    /// creation color with a character of the NAME inside (Android, iOS and Web: the first grapheme; Telegram Desktop: the first
+    /// LETTER or digit, emoji skipped — `ExtractNonEmojiLetter`), so a name that started with the state glyph showed the state
+    /// twice on the phone — the user's "two color circles" (2026-10-18). The icon is set apart from the name, and
+    /// editForumTopic can change it at any time (a topic's `icon_color` is fixed at creation), so the state goes there and the
+    /// name keeps the color square and the title (TopicDisplayName's stateIcon form). None of the 112 is a colored circle or a
+    /// still image, so the states read as shapes, picked by the user from a sheet of all 112 (2026-11-02): Running ✍️ ("Claude
+    /// is writing"), Waiting for you 🔥, Needs approval ❓, Error ‼️, Done (claude exited) 🏁, Idle ☕️ — six distinct icons, none
+    /// of the marks of the prompt line's status (§21.12.3: ✅ answered, ⏹ ended), so "done" never reads as "answered", and none
+    /// the Search topic's 🔎 (SearchTopicIcon). ⚠ A change of an id here makes every icon-form topic of that state out of date:
+    /// PickNameRename re-icons them quietly by TopicRecord::stateIconId, and LegacyStateTopicIconId must keep the ids an older
+    /// file's topics show.
     /// </summary>
     struct TopicStateIcon
     {
@@ -2890,7 +2936,7 @@ namespace Agentmaster::Msg
         const wchar_t* customEmojiId; // Telegram's custom_emoji_id, for createForumTopic / editForumTopic `icon_custom_emoji_id`
     };
 
-    /// <summary>The topic icon that shows a session's state (§21.22).</summary>
+    /// <summary>The topic icon that shows a session's state (§21.22; Running and Waiting for you since §21.46).</summary>
     /// <param name="s">The state.</param>
     /// <returns>The icon (static strings).</returns>
     inline TopicStateIcon StateTopicIcon(SessionState s) noexcept
@@ -2898,9 +2944,9 @@ namespace Agentmaster::Msg
         switch (s)
         {
         case SessionState::Running:
-            return { L"\x26A1\xFE0F", L"5312016608254762256" };
+            return { L"\x270D\xFE0F", L"5238156910363950406" };
         case SessionState::WaitingForInput:
-            return { L"\U0001F4AC", L"5417915203100613993" };
+            return { L"\U0001F525", L"5312241539987020022" };
         case SessionState::NeedsApproval:
             return { L"\x2753", L"5377316857231450742" };
         case SessionState::Error:
@@ -2911,6 +2957,59 @@ namespace Agentmaster::Msg
         default:
             return { L"\x2615\xFE0F", L"5350392020785437399" };
         }
+    }
+
+    /// <summary>
+    /// The custom emoji id §21.22's table gave a state — what the icon of an icon-form topic saved BEFORE §21.46 shows: Running
+    /// ⚡️ and Waiting for you 💬 then, the other four as StateTopicIcon still has them. The state file's reader fills
+    /// TopicRecord::stateIconId from it for a topic saved without the key (StateFromJson), so PickNameRename re-icons exactly the
+    /// topics whose icon §21.46 changed and never spends a call on one that shows its state's icon already. Also what a topic
+    /// shows after an OLDER build renamed it (the older build drops the key, and the bot's repair never brings it back: it is
+    /// volatile), so a newer build that runs again re-icons it too.
+    /// </summary>
+    /// <remarks>
+    /// A guess for one case only: an older build that saved the file without renaming a topic §21.46 had re-iconed leaves that
+    /// topic showing the NEW icon, read here as the old one — its re-icon then answers TOPIC_NOT_MODIFIED, which counts as done
+    /// (one call, nothing seen). ⚠ Never change these ids: they are what Telegram shows on topics made by the §21.22 build.
+    /// </remarks>
+    /// <param name="s">The state the topic's icon shows (TopicRecord::nameState).</param>
+    /// <returns>The id (a static string).</returns>
+    inline const wchar_t* LegacyStateTopicIconId(SessionState s) noexcept
+    {
+        switch (s)
+        {
+        case SessionState::Running:
+            return L"5312016608254762256"; // ⚡️ (§21.22)
+        case SessionState::WaitingForInput:
+            return L"5417915203100613993"; // 💬 (§21.22)
+        default:
+            return StateTopicIcon(s).customEmojiId; // §21.46 kept the other four
+        }
+    }
+
+    /// <summary>
+    /// The 🔎 SEARCH topic's icon (§21.46, the user's "have magnifier the icon for search topic"): Telegram's own 🔎 (RIGHT-POINTING
+    /// MAGNIFYING GLASS, one of the 112 a bot may set). Until §21.46 the Search topic had no icon and the name "🔎 Search", and
+    /// Telegram Desktop draws an icon-less topic as the name's first LETTER (emoji skipped): the user saw a blue "S" bubble. The
+    /// same TopicStateIcon pair as a state's (it is no state: never one of StateTopicIcon's six).
+    /// </summary>
+    /// <returns>The icon (static strings).</returns>
+    inline TopicStateIcon SearchTopicIcon() noexcept
+    {
+        return { L"\U0001F50E", L"5309965701241379366" };
+    }
+
+    /// <summary>
+    /// The Search topic's NAME (§21.46): "Search" when its icon shows the 🔎 — the magnifier is not repeated in the name, as a
+    /// state is not (§21.22's rule: the user's "two color circles") — and "🔎 Search", the name it had before §21.46, while
+    /// Telegram refuses the icon (the phone's icon-less bubble then still draws the 🔎). Only the topic's name: the messages that
+    /// mention "the 🔎 Search topic" and the directory's button keep the glyph.
+    /// </summary>
+    /// <param name="iconShown">True when the topic's icon is SearchTopicIcon.</param>
+    /// <returns>The name for createForumTopic / editForumTopic (a static string).</returns>
+    inline const wchar_t* SearchTopicName(bool iconShown) noexcept
+    {
+        return iconShown ? L"Search" : L"\U0001F50E Search";
     }
 
     /// <summary>
@@ -3358,6 +3457,7 @@ namespace Agentmaster::Msg
         bool state{ false }; // the topic shows another state than the session's (its icon, or its name's glyph)
         bool color{ false }; // the name's square differs from the tab's color square (§21.13)
         bool form{ false }; // the topic shows its state the other way than wanted: the glyph in the name vs the icon (§21.22)
+        bool icon{ false }; // its icon shows its state, but from an older icon table (§21.46: TopicRecord::stateIconId)
     };
 
     /// <summary>
@@ -3373,6 +3473,9 @@ namespace Agentmaster::Msg
     /// its state the other way than `stateIcons` asks — a glyph-form name made before §21.22, or an icon after Telegram refused
     /// one in this run — is due too, as a QUIET change of the same rank as a quiet re-square, once its state has held
     /// kNameStateSettleMs (so the call carries a settled state). The same call fixes a state, a square and the form at once.
+    /// Since §21.46 an icon-form topic whose icon shows its state from an OLDER table (TopicRecord::stateIconId is not
+    /// StateTopicIcon's id for that state: ⚡️ / 💬 after the table moved to ✍️ / 🔥) is a quiet RE-ICON of the same rank, under
+    /// the same conditions — so a changed table reaches the topics whose state does not change, paced like every rename.
     /// </summary>
     /// <param name="facts">The live sessions (the sync's facts, with stateSinceMs, colorHex and colorSinceMs).</param>
     /// <param name="topics">The topic map.</param>
@@ -3423,11 +3526,16 @@ namespace Agentmaster::Msg
             const bool colorDue = t.nameColor != TgTitleColorSquare(f.colorHex) && (f.colorSinceMs <= 0 || nowMs - f.colorSinceMs >= kNameStateSettleMs);
             // §21.22: the state shown the other way than wanted (glyph vs icon) — quiet, and only with a settled state.
             const bool formDue = t.stateIcon != stateIcons && stateSettled;
-            if (!stateDue && !colorDue && !formDue)
+            // §21.46: the right form and the right state, but an icon from an older table — quiet, with a settled state. Only for
+            // a topic whose recorded state IS the session's (otherwise the state rule renames it, with the current icon).
+            const bool iconDue = stateIcons && t.stateIcon && t.nameState == static_cast<int>(f.state) &&
+                                 t.stateIconId != StateTopicIcon(f.state).customEmojiId && stateSettled;
+            if (!stateDue && !colorDue && !formDue && !iconDue)
             {
                 continue; // up to date, or a change that has not held yet
             }
-            // A form change alone ranks with the quiet re-squares (5): every state and every real color change goes first.
+            // A form change or a re-icon alone ranks with the quiet re-squares (5): every state and every real color change goes
+            // first.
             const int rank = stateDue ? urgency(f.state) : (colorDue && t.nameColorMode == static_cast<int>(colorMode) ? 4 : 5);
             const int64_t since = stateDue ? f.stateSinceMs : (colorDue ? f.colorSinceMs : f.stateSinceMs);
             if (pick.sessionId.empty() || rank < bestRank || (rank == bestRank && since < bestSince))
@@ -3436,6 +3544,7 @@ namespace Agentmaster::Msg
                 pick.state = stateDue;
                 pick.color = colorDue;
                 pick.form = formDue;
+                pick.icon = iconDue;
                 bestRank = rank;
                 bestSince = since;
             }
