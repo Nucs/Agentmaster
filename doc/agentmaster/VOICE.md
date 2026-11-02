@@ -467,6 +467,15 @@ once the pick launched it, a typed message sent after the note queued after it.
 * The correction (§5.5, on by default) sends the TEXT and the session's glossary to Anthropic through the PC's own Claude
   Code login — the text that then becomes the session's prompt, which goes there anyway. It reads no file of the session;
   its claude runs with no tools, no MCP server and no settings. `voiceCorrectionModel = off` stops it.
+* **Which account pays** (verified 2026-11-02 on this PC, production 0.8.0.2): the correction's claude, run with the release
+  GUI's own environment exactly as `RunClaudeCapture` builds it, reported `apiKeySource: none` (no API key: the Claude
+  subscription login) and connected only to `api.anthropic.com`. Two things decide it: Agentmaster's own environment (it
+  held no `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN`), and `--setting-sources ""`, which keeps
+  `~/.claude/settings.json` out — so a model gateway configured there (`ANTHROPIC_BASE_URL`, such as a local ChatGPT/Codex
+  proxy) is NOT used, and neither is a model alias it remaps. ⚠ An `ANTHROPIC_API_KEY` set in the user's or the machine's
+  environment WOULD reach the call (`BuildHarnessEnvironment` removes a parent session's variables, not credentials), and
+  Claude Code would then bill that key. OpenAI is never called unless the endpoint engine is chosen (with its own key from
+  Credential Manager); `OPENAI_API_KEY` is read by nothing here.
 * Keys (the endpoint's) live in Credential Manager per profile; never in settings.json, a log line or an error text.
 * The worker runs as the user, hidden, in a job that ends with Agentmaster; its command line is the owner's setting.
 * Only the paired owner's notes are read (the sender check comes first, H3).
@@ -485,6 +494,11 @@ once the pick launched it, a typed message sent after the note queued after it.
 | `voiceWorkerIdleMinutes` | 10 | 0–1440; the worker ends after this long without a note. |
 | `voiceEchoTranscript` | on | The transcript is posted under the note before it is read. |
 | `voiceCorrectionModel` | `claude-sonnet-5-5` | The correction's model (§5.5): `claude-sonnet-5-5` · `claude-haiku-5-5` · `off` (or ""); any other id typed into settings.json is passed to claude's `--model` as is (the cog shows it as "Another model" and keeps it). |
+
+The service takes these at the engine's start and at every cog Save. ⚠ A hand edit of `settings.json` while Agentmaster
+runs reaches it only at the next start: the cog edits an in-memory copy, and a Save before that restart writes the cog's
+values — the old ones — back over the edit (2026-11-02: a hand-set worker command was lost to the next Save six minutes
+later). To change a voice setting on a running instance, use the cog.
 
 ## 10. Open items
 
