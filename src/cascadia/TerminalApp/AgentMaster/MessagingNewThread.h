@@ -30,6 +30,8 @@
 // This header is the PURE half: the folder lists from the registry's facts, the picker's text and buttons, the buttons' callback
 // data, the name a button shows, a topic name without its decoration, and a typed folder path. Header-only, no I/O (the folder
 // probe is injected), no Win32, no WinRT: the m5 suite pins every rule (tests_messaging.cpp, TestMessagingNewThread).
+// §21.25.9: the ➕ message's buttons ("nt:a…", MessagingNewThreadWizard.h's extra folders) are this header's kinds too, and its add
+// picker draws the folder step's two lists through the same builders (detail::AppendNewThreadFolderSections, BuildNewThreadFolderRows).
 
 #pragma once
 
@@ -251,6 +253,21 @@ namespace Agentmaster::Msg
             WindowPick, // value = the window step's 0-based window (NewThreadWizard::windows, as the step showed them)
             WindowDefault, // the window step: its default (the window of the newest tab in the chosen folder)
             WindowRefresh, // the window step: read the windows again
+            // §21.25.9, the ➕ MESSAGE above the model step (MessagingNewThreadWizard.h, "the extra folders"): more folders for the
+            // session, each sent to Claude Code as "/add-dir <path>" when the session starts, before its first prompt. Its buttons
+            // carry the same "nt:" prefix, so the one picker route (_handleCallback → _onNewThreadAction) reads them; the reducer
+            // then checks them against the ➕ message's own state (NewThreadAddStepTakes), not only against the wizard's step.
+            AddFolder, // ➕: the message turns into a folder picker (the add flow's Pick state)
+            AddPickRecent, // value = the folder's 0-based index in the Recent list (the add picker shows the folder step's lists)
+            AddPickUsed, // value = the folder's 0-based index in the Most used list
+            AddPageRecent, // value = the add picker's Recent page to show
+            AddPageUsed, // value = the add picker's Most used page to show
+            AddPageLabelRecent, // the add picker's Recent page label: nothing changes, the toast says the page; value = the page it shows
+            AddPageLabelUsed, // the add picker's Most used page label (as AddPageLabelRecent)
+            AddScope, // value = the /add-dir dialog's option for the picked folder: 1 for this session, 2 remember it (asks first), 3 No
+            AddConfirm, // the "remember it?" confirmation's Yes: the folder is added with option 2
+            AddBack, // one state back in the add flow: the folder picker to the ➕, the confirmation to the three options
+            AddRemove, // value = the 0-based index of an added folder (NewThreadWizard::extraFolders) to take off the list again
         };
         Kind kind{ Kind::None };
         size_t value{ 0 };
@@ -258,13 +275,15 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// The callback data of a picker button: "nt:r:3", "nt:m:0", "nt:rp:1", "nt:mp:2", "nt:rl:1", "nt:ml:0", "nt:x"; the wizard's
-    /// (§21.25) "nt:cf", "nt:bf", "nt:md", "nt:mo:4", "nt:ms", "nt:bm", "nt:w:1", "nt:wd", "nt:wr".
+    /// (§21.25) "nt:cf", "nt:bf", "nt:md", "nt:mo:4", "nt:ms", "nt:bm", "nt:w:1", "nt:wd", "nt:wr"; the ➕ message's (§21.25.9)
+    /// "nt:af", "nt:ar:3", "nt:au:0", "nt:arp:1", "nt:aup:2", "nt:arl:1", "nt:aul:0", "nt:as:2", "nt:ac", "nt:ab", "nt:ax:1".
     /// </summary>
     /// <param name="kind">The action (None gives "").</param>
-    /// <param name="value">The index or page (ignored by the kinds that carry none: Cancel, CreateFolder, BackToFolders,
-    /// ModelDefault, ModelSpecify, BackToModels, WindowDefault, WindowRefresh).</param>
-    /// <returns>The data, at most 26 characters ("nt:", a three-character tag, a 64-bit value's 20 digits): far under the Bot API's
-    /// 64 bytes. Only a value of at most 9 digits parses back (ParseNewThreadCallbackData), which every real index and page is.</returns>
+    /// <param name="value">The index, page or option (ignored by the kinds that carry none: Cancel, CreateFolder, BackToFolders,
+    /// ModelDefault, ModelSpecify, BackToModels, WindowDefault, WindowRefresh, AddFolder, AddConfirm, AddBack).</param>
+    /// <returns>The data, at most 27 characters ("nt:", a tag of up to four characters, a 64-bit value's 20 digits): far under the
+    /// Bot API's 64 bytes. Only a value of at most 9 digits parses back (ParseNewThreadCallbackData), which every real index, page
+    /// and option is.</returns>
     /// <exception cref="std::bad_alloc">If the data cannot be allocated.</exception>
     inline std::wstring NewThreadCallbackData(NewThreadAction::Kind kind, size_t value)
     {
@@ -303,6 +322,30 @@ namespace Agentmaster::Msg
             return prefix + L"wd";
         case NewThreadAction::Kind::WindowRefresh:
             return prefix + L"wr";
+        // §21.25.9: the ➕ message's buttons. Every tag starts with "a" and none equals a tag above, so the parse below never reads
+        // one kind as another ("ar" is not "r", "arp" is not "rp").
+        case NewThreadAction::Kind::AddFolder:
+            return prefix + L"af";
+        case NewThreadAction::Kind::AddPickRecent:
+            return prefix + L"ar:" + std::to_wstring(value);
+        case NewThreadAction::Kind::AddPickUsed:
+            return prefix + L"au:" + std::to_wstring(value);
+        case NewThreadAction::Kind::AddPageRecent:
+            return prefix + L"arp:" + std::to_wstring(value);
+        case NewThreadAction::Kind::AddPageUsed:
+            return prefix + L"aup:" + std::to_wstring(value);
+        case NewThreadAction::Kind::AddPageLabelRecent:
+            return prefix + L"arl:" + std::to_wstring(value);
+        case NewThreadAction::Kind::AddPageLabelUsed:
+            return prefix + L"aul:" + std::to_wstring(value);
+        case NewThreadAction::Kind::AddScope:
+            return prefix + L"as:" + std::to_wstring(value);
+        case NewThreadAction::Kind::AddConfirm:
+            return prefix + L"ac";
+        case NewThreadAction::Kind::AddBack:
+            return prefix + L"ab";
+        case NewThreadAction::Kind::AddRemove:
+            return prefix + L"ax:" + std::to_wstring(value);
         case NewThreadAction::Kind::None:
         default:
             return {};
@@ -332,6 +375,9 @@ namespace Agentmaster::Msg
             { L"bm", NewThreadAction::Kind::BackToModels },
             { L"wd", NewThreadAction::Kind::WindowDefault },
             { L"wr", NewThreadAction::Kind::WindowRefresh },
+            { L"af", NewThreadAction::Kind::AddFolder }, // §21.25.9: the ➕ message's valueless buttons
+            { L"ac", NewThreadAction::Kind::AddConfirm },
+            { L"ab", NewThreadAction::Kind::AddBack },
         };
         for (const auto& [tag, kind] : kBare)
         {
@@ -392,6 +438,40 @@ namespace Agentmaster::Msg
         else if (what == L"w")
         {
             a.kind = NewThreadAction::Kind::WindowPick; // §21.25
+        }
+        // §21.25.9: the ➕ message's valued buttons. AddScope's option is NOT range-checked here (a digit outside 1-3 parses, and
+        // the reducer answers it as a stale tap): the parse only reads the data's shape, the reducer owns what a value may mean.
+        else if (what == L"ar")
+        {
+            a.kind = NewThreadAction::Kind::AddPickRecent;
+        }
+        else if (what == L"au")
+        {
+            a.kind = NewThreadAction::Kind::AddPickUsed;
+        }
+        else if (what == L"arp")
+        {
+            a.kind = NewThreadAction::Kind::AddPageRecent;
+        }
+        else if (what == L"aup")
+        {
+            a.kind = NewThreadAction::Kind::AddPageUsed;
+        }
+        else if (what == L"arl")
+        {
+            a.kind = NewThreadAction::Kind::AddPageLabelRecent;
+        }
+        else if (what == L"aul")
+        {
+            a.kind = NewThreadAction::Kind::AddPageLabelUsed;
+        }
+        else if (what == L"as")
+        {
+            a.kind = NewThreadAction::Kind::AddScope;
+        }
+        else if (what == L"ax")
+        {
+            a.kind = NewThreadAction::Kind::AddRemove;
         }
         else
         {
@@ -483,6 +563,69 @@ namespace Agentmaster::Msg
         return label;
     }
 
+    namespace detail
+    {
+        /// <summary>
+        /// Appends the two folder lists' CURRENT PAGES to a picker's text — the folder step's own picker (§21.17,
+        /// BuildNewThreadPickerHtml) and the ➕ message's add picker (§21.25.9) show the same lists, numbered like their buttons:
+        /// each list's heading with the range shown ("🕘 Recent · 1–10 of 34"), then one line per folder — its number, its full
+        /// path and, for Recent, how long ago it was used, for Most used how many sessions worked there — and after it whatever the
+        /// caller's `note` says about that folder (the add picker marks the session's own folder and the folders added already, so
+        /// a tap that would only be refused is visible before it is made).
+        /// </summary>
+        /// <param name="html">The text to append to (classic Telegram HTML).</param>
+        /// <param name="lists">The two lists.</param>
+        /// <param name="recentPage">The Recent page shown (clamped here).</param>
+        /// <param name="usedPage">The Most used page shown (clamped here).</param>
+        /// <param name="nowMs">The clock the "ago" texts count against (Unix ms).</param>
+        /// <param name="note">Called with each shown folder's path; returns HTML to put at the end of its line ("" = nothing). An
+        /// empty function notes nothing (the folder step's picker, byte for byte as before §21.25.9).</param>
+        /// <exception cref="std::bad_alloc">If the text cannot grow.</exception>
+        /// <exception cref="std::exception">Whatever `note` throws, unchanged.</exception>
+        inline void AppendNewThreadFolderSections(std::wstring& html, const NewThreadLists& lists, size_t recentPage, size_t usedPage, int64_t nowMs,
+                                                  const std::function<std::wstring(const std::wstring&)>& note)
+        {
+            const auto section = [&](const wchar_t* glyph, const wchar_t* name, const std::vector<NewThreadFolder>& list, size_t page, bool recency) {
+                html += L"\n\n";
+                html += glyph;
+                html += L" <b>";
+                html += name;
+                html += L"</b>";
+                if (list.empty())
+                {
+                    html += L"\n<i>No folders known yet.</i>";
+                    return;
+                }
+                page = ClampNewThreadPage(page, list.size());
+                const size_t first = page * kNewThreadPageSize;
+                const size_t last = (std::min)(list.size(), first + kNewThreadPageSize); // (std::min): the <windows.h> macro
+                html += L" \x00B7 " + std::to_wstring(first + 1) + L"\x2013" + std::to_wstring(last) + L" of " + std::to_wstring(list.size());
+                for (size_t i = first; i < last; ++i)
+                {
+                    const auto& f = list[i];
+                    html += L"\n<b>" + std::to_wstring(i + 1) + L"</b> " + TgEscapeHtml(f.path);
+                    if (recency)
+                    {
+                        if (f.lastActivityMs > 0 && nowMs >= f.lastActivityMs)
+                        {
+                            html += L" \x00B7 " + TgShortSpan(nowMs - f.lastActivityMs) + L" ago";
+                        }
+                    }
+                    else
+                    {
+                        html += L" \x00B7 " + std::to_wstring(f.sessions) + (f.sessions == 1 ? L" session" : L" sessions");
+                    }
+                    if (note)
+                    {
+                        html += note(f.path);
+                    }
+                }
+            };
+            section(L"\U0001F558", L"Recent", lists.recent, recentPage, true);
+            section(L"\U0001F3C6", L"Most used", lists.mostUsed, usedPage, false);
+        }
+    }
+
     /// <summary>
     /// The PICKER's text (§21.17): what it is for, what happens to the user's messages, how the title is chosen, the steps that
     /// follow and what Cancel does (§21.25), then the two lists' current pages — each line the folder's number (the button's), its
@@ -519,40 +662,7 @@ namespace Agentmaster::Msg
         // §21.25: the folder is the wizard's FIRST step — say what follows, and that the creation's abort takes the thread with it
         // (the user's rule: an aborted creation deletes its new topic), so a Cancel never surprises.
         html += L"\n<i>Then a model (optional) and a window. \x2716 Cancel deletes this thread.</i>";
-        const auto section = [&](const wchar_t* glyph, const wchar_t* name, const std::vector<NewThreadFolder>& list, size_t page, bool recency) {
-            html += L"\n\n";
-            html += glyph;
-            html += L" <b>";
-            html += name;
-            html += L"</b>";
-            if (list.empty())
-            {
-                html += L"\n<i>No folders known yet.</i>";
-                return;
-            }
-            page = ClampNewThreadPage(page, list.size());
-            const size_t first = page * kNewThreadPageSize;
-            const size_t last = (std::min)(list.size(), first + kNewThreadPageSize); // (std::min): the <windows.h> macro
-            html += L" \x00B7 " + std::to_wstring(first + 1) + L"\x2013" + std::to_wstring(last) + L" of " + std::to_wstring(list.size());
-            for (size_t i = first; i < last; ++i)
-            {
-                const auto& f = list[i];
-                html += L"\n<b>" + std::to_wstring(i + 1) + L"</b> " + TgEscapeHtml(f.path);
-                if (recency)
-                {
-                    if (f.lastActivityMs > 0 && nowMs >= f.lastActivityMs)
-                    {
-                        html += L" \x00B7 " + TgShortSpan(nowMs - f.lastActivityMs) + L" ago";
-                    }
-                }
-                else
-                {
-                    html += L" \x00B7 " + std::to_wstring(f.sessions) + (f.sessions == 1 ? L" session" : L" sessions");
-                }
-            }
-        };
-        section(L"\U0001F558", L"Recent", lists.recent, recentPage, true);
-        section(L"\U0001F3C6", L"Most used", lists.mostUsed, usedPage, false);
+        detail::AppendNewThreadFolderSections(html, lists, recentPage, usedPage, nowMs, nullptr);
         return html;
     }
 
@@ -600,16 +710,43 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
-    /// The picker's KEYBOARD (§21.17): the Recent page's folders two to a row ("🕘 1 · Agentmaster"), its pager row
-    /// (BuildNewThreadPagingRow: the page label between the arrows that lead somewhere), the Most used page's folders
-    /// ("🏆 1 · Agentmaster") and pager row, and Cancel.
+    /// The button kinds of ONE folder picker's two lists (§21.25.9): the folder step's own picker and the ➕ message's add picker
+    /// show the same lists with the same layout, and differ only in what their buttons ask for — a tap on the folder step's
+    /// "🕘 1" chooses the session's folder, the same tap on the add picker asks about an EXTRA folder.
+    /// </summary>
+    struct NewThreadPickerKinds
+    {
+        NewThreadAction::Kind pickRecent; // a Recent folder's button (its value: the folder's index)
+        NewThreadAction::Kind pickUsed; // a Most used folder's button
+        NewThreadAction::Kind pageRecent; // the Recent pager's arrows (their value: the page they turn to)
+        NewThreadAction::Kind pageUsed; // the Most used pager's arrows
+        NewThreadAction::Kind labelRecent; // the Recent pager's page label (a toast only)
+        NewThreadAction::Kind labelUsed; // the Most used pager's page label
+    };
+
+    /// <summary>The folder step's picker (§21.17): its buttons choose the session's own folder.</summary>
+    inline constexpr NewThreadPickerKinds kNewThreadFolderStepKinds{ NewThreadAction::Kind::PickRecent,     NewThreadAction::Kind::PickUsed,
+                                                                     NewThreadAction::Kind::PageRecent,     NewThreadAction::Kind::PageUsed,
+                                                                     NewThreadAction::Kind::PageLabelRecent, NewThreadAction::Kind::PageLabelUsed };
+
+    /// <summary>The ➕ message's add picker (§21.25.9): its buttons ask about an extra folder for the session.</summary>
+    inline constexpr NewThreadPickerKinds kNewThreadAddPickerKinds{ NewThreadAction::Kind::AddPickRecent,     NewThreadAction::Kind::AddPickUsed,
+                                                                    NewThreadAction::Kind::AddPageRecent,     NewThreadAction::Kind::AddPageUsed,
+                                                                    NewThreadAction::Kind::AddPageLabelRecent, NewThreadAction::Kind::AddPageLabelUsed };
+
+    /// <summary>
+    /// The FOLDER ROWS of a picker's keyboard (§21.17; shared with the ➕ message's add picker since §21.25.9): the Recent page's
+    /// folders two to a row ("🕘 1 · Agentmaster"), its pager row (BuildNewThreadPagingRow: the page label between the arrows
+    /// that lead somewhere), the Most used page's folders ("🏆 1 · Agentmaster") and pager row. The caller adds its own last row
+    /// (the folder step's ✖ Cancel, the add picker's ◀ Back).
     /// </summary>
     /// <param name="lists">The picker's lists.</param>
     /// <param name="recentPage">The Recent page shown (clamped here).</param>
     /// <param name="usedPage">The Most used page shown (clamped here).</param>
-    /// <returns>The rows, top first.</returns>
+    /// <param name="kinds">What the buttons ask for (kNewThreadFolderStepKinds or kNewThreadAddPickerKinds).</param>
+    /// <returns>The rows, top first (none for two empty lists).</returns>
     /// <exception cref="std::bad_alloc">If the rows cannot be allocated.</exception>
-    inline std::vector<std::vector<NewThreadButton>> BuildNewThreadPickerKeyboard(const NewThreadLists& lists, size_t recentPage, size_t usedPage)
+    inline std::vector<std::vector<NewThreadButton>> BuildNewThreadFolderRows(const NewThreadLists& lists, size_t recentPage, size_t usedPage, const NewThreadPickerKinds& kinds)
     {
         recentPage = ClampNewThreadPage(recentPage, lists.recent.size());
         usedPage = ClampNewThreadPage(usedPage, lists.mostUsed.size());
@@ -653,10 +790,25 @@ namespace Agentmaster::Msg
                 rows.push_back(std::move(row));
             }
         };
-        folderRows(L"\U0001F558", lists.recent, rFirst, rLast, NewThreadAction::Kind::PickRecent);
-        pagingRow(L"Recent", lists.recent.size(), recentPage, NewThreadAction::Kind::PageRecent, NewThreadAction::Kind::PageLabelRecent);
-        folderRows(L"\U0001F3C6", lists.mostUsed, mFirst, mLast, NewThreadAction::Kind::PickUsed);
-        pagingRow(L"Most used", lists.mostUsed.size(), usedPage, NewThreadAction::Kind::PageUsed, NewThreadAction::Kind::PageLabelUsed);
+        folderRows(L"\U0001F558", lists.recent, rFirst, rLast, kinds.pickRecent);
+        pagingRow(L"Recent", lists.recent.size(), recentPage, kinds.pageRecent, kinds.labelRecent);
+        folderRows(L"\U0001F3C6", lists.mostUsed, mFirst, mLast, kinds.pickUsed);
+        pagingRow(L"Most used", lists.mostUsed.size(), usedPage, kinds.pageUsed, kinds.labelUsed);
+        return rows;
+    }
+
+    /// <summary>
+    /// The picker's KEYBOARD (§21.17): the folder rows of the folder step (BuildNewThreadFolderRows with kNewThreadFolderStepKinds —
+    /// the Recent page's folders two to a row, its pager row, the Most used page's folders and pager row), and ✖ Cancel.
+    /// </summary>
+    /// <param name="lists">The picker's lists.</param>
+    /// <param name="recentPage">The Recent page shown (clamped here).</param>
+    /// <param name="usedPage">The Most used page shown (clamped here).</param>
+    /// <returns>The rows, top first.</returns>
+    /// <exception cref="std::bad_alloc">If the rows cannot be allocated.</exception>
+    inline std::vector<std::vector<NewThreadButton>> BuildNewThreadPickerKeyboard(const NewThreadLists& lists, size_t recentPage, size_t usedPage)
+    {
+        std::vector<std::vector<NewThreadButton>> rows = BuildNewThreadFolderRows(lists, recentPage, usedPage, kNewThreadFolderStepKinds);
         rows.push_back({ NewThreadButton{ L"\x2716 Cancel", NewThreadCallbackData(NewThreadAction::Kind::Cancel, 0) } });
         return rows;
     }

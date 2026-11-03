@@ -3797,6 +3797,10 @@ Then the launch: "🚀 Opening a new session in **proj** · Opus · window 2, ne
 message when the last choice was typed), the picker is deleted, and the bind of §21.17.4 makes the thread the session's
 topic when the session is live.
 
+From the model step on, a second message stands ABOVE the picker: the **➕ message** (§21.25.9, 2026-11-03, NOT BUILT). It
+adds more folders to the session, each sent to Claude Code as `/add-dir` when the session starts, before the first prompt,
+with `/add-dir`'s own three answers chosen here.
+
 - **A typed choice re-posts the picker BELOW the user's message** (the user looks at the bottom of the thread); a button edits
   it in place. A typed folder path is a folder choice at EVERY step (the user changed their mind); "/model x" at the model
   step, one word at the model-id step, a window number at the window step; anything else is the user's message, HELD for the
@@ -4005,6 +4009,189 @@ the window step, beside its number; an unnamed window reads exactly as before.
   window step — the named window's entry, its button [🪟 N · Research] and the default (when it is that window) carry the name;
   send `research`: the tab opens there and the launch line says "Research (window N)". In 🔎 Search ask to resume a session
   without naming a window: the question names "Research"; answer `Research`: it opens there.
+
+#### 21.25.9 More folders for the session: the ➕ message, each folder sent as `/add-dir` before the first prompt (2026-11-03; NOT BUILT)
+
+> The user (2026-11-03): "if user is creating a new session, he might want to use two or more folders, and only one of those
+> folders, usually the first one, is where we open up the Claude session, but we use /add-dir to essentially add a folder and
+> Claude will see that folder as well and also know the CLAUDE.md in it … once I pick up one path on the Telegram or type that
+> in, that's it. I have no option to add a second one before the session starts. … above the model message will have a new
+> message which you need to develop, which is a plus button that explains 'would you like to add another path to this
+> session', and this essentially sends to the terminal /add-dir. And what happens is after that there's a menu with three
+> options and the user will need to pick, then with the buttons, the one that replaces the plus button, if he wants to add
+> for the session or for always or cancel the operation, and then the plus comes back. But if you select the second option,
+> which is 'always remember it', then you should be actually confirming with the user. For the first option, you don't need
+> to confirm."
+
+From the model step on, the wizard's thread has a second message of the bot's, the **➕ message**, ABOVE the picker. It
+gathers more folders for the session; nothing reaches Claude Code before the session exists. When the session is live, the
+bind sends Claude Code `/add-dir <path>` for each folder, AHEAD of the held messages. The `/add-dir` dialog that opens is
+answered at once with the option chosen here. Claude Code itself adds the folder and, for "remember", writes its own
+settings: Agentmaster writes no Claude Code settings file for it.
+
+| State | The ➕ message shows | Its buttons |
+|---|---|---|
+| **Idle** | "➕ **Add another folder to this session?** Claude works in **proj**. A folder added here becomes readable too: when the session starts, Agentmaster sends `/add-dir` for it, before your first prompt." — then the folders added, numbered: `1 K:\docs · for this session`, `2 K:\shared · 📌 remembered` | [➕ Add a folder] (or [➕ Add another folder]; none once 10 are added, with a line saying so), then [✖ 1 · docs] [✖ 2 · shared], two to a row |
+| **Pick** (after ➕) | "➕ **Add a folder** — tap it below, or send its full path." and the folder step's two lists (🕘 Recent, 🏆 Most used, ten a page) — the session's own folder marked *the session's folder*, a folder inside it *inside the session's folder*, an added one *added* | the lists' folder buttons and pagers (the folder step's layout, `BuildNewThreadFolderRows`), then [◀ Back] (= cancel: the ➕ again) |
+| **Scope** (a folder picked or typed) | "📁 **Add `K:\docs`?**", `/add-dir`'s own note ("Claude Code will be able to read files in this directory and make edits when auto-accept edits is on."), and that `/add-dir` asks how — answered now, sent when the session starts | `/add-dir`'s three options, verbatim, one to a row: [1 · Yes, for this session] [2 · Yes, and remember this directory] [3 · No] |
+| **Confirm** (after 2) | "📌 **Remember `K:\shared`?** Claude Code saves it in `K:\proj\.claude\settings.local.json` (`permissions.additionalDirectories`), so **every** session started in **proj** can read it from then on — not only this one. It is saved when this session starts." | [📌 Yes, remember it] [◀ Back] (to the three options) |
+| **inert** (the wizard back at its folder step) | "➕ **More folders for this session** — Choose the session's own folder below first — then you can add more here." and the folders added so far | none |
+
+- **The user's three answers:** 1 adds the folder for this session AT ONCE (no confirmation: the user's rule). 2 asks to
+  confirm first, because it outlives the session: Claude Code's option 2 writes the SESSION FOLDER's
+  `.claude\settings.local.json`, so every later session there reads the folder. Yes adds it; ◀ Back returns to the three
+  options. 3 ("No") cancels. Each answer brings the ➕ back.
+- **The folder:** a list button is checked by the folder step's own bounded probe. A TYPED full path, sent while the ➕
+  message asks for a folder (Pick, Scope or Confirm), is `/add-dir`'s own path question answered by typing: the same
+  case-insensitive walk as the session's folder (`ResolveNewThreadFolderBounded`, shared with `_checkNewThreadFolder`, waited
+  for at most 2 s). Outside those states, a typed path still changes the SESSION's folder, as in §21.25. Refused, with the
+  reason above the lists (`NewThreadExtraFolderProblem`, `ApplyNewThreadAddFolderResolved`):
+  - a network share, unprobed: Claude Code refuses one mid-session ("map the share to a drive letter and pass it at launch
+    with --add-dir");
+  - the session's own folder, or a folder inside it (Claude Code reads it already);
+  - a folder added already (case and slashes do not count);
+  - an eleventh folder (`kNewThreadExtraFoldersMax`, 10);
+  - a folder that does not exist: `/add-dir` adds only an existing one, so no Create is offered here; a listed one that is
+    gone reads the lists again;
+  - a folder that did not answer in time.
+
+  A PARENT of the session's folder is allowed: it widens what Claude can read.
+- **A new session folder** (◀ Back on the picker, then another folder) keeps the added folders, but drops the ones it EQUALS
+  or HOLDS (`PruneNewThreadExtraFolders`), with a line on the ➕ message. ◀ Back to the folders ends a half-made add.
+- **Stale taps:** a ➕ button of another state, or of an earlier keyboard, answers "That button belongs to an earlier step"
+  (`NewThreadAddStepTakes`); an option outside 1–3 is stale. A ➕ tap never clears the PICKER's notice (a refused launch's
+  reason stays readable).
+
+**Where it stands — above the picker:** the first render of the picker at the model step POSTS the ➕ message and posts the
+picker again below it: a picker that stood already is deleted and reposted, and the outbox serves one priority in its queue
+order (`_showNewThreadPicker`'s `addFirst`). Every picker render lets a posted ➕ message follow the step (inert ↔ active),
+but an unchanged render costs no call (`NewThreadViewKey`, `addShownKey`). A ➕ BUTTON edits it in place (keyed `nta:<thread>`).
+A TYPED choice for it reposts the ➕ message, then the picker, below the user's message. A ➕ message the user deleted is
+posted again; a deleted thread drops the record. At the launch it is deleted with the picker; the launch line names the
+folders instead: "🚀 Opening a new session in **proj** + **docs**, 📌 **shared** · Opus · window 2…". A refused launch brings
+the wizard back with its folders, and the ➕ message is posted again above the new picker. ✖ Cancel deletes the thread with
+both messages (a refused delete deletes both; the ➕ message's queued edit is dropped first).
+
+**At the session's start** (`_adoptBoundThreads` → `_queueNewThreadExtraFolders`):
+- **Exactly once.** The folders leave the bind in the lock scope that takes its held messages, so the persisted bind holds
+  neither and a restart cannot send one twice.
+- **Queued first.** Each folder is queued as `/add-dir <path>` through `_queueRemotePrompt`, the funnel of a typed topic
+  message: D30's order, the 5 s remote settle, sent whatever the runner's mode, the delivery's nets. It carries message id 0,
+  so it gets no reaction and quotes nothing. The path goes UNQUOTED: Claude Code (2.1.310, read in its binary) takes the whole
+  trimmed rest of the command as the path and strips no quote. The held messages are handed over AFTER all of them.
+- **The first prompt waits for the folders.** The queue sends one prompt at a time, and an `/add-dir`'s pickup is its echo,
+  which Claude Code writes only once the dialog is answered (§21.34, DELIVERY.md §18). So the first prompt is typed only after
+  every folder is in the workspace. The first held message then waits behind them, so its send gets §21.44's "📤 sent from
+  the queue" line where its turn starts.
+- **The watch's PRESET** (`_watchAddDir`'s `preset`, `MenuWatch::preset`, `_queueRemotePrompt`'s `addDirOption`): when the
+  dialog is found, the card goes up SILENT and already "⏳ Answering · Yes, and remember this directory (chosen when this
+  thread was opened)". It has no buttons and no 60 s clock. The window is asked to press the option at once; the press is
+  claimed in the same lock scope, so the tick never sends a second one. From there the Answering phase's own nets run: a busy
+  box is asked again, a press with no result is repeated (3 in all), and the transcript's result edits the card — "✅ Added and
+  remembered · chosen when this thread was opened" (`AddDirAnswerer::Wizard`).
+- **No dialog:** a folder that opens none (already readable, gone since) gets §21.34's reply, "ℹ️ Already in the workspace"
+  over Claude Code's message, posted without a quote.
+
+**What Claude Code does with it** (2.1.310, read in its binary, not measured live):
+- "for this session" is Claude Code's own session scope; whether a claude that Agentmaster resumes later (a restart, a
+  Deactivate, a reopened window) still has the folder is Claude Code's business, not verified here. "remember" lasts for
+  every later session in that folder.
+- ⚠ **The added folder's `CLAUDE.md` is read only when `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` is truthy** in the
+  session's environment (`RYe()`: the host's `claudeMdAdditionalDirectoriesAsked()`, else that variable). Neither this PC nor
+  Agentmaster sets it (2026-11-03), so the folder becomes readable but its `CLAUDE.md` is not loaded. One line in the user's
+  `~/.claude/settings.json` turns it on for every Claude Code session: `"env": { "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "1" }`.
+  That is the user's call, so nothing here sets it.
+
+**Persistence:** `NewThreadWizard::extraFolders` (`"extraFolders"`: `path`, `option`; only options 1 and 2 load, at most 10)
+rides the record and the bind. The record keeps the ➕ message:
+- `addMessageId` (a post in flight is saved as not posted);
+- `addStep`, `addRecentPage`, `addUsedPage`, `addPath`, `addNotice` (a Scope or Confirm with no folder reads as Idle).
+
+A record or bind saved before §21.25.9 reads as no folders, the ➕ not posted.
+
+**The code:**
+- `MessagingNewThread.h`: the eleven ➕ kinds and their data (`nt:af`, `nt:ar:<i>`, `nt:au:<i>`, `nt:arp:<p>`, `nt:aup:<p>`,
+  `nt:arl:<p>`, `nt:aul:<p>`, `nt:as:<1-3>`, `nt:ac`, `nt:ab`, `nt:ax:<i>`). It also holds the folder step's lists' text and
+  rows, shared with the add picker: `detail::AppendNewThreadFolderSections` with a per-folder note, and `BuildNewThreadFolderRows`
+  with `NewThreadPickerKinds`. `BuildNewThreadPickerHtml` / `BuildNewThreadPickerKeyboard` are unchanged in output.
+- `MessagingNewThreadWizard.h` (pure):
+  - the state: `NewThreadAddActive`, `NewThreadAddStep`, `NewThreadExtraFolder`, `NewThreadRecord`'s ➕ fields;
+  - the outcomes `RenderAdd` / `CheckAddFolder`; `NewThreadIsAddKind`, `NewThreadAddStepTakes`, `ResetNewThreadAdd`,
+    `NewThreadPathIsShare`, `NewThreadExtraFolderProblem`, `ApplyNewThreadAddButton`, `ApplyNewThreadAddFolderResolved`,
+    `PruneNewThreadExtraFolders`;
+  - the text: `NewThreadAddDirCommand`, `NewThreadRememberSettingsFile`, `NewThreadExtraFolderScopeWords`,
+    `BuildNewThreadAddView`, `NewThreadViewKey`, and the launch line;
+  - the routing in `ApplyNewThreadButton` / `ApplyNewThreadText`, and the persistence.
+- `TuiMenus.h`: `AddDirAnswerer::Wizard` ("chosen when this thread was opened"), and the Answering line names a preset's answerer.
+- `Messaging.Inbound.cpp`:
+  - `_showNewThreadAddMessage`, `_checkNewThreadAddFolder`, `_queueNewThreadExtraFolders`;
+  - `_buildNewThreadListsNow` and `ResolveNewThreadFolderBounded` (moved out of `_showNewThreadPicker` / `_checkNewThreadFolder`,
+    unchanged);
+  - `_showNewThreadPicker`'s ordering; the ➕ outcomes in `_applyNewThreadOutcome`; the ➕ log in `_onNewThreadAction`;
+  - the delete at the launch and at a refused abort; `_queueRemotePrompt`'s `addDirOption`.
+- `Messaging.Menus.cpp`: the preset — `_watchAddDir`, `_onMenuScreen`'s answer-at-once branch, the silent card, the
+  answerer in the log.
+- `Messaging.cpp`: `_adoptBoundThreads` takes the folders with the held messages and queues them first.
+- `Messaging.h`: the declarations (documented); `MenuWatch::preset`.
+
+**Logs:**
+- the ➕ message: `[msg] new thread N: ➕ picked|typed extra folder X → exists|missing|…; its three options are up | refused: …`,
+  `extra folder X added (for this session|remembered); K in all` / `taken off`, `the ➕ message was refused (…)`;
+- the session's start: `K of K extra folder(s) go to S as /add-dir, ahead of its held messages`;
+- the watch: `[menu] S /add-dir from the new thread's ➕ message (X) watched: its dialog is answered with option N (…) the
+  moment it opens`, `/add-dir dialog open (X): option N (…) is pressed now, as the new thread's ➕ message chose`,
+  `dialog answered (as the new thread's ➕ message chose)`;
+- navigation: `[nav] remote telegram new-thread N ➕ button at its idle|pick|scope|confirm state`,
+  `… ➕ picked|typed a folder -> scope|refused|stale`, `… extra-folders S queued=K`,
+  `remote telegram menu S /add-dir -> option N (…) from the new thread's wizard`.
+
+**Tests:**
+- `TestMessagingNewThreadWizard` W16 (tests_messaging_newthread.cpp):
+  - the data round trip and its own tags; which step and which ➕ state take which button;
+  - Idle → Pick: the picker's notice kept; the marks; refusals of the session's folder, a subfolder and a share before any
+    probe; a list pick checked;
+  - Scope's options verbatim; stale taps and options outside 1–3; 1 added at once, listed with its ✖; 2 confirmed (the
+    settings file, "every session"), Back to the options, Yes; No and the picker's Back adding nothing;
+  - a duplicate in another spelling, a typed missing folder (no creation), a listed one gone (lists read again), no answer;
+  - typed paths: the extra folder while asking, a typed share, a correction while the options are up, the session's folder
+    when at rest, words held;
+  - the remove button; the unquoted command read back by `ParseAddDirCommandText`; the settings path; the launch line;
+  - Back to the folders (inert, the folders kept, a ➕ tap stale); a new session folder pruning what it holds or equals;
+  - the full list (no ➕, a toast); the view key;
+  - persistence: a round trip; in flight saved as not posted; a garbled state and garbled entries; a record saved before
+    §21.25.9; the bind keeping the folders.
+- `TestTuiMenus` (tests_tuimenus.cpp): the Answering and Answered cards of a preset name the wizard; a tapped card's names
+  nobody.
+
+**Checked** (2026-11-03, HEAD 16824dc82 + this change only, in a copy on Q:):
+- the m5 suite: 11,784 checks, only the three known `TestTaskbarBadge` failures;
+- two planted negative controls (W16's last check, the card block's) failed as planted, so every new check runs;
+- `cl /Zs` with the last build's recorded command lines (`/W3 /WX /permissive-`) passes on the twelve units that include a
+  changed header: `Messaging.cpp`, `Messaging.Inbound.cpp`, `.Menus`, `.Questions`, `.Files`, `.Status`, `.Voice`,
+  `Engine.cpp`, `TerminalPage.AgentMessaging.cpp`, `TerminalPage.AgentEngine.cpp`, `AgentManagerContent.Settings.cpp`,
+  `MessagingSearchBridge.cpp`.
+
+NOT BUILT; nothing tried live. ⚠ The messaging service's class gained members (`Messaging.h`): the next build must PURGE
+(the build-install skill's §5.8; CLAUDE.md *Building FAST* #5).
+
+**Check after the build** (dev, with the bot; a session folder `K:\proj` and two other folders):
+1. Open a new thread with a message and pick `K:\proj`. The ➕ message appears ABOVE the model step (the picker moved below
+   it).
+2. ➕ → the lists, `K:\proj` marked "the session's folder". Tap it: refused, the lists stay. Tap another folder: the three
+   options. "1": the ➕ is back, with the folder listed. ➕ again → type a full path: the options. "2" → the confirmation
+   names `K:\proj\.claude\settings.local.json` → Yes. Finish the model and window steps.
+3. The launch line names both folders (📌 on the second); the picker and the ➕ message are gone. When the session is up:
+   two silent cards, "⏳ Answering … (chosen when this thread was opened)", then "✅ Added for this session" / "✅ Added and
+   remembered". Only then does the held message go (its "📤 sent from the queue" line). In the tab: two `/add-dir` echoes
+   before the first prompt. `K:\proj\.claude\settings.local.json` lists the second folder.
+4. ◀ Back to the folders with folders added: the ➕ message turns inert and lists them; pick the PARENT of an added folder:
+   that one is dropped with a line.
+5. ✖ Cancel: the thread is deleted with both messages.
+
+**Not done.** No ➕ in the topic's `/newsession` / `/forksession` or Search's `/newsession <folder>` (§21.21: no wizard
+there; `/add-dir` in the topic covers a running session). The ➕ message offers no Create for a missing folder. A held
+`/add-dir <path>` typed during the wizard keeps §21.34's card with its 60 s default. Agentmaster does not set
+`CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` (above).
 
 ### 21.26 The card leads with its state, the title under it (2026-10-19; in production since 0.6.8.23 and dev since 0.0.1.31)
 
@@ -5207,6 +5394,10 @@ bundle):
   way) gets one note after 15 screen reads: "⚠️ /add-dir opened a dialog this Agentmaster cannot read — answer it at the PC".
 - **The scope of the clock:** only a dialog of a /add-dir sent from a topic (the card shows its countdown). A /add-dir typed at
   the PC is answered at the PC, as before.
+- **A new thread's own /add-dir** (§21.25.9, 2026-11-03, NOT BUILT): the folders a new thread's ➕ message added are queued as
+  `/add-dir <path>` when the session starts, each with its answer already chosen (the watch's PRESET). The dialog is answered
+  the moment it is found: the card is silent, already "Answering … (chosen when this thread was opened)", with no buttons and
+  no clock.
 
 **How the watch finds and reads it** (Messaging.Menus.cpp, the service's fourth TU; the pure half is `AgentMaster/TuiMenus.h`):
 - **The registry** says when the command was delivered (its prompt Sent and injected) and taken (echoed).

@@ -30,6 +30,12 @@
 //   (NewThreadStepAfterRefusal). ✖ Cancel at any step deletes the thread — the user's rule, "If the creation process aborts in
 //   any way, the new topic needs to be deleted" — and so does a wizard nobody touched for a day (kNewThreadPickerIdleMs).
 //
+// THE ➕ MESSAGE (§21.25.9, "the extra folders" below): from the model step on, a message of its own ABOVE the picker offers more
+// folders for the session — ➕, the folder step's lists (or a typed path), then /add-dir's three options for the folder (for this
+// session; remember it, confirmed first; No) — and lists what was added (NewThreadAddStep, ApplyNewThreadAddButton,
+// BuildNewThreadAddView). The folders ride the launch to the bind, which sends Claude Code "/add-dir <path>" for each before the
+// first prompt, the dialog answered with the option chosen here (NewThreadWizard::extraFolders, NewThreadAddDirCommand).
+//
 // This header is the PURE half: the records (persisted in state.json, so a restart resumes a wizard where it stood), the
 // decisions (which button a step takes, what a typed message means, where a refusal goes back to), the folder resolution over
 // an INJECTED file system, the model-id check, the window choices and their default, and every message and keyboard. No I/O,
@@ -54,6 +60,7 @@
 #include "Json.h" // json::Value (the held messages, the persisted records)
 #include "MessagingNewThread.h" // NewThreadLists, NewThreadAction, the picker's builders, kNewThread* limits
 #include "RemoteLaunch.h" // RemoteLaunchResult (where a refused launch goes back to)
+#include "TuiMenus.h" // §21.25.9: kAddDirOptions / AddDirOptionFor / kAddDirMenuNote — the ➕ message asks /add-dir's own question
 #include "WindowName.h" // kMaxWindowNameLength: the longest window name a window choice keeps (§21.25.8)
 #include "WindowTabTools.h" // WindowCensus (the window step's input)
 
@@ -94,6 +101,10 @@ namespace Agentmaster::Msg
     // How long the poll thread waits for a folder's creation (CreateDirectoryW, on a worker of its own): a network share can
     // take a while; past it the user is told, and the creation may still land.
     inline constexpr uint32_t kNewThreadCreateWaitMs = 5000;
+    // §21.25.9: the most EXTRA folders the ➕ message adds to one session. Each one is an /add-dir the new session runs before its
+    // first prompt (a delivery, a dialog read off the screen, a key press: seconds apiece), and the ➕ message lists them all with a
+    // remove button each; ten is far past the "two or more folders" of the user's request and keeps both bounded.
+    inline constexpr size_t kNewThreadExtraFoldersMax = 10;
 
     // ===== the steps =================================================================================================
 
@@ -151,6 +162,73 @@ namespace Agentmaster::Msg
             return NewThreadStep::Window;
         default:
             return NewThreadStep::Folder;
+        }
+    }
+
+    /// <summary>
+    /// Whether the wizard's step is one the ➕ MESSAGE (§21.25.9) works at: the session's own folder is chosen (the model, model-id
+    /// and window steps). At the folder steps the message — once it was posted — only lists what was added and says that the
+    /// session's folder comes first: its add picker would show the same lists as the folder step right below it, and a tap there
+    /// could not tell the session's folder from an extra one.
+    /// </summary>
+    /// <param name="step">The wizard's step.</param>
+    /// <returns>True at the Model, ModelSpecify and Window steps.</returns>
+    inline bool NewThreadAddActive(NewThreadStep step) noexcept
+    {
+        return step == NewThreadStep::Model || step == NewThreadStep::ModelSpecify || step == NewThreadStep::Window;
+    }
+
+    /// <summary>
+    /// Where the ➕ message's ADD FLOW stands (§21.25.9) — the user's "a plus button … would you like to add another path to this
+    /// session … after that there's a menu with three options … the one that replaces the plus button … and then the plus comes
+    /// back". Persisted as its number (NewThreadRecordToJson): a new state gets a new number.
+    /// </summary>
+    enum class NewThreadAddStep : int
+    {
+        Idle = 0, // the ➕ button (and the folders added so far, each with its ✖)
+        Pick = 1, // which folder: the folder step's two lists, or a typed full path; ◀ Back to the ➕
+        Scope = 2, // /add-dir's three options for the picked folder: for this session, remember it (asks first), No
+        Confirm = 3, // "remember it?" — every session in the session's folder will read it from then on; Yes, or ◀ Back to the three
+    };
+
+    /// <summary>The add flow's word for the logs ("idle", "pick", "scope", "confirm").</summary>
+    /// <param name="step">The add flow's state.</param>
+    /// <returns>A static string; "idle" for a value the switch does not know.</returns>
+    inline const wchar_t* NewThreadAddStepName(NewThreadAddStep step) noexcept
+    {
+        switch (step)
+        {
+        case NewThreadAddStep::Pick:
+            return L"pick";
+        case NewThreadAddStep::Scope:
+            return L"scope";
+        case NewThreadAddStep::Confirm:
+            return L"confirm";
+        case NewThreadAddStep::Idle:
+        default:
+            return L"idle";
+        }
+    }
+
+    /// <summary>
+    /// A persisted add-flow number back to its state. A number this build does not know (a newer build's state file) reads as
+    /// Idle: the ➕ comes back and a folder half-asked about is asked again, which loses a tap but never adds a folder with a scope
+    /// it cannot read.
+    /// </summary>
+    /// <param name="value">The persisted number.</param>
+    /// <returns>The state.</returns>
+    inline NewThreadAddStep NewThreadAddStepFromNumber(int64_t value) noexcept
+    {
+        switch (value)
+        {
+        case 1:
+            return NewThreadAddStep::Pick;
+        case 2:
+            return NewThreadAddStep::Scope;
+        case 3:
+            return NewThreadAddStep::Confirm;
+        default:
+            return NewThreadAddStep::Idle;
         }
     }
 
@@ -992,6 +1070,20 @@ namespace Agentmaster::Msg
     // ===== the records ================================================================================================
 
     /// <summary>
+    /// One EXTRA folder the ➕ message added (§21.25.9): the new session gets it through Claude Code's own "/add-dir &lt;path&gt;" once
+    /// it is live — before its first prompt — and the /add-dir dialog that opens is answered with `option` at once (the menu
+    /// watch's preset, Messaging.Menus.cpp), so Claude Code itself adds the folder, and for option 2 writes the remembered folder
+    /// into its own settings: Agentmaster never writes a Claude Code settings file for it.
+    /// </summary>
+    struct NewThreadExtraFolder
+    {
+        std::wstring path; // the folder in its disk spelling (a list entry, or a typed path resolved case-insensitively)
+        // The dialog's option (TuiMenus.h kAddDirOptions): 1 "Yes, for this session" or 2 "Yes, and remember this directory" — 3 ("No")
+        // is never stored: a folder the user said No to is simply not added. Only 1 and 2 survive a load (NewThreadWizardFromJson).
+        int option{ kAddDirDefaultOption };
+    };
+
+    /// <summary>
     /// The wizard's answers so far and what each step showed (MESSAGING.md §21.25). Persisted with its thread's record
     /// (NewThreadWizardToJson), so a restart resumes the wizard where it stood and a tap on a button that was on the screen before
     /// the restart still maps to what that button showed.
@@ -1038,6 +1130,11 @@ namespace Agentmaster::Msg
         std::wstring windowName; // the chosen window's name as the step showed it ("" = unnamed, or none chosen): the launch line names it (§21.25.8)
         std::wstring anchorSessionId; // the tab the new one opens right after ("" = the strip's end)
         std::wstring anchorTitle;
+        // §21.25.9: the EXTRA folders the ➕ message added, in the order added (at most kNewThreadExtraFoldersMax). An answer like the
+        // others, so it rides the bind (NewThreadBind::wizard) to the session's start — _adoptBoundThreads takes them out in the lock
+        // scope that records the topic, exactly once — and comes back with a refused launch. A new session folder drops the ones it
+        // equals or holds (PruneNewThreadExtraFolders); nothing else changes the list but the user's ➕ and ✖.
+        std::vector<NewThreadExtraFolder> extraFolders;
     };
 
     /// <summary>
@@ -1056,6 +1153,19 @@ namespace Agentmaster::Msg
         std::vector<json::Value> held; // the user's messages in the thread, oldest first (each a copy of the Message object)
         int64_t lastUseMs{ 0 }; // the last message or tap (WallMs): a wizard idle past kNewThreadPickerIdleMs is deleted with its thread
         NewThreadWizard wizard; // §21.25: the steps
+        // §21.25.9, the ➕ MESSAGE above the picker (BuildNewThreadAddView): its own message, posted when the wizard first reaches
+        // the model step and kept ABOVE the picker (the service reposts the picker below a ➕ message it has to post), deleted with
+        // the picker at the launch. Its answers (the folders) live in `wizard.extraFolders`; what it shows on the way lives here.
+        int64_t addMessageId{ 0 }; // the ➕ message (0 = not posted, or its post was refused; -1 = the post is in flight)
+        bool addStale{ false }; // NOT persisted: a change came while its post flew; the post's answer renders again
+        std::wstring addShownKey; // NOT persisted: the render last queued for it (NewThreadViewKey) — an unchanged render sends nothing
+        NewThreadAddStep addStep{ NewThreadAddStep::Idle }; // where its add flow stands
+        size_t addRecentPage{ 0 }; // Pick: the Recent page its add picker shows
+        size_t addUsedPage{ 0 }; // Pick: the Most used page
+        std::wstring addPath; // Scope / Confirm: the folder being asked about (its disk spelling)
+        // One line at the top of the ➕ message (a folder refused, gone or dropped), kept until the next ➕ choice clears it — the
+        // wizard's own notice rule (NewThreadWizard::notice), for the same reason: a render alone never clears it.
+        std::wstring addNotice;
     };
 
     /// <summary>
@@ -1098,11 +1208,14 @@ namespace Agentmaster::Msg
             Abort, // ✖ Cancel: delete the thread (the user's rule: an aborted creation deletes its new topic)
             Hold, // the text is the user's message: hold it for the session (the picker counts it)
             Reply, // tell the user `text` and change nothing (an invalid model id)
+            // §21.25.9, the ➕ message (its own message: a Render would edit the PICKER, which did not change):
+            RenderAdd, // the ➕ message changed: render it (edit it in place; a TYPED choice reposts it and the picker below the user's message); `text` is the toast ("" = none)
+            CheckAddFolder, // check `path` as an EXTRA folder (a list pick must exist; a typed one is resolved case-insensitively), then ApplyNewThreadAddFolderResolved
         };
         Kind kind{ Kind::Stale };
-        std::wstring path; // CheckFolder / CreateFolder: the folder
-        bool typed{ false }; // CheckFolder: the folder was TYPED (a missing one may be created)
-        std::wstring text; // Stale / Toast / Reply: what the user is told
+        std::wstring path; // CheckFolder / CreateFolder / CheckAddFolder: the folder
+        bool typed{ false }; // CheckFolder / CheckAddFolder: the folder was TYPED (a missing one may be created — for the session's folder only)
+        std::wstring text; // Stale / Toast / Reply / RenderAdd: what the user is told
         std::wstring rememberModel; // CollectWindows: a TYPED model id the service remembers (model-list.json), "" = none
     };
 
@@ -1139,7 +1252,80 @@ namespace Agentmaster::Msg
         case K::WindowDefault:
         case K::WindowRefresh:
             return step == NewThreadStep::Window;
+        // §21.25.9: the ➕ message's buttons work while the session's folder is chosen; the add flow's own state then decides which
+        // of them its keyboard shows (NewThreadAddStepTakes).
+        case K::AddFolder:
+        case K::AddPickRecent:
+        case K::AddPickUsed:
+        case K::AddPageRecent:
+        case K::AddPageUsed:
+        case K::AddPageLabelRecent:
+        case K::AddPageLabelUsed:
+        case K::AddScope:
+        case K::AddConfirm:
+        case K::AddBack:
+        case K::AddRemove:
+            return NewThreadAddActive(step);
         case K::None:
+        default:
+            return false;
+        }
+    }
+
+    /// <summary>Whether a button is one of the ➕ message's (§21.25.9) — its own message, its own state, its own reducer.</summary>
+    /// <param name="kind">The button's action.</param>
+    /// <returns>True for the Add… kinds.</returns>
+    inline bool NewThreadIsAddKind(NewThreadAction::Kind kind) noexcept
+    {
+        using K = NewThreadAction::Kind;
+        switch (kind)
+        {
+        case K::AddFolder:
+        case K::AddPickRecent:
+        case K::AddPickUsed:
+        case K::AddPageRecent:
+        case K::AddPageUsed:
+        case K::AddPageLabelRecent:
+        case K::AddPageLabelUsed:
+        case K::AddScope:
+        case K::AddConfirm:
+        case K::AddBack:
+        case K::AddRemove:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether a ➕-message button belongs to the add flow's state (§21.25.9) — what its keyboard shows there: the ➕ and each added
+    /// folder's ✖ at Idle; the folders, the pagers and ◀ Back at Pick; the three options at Scope; Yes and ◀ Back at Confirm. A
+    /// mismatch is a tap on an older keyboard (the edit had not reached the phone): answered as stale, nothing changed.
+    /// </summary>
+    /// <param name="step">The add flow's state now.</param>
+    /// <param name="kind">The button's action (an Add… kind; any other kind belongs to no add state).</param>
+    /// <returns>True when that state shows such a button.</returns>
+    inline bool NewThreadAddStepTakes(NewThreadAddStep step, NewThreadAction::Kind kind) noexcept
+    {
+        using K = NewThreadAction::Kind;
+        switch (kind)
+        {
+        case K::AddFolder:
+        case K::AddRemove:
+            return step == NewThreadAddStep::Idle;
+        case K::AddPickRecent:
+        case K::AddPickUsed:
+        case K::AddPageRecent:
+        case K::AddPageUsed:
+        case K::AddPageLabelRecent:
+        case K::AddPageLabelUsed:
+            return step == NewThreadAddStep::Pick;
+        case K::AddScope:
+            return step == NewThreadAddStep::Scope;
+        case K::AddConfirm:
+            return step == NewThreadAddStep::Confirm;
+        case K::AddBack:
+            return step == NewThreadAddStep::Pick || step == NewThreadAddStep::Confirm;
         default:
             return false;
         }
@@ -1147,6 +1333,395 @@ namespace Agentmaster::Msg
 
     /// <summary>The toast of a stale tap (a button of an earlier step, tapped before the edit reached the phone).</summary>
     inline constexpr const wchar_t* kNewThreadStaleTap = L"That button belongs to an earlier step \x2014 use the picker\x2019s current buttons.";
+
+    // ===== the extra folders: the ➕ message's add flow (§21.25.9) ======================================================
+    //
+    // The user's request (2026-11-03): "if user is creating a new session, he might want to use two or more folders, and only one
+    // of those folders, usually the first one, is where we open up the Claude session, but we use /add-dir to essentially add a
+    // folder … once I pick up one path on the Telegram or type that in, that's it. I have no option to add a second one before
+    // the session starts … above the model message will have a new message … a plus button that explains 'would you like to add
+    // another path to this session', and this essentially sends to the terminal /add-dir. And what happens is after that there's
+    // a menu with three options … the one that replaces the plus button, if he wants to add for the session or for always or
+    // cancel the operation, and then the plus comes back. But if you select the second option, which is 'always remember it',
+    // then you should be actually confirming with the user. For the first option, you don't need to confirm."
+    //
+    // The ➕ message is its own message, kept above the picker from the model step on. ➕ turns it into the folder step's two lists
+    // (or a typed full path: /add-dir's own path question); the picked folder gets /add-dir's three options in place of the ➕ —
+    // 1 for this session, 2 remember it (asked to confirm: it changes every later session in the session's folder), 3 No — and the
+    // ➕ comes back, the folders added listed with a ✖ each. Nothing reaches Claude Code before the session starts: the folders
+    // ride the launch to the bind, which queues "/add-dir <path>" for each AHEAD of the held messages, and the /add-dir dialog
+    // that opens is answered with the option chosen here (MessagingService::_watchAddDir's preset). Claude Code does the adding
+    // and, for option 2, writes its own settings.local.json.
+
+    // Declared here, defined with the launch plan below (its first users were there): the add flow names folders by their leaf.
+    inline std::wstring NewThreadFolderLeaf(std::wstring_view folder);
+
+    /// <summary>The add flow back at its ➕: the folder being asked about is dropped (the folders added stay).</summary>
+    /// <param name="r">The thread's record.</param>
+    inline void ResetNewThreadAdd(NewThreadRecord& r) noexcept
+    {
+        r.addStep = NewThreadAddStep::Idle;
+        r.addPath.clear();
+    }
+
+    /// <summary>
+    /// Whether a path names a network SHARE ("\\server\share…", or "//server/share…" as typed): Claude Code's /add-dir refuses one
+    /// mid-session ("… is a network path, which cannot be added as a working directory. On Windows, map the share to a drive letter
+    /// and pass it at launch with --add-dir"), so the ➕ refuses it up front instead of sending a command that can only fail.
+    /// </summary>
+    /// <param name="path">The folder as listed or typed (blanks and quotes around it allowed).</param>
+    /// <returns>True for a UNC path.</returns>
+    /// <exception cref="std::bad_alloc">If the trimmed copy cannot be allocated.</exception>
+    inline bool NewThreadPathIsShare(std::wstring_view path)
+    {
+        const std::wstring p = TrimFolderPath(path);
+        return p.size() >= 2 && (p[0] == L'\\' || p[0] == L'/') && (p[1] == L'\\' || p[1] == L'/');
+    }
+
+    /// <summary>
+    /// Why a folder cannot be ADDED to the session as an extra folder (§21.25.9) — checked before it is offered /add-dir's three
+    /// options, and again with its disk spelling after the check: a network share (/add-dir refuses one mid-session), the
+    /// session's own folder, a folder INSIDE it (Claude Code reads it already: /add-dir would only answer "already accessible"),
+    /// one added already, or a list that is full. A PARENT of the session's folder is fine: it widens what Claude can read.
+    /// </summary>
+    /// <param name="w">The wizard (its session folder and the folders added so far).</param>
+    /// <param name="path">The folder to add.</param>
+    /// <returns>The reason, one plain sentence ending in a period; "" when the folder can be added.</returns>
+    /// <exception cref="std::bad_alloc">If a key or the reason cannot be allocated.</exception>
+    inline std::wstring NewThreadExtraFolderProblem(const NewThreadWizard& w, std::wstring_view path)
+    {
+        const std::wstring key = NormDirKey(TrimFolderPath(path));
+        if (key.empty())
+        {
+            return L"No folder was given.";
+        }
+        if (NewThreadPathIsShare(path))
+        {
+            return L"That is a network share: Claude Code\x2019s /add-dir does not add one to a running session \x2014 map the share to a drive letter and add that.";
+        }
+        if (!w.folder.empty())
+        {
+            // The session's folder by the app's own folder identity (case-insensitive on Windows, '/' as '\'): FolderKeyCovers with
+            // its subfolders, so "K:\proj\docs" under "K:\proj" is caught as well as "k:/PROJ" itself.
+            const std::wstring sessionKey = NormDirKey(TrimFolderPath(w.folder));
+            if (key == sessionKey)
+            {
+                return L"That is the session\x2019s own folder.";
+            }
+            if (FolderKeyCovers(sessionKey, key, true))
+            {
+                return L"That folder is inside the session\x2019s folder (" + NewThreadFolderLeaf(w.folder) + L"): Claude Code reads it already.";
+            }
+        }
+        for (const auto& f : w.extraFolders)
+        {
+            if (NormDirKey(TrimFolderPath(f.path)) == key)
+            {
+                return L"That folder is added already.";
+            }
+        }
+        if (w.extraFolders.size() >= kNewThreadExtraFoldersMax)
+        {
+            return L"At most " + std::to_wstring(kNewThreadExtraFoldersMax) + L" folders can be added here \x2014 send /add-dir in the session for more.";
+        }
+        return {};
+    }
+
+    /// <summary>The words of an added folder's scope, as the ➕ message and the launch line list it.</summary>
+    /// <param name="option">The /add-dir option (1 for this session, 2 remembered).</param>
+    /// <returns>"for this session", or "📌 remembered".</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring NewThreadExtraFolderScopeWords(int option)
+    {
+        return option == 2 ? std::wstring{ L"\U0001F4CC remembered" } : std::wstring{ L"for this session" };
+    }
+
+    /// <summary>
+    /// The Claude Code settings file a REMEMBERED folder is saved in — what /add-dir's option 2 writes (TuiMenus.h: the session's
+    /// folder's .claude\settings.local.json, permissions.additionalDirectories), named in the confirmation so the user knows the
+    /// choice outlives this session.
+    /// </summary>
+    /// <param name="sessionFolder">The session's own folder.</param>
+    /// <returns>The file's full path.</returns>
+    /// <exception cref="std::bad_alloc">If the path cannot be allocated.</exception>
+    inline std::wstring NewThreadRememberSettingsFile(std::wstring_view sessionFolder)
+    {
+        return JoinFolderPath(JoinFolderPath(sessionFolder, L".claude"), L"settings.local.json");
+    }
+
+    /// <summary>
+    /// The command the new session gets for an extra folder: "/add-dir &lt;path&gt;". The path goes UNQUOTED: Claude Code (2.1.310)
+    /// takes the whole trimmed rest of the command as the path (no quote is stripped, so a quoted path would not be found), and
+    /// the menu watch matches the dialog's path to it the same way (ParseAddDirCommandText, AddDirMenuBelongsTo).
+    /// </summary>
+    /// <param name="f">The folder.</param>
+    /// <returns>The command text.</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring NewThreadAddDirCommand(const NewThreadExtraFolder& f)
+    {
+        return L"/" + std::wstring{ kAddDirCommand } + L" " + f.path;
+    }
+
+    /// <summary>
+    /// Drops the extra folders the session's (new) folder EQUALS or HOLDS (§21.25.9): the user went back and chose a folder that
+    /// is one of them, or their parent, so Claude Code would read them anyway. Called by the reducers that choose the session's
+    /// folder; the ➕ message's notice says which ones went.
+    /// </summary>
+    /// <param name="r">The thread's record (its wizard's folder is the new one).</param>
+    /// <returns>The dropped folders, in their list order (empty when none).</returns>
+    /// <exception cref="std::bad_alloc">If a key, the list or the notice cannot be allocated.</exception>
+    inline std::vector<std::wstring> PruneNewThreadExtraFolders(NewThreadRecord& r)
+    {
+        std::vector<std::wstring> dropped;
+        auto& folders = r.wizard.extraFolders;
+        if (folders.empty() || r.wizard.folder.empty())
+        {
+            return dropped;
+        }
+        const std::wstring sessionKey = NormDirKey(TrimFolderPath(r.wizard.folder));
+        folders.erase(std::remove_if(folders.begin(), folders.end(),
+                                     [&](const NewThreadExtraFolder& f) {
+                                         if (!FolderKeyCovers(sessionKey, NormDirKey(TrimFolderPath(f.path)), true))
+                                         {
+                                             return false;
+                                         }
+                                         dropped.push_back(f.path);
+                                         return true;
+                                     }),
+                      folders.end());
+        if (!dropped.empty())
+        {
+            std::wstring names;
+            for (size_t i = 0; i < dropped.size(); ++i)
+            {
+                names += (i == 0 ? L"" : L", ") + dropped[i];
+            }
+            r.addNotice = L"\u2139 " + names + (dropped.size() == 1 ? L" is" : L" are") + L" in the session\x2019s folder now: taken off the list.";
+        }
+        return dropped;
+    }
+
+    /// <summary>
+    /// A BUTTON of the ➕ message (§21.25.9): what it changes in the add flow and what the service does next. The caller
+    /// (ApplyNewThreadButton) has checked that the wizard's step takes ➕ buttons at all; this checks the add flow's own state
+    /// (NewThreadAddStepTakes) — a button of another state is a stale tap and changes nothing. Every accepted choice but a page
+    /// label clears the ➕ message's notice (the picker's own notice is not this message's).
+    /// </summary>
+    /// <param name="r">The thread's record (changed in place).</param>
+    /// <param name="a">The button's action (an Add… kind).</param>
+    /// <returns>RenderAdd (the ➕ message changed; `text` is the toast), CheckAddFolder (a listed folder to check), Toast (a page
+    /// label; the list is full) or Stale.</returns>
+    /// <exception cref="std::bad_alloc">If a string cannot be allocated.</exception>
+    inline NewThreadOutcome ApplyNewThreadAddButton(NewThreadRecord& r, const NewThreadAction& a)
+    {
+        using K = NewThreadAction::Kind;
+        NewThreadWizard& w = r.wizard;
+        NewThreadOutcome out;
+        if (!NewThreadAddStepTakes(r.addStep, a.kind))
+        {
+            out.kind = NewThreadOutcome::Kind::Stale;
+            out.text = kNewThreadStaleTap;
+            return out;
+        }
+        if (a.kind != K::AddPageLabelRecent && a.kind != K::AddPageLabelUsed)
+        {
+            r.addNotice.clear(); // the user's next choice: the line of the state before goes (a refusal below sets its own)
+        }
+        out.kind = NewThreadOutcome::Kind::RenderAdd;
+        switch (a.kind)
+        {
+        case K::AddFolder:
+            if (w.extraFolders.size() >= kNewThreadExtraFoldersMax)
+            {
+                // Full: the ➕ stays (its keyboard does not change), and the toast says why nothing opened.
+                out.kind = NewThreadOutcome::Kind::Toast;
+                out.text = L"At most " + std::to_wstring(kNewThreadExtraFoldersMax) + L" folders can be added here \x2014 send /add-dir in the session for more.";
+                return out;
+            }
+            r.addStep = NewThreadAddStep::Pick;
+            r.addRecentPage = 0;
+            r.addUsedPage = 0;
+            return out;
+        case K::AddPageLabelRecent:
+        case K::AddPageLabelUsed:
+        {
+            const bool recent = a.kind == K::AddPageLabelRecent;
+            out.kind = NewThreadOutcome::Kind::Toast;
+            out.text = NewThreadPageToast(recent ? L"Recent" : L"Most used", a.value, recent ? r.lists.recent.size() : r.lists.mostUsed.size());
+            return out;
+        }
+        case K::AddPageRecent:
+            r.addRecentPage = ClampNewThreadPage(a.value, r.lists.recent.size());
+            return out;
+        case K::AddPageUsed:
+            r.addUsedPage = ClampNewThreadPage(a.value, r.lists.mostUsed.size());
+            return out;
+        case K::AddPickRecent:
+        case K::AddPickUsed:
+        {
+            const auto& list = a.kind == K::AddPickRecent ? r.lists.recent : r.lists.mostUsed;
+            if (a.value >= list.size())
+            {
+                out.kind = NewThreadOutcome::Kind::Stale;
+                out.text = L"That folder is no longer in the list.";
+                return out;
+            }
+            // Refused before any probe when the list's own spelling already says no (a share is never probed: an offline one
+            // would hold the poll thread for the wait) — the add picker stays, with the reason on top and in the toast.
+            if (std::wstring problem = NewThreadExtraFolderProblem(w, list[a.value].path); !problem.empty())
+            {
+                r.addNotice = L"\u26A0 " + problem;
+                out.text = std::move(problem);
+                return out;
+            }
+            out.kind = NewThreadOutcome::Kind::CheckAddFolder;
+            out.path = list[a.value].path;
+            out.typed = false;
+            return out;
+        }
+        case K::AddScope:
+        {
+            // The option by its digit; a value past the dialog's three (a forged or garbled button) names none and is stale. Checked
+            // before the narrowing cast, so no value can wrap into a valid digit.
+            const AddDirOption* o = a.value >= 1 && a.value <= 3 ? AddDirOptionFor(static_cast<int>(a.value)) : nullptr;
+            if (!o)
+            {
+                out.kind = NewThreadOutcome::Kind::Stale;
+                out.text = kNewThreadStaleTap;
+                return out;
+            }
+            if (o->digit == 2)
+            {
+                // The user's rule: "always remember it" is CONFIRMED first — it writes the session folder's settings, so every later
+                // session started there reads the folder too.
+                r.addStep = NewThreadAddStep::Confirm;
+                return out;
+            }
+            if (o->digit == 3)
+            {
+                // "No": the add is cancelled, the ➕ comes back.
+                const std::wstring leaf = NewThreadFolderLeaf(r.addPath);
+                ResetNewThreadAdd(r);
+                out.text = L"Not added: " + leaf;
+                return out;
+            }
+            // 1, "Yes, for this session": added at once (the user's "For the first option, you don't need to confirm").
+            if (std::wstring problem = NewThreadExtraFolderProblem(w, r.addPath); !problem.empty())
+            {
+                // A belt: nothing changes the list or the session's folder between the pick and this tap but a typed folder, which
+                // re-runs the check — still, a folder that became invalid is never added.
+                r.addNotice = L"\u26A0 " + problem;
+                ResetNewThreadAdd(r);
+                out.text = std::move(problem);
+                return out;
+            }
+            w.extraFolders.push_back(NewThreadExtraFolder{ r.addPath, 1 });
+            out.text = L"Added for this session: " + NewThreadFolderLeaf(r.addPath);
+            ResetNewThreadAdd(r);
+            return out;
+        }
+        case K::AddConfirm:
+            if (std::wstring problem = NewThreadExtraFolderProblem(w, r.addPath); !problem.empty())
+            {
+                r.addNotice = L"\u26A0 " + problem;
+                ResetNewThreadAdd(r);
+                out.text = std::move(problem);
+                return out;
+            }
+            w.extraFolders.push_back(NewThreadExtraFolder{ r.addPath, 2 });
+            out.text = L"Added and remembered: " + NewThreadFolderLeaf(r.addPath);
+            ResetNewThreadAdd(r);
+            return out;
+        case K::AddBack:
+            if (r.addStep == NewThreadAddStep::Confirm)
+            {
+                r.addStep = NewThreadAddStep::Scope; // back to the three options: the folder is still the one asked about
+            }
+            else
+            {
+                ResetNewThreadAdd(r); // the add picker's ◀ Back: the add is cancelled, the ➕ comes back
+            }
+            return out;
+        case K::AddRemove:
+        {
+            if (a.value >= w.extraFolders.size())
+            {
+                out.kind = NewThreadOutcome::Kind::Stale;
+                out.text = L"That folder is no longer in the list.";
+                return out;
+            }
+            const std::wstring leaf = NewThreadFolderLeaf(w.extraFolders[a.value].path);
+            w.extraFolders.erase(w.extraFolders.begin() + static_cast<std::ptrdiff_t>(a.value));
+            out.text = L"Taken off: " + leaf;
+            return out;
+        }
+        default:
+            out.kind = NewThreadOutcome::Kind::Stale;
+            out.text = kNewThreadStaleTap;
+            return out;
+        }
+    }
+
+    /// <summary>
+    /// The answer of an EXTRA folder's check (§21.25.9): an existing folder that may be added is asked about — /add-dir's three
+    /// options replace the picker (Scope); anything else leaves the add picker up with the reason on top. A missing folder is
+    /// never offered for creation here (/add-dir adds only an existing folder; the session's own folder is the one the wizard
+    /// makes). A LIST pick that is gone reads the lists again, as the folder step does.
+    /// </summary>
+    /// <param name="r">The thread's record (changed in place).</param>
+    /// <param name="res">The check's answer (a list pick's probe, or a typed path's case-insensitive resolution).</param>
+    /// <param name="typed">The folder was typed (true) or picked from a list (false).</param>
+    /// <returns>RenderAdd (its `text` the reason for a refusal, "" when the three options are up), or Stale when the add flow was
+    /// left while the check ran (the session's folder step came back, or the ➕ is up again).</returns>
+    /// <exception cref="std::bad_alloc">If a string cannot be allocated.</exception>
+    inline NewThreadOutcome ApplyNewThreadAddFolderResolved(NewThreadRecord& r, const FolderResolution& res, bool typed)
+    {
+        NewThreadOutcome out;
+        if (!NewThreadAddActive(r.wizard.step) || r.addStep == NewThreadAddStep::Idle)
+        {
+            // Left while the folder was checked (Back to the folder step, the add picker's ◀ Back): the answer changes nothing.
+            out.kind = NewThreadOutcome::Kind::Stale;
+            out.text = L"That folder pick was left \x2014 tap \u2795 to add a folder.";
+            return out;
+        }
+        out.kind = NewThreadOutcome::Kind::RenderAdd;
+        const auto refuse = [&](std::wstring reason) {
+            r.addStep = NewThreadAddStep::Pick; // the add picker again (a typed path may have come at Scope or Confirm)
+            r.addPath.clear();
+            r.addNotice = L"\u26A0 " + reason;
+            out.text = std::move(reason);
+        };
+        switch (res.kind)
+        {
+        case FolderResolveKind::Exists:
+            if (std::wstring problem = NewThreadExtraFolderProblem(r.wizard, res.path); !problem.empty())
+            {
+                refuse(std::move(problem)); // its disk spelling turned out to be the session's folder, an added one, …
+                return out;
+            }
+            r.addPath = res.path;
+            r.addStep = NewThreadAddStep::Scope;
+            return out;
+        case FolderResolveKind::Missing:
+            if (!typed)
+            {
+                r.listsBuilt = false; // the next render reads the lists again, without the deleted folder
+                refuse(L"That folder is gone: " + res.path + L". The lists are read again.");
+                return out;
+            }
+            refuse(L"That folder does not exist: " + res.path + L". /add-dir adds an existing folder only.");
+            return out;
+        case FolderResolveKind::NoAnswer:
+            refuse(res.reason.empty() ? NewThreadFolderNoAnswerText(res.path) : res.reason);
+            return out;
+        case FolderResolveKind::IsFile:
+        case FolderResolveKind::NoRoot:
+        case FolderResolveKind::Invalid:
+        default:
+            refuse(res.reason.empty() ? std::wstring{ L"That is not a folder." } : res.reason);
+            return out;
+        }
+    }
 
     /// <summary>Clears the model choice and everything after it (the folder changed, or the user went back to it).</summary>
     /// <param name="w">The wizard.</param>
@@ -1211,7 +1786,8 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// A BUTTON of the wizard's picker (§21.25): what it changes and what the service does next. A button that does not belong to
-    /// the step changes nothing (Stale); ✖ Cancel aborts from every step.
+    /// the step changes nothing (Stale); ✖ Cancel aborts from every step. A button of the ➕ message (§21.25.9: same "nt:" data,
+    /// another message) goes to its own reducer, ApplyNewThreadAddButton, once the step is one the ➕ message works at.
     /// </summary>
     /// <param name="r">The thread's record (changed in place).</param>
     /// <param name="a">The button's action (ParseNewThreadCallbackData).</param>
@@ -1227,6 +1803,12 @@ namespace Agentmaster::Msg
             out.kind = NewThreadOutcome::Kind::Stale;
             out.text = kNewThreadStaleTap;
             return out;
+        }
+        if (NewThreadIsAddKind(a.kind))
+        {
+            // §21.25.9: the ➕ message's own flow. Before the notice rule below: a tap there is no choice of the PICKER's step, so the
+            // picker's line (a refused launch's reason, say) must stay where the user can still read it.
+            return ApplyNewThreadAddButton(r, a);
         }
         // Every accepted button is the user's next choice, so the line of the step before goes — but a page label (a toast that
         // changes nothing) and Cancel (the whole record goes) leave it. A choice below that fails sets its own line again.
@@ -1280,6 +1862,9 @@ namespace Agentmaster::Msg
             w.createExistingPrefix.clear();
             w.createMissing.clear();
             ResetNewThreadAfterFolder(w);
+            // §21.25.9: a half-made add is dropped (the ➕ message turns inert until the session's folder is chosen again); the
+            // folders added so far stay — the next folder choice drops only the ones it equals or holds (PruneNewThreadExtraFolders).
+            ResetNewThreadAdd(r);
             out.kind = NewThreadOutcome::Kind::Render;
             return out;
         case K::ModelDefault:
@@ -1341,9 +1926,10 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// A MESSAGE typed in the wizard's thread (§21.25): a lone folder path is a folder choice at every step (the user changed
-    /// their mind about the folder); "/model &lt;id&gt;" at the model step and one word at the model-id step are a model; a
-    /// window number — or a window's name (§21.25.8; a name several windows share is answered with a Reply) — at the window
-    /// step is a window; anything else is the user's message, HELD for the session.
+    /// their mind about the folder) — except while the ➕ message asks for a folder (§21.25.9: its picker is up, or it asks about
+    /// one), when the path is that EXTRA folder; "/model &lt;id&gt;" at the model step and one word at the model-id step are a
+    /// model; a window number — or a window's name (§21.25.8; a name several windows share is answered with a Reply) — at the
+    /// window step is a window; anything else is the user's message, HELD for the session.
     /// </summary>
     /// <param name="r">The thread's record (changed in place).</param>
     /// <param name="text">The message's text.</param>
@@ -1355,6 +1941,26 @@ namespace Agentmaster::Msg
         NewThreadOutcome out;
         if (const auto folder = NewThreadTypedFolder(text))
         {
+            if (NewThreadAddActive(w.step) && r.addStep != NewThreadAddStep::Idle)
+            {
+                // §21.25.9: /add-dir's own path question, answered by typing — the ➕ message's picker is up (or it asks about a
+                // folder the user now corrects). Never a change of the session's folder: ◀ Back on the picker is that.
+                r.addNotice.clear();
+                if (NewThreadPathIsShare(*folder))
+                {
+                    // Refused before any check (an offline share would hold the walk for its whole wait): the add picker again.
+                    r.addStep = NewThreadAddStep::Pick;
+                    r.addPath.clear();
+                    out.text = NewThreadExtraFolderProblem(w, *folder);
+                    r.addNotice = L"\u26A0 " + out.text;
+                    out.kind = NewThreadOutcome::Kind::RenderAdd;
+                    return out;
+                }
+                out.kind = NewThreadOutcome::Kind::CheckAddFolder;
+                out.path = *folder;
+                out.typed = true;
+                return out;
+            }
             w.notice.clear(); // a choice: the line of the step before goes (the check sets its own when it fails)
             out.kind = NewThreadOutcome::Kind::CheckFolder;
             out.path = *folder;
@@ -1493,6 +2099,7 @@ namespace Agentmaster::Msg
             w.createExistingPrefix.clear();
             w.createMissing.clear();
             ResetNewThreadAfterFolder(w);
+            PruneNewThreadExtraFolders(r); // §21.25.9: an extra folder the session's new folder equals or holds is read anyway
             out.kind = NewThreadOutcome::Kind::EnterModel;
             return out;
         case FolderResolveKind::Missing:
@@ -1543,6 +2150,9 @@ namespace Agentmaster::Msg
             w.createExistingPrefix.clear();
             w.createMissing.clear();
             ResetNewThreadAfterFolder(w);
+            // §21.25.9: every choice of the session's folder keeps the added list consistent — a folder made now holds nothing yet,
+            // but it can be one the user added before it was deleted on disk (the session would then read it anyway).
+            PruneNewThreadExtraFolders(r);
             out.kind = NewThreadOutcome::Kind::EnterModel;
             return out;
         }
@@ -1691,8 +2301,9 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// The launch the wizard's choices ask for, and the line that tells the user what is opening: the folder (and "created" when
-    /// the wizard made it), the model (when not Default), the window (when the step was shown; by its name too when the user
-    /// named it, §21.25.8) and the tab it opens next to.
+    /// the wizard made it), the extra folders the ➕ message added (§21.25.9: by their names, the remembered ones marked 📌 —
+    /// they are not part of the launch itself: the bind sends each as /add-dir once the session is live), the model (when not
+    /// Default), the window (when the step was shown; by its name too when the user named it, §21.25.8) and the tab it opens next to.
     /// </summary>
     /// <param name="r">The thread's record, every choice made.</param>
     /// <returns>The plan.</returns>
@@ -1713,6 +2324,16 @@ namespace Agentmaster::Msg
         {
             textTail += L" (created)";
             htmlTail += L" (created)";
+        }
+        // §21.25.9: the extra folders, in the order they get /add-dir ("in proj + docs, 📌 shared"): what the session will read
+        // besides its own folder is said where the user sees the launch, before the /add-dir cards come in.
+        for (size_t i = 0; i < w.extraFolders.size(); ++i)
+        {
+            const auto& f = w.extraFolders[i];
+            const std::wstring extraLeaf = NewThreadFolderLeaf(f.path);
+            const std::wstring mark = f.option == 2 ? std::wstring{ L"\U0001F4CC " } : std::wstring{};
+            textTail += (i == 0 ? L" + " : L", ") + mark + extraLeaf;
+            htmlTail += (i == 0 ? L" + " : L", ") + mark + L"<b>" + TgEscapeHtml(extraLeaf) + L"</b>";
         }
         if (!w.modelTarget.empty())
         {
@@ -2053,6 +2674,173 @@ namespace Agentmaster::Msg
         }
     }
 
+    namespace detail
+    {
+        /// <summary>
+        /// The folders the ➕ message added (§21.25.9), one numbered line each — the number is its ✖ button's — with its path and
+        /// its scope ("for this session", "📌 remembered"); "" when none was added.
+        /// </summary>
+        /// <param name="w">The wizard.</param>
+        /// <returns>Telegram HTML lines, joined by line breaks (no leading or trailing one).</returns>
+        /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+        inline std::wstring NewThreadExtraFoldersHtml(const NewThreadWizard& w)
+        {
+            std::wstring html;
+            for (size_t i = 0; i < w.extraFolders.size(); ++i)
+            {
+                const auto& f = w.extraFolders[i];
+                html += (i == 0 ? L"" : L"\n") + std::wstring{ L"<b>" } + std::to_wstring(i + 1) + L"</b> <code>" + TgEscapeHtml(f.path) + L"</code> \x00B7 " +
+                        TgEscapeHtml(NewThreadExtraFolderScopeWords(f.option));
+            }
+            return html;
+        }
+    }
+
+    /// <summary>
+    /// The ➕ MESSAGE (§21.25.9) as its add flow stands: its text and its keyboard. At a step where the session's folder is not
+    /// chosen (the folder steps, after ◀ Back) it is INERT — what was added, and that the session's own folder comes first — with
+    /// no button, so its add picker never stands above the folder step's own lists. Otherwise:
+    ///   Idle    "Add another folder to this session?" with what /add-dir does and when, the folders added (numbered), and the ➕
+    ///           (hidden once kNewThreadExtraFoldersMax are added) over one ✖ per added folder;
+    ///   Pick    the folder step's two lists (the session's own folder and the added ones marked: a tap on them is refused), the
+    ///           pagers, "or send its full path", and ◀ Back;
+    ///   Scope   /add-dir's own question for the folder — its note on what the answer grants — and its three options, verbatim;
+    ///   Confirm what remembering means: the session folder's .claude\settings.local.json, every later session there; Yes, ◀ Back.
+    /// The notice (a refusal, a pruned folder) heads every state.
+    /// </summary>
+    /// <param name="r">The thread's record.</param>
+    /// <param name="nowMs">The clock the add picker's "ago" texts count against (Unix ms).</param>
+    /// <returns>The view (no rows = an edit that removes the keyboard).</returns>
+    /// <exception cref="std::bad_alloc">If the view cannot be allocated.</exception>
+    inline NewThreadView BuildNewThreadAddView(const NewThreadRecord& r, int64_t nowMs)
+    {
+        using K = NewThreadAction::Kind;
+        const NewThreadWizard& w = r.wizard;
+        NewThreadView v;
+        const std::wstring notice = r.addNotice.empty() ? std::wstring{} : L"<i>" + TgEscapeHtml(r.addNotice) + L"</i>\n\n";
+        const std::wstring added = detail::NewThreadExtraFoldersHtml(w);
+        const std::wstring sessionLeaf = TgEscapeHtml(NewThreadFolderLeaf(w.folder));
+        if (!NewThreadAddActive(w.step))
+        {
+            v.html = notice + L"\u2795 <b>More folders for this session</b>\n<i>Choose the session\x2019s own folder below first \x2014 then you can add more here.</i>" +
+                     (added.empty() ? std::wstring{} : L"\n\n<i>Added so far:</i>\n" + added);
+            return v;
+        }
+        switch (r.addStep)
+        {
+        case NewThreadAddStep::Pick:
+        {
+            // The marks: the session's own folder, a folder inside it, and an added one — each would only be refused, so the list
+            // says so before the tap (by the app's folder identity: case-insensitive, '/' as '\').
+            const std::wstring sessionKey = NormDirKey(TrimFolderPath(w.folder));
+            const auto note = [&w, &sessionKey](const std::wstring& path) -> std::wstring {
+                const std::wstring key = NormDirKey(TrimFolderPath(path));
+                if (key == sessionKey)
+                {
+                    return L" \x00B7 <i>the session\x2019s folder</i>";
+                }
+                if (FolderKeyCovers(sessionKey, key, true))
+                {
+                    return L" \x00B7 <i>inside the session\x2019s folder</i>";
+                }
+                for (const auto& f : w.extraFolders)
+                {
+                    if (NormDirKey(TrimFolderPath(f.path)) == key)
+                    {
+                        return L" \x00B7 <i>added</i>";
+                    }
+                }
+                return {};
+            };
+            v.html = notice + L"\u2795 <b>Add a folder</b> \x2014 tap it below, or send its full path.\n<i>The session works in <b>" + sessionLeaf + L"</b>.</i>";
+            detail::AppendNewThreadFolderSections(v.html, r.lists, r.addRecentPage, r.addUsedPage, nowMs, note);
+            v.rows = BuildNewThreadFolderRows(r.lists, r.addRecentPage, r.addUsedPage, kNewThreadAddPickerKinds);
+            v.rows.push_back({ NewThreadButton{ L"\u25C0 Back", NewThreadCallbackData(K::AddBack, 0) } });
+            return v;
+        }
+        case NewThreadAddStep::Scope:
+            // /add-dir's own question, asked now — the same note and the same three options, verbatim (TuiMenus.h), one to a row as
+            // on the /add-dir card: the answer is pressed into Claude Code's dialog when the session starts.
+            v.html = notice + L"\U0001F4C1 <b>Add <code>" + TgEscapeHtml(r.addPath) + L"</code>?</b>\n<i>" + std::wstring{ kAddDirMenuNote } +
+                     L"</i>\n\nClaude Code\x2019s <code>/add-dir</code> asks how \x2014 answer it now; it is sent when the session starts, before your first prompt.";
+            for (const auto& o : kAddDirOptions)
+            {
+                v.rows.push_back({ NewThreadButton{ std::to_wstring(o.digit) + L" \x00B7 " + std::wstring{ o.label }, NewThreadCallbackData(K::AddScope, static_cast<size_t>(o.digit)) } });
+            }
+            return v;
+        case NewThreadAddStep::Confirm:
+            // The user's rule: "always remember it" is confirmed — with what it does beyond this session, where it is written, and when.
+            v.html = notice + L"\U0001F4CC <b>Remember <code>" + TgEscapeHtml(r.addPath) + L"</code>?</b>\nClaude Code saves it in <code>" +
+                     TgEscapeHtml(NewThreadRememberSettingsFile(w.folder)) + L"</code> (<code>permissions.additionalDirectories</code>), so <b>every</b> session started in <b>" +
+                     sessionLeaf + L"</b> can read it from then on \x2014 not only this one. It is saved when this session starts.";
+            v.rows.push_back({ NewThreadButton{ L"\U0001F4CC Yes, remember it", NewThreadCallbackData(K::AddConfirm, 0) },
+                               NewThreadButton{ L"\u25C0 Back", NewThreadCallbackData(K::AddBack, 0) } });
+            return v;
+        case NewThreadAddStep::Idle:
+        default:
+        {
+            const bool full = w.extraFolders.size() >= kNewThreadExtraFoldersMax;
+            v.html = notice + L"\u2795 <b>Add another folder to this session?</b>\n<i>Claude works in <b>" + sessionLeaf +
+                     L"</b>. A folder added here becomes readable too: when the session starts, Agentmaster sends <code>/add-dir</code> for it, before your first prompt.</i>";
+            if (!added.empty())
+            {
+                v.html += L"\n\n<i>Added:</i>\n" + added;
+            }
+            if (full)
+            {
+                v.html += L"\n<i>That is the most this message adds (" + std::to_wstring(kNewThreadExtraFoldersMax) + L") \x2014 send /add-dir in the session for more.</i>";
+            }
+            else
+            {
+                v.rows.push_back({ NewThreadButton{ w.extraFolders.empty() ? std::wstring{ L"\u2795 Add a folder" } : std::wstring{ L"\u2795 Add another folder" },
+                                                    NewThreadCallbackData(K::AddFolder, 0) } });
+            }
+            // One ✖ per added folder, two to a row, numbered like its line: a folder added by mistake comes off before anything is sent.
+            std::vector<NewThreadButton> row;
+            for (size_t i = 0; i < w.extraFolders.size(); ++i)
+            {
+                row.push_back(NewThreadButton{ L"\x2716 " + std::to_wstring(i + 1) + L" \x00B7 " + detail::NewThreadButtonLabel(NewThreadFolderLeaf(w.extraFolders[i].path)),
+                                               NewThreadCallbackData(K::AddRemove, i) });
+                if (row.size() == 2)
+                {
+                    v.rows.push_back(std::move(row));
+                    row.clear();
+                }
+            }
+            if (!row.empty())
+            {
+                v.rows.push_back(std::move(row));
+            }
+            return v;
+        }
+        }
+    }
+
+    /// <summary>
+    /// A view's identity for "is this render the one already sent?" (§21.25.9): the ➕ message is rendered again whenever the
+    /// picker is (its inert and active forms follow the picker's step), and an unchanged render must cost no Telegram call — the
+    /// chat's flood budget is ~18 calls a minute.
+    /// </summary>
+    /// <param name="v">The view.</param>
+    /// <returns>Its text and every button's label and data, joined by separators no text holds (U+001E, U+001F).</returns>
+    /// <exception cref="std::bad_alloc">If the key cannot be allocated.</exception>
+    inline std::wstring NewThreadViewKey(const NewThreadView& v)
+    {
+        std::wstring key = v.html;
+        for (const auto& row : v.rows)
+        {
+            key += L'\x1E';
+            for (const auto& b : row)
+            {
+                key += L'\x1F';
+                key += b.text;
+                key += L'\x1F';
+                key += b.data;
+            }
+        }
+        return key;
+    }
+
     // ===== persistence ================================================================================================
 
     namespace detail
@@ -2209,6 +2997,17 @@ namespace Agentmaster::Msg
         o.Set(L"windowName", json::Value::MkStr(w.windowName));
         o.Set(L"anchorSessionId", json::Value::MkStr(w.anchorSessionId));
         o.Set(L"anchorTitle", json::Value::MkStr(w.anchorTitle));
+        // §21.25.9: the extra folders ride every copy of the wizard — the thread's record, and the bind that carries them to the
+        // session's start — so a restart neither loses one nor sends one twice (the bind's are taken out with its held messages).
+        auto extra = json::Value::MkArr();
+        for (const auto& f : w.extraFolders)
+        {
+            auto m = json::Value::MkObj();
+            m.Set(L"path", json::Value::MkStr(f.path));
+            m.Set(L"option", json::Value::MkNum(static_cast<double>(f.option)));
+            extra.Push(std::move(m));
+        }
+        o.Set(L"extraFolders", std::move(extra));
         return o;
     }
 
@@ -2292,6 +3091,29 @@ namespace Agentmaster::Msg
         w.windowName = v.StrAt(L"windowName"); // absent before §21.25.8: the launch line names the window by its number
         w.anchorSessionId = v.StrAt(L"anchorSessionId");
         w.anchorTitle = v.StrAt(L"anchorTitle");
+        // §21.25.9: the extra folders. Absent (a wizard saved before them) reads as none. An entry without a path, or with an option
+        // this build does not send (anything but 1 "for this session" and 2 "remember"), is skipped: a folder is never added with a
+        // scope nobody chose, and the cap holds whatever the file says.
+        if (const auto* extra = v.Find(L"extraFolders"); extra && extra->type == json::Value::Type::Arr)
+        {
+            for (const auto& m : extra->arr)
+            {
+                if (w.extraFolders.size() >= kNewThreadExtraFoldersMax)
+                {
+                    break;
+                }
+                if (m.type != json::Value::Type::Obj || m.StrAt(L"path").empty())
+                {
+                    continue;
+                }
+                const int64_t option = m.I64At(L"option", 0);
+                if (option != 1 && option != 2)
+                {
+                    continue;
+                }
+                w.extraFolders.push_back(NewThreadExtraFolder{ m.StrAt(L"path"), static_cast<int>(option) });
+            }
+        }
         // A window step whose list did not survive is read again (the step shows "looking at the windows…").
         if (w.step == NewThreadStep::Window && w.windows.empty())
         {
@@ -2300,7 +3122,7 @@ namespace Agentmaster::Msg
         return w;
     }
 
-    /// <summary>A thread's record as JSON (the transient pickerStale left out).</summary>
+    /// <summary>A thread's record as JSON (the transient pickerStale, addStale and addShownKey left out).</summary>
     /// <param name="threadId">The thread.</param>
     /// <param name="r">Its record.</param>
     /// <returns>The JSON object.</returns>
@@ -2320,6 +3142,14 @@ namespace Agentmaster::Msg
         o.Set(L"held", detail::NewThreadHeldToJson(r.held));
         o.Set(L"lastUseMs", json::Value::MkNum(static_cast<double>(r.lastUseMs)));
         o.Set(L"wizard", NewThreadWizardToJson(r.wizard));
+        // §21.25.9, the ➕ message: its id (a post in flight as "not posted", like the picker's — the next render posts it) and where
+        // its add flow stood, so its buttons work after a restart and still mean what they showed.
+        o.Set(L"addMessageId", json::Value::MkNum(static_cast<double>(r.addMessageId > 0 ? r.addMessageId : 0)));
+        o.Set(L"addStep", json::Value::MkNum(static_cast<double>(static_cast<int>(r.addStep))));
+        o.Set(L"addRecentPage", json::Value::MkNum(static_cast<double>(r.addRecentPage)));
+        o.Set(L"addUsedPage", json::Value::MkNum(static_cast<double>(r.addUsedPage)));
+        o.Set(L"addPath", json::Value::MkStr(r.addPath));
+        o.Set(L"addNotice", json::Value::MkStr(r.addNotice));
         return o;
     }
 
@@ -2351,6 +3181,19 @@ namespace Agentmaster::Msg
         if (const auto* w = v.Find(L"wizard"))
         {
             r.wizard = NewThreadWizardFromJson(*w);
+        }
+        // §21.25.9, the ➕ message. Absent (a record saved before it) reads as not posted, at its ➕: the next render at the model or
+        // window step posts it above the picker. A state that asks about a folder without one (a garbled file) reads as the ➕, so
+        // no button can add an empty path.
+        r.addMessageId = (std::max)(int64_t{ 0 }, v.I64At(L"addMessageId", 0)); // (std::max): the <windows.h> macro
+        r.addStep = NewThreadAddStepFromNumber(v.I64At(L"addStep", 0));
+        r.addRecentPage = ClampNewThreadPage(static_cast<size_t>((std::max)(int64_t{ 0 }, v.I64At(L"addRecentPage", 0))), r.lists.recent.size());
+        r.addUsedPage = ClampNewThreadPage(static_cast<size_t>((std::max)(int64_t{ 0 }, v.I64At(L"addUsedPage", 0))), r.lists.mostUsed.size());
+        r.addPath = v.StrAt(L"addPath");
+        r.addNotice = v.StrAt(L"addNotice");
+        if ((r.addStep == NewThreadAddStep::Scope || r.addStep == NewThreadAddStep::Confirm) && r.addPath.empty())
+        {
+            ResetNewThreadAdd(r);
         }
         return std::make_pair(threadId, std::move(r));
     }

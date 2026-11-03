@@ -18,6 +18,10 @@
 // key (the window types the option's digit, but only into the very dialog the card shows), and its RESULT is read from the
 // transcript (the echo and the message Claude Code writes once the command ran). The PC's dialog stays fully usable: whoever
 // answers first wins, and the card says who it was.
+//
+// §21.25.9: a new thread's ➕ message chooses the answer BEFORE the session exists. The bind queues "/add-dir <path>" for each folder
+// it added, with that answer as the watch's PRESET (MenuWatch::preset): the dialog is answered the moment it is found — the card
+// silent and already "Answering", no buttons, no clock — and the outcome lands on the card as for any other answer.
 
 #include "Messaging.h"
 
@@ -278,7 +282,7 @@ namespace Agentmaster::Msg
 
     // ===== the watch: started at the queueing (poll thread) ==========================================================
 
-    void MessagingService::_watchAddDir(const std::wstring& sessionId, const std::wstring& promptId, const std::wstring& promptText, const std::wstring& args, int64_t messageId, int64_t threadId)
+    void MessagingService::_watchAddDir(const std::wstring& sessionId, const std::wstring& promptId, const std::wstring& promptText, const std::wstring& args, int64_t messageId, int64_t threadId, int preset)
     {
         MenuWatch w;
         w.key = MakeMenuCardKey();
@@ -289,6 +293,9 @@ namespace Agentmaster::Msg
         w.messageId = messageId;
         w.threadId = threadId;
         w.createdMs = WallMs();
+        // §21.25.9: only the two answers a ➕ message stores are pressed unasked; anything else (No, a garbled value) leaves the
+        // choice to the card, as for a /add-dir typed in the topic.
+        w.preset = preset == 1 || preset == 2 ? preset : 0;
         // The reader starts where the transcript stands NOW, before the command can have run: a command without a dialog writes
         // its result within milliseconds of its delivery, possibly before any tick. A session with no transcript yet (its first
         // message is this command) reads its transcript from the start once it exists.
@@ -321,6 +328,14 @@ namespace Agentmaster::Msg
         if (!dropped.empty())
         {
             _log(L"[menu] " + ShortId(dropped) + L" an open /add-dir watch was dropped: more than " + std::to_wstring(kMenuMaxWatches) + L" at once");
+        }
+        if (preset == 1 || preset == 2)
+        {
+            // §21.25.9: the new thread's own command — its answer was chosen in the ➕ message, so the dialog is answered unasked.
+            const AddDirOption* o = AddDirOptionFor(preset);
+            _log(L"[menu] " + ShortId(sessionId) + L" /add-dir from the new thread's \x2795 message (" + args + L") watched: its dialog is answered with option " +
+                 std::to_wstring(preset) + L" (" + std::wstring{ o ? o->value : std::wstring_view{} } + L") the moment it opens");
+            return;
         }
         _log(L"[menu] " + ShortId(sessionId) + L" /add-dir from topic (message " + std::to_wstring(messageId) + L") watched: its dialog becomes a card here, option " +
              std::to_wstring(kAddDirDefaultOption) + L" picked by itself " + std::to_wstring(kTuiMenuAutoAnswerMs / 1000) + L" s after it opens");
@@ -496,7 +511,9 @@ namespace Agentmaster::Msg
                     // (a key there, Enter on the focused option, Esc).
                     m.answeredBy = (m.pressed != 0 && w->lastPress == MenuAnswerResult::Pressed && AddDirOutcomeFitsOption(outcome, m.pressed)) ? m.pressedBy : AddDirAnswerer::Pc;
                     log = L"[menu] " + ShortId(w->sessionId) + L" /add-dir dialog answered (" +
-                          (m.answeredBy == AddDirAnswerer::Telegram ? L"from Telegram" : (m.answeredBy == AddDirAnswerer::Auto ? L"by itself" : L"at the PC")) +
+                          (m.answeredBy == AddDirAnswerer::Telegram ? L"from Telegram" :
+                                                                      (m.answeredBy == AddDirAnswerer::Auto ? L"by itself" :
+                                                                                                              (m.answeredBy == AddDirAnswerer::Wizard ? L"as the new thread's \x2795 message chose" : L"at the PC"))) +
                           L"): the card shows its result";
                 }
                 else
@@ -767,7 +784,9 @@ namespace Agentmaster::Msg
         // The parse is the read's whole work (pure, a few dozen rows): done before the lock, so the lock is held for bookkeeping only.
         const AddDirMenuScreen menu = ParseAddDirMenuScreen(screen);
         bool post = false;
+        bool press = false; // §21.25.9: a preset's answer, asked of the window right after the card is queued
         std::wstring log;
+        std::wstring nav;
         {
             std::lock_guard lk{ _mtx };
             MenuWatch* w = _findMenuWatchLocked(key);
@@ -783,6 +802,32 @@ namespace Agentmaster::Msg
             if (!AddDirMenuBelongsTo(menu.path, w->args))
             {
                 log = L"[menu] " + ShortId(w->sessionId) + L" a /add-dir dialog for another folder is open (" + menu.path + L"): not this command's, no card";
+            }
+            else if (w->preset != 0)
+            {
+                // §21.25.9: the answer was chosen in the new thread's ➕ message before this session existed. Nobody is asked: the
+                // card goes up already Answering (no buttons, no clock — and silent, _postMenuCard) and the window presses the
+                // option now. From here the Answering phase's own nets run as for a tapped card: a busy box is asked again, a press
+                // that brought no result is repeated (3 in all), and the transcript's result edits the card with the outcome.
+                w->menuSeen = true;
+                AddDirCardModel& m = w->model;
+                m.phase = AddDirCardPhase::Answering;
+                m.path = AddDirShownPath(menu.path, w->args);
+                m.pressed = w->preset;
+                m.pressedBy = AddDirAnswerer::Wizard;
+                // The press is CLAIMED in this lock scope: the tick, which may run between this scope and _pressMenuOption's,
+                // would otherwise read "Answering, never pressed" (pressSerial 0) and send a second press — whose "gone" reply
+                // would then credit the result to the PC. _pressMenuOption takes the claim over with its serial.
+                w->pressInFlight = true;
+                w->pressSentMs = WallMs();
+                ++w->version;
+                post = true;
+                press = true;
+                const AddDirOption* o = AddDirOptionFor(w->preset);
+                log = L"[menu] " + ShortId(w->sessionId) + L" /add-dir dialog open (" + m.path + L"): option " + std::to_wstring(w->preset) + L" (" +
+                      std::wstring{ o ? o->value : std::wstring_view{} } + L") is pressed now, as the new thread's \x2795 message chose";
+                nav = L"remote telegram menu " + ShortId(w->sessionId) + L" /add-dir -> option " + std::to_wstring(w->preset) + L" (" +
+                      std::wstring{ o ? o->value : std::wstring_view{} } + L") from the new thread's wizard";
             }
             else
             {
@@ -802,9 +847,19 @@ namespace Agentmaster::Msg
         {
             _log(log);
         }
+        if (!nav.empty())
+        {
+            LogNav(nav);
+        }
         if (post)
         {
             _postMenuCard(key);
+        }
+        if (press)
+        {
+            // After the card's post is queued (it shows "Answering"); the press goes through the window, which reads the dialog
+            // again and types the digit only into this very dialog (DecideMenuAnswer). No tap waits on it: no holds to carry.
+            _pressMenuOption(key, {});
         }
     }
 
@@ -962,6 +1017,7 @@ namespace Agentmaster::Msg
         int64_t threadId = 0;
         int64_t replyTo = 0;
         uint64_t version = 0;
+        bool silent = false; // §21.25.9: a preset's card needs nobody, so it does not ring
         {
             std::lock_guard lk{ _mtx };
             MenuWatch* w = _findMenuWatchLocked(key);
@@ -969,6 +1025,7 @@ namespace Agentmaster::Msg
             {
                 return; // gone, or a post on its way (its answer catches up with any change)
             }
+            silent = w->preset != 0;
             if (const auto it = _state.topics.find(w->sessionId); it != _state.topics.end())
             {
                 threadId = it->second.threadId;
@@ -999,7 +1056,7 @@ namespace Agentmaster::Msg
         _sendText(
             threadId,
             html,
-            false, // it RINGS: a dialog that answers itself in a minute is a "needs you" moment
+            silent, // a card that asks RINGS: a dialog that answers itself in a minute is a "needs you" moment; a preset's is silent
             SendPriority::Final,
             L"",
             std::move(markup),

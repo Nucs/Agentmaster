@@ -528,6 +528,31 @@ void TestTuiMenus()
         CHECK(pc.find(L"Not added</b> \x00B7 answered at the PC") != std::wstring::npos, "Answered at the PC: the outcome and who");
         CHECK(BuildAddDirCardButtons(m, L"k3y").empty(), "Answered: no buttons (the edit removes them)");
 
+        // MESSAGING.md 21.25.9: a new thread's extra folder - the answer was chosen in its plus message before the session existed.
+        {
+            AddDirCardModel wz;
+            wz.phase = AddDirCardPhase::Answering;
+            wz.path = L"Q:\\docs";
+            wz.pressed = 2;
+            wz.pressedBy = AddDirAnswerer::Wizard;
+            const std::wstring answering = BuildAddDirCardHtml(wz, now);
+            CHECK(answering.find(L"Answering</b> \x00B7 <b>Yes, and remember this directory</b> <i>(chosen when this thread was opened)</i>") != std::wstring::npos &&
+                      answering.find(L"<code>Q:\\docs</code>") != std::wstring::npos,
+                  "21.25.9 Answering by the wizard's choice: the option, who chose it, the folder");
+            CHECK(BuildAddDirCardButtons(wz, L"k3y").empty(), "21.25.9 a preset card has no buttons: nobody is asked");
+            wz.phase = AddDirCardPhase::Answered;
+            wz.outcome = AddDirOutcome::AddedRemembered;
+            wz.answeredBy = AddDirAnswerer::Wizard;
+            wz.outcomeAtMs = now;
+            CHECK(BuildAddDirCardHtml(wz, now).find(L"Added and remembered</b> \x00B7 chosen when this thread was opened") != std::wstring::npos,
+                  "21.25.9 Answered by the wizard's choice: the outcome and who chose it");
+            m.pressedBy = AddDirAnswerer::Telegram;
+            m.phase = AddDirCardPhase::Answering;
+            CHECK(BuildAddDirCardHtml(m, now).find(L"chosen when") == std::wstring::npos && BuildAddDirCardHtml(m, now).find(L"picked by itself") == std::wstring::npos,
+                  "21.25.9 a tapped card's Answering line names nobody (the tap is the user's own)");
+            m.phase = AddDirCardPhase::Answered;
+        }
+
         m.phase = AddDirCardPhase::Closed;
         m.closedWhy = L"its session ended";
         CHECK(BuildAddDirCardHtml(m, now).find(L"No longer open here</b>") != std::wstring::npos && BuildAddDirCardHtml(m, now).find(L"its session ended") != std::wstring::npos,

@@ -177,3 +177,55 @@ that already has a tab.
 - **E6 Every menu** → at most two buttons a row, ⑂ Fork · ✕ Cancel last, "Resume" only for a closed session.
 - **E7 A request in words ("activate it")** → the agent has no activate tool: `mcp__tabs__resume` says where the open tab is
   (§21.38 "Not done"); the test pins that until an activate tool exists.
+
+---
+
+### TGS-06 · More folders for a new session: the ➕ message, sent as /add-dir before the first prompt
+
+> **NOT BUILT** (2026-11-03, after 0.8.0) · **P1 when built** · **Needs** F-TG, mock, F-W2 + two scratch folders besides the
+> session's · **Spec** MESSAGING.md §21.25.9, §21.34
+
+**Promise.** Before a new session starts, the user can add more folders to it from the phone. Each one is answered with
+`/add-dir`'s own three choices. "Remember" is confirmed first. Every folder is in the session's workspace before its first
+prompt runs.
+
+**Phases**
+1. **The ➕ message appears.** *Do:* open a thread with `look at both`, pick folder A. *Expect:* above the MODEL step, the ➕
+   message "Add another folder to this session?" with [➕ Add a folder]; the picker reposted BELOW it.
+   *Check:* [TG] the ➕ message's id is lower than the picker's.
+2. **Pick, then for this session.** *Do:* ➕ → tap folder B in Recent. *Expect:* the three options in place of the ➕:
+   [1 · Yes, for this session] [2 · Yes, and remember this directory] [3 · No]. *Do:* 1. *Expect:* the ➕ back, "1 B · for
+   this session" listed with [✖ 1 · B]; no confirmation.
+3. **Typed, then remember.** *Do:* ➕ → TYPE folder C's full path. *Expect:* the ➕ message and the picker reposted below the
+   typed message, the three options up. *Do:* 2. *Expect:* the confirmation naming `A\.claude\settings.local.json` and
+   "every session started in A". *Do:* ◀ Back → the three options again; 2 → 📌 Yes, remember it. *Expect:* "2 C · 📌
+   remembered".
+4. **Launch.** *Do:* Default model, the default window. *Expect:* "🚀 Opening a new session in A + B, 📌 C · …"; the picker
+   AND the ➕ message deleted.
+5. **The folders go first.** *Expect:* when the session is up, two SILENT cards "⏳ Answering · … (chosen when this thread
+   was opened)" → "✅ Added for this session" / "✅ Added and remembered · chosen when this thread was opened"; only then the
+   held message goes, with its "📤 sent from the queue" line. *Check:* [ENG] the queue sends `/add-dir B`, `/add-dir C`,
+   then `look at both`, each after the one before is echoed; [MOCK] the first model request comes after both echoes;
+   A's `.claude\settings.local.json` lists C under `permissions.additionalDirectories`.
+   [LOG] `[msg] new thread N: 2 of 2 extra folder(s) go to S as /add-dir, ahead of its held messages`,
+   `[menu] S /add-dir dialog open (…): option 2 (yes-remember) is pressed now, as the new thread's ➕ message chose`.
+
+**Edge cases**
+- **E1 The session's own folder, or a folder inside it** → refused above the lists ("That is the session's own folder" /
+  "…inside the session's folder"); marked in the list before any tap.
+- **E2 A network share** (`\\server\share\x`, listed or typed) → refused unprobed (/add-dir refuses one mid-session).
+- **E3 A typed folder that does not exist** → "That folder does not exist … /add-dir adds an existing folder only"; no
+  Create.
+- **E4 A folder added twice** (another case or slashes) → "That folder is added already".
+- **E5 3 · No / the add picker's ◀ Back** → nothing added, the ➕ back.
+- **E6 ✖ on an added folder** → taken off; nothing was sent yet.
+- **E7 Ten folders** → no ➕ (a line says why); a ➕ still on an older keyboard answers with a toast.
+- **E8 ◀ Back to the folders** → the ➕ message turns inert (no button), keeping its list; a new session folder that HOLDS
+  or EQUALS an added folder drops it with a line.
+- **E9 A stale ➕ button** (another state's) → "That button belongs to an earlier step"; the picker's own notice stays.
+- **E10 A refused launch** (a preset that cannot start) → the wizard comes back with its folders, the ➕ message posted
+  again above the new picker.
+- **E11 ✖ Cancel** → the thread is deleted with both messages.
+- **E12 A restart mid-wizard** (at Scope) → the ➕ message's buttons still work, the folder asked about kept.
+- **E13 A folder already readable when the session starts** (in its remembered settings) → no dialog; "ℹ️ Already in the
+  workspace" over Claude Code's message; the held message still goes.

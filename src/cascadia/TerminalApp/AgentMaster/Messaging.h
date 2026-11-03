@@ -1641,7 +1641,27 @@ namespace Agentmaster::Msg
         /// <exception cref="std::exception">Whatever the Search agent's factory throws when the agent cannot be made
         /// (_ensureSearchBridge); the caller logs it (Rule #18) and the next message tries again.</exception>
         void _handleSearchMessage(const json::Value& msg, int64_t threadId);
-        bool _queueRemotePrompt(const std::wstring& sessionId, const std::wstring& text, int64_t messageId, int64_t threadId, bool fromBacklog);
+        /// <summary>
+        /// Queues a message of a session's topic as a REMOTE prompt (D30: next in line — before the runner's own planned prompts,
+        /// after earlier remote ones — and sent whatever the runner's mode), reacts ✍ on the user's message and starts a dormant
+        /// tab so the queue can deliver. §21.34: a "/add-dir &lt;path&gt;" is WATCHED from here (_watchAddDir: its dialog becomes a
+        /// card in the topic), and a bare "/add-dir" is refused with its usage line instead (a path input nobody here can fill).
+        /// Poll thread, or the tick thread (a new thread's hand-over, a voice note's transcript).
+        /// </summary>
+        /// <param name="sessionId">The topic's session.</param>
+        /// <param name="text">The prompt as it goes to the session.</param>
+        /// <param name="messageId">The user's Telegram message (its reactions, the replies' quote, QueuedPrompt::remoteSource); 0 for
+        /// a prompt the service writes itself (§21.25.9: a new thread's extra-folder /add-dir) — reactions then go nowhere
+        /// (_react ignores 0) and replies quote nothing.</param>
+        /// <param name="threadId">The topic.</param>
+        /// <param name="fromBacklog">True when a backlog question's [Queue] queues it (the log says so).</param>
+        /// <param name="addDirOption">§21.25.9: for a "/add-dir &lt;path&gt;", the dialog's option to press as soon as the dialog shows
+        /// (1 for this session, 2 remember it) — chosen in a new thread's ➕ message before the session existed, so nobody is asked
+        /// again and no 60 s default runs; 0 (the default) asks on the card as before. Ignored for any other text.</param>
+        /// <returns>True when the prompt went into the queue; false when the session is closed or the text was refused (each answered
+        /// in the topic).</returns>
+        /// <exception cref="std::bad_alloc">If the prompt, a reply or a log line cannot be allocated.</exception>
+        bool _queueRemotePrompt(const std::wstring& sessionId, const std::wstring& text, int64_t messageId, int64_t threadId, bool fromBacklog, int addDirOption = 0);
         /// <summary>
         /// Runs an Agentmaster /command in a session's topic — typed, or a card button that names one (§21.24) — and replies in the
         /// topic (a refused or unknown one says why). §21.28: called from a tapped button, it runs inside the tap's scope, so its
@@ -2148,15 +2168,64 @@ namespace Agentmaster::Msg
         /// <param name="threadId">The thread.</param>
         /// <param name="repost">True: delete the picker and post it again at the BOTTOM of the thread — after a choice the user
         /// TYPED (a folder, a model id, a window number), which sits below the picker. False: edit in place.</param>
+        /// <remarks>§21.25.9: from the model step on, the thread also has the ➕ MESSAGE, which must stand ABOVE the picker. A picker
+        /// shown there while no ➕ message is posted is reposted, and the ➕ message posted first (one priority, one order in the
+        /// outbox); every render also lets the ➕ message follow the step (_showNewThreadAddMessage: inert at the folder steps).</remarks>
         void _showNewThreadPicker(int64_t threadId, bool repost = false);
+        /// <summary>
+        /// §21.25.9: shows the thread's ➕ MESSAGE as its add flow stands (BuildNewThreadAddView): posts it, or edits it in place —
+        /// only when its render differs from the one last queued (NewThreadViewKey), so following the picker costs no call. Nothing
+        /// is posted at the folder steps (the message first appears with the model step); a posted one turns inert there. Its add
+        /// picker's lists are the folder step's, built here when the folder was typed (_buildNewThreadListsNow). An edit Telegram
+        /// answers "message not found" (the user deleted it) posts a new one; "thread not found" drops the record. Takes `_mtx` for
+        /// the state and releases it before the send. Poll thread, or a census worker.
+        /// </summary>
+        /// <param name="threadId">The thread.</param>
+        /// <param name="repost">True: delete it and post it again at the bottom — after a choice the user TYPED (the caller then
+        /// reposts the picker below it). False: edit in place.</param>
+        void _showNewThreadAddMessage(int64_t threadId, bool repost = false);
+        /// <summary>
+        /// §21.25.9: checks an EXTRA folder for the ➕ message with a BOUND on the wait, exactly as the session's folder is checked
+        /// (ResolveNewThreadFolderBounded: a list pick's probe, a typed path's case-insensitive walk on a worker), then
+        /// ApplyNewThreadAddFolderResolved — /add-dir's three options for an addable folder, the reason otherwise — and a render of
+        /// the ➕ message (reposted with the picker below it for a TYPED path, which sits below both).
+        /// </summary>
+        /// <param name="threadId">The thread.</param>
+        /// <param name="path">The folder (a list entry, or the path the user typed).</param>
+        /// <param name="typed">True when the user typed it.</param>
+        /// <param name="replyTo">The typed message (0 = a button).</param>
+        /// <returns>The toast for a button: "" when the three options are up, the reason when not.</returns>
+        /// <exception cref="std::bad_alloc">If a string cannot be allocated.</exception>
+        std::wstring _checkNewThreadAddFolder(int64_t threadId, const std::wstring& path, bool typed, int64_t replyTo);
+        /// <summary>
+        /// The folder lists a new thread's pickers show (§21.17; the ➕ message's add picker too, §21.25.9): BuildNewThreadLists
+        /// over the registry's PlaceSamples (every session, archived ones included), the machine's temp roots left out, every
+        /// listed folder probed with a BOUND (FolderProbe.h — a UNC path unprobed, the others each kNewThreadListProbeEachMs and
+        /// all together kNewThreadListProbeBudgetMs at most). Call it WITHOUT `_mtx`: it copies the registry and waits on probes.
+        /// </summary>
+        /// <returns>The two lists.</returns>
+        /// <exception cref="std::bad_alloc">If the lists cannot be allocated.</exception>
+        NewThreadLists _buildNewThreadListsNow();
+        /// <summary>
+        /// §21.25.9, at a new thread's bind: queues "/add-dir &lt;path&gt;" for each extra folder its ➕ message added, in order and
+        /// AHEAD of the held messages (the caller hands those over after this), each watched with the option the user chose as its
+        /// preset (_queueRemotePrompt's addDirOption) — so the session reads the folders before its first prompt, and Claude Code
+        /// itself adds each one (and, for a remembered one, writes its own settings). A refusal is logged; the rest still go.
+        /// Tick thread.
+        /// </summary>
+        /// <param name="sessionId">The new session (live, its topic recorded).</param>
+        /// <param name="threadId">Its topic (the user's thread).</param>
+        /// <param name="folders">The folders, taken out of the bind (each sent once).</param>
+        void _queueNewThreadExtraFolders(const std::wstring& sessionId, int64_t threadId, const std::vector<NewThreadExtraFolder>& folders) noexcept;
         /// <summary>
         /// A tap on a picker button (ParseNewThreadCallbackData), read by the thread's wizard (§21.25, ApplyNewThreadButton) and
         /// carried out (_applyNewThreadOutcome): a pager arrow edits the folder step to its page; a pager's page label changes
         /// nothing and answers which page it is; a folder is checked (_checkNewThreadFolder) and leads to the model step; Create
         /// makes a typed folder (_createNewThreadFolder); a model leads to the window step (_collectNewThreadWindows); a window
-        /// launches (_launchNewThread); ✖ Cancel deletes the thread (_abortNewThread). A button of an earlier step answers so and
-        /// changes nothing; a button of a picker this service holds no record of (already launched, cancelled) answers that a
-        /// message in the thread brings a new picker. Takes `_mtx` for the record. Poll thread.
+        /// launches (_launchNewThread); ✖ Cancel deletes the thread (_abortNewThread). §21.25.9: a button of the ➕ message (the same
+        /// "nt:" data) runs its add flow (ApplyNewThreadAddButton), and the log names the extra folder a tap added or took off. A
+        /// button of an earlier step answers so and changes nothing; a button of a picker this service holds no record of (already
+        /// launched, cancelled) answers that a message in the thread brings a new picker. Takes `_mtx` for the record. Poll thread.
         /// </summary>
         /// <param name="action">The button's action.</param>
         /// <param name="threadId">The thread the picker sits in (the callback's message).</param>
@@ -2164,8 +2233,9 @@ namespace Agentmaster::Msg
         std::wstring _onNewThreadAction(const NewThreadAction& action, int64_t threadId);
         /// <summary>
         /// §21.25: carries out what the wizard decided (NewThreadOutcome) for the thread — render, check a folder, create one, enter
-        /// the model step, collect the windows, launch, abort, or answer. The one dispatcher for a button (its toast is the return
-        /// value) and a typed message (`replyTo` set: a reply quotes it, a render re-posts the picker below it). A Hold is the
+        /// the model step, collect the windows, launch, abort, or answer; §21.25.9: render the ➕ message, or check an extra folder
+        /// for it. The one dispatcher for a button (its toast is the return value) and a typed message (`replyTo` set: a reply
+        /// quotes it, a render re-posts the picker below it — and a ➕ render the ➕ message, then the picker below it). A Hold is the
         /// caller's (it owns the message). Poll thread, or a census worker (a window step skipped by its census launches here).
         /// </summary>
         /// <param name="threadId">The thread.</param>
@@ -2230,7 +2300,8 @@ namespace Agentmaster::Msg
         /// Starts the thread's NEW SESSION with every choice of its wizard (§21.17, §21.25, BuildNewThreadLaunchPlan): a fresh Claude
         /// tab in the background of the CHOSEN window (or the engine's choice), right after the anchor tab, with the chosen model,
         /// under a session id minted here and recorded in `_threadBinds` BEFORE the launch so the tick can bind the thread to the
-        /// session the moment it is live (_adoptBoundThreads). A line in the thread says what is opening; the picker is deleted.
+        /// session the moment it is live (_adoptBoundThreads). A line in the thread says what is opening (§21.25.9: with the extra
+        /// folders the ➕ message added, which the bind sends as /add-dir); the picker and the ➕ message are deleted.
         /// No window to take it (the chosen one closed since the census) puts the wizard back at the step that can fix it. §21.23:
         /// the window ANSWERS the launch — a refusal sends the thread back to the wizard at once, with the messages it held and the
         /// reason (_settleLaunchAnswers). §21.28: a tapped wizard button stays busy until that answer — its holds wait in
@@ -2284,7 +2355,9 @@ namespace Agentmaster::Msg
         /// plan never makes the session a topic of its own): the thread becomes the session's topic (a TopicRecord with the
         /// user's thread id, seeded like a created topic), is renamed like every topic (_renameTopic: the state, the color
         /// square, the title), gets its card, and receives the held messages as if they had been sent in the topic (the first
-        /// one is the session's first prompt). The bind stays in `_threadBinds` until the topic is recorded and every message it
+        /// one is the session's first prompt) — §21.25.9: AFTER "/add-dir &lt;path&gt;" for each extra folder its ➕ message added
+        /// (_queueNewThreadExtraFolders, the dialog answered with the option chosen there), taken out of the bind in the lock
+        /// scope that takes its messages, so each goes once. The bind stays in `_threadBinds` until the topic is recorded and every message it
         /// holds is handed over: what the user writes meanwhile joins it and reaches the session after the earlier messages, in
         /// order (the record and the bind's messages change hands in one lock scope, and the bind leaves only in a scope that
         /// finds it empty). The first name's color is resolved fresh from the session's record, as a created topic's is, and
@@ -3537,9 +3610,13 @@ namespace Agentmaster::Msg
             std::wstring promptId; // the queued prompt: its delivery (Sent, injected) and its echo are read in the registry
             std::wstring promptText; // what was queued ("/add-dir <path>"): the transcript's echo is matched against it
             std::wstring args; // the path as the user typed it
-            int64_t messageId{ 0 }; // the user's /add-dir message: the card and the replies answer it
+            int64_t messageId{ 0 }; // the user's /add-dir message: the card and the replies answer it (0 = §21.25.9's own command: no quote)
             int64_t threadId{ 0 }; // the topic (re-read at each post: a recreated topic has a new thread)
             int64_t createdMs{ 0 };
+            // §21.25.9: the option chosen BEFORE the dialog opened — a new thread's ➕ message (1 for this session, 2 remember it).
+            // The dialog is then answered with it the moment it is seen (the card is posted silent, already Answering, with no
+            // buttons and no clock); 0 = none, the card asks and the 60 s default runs (§21.34).
+            int preset{ 0 };
             // The transcript reader (ReadMenuTranscript, outside `_mtx`).
             std::wstring transcriptPath; // "" until it resolves (a session's first command can come before its transcript)
             int64_t offset{ 0 }; // where the reader goes on: the transcript's size at the queueing, then after each complete line read
@@ -3581,10 +3658,12 @@ namespace Agentmaster::Msg
         /// <param name="promptId">The queued prompt.</param>
         /// <param name="promptText">Its text.</param>
         /// <param name="args">The path as typed (ParseAddDirCommandText).</param>
-        /// <param name="messageId">The user's message.</param>
+        /// <param name="messageId">The user's message (0 = a command the service wrote: §21.25.9's extra folders).</param>
         /// <param name="threadId">The topic.</param>
+        /// <param name="preset">§21.25.9: the dialog's option chosen in advance (1 or 2; MenuWatch::preset), pressed as soon as the
+        /// dialog shows; 0 (the default) = the card asks, with its 60 s default. Any other value is taken as 0.</param>
         /// <exception cref="std::bad_alloc">If the watch cannot be stored (the caller's guard logs it; the command still goes, unwatched).</exception>
-        void _watchAddDir(const std::wstring& sessionId, const std::wstring& promptId, const std::wstring& promptText, const std::wstring& args, int64_t messageId, int64_t threadId);
+        void _watchAddDir(const std::wstring& sessionId, const std::wstring& promptId, const std::wstring& promptText, const std::wstring& args, int64_t messageId, int64_t threadId, int preset = 0);
         /// <summary>
         /// The tick's pass over the menu watches (after _questionsTick): each open watch is advanced (_tickMenuWatch), and finished
         /// ones are forgotten kMenuWatchKeepMs after their end. Tick thread. Never throws (Rule #18: a failure is logged, and the next
@@ -3604,7 +3683,8 @@ namespace Agentmaster::Msg
         /// <summary>
         /// A screen read's reply (the hosting window's UI thread): the dialog of the watched command found on it (ParseAddDirMenuScreen,
         /// and its path the command's — AddDirMenuBelongsTo) opens the card: phase Open, the clock started, the card posted.
-        /// A reply of an older read is ignored.
+        /// §21.25.9: a watch with a PRESET answers at once instead — the card goes up silent and already Answering (pressed by the
+        /// wizard's choice), and the window is asked to press it. A reply of an older read is ignored.
         /// </summary>
         /// <param name="key">The watch's key.</param>
         /// <param name="serial">The read's serial (MenuWatch::probeSerial when it was asked for).</param>
@@ -3642,8 +3722,9 @@ namespace Agentmaster::Msg
         std::wstring _onMenuTap(const std::wstring& data, int64_t messageId);
         /// <summary>
         /// Posts the card in the watch's CURRENT topic as a reply to the user's /add-dir message, with sound (a dialog that answers
-        /// itself in a minute is a "needs you" moment), at an answer's priority. A post Telegram refuses is tried again
-        /// kMenuRepostAfterFailureMs later while the card is open; a change made while the post was on its way is edited in after.
+        /// itself in a minute is a "needs you" moment) — silent for a §21.25.9 preset, which needs nobody — at an answer's priority.
+        /// A post Telegram refuses is tried again kMenuRepostAfterFailureMs later while the card is open; a change made while the
+        /// post was on its way is edited in after.
         /// </summary>
         /// <param name="key">The watch's key.</param>
         /// <exception cref="std::bad_alloc">If the text or the outbox item cannot be allocated.</exception>

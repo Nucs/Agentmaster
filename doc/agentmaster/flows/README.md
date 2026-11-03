@@ -36,7 +36,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [08-telegram-topics.md](08-telegram-topics.md) | Telegram: setup, topics, history, the mirror (TGT) | 11 | 4 / 6 / 1 | 37 | 25 | 2 |
 | [09-telegram-card-and-control.md](09-telegram-card-and-control.md) | Telegram: the card, prompts, /steer, /enter, /commands, the screen (TGC) | 7 | 4 / 2 / 0 (+1 NOT BUILT) | 30 | 31 | 2 |
 | [10-telegram-questions-and-menus.md](10-telegram-questions-and-menus.md) | Telegram: question cards, /add-dir menu cards (TGQ) | 6 | 3 / 3 / 0 | 24 | 21 | — |
-| [11-telegram-search-and-new-threads.md](11-telegram-search-and-new-threads.md) | Telegram: 🔎 Search, fleet commands, the new-thread wizard, the pick menu (TGS) | 5 | 2 / 1 / 1 (+1 NOT BUILT) | 25 | 29 | — |
+| [11-telegram-search-and-new-threads.md](11-telegram-search-and-new-threads.md) | Telegram: 🔎 Search, fleet commands, the new-thread wizard and its ➕ folders, the pick menu (TGS) | 6 | 2 / 1 / 1 (+2 NOT BUILT) | 30 | 42 | — |
 | [12-telegram-file-links.md](12-telegram-file-links.md) | Telegram: file links and the file server (TGF) | 4 | 0 / 3 / 1 | 7 | 6 | — |
 | [13-ai-search.md](13-ai-search.md) | The Sessions page's AI search (AIS) | 5 | 2 / 3 / 0 | 20 | 10 | — |
 | [14-presets.md](14-presets.md) | Presets: other models and providers (PRE) | 5 | 3 / 2 / 0 | 15 | 11 | — |
@@ -213,7 +213,8 @@ where it was (SP-02 phase 8; SP-K3) · a reopened window's sessions and a Resume
 mode, an interrupt hold included (PQR-15 phase 2, PQR-07 E9, LIF-04 E1; PQR-K8) · the side panel's header is + · Sum · ⋯,
 the ⋯ menu holding the dock, ⌖, the card scope, the card order and the collapse (SP-10; SIDE_PANEL.md §2i) · Telegram's
 `/enter` presses ONE Enter on the prompt waiting in the box, never into a menu, a dialog or an empty box (TGC-07;
-MESSAGING.md §21.47).
+MESSAGING.md §21.47) · a new thread's ➕ message adds more folders to the session, each sent as `/add-dir` with its answer
+chosen before the session starts, and before its first prompt (TGS-06; MESSAGING.md §21.25.9).
 
 **The regression base** — older behaviors the recent releases build on, covered because every new feature leans on
 them: the /handover family (HND-01, HND-03, HND-04, HND-05, HND-07, HND-08), the Sessions browser (SES-01, SES-02,

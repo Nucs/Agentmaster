@@ -4971,6 +4971,9 @@ namespace Agentmaster::Msg
             // empty, as the thread's hand-over queue: the poll thread adds to it what the user writes now (_handleMessage sends
             // a message of a thread that has a topic and a bind to _holdForNewThread), until the drain below finds it empty.
             std::vector<json::Value> held;
+            // §21.25.9: the extra folders the thread's ➕ message added leave the bind in the SAME scope as the held messages: the
+            // persisted bind then holds neither, so a restart after this point can never send a folder's /add-dir twice.
+            std::vector<NewThreadExtraFolder> extraFolders;
             {
                 std::lock_guard lk{ _mtx };
                 _state.topics[s.id] = t;
@@ -4980,6 +4983,7 @@ namespace Agentmaster::Msg
                 if (const auto it = bindOf(); it != _threadBinds.end())
                 {
                     held.swap(it->held); // leaves the bind's own vector empty for the poll thread's next message
+                    extraFolders.swap(it->wizard.extraFolders);
                 }
             }
             // §21.13: the color of the topic's FIRST name — resolved fresh from the session's record as it is now (as _createTopic
@@ -5047,6 +5051,10 @@ namespace Agentmaster::Msg
                     LogSwallowedException(L"MessagingService::_adoptBoundThreads (start)");
                 }
             }
+            // §21.25.9: the extra folders first — "/add-dir <path>" for each, its dialog answered with the option the ➕ message chose
+            // — so the queue sends them before anything the user wrote: the first prompt finds every folder in the workspace.
+            // Never throws (each folder's failure is contained and logged); the hand-over below runs whatever happened here.
+            _queueNewThreadExtraFolders(s.id, b.threadId, extraFolders);
             // What the user wrote in the thread, oldest first, as if it had been written in the topic (it was read live: no
             // backlog question) — then what the bind took while this ran, batch by batch, until a look under the lock finds it
             // empty and removes it. From then on the poll thread sends the thread's messages straight to the topic, and every

@@ -912,6 +912,295 @@ namespace
             CHECK((old.windows.size() == 2 && old.windows[0].name.empty() && old.windowName.empty() && old.windowNumber == 1),
                   "W15: a wizard saved before the names reads every window unnamed (by its number), its choice intact");
         }
+
+        // ===== W16. the plus message: more folders for the session, each sent as /add-dir before the first prompt (21.25.9) =====
+        {
+            // The buttons' data: every add kind round-trips, within the Bot API's 64 bytes; its tags are its own.
+            const K addKinds[] = { K::AddFolder, K::AddPickRecent, K::AddPickUsed, K::AddPageRecent, K::AddPageUsed, K::AddPageLabelRecent,
+                                   K::AddPageLabelUsed, K::AddScope,  K::AddConfirm,  K::AddBack,       K::AddRemove };
+            bool addRoundTrip = true;
+            for (const K k : addKinds)
+            {
+                const bool valued = k != K::AddFolder && k != K::AddConfirm && k != K::AddBack;
+                const NewThreadAction back = ParseNewThreadCallbackData(NewThreadCallbackData(k, 7));
+                addRoundTrip = addRoundTrip && back.kind == k && back.value == (valued ? 7u : 0u) && NewThreadCallbackData(k, 999999999).size() <= 64 && NewThreadIsAddKind(k);
+            }
+            CHECK((addRoundTrip), "W16: every plus-message button parses back to its kind (and value), within 64 bytes, and is an add kind");
+            CHECK((NewThreadCallbackData(K::AddFolder, 0) == L"nt:af" && NewThreadCallbackData(K::AddPickRecent, 3) == L"nt:ar:3" &&
+                      NewThreadCallbackData(K::AddScope, 2) == L"nt:as:2" && NewThreadCallbackData(K::AddRemove, 1) == L"nt:ax:1" &&
+                      ParseNewThreadCallbackData(L"nt:r:3").kind == K::PickRecent && ParseNewThreadCallbackData(L"nt:af:1").kind == K::None &&
+                      ParseNewThreadCallbackData(L"nt:as:").kind == K::None && ParseNewThreadCallbackData(L"nt:arp:x").kind == K::None),
+                  "W16: the plus-message tags are their own (ar is not r); a value on af, an empty or non-digit value: none");
+            CHECK((!NewThreadIsAddKind(K::PickRecent) && !NewThreadIsAddKind(K::Cancel) && !NewThreadIsAddKind(K::WindowPick) && !NewThreadIsAddKind(K::None)),
+                  "W16: the wizard's own kinds are not plus-message kinds");
+            CHECK((!NewThreadStepTakes(NewThreadStep::Folder, K::AddFolder) && !NewThreadStepTakes(NewThreadStep::CreateFolder, K::AddScope) &&
+                      NewThreadStepTakes(NewThreadStep::Model, K::AddFolder) && NewThreadStepTakes(NewThreadStep::ModelSpecify, K::AddPickUsed) &&
+                      NewThreadStepTakes(NewThreadStep::Window, K::AddConfirm)),
+                  "W16: the plus message works once the session's folder is chosen (model, model id, window), never at the folder steps");
+            CHECK((NewThreadAddStepTakes(NewThreadAddStep::Idle, K::AddFolder) && NewThreadAddStepTakes(NewThreadAddStep::Idle, K::AddRemove) &&
+                      !NewThreadAddStepTakes(NewThreadAddStep::Idle, K::AddScope) && NewThreadAddStepTakes(NewThreadAddStep::Pick, K::AddPickRecent) &&
+                      NewThreadAddStepTakes(NewThreadAddStep::Pick, K::AddBack) && !NewThreadAddStepTakes(NewThreadAddStep::Pick, K::AddConfirm) &&
+                      NewThreadAddStepTakes(NewThreadAddStep::Scope, K::AddScope) && !NewThreadAddStepTakes(NewThreadAddStep::Scope, K::AddBack) &&
+                      NewThreadAddStepTakes(NewThreadAddStep::Confirm, K::AddConfirm) && NewThreadAddStepTakes(NewThreadAddStep::Confirm, K::AddBack) &&
+                      !NewThreadAddStepTakes(NewThreadAddStep::Confirm, K::AddFolder)),
+                  "W16: each add state takes only the buttons its keyboard shows");
+
+            // A wizard at the model step in K:\proj, with the folder step's lists (a share and a subfolder among them).
+            NewThreadRecord r;
+            r.listsBuilt = true;
+            r.lists.recent = { NewThreadFolder{ L"K:\\proj", 3, 1000 }, NewThreadFolder{ L"K:\\docs", 2, 900 }, NewThreadFolder{ L"K:\\proj\\sub", 1, 800 } };
+            r.lists.mostUsed = { NewThreadFolder{ L"K:\\shared", 5, 700 }, NewThreadFolder{ L"\\\\nas\\share\\lib", 4, 600 } };
+            r.wizard.folder = L"K:\\proj";
+            EnterNewThreadModelStep(r.wizard, {}, false, L"");
+            r.wizard.notice = L"keep me";
+
+            // Idle: the question, what /add-dir does and when, and the plus.
+            NewThreadView v = BuildNewThreadAddView(r, 2000);
+            CHECK((v.html.find(L"Add another folder to this session?") != std::wstring::npos && v.html.find(L"<code>/add-dir</code>") != std::wstring::npos &&
+                      v.html.find(L"before your first prompt") != std::wstring::npos && v.rows.size() == 1 && ParseNewThreadCallbackData(v.rows[0][0].data).kind == K::AddFolder),
+                  "W16: the plus message at rest: the question, /add-dir before the first prompt, one plus button");
+            NewThreadOutcome out = ApplyNewThreadButton(r, WzPress(v.rows, L"Add a folder"));
+            CHECK((out.kind == O::RenderAdd && r.addStep == NewThreadAddStep::Pick && r.wizard.notice == L"keep me"),
+                  "W16: plus opens the add picker; the PICKER's notice is not the plus message's to clear");
+
+            // Pick: the folder step's lists, the session's folder and a folder inside it marked, Back last.
+            v = BuildNewThreadAddView(r, 2000);
+            CHECK((v.html.find(L"<b>Add a folder</b>") != std::wstring::npos && v.html.find(L"<i>the session\x2019s folder</i>") != std::wstring::npos &&
+                      v.html.find(L"<i>inside the session\x2019s folder</i>") != std::wstring::npos && v.html.find(L"K:\\shared") != std::wstring::npos),
+                  "W16: the add picker shows the folder step's lists, marking the session's folder and one inside it");
+            CHECK((WzPress(v.rows, L"1 \x00B7 proj").kind == K::AddPickRecent && WzPress(v.rows, L"1 \x00B7 shared").kind == K::AddPickUsed &&
+                      ParseNewThreadCallbackData(v.rows.back()[0].data).kind == K::AddBack),
+                  "W16: its folder buttons ask about an extra folder (add kinds), and it ends with Back");
+            out = ApplyNewThreadButton(r, WzPress(v.rows, L"1 \x00B7 proj"));
+            CHECK((out.kind == O::RenderAdd && r.addStep == NewThreadAddStep::Pick && r.addNotice.find(L"own folder") != std::wstring::npos &&
+                      out.text.find(L"own folder") != std::wstring::npos),
+                  "W16: the session's own folder is refused before any check; the picker stays, the reason on top and in the toast");
+            out = ApplyNewThreadButton(r, WzPress(v.rows, L"3 \x00B7 sub"));
+            CHECK((out.kind == O::RenderAdd && r.addNotice.find(L"inside the session") != std::wstring::npos), "W16: a folder inside the session's folder is refused (read already)");
+            out = ApplyNewThreadButton(r, WzPress(v.rows, L"2 \x00B7 lib"));
+            CHECK((out.kind == O::RenderAdd && r.addNotice.find(L"network share") != std::wstring::npos), "W16: a network share is refused unprobed (/add-dir refuses one mid-session)");
+            out = ApplyNewThreadButton(r, WzPress(v.rows, L"2 \x00B7 docs"));
+            CHECK((out.kind == O::CheckAddFolder && out.path == L"K:\\docs" && !out.typed && r.addNotice.empty()), "W16: another folder is checked; the notice goes with the choice");
+
+            // Scope: /add-dir's own three options, verbatim.
+            FolderResolution found;
+            found.kind = FolderResolveKind::Exists;
+            found.path = L"K:\\docs";
+            out = ApplyNewThreadAddFolderResolved(r, found, false);
+            CHECK((out.kind == O::RenderAdd && r.addStep == NewThreadAddStep::Scope && r.addPath == L"K:\\docs" && out.text.empty()), "W16: an addable folder gets the three options");
+            v = BuildNewThreadAddView(r, 2000);
+            CHECK((v.html.find(L"Add <code>K:\\docs</code>?") != std::wstring::npos && v.html.find(L"auto-accept edits") != std::wstring::npos && v.rows.size() == 3 &&
+                      v.rows[0][0].text == L"1 \x00B7 Yes, for this session" && v.rows[1][0].text == L"2 \x00B7 Yes, and remember this directory" &&
+                      v.rows[2][0].text == L"3 \x00B7 No" && v.rows[1][0].data == L"nt:as:2"),
+                  "W16: the three options are /add-dir's own, verbatim, one to a row, in place of the plus");
+            CHECK((ApplyNewThreadButton(r, NewThreadAction{ K::AddFolder, 0 }).kind == O::Stale && ApplyNewThreadButton(r, NewThreadAction{ K::AddPickUsed, 0 }).kind == O::Stale &&
+                      ApplyNewThreadButton(r, NewThreadAction{ K::AddScope, 4 }).kind == O::Stale && ApplyNewThreadButton(r, NewThreadAction{ K::AddScope, 0 }).kind == O::Stale &&
+                      r.addStep == NewThreadAddStep::Scope),
+                  "W16: a button of another add state, or an option outside the three, is stale and changes nothing");
+            out = ApplyNewThreadButton(r, WzPress(v.rows, L"1 \x00B7 Yes, for this session"));
+            CHECK((out.kind == O::RenderAdd && r.addStep == NewThreadAddStep::Idle && r.wizard.extraFolders.size() == 1 && r.wizard.extraFolders[0].path == L"K:\\docs" &&
+                      r.wizard.extraFolders[0].option == 1 && out.text.find(L"docs") != std::wstring::npos && r.addPath.empty()),
+                  "W16: option 1 adds the folder for this session at once (no confirmation), and the plus comes back");
+            v = BuildNewThreadAddView(r, 2000);
+            CHECK((v.html.find(L"<b>1</b> <code>K:\\docs</code> \x00B7 for this session") != std::wstring::npos && WzPress(v.rows, L"Add another folder").kind == K::AddFolder &&
+                      WzPress(v.rows, L"1 \x00B7 docs").kind == K::AddRemove),
+                  "W16: the plus message lists what was added, a remove button each, and the plus again");
+
+            // Remember: confirmed first, Back returns to the three options.
+            ApplyNewThreadButton(r, NewThreadAction{ K::AddFolder, 0 });
+            found.path = L"K:\\shared";
+            ApplyNewThreadAddFolderResolved(r, found, false);
+            out = ApplyNewThreadButton(r, NewThreadAction{ K::AddScope, 2 });
+            CHECK((out.kind == O::RenderAdd && r.addStep == NewThreadAddStep::Confirm && r.wizard.extraFolders.size() == 1), "W16: option 2 (remember it) asks first - nothing is added yet");
+            v = BuildNewThreadAddView(r, 2000);
+            CHECK((v.html.find(L"Remember <code>K:\\shared</code>?") != std::wstring::npos && v.html.find(L"<code>K:\\proj\\.claude\\settings.local.json</code>") != std::wstring::npos &&
+                      v.html.find(L"<b>every</b> session started in <b>proj</b>") != std::wstring::npos && WzPress(v.rows, L"Yes, remember it").kind == K::AddConfirm &&
+                      WzPress(v.rows, L"Back").kind == K::AddBack),
+                  "W16: the confirmation names the settings file Claude Code writes, and that every later session in the folder reads it");
+            out = ApplyNewThreadButton(r, NewThreadAction{ K::AddBack, 0 });
+            CHECK((out.kind == O::RenderAdd && r.addStep == NewThreadAddStep::Scope && r.addPath == L"K:\\shared"), "W16: Back from the confirmation: the three options, the same folder");
+            ApplyNewThreadButton(r, NewThreadAction{ K::AddScope, 2 });
+            out = ApplyNewThreadButton(r, NewThreadAction{ K::AddConfirm, 0 });
+            CHECK((out.kind == O::RenderAdd && r.addStep == NewThreadAddStep::Idle && r.wizard.extraFolders.size() == 2 && r.wizard.extraFolders[1].path == L"K:\\shared" &&
+                      r.wizard.extraFolders[1].option == 2),
+                  "W16: Yes adds it to be remembered, and the plus comes back");
+            CHECK((BuildNewThreadAddView(r, 2000).html.find(L"<code>K:\\shared</code> \x00B7 \U0001F4CC remembered") != std::wstring::npos), "W16: a remembered folder is listed as such");
+
+            // No, and the add picker's Back: nothing is added.
+            ApplyNewThreadButton(r, NewThreadAction{ K::AddFolder, 0 });
+            found.path = L"K:\\other";
+            ApplyNewThreadAddFolderResolved(r, found, false);
+            out = ApplyNewThreadButton(r, NewThreadAction{ K::AddScope, 3 });
+            CHECK((out.kind == O::RenderAdd && r.addStep == NewThreadAddStep::Idle && r.wizard.extraFolders.size() == 2 && r.addPath.empty()), "W16: No cancels the add; the plus comes back");
+            ApplyNewThreadButton(r, NewThreadAction{ K::AddFolder, 0 });
+            out = ApplyNewThreadButton(r, NewThreadAction{ K::AddBack, 0 });
+            CHECK((out.kind == O::RenderAdd && r.addStep == NewThreadAddStep::Idle), "W16: Back from the add picker cancels too");
+
+            // The check's other answers: a duplicate in another spelling, a missing folder (typed, listed), no answer.
+            ApplyNewThreadButton(r, NewThreadAction{ K::AddFolder, 0 });
+            found.path = L"k:/DOCS";
+            out = ApplyNewThreadAddFolderResolved(r, found, true);
+            CHECK((out.kind == O::RenderAdd && r.addStep == NewThreadAddStep::Pick && r.addNotice.find(L"added already") != std::wstring::npos),
+                  "W16: a folder added already (any case, any slash) is refused");
+            FolderResolution missing;
+            missing.kind = FolderResolveKind::Missing;
+            missing.path = L"K:\\nothere";
+            out = ApplyNewThreadAddFolderResolved(r, missing, true);
+            CHECK((out.kind == O::RenderAdd && r.addStep == NewThreadAddStep::Pick && r.addNotice.find(L"does not exist") != std::wstring::npos && r.listsBuilt),
+                  "W16: a typed folder that does not exist is refused (never offered for creation here)");
+            out = ApplyNewThreadAddFolderResolved(r, missing, false);
+            CHECK((out.kind == O::RenderAdd && r.addNotice.find(L"gone") != std::wstring::npos && !r.listsBuilt), "W16: a listed folder that is gone: the lists are read again");
+            r.listsBuilt = true;
+            FolderResolution slow;
+            slow.kind = FolderResolveKind::NoAnswer;
+            slow.path = L"K:\\slow";
+            ApplyNewThreadAddFolderResolved(r, slow, true);
+            CHECK((r.addNotice.find(L"did not answer") != std::wstring::npos), "W16: a folder that did not answer: said so");
+
+            // A typed folder: while the plus message asks, it is the extra folder; at rest, the session's folder (21.25 as before).
+            out = ApplyNewThreadText(r, L"K:/brand");
+            CHECK((out.kind == O::CheckAddFolder && out.typed && out.path == L"K:\\brand"), "W16: while the plus message asks, a typed folder is the EXTRA folder");
+            out = ApplyNewThreadText(r, L"\\\\nas\\share\\x");
+            CHECK((out.kind == O::RenderAdd && r.addStep == NewThreadAddStep::Pick && r.addNotice.find(L"network share") != std::wstring::npos), "W16: a typed share is refused before any check");
+            ApplyNewThreadAddFolderResolved(r, found, false); // K:\DOCS spelled oddly: refused as a duplicate, still at the picker
+            found.path = L"K:\\brand";
+            ApplyNewThreadAddFolderResolved(r, found, true);
+            CHECK((r.addStep == NewThreadAddStep::Scope && r.addPath == L"K:\\brand"), "W16: a typed folder that exists gets the three options");
+            out = ApplyNewThreadText(r, L"K:\\brand2");
+            CHECK((out.kind == O::CheckAddFolder && out.path == L"K:\\brand2"), "W16: a folder typed while the options are up replaces the one asked about");
+            ApplyNewThreadButton(r, NewThreadAction{ K::AddScope, 3 });
+            out = ApplyNewThreadText(r, L"K:\\elsewhere");
+            CHECK((out.kind == O::CheckFolder && out.typed && out.path == L"K:\\elsewhere"), "W16: with the plus message at rest, a typed folder changes the SESSION's folder (as before)");
+            CHECK((ApplyNewThreadText(r, L"please read both folders").kind == O::Hold), "W16: words are the user's message, held, whatever the plus message shows");
+
+            // Remove: the one named, nothing else.
+            out = ApplyNewThreadButton(r, NewThreadAction{ K::AddRemove, 0 });
+            CHECK((out.kind == O::RenderAdd && r.wizard.extraFolders.size() == 1 && r.wizard.extraFolders[0].path == L"K:\\shared" && out.text.find(L"docs") != std::wstring::npos),
+                  "W16: a remove button takes that folder off the list");
+            CHECK((ApplyNewThreadButton(r, NewThreadAction{ K::AddRemove, 5 }).kind == O::Stale && r.wizard.extraFolders.size() == 1), "W16: a remove index past the list is stale");
+
+            // The command the session gets: unquoted (Claude Code takes the whole rest as the path), read back as the path.
+            const NewThreadExtraFolder spaced{ L"K:\\my docs", 2 };
+            std::wstring args;
+            CHECK((NewThreadAddDirCommand(spaced) == L"/add-dir K:\\my docs" && ParseAddDirCommandText(NewThreadAddDirCommand(spaced), args) && args == L"K:\\my docs"),
+                  "W16: the session's command is /add-dir with the path unquoted, and the menu watch reads the same path back");
+            CHECK((NewThreadRememberSettingsFile(L"K:\\proj") == L"K:\\proj\\.claude\\settings.local.json" && NewThreadRememberSettingsFile(L"K:\\") == L"K:\\.claude\\settings.local.json"),
+                  "W16: where a remembered folder is saved");
+
+            // The launch line names the extra folders, the remembered one marked.
+            r.wizard.extraFolders.insert(r.wizard.extraFolders.begin(), NewThreadExtraFolder{ L"K:\\docs", 1 });
+            r.wizard.modelChosen = true;
+            const NewThreadLaunchPlan plan = BuildNewThreadLaunchPlan(r);
+            CHECK((plan.summaryText.find(L"in proj + docs, \U0001F4CC shared") != std::wstring::npos && plan.summaryHtml.find(L"+ <b>docs</b>, \U0001F4CC <b>shared</b>") != std::wstring::npos &&
+                      plan.dir == L"K:\\proj"),
+                  "W16: the launch line names the extra folders (the remembered one marked); the launch itself is the session's folder");
+
+            // A new session folder drops the extra folders it equals or holds; Back to the folders keeps the list but ends a half-made add.
+            NewThreadRecord pr = r;
+            pr.addStep = NewThreadAddStep::Pick;
+            out = ApplyNewThreadButton(pr, NewThreadAction{ K::BackToFolders, 0 });
+            CHECK((out.kind == O::Render && pr.wizard.step == NewThreadStep::Folder && pr.addStep == NewThreadAddStep::Idle && pr.wizard.extraFolders.size() == 2),
+                  "W16: Back to the folders ends the add flow and keeps the folders added");
+            v = BuildNewThreadAddView(pr, 2000);
+            CHECK((v.rows.empty() && v.html.find(L"own folder below first") != std::wstring::npos && v.html.find(L"<code>K:\\docs</code>") != std::wstring::npos),
+                  "W16: at the folder step the plus message is inert: no button, what was added, the session's folder first");
+            CHECK((ApplyNewThreadButton(pr, NewThreadAction{ K::AddFolder, 0 }).kind == O::Stale), "W16: a plus tapped at the folder step is stale");
+            FolderResolution parent;
+            parent.kind = FolderResolveKind::Exists;
+            parent.path = L"K:\\";
+            out = ApplyNewThreadFolderResolved(pr, parent, true);
+            CHECK((out.kind == O::EnterModel && pr.wizard.extraFolders.empty() && pr.addNotice.find(L"taken off") != std::wstring::npos &&
+                      pr.addNotice.find(L"K:\\docs") != std::wstring::npos),
+                  "W16: a session folder that holds the added folders drops them, and the plus message says so");
+            NewThreadRecord sib = r;
+            parent.path = L"K:\\docs";
+            ApplyNewThreadFolderResolved(sib, parent, true);
+            CHECK((sib.wizard.extraFolders.size() == 1 && sib.wizard.extraFolders[0].path == L"K:\\shared"), "W16: the one the new session folder equals goes; the others stay");
+
+            // Full: no plus, and the list says so; the extra-folder check refuses an eleventh.
+            NewThreadRecord full;
+            full.wizard.folder = L"K:\\proj";
+            full.wizard.step = NewThreadStep::Window;
+            for (size_t i = 0; i < kNewThreadExtraFoldersMax; ++i)
+            {
+                full.wizard.extraFolders.push_back(NewThreadExtraFolder{ L"K:\\f" + std::to_wstring(i), 1 });
+            }
+            v = BuildNewThreadAddView(full, 2000);
+            CHECK((WzPress(v.rows, L"Add").kind == K::None && v.html.find(L"the most this message adds") != std::wstring::npos && v.rows.size() == (kNewThreadExtraFoldersMax + 1) / 2),
+                  "W16: full: no plus, the line says why, and a remove button for each folder, two to a row");
+            CHECK((ApplyNewThreadButton(full, NewThreadAction{ K::AddFolder, 0 }).kind == O::Toast && full.addStep == NewThreadAddStep::Idle &&
+                      NewThreadExtraFolderProblem(full.wizard, L"K:\\new").find(L"At most") != std::wstring::npos),
+                  "W16: full: a plus still on an older keyboard answers with a toast; the check refuses one more");
+
+            // An unchanged render has the same key (no call); any change makes another.
+            CHECK((NewThreadViewKey(BuildNewThreadAddView(r, 2000)) == NewThreadViewKey(BuildNewThreadAddView(r, 2000))), "W16: the same view, the same key");
+            NewThreadRecord changed = r;
+            changed.addNotice = L"x";
+            CHECK((NewThreadViewKey(BuildNewThreadAddView(r, 2000)) != NewThreadViewKey(BuildNewThreadAddView(changed, 2000))), "W16: a changed view, another key");
+
+            // Persistence: the record and the bind keep the add flow and the folders; a file of another build loses nothing it could misread.
+            NewThreadRecord saved = r;
+            saved.addMessageId = 4242;
+            saved.addStep = NewThreadAddStep::Confirm;
+            saved.addPath = L"K:\\pending";
+            saved.addRecentPage = 0;
+            saved.addNotice = L"note";
+            const auto back = NewThreadRecordFromJson(NewThreadRecordToJson(77, saved));
+            CHECK((back && back->first == 77 && back->second.addMessageId == 4242 && back->second.addStep == NewThreadAddStep::Confirm && back->second.addPath == L"K:\\pending" &&
+                      back->second.addNotice == L"note" && back->second.wizard.extraFolders.size() == 2 && back->second.wizard.extraFolders[1].option == 2 &&
+                      back->second.wizard.extraFolders[0].path == L"K:\\docs"),
+                  "W16: the record round-trips the plus message (its id, state, folder asked about, notice) and the extra folders");
+            NewThreadRecord inFlight = saved;
+            inFlight.addMessageId = -1;
+            CHECK((NewThreadRecordFromJson(NewThreadRecordToJson(78, inFlight))->second.addMessageId == 0), "W16: a post in flight is saved as not posted (the next render posts it)");
+            json::Value garbled = NewThreadRecordToJson(79, saved);
+            for (auto& [key, value] : garbled.members)
+            {
+                if (key == L"addPath")
+                {
+                    value = json::Value::MkStr(L"");
+                }
+                if (key == L"wizard")
+                {
+                    for (auto& [wk, wv] : value.members)
+                    {
+                        if (wk == L"extraFolders")
+                        {
+                            auto three = json::Value::MkObj();
+                            three.Set(L"path", json::Value::MkStr(L"K:\\no"));
+                            three.Set(L"option", json::Value::MkNum(3));
+                            wv.Push(std::move(three));
+                            auto pathless = json::Value::MkObj();
+                            pathless.Set(L"option", json::Value::MkNum(1));
+                            wv.Push(std::move(pathless));
+                        }
+                    }
+                }
+            }
+            const auto g = NewThreadRecordFromJson(garbled);
+            CHECK((g && g->second.addStep == NewThreadAddStep::Idle && g->second.wizard.extraFolders.size() == 2),
+                  "W16: a state asking about no folder reads as the plus; an option nobody can choose, or no path, is skipped");
+            json::Value legacy = NewThreadRecordToJson(80, saved);
+            legacy.members.erase(std::remove_if(legacy.members.begin(), legacy.members.end(), [](const auto& m) { return m.first.rfind(L"add", 0) == 0; }), legacy.members.end());
+            for (auto& [key, value] : legacy.members)
+            {
+                if (key == L"wizard")
+                {
+                    value.members.erase(std::remove_if(value.members.begin(), value.members.end(), [](const auto& m) { return m.first == L"extraFolders"; }), value.members.end());
+                }
+            }
+            const auto old = NewThreadRecordFromJson(legacy);
+            CHECK((old && old->second.addMessageId == 0 && old->second.addStep == NewThreadAddStep::Idle && old->second.wizard.extraFolders.empty() &&
+                      old->second.wizard.folder == L"K:\\proj"),
+                  "W16: a record saved before the plus message reads as not posted, at rest, no folders added");
+            NewThreadBind bind;
+            bind.sessionId = L"s1";
+            bind.threadId = 9;
+            bind.wizard = r.wizard;
+            const auto bindBack = NewThreadBindFromJson(NewThreadBindToJson(bind));
+            CHECK((bindBack && bindBack->wizard.extraFolders.size() == 2 && bindBack->wizard.extraFolders[1].path == L"K:\\shared"),
+                  "W16: a launch waiting for its session keeps the extra folders across a restart (the bind sends them once it is live)");
+        }
     }
 }
 

@@ -797,6 +797,7 @@ namespace Agentmaster::Msg
         Telegram, // a tap on the card
         Auto, // the clock: kTuiMenuAutoAnswerMs passed with no answer
         Pc, // the PC (a key in the terminal), or anything the card did not press
+        Wizard, // MESSAGING.md §21.25.9: chosen in a new thread's ➕ message before the session started (the watch's preset)
     };
 
     /// <summary>What a menu card shows (the service keeps one per watched /add-dir that opened its dialog).</summary>
@@ -907,6 +908,9 @@ namespace Agentmaster::Msg
                 return L"\x23F1\xFE0F picked by itself after " + std::to_wstring(kTuiMenuAutoAnswerMs / 1000) + L" s";
             case AddDirAnswerer::Pc:
                 return L"answered at the PC";
+            case AddDirAnswerer::Wizard:
+                // §21.25.9: the ➕ message's choice, made before the session existed — said so, since nobody tapped this card.
+                return L"chosen when this thread was opened";
             case AddDirAnswerer::None:
             default:
                 return {};
@@ -943,9 +947,11 @@ namespace Agentmaster::Msg
         case AddDirCardPhase::Answering:
         {
             const AddDirOption* o = AddDirOptionFor(m.pressed);
+            // Who chose what is being pressed, when it was not a tap on this card: the clock, or (§21.25.9) a new thread's ➕ message.
+            const bool chosenElsewhere = m.pressedBy == AddDirAnswerer::Auto || m.pressedBy == AddDirAnswerer::Wizard;
             return L"\x23F3 <b>Answering</b> \x00B7 <b>" + TgEscapeHtml(o ? o->label : std::wstring_view{ L"?" }) + L"</b>" +
-                   (m.pressedBy == AddDirAnswerer::Auto ? L" <i>(" + AnswererPhrase(AddDirAnswerer::Auto) + L")</i>" : std::wstring{}) + L"\n<i>" +
-                   std::wstring{ kAddDirMenuTitle } + L"</i>" + PathLine(m.path);
+                   (chosenElsewhere ? L" <i>(" + AnswererPhrase(m.pressedBy) + L")</i>" : std::wstring{}) + L"\n<i>" + std::wstring{ kAddDirMenuTitle } + L"</i>" +
+                   PathLine(m.path);
         }
         case AddDirCardPhase::Answered:
         {
