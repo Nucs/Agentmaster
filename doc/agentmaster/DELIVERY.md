@@ -1271,10 +1271,11 @@ the runner's mode (§12).
   or "the runner stays **Auto**.". The verdicts that pause it (the lost send, the Enter-retry give-up, the merge)
   set Off in the same registry update that sets Failed.
 
-**Still open:** the Enter-retry rescue (`DecideEnterRetry`'s draft guard and `_PressEnterForWatchedPrompt`) compares
-the box with `DraftMatchesPromptText`, so it never presses into ANY collapsed render of our prompt, counted or bare: a
-verified fill whose Enter claude then eats ends in the lost-send verdict instead of the rescue. Loosening that guard
-trades against its RC3 protection of the user's own draft, so it is a decision of its own.
+**Closed by §20:** the Enter-retry rescue (`DecideEnterRetry`'s draft guard and `_PressEnterForWatchedPrompt`)
+compared the box with `DraftMatchesPromptText` alone, so it never pressed into ANY collapsed render of our prompt,
+counted or bare: a verified fill whose Enter claude then ate ended in the lost-send verdict instead of the rescue.
+§20 records the placeholder each collapsed commit verified (with claude's paste number, so the RC3 protection of the
+user's own draft holds) and lets the rescue press into exactly that.
 
 **Tests:** `TestPendingPaste` (tests_summary_anchor.cpp: the bare grammar with its fragments, no bare truncated form,
 the cache never answering a zero count, the annotation, the refused expansion) and `TestVerifiedPlacement`
@@ -1284,3 +1285,83 @@ and the undo's press or refusal).
 
 **Live check after the build:** a Telegram message longer than 800 characters with no line break (or a voice note)
 → `[delivered] <sid8> prompt <id8> (chars=…, verified=collapsed)`, the reaction 👨‍💻, and no `[send-verify] FOREIGN`.
+
+**Verified on the build server:** the 2026-11-03 e2e gate on build `b20261103-1` (89cbb9e26) ran PQR-K11's
+known-defect test, which asserts the old failure; it failed because the 2,000-character one-line prompt was delivered.
+
+## 20. The send cycle for a COLLAPSED prompt — the committed render, the forecast, the journal, the late-draw grace (2026-11-03, NOT BUILT yet)
+
+**The report (2026-11-03, the release instance 0.8.0.2):** "When I send a long message on Telegram or a voice message
+that gets transcribed to a long message, we get `[Pasted text #1 +31 lines]` pasted instead of the text", then the
+topic said "↩ Not sent now: the session's input box could not take it at once" (a `/steer`) and "👎 not delivered —
+the prompt never became a message". The user asked for the autorunner's flow, as a cycle: *my input is X — did we
+achieve X inside the input box — if we did, press Enter — did the message disappear or change, and are we now
+running.*
+
+**What the trail showed** (release `hooks.log`, 2026-11-03 21:16–21:49; sessions `00c6c0af`, `fab5ea7a`, `a4c6ff8e`,
+`cd34ab6c`): every failure was §19's. One-line voice transcripts of 989–2,803 characters were drawn as the bare
+`[Pasted text #N]`, read back as FOREIGN twice and Failed; 0.8.0.2 predates §19 (81683c34b, bc9988b8b). The `/steer`
+of 21:30:25 went through the same seam (`SessionRegistry::SubmitPrompt`): the draft swap stashed the user's
+32-character draft with Ctrl+S as it should, the verify refused the bare marker, the prompt went back to Pending (the
+"Not sent now" notice — `SteerDecline::Other`: nothing the decline leaves explains it), failed on its second fill, and
+the swap's restore popped the draft back. No multi-line prompt failed: the 34 `verified=collapsed` deliveries in the
+same log were all echo-consumed. So the cycle the user asked for is the verified send's own; this section makes each
+of its steps recognize X when claude shows X as a placeholder.
+
+**The cycle, step by step:**
+1. **The forecast** (`ForecastFillPlaceholder`, `PlaceholderCountMatchesForecast`, SessionModels.h): the placeholder
+   claude will draw for OUR fill, worked out from the fill as claude stores it (`PromptFillBody`, then claude's paste
+   normalization) — whether it collapses, and its exact `+M lines` count. The read-back verify and the Foreign undo
+   accept that count beside the two counting conventions they already knew, so a prompt ending in line breaks (claude
+   counts them; the trimmed compare did not) is no longer foreign. Evaluated last, after the cheap compares.
+2. **The journal** (PENDING_INPUT.md §2c): `_InjectPromptVerified` journals each fill before it types it
+   (`NotePastedText(PromptFillBody(text))`), so a placeholder of it that stays in the box (an eaten Enter, a refused
+   or aborted delivery) expands to the real text in Copy Current Prompt, the stored draft and a fork's carry. The fill
+   leaves the journal again through `SessionRegistry::ForgetPastedText`: in both echo consumes (`OnHookEvent`'s push,
+   `NoteExternalPrompt`'s pull) once the prompt became a message, and on the Foreign path once the undo took the fill
+   out. The scan's own prune never sees a send's fill — it skips a session while its delivery holds the box, and the
+   fill is gone before the next scan — so without the forget the fills of every successful send would pile up and an
+   old one could be handed to a new placeholder whose paste went unrecorded (a dropped text).
+3. **The late-draw grace** (`kSendVerifyLateDrawGraceMs`, 3 s, TerminalPage.AgentObserver.cpp): a box still EMPTY when
+   the 1.5 s settle ends gets one more settle, from a fresh anchor, before the fill is judged eaten and typed again.
+   The 2026-11-03 e2e gate (`b20261103-1`) saw "eaten" verdicts under load re-fill prompts that claude then drew twice
+   or three times (`fills=2` merged into one message; three copies refused as foreign). A paste claude really ate never
+   shows, so the grace costs that rare case 3 s per fill. Logged `[send-verify] <sid8> fill N/3 drew late (…)` when it
+   saw the fill.
+4. **The commit and the COMMITTED RENDER** (`QueuedPrompt::committedRender`, transient): a collapsed commit records the
+   placeholder the read-back verified (`MarkPromptInjected(id, promptId, box)`) and names it in the log:
+   `[delivered] <sid8> prompt <id8> (chars=…, verified=collapsed, as="[Pasted text #3]")`. It is read only through
+   `TrustedCommittedRender`: at most `kCommittedRenderTrustMs` (60 s) after the injection stamp, and never once a fresh
+   send has reset that stamp. Every injection overwrites it (an exact commit records ""); `RollbackPromptToPending`
+   clears it.
+5. **Did it leave the box, and are we running?** The draft swap's submit wait (its step 6) counts the prompt as gone
+   only when the box holds neither its text nor its committed placeholder (`BoxShowsCommittedRender`). Before, a
+   placeholder still in the box read as gone, and a `/steer` into a running turn (whose "turn started" test is true at
+   once) went on to restore the user's draft over the un-submitted placeholder.
+6. **If it did not leave, Enter again:** the Enter rescue — `DecideEnterRetry`'s draft guard on the scan's read, and
+   `_PressEnterForWatchedPrompt` on a live read — presses when the box holds the prompt's text OR its trusted committed
+   placeholder (`BoxHoldsCommittedFill`; `[enter-retry] … verified press (box holds the placeholder the watched prompt
+   committed as)`). That closes §19's open item. A placeholder with another paste number is a paste of the user's and
+   still blocks the press, as any other draft does.
+
+**Why the paste number identifies our fill, and for how long.** Claude numbers each paste past the numbers its box and
+paste store still hold — `#1`, `#2`, `#3`, `#4` across the `00c6c0af` attempts, none of them submitted — so while our
+fill sits in the box no other paste carries its number. Once the box has emptied, a later paste may be numbered alike;
+the 60 s trust window bounds that, and every reader acts well inside it (the rescue presses ~3 s, ~9 s and ~15 s
+after the send; the swap waits at most 18 s).
+
+**Not changed:** the steer's "Not sent now" wording (`SteerDecline::Other` still names a refused verify — rarer now)
+and the 👎 line.
+
+**Tests:** `TestVerifiedPlacement` (tests_spawn_sched.cpp, the §20 block): the forecast (inline, bare, CRLF, the
+newline threshold, trailing line breaks), the verify and the undo under it, the trust window (fresh, at its end, past
+it, a future stamp, a reset stamp), the render compare (a soft wrap, another number, another shape, text beside it,
+nothing recorded), `DecideEnterRetry` (our placeholder → Retry; another number, no render, past the window, a human
+draft → Waiting), `MarkPromptInjected` / `RollbackPromptToPending`, `ForgetPastedText`, and both echo consumes
+forgetting the fill. e2e: PQR-K11's known-defect test became
+`test_a_long_single_line_prompt_goes_whole_as_one_message`, which also requires the `as="[Pasted text #N]"` note.
+
+**Live check after the build:** a voice note or a Telegram message over 800 characters → `[delivered] <sid8> prompt
+<id8> (chars=…, verified=collapsed, as="[Pasted text #N]")`, the reaction 👨‍💻, no `[send-verify] FOREIGN`, no 👎. A
+`/steer` of one into a running session with a draft in the box → `[draft-swap] … holding an unsent draft`, the same
+`[delivered]` line, and the draft back in the box.

@@ -371,7 +371,8 @@ namespace Agentmaster
         // Agentmaster (PENDING_INPUT.md §2c — the PASTE JOURNAL): record a paste Agentmaster itself just
         // delivered into this session's input box — a user clipboard paste (TerminalPage's paste handler)
         // or one of our own no-submit box fills (the §10 re-fill, the /handover-standby fill, the §9
-        // swap's re-paste fallback, the §11 fork carry). Current Claude Code keeps an unsent paste ONLY in
+        // swap's re-paste fallback, the §11 fork carry) or the verified send's fill (DELIVERY.md §20; it
+        // leaves again through ForgetPastedText once its prompt is echoed). Current Claude Code keeps an unsent paste ONLY in
         // its own process memory (the paste-cache is written at SUBMIT time), so this journal is the one
         // place a draft's "[Pasted text #N +M lines]" placeholder can be resolved back to its content —
         // what makes a fork carry, a Copy Current Prompt and the §8c store see the real text.
@@ -403,6 +404,25 @@ namespace Agentmaster
         // placeholder whose own paste went unrecorded (a drag-dropped text). Thread-safe, idempotent.
         //   id — the session.
         void ClearPasteJournal(const std::wstring& id);
+
+        // Agentmaster (DELIVERY.md §20): forget ONE paste — the newest journal entry equal to `rawText` once
+        // normalized the way NotePastedText stores it. The verified send journals each fill it types (so a
+        // placeholder of it left in the box after a failed or eaten submit still expands to the real text),
+        // and the fill must leave the journal once its prompt became a message: the scan's prune
+        // (ClearPasteJournal on the box's confirmed clear) never sees a send's fill — the scan skips a
+        // session while its delivery holds the box, and the fill is gone before the next scan — so without
+        // this the fills of every successful send would pile up, and an old one could later be handed to a
+        // NEW placeholder whose own paste went unrecorded (a dropped text). Called by both echo consumes
+        // (OnHookEvent's push, NoteExternalPrompt's pull) for the prompt they marked echoed.
+        // ⚠ Content-addressed, like NotePastedText's de-dupe: a user's own paste of the very same text is
+        // one entry with ours, and goes with it. QUIET. A no-op for an unknown session, a text claude would
+        // never collapse (never recorded) or one not in the journal. Thread-safe; takes the registry lock,
+        // so never call it from inside an Update mutator or with the lock held.
+        //   id      — the session.
+        //   rawText — the text as it was pasted (normalized here exactly as NotePastedText does).
+        //   throws  — std::bad_alloc when the normalization's copy cannot be allocated (nothing is removed
+        //             then); std::system_error from the registry mutex's lock.
+        void ForgetPastedText(const std::wstring& id, const std::wstring& rawText);
 
         // Agentmaster (§2c): move a session's journal onto another id (appended after the target's own
         // entries) — the restore-FRESH re-key, where the reopened draft memory moves to a newly minted
@@ -554,7 +574,19 @@ namespace Agentmaster
         // for an unknown id/prompt or one no longer Sent. This is what lets the lost-send verdict
         // (DecideLostSend) tell "delivered but vanished" from "accepted but never yet delivered"
         // (DecideUndeliveredReclaim) instead of failing a slow delivery one second past gate expiry.
-        void MarkPromptInjected(const std::wstring& id, const std::wstring& promptId);
+        // DELIVERY.md §20: the same stamp records QueuedPrompt::committedRender — the placeholder the
+        // verified fill was read back as when claude drew it collapsed, "" for every other injection —
+        // so the Enter rescue and the draft swap's submit wait can recognize that placeholder as the
+        // prompt still sitting in the box. Every injection overwrites it (an exact commit clears what an
+        // earlier attempt recorded).
+        //   id              — the session.
+        //   promptId        — the prompt whose bytes just reached the ConPTY ("" is a no-op).
+        //   committedRender — the verified read-back of a collapsed fill (the box text, e.g.
+        //                     "[Pasted text #3 +31 lines]"); "" for an exact commit and every unverified path.
+        //   throws          — std::bad_alloc when the render's copy cannot be allocated (the stamp is then
+        //                     already written; the render keeps its previous value); std::system_error
+        //                     from the registry mutex's lock.
+        void MarkPromptInjected(const std::wstring& id, const std::wstring& promptId, const std::wstring& committedRender = {});
 
         // Return a Sent prompt to Pending — the shared body of the Rule-#4 rollback every send path
         // already performed inline, now also reachable from the hosting window when an accepted

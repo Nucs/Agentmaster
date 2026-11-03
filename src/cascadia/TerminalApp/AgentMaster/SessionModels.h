@@ -488,6 +488,26 @@ namespace Agentmaster
         // delivered" (retryable — reclaimed to Pending). Reset to 0 at each fresh send/rollback;
         // deliberately NOT reset by an Enter-retry press (the fill it retries WAS injected).
         int64_t injectedAtUnixMs{ 0 };
+        // Agentmaster (DELIVERY.md §20 — the COMMITTED RENDER): what the input box showed of THIS prompt at the
+        // moment its verified fill committed the submit Enter, when claude drew that fill as a PLACEHOLDER: the
+        // exact read-back, e.g. "[Pasted text #3 +31 lines]", or the bare "[Pasted text #2]" of a long one-line
+        // voice note. "" when the fill read back as its own text (an exact commit: the prompt's text itself then
+        // identifies it in the box) and for every send that did not go through the verified fill.
+        // WHY: after the Enter, "is our prompt still sitting in the box?" must be answerable for a placeholder
+        // too. The Enter rescue (DecideEnterRetry's draft guard, the hosting window's verified presser) and the
+        // draft swap's submit wait compared the box with the prompt's TEXT, which a placeholder never equals, so
+        // an Enter claude ate after a collapsed fill was never pressed again (the lost-send verdict failed the
+        // prompt instead — DELIVERY.md §19 "Still open"), and the swap could read a stuck placeholder as "gone"
+        // and restore the user's draft on top of it. The render carries claude's paste NUMBER (#N), which tells
+        // our placeholder from a paste of the user's that has the same line count.
+        // ⚠ Read it ONLY through TrustedCommittedRender: claude numbers pastes from what its box and paste store
+        // still hold, so once our fill has left the box a later paste can carry the same "#N"; the render
+        // identifies our fill only for kCommittedRenderTrustMs after injectedAtUnixMs, and never once a fresh
+        // send has reset that stamp to 0.
+        // Written by SessionRegistry::MarkPromptInjected at the verified commit (overwritten by every injection,
+        // so an exact commit clears an older value) and cleared by RollbackPromptToPending.
+        // TRANSIENT (NOT persisted — Persistence.cpp must not write it; a restored prompt has no box to be in).
+        std::wstring committedRender;
         // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): when this prompt ENTERED the queue as
         // waiting work (system-clock ms; 0 == not stamped yet). The Tests Autorunner types a prompt in
         // only once the session has held a sendable status for the whole settle window, counted from
@@ -984,6 +1004,51 @@ namespace Agentmaster
         return ClaudePasteNewlineCount(pasted) == 0 && ClaudeWouldCollapsePaste(pasted);
     }
 
+    // Agentmaster (DELIVERY.md §20 — the FORECAST): what claude will draw in its box for OUR fill of a prompt,
+    // worked out before anything is typed. The read-back verify and the Foreign undo compare a placeholder's
+    // "+M lines" with the prompt's TRIMMED text under the two counting conventions ever observed (newlines or
+    // segments); claude, however, counts the line breaks of the fill exactly as it stores it, trailing ones
+    // included, so a prompt that ends in two or more line breaks drew a count neither convention produced and
+    // its own placeholder read as foreign. The forecast is that exact count, an additional accepted value
+    // beside the two conventions — never a replacement for them (a claude that counts segments still verifies).
+    struct FillPlaceholderForecast
+    {
+        bool collapses{ false }; // claude shows the fill as a placeholder rather than as its text
+        size_t lines{ 0 }; // the "+M lines" count the placeholder carries (0 = the bare "[Pasted text #N]"); read it only when `collapses`
+    };
+
+    // Forecast claude's placeholder for OUR fill of `promptText`: the fill as claude stores it (PromptFillBody,
+    // then NormalizePastedTextLikeClaude: CRLF/CR -> LF, TAB -> four spaces), collapsed when ClaudeWouldCollapsePaste
+    // says so, its count ClaudePasteNewlineCount — the same three rules PromptFillCollapsesToBareMarker applies to
+    // the bare form, here for every form. Costs one sanitize + one normalization of the text: call it only after
+    // the cheap convention compares failed (VerifyFillAgainstPrompt and DecideSendUndo short-circuit to it).
+    //   promptText — the queued text exactly as BuildPromptFill receives it (unsanitized: this applies
+    //                PromptFillBody itself, so the forecast matches what is actually pasted).
+    //   returns    — whether claude collapses that fill, and the count it writes when it does.
+    //   throws     — std::bad_alloc on allocation failure only (the sanitize's and the copies' only failure mode).
+    inline FillPlaceholderForecast ForecastFillPlaceholder(std::wstring_view promptText)
+    {
+        const std::wstring pasted = NormalizePastedTextLikeClaude(PromptFillBody(promptText));
+        return FillPlaceholderForecast{ ClaudeWouldCollapsePaste(pasted), ClaudePasteNewlineCount(pasted) };
+    }
+
+    // Does a placeholder's "+M lines" count equal the count claude writes for OUR fill of `promptText`
+    // (ForecastFillPlaceholder)? False whenever claude would not collapse that fill at all: a placeholder can
+    // then never be ours, whatever its count says.
+    //   markerLines — the placeholder's M (PasteMarker::lines; 0 for the bare form).
+    //   promptText  — the queued text exactly as BuildPromptFill receives it.
+    //   returns     — true when the forecast collapses and its count is `markerLines`.
+    //   throws      — std::bad_alloc on allocation failure only.
+    inline bool PlaceholderCountMatchesForecast(int markerLines, std::wstring_view promptText)
+    {
+        if (markerLines < 0)
+        {
+            return false; // no parsed marker carries a negative count; refuse rather than wrap it into a huge size_t
+        }
+        const auto forecast = ForecastFillPlaceholder(promptText);
+        return forecast.collapses && static_cast<size_t>(markerLines) == forecast.lines;
+    }
+
     inline FillVerify VerifyFillAgainstPrompt(std::wstring_view boxText, std::wstring_view promptText)
     {
         using namespace verify_detail;
@@ -1016,9 +1081,12 @@ namespace Agentmaster
             {
                 // WHOLE-COLLAPSE: the marker must be the box's ONLY visible content (fragments /
                 // other lines would be content the prompt does not explain), and its M must match
-                // the prompt under either observed counting convention (PendingPaste.h). A BARE marker
-                // (M == 0) matches every one-line prompt by count, so it also needs claude to render
-                // THIS fill bare: no line break and over 800 characters (§19) — never a short prompt.
+                // the prompt under either observed counting convention (PendingPaste.h) or the exact
+                // count claude writes for this fill (§20: PlaceholderCountMatchesForecast — the count of
+                // the UNTRIMMED fill, so a prompt ending in line breaks still verifies; evaluated last, the
+                // two cheap compares short-circuit it). A BARE marker (M == 0) matches every one-line
+                // prompt by count, so it also needs claude to render THIS fill bare: no line break and
+                // over 800 characters (§19) — never a short prompt.
                 bool onlyContent = WsStripped(m.headFragment).empty() && WsStripped(m.tailFragment).empty();
                 for (size_t li = 0; onlyContent && li < boxLines.size(); ++li)
                 {
@@ -1029,7 +1097,8 @@ namespace Agentmaster
                 }
                 if (onlyContent &&
                     (static_cast<size_t>(m.lines) == paste_detail::NewlineCount(prompt) ||
-                     static_cast<size_t>(m.lines) == promptSegs.size()) &&
+                     static_cast<size_t>(m.lines) == promptSegs.size() ||
+                     PlaceholderCountMatchesForecast(m.lines, promptText)) &&
                     (m.lines != 0 || PromptFillCollapsesToBareMarker(promptText)))
                 {
                     return FillVerify::VerifiedCollapsed;
@@ -1124,10 +1193,10 @@ namespace Agentmaster
         // A trailing collapsed marker token that stands for OUR prompt: ONE press removes it
         // atomically. Checked BEFORE the tail test — the token's text shares no characters with the
         // prompt it stands for. Guarded by the SAME collapse arithmetic the verify accepts (M ==
-        // the prompt's newline count or segment count, and for the BARE "[Pasted text #N]" also
-        // PromptFillCollapsesToBareMarker, §19): a placeholder that fails it is treated as the USER's
-        // content (a pre-existing paste-cache draft, or their own long one-line paste next to a short
-        // prompt of ours) and never deleted.
+        // the prompt's newline count or segment count or claude's own count for this fill — §20's
+        // forecast —, and for the BARE "[Pasted text #N]" also PromptFillCollapsesToBareMarker, §19):
+        // a placeholder that fails it is treated as the USER's content (a pre-existing paste-cache
+        // draft, or their own long one-line paste next to a short prompt of ours) and never deleted.
         const auto markers = FindPasteMarkers(box);
         if (!markers.empty())
         {
@@ -1137,7 +1206,8 @@ namespace Agentmaster
             const bool atLineEnd = WsStripped(last.tailFragment).empty();
             const bool arithmeticOurs = !last.truncated &&
                                         (static_cast<size_t>(last.lines) == paste_detail::NewlineCount(prompt) ||
-                                         static_cast<size_t>(last.lines) == paste_detail::SplitSegments(prompt).size()) &&
+                                         static_cast<size_t>(last.lines) == paste_detail::SplitSegments(prompt).size() ||
+                                         PlaceholderCountMatchesForecast(last.lines, promptText)) &&
                                         (last.lines != 0 || PromptFillCollapsesToBareMarker(promptText));
             if (isLastLine && atLineEnd && arithmeticOurs)
             {
@@ -1157,6 +1227,81 @@ namespace Agentmaster
         plan.action = SendUndoAction::Press;
         plan.presses = prompt.size(); // the caller caps this against its remaining budget + per-inject max
         return plan;
+    }
+
+    // ---- THE COMMITTED RENDER (DELIVERY.md §20) — "is our prompt still in the box?" after the Enter ----------
+    //
+    // The verified send's cycle is: fill X → read the box back until it holds X (its text, or the placeholder
+    // claude draws for X) → press Enter → watch X LEAVE the box while the turn starts → if it never leaves,
+    // press Enter again (the Enter rescue). The last two steps need to recognize X in the box after the commit,
+    // and a placeholder never reads as X's text. QueuedPrompt::committedRender records the placeholder the
+    // read-back verified; these three rules are the only way to read it.
+
+    // How long after a prompt's injection its committed placeholder render still identifies OUR fill. Every
+    // reader acts well inside it: the Enter rescue presses ~3 s, ~9 s and ~15 s after the send
+    // (kEnterRetryFirstMs, kEnterRetryIntervalMs, Scheduler.h) and the draft swap's submit wait gives up after
+    // 18 s. Past it, a box that shows the same "[Pasted text #N ...]" is more likely a NEW paste that claude
+    // numbered alike after our fill left the box than our fill still sitting there, and a lone Enter into it
+    // would submit the user's own text — so the render stops counting and the box reads as foreign again (the
+    // lost-send verdict, never a press, then owns a prompt still unaccounted for).
+    inline constexpr int64_t kCommittedRenderTrustMs = 60000;
+
+    // The prompt's committed placeholder render while it may still be trusted, else empty. Trusted means: a
+    // render was recorded, the prompt carries an injection stamp (a fresh send resets injectedAtUnixMs to 0,
+    // which disarms a render left over from an earlier attempt), and that stamp is at most
+    // kCommittedRenderTrustMs old. A stamp in the future (the wall clock stepped back) is not trusted either:
+    // the window cannot be measured, and an untrusted render only costs a rescue, never a wrong Enter.
+    //   p         — the watched prompt (its committedRender and injectedAtUnixMs are read).
+    //   nowUnixMs — the wall clock, ms (the same system clock injectedAtUnixMs was stamped with).
+    //   returns   — a view of p.committedRender, valid while `p` lives and is not modified; empty when untrusted.
+    //   throws    — nothing.
+    inline std::wstring_view TrustedCommittedRender(const QueuedPrompt& p, int64_t nowUnixMs) noexcept
+    {
+        if (p.committedRender.empty() || p.injectedAtUnixMs == 0)
+        {
+            return {};
+        }
+        const int64_t age = nowUnixMs - p.injectedAtUnixMs;
+        if (age < 0 || age > kCommittedRenderTrustMs)
+        {
+            return {};
+        }
+        return p.committedRender;
+    }
+
+    // Does the box show OUR committed placeholder render? Compared on the verify's own key (FoldTrimPromptText,
+    // then every whitespace stripped): a soft wrap or the box's padding never changes a placeholder's
+    // characters, while a different paste number, another count or any other text does. An empty render never
+    // matches (nothing was recorded, or TrustedCommittedRender withheld it).
+    //   box             — the input box as read now (the live probe, or the scan's SessionInfo::pendingInput).
+    //   committedRender — TrustedCommittedRender's answer for the watched prompt.
+    //   returns         — true when the box reads exactly that placeholder.
+    //   throws          — std::bad_alloc on allocation failure only (the compare keys' copies).
+    inline bool BoxShowsCommittedRender(std::wstring_view box, std::wstring_view committedRender)
+    {
+        using namespace verify_detail;
+        if (committedRender.empty())
+        {
+            return false;
+        }
+        const std::wstring renderKey = WsStripped(FoldTrimPromptText(committedRender));
+        return !renderKey.empty() && WsStripped(FoldTrimPromptText(box)) == renderKey;
+    }
+
+    // Does the box still hold OUR fill of the watched prompt — its own text (the R2 draft-guard compare,
+    // DraftMatchesPromptText: newline-folded, trailing-trimmed, invisible-insensitive, no other fuzz) or the
+    // placeholder its verified fill committed as (BoxShowsCommittedRender)? The question the Enter rescue asks
+    // before it presses: true means a lone Enter submits OUR prompt (the rescue), false means it would submit
+    // whatever else the box holds — the user's draft — so it must not press. Callers pass a non-empty box:
+    // an empty box is the "nothing to submit" case each of them handles first.
+    //   box             — the input box as read now.
+    //   promptText      — the watched prompt's text.
+    //   committedRender — TrustedCommittedRender's answer for that prompt ("" when none is trusted).
+    //   returns         — true when the box reads as our fill.
+    //   throws          — std::bad_alloc on allocation failure only.
+    inline bool BoxHoldsCommittedFill(std::wstring_view box, std::wstring_view promptText, std::wstring_view committedRender)
+    {
+        return DraftMatchesPromptText(box, promptText) || BoxShowsCommittedRender(box, committedRender);
     }
 
     // Agentmaster (PENDING_INPUT.md §9): ONE prompt submission, as handed to the hosting window's

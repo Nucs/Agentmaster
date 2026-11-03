@@ -4537,6 +4537,187 @@ void TestVerifiedPlacement()
         const AppSettings c = DeserializeAppSettings(L"{\"version\":1,\"settings\":{}}");
         CHECK(c.verifySendBeforeSubmit, "settings: an absent key reads the ON default");
     }
+
+    // ==== DELIVERY.md §20: the send cycle for a COLLAPSED prompt (a long Telegram message, a voice note) ====
+    // A one-line transcript of 1050 characters, the 2026-11-02/03 incidents' shape: claude shows it as "[Pasted text #N]".
+    std::wstring voice20;
+    while (voice20.size() < 1050)
+    {
+        voice20 += L"Read the failing test and fix the parser before the release. ";
+    }
+    voice20.resize(1050);
+
+    // ---- §20: the FORECAST of the placeholder claude draws for our fill ----
+    {
+        using FV = FillVerify;
+        auto f = ForecastFillPlaceholder(L"fix the tests");
+        CHECK(!f.collapses, "forecast: a short one-line fill stays inline");
+        f = ForecastFillPlaceholder(voice20);
+        CHECK(f.collapses && f.lines == 0, "forecast: a long one-line fill collapses BARE (M == 0)");
+        f = ForecastFillPlaceholder(L"a\r\nb\r\nc\r\nd");
+        CHECK(f.collapses && f.lines == 3, "forecast: three CRLF line breaks collapse as +3 (a CRLF counts once)");
+        f = ForecastFillPlaceholder(L"a\nb\nc");
+        CHECK(!f.collapses, "forecast: two line breaks under 800 characters stay inline (claude's newline threshold)");
+        // What the forecast is for: a prompt ENDING in line breaks. Claude counts them; the trimmed compare did not.
+        const std::wstring trailing = L"a\nb\nc\nd\n\n"; // 5 line breaks as pasted; trimmed: 3 newlines, 4 segments
+        f = ForecastFillPlaceholder(trailing);
+        CHECK(f.collapses && f.lines == 5, "forecast: trailing line breaks count (claude counts the UNTRIMMED fill)");
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #1 +5 lines]", trailing) == FV::VerifiedCollapsed, "verify: a fill ending in line breaks verifies under claude's own count (was Foreign)");
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #1 +4 lines]", trailing) == FV::VerifiedCollapsed, "verify: ...and still under the segment convention");
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #1 +6 lines]", trailing) == FV::Foreign, "verify: a count no convention and no forecast explains stays Foreign");
+        CHECK(VerifyFillAgainstPrompt(L"[Pasted text #7]", voice20) == FV::VerifiedCollapsed, "verify: the voice note's bare placeholder verifies (the incident shape)");
+        CHECK(PlaceholderCountMatchesForecast(5, trailing) && !PlaceholderCountMatchesForecast(4, trailing), "forecast compare: the exact count only");
+        CHECK(!PlaceholderCountMatchesForecast(1, L"a\nb"), "forecast compare: a fill claude never collapses matches no placeholder");
+        CHECK(!PlaceholderCountMatchesForecast(-1, voice20), "forecast compare: a negative count never matches");
+        const auto undo = DecideSendUndo(L"user typed\n[Pasted text #4 +5 lines]", trailing);
+        CHECK(undo.action == SendUndoAction::Press && undo.presses == 1, "undo: our trailing-line-break fill's placeholder deletes in one press");
+    }
+
+    // ---- §20: the COMMITTED RENDER — our placeholder recognized in the box after the Enter ----
+    {
+        const int64_t T = 5000000;
+        QueuedPrompt p;
+        p.id = L"cr";
+        p.text = voice20;
+        p.committedRender = L"[Pasted text #3]";
+        p.injectedAtUnixMs = T;
+        CHECK(TrustedCommittedRender(p, T + 1000) == L"[Pasted text #3]", "render: trusted right after the injection");
+        CHECK(TrustedCommittedRender(p, T + kCommittedRenderTrustMs) == L"[Pasted text #3]", "render: trusted up to the end of its window");
+        CHECK(TrustedCommittedRender(p, T + kCommittedRenderTrustMs + 1).empty(), "render: past the window a same-looking placeholder may be a NEW paste");
+        CHECK(TrustedCommittedRender(p, T - 1).empty(), "render: a stamp in the future (the clock stepped back) is not trusted");
+        QueuedPrompt resent = p;
+        resent.injectedAtUnixMs = 0; // a fresh send resets the stamp: the old render must not vouch for the new attempt
+        CHECK(TrustedCommittedRender(resent, T + 1000).empty(), "render: a fresh send (stamp reset to 0) disarms an older render");
+        CHECK(BoxShowsCommittedRender(L"[Pasted text #3]", L"[Pasted text #3]"), "render: the box shows it");
+        CHECK(BoxShowsCommittedRender(L"[Pasted\ntext #3]  ", L"[Pasted text #3]"), "render: a soft wrap or padding never hides it");
+        CHECK(!BoxShowsCommittedRender(L"[Pasted text #4]", L"[Pasted text #3]"), "render: another paste number is a paste of the user's");
+        CHECK(!BoxShowsCommittedRender(L"[Pasted text #3 +31 lines]", L"[Pasted text #3]"), "render: another shape is not ours");
+        CHECK(!BoxShowsCommittedRender(L"typed [Pasted text #3]", L"[Pasted text #3]"), "render: other text beside it is not ours");
+        CHECK(!BoxShowsCommittedRender(L"[Pasted text #3]", L""), "render: nothing recorded matches nothing");
+        CHECK(!BoxShowsCommittedRender(L"", L"[Pasted text #3]"), "render: an empty box shows nothing");
+        CHECK(BoxHoldsCommittedFill(L"fix the tests", L"fix the tests", L""), "holds: the prompt's own text (the R2 rule, unchanged)");
+        CHECK(BoxHoldsCommittedFill(L"[Pasted text #3]", voice20, L"[Pasted text #3]"), "holds: the placeholder our fill committed as");
+        CHECK(!BoxHoldsCommittedFill(L"a human draft", voice20, L"[Pasted text #3]"), "holds: a human draft is never ours");
+        CHECK(!BoxHoldsCommittedFill(L"[Pasted text #3]", voice20, L""), "holds: without a trusted render a placeholder is not ours");
+    }
+
+    // ---- §20: the Enter rescue presses into OUR placeholder (DELIVERY.md §19 "Still open", closed) ----
+    {
+        // A session at rest whose collapsed send claude did not take: the box still shows the placeholder.
+        auto mk = [&](const std::wstring& box, const std::wstring& render, int64_t injectedAgoMs) {
+            const int64_t now = NowMsTest();
+            SessionInfo s = MakeSession(L"crp", SessionState::WaitingForInput);
+            s.live = true;
+            s.started = true;
+            s.pendingInput = box;
+            QueuedPrompt q;
+            q.id = L"w20";
+            q.text = voice20;
+            q.status = PromptStatus::Sent;
+            q.origin = PromptOrigin::Autorun;
+            q.echoed = false;
+            q.sentAtUnixMs = now - 5000; // past the first press's due time
+            q.injectedAtUnixMs = now - injectedAgoMs;
+            q.committedRender = render;
+            s.queue.push_back(q);
+            return s;
+        };
+        CHECK(DecideEnterRetry(mk(L"[Pasted text #3]", L"[Pasted text #3]", 5000), NowMsTest()).action == EnterRetryAction::Retry,
+              "enter-retry: a box holding our committed placeholder gets the rescue press (was: Waiting -> lost-send -> Failed)");
+        CHECK(DecideEnterRetry(mk(L"[Pasted text #4]", L"[Pasted text #3]", 5000), NowMsTest()).action == EnterRetryAction::Waiting,
+              "enter-retry: a placeholder with another paste number is the user's: no press");
+        CHECK(DecideEnterRetry(mk(L"[Pasted text #3]", L"", 5000), NowMsTest()).action == EnterRetryAction::Waiting,
+              "enter-retry: with no committed render a placeholder never passes for our prompt");
+        CHECK(DecideEnterRetry(mk(L"[Pasted text #3]", L"[Pasted text #3]", kCommittedRenderTrustMs + 5000), NowMsTest()).action == EnterRetryAction::Waiting,
+              "enter-retry: a render past its trust window no longer counts");
+        CHECK(DecideEnterRetry(mk(L"a human draft", L"[Pasted text #3]", 5000), NowMsTest()).action == EnterRetryAction::Waiting,
+              "enter-retry: a human draft still blocks the press");
+    }
+
+    // ---- §20: MarkPromptInjected records the render; every injection overwrites it; the rollback clears it ----
+    {
+        SessionRegistry reg;
+        auto s = MakeSession(L"mr", SessionState::WaitingForInput);
+        s.live = true;
+        reg.Upsert(s);
+        reg.Update(L"mr", [&](SessionInfo& ss) {
+            QueuedPrompt q;
+            q.id = L"r1";
+            q.text = voice20;
+            q.status = PromptStatus::Sent;
+            q.origin = PromptOrigin::Autorun;
+            q.sentAtUnixMs = NowMsTest();
+            ss.queue.push_back(q);
+        });
+        reg.MarkPromptInjected(L"mr", L"r1", L"[Pasted text #2]");
+        auto after = reg.Get(L"mr");
+        CHECK(after && after->queue[0].committedRender == L"[Pasted text #2]" && after->queue[0].injectedAtUnixMs != 0,
+              "mark: a collapsed commit records its placeholder with the injection stamp");
+        reg.MarkPromptInjected(L"mr", L"r1");
+        after = reg.Get(L"mr");
+        CHECK(after && after->queue[0].committedRender.empty() && after->queue[0].injectedAtUnixMs != 0,
+              "mark: a later exact (or unverified) injection clears the older render");
+        reg.MarkPromptInjected(L"mr", L"r1", L"[Pasted text #5]");
+        reg.RollbackPromptToPending(L"mr", L"r1", false);
+        after = reg.Get(L"mr");
+        CHECK(after && after->queue[0].status == PromptStatus::Pending && after->queue[0].committedRender.empty() && after->queue[0].injectedAtUnixMs == 0,
+              "rollback: the render goes with the injection stamp");
+    }
+
+    // ---- §20: the send's fill in the PASTE JOURNAL — and out of it once its prompt became a message ----
+    {
+        SessionRegistry reg;
+        auto s = MakeSession(L"jf", SessionState::WaitingForInput);
+        s.live = true;
+        reg.Upsert(s);
+        const std::wstring many = L"one\ntwo\nthree\nfour"; // three line breaks: claude collapses it
+        reg.NotePastedText(L"jf", PromptFillBody(voice20));
+        reg.NotePastedText(L"jf", PromptFillBody(many));
+        CHECK(reg.PasteJournal(L"jf").size() == 2, "journal: the send's fills are recorded like any paste");
+        reg.ForgetPastedText(L"jf", PromptFillBody(L"fix the tests"));
+        CHECK(reg.PasteJournal(L"jf").size() == 2, "forget: a text claude shows inline was never recorded: nothing goes");
+        reg.ForgetPastedText(L"jf", PromptFillBody(voice20));
+        auto j = reg.PasteJournal(L"jf");
+        CHECK(j.size() == 1 && j[0].text == many, "forget: exactly that fill leaves, the other paste stays");
+        reg.ForgetPastedText(L"jf", PromptFillBody(voice20));
+        CHECK(reg.PasteJournal(L"jf").size() == 1, "forget: forgetting it again is a no-op");
+        reg.ForgetPastedText(L"nope", PromptFillBody(many));
+        CHECK(reg.PasteJournal(L"jf").size() == 1, "forget: another session's forget touches nothing here");
+
+        // The PUSH echo consume forgets the echoed prompt's fill (claude's hook carries the expanded text).
+        reg.Update(L"jf", [&](SessionInfo& ss) {
+            QueuedPrompt q;
+            q.id = L"je";
+            q.text = many;
+            q.status = PromptStatus::Sent;
+            q.origin = PromptOrigin::Autorun;
+            q.echoed = false;
+            q.sentAtUnixMs = NowMsTest();
+            ss.queue.push_back(q);
+        });
+        reg.OnHookEvent(UPS(L"jf", many));
+        auto after = reg.Get(L"jf");
+        CHECK(after && !after->queue.empty() && after->queue.back().id == L"je" && after->queue.back().echoed, "echo: the push echo is consumed");
+        CHECK(reg.PasteJournal(L"jf").empty(), "echo: ...and the prompt's fill leaves the journal (it is out of the box)");
+
+        // The PULL echo consume forgets too.
+        reg.NotePastedText(L"jf", PromptFillBody(voice20));
+        const int64_t sentAt = NowMsTest();
+        reg.Update(L"jf", [&](SessionInfo& ss) {
+            QueuedPrompt q;
+            q.id = L"jp";
+            q.text = voice20;
+            q.status = PromptStatus::Sent;
+            q.origin = PromptOrigin::Autorun;
+            q.echoed = false;
+            q.sentAtUnixMs = sentAt;
+            ss.queue.push_back(q);
+        });
+        reg.NoteExternalPrompt(L"jf", voice20, sentAt + 5);
+        after = reg.Get(L"jf");
+        CHECK(after && after->queue.back().id == L"jp" && after->queue.back().echoed && reg.PasteJournal(L"jf").empty(),
+              "pull-echo: the transcript line consumes the prompt and forgets its fill");
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -536,7 +536,8 @@ namespace Agentmaster
     //
     // DRAFT GUARD (R2 — mandatory, proven on the live log): before pressing, the box's observed
     // unsent draft (s.pendingInput, the PENDING_INPUT.md monitor) is compared to the watched
-    // prompt's text. A box holding OUR prompt (fold-matched) is the eaten-CR shape — press, that IS
+    // prompt's text. A box holding OUR prompt (fold-matched — or, DELIVERY.md §20, the placeholder
+    // our verified fill committed as, BoxHoldsCommittedFill) is the eaten-CR shape — press, that IS
     // the rescue. A box holding ANYTHING ELSE is (or may be) the human's draft — a lone Enter would
     // SUBMIT it, the exact RC3 merge: in the recorded incident the box held the user's 17-char
     // draft at 08:50:07 while the lost `#6` sat Sent-unechoed, and without this guard the re-armed
@@ -611,7 +612,13 @@ namespace Agentmaster
         // DRAFT GUARD (R2, see the contract above): a box observed holding text that is NOT our
         // watched prompt is never pressed into — a lone Enter would submit the human's draft (the
         // RC3 merge). Keep watching instead; the lost-send verdict owns the terminal resolution.
-        if (!s.pendingInput.empty() && !DraftMatchesPromptText(s.pendingInput, best->text))
+        // DELIVERY.md §20: "our watched prompt" includes the PLACEHOLDER claude drew for it — a long
+        // or many-line fill sits in the box as "[Pasted text #N ...]", never as its text, so the text
+        // compare alone refused every rescue of a collapsed fill whose Enter claude ate. The placeholder
+        // the verified fill committed as (QueuedPrompt::committedRender) counts while it is trusted
+        // (TrustedCommittedRender: recorded at this injection, at most a minute old); its paste number
+        // keeps a same-sized paste of the user's from passing for ours.
+        if (!s.pendingInput.empty() && !BoxHoldsCommittedFill(s.pendingInput, best->text, TrustedCommittedRender(*best, nowUnixMs)))
         {
             plan.action = EnterRetryAction::Waiting;
             return plan;

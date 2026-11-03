@@ -263,9 +263,14 @@ verified send's read-back, DELIVERY.md §19):
   paste warnings (a rejected paste never reached claude) and right before `HandleClipboardData`. Bracketed
   pastes only (only those can become placeholders).
 - **our own no-submit fills** — the §10 re-fill, the /handover-standby fill, the §9 swap's re-paste fallback,
-  and the §11 fork carry's blocks (journaled under the FORK at arm time). Submitted sends (the autorunner,
-  Send-now) are deliberately NOT journaled: they leave the box, and a journaled submission could be matched
-  to a later placeholder whose own paste went unrecorded.
+  and the §11 fork carry's blocks (journaled under the FORK at arm time).
+- **the verified send's fills** (the autorunner, Send-now, a Telegram message or `/steer`; DELIVERY.md §20) —
+  journaled right before each fill is typed, so a placeholder of a send that stays in the box (an Enter claude
+  ate, a refused or aborted delivery) expands to the real text. They were left out until 2026-11-03 because a
+  submitted send leaves the box, and its entry could later be matched to a placeholder whose own paste went
+  unrecorded; that is why each one is **forgotten** again (`ForgetPastedText`, the newest equal entry) as soon
+  as its prompt is echoed (the push and the pull consume) or the Foreign undo took it out of the box. The scan's
+  prune below never sees a send's fill: it skips a session while the delivery holds the box.
 
 **Rules.** Only collapse-eligible pastes are kept (an inline paste never backs a placeholder); an identical
 consecutive re-paste refreshes the newest entry; ≤16 entries / 16 M chars per session (oldest dropped), an
@@ -274,7 +279,7 @@ map, never inside `SessionInfo` (a paste can be megabytes and snapshots are copi
 **Transient** — an app restart forgets it (a restored draft then falls back to §2b, i.e. the pre-journal
 behavior). **Pruned** when the scan confirms the draft CLEARED (`_ScanPendingInput`'s flip to empty — the
 prompt was sent or discarded), moved onto the new id by a restore-fresh (`_LaunchClaudeSession`), dropped by
-`Remove`.
+`Remove`; a send's own fill is **forgotten** one entry at a time (`ForgetPastedText`, above).
 
 **Resolution** (`ResolveDraftCarry`, pure; `ResolvePendingDraftCarry` the adapter — reads the cache only when
 the journal can't answer):

@@ -658,7 +658,8 @@ def test_a_multi_line_prompt_goes_as_one_message_and_is_recorded_once(am, s1):
 @pytest.mark.p1
 @pytest.mark.flow("PQR-01")
 def test_a_long_multi_line_prompt_goes_whole_as_one_message(am, s1):
-    """PQR-01 E4 (the multi-line half; one long LINE is PQR-K11): a 2,000-character prompt on 40 lines is one message —
+    """PQR-01 E4 (the multi-line half; one long LINE: test_a_long_single_line_prompt_goes_whole_as_one_message, PQR-K11's
+    fix): a 2,000-character prompt on 40 lines is one message —
     Claude Code shows the paste collapsed as "[Pasted text #1 +N lines]", which the delivery verifies as its own
     collapsed render (`verified=collapsed`), and expands it on the submit — so the model and the transcript get the
     whole text, once.
@@ -2844,16 +2845,17 @@ def test_known_defect_a_queued_prompt_with_hebrew_is_never_delivered(am, s1, pro
 
 @pytest.mark.p1
 @pytest.mark.flow("PQR-01")
-@pytest.mark.known_defect("PQR-K11")
+@pytest.mark.needs_fix("PQR-K11")
 @pytest.mark.slow
-def test_known_defect_a_long_single_line_prompt_is_never_delivered(am, s1):
-    """PQR-K11 (found by this suite on 2026-10-26, PQR-01 E4, run pqr6): Claude Code shows a long paste of ONE line
-    collapsed as a bare "[Pasted text #1]" — no "+M lines" part, which only a multi-line paste carries — and the
-    verified delivery's paste-marker parser (PendingPaste.h ParseMarkerAt) knows only the "+M lines" form, so the
-    read-back after the fill is no collapsed render of the prompt but foreign content. TODAY: "FOREIGN read-back after
-    the fill (box chars=16 head="[Pasted text #1]")", a second fill, then "FAILED after 2 unverifiable deliveries": the
-    2,000-character prompt never reaches the model. Expected once fixed: the bare marker verifies as the collapsed
-    render of a one-line prompt (DraftCarry.h already parses it), and the prompt goes once, whole.
+def test_a_long_single_line_prompt_goes_whole_as_one_message(am, s1):
+    """PQR-01 E4 (the one-line half; PQR-K11's fix, `needs_fix`: no published release holds DELIVERY.md §19 and §20, so it
+    fails on 0.8.1 and older, as their known-defect test recorded): Claude Code shows a long paste of ONE line
+    collapsed as a bare "[Pasted text #1]" — no "+M lines" part, which only a multi-line paste carries. The delivery
+    reads that bare marker as the collapsed render of its own one-line fill (`verified=collapsed`, the placeholder it
+    committed as named in `as="…"`, DELIVERY.md §20), presses Enter, and Claude Code expands it on the submit — so the
+    model and the transcript get the whole 2,000 characters, once. Before §19 the read-back took the bare marker for
+    foreign content ("FOREIGN read-back after the fill … head="[Pasted text #1]"") and the prompt failed after two
+    fills: every long Telegram message and voice note on one line.
 
     Args:
         am: The app.
@@ -2863,11 +2865,13 @@ def test_known_defect_a_long_single_line_prompt_is_never_delivered(am, s1):
     words = " ".join(f"w{i:04d}" for i in range(1, 400))
     prompt = "long " + words[:1990] + ' [[mock reply "long ok"]]'
     am.window.queue.open(s1.title).queue(prompt)
-    am.profile.hooks.wait(rf'\[send-verify\] {s1.short} FOREIGN read-back after the fill \(box chars=\d+ '
-                          rf'head="\[Pasted text #\d+\]"\)', since=marks.hooks, timeout_s=RUNNER_WAIT_S)  # TODAY
-    am.profile.autorunner.wait(rf"\[send-verify\] {s1.short} prompt [0-9a-f]{{8}} FAILED after 2 unverifiable "
-                               rf"deliveries", since=marks.autorunner, timeout_s=60)  # TODAY
-    _assert_no_turn(am, "long w0001", marks.seq, 15, "TODAY the delivery refused its own fill")
+    e = am.mock.wait_prompt("long w0001", since=marks.seq, timeout_s=RUNNER_WAIT_S)
+    assert e["user_text"] == prompt, f"{len(e['user_text'])} characters arrived of {len(prompt)}"
+    am.profile.hooks.wait(rf'\[delivered\] {s1.short} prompt [0-9a-f]{{8}} \(chars=\d+, verified=collapsed, '
+                          rf'as="\[Pasted text #\d+\]"', since=marks.hooks, timeout_s=30)
+    assert not am.profile.hooks.find(rf"\[send-verify\] {s1.short} FOREIGN read-back", since=marks.hooks), \
+        "the delivery took its own collapsed fill for foreign content"
+    _assert_delivered_once_as_queued(am, s1, marks, prompt, "long w0001")
 
 
 @pytest.mark.p2

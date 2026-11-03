@@ -132,7 +132,10 @@ once, exactly as written, after the session has settled — and moves from UPCOM
 - **E4 Long prompt.** 2,000 characters. *Expect:* one message (Claude may show it as a paste placeholder);
   the transcript holds the full text. *Check:* [TR] full text. Measured (2026-10-26, run `pqr6`, 0.8.0): on 40 lines
   it goes whole, verified as the collapsed render `[Pasted text #1 +N lines]`
-  (`test_a_long_multi_line_prompt_goes_whole_as_one_message`); on ONE line it is never delivered — **PQR-K11**.
+  (`test_a_long_multi_line_prompt_goes_whole_as_one_message`); on ONE line it was never delivered — **PQR-K11**,
+  fixed in code 2026-11-02 (DELIVERY.md §19, §20): it now verifies as the bare `[Pasted text #1]`, the placeholder
+  named in its `[delivered] … verified=collapsed, as="…"` line (`test_a_long_single_line_prompt_goes_whole_as_one_message`,
+  `needs_fix`).
 - **E5 Empty compose box.** *Do:* Add to queue with an empty box. *Expect:* nothing is queued.
 - **E6 Queued while Running.** *Expect:* the send waits for the turn's end, then the settle.
 
@@ -695,11 +698,19 @@ asynchronous (CLAUDE.md, Gotchas *Popup placement*), so the handler runs after t
 for the user's edit and resets the walk (`_ResetPromptHistory`), and the next Up starts over at the newest.
 Shift+Up and Ctrl+Up are not affected (the text box's own) — `test_up_in_the_compose_box_recalls_the_newest_sent_prompt`.
 
-### PQR-K11 · A long one-line prompt is never delivered
+### PQR-K11 · A long one-line prompt is never delivered — **fixed in code 2026-11-02** (NOT BUILT into an install)
 
 > **P1** · Found by the e2e suite on 2026-10-26 against 0.8.0 + Claude Code 2.1.291 (PQR-01 E4, run `pqr6`) ·
-> `e2e/suites/test_prompt_queue_runner.py::test_known_defect_a_long_single_line_prompt_is_never_delivered`
-> (`known_defect`)
+> `e2e/suites/test_prompt_queue_runner.py::test_a_long_single_line_prompt_goes_whole_as_one_message`
+> (`needs_fix`; until 2026-11-03 the `known_defect` test
+> `test_known_defect_a_long_single_line_prompt_is_never_delivered`)
+
+**The fix** (DELIVERY.md §19, 81683c34b + bc9988b8b): the paste grammar reads the bare marker, and the verify and the
+undo take it as OUR fill exactly when claude would draw that fill bare. DELIVERY.md §20 completes the send cycle
+around it: the placeholder each collapsed commit verified is recorded, so the Enter rescue and the draft swap's
+submit wait recognize the prompt in the box after the Enter. On the release (0.8.0.2) the defect failed every long
+Telegram message and voice note on one line (2026-11-02/03); the build server's e2e gate on `b20261103-1` ran the
+old known-defect test, which failed because the prompt was delivered.
 
 Claude Code shows a long paste of ONE line collapsed as a bare `[Pasted text #1]` — without the `+M lines` part
 that a multi-line paste's marker carries. The verified delivery's paste-marker parser (`PendingPaste.h`

@@ -734,6 +734,7 @@ namespace Agentmaster
         std::wstring mergeTrace; // DELIVERY_PLAN.md R7: the [merge-detected] line (both logs), filled under the lock
         std::wstring holdTrace; // DELIVERY.md §14: the [interrupt-resume] line (both logs), filled under the lock
         std::wstring lineageTrace; // the summary's conversation chain: the [lineage] /clear pairing line, filled under the lock
+        std::wstring echoedPromptText; // DELIVERY.md §20: the text of the prompt this UPS echoed — its fill leaves the paste journal after the lock
 
         {
             std::lock_guard guard{ _mtx };
@@ -1012,6 +1013,7 @@ namespace Agentmaster
                     {
                         p.echoed = true; // consume exactly one echo per injected prompt
                         isEcho = true;
+                        echoedPromptText = p.text; // §20: copied, not referenced — the queue may change once the lock is gone
                         break;
                     }
                 }
@@ -1132,6 +1134,23 @@ namespace Agentmaster
             // The summary's conversation chain: which session a /clear continued (the link the summary's
             // history then lists). Logged outside the lock, like every trace above.
             AppendStateLog(L"hooks.log", lineageTrace);
+        }
+        if (!echoedPromptText.empty())
+        {
+            // DELIVERY.md §20: the echoed prompt became a message, so its fill is out of the box and can back no
+            // placeholder any more — drop it from the paste journal (ForgetPastedText; a no-op for a prompt short
+            // enough to have been pasted inline). It must run outside the lock (the forget takes it) and with the
+            // body as it was PASTED (PromptFillBody — the sanitized text the verified send journaled).
+            try
+            {
+                ForgetPastedText(msg.sessionId, PromptFillBody(echoedPromptText));
+            }
+            catch (...)
+            {
+                // Rule #18. Recovery: the entry stays until the box's next confirmed clear prunes the journal (the
+                // pre-§20 lifetime); the hook's notify below must still run.
+                LogSwallowedException(L"SessionRegistry::OnHookEvent (forget the echoed fill)");
+            }
         }
         if (found)
         {
@@ -1818,6 +1837,39 @@ namespace Agentmaster
         _pasteJournals.erase(it);
     }
 
+    // Agentmaster (DELIVERY.md §20): see the header. The normalization runs BEFORE the lock (NotePastedText's
+    // recipe: the copy of a multi-KB text never extends the registry's critical section), and only the
+    // NEWEST equal entry goes — the one the send itself refreshed or appended last, since NotePastedText folds
+    // an identical re-paste into the newest entry.
+    void SessionRegistry::ForgetPastedText(const std::wstring& id, const std::wstring& rawText)
+    {
+        const std::wstring text = NormalizePastedTextLikeClaude(rawText);
+        if (text.empty() || !ClaudeWouldCollapsePaste(text))
+        {
+            return; // NotePastedText never recorded such a text: nothing to look for (and no lock to take)
+        }
+        std::lock_guard guard{ _mtx };
+        const auto it = _pasteJournals.find(id);
+        if (it == _pasteJournals.end())
+        {
+            return;
+        }
+        auto& journal = it->second;
+        for (size_t i = journal.size(); i-- > 0;)
+        {
+            if (journal[i].text == text)
+            {
+                _pasteJournalChars -= (std::min)(_pasteJournalChars, journal[i].text.size());
+                journal.erase(journal.begin() + static_cast<std::ptrdiff_t>(i));
+                break;
+            }
+        }
+        if (journal.empty())
+        {
+            _pasteJournals.erase(it); // an empty journal is no journal (PasteJournal answers {} either way)
+        }
+    }
+
     void SessionRegistry::MovePasteJournal(const std::wstring& fromId, const std::wstring& toId)
     {
         if (fromId == toId)
@@ -1890,6 +1942,7 @@ namespace Agentmaster
         std::wstring pullEchoTrace; // DELIVERY_PLAN.md R1: filled under the lock, logged after it
         std::wstring mergeTrace; // DELIVERY_PLAN.md R7: the pull-side [merge-detected] line
         std::wstring holdTrace; // DELIVERY.md §14: the pull-side [interrupt-resume] line
+        std::wstring echoedPromptText; // DELIVERY.md §20: the prompt this line vouched for — its fill leaves the paste journal after the lock
         {
             std::lock_guard guard{ _mtx };
             const auto it = _sessions.find(id);
@@ -1947,6 +2000,7 @@ namespace Agentmaster
                     p.echoed = true; // the transcript confirmed the send became a message (pull evidence)
                     pullEchoTrace = L"[pull-echo] " + ShortId(id) + L" prompt " + ShortId(p.id) +
                                     L" (transcript confirmed the delivered prompt became a message)\n";
+                    echoedPromptText = p.text; // §20: copied, not referenced — the queue may change once the lock is gone
                     break; // consume at most one — mirrors the push consume's one-echo-per-injection rule
                 }
             }
@@ -2019,6 +2073,21 @@ namespace Agentmaster
         if (!pullEchoTrace.empty())
         {
             AppendStateLog(L"hooks.log", pullEchoTrace); // outside the lock, like every trace here
+        }
+        if (!echoedPromptText.empty())
+        {
+            // DELIVERY.md §20: the pull twin of OnHookEvent's forget — the prompt became a message, so its fill (as
+            // pasted: PromptFillBody) leaves the paste journal. Outside the lock: the forget takes it.
+            try
+            {
+                ForgetPastedText(id, PromptFillBody(echoedPromptText));
+            }
+            catch (...)
+            {
+                // Rule #18. Recovery: the entry stays until the box's next confirmed clear prunes the journal; the
+                // traces and the notify below must still run.
+                LogSwallowedException(L"SessionRegistry::NoteExternalPrompt (forget the echoed fill)");
+            }
         }
         if (!mergeTrace.empty())
         {
@@ -2338,7 +2407,7 @@ namespace Agentmaster
     // Agentmaster (DELIVERY.md §12 — INJECTION EVIDENCE): see the header. Quiet by design (the
     // [delivered] log line at the call site is the observability; the echo machinery carries the
     // visible consequences).
-    void SessionRegistry::MarkPromptInjected(const std::wstring& id, const std::wstring& promptId)
+    void SessionRegistry::MarkPromptInjected(const std::wstring& id, const std::wstring& promptId, const std::wstring& committedRender)
     {
         if (promptId.empty())
         {
@@ -2355,6 +2424,10 @@ namespace Agentmaster
             if (p.id == promptId && p.status == PromptStatus::Sent)
             {
                 p.injectedAtUnixMs = NowMs();
+                // DELIVERY.md §20: ALWAYS overwritten, never merged — the render describes THIS injection
+                // only, so an exact commit (or an unverified one) must clear the placeholder an earlier,
+                // rolled-back attempt left. The stamp above is what TrustedCommittedRender anchors on.
+                p.committedRender = committedRender;
                 break;
             }
         }
@@ -2450,6 +2523,7 @@ namespace Agentmaster
                 p.status = PromptStatus::Pending;
                 p.echoed = false;
                 p.injectedAtUnixMs = 0; // §12: a rolled-back prompt's next send is a fresh delivery
+                p.committedRender.clear(); // §20: that delivery verifies (and records) its own render
                 if (p.attempts > 0)
                 {
                     p.attempts -= 1;

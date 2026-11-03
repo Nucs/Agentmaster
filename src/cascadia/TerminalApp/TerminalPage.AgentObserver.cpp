@@ -5864,6 +5864,13 @@ namespace winrt::TerminalApp::implementation
     static constexpr int32_t kSendVerifyProbeRows = 1000; // the raised read window for verification reads — a filled prompt can render taller than the scan's fixed 120 rows
     static constexpr int64_t kSendVerifySettleMs = 1500; // per fill: how long the read-back may keep settling while the box is still CHANGING (progress-extended)
     static constexpr int64_t kSendVerifySettleHardCapMs = 4000; // absolute cap on one fill's settle, however long the box keeps growing
+    // DELIVERY.md §20 — the LATE-DRAW GRACE: a fill whose box still reads EMPTY when its settle ends gets this much more
+    // watching before it is judged eaten and typed again. A busy claude can draw a paste well past the 1.5 s settle (the
+    // 2026-11-03 e2e gate, build b20261103-1: under load "eaten" verdicts re-filled prompts claude then drew TWICE or
+    // three times, and the merge that followed failed them); a paste claude really ate never shows, so waiting costs
+    // that rare case 3 s per fill and nothing else. The grace re-anchors the settle, so a fill that shows late still
+    // gets the whole progress-extended settle (up to kSendVerifySettleHardCapMs) to finish drawing.
+    static constexpr int64_t kSendVerifyLateDrawGraceMs = 3000;
     static constexpr int32_t kSendVerifyMaxFills = 3; // fill attempts per delivery before giving up (was 2; raised per the confirm-and-retry directive, DELIVERY.md §12 — inner re-fills are livelock-free: they never touch the advance trigger)
     static constexpr int64_t kSendUndoBudgetMs = 5000; // wall-clock cap on the Foreign undo ladder
     static constexpr int64_t kDraftSwapRestoreHardCapMs = 4000; // R6a: the restore settle extends while the box is still CHANGING (a large stash pop's repaint outruns the fixed 1.2s), up to this
@@ -5951,6 +5958,32 @@ namespace winrt::TerminalApp::implementation
             }
         }
         return out;
+    }
+
+    // Agentmaster (DELIVERY.md §20): the placeholder render a prompt's verified fill committed as, read out of a
+    // registry snapshot — TrustedCommittedRender over the matching queue entry, COPIED so it outlives the snapshot.
+    // The window's two "is our prompt still in the box?" readers (the draft swap's submit wait, the Enter rescue's
+    // verified presser) go through it, so both apply the same trust window as the scheduler's draft guard.
+    //   info      — a registry snapshot (SessionRegistry::Get), or nullopt for a session that is gone.
+    //   promptId  — the watched prompt's id.
+    //   nowUnixMs — the wall clock (TtNowMs: the system clock QueuedPrompt::injectedAtUnixMs is stamped with).
+    //   returns   — the render, or "" when the session or the prompt is gone, nothing was recorded, or the render is
+    //               past its trust window.
+    //   throws    — std::bad_alloc on allocation failure only (the copy).
+    static std::wstring CommittedRenderIn(const std::optional<::Agentmaster::SessionInfo>& info, const std::wstring& promptId, int64_t nowUnixMs)
+    {
+        if (!info)
+        {
+            return {};
+        }
+        for (const auto& p : info->queue)
+        {
+            if (p.id == promptId)
+            {
+                return std::wstring{ ::Agentmaster::TrustedCommittedRender(p, nowUnixMs) };
+            }
+        }
+        return {};
     }
 
     // The submitter this window registers next to its injector. Called on the SENDING thread — the
@@ -6189,9 +6222,14 @@ namespace winrt::TerminalApp::implementation
     // replacement for the blind paste+CR. FILL (bracketed paste, NO CR) → settle → READ THE BOX BACK
     // (the deep probe — a filled prompt can render taller than the scan window) → commit the lone CR
     // only on a read that verifies as exactly-the-prompt (whitespace-tolerant) or its collapsed
-    // placeholder render (claude re-collapses a big pasted fill — the handover paste tier). Recovery
+    // placeholder render (claude re-collapses a big pasted fill — the handover paste tier). DELIVERY.md
+    // §20 adds three things around that loop: each fill is journaled first (NotePastedText, so a
+    // placeholder of it left in the box still expands to the real text), a box still EMPTY when a
+    // settle ends gets the late-draw grace before it counts as eaten, and a collapsed commit records the
+    // placeholder it verified (MarkPromptInjected's committedRender) — the form in which the Enter
+    // rescue and the swap's submit wait recognize the prompt in the box afterwards. Recovery
     // per verdict:
-    //   Eaten    → re-fill (≤ kSendVerifyMaxFills), then give up (strike).
+    //   Eaten    → (after the late-draw grace) re-fill (≤ kSendVerifyMaxFills), then give up (strike).
     //   Partial  → OUR text, incomplete: discard it (the mail-clear's End+Ctrl+U ladder — a true,
     //              mid-turn-safe discard; nothing foreign is at risk) and re-fill (counts as a fill).
     //   Foreign  → the merge, caught BEFORE the commit: undo our insertion in verified backspace
@@ -6282,6 +6320,23 @@ namespace winrt::TerminalApp::implementation
                                                   L" (the gate claim was lost - a newer attempt owns this prompt)\n");
                 co_return 3;
             }
+            // DELIVERY.md §20 (the paste journal, PENDING_INPUT.md §2c): this fill is a paste like any other, and a long
+            // one shows in the box only as claude's "[Pasted text #N ...]". Journaled BEFORE the write — while its
+            // content still exists outside claude — so a placeholder of it that stays in the box (an Enter claude ate, a
+            // refused or aborted delivery) expands to the real text in Copy Current Prompt, the stored draft and a
+            // fork's carry. A re-fill of the same text only refreshes the entry; the echo consume forgets it once the
+            // prompt became a message (SessionRegistry::ForgetPastedText); a text claude shows inline is never recorded.
+            try
+            {
+                _sessionRegistry->NotePastedText(sessionId, ::Agentmaster::PromptFillBody(text));
+            }
+            catch (...)
+            {
+                // Rule #18. Recovery: the fill goes un-journaled (a placeholder of it that stays in the box then reads
+                // "unresolved", as before §20) — never let the journal cost the delivery, which must still reach the
+                // box and, on every exit, hand it back unlocked.
+                ::Agentmaster::AgentLogCaughtException(L"_InjectPromptVerified journal");
+            }
             if (!_sessionRegistry->Inject(sessionId, ::Agentmaster::BuildPromptFill(text)))
             {
                 co_return 0; // injector vanished — nothing typed; the caller rolls back
@@ -6290,36 +6345,55 @@ namespace winrt::TerminalApp::implementation
 
             // Settle: poll the deep probe until the box verifies, progress-extending while it is
             // still changing (a large paste renders over several frames), hard-capped.
-            const int64_t settleStart = TtNowMs();
+            int64_t settleStart = TtNowMs(); // §20: re-anchored once, by the late-draw grace below
             int64_t deadline = settleStart + kSendVerifySettleMs;
             int32_t boxState = stUnknown;
             std::wstring box;
             std::wstring lastSeen;
             auto verdict = ::Agentmaster::FillVerify::Eaten;
-            while (TtNowMs() < deadline)
+            bool lateDrawGraceUsed = false; // §20: at most one grace per fill
+            for (;;)
             {
-                co_await winrt::resume_after(std::chrono::milliseconds(kDraftSwapPollMs));
-                co_await wil::resume_foreground(Dispatcher());
-                if (!_sessionRegistry)
+                while (TtNowMs() < deadline)
                 {
-                    co_return 0;
-                }
-                std::tie(boxState, box) = _ReadInputBoxProbeForSession(sessionId, kSendVerifyProbeRows);
-                if (boxState == stEmpty || boxState == static_cast<int32_t>(::Agentmaster::InputBoxState::Draft))
-                {
-                    verdict = ::Agentmaster::VerifyFillAgainstPrompt(box, text);
-                    if (verdict == ::Agentmaster::FillVerify::Verified || verdict == ::Agentmaster::FillVerify::VerifiedCollapsed)
+                    co_await winrt::resume_after(std::chrono::milliseconds(kDraftSwapPollMs));
+                    co_await wil::resume_foreground(Dispatcher());
+                    if (!_sessionRegistry)
                     {
-                        break;
+                        co_return 0;
+                    }
+                    std::tie(boxState, box) = _ReadInputBoxProbeForSession(sessionId, kSendVerifyProbeRows);
+                    if (boxState == stEmpty || boxState == static_cast<int32_t>(::Agentmaster::InputBoxState::Draft))
+                    {
+                        verdict = ::Agentmaster::VerifyFillAgainstPrompt(box, text);
+                        if (verdict == ::Agentmaster::FillVerify::Verified || verdict == ::Agentmaster::FillVerify::VerifiedCollapsed)
+                        {
+                            break;
+                        }
+                    }
+                    if (box != lastSeen)
+                    {
+                        lastSeen = box; // progress — extend, capped
+                        const int64_t extended = TtNowMs() + kSendVerifySettleMs;
+                        const int64_t hardCap = settleStart + kSendVerifySettleHardCapMs;
+                        deadline = extended < hardCap ? extended : hardCap;
                     }
                 }
-                if (box != lastSeen)
+                // DELIVERY.md §20 — the LATE-DRAW GRACE (kSendVerifyLateDrawGraceMs): a box still EMPTY when the settle
+                // ends is not yet proof that claude ate the paste — a busy claude draws it later, and typing it again
+                // then puts it in the box twice. So the settle runs once more from a fresh anchor before the fill is
+                // judged eaten. Only an EMPTY readable box earns it: a partial or foreign read is already evidence, and
+                // an unreadable box (NoBox / a menu / gone) is a strike below either way.
+                if (!lateDrawGraceUsed &&
+                    (boxState == stEmpty || boxState == static_cast<int32_t>(::Agentmaster::InputBoxState::Draft)) &&
+                    ::Agentmaster::VerifyFillAgainstPrompt(box, text) == ::Agentmaster::FillVerify::Eaten)
                 {
-                    lastSeen = box; // progress — extend, capped
-                    const int64_t extended = TtNowMs() + kSendVerifySettleMs;
-                    const int64_t hardCap = settleStart + kSendVerifySettleHardCapMs;
-                    deadline = extended < hardCap ? extended : hardCap;
+                    lateDrawGraceUsed = true;
+                    settleStart = TtNowMs();
+                    deadline = settleStart + kSendVerifyLateDrawGraceMs;
+                    continue;
                 }
+                break;
             }
 
             // ---- the COMMIT, or the recovery ----
@@ -6340,6 +6414,16 @@ namespace winrt::TerminalApp::implementation
                 co_return strike(boxState == stMenu ? L"a menu opened over the input box after the fill" :
                                                       L"the input box was unreadable after the fill");
             }
+            if (lateDrawGraceUsed && verdict != ::Agentmaster::FillVerify::Eaten)
+            {
+                // §20: the forensic line for the case the grace exists for — without it a slow draw that the grace
+                // saved would be indistinguishable in hooks.log from an ordinary first-read verify. (Here the box was
+                // readable: the unreadable case left above as a strike.)
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              L"[send-verify] " + sid8 + L" fill " + std::to_wstring(fills) + L"/" + std::to_wstring(kSendVerifyMaxFills) +
+                                                  L" drew late (the box was still empty when the settle ended; it showed during the " +
+                                                  std::to_wstring(kSendVerifyLateDrawGraceMs / 1000) + L" s late-draw grace) - judged as drawn, not typed again\n");
+            }
 
             if (verdict == ::Agentmaster::FillVerify::Verified || verdict == ::Agentmaster::FillVerify::VerifiedCollapsed)
             {
@@ -6359,22 +6443,41 @@ namespace winrt::TerminalApp::implementation
                     co_return 0; // injector vanished between fill and CR — the fill stays visible as a draft; caller rolls back
                 }
                 _sendVerifyStrikes.erase(promptId);
-                _sessionRegistry->MarkPromptInjected(sessionId, promptId); // §12: injection evidence for the lost-send verdict
+                // §12: injection evidence for the lost-send verdict. §20: plus, for a collapsed fill, the placeholder
+                // the read-back verified — the one form in which this prompt can be recognized in the box from now on
+                // (the Enter rescue, the draft swap's submit wait). An exact commit records "" (its text identifies it).
+                const bool collapsed = verdict == ::Agentmaster::FillVerify::VerifiedCollapsed;
+                _sessionRegistry->MarkPromptInjected(sessionId, promptId, collapsed ? box : std::wstring{});
+                std::wstring renderNote; // §20: which placeholder it committed as — the forensic link to later [enter-retry] lines
+                if (collapsed)
+                {
+                    renderNote = box.substr(0, 64);
+                    for (auto& ch : renderNote)
+                    {
+                        if (ch == L'\n' || ch == L'\r' || ch == L'\t')
+                        {
+                            ch = L' '; // one log line, whatever a soft wrap put into the read
+                        }
+                    }
+                    renderNote = L", as=\"" + renderNote + L"\"";
+                }
                 ::Agentmaster::AppendStateLog(L"hooks.log",
                                               L"[delivered] " + sid8 + L" prompt " + ::Agentmaster::ShortId(promptId) +
                                                   L" (chars=" + std::to_wstring(text.size()) +
-                                                  L", verified=" + (verdict == ::Agentmaster::FillVerify::Verified ? L"exact" : L"collapsed") +
+                                                  L", verified=" + (verdict == ::Agentmaster::FillVerify::Verified ? L"exact" : L"collapsed") + renderNote +
                                                   (fills > 1 ? L", fills=" + std::to_wstring(fills) : L"") + DeliverySanitizeNote(text) + L")\n");
                 co_return 1;
             }
 
             if (verdict == ::Agentmaster::FillVerify::Eaten)
             {
-                // Verified-empty past the settle: the TUI ate the paste pre-raw-mode (the standby
-                // lane's measured race). Nothing of ours is in the box — safe to re-fill.
+                // Verified-empty past the settle AND the late-draw grace (§20): the TUI ate the paste
+                // pre-raw-mode (the standby lane's measured race). Nothing of ours is in the box — safe
+                // to re-fill.
                 ::Agentmaster::AppendStateLog(L"hooks.log",
                                               L"[send-verify] " + sid8 + L" fill " + std::to_wstring(fills) + L"/" + std::to_wstring(kSendVerifyMaxFills) +
-                                                  L" was eaten (box verified empty) - " + (fills < kSendVerifyMaxFills ? L"re-filling" : L"giving up") + L"\n");
+                                                  L" was eaten (box verified empty, through the " + std::to_wstring(kSendVerifyLateDrawGraceMs / 1000) +
+                                                  L" s late-draw grace too) - " + (fills < kSendVerifyMaxFills ? L"re-filling" : L"giving up") + L"\n");
                 continue;
             }
 
@@ -6510,6 +6613,23 @@ namespace winrt::TerminalApp::implementation
                 if (!cur.empty())
                 {
                     _sessionRegistry->SetPendingInput(sessionId, cur);
+                }
+                // §20: with our insertion undone, the journal entry this fill wrote backs nothing in the box any more —
+                // unless the undo stopped with our text or placeholder still at the box's end (DecideSendUndo would
+                // press again: the budget, a stall or the deadline ended it), where the entry stays to back exactly
+                // that leftover. A retry of the prompt journals its own fill again.
+                if (::Agentmaster::DecideSendUndo(cur, text).action != ::Agentmaster::SendUndoAction::Press)
+                {
+                    try
+                    {
+                        _sessionRegistry->ForgetPastedText(sessionId, ::Agentmaster::PromptFillBody(text));
+                    }
+                    catch (...)
+                    {
+                        // Rule #18. Recovery: the entry stays until the box's next confirmed clear prunes the
+                        // journal (the pre-§20 lifetime); the strike below must still resolve the delivery.
+                        ::Agentmaster::AgentLogCaughtException(L"_InjectPromptVerified journal forget");
+                    }
                 }
                 co_return strike(L"foreign content in the box (merge refused, our insertion undone)");
             }
@@ -6973,8 +7093,15 @@ namespace winrt::TerminalApp::implementation
         // §15: the sent text went in SANITIZED (PromptFillBody), and claude's own cleanup can reshape it
         // further, so "does the box still read the prompt" must be invisible-insensitive — an exact
         // compare reads a still-stuck prompt as GONE and would restore the draft straight into it.
+        // §20: a COLLAPSED fill sits in the box as claude's placeholder, never as the sent text, so "the box does
+        // not read the sent text" alone read a stuck placeholder as gone — and a turn already running (a /steer into
+        // a working session) satisfies turnStarted at once, so the swap went on to restore the user's draft on top
+        // of the un-submitted placeholder (the restore's Ctrl+U would then kill OUR prompt). The prompt therefore
+        // counts as gone only when the box holds neither its text nor the placeholder its verified fill committed
+        // as (QueuedPrompt::committedRender, re-read with each snapshot below; "" for an exact commit).
         const auto sentNorm = DraftSwapCompareKey(DraftSwapFoldCr(submission.text));
         bool submitted = false;
+        std::wstring committedRender;
         for (int64_t waited = 0; waited <= kDraftSwapSubmitBudgetMs; waited += kDraftSwapPollMs)
         {
             co_await winrt::resume_after(std::chrono::milliseconds(kDraftSwapPollMs));
@@ -6986,11 +7113,13 @@ namespace winrt::TerminalApp::implementation
             }
             box = _ReadLiveDraftForSession(id);
             const auto now = _sessionRegistry->Get(id);
+            committedRender = CommittedRenderIn(now, submission.promptId, TtNowMs());
             const bool turnStarted = now &&
                                      ((now->state != ::Agentmaster::SessionState::Idle && now->state != ::Agentmaster::SessionState::WaitingForInput) ||
                                       now->turns.lastPromptUnixMs > sentAtMs ||
                                       now->convLastActivityUnixMs > sentAtMs);
-            const bool promptGone = box.empty() || DraftSwapCompareKey(DraftSwapFoldCr(box)) != sentNorm;
+            const bool promptGone = box.empty() ||
+                                    (DraftSwapCompareKey(DraftSwapFoldCr(box)) != sentNorm && !::Agentmaster::BoxShowsCommittedRender(box, committedRender));
             if (promptGone && turnStarted)
             {
                 submitted = true;
@@ -7000,8 +7129,9 @@ namespace winrt::TerminalApp::implementation
         if (!submitted && !box.empty())
         {
             // The box still holds the PROMPT (the classic eaten submit CR — with the promptGone
-            // test above, a non-empty box can only strand us here by reading the sent text, or by
-            // the turn never signaling at all). The Enter-retry watchdog owns the rescue once the
+            // test above, a non-empty box can only strand us here by reading the sent text or the
+            // placeholder it committed as (§20), or by the turn never signaling at all). The
+            // Enter-retry watchdog — which knows that placeholder too (§20) — owns the rescue once the
             // gate closes; we must not add to the box. The draft is NOT lost: it is in the TUI's
             // kill-ring (one Ctrl+Y away) and stays in the registry's memory below. Log WHAT the
             // box reads (DELIVERY.md observability — the 07:26:59 forensics could not tell).
@@ -7013,7 +7143,7 @@ namespace winrt::TerminalApp::implementation
                     ch = L' ';
                 }
             }
-            const bool boxIsPrompt = DraftSwapCompareKey(DraftSwapFoldCr(box)) == sentNorm;
+            const bool boxIsPrompt = DraftSwapCompareKey(DraftSwapFoldCr(box)) == sentNorm || ::Agentmaster::BoxShowsCommittedRender(box, committedRender);
             ::Agentmaster::AppendStateLog(L"hooks.log",
                                           L"[draft-swap] " + sid8 + L" restore DEFERRED: the prompt has not left the input box (box chars=" +
                                               std::to_wstring(box.size()) + L" matchesPrompt=" + (boxIsPrompt ? L"yes" : L"no") +
@@ -7052,6 +7182,8 @@ namespace winrt::TerminalApp::implementation
     // Enter into it SELECTS the highlighted option — an answer fabricated by the rescue mechanism.
     // So the press reads the box RIGHT NOW:
     //   Draft == the watched prompt (fold-matched)  → press: the eaten-CR rescue, unchanged.
+    //   Draft == the placeholder the prompt's       → press: the same rescue for a COLLAPSED fill
+    //            verified fill committed as (§20)     ("[Pasted text #N ...]", trusted for a minute).
     //   Empty (verified)                            → press: a lone Enter into an empty box is a
     //                                                 no-op for claude.
     //   Draft ≠ the prompt (foreign)                → REFUSE + refresh pendingInput with the live
@@ -7083,13 +7215,25 @@ namespace winrt::TerminalApp::implementation
             }
             const auto [state, live] = _ReadInputBoxProbeForSession(sessionId, kSendVerifyProbeRows);
             const auto st = static_cast<::Agentmaster::InputBoxState>(state);
-            if (st == ::Agentmaster::InputBoxState::Empty ||
-                (st == ::Agentmaster::InputBoxState::Draft && ::Agentmaster::DraftMatchesPromptText(live, promptText)))
+            // DELIVERY.md §20: a COLLAPSED fill sits in the box as claude's placeholder, which never reads as the
+            // prompt's text — so the placeholder its verified fill committed as (the registry's trusted
+            // committedRender: this injection's, at most a minute old) counts as the watched prompt too, and an Enter
+            // claude ate after a long or many-line fill is pressed again instead of failing as a lost send. Looked up
+            // only for a Draft (the one state the render can decide), on this UI thread from a fresh snapshot.
+            const std::wstring committedRender = st == ::Agentmaster::InputBoxState::Draft ?
+                                                     CommittedRenderIn(_sessionRegistry->Get(sessionId), promptId, TtNowMs()) :
+                                                     std::wstring{};
+            const bool holdsText = st == ::Agentmaster::InputBoxState::Draft && ::Agentmaster::DraftMatchesPromptText(live, promptText);
+            const bool holdsPlaceholder = st == ::Agentmaster::InputBoxState::Draft && !holdsText &&
+                                          ::Agentmaster::BoxShowsCommittedRender(live, committedRender);
+            if (st == ::Agentmaster::InputBoxState::Empty || holdsText || holdsPlaceholder)
             {
                 _sessionRegistry->Inject(sessionId, std::wstring(1, L'\r'));
                 ::Agentmaster::AppendStateLog(L"hooks.log",
                                               L"[enter-retry] " + sid8 + L" prompt " + ::Agentmaster::ShortId(promptId) +
-                                                  (st == ::Agentmaster::InputBoxState::Empty ? L" verified press (box empty)\n" : L" verified press (box holds the watched prompt)\n"));
+                                                  (st == ::Agentmaster::InputBoxState::Empty ? L" verified press (box empty)\n" :
+                                                   holdsText                                 ? L" verified press (box holds the watched prompt)\n" :
+                                                                                               L" verified press (box holds the placeholder the watched prompt committed as)\n"));
                 co_return;
             }
             if (st == ::Agentmaster::InputBoxState::Draft)
