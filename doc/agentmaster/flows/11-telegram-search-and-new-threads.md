@@ -141,7 +141,7 @@ every step is answered; an aborted creation leaves no stray thread.
 
 ### TGS-05 · A pick's menu fits where the session stands
 
-> **NOT BUILT** (0502c9380, after 0.8.0) · **P1 when built** · **Needs** F-TG, mock, F-S2 + a deactivated tab, an idle tab, an
+> **NOT BUILT** (380e86d64, after 0.8.0) · **P1 when built** · **Needs** F-TG, mock, F-S2 + a deactivated tab, an idle tab, an
 > exited claude, a pinned session · **Spec** MESSAGING.md §21.38, §5.4
 
 **Promise.** A session Search finds is offered what it needs from where it stands: a closed one is resumed, a deactivated

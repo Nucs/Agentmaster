@@ -10,7 +10,7 @@ below comes from the corrected walk; the old values are listed in §7.
 
 ## 1. What was measured
 
-- **The instance:** production 0.6.8.22 (the build of ec966a2ca, `Q:\agentmaster-layouts\Release-B`),
+- **The instance:** production 0.6.8.22 (the build of 9ad5432f0, `Q:\agentmaster-layouts\Release-B`),
   pid 41148, started 2026-10-19 07:35:36; 4 windows holding 703 tabs (556 + 93 + 7 + 47) by their window
   records at the first dump. In its life by then: 705 tab insertions (the restore + 10 new sessions + 1
   fork), 2 tabs closed. Five more tabs were opened between the first dump and the last.

@@ -14,7 +14,7 @@ steps and its checks are the test's assertions.
 
 Written 2026-10-23 from: the per-version changelogs of the four releases
 (`.claude/skills/release-version/am_release_080_notes.draft.md` holds them all), the commits after `v0.8.0`
-(9245a890f, 381c6c715, 57a40dd30, 0502c9380, 3b042ea32), every spec document under `doc/agentmaster/`, the project
+(0139d2eb8, 5bc91d3de, dd7b1fefc, 380e86d64, 4950ece21), every spec document under `doc/agentmaster/`, the project
 CLAUDE.md, and the code wherever a document and the code disagreed (the disagreements are listed at the end).
 The catalog started as a design; the section **The suite that runs these flows** below records the implemented
 subset (67 tests on 2026-10-23, all green on a test build with that day's fixes). Other flows remain specifications,
@@ -200,10 +200,10 @@ Fixes: three UI-freeze classes (*ROB-06*, ROB-10, MGR-06) · the tab-drag crash 
 (DRF-05) · a two-file `/handover` and the delete-after disarm (HND-02, HND-06).
 
 **After 0.8.0 (NOT BUILT into a release)** — interrupted turns: Restart's question, the fork question and its stop
-watch, their Telegram versions (INT-05–INT-07; 381c6c715) · a Search pick's menu by the session's state: Activate,
-Wake, Go to topic (TGS-05; 0502c9380) · `agentmaster <verb>` answered by an unpackaged install's own exe, and the
-release CLI on the right profile (CLI-02 phase 3, CLI-K2; 3b042ea32) · the installer's edge cases (INS-01 E3–E6;
-9245a890f — the script on the branch; the app's embedded copy not built) · a side-panel card's dot is the tab strip's
+watch, their Telegram versions (INT-05–INT-07; 5bc91d3de) · a Search pick's menu by the session's state: Activate,
+Wake, Go to topic (TGS-05; 380e86d64) · `agentmaster <verb>` answered by an unpackaged install's own exe, and the
+release CLI on the right profile (CLI-02 phase 3, CLI-K2; 4950ece21) · the installer's edge cases (INS-01 E3–E6;
+0139d2eb8 — the script on the branch; the app's embedded copy not built) · a side-panel card's dot is the tab strip's
 status icon: the draft's three dots, the red unread ring, the cache-warm spark crown (SP-08; SIDE_PANEL.md §2g) · a
 launch made on the Agent Manager page stays on the page and selects the new session there, and a launch from a tab is
 selected on the page too (MGR-07; MGR-K1) · ONE click on the + card's Launch while its presets menu is open (SP-05
@@ -244,7 +244,7 @@ the Explorer tree, templates. They belong to the suite's later breadth (E2E_TEST
 | TRN-K2 | A ▸ jump in the side panel's peek mode scrolls a hidden tab | read, 2026-10-05 |
 | DSP-K1 | A portable / per-user install shows no session toast; its clicks would do nothing | probe, 2026-09-27 |
 | CLI-K1 | The dev alias's CLI crashes on every real verb (Debug build, Control Flow Guard) | measured, CLI.md §11 |
-| CLI-K2 | An unpackaged release CLI reads the DEV profile — **fixed in code** by 3b042ea32, verified on the test build 0.8.1.1 (run `fixall-0811`; not in a release) | measured, CLI.md §11 |
+| CLI-K2 | An unpackaged release CLI reads the DEV profile — **fixed in code** by 4950ece21, verified on the test build 0.8.1.1 (run `fixall-0811`; not in a release) | measured, CLI.md §11 |
 | MGR-K1 | A session launched from the Agent Manager page is not selected on the page (Home offers no way back) until a tab switch — **fixed in code 2026-10-23**, verified on the test build 0.8.1.1 (run `fixall-0811`; MGR-07; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_manager_page.py`) |
 | SP-K1 | The + card's Launch needs a second click while its presets menu is open (the page's own Launch takes one) — **fixed in code 2026-10-23**, verified on the test build 0.8.1.1 (run `fixall-0811`; SP-05 phase 5; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_side_panel.py`) |
 | TCM-K1 | A blank tab rename leaves the tab showing Claude Code's own terminal title (the session keeps its title) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
@@ -262,7 +262,7 @@ the Explorer tree, templates. They belong to the suite's later breadth (E2E_TEST
 **Checked both ways (2026-10-23).** Every defect fixed in code (MGR-K1, SP-K1, TCM-K2, TAB-K1, TAB-K3, A11Y-K1,
 TAB-K4, CLI-K2) has a `needs_fix` test that asserts the CORRECT behavior, and each was run on both builds. On 0.8.0
 every one fails on its defect (runs `nf-080`, `nf-080b`; TAB-K1's sweep on 6 of its 9 moments — the defect is a race,
-which is why it is a sweep). On the test build 0.8.1.1 — a purged Release build whose `src/` equals HEAD 1f4c68678,
+which is why it is a sweep). On the test build 0.8.1.1 — a purged Release build whose `src/` equals HEAD a65c6ac9a,
 zipped and run only in a claude-fleet desktop, never installed on this PC — every one passes (runs `fixall-0811`,
 `fixall-0811b`). The open defects the suite found (TCM-K1, ROB-K1, TAB-K5, A11Y-K2) keep a known-defect test that
 asserts TODAY's wrong behavior; each passes on both builds, so none of the fixes touched them. The defects found by
@@ -296,9 +296,9 @@ feature tests (`e2e/suites/test_prompt_queue_runner.py::test_restart_session_sen
 
 - **The Waiting-for-you timeout's default** is **4320 minutes (3 days)** in `SessionModels.h`
   (`waitingForYouTimeoutMinutes{ 4320 }`), and the cog's slider runs to 7 days; CLAUDE.md said "a 1m–3d slider … default
-  60 = 1h" (corrected in b4fb6b941). The flows use the code's default (STA-01).
+  60 = 1h" (corrected in 8072d5188). The flows use the code's default (STA-01).
 - **The queue history's origin pill** reads **`auto`** (blue) for a prompt the runner sent, not `flight`
-  (`AgentManagerContent.AutoTesting.cpp`); CLAUDE.md said "flight" (corrected in b4fb6b941), and a comment there still
+  (`AgentManagerContent.AutoTesting.cpp`); CLAUDE.md said "flight" (corrected in 8072d5188), and a comment there still
   does.
 - **MESSAGING.md §21.19, §21.20, §21.22, §21.23 and §21.25, and SESSIONS.md §9.15** still carry "NOT BUILT yet" in their
   headings although 0.8.0 shipped them (the status note at the top of MESSAGING.md says to read such markers as older
@@ -314,15 +314,15 @@ feature tests (`e2e/suites/test_prompt_queue_runner.py::test_restart_session_sen
 The executable suite is [`e2e/`](../../../e2e/README.md) (the scripted model, the driver and its page objects, the
 fixtures, the guest runner, the host orchestrator). Each test is marked with its flow (`@pytest.mark.flow("…")`).
 Status on 2026-10-23 against the published 0.8.0 portable build and Claude Code 2.1.291 in a claude-fleet Windows 11
-desktop: **49 of 49 tests pass in 37 min** (the suite of f710660e0); a known-defect test passes while its defect
+desktop: **49 of 49 tests pass in 37 min** (the suite of e80dfb1e5); a known-defect test passes while its defect
 exists. A `needs_fix` test proves a fix that no release holds yet, so it fails on 0.8.0 by design (deselect those
-tests there with `-m "not needs_fix"`). A TEST build of 8932908db with MGR-K1's and SP-K1's fixes passed all 41
-tests of the suites of 3773f7149, its three new `needs_fix` tests included, and all 28 tests of the tab life cycle,
-robustness and tab menu suites of f710660e0 (the Deactivate scopes test on a rerun, once its own shell count stopped
+tests there with `-m "not needs_fix"`). A TEST build of 4a889f147 with MGR-K1's and SP-K1's fixes passed all 41
+tests of the suites of 7af52f8ed, its three new `needs_fix` tests included, and all 28 tests of the tab life cycle,
+robustness and tab menu suites of e80dfb1e5 (the Deactivate scopes test on a rerun, once its own shell count stopped
 counting a hook forwarder; [`../E2E_TESTING.md`](../E2E_TESTING.md) status).
 
 **Later the same day the suite had 67 tests**, and all 67 pass on the test build 0.8.1.1 — a purged Release build
-whose `src/` equals HEAD 1f4c68678, so it holds every fix of 2026-10-23 (MGR-K1, SP-K1, TCM-K2, TAB-K1, TAB-K3,
+whose `src/` equals HEAD a65c6ac9a, so it holds every fix of 2026-10-23 (MGR-K1, SP-K1, TCM-K2, TAB-K1, TAB-K3,
 A11Y-K1, TAB-K4, CLI-K2) — in a claude-fleet desktop: run `fixall-0811` (65 tests in 63 min: 63 passed; the two
 failures were test versions since corrected — the quit test's hit-test check, now A11Y-K2's own test, and a TAB-K2
 test that expected the FIRST Claude tab to start) and run `fixall-0811b` (the corrected two, A11Y-K2's and TAB-K5's

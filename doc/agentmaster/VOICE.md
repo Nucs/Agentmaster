@@ -212,7 +212,7 @@ underscore, `::`, a file name, a cmdlet like `Get-AppxPackage`, an error code li
 only SPEAKABLE names, too: no `lowerCamelCase` identifier (`tabToken`, `kStateSettleMs`), nothing of three or more word
 parts (`WriteAllUtf8`, `SHGetKnownFolderPath`), no two-character token that is not an acronym (`v9`, `m5`). On the owner's
 recordings those identifiers had filled Whisper's prompt and pushed out the glossary words a note did hold (§4.4). On this
-repository's CLAUDE.md (at `a935ca604`) the mining yields Agentmaster, Claude, XAML, ConPTY, MSIX, SDK, DuckDB, x64, …
+repository's CLAUDE.md (at `f0a54ee8c`) the mining yields Agentmaster, Claude, XAML, ConPTY, MSIX, SDK, DuckDB, x64, …
 
 ### 5.3 The four uses
 
@@ -415,7 +415,7 @@ exits 1 when the configuration misses the bar (corpus WER ≤ 5 %, every term wi
 are missing; it passed 3 runs of 3 at 0.0 % (§4.4). It is the app's pipeline: the same vocabulary, Whisper's prompt, the
 dictionary pass, the second hearing and the correction's prompt and guard (`llm_fix.py`, which `VoiceCorrect.h` matches by
 goldens). It calls Sonnet 5.5 three times (one per note) on this PC's Claude Code login. The session context is CLAUDE.md
-pinned at `a935ca604` (`--claude-md-rev`), the repository before this feature documented itself, so the test cannot grow
+pinned at `f0a54ee8c` (`--claude-md-rev`), the repository before this feature documented itself, so the test cannot grow
 easier as VOICE.md's words land in CLAUDE.md.
 
 ### 7.4 Generality

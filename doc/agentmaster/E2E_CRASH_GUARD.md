@@ -5,7 +5,7 @@
 >
 > **How each fact was established:**
 > - *measured*: measured on the workstation for this plan (Appendix D).
-> - *read*: read from the code at `3773f7149`, plus the end-to-end driver as it stood in the working tree that
+> - *read*: read from the code at `7af52f8ed`, plus the end-to-end driver as it stood in the working tree that
 >   afternoon.
 > - *G0 checks*: still to be confirmed in a test desktop (§11).
 >
@@ -250,7 +250,7 @@ What the Guard cannot promise:
   FAST #1). The run manifest records the tested build and matching symbol identity; missing/mismatched symbols are
   an explicit readiness/triage failure, never silently substituted by a private-only symbol policy.
 - **A real leak with a published before and after** (*read*: `git tag --contains`):
-  - `v0.7.10-prerelease` lacks fa3245561, the UText fix ([MEMORY_LEAKS.md](MEMORY_LEAKS.md) §3);
+  - `v0.7.10-prerelease` lacks 68ab87abb, the UText fix ([MEMORY_LEAKS.md](MEMORY_LEAKS.md) §3);
   - `v0.8.0` has it.
 
   So the URL-scan leak cycle must flag the first and pass the second.
@@ -1830,4 +1830,4 @@ the repository: the request was for a plan, so G0 repeats them in a test desktop
 **Read for this plan.**
 - The cached `Agentmaster_0.8.0.0_x64.zip` in the E2E desktop's persist folder: 67 entries, no `.pdb`.
 - The 11 run zips in that folder: no `leftovers.txt`.
-- `git tag --contains` for fa3245561, a790584c9, b59c23418 and 071031fdf (§3.7).
+- `git tag --contains` for 68ab87abb, a790584c9, b59c23418 and 071031fdf (§3.7).

@@ -1096,7 +1096,7 @@ The user's request: "Are there any cpu hotspots that can be taken care of? can y
 running (via readonly) is suffering from wasted cpu and time?" Production was measured read-only at night
 (02:10–02:45), with its sessions mostly at rest; nothing was suspended, written or attached.
 
-- **The instance:** pid 41148, 0.6.8.22 (the build of ec966a2ca, `Q:\agentmaster-layouts\Release-B`), up since
+- **The instance:** pid 41148, 0.6.8.22 (the build of 9ad5432f0, `Q:\agentmaster-layouts\Release-B`), up since
   2026-10-19 07:35. It holds every fix of §10 and §12. 4 windows: 556 + 96 + 7 + 47 tabs (the 47-tab window is
   minimized and shows the Agent Manager page); 34 initialized terminals; 32 live `claude.exe`. The session that
   measured runs inside it, so its own `claude.exe`, `bash` and `python` are subtracted below.
@@ -1175,7 +1175,7 @@ parents at +0x38):
   here. For each it calls `_session` (`SessionRegistry::Get`: a full `SessionInfo` copy, queued prompts
   included), copies its `TopicRecord` and `Mirror`, runs `_followTranscript` (opens the transcript and reads
   its tail), runs `_refreshCard` (renders and hashes the card), then copies the fields back and sets
-  `_stateDirty = true` **unconditionally** (Messaging.cpp:2115 today; :2062 in ec966a2ca, the build in
+  `_stateDirty = true` **unconditionally** (Messaging.cpp:2115 today; :2062 in 9ad5432f0, the build in
   production).
 - **So `_saveStateIfDirty`** (gap `kStateSaveGapMs` = 2 s) rewrites the whole state file every ~3.2 s:
   measured 20 rewrites a minute, 465 KB each, after a `CopyFileW` of the old file to `state.json.prev`, with
@@ -1306,7 +1306,7 @@ the code; nothing is built. The design, the known limits and the checks are in
 
 `TerminalPage.h` gained data members and `AgentSidePanelCardView` changed shape. `TerminalPage.h` is not on the
 purge-trigger list, so the next Debug AND Release builds must purge by force (the build-install skill §5.8).
-Done on 2026-10-20: the Debug and Release builds of af3d40b5e were purged by force (`stagebuild.ps1 -ForcePurge`).
+Done on 2026-10-20: the Debug and Release builds of 5f70cfda1 were purged by force (`stagebuild.ps1 -ForcePurge`).
 
 ### 14f. Check after the build
 
@@ -1316,7 +1316,7 @@ which this change should not move: frames follow property changes, §13b).
 
 ## 15. Home freezes the app for 2–11 s: the Agent Manager page's catch-up rebuild (2026-11-02)
 
-The report (production 0.8.0.2, the build of b9780db43, pid 95532, up since 2026-11-01 08:14; 4 windows of
+The report (production 0.8.0.2, the build of f80ac468e, pid 95532, up since 2026-11-01 08:14; 4 windows of
 584 + 163 + 47 + 7 tabs, 799 live sessions): "When pressing home button (that opens agent manager tab/page), the
 app/ui freezes for 2-4 seconds, sometimes 10s". Investigated read-only: production's hooks.log and window records,
 the code, two `stacksnap sample` runs on the UI thread (60 s and 270 s at 3 ms; nothing suspended; the build's PDBs

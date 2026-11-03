@@ -1,18 +1,18 @@
 <!-- Agentmaster 0.7.10-prerelease release notes — PRE-RELEASE (the stable 0.7.0 stays Latest).
-     Range: v0.7.9-prerelease..07e7a295b = 19 commits (6 user-facing; 13 docs: the 0.7.9 notes archive,
+     Range: v0.7.9-prerelease..b8c33adb7 = 19 commits (6 user-facing; 13 docs: the 0.7.9 notes archive,
      the deploy/swap references, status corrections, and DESIGN-only documents — the DuckDB session
      database (SESSIONS_DB.md) and the session-agent tool redesign (SESSIONS_AGENT.md) — which build nothing).
      Baseline = the previous NON-nightly release = the 0.7.9 pre-release (no nightly since).
-     RELEASING from 07e7a295b (= origin/agentmaster tip after pushing the 18 unpushed commits).
+     RELEASING from b8c33adb7 (= origin/agentmaster tip after pushing the 18 unpushed commits).
      NOT included: another session's uncommitted harness work (AgentHarness*.{h,cpp}) that was in the
      working tree while this was cut.
      Tag v0.7.10-prerelease -> ver4 0.7.10.0, rawver 0.7.10-prerelease. 0.7.10 = the patch after 0.7.9
      (the updater compares major.minor.patch numerically: 10 > 9; ParseVersion reads each part as a number).
      nightly=false, so release.yml does NOT auto-mark prerelease — mark it at publish. The installer's
      -Version maps to the TAG (full suffix 0.7.10-prerelease); asset names stay numeric ver4.
-     Pre-validation: no local build (project rule). Dev 0.0.1.6 (Debug, built 2026-10-13 from 2ad186327)
-     already holds every code change except 70990582f (the AI-search prompt rule); ci.yml run 38523114488
-     (x64 Release) and release.yml run 38523127576 (x64 + arm64), both on 07e7a295b, are the clean builds.
+     Pre-validation: no local build (project rule). Dev 0.0.1.6 (Debug, built 2026-10-13 from d860ebdf1)
+     already holds every code change except 9aa6e0d85 (the AI-search prompt rule); ci.yml run 38523114488
+     (x64 Release) and release.yml run 38523127576 (x64 + arm64), both on b8c33adb7, are the clean builds.
      Publish: gh release edit v0.7.10-prerelease -R Nucs/Agentmaster --draft=false --prerelease --latest=false
        (NEVER --latest; the stable 0.7.0 stays Latest).
      Assets: Agentmaster_0.7.10.0.msixbundle, _x64.zip, _arm64.zip, Agentmaster.cer. -->

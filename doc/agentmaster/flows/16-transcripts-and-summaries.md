@@ -197,7 +197,7 @@ transcript, including the sessions it continues and the subagents it spawned.
 ## Known defects (expected failures until fixed)
 
 ### TRN-K1 · A board or tree sort click reverts the summary panel's dragged size
-> **P2** · Found by reading on 2026-10-05, still in the code at 57a40dd30 · memory `summary-panel-review-2026-10-05`
+> **P2** · Found by reading on 2026-10-05, still in the code at dd7b1fefc · memory `summary-panel-review-2026-10-05`
 
 The page's settings sink restores the summary toggles from disk but not `summaryPanelWidthFraction` /
 `summaryPanelHeightFraction` (`TerminalPage.AgentEngine.cpp`, the preserve block near `summaryPanelShowHistory`), and the

@@ -15,10 +15,11 @@
 
 | Install | Identity | Version | Runs from | Commit |
 |---|---|---|---|---|
-| production | `Agentmaster` | 0.8.0.2 | the loose layout `Q:\agentmaster-layouts\Release-B` (build server build `b20261101-1`, installed by `amb install`) | `b9780db43` |
-| dev | `AgentmasterDev` | 0.0.1.41 | the loose layout `Q:\agentmaster-layouts\Debug-B` (build server build `b20261031-1`, installed by `amb install`) | `d1da872d1` |
+| production | `Agentmaster` | 0.8.0.2 | the loose layout `Q:\agentmaster-layouts\Release-B` (build server build `b20261101-1`, installed by `amb install`) | `f80ac468e` (its binaries carry `b9780db43`) |
+| dev | `AgentmasterDev` | 0.0.1.41 | the loose layout `Q:\agentmaster-layouts\Debug-B` (build server build `b20261031-1`, installed by `amb install`) | `81df9c3be` (its binaries carry `d1da872d1`) |
 
 - Whether a commit is in a build: `git merge-base --is-ancestor <commit> <build commit>`.
+- A hash in parentheses is the one a build's binaries (and the build server's records) carry for that commit before the private-data scrub of the history; `refs/backup/pre-scrub-2026-11-03/` keeps those commits in this clone only (never push it). The table's first hash is the commit in the published history.
 - Update this table at every deploy (`Get-AppxPackage Agentmaster*` shows each install's version and folder; a loose layout runs the commit it was built from).
 - A layout installed from the build server carries no PDBs: its build's symbols zip has them (`amb fetch <build id> --kind symbols-zip`); the PDBs under `bin\` belong to the last LOCAL build of that configuration.
 

@@ -1,7 +1,7 @@
 # E2E reliability: a guard around every test, and a dedicated failure suite
 
 > **Planning only — 2026-10-23.** No implementation, build, installation, fault injection or test run is part of
-> this change. Source baseline: `3773f7149` (40 E2E tests reported green against portable 0.8.0 and Claude Code
+> this change. Source baseline: `7af52f8ed` (40 E2E tests reported green against portable 0.8.0 and Claude Code
 > 2.1.291). Another agent owns feature-scenario implementation. This document defines the shared reliability
 > infrastructure and the special scenarios that implementation should use.
 >

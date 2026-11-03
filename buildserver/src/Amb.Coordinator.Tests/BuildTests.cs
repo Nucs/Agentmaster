@@ -16,7 +16,7 @@ namespace Amb.Coordinator.Tests;
 public sealed class BuildTests : IDisposable
 {
     /// <summary>A full commit SHA for the tests.</summary>
-    private const string Commit = "5f5d53fa98edbe586f9998ec576ae8fd7d252c57";
+    private const string Commit = "6482adbde46949a8ebbd873966516356e9b3e0be";
 
     /// <summary>The test's own site root under %TEMP%, deleted after it.</summary>
     private readonly string _root = Path.Combine(Path.GetTempPath(), "amb-build-" + Guid.NewGuid().ToString("N"));

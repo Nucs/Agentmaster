@@ -19,8 +19,8 @@ here, keep portable, later); the binary is `Agentmaster.exe` with a `WindowsTerm
 **for all users** (one approval, that step only), **for the signed-in user** when another account or SYSTEM runs it;
 rights never kept; uninstall removes only what a release shipped; an upgrade puts the old version back on failure; a
 failed or cancelled update restarts the installed version; the one-command installer asks the same and takes `-Scope`;
-a user's own install wins over an all-users one for that user (629a4f753, `AGENTMASTER_NO_HANDOFF=1` turns it off).
-After 0.8.0 (9245a890f, the installer script on the branch; the app's embedded updater copy NOT BUILT): the installer's
+a user's own install wins over an all-users one for that user (77a7c7db1, `AGENTMASTER_NO_HANDOFF=1` turns it off).
+After 0.8.0 (0139d2eb8, the installer script on the branch; the app's embedded updater copy NOT BUILT): the installer's
 edge cases.
 
 ## Lifecycle model
@@ -57,11 +57,11 @@ edge cases.
 - **E1 `-Scope User -NonInteractive`** → no question.
 - **E2 Run again, same version** → "Already up to date", nothing downloaded.
 - **E3 Typed into a TAB of the Agentmaster it upgrades** → "the step goes on in a new window"; the new window asks, closes the
-  app, upgrades, starts it again (9245a890f).
+  app, upgrades, starts it again (0139d2eb8).
 - **E4 `irm … | iex`** → the caller's PowerShell keeps its `$ErrorActionPreference`, no leftover function or variable
-  (9245a890f).
-- **E5 Ctrl+C half way** → the previous version back (9245a890f).
-- **E6 `-Version 0.7.10`** → finds `v0.7.10-prerelease` (9245a890f).
+  (0139d2eb8).
+- **E5 Ctrl+C half way** → the previous version back (0139d2eb8).
+- **E6 `-Version 0.7.10`** → finds `v0.7.10-prerelease` (0139d2eb8).
 
 ---
 
@@ -135,7 +135,7 @@ edge cases.
 
 ### INS-05 · A user's own install wins over the all-users one
 
-> **Since** 0.8.0 (629a4f753) · **P1** · **Needs** INS-03's state · **Spec** PROFILES.md §2b, §2c (2026-10-22)
+> **Since** 0.8.0 (77a7c7db1) · **P1** · **Needs** INS-03's state · **Spec** PROFILES.md §2b, §2c (2026-10-22)
 
 **Phases**
 1. **Pin the shared copy, then install your own.** *Expect:* the desktop and Start icons now open the user's copy (its AUMID);

@@ -34,7 +34,7 @@
 > best fit for a slot based on tiny11 E5. measure varieties / update the design/plan and measure ahead all numbers and
 > make decisions accordingly". E3 (the homelab changes for dock) was not answered and stays open (§14).
 >
-> **This revision replaces the third (8a840e9c5)**, which replaced the second (317c4d6eb) and the first (58a31fd7c); all
+> **This revision replaces the third (f8da3cc6c)**, which replaced the second (23a77209e) and the first (59d1c5451); all
 > three are in git history. Every number was measured on 2026-10-24 or 2026-10-25; §16 has the tables, §17 how.
 
 ## 0. In one page
@@ -554,7 +554,7 @@ claude-fleet desktops whose creation alone took 549 s (`vm-setup-validation-2026
 | P0.1 | the `buildserver` distro on Q: (sparse after W1's restart); fastrund 1.2.x in it: ad-hoc runs, its ports from Windows, its idle cost | **passed 2026-10-25** (§16.9): the distro made by `site/sitectl.py create` in 11.5 s; production's fastrund image in it answers `/healthz` from Windows 0.36 s after `podman run`, runs ad-hoc scripts (the first 2.6 s after its start, then ~15 ms from Windows), 30 MB resident; found: Windows reaches it only at the distro's address, its HTTPS registry pulls fail (plain HTTP through Traefik works), slots run without cgroups |
 | P0.2 | the slot chain through the coordinator: a base image installed by a request, then booted through an overlay, one command through its guest agent, a graceful stop | **passed 2026-10-25** (§16.10): `am-base` made from Tiny11 Core in 13.1 min (the agent's hello after 751 s), booted and ready 43 s after the request, `ver` run, gone 9 s after the shutdown step; found: a boot must pass the image's own dockur `VERSION`, or dockur reinstalls Windows over the slot |
 | P0.5 | e2e on Tiny11 Core: a few suites on Core and on a full Windows 11 desktop, side by side (decides whether `am-e2e` is Core or regular Tiny11) | **passed 2026-10-25** (§16.11): the same build and 48 tests of six suites on `am-e2e` and on a claude-fleet desktop: the same outcome on 45; the 3 that differ are the TAB-K1 race's timing (two parametrized probes, a `needs_fix` defect of that build, on opposite sides in the two runs) and one UI Automation COM error on the full desktop. Test times equal (24.9 / 25.3 min). **`am-e2e` stays on Tiny11 Core** |
-| P0.4 | a full build in a VM, cold and incremental, against native (W4: over 2× native → the host lane) | **passed 2026-10-26** (§16.12): the same Release build of 5f5d53fa9 at the same parallelism (`/m:2`, `CL_MPCount` 2): cold 2,278.6 s in the build VM against 1,955.3 s natively (**1.17×**); incremental to ea28331ae 360.0 s against 275.6 s (**1.31×**). Release, not Debug: the first build served the MVP too, and Release compiles the most. **Builds stay in VMs** (W4) |
+| P0.4 | a full build in a VM, cold and incremental, against native (W4: over 2× native → the host lane) | **passed 2026-10-26** (§16.12): the same Release build of 6482adbde at the same parallelism (`/m:2`, `CL_MPCount` 2): cold 2,278.6 s in the build VM against 1,955.3 s natively (**1.17×**); incremental to d6ba4fee6 360.0 s against 275.6 s (**1.31×**). Release, not Debug: the first build served the MVP too, and Release compiles the most. **Builds stay in VMs** (W4) |
 
 **Then two tracks in parallel:**
 - **Track A, fastrun** (its repository, in a worktree of its own; tested on this PC's node and fastrun-next, never on
@@ -585,16 +585,16 @@ Core. Still owed for Phase 1's own scope: a full-suite run on `am-e2e` (`--run-t
 kept build VM `build-1`, into a build id whose portable zip, layout zip, symbols zip, `build.log` and `build.json` sit in
 the store with their SHA-256; `amb artifacts` lists them and `amb fetch` copies them to `Q:\buildserver\out\<build id>`.
 Its done-when holds on this PC, checked on the real site by [`tests/site_build.py`](tests/site_build.py): a Release
-build of HEAD (e54f37fae) got build id `b20261026-3` 11.7 min after its request; an identical request answered with that
+build of HEAD (4115b1067) got build id `b20261026-3` 11.7 min after its request; an identical request answered with that
 id in 0 s; `amb e2e` passed the smoke suite on it; `amb fetch` copied its zip and checked the hash; no slot was left;
 and K: was only read (§16.12). It differs from the table and from §2, §5.1, §8 and §11 in these ways:
 - **Release is the default and what the check built**, not Debug: Release is what e2e runs and what P0.4 measured. A
   Debug build's binaries link the debug UCRT (`ucrtbased.dll`, which only the Windows SDK installs), so its portable zip
   runs on no PC without the SDK, `am-e2e` included. A Debug build of HEAD works the same way in its own worktree:
-  `b20261026-4` (e54f37fae), cold, 23.9 min from its request (§16.12).
+  `b20261026-4` (4115b1067), cold, 23.9 min from its request (§16.12).
 - **Not built yet:** `amb test m5|syntax`; purge `auto` (`none` is the default, `force` deletes the worktree's build
   outputs first); the store's budget (each Release build keeps ~0.6 GB, and nothing deletes builds yet). Built since
-  (2026-10-29, fb20046ab): snapshot commits of uncommitted work (`amb build --snapshot [-- <paths>]`: a reproducible
+  (2026-10-29, 25c320417): snapshot commits of uncommitted work (`amb build --snapshot [-- <paths>]`: a reproducible
   commit made in a private index under `refs/buildserver/snapshots/`, as §11 asks; the CLI makes it, the mirror fetches
   it, the build checks its parent) and the binlog (a `Directory.Build.rsp` with `-bl` beside the solution for the
   build's duration, which msbuild reads by itself, so a commit of any age gets one; kept as `build.binlog`).
@@ -612,7 +612,7 @@ and K: was only read (§16.12). It differs from the table and from §2, §5.1, �
 - **W1 was not needed:** the site's disk is not sparse, so it keeps what a build frees for the next one; Q: had room
   once the owner freed it (W3).
 
-**Phase 4's install as built (2026-10-29, fb20046ab; [`README.md`](README.md) "Installs"):** `amb install <build id>
+**Phase 4's install as built (2026-10-29, 25c320417; [`README.md`](README.md) "Installs"):** `amb install <build id>
 --instance dev|production` is a request of its own kind (Deploy: the kind Install already makes base images) that the
 coordinator runs with no slot. The table's "install of a build id through the swap script" holds: on dev, a dry run, an
 install of `b20261028-3` (0.0.1.39 @ Debug-B → 0.0.1.40 @ Debug) and an install with an injected failure after the
@@ -811,8 +811,8 @@ the request's own events (`amb logs <id>`).
 
 ### 16.11 P0.5: e2e on Tiny11 Core against a full Windows 11 (2026-10-25)
 
-The same build (`b20261025-1`: `Agentmaster_0.8.1.0_x64.zip`, SHA-256 `cc9e69c99828…`, from 8932908db) and the same six
-suites at e2e commit 8983169ac (`test_smoke`, `test_tab_menu`, `test_side_panel`, `test_accessibility`,
+The same build (`b20261025-1`: `Agentmaster_0.8.1.0_x64.zip`, SHA-256 `cc9e69c99828…`, from 4a889f147) and the same six
+suites at e2e commit 8310c1917 (`test_smoke`, `test_tab_menu`, `test_side_panel`, `test_accessibility`,
 `test_workspace`, `test_cli`: 48 tests), once in an `am-e2e` slot through `amb e2e` (request r20261025-101340-29b0e6),
 once on a claude-fleet desktop (`am-e2e-1`, the fleet's Tiny11 25H2 golden image) through `e2e/host/e2e_run.py`
 (run `p05-full-20261025`), one after the other, each at 8 GB / 6 vCPU. Compared by
@@ -826,7 +826,7 @@ once on a claude-fleet desktop (`am-e2e-1`, the fleet's Tiny11 25H2 golden image
 | after the suite | the VM did not stop by itself for 97 s (dockur's ACPI window; capped at 20 s since) | the desktop deleted |
 
 - **Same outcome on 45 of 48.** Both fail the same 7 `needs_fix` tests (TCM-K2, SP-K3, TAB-K3 ×2, A11Y-K1 ×3: fixes
-  that came after 8932908db) and `test_panel_state_survives_a_restart` (SP-06; the '«' button had no rectangle after
+  that came after 4a889f147) and `test_panel_state_survives_a_restart` (SP-06; the '«' button had no rectangle after
   the restart on both, at either screen size), and pass the other 37.
 - **The 3 that differ:** `test_closing_one_of_two_windows_keeps_its_claude_tab[400]` and `[475]` probe the TAB-K1 race
   at fixed delays after a tab switch; on this unfixed build the race was hit at 475 ms on Core and at 400 ms on the
@@ -849,13 +849,13 @@ the same wrapper and parallelism on this PC, from a private clone on Q: under th
 |---|---|
 | the build image: `images.py build-image` (8 GB / 8 vCPU) | 24.6 min: Build Tools 17.14.37824.6 in 22.4 min (MSVC 14.44.35207, SDKs 22621 + 26100, MakeAppx, vcpkg, the .NET SDK), PowerShell 7.6.8 and PortableGit 2.56.0.3 from the staged downloads, VSSetup 2.2.16, the trims, the seal (TiWorker idle); `am-build` = 22.3 GB of files over `am-base`; `images.py check --image am-build` found every tool |
 | the site's mirror: the first fetch / later ones | 92 s for 145 MB / 0–14 s |
-| **the first build** (5f5d53fa9, Release, dev; r20261026-061859-3d231a; 8.8 GB, `/m:2`, `CL_MPCount` 2) | placed once the site's page cache was dropped (Windows' available memory 12.6 → 15.1 GB); the VM's first boot ~2 min, D: made; the whole history as a bundle (140.3 MB) checked out in 46.5 s; "Build OK in 2,278.6 s" (38.0 min, cold: NuGet, DuckDB, vcpkg from source, every project); packaging 2.7 min; `b20261026-1`: the portable zip 201.9 MB, the layout zip 198.0 MB, the symbols zip 171.0 MB (16 PDBs matched; `TerminalThemeHelpers.pdb` missing, not required), `build.log` 0.9 MB; D: then held ~29 GB. 54 min from the request to the build id, ~10 of them the step waiting for msbuild's lingering processes (fixed since, below) |
+| **the first build** (6482adbde, Release, dev; r20261026-061859-3d231a; 8.8 GB, `/m:2`, `CL_MPCount` 2) | placed once the site's page cache was dropped (Windows' available memory 12.6 → 15.1 GB); the VM's first boot ~2 min, D: made; the whole history as a bundle (140.3 MB) checked out in 46.5 s; "Build OK in 2,278.6 s" (38.0 min, cold: NuGet, DuckDB, vcpkg from source, every project); packaging 2.7 min; `b20261026-1`: the portable zip 201.9 MB, the layout zip 198.0 MB, the symbols zip 171.0 MB (16 PDBs matched; `TerminalThemeHelpers.pdb` missing, not required), `build.log` 0.9 MB; D: then held ~29 GB. 54 min from the request to the build id, ~10 of them the step waiting for msbuild's lingering processes (fixed since, below) |
 | the same build natively (`p04_native.sh cold`) | "Build OK in 1,955.3 s" (32.6 min): **the VM took 1.17×** |
-| **incremental:** 5f5d53fa9 → ea28331ae in the same worktree (r20261026-074830-985d31; 9.6 GB; 5b292ab4a's installer headers undone) | no bundle (ea28331ae is reachable from the worktree's commit); the VM's boot 38 s; checkout 6.6 s; "Build OK in 360.0 s" (6.0 min); packaging 2.7 min; `b20261026-2` 10.2 min after the request |
+| **incremental:** 6482adbde → d6ba4fee6 in the same worktree (r20261026-074830-985d31; 9.6 GB; c586330f1's installer headers undone) | no bundle (d6ba4fee6 is reachable from the worktree's commit); the VM's boot 38 s; checkout 6.6 s; "Build OK in 360.0 s" (6.0 min); packaging 2.7 min; `b20261026-2` 10.2 min after the request |
 | the same natively (`p04_native.sh incr`) | "Build OK in 275.6 s" (4.6 min): **1.31×** |
-| **the acceptance check** (`tests/site_build.py`): ea28331ae → e54f37fae (r20261026-080522-444ac4; 10.9 GB, `/m:2`, `CL_MPCount` 3; 5b292ab4a redone and c50fb6468's persistence files) | an incremental bundle of 0.1 MB, the VM's boot 27 s, checkout 4.1 s; "Build OK in 447.3 s" (7.5 min); packaging 164.1 s; `b20261026-3` 11.7 min after the request. The identical request: the same id in 0 s, no slot. `amb e2e` on it: placed 18 s after its request (once Windows had the build VM's memory back), the smoke suite passed, 2 min 40 s in all. `amb fetch`: 206.9 MB, hash checked. No slot left; K: only read. 7 of 7 checks |
+| **the acceptance check** (`tests/site_build.py`): d6ba4fee6 → 4115b1067 (r20261026-080522-444ac4; 10.9 GB, `/m:2`, `CL_MPCount` 3; c586330f1 redone and 36367404f's persistence files) | an incremental bundle of 0.1 MB, the VM's boot 27 s, checkout 4.1 s; "Build OK in 447.3 s" (7.5 min); packaging 164.1 s; `b20261026-3` 11.7 min after the request. The identical request: the same id in 0 s, no slot. `amb e2e` on it: placed 18 s after its request (once Windows had the build VM's memory back), the smoke suite passed, 2 min 40 s in all. `amb fetch`: 206.9 MB, hash checked. No slot left; K: only read. 7 of 7 checks |
 | `amb fetch` of `b20261026-1`'s portable zip | 201.9 MB in 1 s, SHA-256 checked; a target on K: refused (exit 2) |
-| **a Debug build** of e54f37fae in a new worktree (r20261026-082909-883b8d; 16 GB, `/m:3`, `CL_MPCount` 3) | the first attempt (r20261026-082419-968ab6) failed at its checkout: the submodule's commit was recorded once for the VM, so the new worktree got no submodule bundle (fixed, below). Then: the VM's boot 37 s; the whole history with the submodule (140.4 MB), checkout 6.8 s (the failed attempt had fetched the repository); "Build OK in 1,237.0 s" (20.6 min, cold); packaging 93.4 s; `b20261026-4` 23.9 min after the request: the portable zip 123.9 MB, the layout zip 120.1 MB, the symbols zip 72.3 MB (16 PDBs matched), `build.log` 0.9 MB. The package step's output had no NUL left |
+| **a Debug build** of 4115b1067 in a new worktree (r20261026-082909-883b8d; 16 GB, `/m:3`, `CL_MPCount` 3) | the first attempt (r20261026-082419-968ab6) failed at its checkout: the submodule's commit was recorded once for the VM, so the new worktree got no submodule bundle (fixed, below). Then: the VM's boot 37 s; the whole history with the submodule (140.4 MB), checkout 6.8 s (the failed attempt had fetched the repository); "Build OK in 1,237.0 s" (20.6 min, cold); packaging 93.4 s; `b20261026-4` 23.9 min after the request: the portable zip 123.9 MB, the layout zip 120.1 MB, the symbols zip 72.3 MB (16 PDBs matched), `build.log` 0.9 MB. The package step's output had no NUL left |
 | an identical Debug request sent while it built (r20261026-083038-76d2f6) | `waiting: the build VM is busy with r20261026-082909-883b8d` for 22.4 min, then answered "build b20261026-4 exists" the instant the first ended, without a slot |
 | the site afterwards | its disk `ext4.vhdx` 102.6 GB on Q:, holding 92.7 GB: the build VM's data disk 55.3 GB (two worktrees, Release ~29 GB and Debug ~26 GB, with vcpkg's binary cache) and its overlay 2.6 GB; the images `am-base` 9.1, `am-build` 20.3 and `am-e2e` 1.9 GB; the store 2.2 GB (five build ids); the mirror 0.2 GB. Q: 161 GB free |
 
@@ -875,17 +875,17 @@ the same wrapper and parallelism on this PC, from a private clone on Q: under th
 ### 16.13 Phase 4's install, snapshots and binary logs (2026-10-29)
 
 The install rows are requests to `amb-coordinator` (the deploy job, no slot) against the dev instance, with build
-`b20261028-3` (a purged Debug dev build of 364e18f23: what dev ran, so its behaviour did not change); the session that
+`b20261028-3` (a purged Debug dev build of 64a3a4846: what dev ran, so its behaviour did not change); the session that
 asked ran inside production. While they ran the PC had 3.3-7.2 GB available and 4.9-7.9 GB of free commit (the owner's
 browser, a game and an IDE).
 
 | What | Measured |
 |---|---|
 | a Windows process started through the distro's interop socket (`/run/WSL/1_interop`) by a detached daemon (setsid, its wsl.exe gone) | ancestry pwsh.exe ← wslhost.exe ← wslservice.exe ← services.exe ← wininit.exe; session 1 (the user's desktop); USERPROFILE C:\Users\ELI; working folder Q:\buildserver (the daemon's /mnt/q/buildserver) |
-| `amb install … --dry-run` (r20261029-052053-6d078c) | 28 s from request to end: the scripts of refs/heads/agentmaster (fb20046ab) exported, the 121.0 MB layout zip staged in 3 s and its SHA-256 checked, Debug's older build (0.0.1.38) moved aside, 316 files extracted in 2.6 s, every check passed (AgentmasterDev 0.0.1.0, TerminalApp.dll bakes 364e18f23, the same 316 files as Debug-B), the swap's -WhatIf plan (0.0.1.40 @ Debug, stop pid 34424), Debug put back as it was |
+| `amb install … --dry-run` (r20261029-052053-6d078c) | 28 s from request to end: the scripts of refs/heads/agentmaster (25c320417) exported, the 121.0 MB layout zip staged in 3 s and its SHA-256 checked, Debug's older build (0.0.1.38) moved aside, 316 files extracted in 2.6 s, every check passed (AgentmasterDev 0.0.1.0, TerminalApp.dll bakes 64a3a4846, the same 316 files as Debug-B), the swap's -WhatIf plan (0.0.1.40 @ Debug, stop pid 34424), Debug put back as it was |
 | `amb install …` (r20261029-052143-6045b9) | 2.5 min from request to end: staged and checked in 7 s; the requesting claude not one of dev's sessions (no wait); no dev session Running (2 open); the mutex; the swap's stop 11 s after its start (its own validation); drained 38.1 s; registered 0.0.1.40 @ Debug in 12.8 s; launched pid 22412: 55.2 s down (5.5-6.9 s on the quiet PC of 10-26 and 10-28: the drain is what the memory pressure slowed); the older build deleted; alive after the 60 s watch, no dialog, no trouble line |
 | `amb install … --inject-failure after-stop` (r20261029-052756-7ea5e1) | Debug-B's older build (0.0.1.39) moved aside, the build extracted and checked; the swap stopped pid 22412, drained 4.4 s, failed on purpose, "rollback: relaunching the still-registered 0.0.1.40"; that version's GUI (pid 79168) seen ~5 s later; Debug-B put back (0.0.1.39); the mutex released; `Failed: ROLLED BACK: …`, amb exit 1; ~9 s down |
-| `amb build --snapshot … -- buildserver/steps/install/install-build.ps1` | the snapshot c5f3cd907 of HEAD fb20046ab (the one named file over HEAD), its ref under refs/buildserver/snapshots/, the working tree, the index and HEAD unchanged. Its purged Debug build (r20261029-052923-e3a171, an 8-hour wait timeout) was queued at 05:29Z and waited `homepc: memory`: a build is admitted with 24 GB of free commit, and the PC had 3.3-7.9 GB |
+| `amb build --snapshot … -- buildserver/steps/install/install-build.ps1` | the snapshot c5f3cd907 of HEAD 25c320417 (the one named file over HEAD), its ref under refs/buildserver/snapshots/, the working tree, the index and HEAD unchanged. Its purged Debug build (r20261029-052923-e3a171, an 8-hour wait timeout) was queued at 05:29Z and waited `homepc: memory`: a build is admitted with 24 GB of free commit, and the PC had 3.3-7.9 GB |
 | msbuild 17.14 (this PC's VS 2022) with a `Directory.Build.rsp` holding `-bl:<file>` beside a `.slnx` | the binary log was written (the build-step route of the binlog, checked on a scratch solution; the VM's Build Tools are 17.14 too) |
 
 ### 16.14 A slot's RAM on the site's disk: a memory cap and a swap file on Q: (2026-10-29)
@@ -952,4 +952,4 @@ instead. `amb e2e --ram 8` asks for the old uncapped VM.
 - **fastrun:** `Spawner.cs` (`SetUpCgroups`), `Kube.cs`, `Settings.cs`, `AppReleases.cs`, `Runtime.cs`,
   `proto/fastrun/v1/fastrun.proto`, `deploy/k8s/fastrun.yaml`.
 - **The third revision's evidence** (2026-10-24) still holds for kubectl, Docker Desktop's settings, dock over SSH and
-  k3s; see 8a840e9c5.
+  k3s; see f8da3cc6c.

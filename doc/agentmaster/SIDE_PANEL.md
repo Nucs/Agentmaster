@@ -937,7 +937,7 @@ shifts the box's own clear button (the template part `DeleteButton`) left by the
 §9.5 recipe). Clicking it runs `_SidePanelSetAiMode` on a clean tick:
 
 - **The box keeps its text through the switch, both ways, and through ⊘** — the user's rule for the AI search box (the
-  Sessions page's d45d079e0, same day: "the box is one box: the prompt line with AI on, the search box with AI off"). Only
+  Sessions page's 7d8ed1043, same day: "the box is one box: the prompt line with AI on, the search box with AI off"). Only
   its placeholder and tip follow the mode, and only Enter sends or empties it. The nav lines carry the box's length:
   `[nav] sidepanel ai on box=N`, `… ai off box=N`, `… ai-reset box=N`.
 - **On:** the box becomes the REQUEST line (placeholder "describe a session, then press Enter", its own tip; a typed filter
@@ -1113,10 +1113,10 @@ when you deliberately peek another.** Two inputs drive the one selection (`_side
     now has focus", or the popup still holds it). The terminal's `GettingFocus` therefore names
     no previous element, or one inside the closed popup, never one under the terminal column or
     the panel.
-  - **The first version of this rule** (678f11056, never built) read "from nowhere" as the window
+  - **The first version of this rule** (a0e892b90, never built) read "from nowhere" as the window
     regaining activation and FOLLOWED, so it fixed neither report. A window coming back to the
     foreground keeps the peek now too: it is not a touch of the terminal either. (Before
-    678f11056 every `GotFocus` followed; the original rule named the window regaining activation
+    a0e892b90 every `GotFocus` followed; the original rule named the window regaining activation
     as one of its cases — whether XAML Islands raises the terminal's `GotFocus` then was never
     measured.)
   - **How it is wired:** `TabContent`'s `GettingFocus` (`AddHandler`, `handledEventsToo`; raised

@@ -264,7 +264,7 @@ $results += Get-Leaks 'iex'
 @pytest.mark.flow("INS-01")
 @pytest.mark.install("IS-10")
 def test_the_callers_powershell_keeps_nothing(lane, kit, machine):
-    """The script-block form and `… | iex` in a Windows PowerShell 5.1 and a PowerShell 7 (E4, 9245a890f).
+    """The script-block form and `… | iex` in a Windows PowerShell 5.1 and a PowerShell 7 (E4, 0139d2eb8).
 
     Promise: a run that is not a file run leaves the caller's session as it was — its $ErrorActionPreference, no
     function, no `$script:` list, no parameter variable, no module — whether the run succeeds (the script block
@@ -305,7 +305,7 @@ def test_the_callers_powershell_keeps_nothing(lane, kit, machine):
 @pytest.mark.install("IS-14", "IS-15", "IS-16")
 def test_install_dir_rules(lane, kit, machine):
     """-InstallDir: a relative folder is made absolute; a folder of other files gets an Agentmaster folder inside it; a
-    second per-user copy elsewhere is refused with how to move the first (9245a890f).
+    second per-user copy elsewhere is refused with how to move the first (0139d2eb8).
 
     Args:
         lane: The install lane's facts (the staged installer).

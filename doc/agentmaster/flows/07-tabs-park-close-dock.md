@@ -357,7 +357,7 @@ the last window's close with the save due 8 ms after the archive, and the closes
 > **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0 (its known-defect test, replaced by
 > `e2e/suites/test_tab_lifecycle.py::test_shift_click_on_a_parked_tab_starts_it_in_place`, `needs_fix`). **The fix:**
 > the tab's press handler receives the left press, and the Shift+Click keeps its release from selecting the tab
-> (c039d73f1). **Verified** on the test build 0.8.1.1 (a purged Release build of HEAD c0dcc2504 + the working tree at
+> (f9db1f0c5). **Verified** on the test build 0.8.1.1 (a purged Release build of HEAD 6a19f914f + the working tree at
 > 18:25, whose `TerminalApp.dll` holds the fix; never installed on this PC): in the full-suite run `fixall-0811`
 > (desktop `am-fixcheck-0811`; finished 2026-10-23 20:53:52) the test passed in 84 s — the parked tab started in place, the
 > selection and the keyboard stayed on t2, no `tab-focus`, and a second Shift+Click started nothing. On 0.8.0 the same
@@ -413,9 +413,9 @@ they were (TAB-01 phase 4); a second Shift+Click on the running tab starts nothi
 
 ### TAB-K3 · The quit confirmation is invisible to UI Automation — FIXED in code 2026-10-23, verified on a test build (NOT BUILT into a release)
 > **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0 (the driver answered it blind, with Enter). **The fix:**
-> every ContentDialog the page shows is built in code (8e8480089). Proved by `e2e/suites/test_accessibility.py::
+> every ContentDialog the page shows is built in code (de7962664). Proved by `e2e/suites/test_accessibility.py::
 > test_the_quit_confirmation_is_readable` and `…::test_the_large_paste_warning_is_readable` (`needs_fix("TAB-K3")`).
-> **Verified** on the test build 0.8.1.1 (a purged Release build whose `src/` equals HEAD 1f4c68678; never installed on
+> **Verified** on the test build 0.8.1.1 (a purged Release build whose `src/` equals HEAD a65c6ac9a; never installed on
 > this PC): both tests pass (runs `fixall-0811` and `fixall-0811b`, 2026-10-23); on 0.8.0 both fail as designed, the
 > dialog never found (runs `nf-080`, `nf-080b`). What it was on 0.8.0:
 

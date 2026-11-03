@@ -1109,16 +1109,16 @@ none of its 3 sessions in its 20 s.
 
 ### 9.14 Windows and tabs, and a prompt that explains itself (2026-10-17; in DEV since 0.0.1.28, 2026-10-18 00:06; "What ## Tools teaches" of 2026-10-18 in DEV since 0.0.1.29, 02:27; not in production)
 
-> **State, checked 2026-10-18 00:20:** another session built dev from `2404f7838` (this section's commit) and
-> swapped it in as 0.0.1.28 (`Q:\agentmaster-layouts\Debug`, 00:06:49; commit `0735f2612`). A UTF-16LE probe of
+> **State, checked 2026-10-18 00:20:** another session built dev from `570f5f9c3` (this section's commit) and
+> swapped it in as 0.0.1.28 (`Q:\agentmaster-layouts\Debug`, 00:06:49; commit `2f255c532`). A UTF-16LE probe of
 > that layout's `TerminalApp.dll` finds `# Instructional Behaviors` and `mcp__tabs__list`, and `duckdb.dll` now
 > lies beside `agentmaster-sessiondb.exe` (the `CopyAgentmasterDuckDbToLayout` fix works). Dev's profile still has
 > `sessionDbMode` Off, and dev's hooks.log has no AI-search request since the swap: nothing below has run against
 > the live model yet. Production (0.6.8.21) has none of it.
 >
-> **Checked again 2026-10-18 07:05:** another session built `ac4167e63` (MESSAGING.md §21.17; it descends from
-> `069d6a37a`, this section's "What ## Tools teaches") into `Q:\agentmaster-layouts\Debug-B` and swapped dev to
-> 0.0.1.29 at 02:27 (commit `0ff5fbd60`). Its `TerminalApp.dll` holds `Patterns for grep` and `The git branch is not
+> **Checked again 2026-10-18 07:05:** another session built `d683a3270` (MESSAGING.md §21.17; it descends from
+> `e1702382b`, this section's "What ## Tools teaches") into `Q:\agentmaster-layouts\Debug-B` and swapped dev to
+> 0.0.1.29 at 02:27 (commit `5e8a3db24`). Its `TerminalApp.dll` holds `Patterns for grep` and `The git branch is not
 > among them` as well as `mcp__tabs__list` (UTF-16LE probe), and `duckdb.dll` is in that layout too. Dev's GUI has run
 > from `Debug-B` since 02:27:33 and responds; the restore re-homed 57 tabs, none skipped; no Application error. Still
 > no AI-search request on dev since either swap: the teaching, the tabs tools and the three-part prompt have not met

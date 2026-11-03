@@ -768,7 +768,7 @@ that left without waking logs `left the wake barrier - <why>`.
   that Error is "busy at the restart", so it is woken.
 - No setting switches it off yet.
 - ⚠ `TerminalPage` gained data members (`_restoreWake`, `_restoreWakeTimer`): the next build must
-  purge (the build-install skill §5.8). Done: dev 0.0.1.31's Debug build and both builds of af3d40b5e (2026-10-20)
+  purge (the build-install skill §5.8). Done: dev 0.0.1.31's Debug build and both builds of 5f70cfda1 (2026-10-20)
   were purged by force (`TerminalPage.h` is not on the purge-trigger list).
 
 **Live checks owed after a build:** (1) quit with a turn running in a background tab of window 2 →
@@ -789,7 +789,7 @@ what could? The answer, from the code and the experiments below:
 
 | Candidate | Verdict | Evidence |
 |---|---|---|
-| The install deletes the profile | **No** (v0.7.7–v0.8.0, the releases with the question) | Their only recursive delete (`RemoveShippedEntries`) runs inside the install folder on names the zip itself ships; v0.8.0's 4 e2e scenarios kept every file. Since 5b292ab4a every installer delete is profile-guarded. |
+| The install deletes the profile | **No** (v0.7.7–v0.8.0, the releases with the question) | Their only recursive delete (`RemoveShippedEntries`) runs inside the install folder on names the zip itself ships; v0.8.0's 4 e2e scenarios kept every file. Since c586330f1 every installer delete is profile-guarded. |
 | The installed copy opens another, empty profile | **No** (v0.8.0) | The question runs before the zip copy resolves or exports a profile (`EnsureInstallDecidedAtStartup` precedes `EnsureProfileResolvedAtStartup`), and the installed copy's `profile.path` names the package's own folder (`UserInstallProfileDir`). v0.7.7–v0.7.10 always took the Default profile: wrong only for a package moved to another folder. |
 | The package removal deletes state | **No** | Both 0.7.0 and 0.8.0 keep Terminal's own settings in `<profile>\terminal\` (the `AGENTMASTER_PROFILE` redirect), and the removal script stops the old GUI and drains its hosts before the installed copy starts — no two apps write the profile at once. |
 | The first launch rewrites the state | **Yes, whenever a state file cannot be read** | Below. |
@@ -938,7 +938,7 @@ the install scripts and Windows Terminal's own settings code.
 **Still open (the owner's call):**
 - **An older Agentmaster on this profile.** This happens when a second install is left beside the new one: the zip's
   take-over box is unticked by default while the package is running. When the older version runs, it saves
-  `sessions.json`, `settings.json` and the window records without the fields it does not know. Builds before c50fb6468
+  `sessions.json`, `settings.json` and the window records without the fields it does not know. Builds before 36367404f
   also still fail open (§15). Nothing in this build can change an older build's code. **Covered by §17:** every save keeps
   what it does not understand, a newer format is never written, and the next start of a §17 build puts back from its
   shadows what an older build dropped (after a snapshot).

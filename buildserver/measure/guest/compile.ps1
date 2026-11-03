@@ -3,7 +3,7 @@
     Measurement job: the compile benchmark in the guest, twice, with the Build Tools that 5.ps1 installed.
 
 .DESCRIPTION
-    Unzips the harness sources (a git archive of src\cascadia\TerminalApp\AgentMaster at 387b4e842, the same copy the
+    Unzips the harness sources (a git archive of src\cascadia\TerminalApp\AgentMaster at 4c4084aef, the same copy the
     host compiled) onto D: (the raw data disk), then runs compile-bench.ps1 twice at /MP4 with
     D:\BuildTools\VC\Auxiliary\Build\vcvars64.bat: results\compile-guest-mp4-1.json (cold: nothing in the guest's
     file cache yet) and results\compile-guest-mp4-2.json (warm).

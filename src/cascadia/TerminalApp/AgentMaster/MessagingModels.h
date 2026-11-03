@@ -5212,7 +5212,7 @@ namespace Agentmaster::Msg
     /// there. "c:allscreen:" with a 36-character id is 48 bytes of Telegram's 64.
     /// </summary>
     /// <remarks>
-    /// The verb's first build (7c7397861, in dev 0.0.1.36) drew at the Default level at once; a card posted by that build that
+    /// The verb's first build (23d48721f, in dev 0.0.1.36) drew at the Default level at once; a card posted by that build that
     /// still shows the old button now opens the picker instead - the newer meaning, and harmless (nothing is drawn unasked).
     /// </remarks>
     inline constexpr std::wstring_view kCardVerbAllScreen = L"allscreen";

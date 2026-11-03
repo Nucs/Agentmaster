@@ -787,7 +787,7 @@ namespace
     //     of closing it — an item, Esc, a click outside it — used to end the peek of the card it was opened on and,
     //     with the ⌖ toggle on, scroll the list back to the focused tab's card. The user's reports of 2026-10-24:
     //     "Move to Idle/Done" on the 5th card selected the top card and jumped the list to the top, and closing the
-    //     menu without a choice jumped it too. The first version of this rule (678f11056) read "from nowhere" as the
+    //     menu without a choice jumped it too. The first version of this rule (a0e892b90) read "from nowhere" as the
     //     window regaining activation and followed, so it fixed neither. A window coming back to the foreground keeps
     //     the peek now as well: it is not a touch either.
     //   - an element elsewhere: an overlay over the page that gives focus back when it closes (the transcript reading
@@ -5533,7 +5533,7 @@ namespace winrt::TerminalApp::implementation
             }
             _sidePanelAiMode = on;
             // The box KEEPS its text through the switch, both ways — the user's rule for the AI search box (2026-10-31, the
-            // Sessions page's d45d079e0: "the box is one box: the prompt line with AI on, the search box with AI off"). Only
+            // Sessions page's 7d8ed1043: "the box is one box: the prompt line with AI on, the search box with AI off"). Only
             // its placeholder and tip follow the mode (a placeholder shows only while the box is empty), and only Enter sends
             // or empties it. ⚠ Never empty the box here: that loses what the user typed. The nav line carries the box's
             // LENGTH (never its words, which stay out of the nav trail), so a live check can read that the text survived.

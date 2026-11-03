@@ -812,7 +812,7 @@ installs are the per-user and all-users installs (Apps & Features entries) that 
 |---|---|---|
 | MSIX install / update (App Installer, `Add-AppxPackage`, the script's `-Scope Package`, the in-app package update) | nothing (an update keeps the package's storage; `UpdateWhileInUse` = defer) | safe |
 | MSIX removal: Settings ▸ Apps, the script's `-Uninstall`, the takeover box (zip first launch, per-user and all-users), the "blocking install" removal (script and in-app update), the dev swap's `-ReplaceInstalledPackage` | the package's own storage `%LOCALAPPDATA%\Packages\<family>\` — never the profile | **kept first since this audit** (below); Settings ▸ Apps is Windows' own, out of reach |
-| Zip first launch: Install just for you / a picked folder / for all users / for the signed-in user | only shipped names inside the install folder (`RemoveTreeGuarded`); a folder in the way is renamed aside; a profile holder refused | safe (5b292ab4a, e2e IS-100–IS-107) |
+| Zip first launch: Install just for you / a picked folder / for all users / for the signed-in user | only shipped names inside the install folder (`RemoveTreeGuarded`); a folder in the way is renamed aside; a profile holder refused | safe (c586330f1, e2e IS-100–IS-107) |
 | Zip first launch: Install here / keep portable / ask later / use the installed copy | nothing (in place copies nothing; the others write `install.path` only) | safe |
 | "Delete the downloaded copy?" | the zip's own folder, only when it holds nothing but the download (a non-empty `profile\` / `settings\` → not offered), to the Recycle Bin | safe |
 | `Install-Agentmaster.ps1` (`-Scope User / Machine`, upgrades, `-InstallDir`, `-ZipPath`) | shipped names only (`Remove-AmEntries` → `Remove-AmTreeGuarded`); `-InstallDir` with other files gets an `Agentmaster` subfolder | safe |
@@ -820,7 +820,7 @@ installs are the per-user and all-users installs (Apps & Features entries) that 
 | Uninstall (Apps & Features, `--uninstall-portable`, the cog, `-UninstallMachine`) | shipped names, a stale set-aside, `install.path`; the folder only when left empty, and never an empty `.agentmaster*` one | safe |
 | Active Setup (per-user icons of an all-users copy), the install hand-off, taskbar pins | shortcuts and registry entries only | safe |
 | The cog's "Change profile folder…" | nothing (`MigrateProfileData` copies, skip-existing; the old folder stays) | safe |
-| The first launch after any install | an unreadable state file used to be replaced by "nothing saved" | **fixed in c50fb6468** (PERSISTENCE.md §15) |
+| The first launch after any install | an unreadable state file used to be replaced by "nothing saved" | **fixed in 36367404f** (PERSISTENCE.md §15) |
 | The profile choice at startup, and an install's `profile.path` | the home map read failed OPEN: a locked map read as "no choice" | **fixed since this audit** (below) |
 | `tools/install-qa` `Reset-AmQa` (QA only) | every package of every user, the all-users install, the QA accounts' profiles — nothing stopped it on a real PC | **guarded since this audit**: refuses unless the machine is a claude-desktops guest or carries the install lane's file |
 

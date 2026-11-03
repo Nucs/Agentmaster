@@ -7,7 +7,7 @@
 **What shipped.** 0.8.0: a turn that died on an API error continues when its session is resumed (Restart,
 Deactivate → wake, a window restore, Sessions "Resume here") — one rewind line appended after the old
 claude exits; after a restart the restored tabs that were busy start by themselves (the restore wake).
-**After 0.8.0 (NOT BUILT, commit 381c6c715):** Restart asks whether to continue a turn the USER
+**After 0.8.0 (NOT BUILT, commit 5bc91d3de):** Restart asks whether to continue a turn the USER
 interrupted; a fork of a session in the middle of a turn asks "Fork interrupted / uninterrupted", and a
 stop watch Esc's the fork's continued turn when asked to.
 
@@ -162,7 +162,7 @@ no busy tab to wake here`). B (a question at the restart): the continued turn as
 
 ### INT-05 · Restart asks whether to continue a turn the user interrupted
 
-> **NOT BUILT** (381c6c715, after 0.8.0) · **P0 when built** · **Needs** mock (`hold`, tools), Esc · **Spec** HOOKS.md *Interrupted turns*
+> **NOT BUILT** (5bc91d3de, after 0.8.0) · **P0 when built** · **Needs** mock (`hold`, tools), Esc · **Spec** HOOKS.md *Interrupted turns*
 
 **Promise.** Restarting a session the user stopped with Esc asks whether to continue the turn; the default
 keeps it stopped.
@@ -196,7 +196,7 @@ keeps it stopped.
 
 ### INT-06 · Forking a session in the middle of a turn asks how
 
-> **NOT BUILT** (381c6c715) · **P0 when built** · **Needs** mock (`hold`, `bash "sleep 40"`) · **Spec** HOOKS.md *Interrupted turns* (fork question, stop watch)
+> **NOT BUILT** (5bc91d3de) · **P0 when built** · **Needs** mock (`hold`, `bash "sleep 40"`) · **Spec** HOOKS.md *Interrupted turns* (fork question, stop watch)
 
 **Promise.** Forking a running session asks whether the fork should also run the turn; the default stops
 the fork's copy of the turn by itself, without the user racing to press Esc.

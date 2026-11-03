@@ -22,10 +22,10 @@
 >
 > **The first fixes checked by the suite (2026-10-23, NOT BUILT into a release):** MGR-K1 (a launch on the Agent
 > Manager page stays on the page and selects the new session there; flows/01 MGR-07) and SP-K1 (one click on the + card's
-> Launch while its presets menu is open; flows/02 SP-05 phase 5) are fixed in code. A TEST build of 8932908db with the two
+> Launch while its presets menu is open; flows/02 SP-05 phase 5) are fixed in code. A TEST build of 4a889f147 with the two
 > fixes (a purged Release build, packaged as a portable zip stamped 0.8.1.0 so the copy meets no update question;
-> never installed on the PC) passed, in its own claude-fleet desktop, 41 of 41 tests of the suites of 3773f7149 — the three
-> new `needs_fix` tests included — and 27 of 28 of the tab life cycle, robustness and tab menu suites of f710660e0 in
+> never installed on the PC) passed, in its own claude-fleet desktop, 41 of 41 tests of the suites of 7af52f8ed — the three
+> new `needs_fix` tests included — and 27 of 28 of the tab life cycle, robustness and tab menu suites of e80dfb1e5 in
 > one run. The 28th, the Deactivate scopes test, failed on its own shell count (it counted a hook forwarder, a Windows
 > PowerShell that claude.exe starts, as a shell tab); counting only the PowerShells the GUI itself starts, it passed on a
 > rerun. A rerun in between lost a save to ROB-K1, caused by the test's own poll of `sessions.json` (flows/20: the
@@ -34,7 +34,7 @@
 >
 > **Every fix checked both ways (2026-10-23, NOT BUILT into a release):** with MGR-K1, SP-K1, TCM-K2, TAB-K1, TAB-K3,
 > A11Y-K1, TAB-K4 and CLI-K2 fixed in code, the suite had 67 tests. A test build 0.8.1.1 — a purged Release build whose
-> `src/` equals HEAD 1f4c68678, zipped and run only in a claude-fleet desktop — passed all 67 (runs `fixall-0811`, 63 of
+> `src/` equals HEAD a65c6ac9a, zipped and run only in a claude-fleet desktop — passed all 67 (runs `fixall-0811`, 63 of
 > 65 with two test versions since corrected, and `fixall-0811b`, 5 of 5 with the dialog probe). On 0.8.0 every
 > `needs_fix` test fails on its defect (runs `nf-080`, `nf-080b`), and the known-defect tests of the open defects
 > (TCM-K1, ROB-K1, TAB-K5, A11Y-K2; SP-K2's too, a feature since 2026-10-24) pass on both builds. [`flows/README.md`](flows/README.md), *Checked both ways*.

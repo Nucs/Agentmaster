@@ -461,7 +461,7 @@ def test_a_never_prompted_session_comes_back_fresh_after_a_restart(am):
     it: the restored tab starts a FRESH claude under the SAME id (`[restore-fresh] <id> "<title>"`, `--session-id <id>`,
     never `--resume`), in the same folder and under the same title, and its record is kept.
 
-    Until v0.8.1 the restore minted a new id and dropped the old record (measured on 0.8.0, run pqr1). Since 21f0482d4
+    Until v0.8.1 the restore minted a new id and dropped the old record (measured on 0.8.0, run pqr1). Since 672e3bc67
     (PERSISTENCE.md §16) a lookup that found no transcript never re-keys or drops a record: had the lookup missed a
     transcript that exists, Claude Code refuses the id in the tab instead of the session being lost. The run of v0.8.1
     (r20261029-062014-6da298 and r20261029-125141-126ed7) logged the same id, which the old assertion took for a failure.

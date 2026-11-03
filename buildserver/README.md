@@ -114,7 +114,7 @@ amb list | show <id> | cancel <id>
   SDK installs, so a Debug portable zip does not run on a PC without the SDK, `am-e2e` included: `amb e2e` takes
   Release builds.
 - **Installing a build on this PC:** `amb install` (next section). By hand, the same steps were first done on
-  2026-10-26: `b20261026-5` (a Debug dev build of a8d8b97a2) became dev 0.0.1.36: the fetch took 0.8 s, the extraction
+  2026-10-26: `b20261026-5` (a Debug dev build of 756861eb1) became dev 0.0.1.36: the fetch took 0.8 s, the extraction
   1.6 s, its 316 files were exactly those of the local msbuild layout it replaced, and the swap was down 6.9 s. Its PDBs
   stay in the build's symbols zip.
 - **Memory:** a build needs 8 GB beyond Windows' 6 GB reserve. While the PC has less, the request waits; the site's

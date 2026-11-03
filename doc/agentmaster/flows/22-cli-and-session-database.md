@@ -58,7 +58,7 @@ database tools from the next start; the CLI verbs `search`, `sql`, `sessdb`; a s
 2. **Cross-target.** `agentmaster sessions --instance dev` → the dev profile.
 3. **An unpackaged install on PATH.** *Do:* a per-user or all-users install whose folder is on PATH beside (or instead of)
    the package; from Git Bash and from Python's subprocess run `agentmaster sessions --json`. *Expect:* the CLI's answer
-   and exit code; the app NEVER starts (no window, no "profile in use" dialog). *Since 3b042ea32 (NOT BUILT):* the name
+   and exit code; the app NEVER starts (no window, no "profile in use" dialog). *Since 4950ece21 (NOT BUILT):* the name
    finds `Agentmaster.exe`, whose first step hands a CLI verb or a CLI-only flag to the `agentmaster-cli.exe` beside it
    (CLI.md §2a). *Before it:* a second app started and asked about the profile (seen 2026-10-23 on the workstation) — so
    this phase is an expected failure on any build older than that commit. An interactive cmd.exe and a plain PowerShell
@@ -71,7 +71,7 @@ database tools from the next start; the CLI verbs `search`, `sql`, `sessdb`; a s
 - **CLI-K2 An unpackaged release CLI with no inherited `AGENTMASTER_PROFILE` reads the DEV profile** (the project defined
   `AGENTMASTER_DEV` for every configuration; CLI.md §11) — so a per-user install's `agentmaster-cli.exe` run from a plain
   shell answers from `~/.agentmaster-dev`, and creates it. Expected: the install's own profile. Fixed in code by
-  3b042ea32 (the define now only for a non-Release identity; NOT BUILT): the marker comes off with the first release
+  4950ece21 (the define now only for a non-Release identity; NOT BUILT): the marker comes off with the first release
   build that holds it. Proved by `e2e/suites/test_cli.py::test_a_plain_shell_reads_the_installs_own_profile`
   (`needs_fix("CLI-K2")`: the guest's install folder, `sessions --json` with no `AGENTMASTER_PROFILE`, the envelope's
   `profile` is `%USERPROFILE%\.agentmaster`, never `.agentmaster-dev`).

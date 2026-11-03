@@ -505,7 +505,7 @@ bash tools/am-lock.sh release --token "$TOKEN"
    Files`, `obj/x64/<Config>/Microsoft.Terminal.Settings.Editor` — its appearance preview sets
    `CursorVisibility`). The reason: a member inserted MID-interface moves the vtable slot of every
    member declared after it, and a stale caller then calls the wrong method. On 2026-10-19
-   `ReadScreenSnapshot` (4d8826851) was inserted in the middle of both interfaces, with upstream
+   `ReadScreenSnapshot` (58b3bdfce) was inserted in the middle of both interfaces, with upstream
    members such as `SendInput`, `CursorVisibility` and the events after it. Purged that way, the
    two builds took 1,400 s (Release, 3 compilers) and 1,247 s (Debug, 2 compilers), and MSBuild
    recompiled the settings model by itself (it references the control's winmd). Session 9c3454bb's

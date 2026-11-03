@@ -3,18 +3,18 @@
      0.8.0-only batch + the full per-version fold of every intervening pre-release (0.7.10, 0.7.9, 0.7.7: their PUBLISHED
      bodies minus their intro paragraph and Install, headers demoted; release-notes skill §6). The nightlies are invisible
      to baselines: 0.7.7 re-shipped the 0.7.1–0.7.6 nightlies (it baselined off 0.7.0) and 0.7.9 re-shipped 0.7.8.
-     0.8.0's own batch: v0.7.10-prerelease..629a4f753 = 122 commits (74 code: 49 feat, 23 fix, 1 perf, 1 build; 48 docs,
+     0.8.0's own batch: v0.7.10-prerelease..77a7c7db1 = 122 commits (74 code: 49 feat, 23 fix, 1 perf, 1 build; 48 docs,
      design and deploy notes, which change nothing a user sees). Since 0.7.0: 348 commits.
      RELEASING from the branch tip (the user, 2026-10-22: "Kindly release stable version with latest commit"):
-     629a4f753 plus the commit of this draft. That includes f1353118b (Telegram FILE LINKS, off by default; its Settings
-     texts name the owner's relay example.com and K:\source\proxmox paths) and the install rework (d6c85e54f, 71e3d0270,
-     473e40abf, 629a4f753) plus the console guard (1c6f70ad1).
-     Builds behind it: production 0.6.8.23 (purged Release) and dev 0.0.1.32 run af3d40b5e; dev 0.0.1.33 adds
-     f1353118b + d6c85e54f; the install QA built x64 Release of 629a4f753's sources (Q:\agentmaster-layouts\QA).
+     77a7c7db1 plus the commit of this draft. That includes 6224e14e7 (Telegram FILE LINKS, off by default; its Settings
+     texts name the owner's relay example.com and K:\source\proxmox paths) and the install rework (aefacf2cc, 0792de95d,
+     64cbd92aa, 77a7c7db1) plus the console guard (697b37c90).
+     Builds behind it: production 0.6.8.23 (purged Release) and dev 0.0.1.32 run 5f70cfda1; dev 0.0.1.33 adds
+     6224e14e7 + aefacf2cc; the install QA built x64 Release of 77a7c7db1's sources (Q:\agentmaster-layouts\QA).
      Version: tag v0.8.0 -> ver4 0.8.0.0, rawver 0.8.0. The updater compares major.minor.patch numerically, so 0.8.0 is
      offered over 0.7.10 (pre-release channel) and 0.7.0 (stable channel).
-     ⚠ GitHub has seen nothing past 7248d2592: the session database service (agentmaster-sessiondb.vcxproj) and the
-     workflows' "Fetch libduckdb" step (50df738c1) get their FIRST CI run with this push, and arm64 has never been
+     ⚠ GitHub has seen nothing past e2a8e5570: the session database service (agentmaster-sessiondb.vcxproj) and the
+     workflows' "Fetch libduckdb" step (e8cb7c4ad) get their FIRST CI run with this push, and arm64 has never been
      built anywhere (release.yml builds it; ci.yml is x64 only). The push also publishes the reworked
      tools/Install-Agentmaster.ps1, which the one-command install fetches from the branch.
      Push first (fast-forward): env -u GH_TOKEN -u GITHUB_TOKEN git push origin agentmaster
@@ -24,7 +24,7 @@
      Publish: gh release edit v0.8.0 -R Nucs/Agentmaster --draft=false --latest --prerelease=false (REPLACES 0.7.0 as Latest).
      Assets: Agentmaster_0.8.0.0.msixbundle, Agentmaster_0.8.0.0_x64.zip, Agentmaster_0.8.0.0_arm64.zip, Agentmaster.cer.
      DONE 2026-10-22 (times UTC):
-       - pushed 7248d2592..7ee5fadcc; tag v0.8.0 -> 7ee5fadcc (this draft's commit);
+       - pushed e2a8e5570..0468fecf6; tag v0.8.0 -> 0468fecf6 (this draft's commit);
        - ci.yml run 39800299648 (x64, from scratch): success;
        - release.yml run 39800356681: success (queued ~7 min, built 15:04-15:28, x64 + arm64; the first arm64 build
          of the session database service and the first "Fetch libduckdb" step passed);

@@ -2298,7 +2298,7 @@ namespace winrt::TerminalApp::implementation
         // dormant tab — archives the record in place (_ArchiveClaudeSession's dead branch), because no window would answer.
         // And one scope is never routed: "Deactivate All Idle Tabs" reaches every idle tab, not the session's neighbors, so
         // it runs in THIS window — the one the user clicked in — through _DeactivateIdleTabsAsking, which asks "This window
-        // / All windows" when other windows hold idle tabs too (2026-10-24; c6e501bb0 had sent it to the session's window).
+        // / All windows" when other windows hold idle tabs too (2026-10-24; 24639212b had sent it to the session's window).
         //   sessionId — the menu's session; empty is a no-op.
         //   close     — false: "Deactivate ▸" (park; no confirm by design, a turn in flight is cut off); true: "Close ▸".
         //   scope     — Tab::kDeactivateScope* (0..7, the tab menu's own codes; 7 = the Idle tabs, Deactivate only)

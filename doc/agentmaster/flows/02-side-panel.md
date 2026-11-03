@@ -121,7 +121,7 @@ click back into the terminal; double-click jumps to a card's tab.
   selected and the list has not moved.
 - **E10 The window comes back to the foreground** (Alt+Tab away and back while peeking B; NOT BUILT) → B stays
   selected: returning to the window is not a touch of the terminal (since the second version of SP-K3's fix; the
-  first version, 678f11056, followed there).
+  first version, a0e892b90, followed there).
 
 ---
 
@@ -365,7 +365,7 @@ the same race.
 > popup itself, or nowhere) and only then restores the terminal — keeps the peek, and so does focus handed back by a
 > page overlay, focus from the title bar's tab strip and the window coming back to the foreground. A click into the
 > terminal still ends a peek; a click that only closes the menu never reaches the terminal (the popup root takes it).
-> **The first version** (678f11056, the same day, never built) treated focus from nowhere as the window regaining
+> **The first version** (a0e892b90, the same day, never built) treated focus from nowhere as the window regaining
 > activation and followed, so it fixed neither report; the second version keeps it (SIDE_PANEL.md §3 has the WinUI
 > reading). Every kept peek that would have moved the selection writes `[sidepanel] focus came back to the terminal
 > from <origin>, …` in hooks.log, `<origin>` naming how focus came back, so a test build shows which case a menu's

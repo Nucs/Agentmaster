@@ -10,10 +10,10 @@
 > 0.6.8.21 since 2026-10-17 12:01 with 413 topics (§21.12.5); §21.17 = every title opens its topic, the "👤 You" line's title row, turns that quote turns, and a NEW THREAD that starts a session in a folder the user picks — LIVE on dev 0.0.1.29 since 2026-10-18 02:27; §22 = folder groups — the topics grouped by working
 > folder, a discovery, DESIGN ONLY); designed 2026-10-15, revised twice on 2026-10-16.**
 > **Where each part runs** (checked 2026-10-28 against git and the commit each installed `TerminalApp.dll` bakes):
-> PRODUCTION 0.8.0.1 (a Release build of 1e0076bc6 by the build server, a loose layout since 2026-10-28, in place of the
+> PRODUCTION 0.8.0.1 (a Release build of fe47d239f by the build server, a loose layout since 2026-10-28, in place of the
 > installed MSIX of release v0.8.0) holds everything through §21.44, §21.32.4 included (its file links stay Off until
 > switched on in the cog), but not the two changes of 2026-10-28: §21.41's move of ⎋ Esc to the Session page alone and
-> §21.43's note in a NEW thread; DEV 0.0.1.39 (a Debug build of 364e18f23 by the build server, since 2026-10-28) holds
+> §21.43's note in a NEW thread; DEV 0.0.1.39 (a Debug build of 64a3a4846 by the build server, since 2026-10-28) holds
 > everything through §21.44, those two included; §21.32–§21.32.3 and §21.36 are
 > research and design — §21.32.4's route home (Cloudflare, the tunnel, the fastrun relay) is LIVE —, §22 design only. A
 > heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than these builds. **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
@@ -358,7 +358,7 @@ hot swap, direct reach of the registry, scheduler and sinks. It costs, with the 
     the app, set `searchThreadId` to 0 in `<profile>\messaging\telegram\state.json`, start it.
   - **A link that opens Search: the right number exists, and only Telegram Desktop's code opens it** (asked
     2026-10-17, "preferably in the 'all' area"; read from the docs and the three clients' sources, nothing
-    built, nothing tried on a device). ⚠ This bullet first said (commit 01ea104cf) that the bot's number for
+    built, nothing tried on a device). ⚠ This bullet first said (commit 5e6d1f44d) that the bot's number for
     Search is not the user's. That is wrong for TOPICS. A private chat has two message-id spaces, one per
     account (`api/updates`), but a topic's canonical id is the USER-space id of its creation message, and the
     HTTP Bot API's `message_thread_id` already IS that id. Tested by mtcute (issue #153, layer 223, re-checked
@@ -450,7 +450,7 @@ session handled only from the phone. (Merely viewing a topic cannot be seen: bot
 
 ### 5.4 🔎 Search: find, wake, revive (D24)
 
-- **2026-10-17, later (in DEV since 0.0.1.28, 2026-10-18 00:06 — the build of 2404f7838; not in production;
+- **2026-10-17, later (in DEV since 0.0.1.28, 2026-10-18 00:06 — the build of 570f5f9c3; not in production;
   `SESSIONS.md` §9.14):** the agent also gets the **tabs** server —
   `list` (every window and its tabs), `resume` / `fork` (a session as a tab after a chosen tab; with more
   than one window open the call refuses until the user names a window, which from a phone the agent must
@@ -790,7 +790,7 @@ Code's `/status` itself stays in the refusal table: nothing is typed into the se
 > which runs beside the dialog and may wait for the phone (measured on 2.1.291, seven scenarios). So questions
 > need no key plan and no screen read. What stays from this section for them is the message shape and the
 > "answered elsewhere" edit. **Plan approval keeps the design below:** a hook approved and rejected a plan in the
-> same probe (that document's first version, commit 2c896eea1), but the user put plans out of that design's scope.
+> same probe (that document's first version, commit 57ce9b962), but the user put plans out of that design's scope.
 > The text below is the earlier design.
 
 - **What is open:** in a linked session, the link's `question` / `permission` events (from `tool.call` on
@@ -1297,7 +1297,7 @@ transport's failures and slow calls.
   user) — about 1.2 s apart (the outbox pacing: `createForumTopic`, the "Mirroring from here on" note, the
   card, `pinChatMessage` per topic), `cardMessageId` set on all 47 in `state.json`, and not one `[tg]` line in
   `messaging.log` (no 4xx, no 429). Items 3–7 of §21.3 (the phone's side) were not exercised in this run.
-- **Fixed from that run** (the commit after `d1d23a5ca`, swapped into dev the same evening):
+- **Fixed from that run** (the commit after `404e57f8f`, swapped into dev the same evening):
   - Every topic creation logged `[msg] dropped a message from a sender that is not the paired owner` (48
     lines): the bot's OWN `forum_topic_created` service message comes back through `getUpdates` with the bot
     as the sender. `_handleMessage` now returns silently for the bot's own id (`_botId`, from `getMe`) before
@@ -1601,7 +1601,7 @@ picking and then a second menu asks if to Resume, Fork (no fork and pin)"* (D24 
   TestTaskbarBadge failures only; `cl /Zs` with the app's recorded lines (warnings as errors) of
   `MessagingSearchBridge.cpp`, `Messaging.cpp`, `Messaging.Inbound.cpp`, `Engine.cpp`,
   `TerminalPage.AgentEngine.cpp` and `AgentManagerContent.Settings.cpp`, each plain unit with a negative control.
-  Not built into the app when written; built since into dev 0.0.1.17 (2026-10-16 22:46, from HEAD 4edb9f377, which holds
+  Not built into the app when written; built since into dev 0.0.1.17 (2026-10-16 22:46, from HEAD 33f5a01ee, which holds
   this work) and production 0.6.8.21 (2026-10-17 12:01) — a string probe of both installed DLLs, 2026-10-18.
 - **Seen live on dev** (its hooks.log by 2026-10-18): 19 requests; `/clear` 4 times, each with its `[ai-search] reset` within
   3 ms; one pick (`[nav] remote telegram search pick 3 c731238b (closed)`, 2026-10-16 22:59, on
@@ -1662,7 +1662,7 @@ recreation"*.
 - **Tests** (`TestMessaging`): `MostRecentSortKeyMs` (boundaries, the activity fallback); `TopicRanksAbove` (keys, the
   case-insensitive title tie, the upper-casing); the creates' order (`adecb` — ties included); `NeedsTopicRecreation`;
   the round trip of `topicLayout` + `orphanThreads` and a file without them; `/recreate` a Search fleet command, never a
-  prompt. m5, isolated on HEAD 4edb9f377 + this change: 7163 checks, the 3 known TestTaskbarBadge failures only.
+  prompt. m5, isolated on HEAD 33f5a01ee + this change: 7163 checks, the 3 known TestTaskbarBadge failures only.
 - **The live run** (dev 0.0.1.17, swapped 22:46:38, downtime 7.7 s): the start-up hold ended at 122 s with the window's
   56 Claude tabs re-homed; the recreation deleted the 48 old topics in 57 s (22:48:40 → 22:49:37), then made 48 new
   ones in 70 s, every `most recent` stamp in non-decreasing order (the oldest, 18 Sep 11:25, first; ba1ee743 — the
@@ -1773,11 +1773,11 @@ the whole session as messages, not a file plus the last 10 turns.
   top, a swap in the middle, a topic missing from the list; the record's round trip and `TopicBackfillPending`; layout
   2; the replay's lowest priority; the card's history line; the `Answer` item (one answer, several, a plain tool result
   stays one, a conversation message) and its post between the question and the reply; a url with balanced parentheses,
-  and one with unbalanced. m5, isolated on HEAD 5f4c8f608 + the first build: 7214 checks; on 3bc71b412 + the flood
-  budget and the per-turn commits: 7220; on c5f4d0c6c + the answers and the link fix: 7230 — the 3 known
+  and one with unbalanced. m5, isolated on HEAD df476bc4c + the first build: 7214 checks; on 0e12a9ea3 + the flood
+  budget and the per-turn commits: 7220; on 7df005d3a + the answers and the link fix: 7230 — the 3 known
   TestTaskbarBadge failures only, each time.
 - **The live run** (dev, this machine, the owner's bot; 2026-10-16 23:44 → 2026-10-17 01:34):
-  - **0.0.1.18** (3bc71b412, `Q:\agentmaster-layouts\Debug`, swapped 23:44:11, downtime 8.0 s): the start-up hold ended
+  - **0.0.1.18** (0e12a9ea3, `Q:\agentmaster-layouts\Debug`, swapped 23:44:11, downtime 8.0 s): the start-up hold ended
     at 127 s; the layout-2 recreation deleted the 48 old topics in 60 s and made 48 new ones in 69 s (23:46:28 →
     23:48:37), in MOST RECENT order; the replay began at once with ba1ee743 (the session under QA: 8 messages), then
     9c3454bb (82 messages in 166 s — one per 2 s, as designed).
@@ -1785,9 +1785,9 @@ the whole session as messages, not a file plus the last 10 turns.
     (retry after 40 s) after ~11 minutes at ~27 messages a minute: the flood budget (above).
   - **0.0.1.19** (`Debug-B`, swapped 00:07:45, downtime 6.2 s): the call window at 18 a minute; no 429 after it — the
     traffic lines read 180–185 calls per 10 minutes for the rest of the run. Its restart repeated part of one window in
-    b480b2d7's topic and began an old session's replay before the start-up hold ended (both fixed in c5f4d0c6c, live
+    b480b2d7's topic and began an old session's replay before the start-up hold ended (both fixed in 7df005d3a, live
     from 0.0.1.20).
-  - **0.0.1.20** (d9464b038 — c5f4d0c6c, a6cd24078 and 982615a6e with the other session's committed Search work —
+  - **0.0.1.20** (1f57b733c — 7df005d3a, 94fe32d03 and 45e3813bd with the other session's committed Search work —
     `Debug`, swapped 01:09:39, downtime 6.5 s, 20 s after a topic's history was in: the first messages of the next
     topic, 3d7a87b8, repeat once): it waited for the start-up hold (120 s), went on by rank from each topic's committed
     position, and from then on rendered the user's answers.
@@ -1804,7 +1804,7 @@ the whole session as messages, not a file plus the last 10 turns.
 
 ### 21.10 The Search answer as evidence cards, and an agent that reads before it shows (2026-10-17)
 
-> Status: written 2026-10-17 (session cb14b056). Built into dev 0.0.1.20 (2026-10-17 01:09, the build of d9464b038, which
+> Status: written 2026-10-17 (session cb14b056). Built into dev 0.0.1.20 (2026-10-17 01:09, the build of 1f57b733c, which
 > holds this work) and production 0.6.8.21 (2026-10-17 12:01) — a string probe of both installed DLLs, 2026-10-18. Used live
 > on dev (the requests of 2026-10-18 08:26 and 12:36 behind §21.20); production's Search topic has had no request. The
 > agent's half is `SESSIONS.md` §9.12.
@@ -1843,7 +1843,7 @@ matched by title or path without reading it.
 ### 21.11 Rich messages, verbose or conversation-only topics, a state glyph in every topic name, a secretary bot (2026-10-17)
 
 > Status: written 2026-10-17 (session 0b1f8635); LIVE on dev 0.0.1.21 (`Q:\agentmaster-layouts\Debug-B`, a purged full
-> rebuild, 03:08), and in production since 0.6.8.21 (2026-10-17 12:01, the Release build of 46e3aad42, §21.12.5). Checked
+> rebuild, 03:08), and in production since 0.6.8.21 (2026-10-17 12:01, the Release build of ac6b4c974, §21.12.5). Checked
 > live: the glyph renames and their notice deletes; the rich Markdown as
 > Telegram parses it. Still open: §21.11.5.
 
@@ -2021,7 +2021,7 @@ showing beyond unformatted ascii".
 
 > Status: written 2026-10-17 (session 0b1f8635); LIVE on dev 0.0.1.22 (`Q:\agentmaster-layouts\Debug`, a purged full
 > rebuild, 11:24), on the NEW dev bot. LIVE in production 0.6.8.21 since 12:01 (`Q:\agentmaster-layouts\Release`, a
-> Release build of 46e3aad42, swapped by a one-shot task at the end of session 0b1f8635's turn, the bot switched on while
+> Release build of ac6b4c974, swapped by a one-shot task at the end of session 0b1f8635's turn, the bot switched on while
 > production was stopped — §21.12.5).
 
 **The user's requests** (2026-10-17 morning): "1. Lets introduce the changes to the user message: a. "👤 You · 14:02 · typed
@@ -2102,9 +2102,9 @@ of telegram. The one used by debug should move to the release agentmaster … Th
 
 #### 21.12.5 Production gets the bot (2026-10-17 midday)
 
-- **The build**: a purged Release build of HEAD 46e3aad42 (`SessionModels.h` and `SessionRegistry.*` changed since the last
+- **The build**: a purged Release build of HEAD ac6b4c974 (`SessionModels.h` and `SessionRegistry.*` changed since the last
   Release build, dd8e97e35) into `Q:\agentmaster-layouts\Release` while production kept running from `Release-B`: 692 s
-  ("Build OK in 685.7s"), 3 compilers, lowest free commit 22.1 GB. Checked: TerminalApp.dll bakes 46e3aad42 and holds the
+  ("Build OK in 685.7s"), 3 compilers, lowest free commit 22.1 GB. Checked: TerminalApp.dll bakes ac6b4c974 and holds the
   messaging strings (production's has none), the manifest is the unstamped Agentmaster 0.0.1.0, 192 icons, nothing runs
   from the folder. Agentmaster.exe (2026-10-11) and Microsoft.Terminal.Control.dll (2026-10-06) kept their dates: none of
   their sources changed since (git log).
@@ -2144,8 +2144,8 @@ of telegram. The one used by debug should move to the release agentmaster … Th
 
 ### 21.13 The title wears the tab's color, and a line tells a new title or color (2026-10-17)
 
-> Status: written 2026-10-17 (session 13e76a66, commit 3a73980d9); LIVE on dev 0.0.1.23 since 13:16
-> (`Q:\agentmaster-layouts\Debug-B`); not in production (0.6.8.21 is the build of 46e3aad42) — a production build and
+> Status: written 2026-10-17 (session 13e76a66, commit 1ceee0a2a); LIVE on dev 0.0.1.23 since 13:16
+> (`Q:\agentmaster-layouts\Debug-B`); not in production (0.6.8.21 is the build of ac6b4c974) — a production build and
 > swap need the user's word.
 
 **The user's request** (2026-10-17): "Can the title have a color background in all places we print title, that matches and
@@ -2255,12 +2255,12 @@ own line"**, worded `"<from>" changed the title to "<to>"`.
   Scheduler integration check each time ("question cleared: the queued prompt fires", then "the held prompt self-releases
   once the status held for the full window") — timing checks on a machine busy with production's history replay; nothing
   here touches the scheduler. `/Zs /W4` of Messaging.cpp + Messaging.Inbound.cpp: clean.
-- **The build**: Debug, HEAD 3a73980d9, into `Q:\agentmaster-layouts\Debug-B` while dev ran from `Debug` — run from a
+- **The build**: Debug, HEAD 1ceee0a2a, into `Q:\agentmaster-layouts\Debug-B` while dev ran from `Debug` — run from a
   session INSIDE PRODUCTION, so no scheduled task was needed (the dev swap never touches production): `devbuild.ps1`
   (relbuild.ps1 with the Debug configuration and the dev identity; this session's scratchpad `swap\`), no purge trigger
-  since the last Debug build (b669747c0 + the §21.12 work), yet a FULL rebuild of TerminalAppLib (pch.cpp first) — the
+  since the last Debug build (491266890 + the §21.12 work), yet a FULL rebuild of TerminalAppLib (pch.cpp first) — the
   11:40 Release build had purged the `Generated Files` folder the two configurations share — 537 s with 3 compilers, lowest
-  free commit 26.4 GB. Checked: TerminalApp.dll bakes 3a73980d9, the unstamped AgentmasterDev 0.0.1.0, 192 icons, nothing
+  free commit 26.4 GB. Checked: TerminalApp.dll bakes 1ceee0a2a, the unstamped AgentmasterDev 0.0.1.0, 192 icons, nothing
   ran from the folder.
 - **The swap** (13:16:30, `Swap-AgentmasterLayout.ps1 -PackageName AgentmasterDev`, one open session, Idle): drain 2.8 s,
   register 3.1 s at the first attempt, **downtime 6.5 s**; `[msg] connected as @ExampleSessionsDevBot` 1 s after the
@@ -2322,7 +2322,7 @@ own line"**, worded `"<from>" changed the title to "<to>"`.
   still told, a difference past the cut, a blank old title) and `TopicChangeShowsTitle`; the title row; a Search card, rest
   line and pick menu; the new thread's picker. `TestMessagingDirectory`: the dot toast of a two-line title and of a CR LF
   pair. `TestMessagingNewThread`: the title row of a two-line title (it expected the first line only). The isolated m5 run
-  (HEAD f3093efa0 + this work, ONE compiler under a commit guard: the machine had 2–4 GB of free commit): 8,124 checks, the 3
+  (HEAD 7aae07c62 + this work, ONE compiler under a commit guard: the machine had 2–4 GB of free commit): 8,124 checks, the 3
   known TestTaskbarBadge failures only. A before/after program on the exact titles printed, with HEAD's headers,
   `“🟪 BetterClipboard” changed the title to “🟪 BetterClipboard”` and the name `🔵 🟪 BetterClipboard<CR>on-launch`; with this
   work, `… changed the title to “🟪 BetterClipboard on-launch”` and `🔵 🟪 BetterClipboard on-launch`.
@@ -2332,8 +2332,8 @@ own line"**, worded `"<from>" changed the title to "<to>"`.
 
 ### 21.14 A topic's name follows its session during the history replay; a long 429 holds one method, not the bot (2026-10-17)
 
-> Status: written 2026-10-17 (session 0b1f8635, commit 4f3c643d9); LIVE on dev 0.0.1.24 since 17:24
-> (`Q:\agentmaster-layouts\Debug`); not in production — 0.6.8.21 (the build of 46e3aad42) still has the rename gate that the
+> Status: written 2026-10-17 (session 0b1f8635, commit 94c711a54); LIVE on dev 0.0.1.24 since 17:24
+> (`Q:\agentmaster-layouts\Debug`); not in production — 0.6.8.21 (the build of ac6b4c974) still has the rename gate that the
 > replay starves and the 429 sleep that silences the bot.
 
 **The user's request** (2026-10-17 ~17:00, after five hours of production's topics): "Can we rename topic when the topic has
@@ -2392,14 +2392,14 @@ a running session (blue circle) instead of the yellow one or as red when error".
 
 #### 21.14.4 Checked
 
-- **m5, isolated** (HEAD 9dbff4afc + these files only): 7,482 checks, only the 3 known `TestTaskbarBadge` failures. The new
+- **m5, isolated** (HEAD d65e33f41 + these files only): 7,482 checks, only the 3 known `TestTaskbarBadge` failures. The new
   blocks: the budget rule (room for two calls under 18), the replay's hold and its 90 s bound, a two-minute model of the
   replay at its cap with a rename falling due (made within 10 s; the old rule found no moment; the replay goes on), and the
   flood parking (one method parked, the others free; a second method escalates to all until the latest deadline; an
   expired entry neither holds nor escalates; a retry_after under a second counts as one), plus the census kinds.
 - `/Zs /W4` of `Messaging.cpp` + `Messaging.Inbound.cpp`: clean.
 - **Dev 0.0.1.24** (17:24): an incremental Debug build into `Q:\agentmaster-layouts\Debug` (no purge trigger since dev's
-  3a73980d9 build; 196 s, `-MaxCpu 4 -ClMpCount 6`); the layout bakes 4f3c643d9 and carries the new log strings; swapped
+  1ceee0a2a build; 196 s, `-MaxCpu 4 -ClMpCount 6`); the layout bakes 94c711a54 and carries the new log strings; swapped
   from a shell inside production (0.0.1.23 @ `Debug-B` → 0.0.1.24, drain 2.3 s, register 2.7 s, **downtime 5.8 s**, one Idle
   session). The new instance: connected as `@ExampleSessionsDevBot` 1 s after the start, 57 tabs resumed, none skipped,
   the start-up hold ended at 121 s, no `[exc]`. A real state change came at once (`61e3e3ff idle -> error`, a cut-off turn)
@@ -2437,8 +2437,8 @@ a running session (blue circle) instead of the yellow one or as red when error".
 
 ### 21.15 Every title is a color chip — an in-text button in the tab's color family (2026-10-17)
 
-> Status: written 2026-10-17 (session 13e76a66, commit 7017fd863); LIVE on dev 0.0.1.25 since 18:25
-> (`Q:\agentmaster-layouts\Debug-B`); not in production (0.6.8.21 is the build of 46e3aad42) — a production build and
+> Status: written 2026-10-17 (session 13e76a66, commit 033b424c3); LIVE on dev 0.0.1.25 since 18:25
+> (`Q:\agentmaster-layouts\Debug-B`); not in production (0.6.8.21 is the build of ac6b4c974) — a production build and
 > swap need the user's word.
 
 **The user's request** (2026-10-17, after looking at the color tests in thread 26785 of the dev chat): "Go for 10 with
@@ -2536,12 +2536,12 @@ title as an in-text copy_text button of a rich message, in each of Telegram's bu
   render, which proves it byte-identical to before. `TestMessagingSearch` — the rich answer and pick menu. The isolated m5
   run (HEAD + this work): 7,512 checks, only the 3 known TestTaskbarBadge failures. `/Zs /W4` of Messaging.cpp +
   Messaging.Inbound.cpp: clean.
-- **The build**: Debug, HEAD 7017fd863, into `Q:\agentmaster-layouts\Debug-B` while dev ran from `Debug`, from a session
-  inside production (`devbuild.ps1`, this session's scratchpad `swap\`); no purge trigger since dev's 4f3c643d9, so an
-  incremental build: 447 s with 3 compilers, "Build OK", TerminalApp.dll bakes 7017fd863, 192 icons. The script's last check
+- **The build**: Debug, HEAD 033b424c3, into `Q:\agentmaster-layouts\Debug-B` while dev ran from `Debug`, from a session
+  inside production (`devbuild.ps1`, this session's scratchpad `swap\`); no purge trigger since dev's 94c711a54, so an
+  incremental build: 447 s with 3 compilers, "Build OK", TerminalApp.dll bakes 033b424c3, 192 icons. The script's last check
   refused the layout because its manifest read `0.0.1.23` — the stamp of that slot's previous swap, which the incremental
   package step carried over — instead of the unstamped `0.0.1.0`. The manifest was identical to the running one apart from
-  the version, the packaging files had not changed since 3a73980d9, and the swap stamps its own version, so the swap went on.
+  the version, the packaging files had not changed since 1ceee0a2a, and the swap stamps its own version, so the swap went on.
 - **The swap** (18:25:24, `Swap-AgentmasterLayout.ps1 -PackageName AgentmasterDev`, no open session): 0.0.1.24 → 0.0.1.25,
   drain 1.1 s, register 18.9 s at the first attempt, **downtime 20.6 s**; `[msg] connected as @ExampleSessionsDevBot`
   1 s after the start.
@@ -2557,14 +2557,14 @@ title as an in-text copy_text button of a rich message, in each of Telegram's bu
 
 ### 21.16 The pinned directory — the dedicated topics and every tag on an open tab with its tabs, in one message of the main view (2026-10-17)
 
-> Status: written 2026-10-17 (session 0b1f8635, commit 00b4bc3aa); LIVE on dev since 0.0.1.26 (20:40, the build of
-> 19c6b7d1b). The 0-tab rule (§21.16.1: a tag no open tab carries is not listed) was written the same evening, after the
-> user saw the first directory (commit a7196c11b), and is LIVE on dev 0.0.1.27 since 21:17 (`Q:\agentmaster-layouts\Debug-B`):
+> Status: written 2026-10-17 (session 0b1f8635, commit 7a90c5402); LIVE on dev since 0.0.1.26 (20:40, the build of
+> 674438b9e). The 0-tab rule (§21.16.1: a tag no open tab carries is not listed) was written the same evening, after the
+> user saw the first directory (commit 62867b096), and is LIVE on dev 0.0.1.27 since 21:17 (`Q:\agentmaster-layouts\Debug-B`):
 > its first start EDITED message 916. The DOT (§21.16.7: a tab's state dot is a button that puts its topic first in the
 > thread list, because no link opens a bot-chat topic on Telegram Android, §21.16.3) was written at 23:00 the same night
-> (commit e4c953201) and is LIVE on dev 0.0.1.28 since 2026-10-18 00:09 (`Q:\agentmaster-layouts\Debug`, the build of
-> 2404f7838): its first start EDITED message 916 with one dot button; a tap on it is not checked yet. Not in production
-> (0.6.8.21 is the build of 46e3aad42) — a production build and swap need the user's word. The RECENT ACTIVITY section
+> (commit 94ed14af8) and is LIVE on dev 0.0.1.28 since 2026-10-18 00:09 (`Q:\agentmaster-layouts\Debug`, the build of
+> 570f5f9c3): its first start EDITED message 916 with one dot button; a tap on it is not checked yet. Not in production
+> (0.6.8.21 is the build of ac6b4c974) — a production build and swap need the user's word. The RECENT ACTIVITY section
 > (§21.16.8: at the bottom, the ten newest open tabs whose claude has not ended — Idle ones included, at the user's word) was written 2026-10-19
 > (NOT BUILT yet).
 
@@ -2731,10 +2731,10 @@ updated 5 minutes ago
   paint tags from the moved palette (TabHeaderControl.cpp, TerminalPage.AgentObserver.cpp) against the last Debug build's
   PCH: clean, and a negative control (`static_assert(kTagPaletteRgbCount == 13)` appended) failed at that line as it must.
 - **The build** (20:27, after the session that was editing `SessionModels.h` in the same tree committed its work as
-  19c6b7d1b — a build before that would have shipped its half-done code): Debug, HEAD 19c6b7d1b, into
+  674438b9e — a build before that would have shipped its half-done code): Debug, HEAD 674438b9e, into
   `Q:\agentmaster-layouts\Debug` while dev ran from `Debug-B`, from a session inside production (`devbuild.ps1`, this
-  session's scratchpad `swap\`); PURGED (`SessionModels.h` changed since dev's 7017fd863), 580 s with 3 compilers, "Build OK",
-  TerminalApp.dll bakes 19c6b7d1b, the manifest `AgentmasterDev 0.0.1.0`, 192 icons.
+  session's scratchpad `swap\`); PURGED (`SessionModels.h` changed since dev's 033b424c3), 580 s with 3 compilers, "Build OK",
+  TerminalApp.dll bakes 674438b9e, the manifest `AgentmasterDev 0.0.1.0`, 192 icons.
 - **The swap** (20:37:51, `Swap-AgentmasterLayout.ps1 -PackageName AgentmasterDev`, one open dev session, Idle): 0.0.1.25 →
   0.0.1.26, drain 1.5 s, register 2.1 s at the first attempt, **downtime 4.5 s**; the window re-homed 57 tabs, none skipped.
 - **Checked live** (dev hooks.log, `messaging\telegram\state.json`, `messaging.log`): 20:37:58 connected; 20:39:57 the start-up
@@ -2752,12 +2752,12 @@ updated 5 minutes ago
   it EDITS the directory (the hash moves: dev's six tags with no open tab go). Tests: the tag left out of both renders and
   counted; "only 0-tab tags" renders and hashes exactly like "no tag at all"; a 0-tab tag added, renamed or recolored keeps the
   hash, and its first open tab makes it appear; the tag order case-insensitive against an ordinal one ("Zulu" after
-  "release"); the log's words. The isolated m5 run (HEAD 19c6b7d1b + this work): 7,652 checks, only the 3 known
+  "release"); the log's words. The isolated m5 run (HEAD 674438b9e + this work): 7,652 checks, only the 3 known
   TestTaskbarBadge failures. `cl /Zs` with the last Debug build's flags of Messaging.cpp and Messaging.Inbound.cpp: clean,
   and a negative control (a `static_assert` on `DirectoryRender` appended to a copy of Messaging.cpp) failed as it must.
-  - **Built** 21:11–21:14 (`devbuild.ps1`, a session inside production): Debug, HEAD a7196c11b, into
-    `Q:\agentmaster-layouts\Debug-B` while dev ran from `Debug`; incremental (no purge trigger since 19c6b7d1b), 166 s with 3
-    compilers; TerminalApp.dll bakes a7196c11b, the manifest `AgentmasterDev 0.0.1.0`, 192 icons. K: sat between 0 and 3 GB
+  - **Built** 21:11–21:14 (`devbuild.ps1`, a session inside production): Debug, HEAD 62867b096, into
+    `Q:\agentmaster-layouts\Debug-B` while dev ran from `Debug`; incremental (no purge trigger since 674438b9e), 166 s with 3
+    compilers; TerminalApp.dll bakes 62867b096, the manifest `AgentmasterDev 0.0.1.0`, 192 icons. K: sat between 0 and 3 GB
     free that evening (the commit's first try failed there: `git hash-object` exit 128), and the build's intermediates went
     to Q: through the `obj\x64\Debug` junction.
   - **Swapped** 21:14:52 (`Swap-AgentmasterLayout.ps1 -PackageName AgentmasterDev`, one open dev session, Idle): 0.0.1.26 →
@@ -2814,24 +2814,24 @@ updated 5 minutes ago
   `ParseDirectoryFrontCallbackData`, `DirectoryFrontAnswer`, `detail::DirectoryDotHtml`, the legend, `dotsShown`; its header
   note now says what each app does with a title link); Messaging.Inbound.cpp (`_handleCallback`'s branch, `_bringTopicToFront`,
   `kFrontTapGapMs`); Messaging.cpp (`_resortTick`'s fold and hold, the three resets); Messaging.h (`_frontRequests`,
-  `_frontTapMs`, `_frontHeld`). Commit e4c953201.
+  `_frontTapMs`, `_frontHeld`). Commit 94ed14af8.
 - **Tests** (`TestMessagingDirectory`): every rich tab line carries its dot button and the tab with no topic a plain dot; the
   classic render has no button and no legend; the legend sits under the Tags heading and is absent when no listed tab has a
   topic; `dotsShown` and the log's words; the callback data's round trip, its bound, and every malformed form reading as no
   topic (empty, `0`, a sign, junk, a trailing space, another prefix, another button's data, 19 digits); the toast with a
   title, with the history pending, with a blank title, and a 500-character title kept under 200. The isolated m5 run (HEAD
-  de08fe9b7 + this work): 7,666 checks, only the 3 known TestTaskbarBadge failures. `cl /Zs` with the last Debug build's
+  3a7654d01 + this work): 7,666 checks, only the 3 known TestTaskbarBadge failures. `cl /Zs` with the last Debug build's
   flags of Messaging.cpp, Messaging.Inbound.cpp and AgentManagerContent.Settings.cpp (another includer of Messaging.h): clean;
   a negative control (a false `static_assert` on `kDirectoryFrontCallbackPrefix` appended to a copy of
   Messaging.Inbound.cpp) failed as it must.
 - **The build** (2026-10-17 23:54 – 2026-10-18 00:06): it waited ~30 min for another session that was editing
   `TerminalPage.h`, `Engine.h`, `SessionSearchTools.*` and the wapproj in the same tree, until that session committed its
-  work as 2404f7838 (the AI search's window and tab tools); a build before that would have shipped it half-done. Then Debug,
-  HEAD 2404f7838, into `Q:\agentmaster-layouts\Debug` while dev ran from `Debug-B`, from a session inside production
+  work as 570f5f9c3 (the AI search's window and tab tools); a build before that would have shipped it half-done. Then Debug,
+  HEAD 570f5f9c3, into `Q:\agentmaster-layouts\Debug` while dev ran from `Debug-B`, from a session inside production
   (`devbuild.ps1`, this session's scratchpad `swap\`). PURGED although no listed trigger changed (`SessionModels.h`,
-  `SessionRegistry.*`, `*.idl`): 2404f7838 gave the `TerminalPage` class (`_windowAgentToolsToken`) and the `Engine` struct
+  `SessionRegistry.*`, `*.idl`): 570f5f9c3 gave the `TerminalPage` class (`_windowAgentToolsToken`) and the `Engine` struct
   (the agent-tool sinks) new data members, the stale-layout case the purge rule exists for; the script's new `-ForcePurge`
-  says why in its log. 704.5 s with 3 compilers, "Build OK"; TerminalApp.dll bakes 2404f7838, the manifest
+  says why in its log. 704.5 s with 3 compilers, "Build OK"; TerminalApp.dll bakes 570f5f9c3, the manifest
   `AgentmasterDev 0.0.1.0`, 192 icons, the layout idle. K: sat at 0–1 GB free while the session waited (a docs edit failed
   `ENOSPC`); no build of this repo ran then, and the top writers were Rider (with `K:\source\NumSharp` open) and .NET
   build nodes.
@@ -2852,7 +2852,7 @@ updated 5 minutes ago
 
 - **The user's request** (2026-10-19): "In the telegram pinned message we specify the tabs we have. At the bottom add the top
   10 tab titles in the order of their recent activity and that are not in stationary status." Once the first version was
-  written (e42c75fcf, which left Idle tabs out): "Do include idle ones please".
+  written (32fcf915b, which left Idle tabs out): "Do include idle ones please".
 - **What it shows** — the directory's last section, right before the footer:
 
   ```
@@ -2873,7 +2873,7 @@ updated 5 minutes ago
   line: "No tab to list: none is open, or every open one has ended."
 - **"Stationary"** (`DirectoryStateIsStationary`): **Done** only — a tab whose claude has ended; nothing happens in it until
   it is restarted. Listed: **Running**, **Waiting for you**, **Needs approval**, **Error** and **Idle**. The first version
-  (e42c75fcf) read the user's word as "nothing happens in the tab and nothing is asked of the user" and left Idle out too;
+  (32fcf915b) read the user's word as "nothing happens in the tab and nothing is asked of the user" and left Idle out too;
   the user's answer the same day: "Do include idle ones please". So on a quiet fleet the section lists the ten tabs used
   last, whatever their state. An Idle tab past its topic's idle grace (D25) has no topic: its row is a plain dot and a chip
   that opens nothing until its next turn. ⚠ A state added to `SessionState` later is listed until it is named in
@@ -3124,7 +3124,7 @@ updated 5 minutes ago
   probe over an injected probe that hangs on cue — a hung probe answers NoAnswer after the CALLER's wait, a second ask joins it,
   the cap starts no third one, the late answer is kept, `maxAgeMs` 0 asks again, a throwing probe is not kept —, the no-answer
   text, and `HeldMessageGone`'s yes and no answers. `TestSpawnBuilders`: a fresh launch
-  takes a chosen id (`--session-id`, no `--resume`), and mints one without. The isolated m5 run (HEAD f2fb06549 + this work):
+  takes a chosen id (`--session-id`, no `--resume`), and mints one without. The isolated m5 run (HEAD 0122bde2e + this work):
   7,949 checks, only the 3 known TestTaskbarBadge failures (a first run before the rebase also failed TestCmdPathLimit's
   real-cmd.exe end-to-end once, which this work does not touch; it passed on the re-run). `cl /Zs` with the last Debug build's
   flags on a shadow tree of exactly this commit: the 10 units it touches or that include its headers (Messaging.cpp,
@@ -3135,15 +3135,15 @@ updated 5 minutes ago
   - **The pager row** (2026-10-18, NOT BUILT yet): the label's data and its malformed forms, the label text, the toast (a middle
     page, a page past the end, an empty and a one-page list), `BuildNewThreadPagingRow` on the first, a middle and the last page,
     past the end, a two-page list and a one-page list, and the keyboard's pager rows on a middle page and on both last pages. The
-    isolated m5 run (HEAD 954d177a1 + this change): 8,071 checks, only the 3 known TestTaskbarBadge failures. `cl /Zs` with the
+    isolated m5 run (HEAD 2e538942c + this change): 8,071 checks, only the 3 known TestTaskbarBadge failures. `cl /Zs` with the
     last Debug build's recorded lines: Messaging.Inbound.cpp, Messaging.cpp, Engine.cpp, MessagingSearchBridge.cpp,
     TerminalPage.AgentEngine.cpp and AgentManagerContent.Settings.cpp pass; a probe that calls `BuildNewThreadPagingRow` with
     one argument too few fails with exactly C2660.
-- **The build** (2026-10-18 02:14–02:26): Debug, HEAD ac4167e63 (it also carries another session's §21.18 start note,
-  f2fb06549), into `Q:\agentmaster-layouts\Debug-B` while dev ran from `Debug`, from a session inside production
+- **The build** (2026-10-18 02:14–02:26): Debug, HEAD d683a3270 (it also carries another session's §21.18 start note,
+  0122bde2e), into `Q:\agentmaster-layouts\Debug-B` while dev ran from `Debug`, from a session inside production
   (`devbuild.ps1`); the tree was clean (both sessions' work committed). PURGED: `SessionRegistry.*` changed since the last Debug
-  build (2404f7838), and `Messaging.h` / `TopicRecord` / `Engine` gained members. 690.6 s with 3 compilers, "Build OK";
-  `TerminalApp.dll` bakes ac4167e63, the manifest `AgentmasterDev 0.0.1.0`, 192 icons, the layout idle. K: had ~250 MB free
+  build (570f5f9c3), and `Messaging.h` / `TopicRecord` / `Engine` gained members. 690.6 s with 3 compilers, "Build OK";
+  `TerminalApp.dll` bakes d683a3270, the manifest `AgentmasterDev 0.0.1.0`, 192 icons, the layout idle. K: had ~250 MB free
   throughout (the intermediates go to Q:).
 - **The swap** (02:27:24, `Swap-AgentmasterLayout.ps1 -PackageName AgentmasterDev`; two open dev sessions, both Idle):
   0.0.1.28 → 0.0.1.29, drain 5.6 s, register 3.1 s at the first attempt, **downtime 9.4 s**; the window re-homed 57 tabs by
@@ -3168,7 +3168,7 @@ updated 5 minutes ago
 > telegram to Search topic mentioning that. This will help us notice restarts or regain accessability", and
 > "\"Runner Auto * queue 0\" is the common default and should be hidden (not plotted)".
 
-**What v1 did (d1d23a5ca, 2026-10-16).** A start note existed: at the first tick after the connect the bot
+**What v1 did (404e57f8f, 2026-10-16).** A start note existed: at the first tick after the connect the bot
 posted "Agentmaster started — N topic(s) kept from the last run" in 🔎 Search, silent, plus "⚠ the previous run
 ended unexpectedly at <time>" with sound when the previous run's marker was still on disk. Four defects:
 
@@ -3262,7 +3262,7 @@ kinds, at the first start ever, and with an escaped version.
 4. A card of a session in the default (Auto, nothing queued) shows no runner line; Paused, a queued prompt or the
    global pause shows it.
 
-**Live on dev 0.0.1.29** (built by another session from ac4167e63, which holds this work; swapped in at 2026-10-18
+**Live on dev 0.0.1.29** (built by another session from d683a3270, which holds this work; swapped in at 2026-10-18
 02:27): dev hooks.log `02:27:36.771 [msg] start note: the app's launch, version dev 0.0.1.29, the previous run did
 not close (last seen alive 02:26), 48 topic(s) kept` → `… queued for the Search topic (thread 25027, with sound)` →
 `02:27:38.304 [msg] start note posted in the Search topic (message 931)`. Check 1 passed in the log; "did not close"
@@ -3372,7 +3372,7 @@ below, one line each.)", then the lines, silent, every number once; "resume 37" 
 
 ### 21.21 Known bugs, not fixed (found 2026-10-18)
 
-Each was read in the code at a7bb5a577; the ones marked "seen" also show in a log or a file. None is fixed yet.
+Each was read in the code at a8d57066b; the ones marked "seen" also show in a log or a file. None is fixed yet.
 
 - **An aborted creation leaves its new thread**, against the user's rule of 2026-10-18 ("QA the entire creation of a new
   session process … If the creation process aborts in any way, the new topic needs to be deleted"). No abort path deletes
@@ -3483,7 +3483,7 @@ dropped as cleanly as a pair; a long title cut within 128 with the square first;
 `StripTopicNameDecoration` of an icon-form name; the refusal reader (the emoji, the icon, the document — not a 429, a
 deleted thread, "not modified" or no words); the picker (a glyph-form topic is a quiet re-form, the glyph form wanted brings
 icon topics back, an unsettled state waits, a state change goes first, nothing is due when every topic shows its state in
-its icon); `stateIcon`'s round trip and an older file. The isolated m5 run (HEAD a7bb5a577 + this work; the two commits
+its icon); `stateIcon`'s round trip and an older file. The isolated m5 run (HEAD a8d57066b + this work; the two commits
 since change only documents): 8,089 checks, only the 3 known TestTaskbarBadge failures. `cl /Zs` with the last Debug
 build's recorded flags of Messaging.cpp, Messaging.Inbound.cpp, Engine.cpp, MessagingSearchBridge.cpp,
 AgentManagerContent.Settings.cpp and TerminalPage.AgentEngine.cpp: clean; a negative control (a false `static_assert` on
@@ -3596,7 +3596,7 @@ from the engine; the last-activated window first, a refusing and a throwing sink
 answer even when a refusing sink's copy of the reply dies later; a throwing requester contained; an empty reply. The service
 half (`_settleLaunchAnswers`, `_expireRevives`, the new-thread picker's return) has no test, like the rest of the service.
 
-**Checked** (2026-10-18, HEAD 1efab4879 + this change only, in scratch folders; the shared tree held another session's
+**Checked** (2026-10-18, HEAD 3f84678f2 + this change only, in scratch folders; the shared tree held another session's
 unfinished work): the m5 suite 8,163 checks, the three known `TestTaskbarBadge` failures only (a first run also failed the
 scheduler's timing test "woken tab: the queue resumes by itself…", which passed in the next run and in HEAD's own run);
 `cl /Zs` with the app's flags on a shadow tree of this change — `Engine.cpp`, `Messaging.cpp`, `Messaging.Inbound.cpp`,
@@ -3616,7 +3616,7 @@ scheduler's timing test "woken tab: the queue resumes by itself…", which passe
 3. 🔎 Search ▶ Resume of a closed session: "Opened …"; of a session with no transcript on disk: "… as a NEW session …".
 4. 🔎 Search ▶ Resume of a session whose tab is open in a window: "<title> is open already …", and no second tab opens.
 
-### 21.24 The card's buttons on two pages, and the screen as a picture (2026-10-18; 4d8826851 + bcc546a30 in production 0.6.8.22 and dev 0.0.1.30 since 2026-10-19; d0fbc4e31 in production since 0.6.8.23 and dev since 0.0.1.31)
+### 21.24 The card's buttons on two pages, and the screen as a picture (2026-10-18; 58b3bdfce + 2ff2d2b82 in production 0.6.8.22 and dev 0.0.1.30 since 2026-10-19; 991a00486 in production since 0.6.8.23 and dev since 0.0.1.31)
 
 > The user's request (2026-10-18): "The buttons in a topic's bottom pinned status message (with title and status which keeps
 > getting updated), we need to refactor the buttons a bit. — Have a button "<cog>Session" that then changes the buttons of the
@@ -3729,7 +3729,7 @@ blanks in the background, a red cell's corner, a green blank cell, ink inside a 
 cell, a box rule joining across columns; an unknown font falls back; an empty snapshot is refused. `tests_messaging.cpp`'s
 Error-line check follows the new wording.
 
-**Checked** (2026-10-18, HEAD 8bab5e432 + this change only, in scratch folders; the shared tree held another session's
+**Checked** (2026-10-18, HEAD 2b49cd4fe + this change only, in scratch folders; the shared tree held another session's
 work, committed meanwhile): the m5 suite 8,278 checks, the three known `TestTaskbarBadge` failures only (on earlier bases
 three first runs each also failed one scheduler timing check, a different one every time, which passed in every rerun);
 `cl /Zs` with the app's flags on a shadow tree of this change — `Messaging.cpp`, `Messaging.Inbound.cpp`,
@@ -3741,11 +3741,11 @@ emoji, wide CJK, blocks, rules joined). NOT BUILT then; nothing tried live.
 ⚠ `ControlCore.idl` and `TermControl.idl` changed, and the messaging service gained data members: the next build must purge
 (the build-install skill's §5.8).
 
-**Built** (checked 2026-10-19): the purged builds of ec966a2ca that another session swapped in on 2026-10-19 — production
-0.6.8.22 (`Q:\agentmaster-layouts\Release-B`) and dev 0.0.1.30 (`Q:\agentmaster-layouts\Debug`) — hold 4d8826851 and
-bcc546a30 (git ancestry; a UTF-16LE probe of both installed `TerminalApp.dll` files finds `screen-snapshot`, `screenimg` and
+**Built** (checked 2026-10-19): the purged builds of 9ad5432f0 that another session swapped in on 2026-10-19 — production
+0.6.8.22 (`Q:\agentmaster-layouts\Release-B`) and dev 0.0.1.30 (`Q:\agentmaster-layouts\Debug`) — hold 58b3bdfce and
+2ff2d2b82 (git ancestry; a UTF-16LE probe of both installed `TerminalApp.dll` files finds `screen-snapshot`, `screenimg` and
 ` Screen Image`). So both installs show the first two layouts: Main [⚙️ Session] [🔄 Restart Session] led by the state row,
-Fork and New Session on the Session page. The rule of 2026-10-19 (d0fbc4e31: Restart and Resume on the Session page, Restart
+Fork and New Session on the Session page. The rule of 2026-10-19 (991a00486: Restart and Resume on the Session page, Restart
 on Main only in Error / Done, Restart starting a parked tab) is in no build yet; it changes no `.idl`. Nothing was checked
 from the phone.
 
@@ -3927,7 +3927,7 @@ wizards); the abort line; `createdUnixMs` in `sessions.json`. `tests_tabtools.cp
 NAMES its window goes to that window only (with its anchor session), a named window that is not open answers false with no
 other window asked, no name keeps the old order.
 
-**Checked** (2026-10-18, HEAD bcc546a30 + this change only, in a scratch folder): the m5 suite 8,411 checks, the three
+**Checked** (2026-10-18, HEAD 2ff2d2b82 + this change only, in a scratch folder): the m5 suite 8,411 checks, the three
 known `TestTaskbarBadge` failures only (133 more than §21.24's 8,278: the wizard's and the named window's); one run also
 failed a scheduler timing check ("…sends once the queue window ran out", the load flake §21.24 records), which passed on the
 rerun.
@@ -4031,7 +4031,7 @@ You asked how Telegram could answer…
 **The cost: one edit per topic, once.** The service compares a hash of the card's classic text and buttons with the one the
 topic's record holds (`TopicRecord::cardTextHash`, persisted, §21.6). Every card's text changed, so the first refresh after the
 build edits each card once (or re-posts it, where a re-post is due anyway): one call per topic on the chat's flood budget, at
-the outbox's ~1 call/s. d0fbc4e31 (§21.24's Restart rule, also in no build yet) changes the Main keyboard of every card too,
+the outbox's ~1 call/s. 991a00486 (§21.24's Restart rule, also in no build yet) changes the Main keyboard of every card too,
 and the hash covers the buttons, so a build that carries both costs ONE edit per card, not two. The function's `<remarks>`
 now says that the line order is part of the hash.
 
@@ -4046,7 +4046,7 @@ then "💤 not running — …"; `/status` shows the same order.
 **Still in no build (checked 2026-10-19 ~15:15, when the user asked again).** A card on the user's phone still showed the title
 first ("📌 🟧 Small telegram fixes" over "🟡 Waiting for you since 14:57"), and none of the four layouts on Q: holds this change.
 Production 0.6.8.22 (`Release-B`, its `TerminalApp.dll` built at 06:41) and dev 0.0.1.30 (`Debug`, 07:03) are builds of
-ec966a2ca, which came before 4621cf9d4 (09:27). `Release` (0.6.8.21) and `Debug-B` (0.0.1.29) are older. The proof was a probe
+9ad5432f0, which came before f8fefe150 (09:27). `Release` (0.6.8.21) and `Debug-B` (0.0.1.29) are older. The proof was a probe
 of each `TerminalApp.dll` for the wide literal `L"\n📌 "`, which only the state-first code has. It was in none of the four.
 
 ### 21.27 A shorter place line (2026-10-19; in production since 0.6.8.23 and dev since 0.0.1.31)
@@ -4074,7 +4074,7 @@ The card of the request, with §21.26 and this change:
 ```
 
 **The cost:** the same as §21.26's. Every card's text changes, so the first refresh after the build edits each card once. A
-build that carries d0fbc4e31, §21.26 and this change costs one edit per card in total.
+build that carries 991a00486, §21.26 and this change costs one edit per card in total.
 
 **Tests** (`tests/tests_messaging.cpp`, `TestMessaging`):
 - The card's third line is exactly "/source/Agentmaster · agentmaster · opus-5-5 · max · 182K".
@@ -4236,7 +4236,7 @@ PC, and a rekey's new title (§21.6).
 
 | Install | Topic renames | Title lines told | Failed renames | Lines dropped by a replay |
 |---|---|---|---|---|
-| Production | 619 | 9 | 15, every one a 429 (before 4f3c643d9, §21.14, which retries those) | 0 |
+| Production | 619 | 9 | 15, every one a 429 (before 94c711a54, §21.14, which retries those) | 0 |
 | Dev | 188 | 2 | 0 | 0 |
 
 The gaps were rare in practice, but once the reply is gone each would leave a rename with no answer at all.
@@ -5355,7 +5355,7 @@ fix 5 of [`UI_THREAD.md`](UI_THREAD.md) §13g.
 - Messaging.h: the members `_stateProgressDirty`, `_stateSaveMtx`, `_lastSavedStateBytes`, `_lastPrevCopyMs` and
   `_stateFileReadable`, and `_refreshCard`'s `known`.
 - ⚠ `MessagingService` gained data members: the next build must purge (the build-install skill §5.8;
-  [`CLAUDE.md`](../../CLAUDE.md)'s purge rule) — done: both builds of af3d40b5e (2026-10-20) were purged.
+  [`CLAUDE.md`](../../CLAUDE.md)'s purge rule) — done: both builds of 5f70cfda1 (2026-10-20) were purged.
 - ⚠ A new persisted field must decide its kind: progress only when losing its last 10 s is harmless; anything that would
   orphan a message or a topic is structural.
 
@@ -5493,7 +5493,7 @@ and its tab is the user's shell, which Search must not start or restart.
 
 **The menus** (`SearchPickMenuRows`): §5.4's table — two buttons a row at most, ⑂ Fork · ✕ Cancel always last, and no
 button that pins. **No 📌 variants** (the user's "Remove the pin overloads", 2026-10-23, right after the first version of
-this change, commit 0502c9380): the first version also offered ▶ Resume 📌 (since §21.7), ▶ Activate 📌, ⏰ Wake 📌, and
+this change, commit 380e86d64): the first version also offered ▶ Resume 📌 (since §21.7), ▶ Activate 📌, ⏰ Wake 📌, and
 📌 Pin for a listed session; they are gone with their token kinds (`pick-resume-pin`, `pick-activate-pin`,
 `pick-wake-pin`, `pick-pin`) and `SearchPickActionPins`. A session is pinned in its own topic (`/pin`, the card's 📌 Pin);
 `/idle`'s list keeps its own Wake 📌. **The actions** (`_onSearchPickAction`, on the state at the TAP):
@@ -5572,7 +5572,7 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
 
 **The button and the command.**
 - The Session page gets a row of its own under [🖥 Screen Text] [🖼 Screen Image]: **[📜 All Screen ▸]** (`c:allscreen:<sid>`,
-  48 bytes). The page now has seven rows; no existing button moved. In its first build (7c7397861, dev 0.0.1.36) the button
+  48 bytes). The page now has seven rows; no existing button moved. In its first build (23d48721f, dev 0.0.1.36) the button
   drew at the Default level at once; since the follow-up it opens the level picker below. A card posted by that build opens
   the picker too: the verb is the same.
 - **The level picker** (the card's third page, `CardPage::AllScreen`; MessagingModels.h `kAllScreenLevels`): the File Diffs
@@ -6602,9 +6602,9 @@ user's own message, above the previous turn's reply, became the turn's prompt �
 - the stamp's round trip in `sessions.json`: written only for the prompt that waited, to the millisecond; absent and negative
   read as 0.
 
-Every check ran on HEAD plus this change alone: until eb2ccadfb committed, another session's unfinished §21.43 hunks sat in six
+Every check ran on HEAD plus this change alone: until 565a4ea8d committed, another session's unfinished §21.43 hunks sat in six
 of the same files.
-- The m5 suite, on an isolated copy with its own profile: 10,379 checks before eb2ccadfb and 10,569 on top of it (its voice
+- The m5 suite, on an isolated copy with its own profile: 10,379 checks before 565a4ea8d and 10,569 on top of it (its voice
   tests included), each time with only the 3 known `TestTaskbarBadge` failures. One run also failed the scheduler's real-time
   settle check ("the held prompt self-releases …"), the known flake under load; the exe run again passed it.
 - `cl /Zs` with the last Debug build's recorded lines over a shadow tree: all 111 TerminalAppLib units, the CLI's 17 at
@@ -6687,14 +6687,14 @@ A close of a session in any other state takes the same path; only its state diff
   - `TestMessagingCloseAnswersWaiting` (tests_messaging.cpp, 10 checks): the bot's path above on a real registry, with the
     facts built as `_syncTopics` builds them; the directory counts; the resume; and the control: without the demotion, a
     resumed session read Waiting and got its topic back at once.
-- An isolated copy (HEAD 825adee72 plus this change alone, its own profile) ran 10,852 checks, with only the 3 known
+- An isolated copy (HEAD e75d9548c plus this change alone, its own profile) ran 10,852 checks, with only the 3 known
   `TestTaskbarBadge` failures.
 - A negative control (the demotion left out, in the copy only) failed 10 of the new checks.
 - `cl /Zs` with the last Debug build's recorded lines passed `TerminalPage.AgentSessions.cpp` and `TabManagement.cpp`. A wrong
   argument count planted in a scratch copy of each failed with C2660 at that line.
 - The CLI's `SessionRegistry.cpp`, `agentcli.cpp` and `Persistence.cpp` passed at `/W4 /WX`.
-- ⚠ `SessionModels.h` changed (a new inline function, no layout change): the next build purges anyway (21f0482d4, 89cc2766e,
-  825adee72).
+- ⚠ `SessionModels.h` changed (a new inline function, no layout change): the next build purges anyway (672e3bc67, 605e314dc,
+  e75d9548c).
 
 **Check after the build** (dev, with its bot):
 1. A session Waiting for you with a topic: close its tab. hooks.log shows `[archive] <id> (waiting for you -> idle)`, then
@@ -6801,7 +6801,7 @@ The history replay yields to them, as it does to any rename.
     - a stray id in the glyph form is ignored;
     - no Search icon yet.
   - Its convergence: exactly the Running and Waiting topics are re-iconed, once each.
-- **The harness, on an isolated copy** (HEAD 53eec1c74 plus this change alone, its own profile): 11,442 checks, with only the 3
+- **The harness, on an isolated copy** (HEAD bc9988b8b plus this change alone, its own profile): 11,442 checks, with only the 3
   known `TestTaskbarBadge` failures.
 - **Its negative control** (the re-icon rule switched off, in a second copy) failed exactly the two convergence checks: "a
   topic that shows the older table's icon is re-iconed" and "exactly the running and waiting topics are re-iconed".

@@ -10,7 +10,7 @@
   "runs": [
     {
       "name": "cold",
-      "commit": "5f5d53fa98edbe586f9998ec576ae8fd7d252c57",
+      "commit": "6482adbde46949a8ebbd873966516356e9b3e0be",
       "vm": {
         "request": "r20261026-061859-3d231a",
         "build_id": "b20261026-1",
@@ -27,15 +27,15 @@
     },
     {
       "name": "incremental",
-      "commit": "ea28331ae4c588bc019fa0bd3fb4d24a35018497",
-      "from": "5f5d53fa98edbe586f9998ec576ae8fd7d252c57",
-      "changes": "5b292ab4a undone (the installer: PortableInstall.h and ProfileBootstrap.h, Win32 headers shared with the exe, and the embedded am-update.ps1): the TUs that include them and the links after",
+      "commit": "d6ba4fee6d41dc5b41e6eddfdee899bcb2dbaf17",
+      "from": "6482adbde46949a8ebbd873966516356e9b3e0be",
+      "changes": "c586330f1 undone (the installer: PortableInstall.h and ProfileBootstrap.h, Win32 headers shared with the exe, and the embedded am-update.ps1): the TUs that include them and the links after",
       "vm": {
         "request": "r20261026-074830-985d31",
         "build_id": "b20261026-2",
         "grant": "9.6 GB, 8 vCPU",
         "build_ok_s": 360.0,
-        "bundle": "none (ea28331ae is reachable from the worktree's 5f5d53fa9)"
+        "bundle": "none (d6ba4fee6 is reachable from the worktree's 6482adbde)"
       },
       "native": {
         "script": "measure/p04_native.sh incr",

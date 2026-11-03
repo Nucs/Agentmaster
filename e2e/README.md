@@ -400,7 +400,7 @@ queued prompt Pending and its mode).
 
 **Checked both ways (2026-10-23).** Each `needs_fix` test fails on 0.8.0 on its defect (runs `nf-080`, `nf-080b`;
 TAB-K1's sweep on 6 of its 9 moments) and passes on the test build 0.8.1.1, a purged Release build whose `src/` equals
-HEAD 1f4c68678 (runs `fixall-0811`, `fixall-0811b`: every test of these suites passes there, 67 of 67). Each
+HEAD a65c6ac9a (runs `fixall-0811`, `fixall-0811b`: every test of these suites passes there, 67 of 67). Each
 known-defect test passes on both builds: TCM-K1, ROB-K1, TAB-K5 and A11Y-K2 are still there (SP-K2's too; it is a
 feature since 2026-10-24). Results:
 `Q:\agentmaster-e2e\runs\<run>\`.

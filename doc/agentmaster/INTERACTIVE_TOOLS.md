@@ -11,7 +11,7 @@
 > with preview as it lets you to show how the choice/option will be used and lets use add note." This document
 > covers `AskUserQuestion`, above all its **previews** and its **notes**. Plan approval (`ExitPlanMode`),
 > `EnterPlanMode` and `ProposeGoal` are out of scope. What was read and measured on them is in this file's first
-> version (commit 2c896eea1), and the probe still runs its two plan scenarios with `--with-plans`.
+> version (commit 57ce9b962), and the probe still runs its two plan scenarios with `--with-plans`.
 
 ## 0. Summary
 

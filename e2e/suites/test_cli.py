@@ -52,7 +52,7 @@ def _same_path(a: Path, b: Path) -> bool:
 @pytest.mark.flow("CLI-02")
 @pytest.mark.needs_fix("CLI-K2")
 def test_a_plain_shell_reads_the_installs_own_profile(am):
-    """CLI-02 / CLI-K2's fix (3b042ea32, 2026-10-23): the CLI beside an unpackaged RELEASE install, run from a plain
+    """CLI-02 / CLI-K2's fix (4950ece21, 2026-10-23): the CLI beside an unpackaged RELEASE install, run from a plain
     shell — no AGENTMASTER_PROFILE inherited — answers from the profile the app beside it resolves (ResolveProfileDir:
     here no `profile.path` beside the exe, no portable marker, and no saved choice in `~/.agentmaster.profiles`, so
     `%USERPROFILE%\\.agentmaster`), never from `%USERPROFILE%\\.agentmaster-dev`. On 0.8.0 every configuration of the

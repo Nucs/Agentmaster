@@ -191,7 +191,7 @@ same id, same folder, same title, same record — instead of a `--resume` that w
 1. **Launch, no prompt.** *Expect:* idle, no transcript.
 2. **Quit and reopen.** *Expect:* the restored tab's claude runs `--session-id <the SAME id>` and no `--resume`; the
    record is kept. *Check:* [LOG] `[restore-fresh] <id> "<title>" cwd=…`, the same id; [OS] the command line; [ENG]
-   the record still in `sessions.json` with its title. Since v0.8.1 (21f0482d4, PERSISTENCE.md §16): a lookup that found
+   the record still in `sessions.json` with its title. Since v0.8.1 (672e3bc67, PERSISTENCE.md §16): a lookup that found
    no transcript never re-keys or drops a record, because a lookup that missed an existing transcript would otherwise
    lose the session (Claude Code then refuses the id in the tab instead). Until then the reopen minted a NEW id and
    dropped the old record (measured on 0.8.0, run pqr1); the test asserted that until the v0.8.1 run of 2026-10-29.

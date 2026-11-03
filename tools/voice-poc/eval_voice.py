@@ -40,7 +40,7 @@ from vocab import Vocabulary, session_vocabulary
 
 #: The commit whose CLAUDE.md is the "session" context: the repository as it stood when the sentences were written
 #: (before this feature's own documentation mentioned Parakeet, Opus or voice notes).
-DEFAULT_CLAUDE_MD_REV = "a935ca604"
+DEFAULT_CLAUDE_MD_REV = "f0a54ee8c"
 
 
 def pinned_claude_md(rev: str, repo: Path) -> str:

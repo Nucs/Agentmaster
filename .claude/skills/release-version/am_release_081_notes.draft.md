@@ -1,30 +1,30 @@
 <!-- Agentmaster 0.8.1 release notes — STABLE (becomes Latest, replacing 0.8.0).
-     Range: v0.8.0..89cc2766e = 84 commits. 37 user-facing: 30 feat + 17 fix, minus 11 dev-tooling ones, plus the
-     45cbf8d15 refactor that changes a Telegram menu. 47 internal: 21 docs, 14 test, 1 tools, 9 build-server feats,
+     Range: v0.8.0..605e314dc = 84 commits. 37 user-facing: 30 feat + 17 fix, minus 11 dev-tooling ones, plus the
+     71a585d81 refactor that changes a Telegram menu. 47 internal: 21 docs, 14 test, 1 tools, 9 build-server feats,
      1 swap-script feat, 1 e2e-host feat. No pre-release since 0.8.0, so there is nothing to fold (release-notes §6):
      the notes are 0.8.1's own batch.
-     RELEASING the PINNED commit 89cc2766ee2c3c096013b996a6beb9a454185220 (the user, 2026-10-29: "Pin current commit and
+     RELEASING the PINNED commit 605e314dca26cae0606863996b5321e2e7939f1d (the user, 2026-10-29: "Pin current commit and
      lets do 0.8.1 no prerelease"). The tag goes on it even if the branch moves on; this draft's own commit comes after
      it and changes nothing that is built.
-     Builds behind it: production 0.8.0.1 runs 1e0076bc6; dev 0.0.1.39 runs 364e18f23 (build server b20261028-3).
-     21f0482d4 (the profile-overwrite audit) and 89cc2766e (state files across versions) are in NO build yet. This
+     Builds behind it: production 0.8.0.1 runs fe47d239f; dev 0.0.1.39 runs 64a3a4846 (build server b20261028-3).
+     672e3bc67 (the profile-overwrite audit) and 605e314dc (state files across versions) are in NO build yet. This
      release's ci.yml and release.yml runs are their first compile and link; before them, only the m5 harness and
      cl /Zs had checked them.
-     GitHub had built up to 68f44f0de (ci.yml run 40312689347: success). That run was the first of d496ccc6e's symbols
+     GitHub had built up to 2a255bc75 (ci.yml run 40312689347: success). That run was the first of a753de9b9's symbols
      steps (x64). arm64's symbols steps run for the first time in release.yml.
      Version: tag v0.8.1 -> ver4 0.8.1.0, rawver 0.8.1. The updater compares major.minor.patch, so 0.8.1 is offered
      over 0.8.0.
-     Push first (fast-forward from 68f44f0de): env -u GH_TOKEN -u GITHUB_TOKEN git push origin <draft commit>:agentmaster
-     Tag:     git tag -a v0.8.1 -m "Agentmaster 0.8.1" 89cc2766ee2c3c096013b996a6beb9a454185220
+     Push first (fast-forward from 2a255bc75): env -u GH_TOKEN -u GITHUB_TOKEN git push origin <draft commit>:agentmaster
+     Tag:     git tag -a v0.8.1 -m "Agentmaster 0.8.1" 605e314dca26cae0606863996b5321e2e7939f1d
               env -u GH_TOKEN -u GITHUB_TOKEN git push origin v0.8.1
      Notes:   strip this comment (awk 'f{print} /^## Agentmaster 0.8.1/{f=1; print}' <draft> > body.md), then
               gh release edit v0.8.1 -R Nucs/Agentmaster --notes-file body.md
      Publish: gh release edit v0.8.1 -R Nucs/Agentmaster --draft=false --latest --prerelease=false (REPLACES 0.8.0 as Latest).
      Assets: Agentmaster_0.8.1.0.msixbundle, _x64.zip, _arm64.zip, _x64_symbols.zip, _arm64_symbols.zip, Agentmaster.cer.
      DONE 2026-10-29 (times UTC):
-       - pushed 68f44f0de..86a839a90 (the pin + this draft's first commit); annotated tag v0.8.1 (c0cecc0a2) -> 89cc2766e.
-       - ci.yml run 40820849372 (x64 Release from scratch, on 86a839a90): success, done by 05:29. That was the first
-         compile and link of 21f0482d4 and 89cc2766e anywhere.
+       - pushed 2a255bc75..7145bbce5 (the pin + this draft's first commit); annotated tag v0.8.1 (c0cecc0a2) -> 605e314dc.
+       - ci.yml run 40820849372 (x64 Release from scratch, on 7145bbce5): success, done by 05:29. That was the first
+         compile and link of 672e3bc67 and 605e314dc anywhere.
        - release.yml run 40820853815: success, with no queue wait:
          - prep 05:00:18-05:00:21;
          - x64 05:00:25-05:19:02 (18.6 min);
@@ -39,8 +39,8 @@
          - the portable zip: 83 files under agentmaster-0.8.1.0\, .am-version 0.8.1.0, and 16 public PDBs (83.4 MB
            unpacked), each named in .am-manifest's 46 lines;
          - the symbols zip: the same 16 names as full PDBs (893 MB unpacked; TerminalApp.pdb 222 MB).
-         - A UTF-16 probe of the zip's TerminalApp.dll finds "89cc2766e" and strings of 89cc2766e (the snapshot
-           marker), 21f0482d4 ("HELD in the record"), 48d0259db ("late save refused") and the voice notes.
+         - A UTF-16 probe of the zip's TerminalApp.dll finds "605e314dc" and strings of 605e314dc (the snapshot
+           marker), 672e3bc67 ("HELD in the record"), 5a9ba9f79 ("late save refused") and the voice notes.
        - Notes applied; the read-back equals this body apart from its final newline. Published 05:37:58 as stable +
          Latest: `gh release list` shows "Agentmaster 0.8.1 Latest", and /releases/latest answers v0.8.1 with 6
          assets. -->

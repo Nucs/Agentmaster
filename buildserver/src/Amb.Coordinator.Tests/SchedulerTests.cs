@@ -99,7 +99,7 @@ public sealed class SchedulerTests : IDisposable
         RequestRecord import = _book.Create(new CreateRequest(RequestKind.Import, new RequestInputs
         {
             Source = PortableZip("0.8.1.0"),
-            Commit = "89cc2766ee2c3c096013b996a6beb9a454185220",
+            Commit = "605e314dca26cae0606863996b5321e2e7939f1d",
         }));
         RequestRecord smoke = _book.Create(new CreateRequest(RequestKind.Smoke, new RequestInputs()));
         _scheduler.Admit();

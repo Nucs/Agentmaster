@@ -303,7 +303,7 @@ namespace Agentmaster::Msg
     /// Whether a tab's state is STATIONARY — the user's word (2026-10-19) for the tabs the Recent activity section leaves out
     /// (§21.16.8): Done, a tab whose claude has ended — nothing happens in it until it is restarted. Every other state is listed:
     /// Running (a turn in flight), Waiting for you (its turn is over and it waits for the next message), Needs approval and
-    /// Error (each waits for the user's answer), and Idle. Idle was stationary in the first version (e42c75fcf: nothing happens
+    /// Error (each waits for the user's answer), and Idle. Idle was stationary in the first version (32fcf915b: nothing happens
     /// in the tab and nothing is asked of the user); the user asked the same day to list it: "Do include idle ones please". ⚠ A
     /// state added to SessionState is NOT stationary until it is named here, so a new state shows in the section rather than
     /// vanishing from it.
