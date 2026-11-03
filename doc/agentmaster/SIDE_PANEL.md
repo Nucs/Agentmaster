@@ -7,14 +7,15 @@ per-tab overlay's components, so it carries their business logic verbatim instea
 
 ## 1. Layout
 
-Shown in the DEFAULT dock (LEFT); the header's `⇄` flips it to the mirror image (dock RIGHT),
-which also flips the collapse chevron (`«` here — it always points toward the docked edge).
+Shown in the DEFAULT dock (LEFT); the header's `⋯` ▸ **Dock on the right** flips it to the mirror image (dock
+RIGHT), which also flips the collapse symbols (the menu's `«` here and the collapsed strip's `»` — the collapse always
+points toward the docked edge).
 
 ```
 ┌ tab row ────────────────────────────────────────────────────────────┐
 ├───────────────────────────────┬──┬──────────────────────────────────┤
-│[+][Sum][LOCAL][sort][⌖][⇄][«] │ ▌│                                  │  ← header line 1 (right-aligned): + launcher (§2e) /
-│                               │ ▌│                                  │    summary area / card SCOPE / order / scroll-to-tab / dock / collapse
+│                   [+][Sum][⋯] │ ▌│                                  │  ← header line 1 (right-aligned): + launcher (§2e) /
+│                               │ ▌│                                  │    summary area (§2d) / ⋯ menu (§2i: dock, ⌖, scope, order, collapse)
 │ [filter sessions…]            │ ▌│                                  │  ← header line 2: the filter box, full width
 │ N of M (this window)          │ ▌│        terminal content          │  ← count line (names the scope)
 │ ┌───────────────────────────┐ │ ▌│          (TabContent)            │
@@ -36,7 +37,7 @@ the panel:
 ```
 ┌ tab row ────────────────────────────────────────────────────────────┐
 ├───────────────────────────────┬──┬──────────────────────────────────┤
-│[+][Sum][LOCAL][sort][⌖][⇄][«] │ ▌│                                  │  ← "Sum" OFF (unchecked)
+│                   [+][Sum][⋯] │ ▌│                                  │  ← "Sum" OFF (unchecked)
 │ [filter sessions…]            │ ▌│                                  │
 │ N of M (this window)          │ ▌│                                  │
 │ ┌───────────────────────────┐ │ ▌│ ┌──────────────────────────────┐ │  ← hover a card: the session's RICH card
@@ -56,7 +57,7 @@ model's answer and its list of sessions instead of the session cards; the summar
 ```
 ┌ tab row ────────────────────────────────────────────────────────────┐
 ├───────────────────────────────┬──┬──────────────────────────────────┤
-│[+][Sum][LOCAL][sort][⌖][⇄][«] │ ▌│                                  │
+│                   [+][Sum][⋯] │ ▌│                                  │
 │ [describe a session, Enter[AI]]│ ▌│                                  │  ← the filter box is the REQUEST line (AI checked)
 │ 3 sessions found              │ ▌│                                  │  ← the count line speaks for the AI view
 │ ╭───────────────────────────╮ │ ▌│                                  │
@@ -77,16 +78,15 @@ model's answer and its list of sessions instead of the session cards; the summar
   rotation — LEFT = `[panel][splitter][TabContent *]`, RIGHT = its mirror. Both extra columns are
   0 until `_InitAgentSidePanel` runs, so a build without the panel renders the pre-feature layout.
 - The whole panel forces the Agentmaster DARK theme (explicit fills, `RequestedTheme(Dark)`).
-- Collapse (the header chevron / the strip) shrinks the panel to a 20px expander strip; the
-  header also carries the **+** launcher (§2e, the first button, left of Sum), the **Sum**
-  summary-area toggle (§2d, left of LOCAL / GLOBAL), the card
-  list's **LOCAL / GLOBAL** scope toggle (§2), the `⌖` **scroll-to-selected-tab** icon toggle
-  (§2a), and a `⇄` dock-side flip.
-- The header is **two lines** (one 2-row grid): the buttons, right-aligned in their original order,
+- The header's line of buttons is **+** (the launcher, §2e), **Sum** (the summary-area toggle, §2d)
+  and **⋯** (§2i), a menu holding **Dock on the right / left** (`⇄`), **Scroll to the selected tab**
+  (`⌖`, §2a), **Card scope ▸** (LOCAL / GLOBAL, §2), **Card order ▸** (§2) and **Collapse the side
+  panel**, which shrinks the panel to a 20px expander strip (the strip's chevron brings it back).
+- The header is **two lines** (one 2-row grid): the buttons, right-aligned,
   over the filter box, which spans every column. Sharing one line with the buttons, the box was
   squeezed toward its minimum on a narrow panel while the buttons kept their natural widths.
-- **Two font sizes.** The worded buttons (Sum, LOCAL / GLOBAL, the sort label) are 11 px; the ICON
-  buttons (`+`, `⌖`, `⇄`, the collapse chevron, and the collapsed strip's chevron) are 12 px
+- **Two font sizes.** The worded button (Sum) is 11 px; the ICON buttons (`+`, `⋯`, and the
+  collapsed strip's chevron) are 12 px
   (`kSidePanelIconFontSize`, 2026-10-05 — they were 11 px, and a symbol reads smaller than a word at
   the same size).
 - **The two separators are 3 px thick** (`kSidePanelSplitterPx`: the vertical one's ContentArea
@@ -103,15 +103,15 @@ model's answer and its list of sessions instead of the session cards; the summar
   capture loss) gives the text back.
 - **The buttons' tooltips open only after 3 s of rest** (`kSidePanelButtonTipDelay`, 2026-10-10, commit
   952c246fa — the user's request; in production 0.6.8.19 since 2026-10-12 and in the v0.7.9
-  pre-release): the header's `+`, **Sum**, LOCAL / GLOBAL, the sort, `⌖`, `⇄` and
-  the collapse chevron, and the collapsed strip's expand chevron. Each tip is a paragraph, and at
+  pre-release): the header's `+`, **Sum** and `⋯`, every item of the `⋯` menu (§2i — the buttons it
+  replaced waited 3 s too), and the collapsed strip's expand chevron. Each tip is a paragraph, and at
   ~133 ms it opened over the panel whenever the pointer reached a button on its way to a click. Any
-  move restarts the 3 s. A new button in the panel must pass the constant to its `AgentSetTip` /
-  `AgentSetTitledTip`. Not changed on purpose: the filter box (not a button), the cards (4 s), the
+  move restarts the 3 s. A new button in the panel, or a new `⋯` menu item, must pass the constant to its
+  `AgentSetTip` / `AgentSetTitledTip`. Not changed on purpose: the filter box (not a button), the cards (4 s), the
   separators (7 s), the summary area's own buttons (the per-tab summary panel's, shared with every
   tab) and the `+` launcher card (the Agent Manager's own launch bar, §2e). Check after the build:
-  the pointer still on each of the eight buttons opens its tip after ~3 s, a move restarts the wait,
-  and a click before then shows no tip.
+  the pointer still on each of the three header buttons and on each menu item opens its tip after ~3 s,
+  a move restarts the wait, and a click before then shows no tip.
 
 ## 2. TOP — the session cards (the Triage-Board integration, vertical)
 
@@ -121,7 +121,7 @@ model's answer and its list of sessions instead of the session cards; the summar
   **LOCAL by default — only the sessions whose tab is hosted in THIS window**
   (`TerminalPage::_HostedSessionIds()`, the live `_claudeTabs` set — the SAME predicate the
   Explorer Tree's LOCAL scope provider reads, so the two surfaces can never disagree about what
-  "here" means); the header's **LOCAL / GLOBAL** toggle (`_SidePanelToggleScope`) widens THIS
+  "here" means); the header's `⋯` ▸ **Card scope** ▸ LOCAL / GLOBAL (`_SidePanelSetScope`, §2i) widens THIS
   window's list to every window's sessions. It is a SEPARATE state from the Manager's tree/board
   scope (they answer different questions — the fleet lens vs. what sits beside your terminal) and
   is persisted **per window only** (§4). The list is **edited in place, never rebuilt** (§2c), and only
@@ -142,11 +142,11 @@ model's answer and its list of sessions instead of the session cards; the summar
   whitespace-split AND terms, "quoted phrase" exact, a bare whole GUID matches the session +
   its forks by IDENTITY. The **AI** toggle inside the box, at its right end (§2h; its tip waits the buttons' 3 s), turns
   it into the AI search's request line, and the card area then shows the model's list instead of these cards.
-- **Order** (header, first line): the SHARED `AppSettings::boardSort`, cycled through
-  `AgentManagerContent::CycleBoardSort` (a new public wrapper over the board's own
-  `_CycleBoardSort`) and applied with the board's own `MakeSortKey`/`SortKeyLess` — one sort
-  spec, two surfaces, zero drift. The cycle is MOST ACTIVE · **MOST RECENT** · NEWEST · OLDEST ·
-  A–Z. **MOST RECENT** orders by the newest **turn boundary** only — `SessionInfo::turnStartUnixMs`
+- **Order** (`⋯` ▸ **Card order**, §2i): the SHARED `AppSettings::boardSort`, set by name through
+  `AgentManagerContent::SetBoardSort` (the board's own `_CycleBoardSort` tail: persist through the settings sink,
+  broadcast, re-sort the board) and applied with the board's own `MakeSortKey`/`SortKeyLess` — one sort
+  spec, two surfaces, zero drift. The orders, in the board button's cycle sequence, are MOST ACTIVE · **MOST RECENT** ·
+  NEWEST · OLDEST · A–Z. **MOST RECENT** orders by the newest **turn boundary** only — `SessionInfo::turnStartUnixMs`
   (the user's last prompt SENT: a prompt-carrying `UserPromptSubmit`, the scanner's pull-echo of a
   real prompt line, or the observer's transcript-tail read) and `turnEndUnixMs` (the assistant's
   last turn END: a real `Stop`, a terminal `stop_reason` line, or the `[Request interrupted…]`
@@ -224,9 +224,8 @@ model's answer and its list of sessions instead of the session cards; the summar
 
 ### 2a. The `⌖` toggle — selecting a tab scrolls the list to its card
 
-The header's `⌖` icon toggle (a real `ToggleButton` between the sort button and `⇄` — the Sessions
-page's scope-toggle idiom, so its accent fill *is* the on/off state) makes **selecting a tab scroll
-the card list until that tab's card is on screen**. It is a GLOBAL preference,
+The `⋯` menu's **Scroll to the selected tab** item (`⌖`, a check item — checked while it is on; §2i) makes
+**selecting a tab scroll the card list until that tab's card is on screen**. It is a GLOBAL preference,
 `AppSettings::sidePanelScrollToSelectedTab`, **ON by default**.
 
 - **What scrolls it.** A tab selection — the one funnel (`_OnTabSelectionChanged` →
@@ -257,10 +256,11 @@ the card list until that tab's card is on screen**. It is a GLOBAL preference,
   `_SidePanelSelectSession` when `driveManagerLens`), selecting a tab with no card (pwsh / cmd /
   external), and turning the toggle off (here, or by another window's broadcast) all drop the debt,
   so a stale reveal can never yank the list to a tab you have already left.
-- **Persistence + reach.** The click is a freshest-disk RMW of that ONE field (the `⇄` recipe) plus a
+- **Persistence + reach.** The click is a freshest-disk RMW of that ONE field (the dock flip's recipe) plus a
   LIVE `BroadcastSettingsChanged` of the struct just read from disk — never this window's copy, which
-  can be stale on other out-of-cog fields — so every open window re-pins its toggle at once
-  (`_ApplyBroadcastSettings` → `_SidePanelApplySettings` → `_SidePanelUpdateScrollToTabButton`).
+  can be stale on other out-of-cog fields — so every open window adopts it at once
+  (`_ApplyBroadcastSettings` → `_SidePanelApplySettings`, which drops an owed reveal when it turned off; each
+  window's `⋯` menu reads the new check at its next open).
   Turning it ON scrolls straight to the focused tab's card when that card is the selected one (a live
   peek of another card is left alone).
 
@@ -399,7 +399,7 @@ twice a second while sessions changed, and once more every 30 s to move the "ago
 
 ### 2d. The "Sum" toggle — no summary area, a rich card beside the panel instead
 
-The header's **Sum** button (a real `ToggleButton`, left of LOCAL / GLOBAL; checked = the summary
+The header's **Sum** button (a real `ToggleButton`, between `+` and `⋯`; checked = the summary
 area is shown, the default) hides the bottom summary area. The session cards then fill the whole
 body, and **hovering a card opens that session's RICH card beside the panel** — the very card a tab
 header shows when you hover it: same content, same lifecycle, same wheel scrolling. It opens to the
@@ -498,7 +498,7 @@ in flight finds the card by id when it lands (or finds none).
 
 **Check after the build:** Sum OFF hides the summary and its splitter, and the cards fill the body;
 hovering a card opens the rich card beside the panel, centered on the card's height, on the right of
-a left-docked panel and on the left after `⇄`; the wheel scrolls its Summary body and, when it can't,
+a left-docked panel and on the left after a dock flip (`⋯` ▸ Dock on the right); the wheel scrolls its Summary body and, when it can't,
 scrolls the card list; a ribbon's hover panel never has the rich card behind it; a width drag or a
 dock flip is followed at the next hover; Sum ON brings the summary and the small card tips back; a
 reopened window keeps its own choice, and a new window takes the last one; measure the card's real
@@ -528,7 +528,8 @@ Manager's own launch row, so a session starts from the side panel without leavin
 
 1. **Where:** `+` in header column 1, left of **Sum**; Sum, LOCAL / GLOBAL, the sort, `⌖`, `⇄` and
    the chevron each moved one column right (column 7 is new). An ICON button: 12 px like `⌖` / `⇄`,
-   `IsTabStop` false like its siblings, an automation name ("Launch a session").
+   `IsTabStop` false like its siblings, an automation name ("Launch a session"). (Since §2i the line is
+   `+` · Sum · `⋯`: LOCAL / GLOBAL, the sort, `⌖`, `⇄` and the chevron are the `⋯` menu's items; `+` keeps column 1.)
 2. **Placement — tooltip-like, but interactive.** The card's corner sits at the click point and the
    card extends toward the window's center: a click in the left half opens it rightward (its left
    edge at the click), in the right half leftward (its right edge at the click), and the same with
@@ -603,7 +604,7 @@ Manager's own launch row, so a session starts from the side panel without leavin
    Codex mode.
 7. **Closing:** a press OUTSIDE the card (a `Root()` `handledEventsToo` hook — the tag editor's
    recipe), Esc (with the drop-down closed), `+` again, a launch / resume / fork, a tab switch, a
-   collapse, a dock flip (`⇄` here, or a settings broadcast that moved the dock). INSIDE counts the
+   collapse, a dock flip (the `⋯` menu's dock item here, or a settings broadcast that moved the dock). INSIDE counts the
    card, its drop-down (a separate `Root()` popup), the `+` button (its click toggles), and the
    content of any other open popup — the **Specify a model** prompt the Launch hover menu opens is a
    `Root()` popup too, and a click in it must not close the card whose launch it is about to finish.
@@ -711,10 +712,10 @@ press while it is open reads the open popups once and walks the press's ancestor
 (identities compared as raw `IUnknown` pointers).
 
 **Check after the build:** `+` sits left of Sum and toggles the card; a click near the top-left
-opens it down-right with its corner at the click, and after `⇄` (dock right) down-left; the card
+opens it down-right with its corner at the click, and after a dock flip (dock right) down-left; the card
 opens with the caret in the box and its folder list OPEN right below the box (2026-10-19), never
 over the box or Launch Claude, not even for one frame — the first "+" of a new window, a "+" after
-selecting another tab (the Manager's text changed), a "+" after `⇄`, and a "+" while the box holds a
+selecting another tab (the Manager's text changed), a "+" after a dock flip, and a "+" while the box holds a
 session id; a plain "+" writes no `[launchbar] the folder list moved under its box …` line to
 hooks.log (one at every "+" would mean the layout pass before the open did not place the card);
 Esc closes the list and keeps the card, a second Esc closes the card, and after that first Esc a
@@ -1033,6 +1034,80 @@ past a day → 1440, a hand-edited 0, a write of an unclamped value).
   park line; Settings ▸ Sessions ▸ AI SEARCH changes the minutes.
 - No `[exc] _SidePanelAi…` / `[exc] side panel AI …` line in hooks.log.
 
+### 2i. The `⋯` menu — the header's settings and the collapse (2026-11-03, NOT BUILT yet)
+
+The user's layout of 2026-11-03: the header's first line keeps **+** and **Sum** where they were and ends in **⋯**, in the
+collapse chevron's place. The other five buttons (LOCAL / GLOBAL, the sort, `⌖`, `⇄`, `«`) are its menu's items, so the
+line reads `+ Sum ⋯` and fits a narrow panel (the sort button alone was up to 11 characters wide, and its width jumped
+as it cycled).
+
+```
+                 [+][Sum][⋯]
+       ┌───────────────────────────────────┐
+       │     ⇄  Dock on the right          │
+       │  ✓  ⌖  Scroll to the selected tab │
+       │     ⧉  Card scope: LOCAL        › │──► ✓ LOCAL — this window's sessions
+       │     ⇅  Card order: MOST ACTIVE  › │      GLOBAL — every window's sessions
+       │ ───────────────────────────────── │
+       │     «  Collapse the side panel    │    Card order ›: ✓ MOST ACTIVE · MOST RECENT · NEWEST · OLDEST · A–Z
+       └───────────────────────────────────┘
+```
+
+- **The items**, top to bottom in the user's order, each with its symbol LEFT of its text (the item's icon slot; Segoe UI
+  Symbol, the font the panel's glyph buttons draw from, so `⇄`, `⌖` and `«` are the symbols the buttons wore; `⧉` and `⇅`
+  are new):
+  1. **Dock on the right** / **Dock on the left** (`⇄`) — the dock flip (`_SidePanelFlipDock`, GLOBAL), worded as where the
+     panel goes.
+  2. **Scroll to the selected tab** (`⌖`) — a check item, checked while the GLOBAL setting is on (§2a).
+  3. **Card scope: LOCAL / GLOBAL ▸** (`⧉`) — two check entries, the current one checked (`_SidePanelSetScope`, per
+     window, §2).
+  4. **Card order: <the order> ▸** (`⇅`) — the five orders in the board cycle's sequence, the current one checked, each with
+     a tooltip saying what it sorts by (`_SidePanelSetSort` → `AgentManagerContent::SetBoardSort`: GLOBAL, shared with the
+     Triage Board, §2). A stray stored BY PID reads MOST ACTIVE, as on the board, and a pick of MOST ACTIVE then sets it.
+  5. a separator, then **Collapse the side panel** (`«` docked left, `»` docked right — toward the docked edge, like the
+     chevron it replaced); the strip's chevron brings the panel back.
+- **Built at every open** (`_SidePanelFillMoreMenu`, from the menu's `Opening`; the Agent Manager's lazy session menus'
+  idiom): every text and check is read from the live settings then, so a change made in another window never leaves the
+  menu stale, and nothing has to keep it in step. The submenu headers carry the current scope and order in their text,
+  because the line no longer shows them. The handler reaches the menu through `sender` and the page through a weak
+  reference: a menu that captured itself would never be freed.
+- **Commands run one tick later** (`_SidePanelRunMenuCommand`, Normal priority): inside the Click the menu is still closing,
+  and the collapse and the dock flip re-lay the header it is anchored to. Each command first re-checks the state its item
+  was built for (the dock side, the `⌖` setting, an expanded panel; a scope or order already set does nothing), so a menu
+  left open while another window changed a setting never inverts it. A failure is logged
+  (`[exc] side panel more menu: <command>`; a fill that threw opens with the items built so far).
+- **Placement:** below `⋯` with the right edges aligned (`BottomEdgeAlignedRight`): the header's buttons sit at the panel's
+  right end in either dock, so the menu spreads over the panel, not over the terminal.
+- **The keyboard:** `⋯` is `IsTabStop` false like its siblings (a click never pulls focus out of the terminal by itself); the
+  open menu holds the keyboard and hands it back as it closes — a hand-back, which keeps a card peek (§3). The "+"
+  launcher card closes at the press on `⋯` (an outside press, §2e).
+- **Tooltips:** `⋯` and every item wait `kSidePanelButtonTipDelay` (3 s), the panel buttons' rule (§1).
+- **UI Automation** (E2E_TESTING.md §6.3): `⋯` is `am.side.more`, named "More options"; the items keep the ids of the buttons
+  they replaced (`am.side.dock`, `am.side.scrollToTab`, `am.side.scope`, `am.side.sort`, `am.side.collapse` — ids are added,
+  never renamed), and the entries add `am.side.scope.<local|global>` and `am.side.sort.<active|recent|newest|oldest|alpha>`
+  (the settings.json tokens). The e2e driver (`e2e/amdriver/ui/sidepanel.py`) drives both header shapes — the menu when
+  `am.side.more` exists, the 0.8.x buttons otherwise; the flow is SP-10, its test
+  `test_side_panel.py::test_more_menu_holds_the_header_controls` (`needs_fix("SP-F1")`).
+- **Files:** `TerminalPage.AgentSidePanel.cpp` (the button, `_SidePanelFillMoreMenu`, `_SidePanelRunMenuCommand`,
+  `_SidePanelSetScope`, `_SidePanelSetSort`, the `kSidePanel*Glyph` symbols, `kSidePanelOrderChoices`), `TerminalPage.h`
+  (`_sidePanelMoreBtn` replaced four button members: a TerminalPage layout change, so the next build must purge),
+  `AgentManagerContent.{h,Tree.cpp}` (`SetBoardSort`).
+
+**Check after the build** (a purged build: `TerminalPage.h`'s data members changed):
+- The line reads `+ Sum ⋯` (right-aligned), and stays whole on a panel at its narrowest; `⋯`'s tip ("More options") opens after 3 s.
+- `⋯` opens the menu below it, inside the panel, in both docks; each item's symbol sits left of its text; the `⌖` item is
+  checked while scroll-to-tab is on.
+- Card scope ▸ GLOBAL: the count line reads `… across all windows` and the header text `Card scope: GLOBAL`; a new window
+  still starts LOCAL.
+- Card order ▸ NEWEST / OLDEST / A–Z: the cards re-sort at once, the Triage Board follows, settings.json `boardSort` changes,
+  another window's list re-sorts (the broadcast); each order's tip says what it sorts by.
+- Scroll to the selected tab: settings.json `sidePanelScrollToSelectedTab` flips, every open window follows (its menu shows
+  the check at the next open).
+- Dock on the right: the panel moves, the item then reads "Dock on the left", the collapse symbol becomes `»`.
+- Collapse the side panel: the 20px strip; its chevron restores the panel.
+- Esc closes the menu (and its submenu) without a change; no keystroke reaches the terminal; no
+  `[exc] side panel more menu` line in hooks.log.
+
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 
 The bottom area hosts a REAL `AgentTabOverlay` whose summary panel is switched into the new
@@ -1165,7 +1240,7 @@ below).
 | `⌖` scroll to the selected tab (§2a) | — | `AppSettings::sidePanelScrollToSelectedTab` (true = **ON, the default**; absent key = ON) — a GLOBAL preference, broadcast live to every open window |
 | the filter box's **AI** toggle (§2h) | `WindowRecord::sidePanelAiMode` (-1 = unset; written only when set; a non-bool value reads unset) | `AppSettings::sidePanelAiMode` (false = **the session cards, the default**) |
 
-- **The card scope is the one field with NO last-one-wins export**: `_SidePanelToggleScope`
+- **The card scope is the one field with NO last-one-wins export**: `_SidePanelSetScope`
   persists it through the window-record autosave alone — never `_SidePanelPersistDefaults`, and
   there is no `AppSettings` field to seed from. A window that flips to GLOBAL keeps that for
   itself; a new window (or a pre-feature record, where the key is absent) starts LOCAL. This is
@@ -1183,18 +1258,18 @@ below).
   value degrades to the shipped default — a corrupt file can never collapse the terminal.
 - All six AppSettings fields are written OUTSIDE the cog form, so BOTH cog-Save preserve
   blocks (content + page sink) restore them from disk. For the `⌖` toggle the page sink's line is
-  load-bearing beyond the cog: the board-sort cycle (the board header's AND this panel's sort
-  button) saves through that sink carrying the Manager content's `AppSettings` copy, which never
+  load-bearing beyond the cog: the board sort (the board header's cycle AND this panel's `⋯` ▸ Card
+  order, `SetBoardSort`) saves through that sink carrying the Manager content's `AppSettings` copy, which never
   learns of THIS window's own `⌖` flip (the toggle lives on the page; the content only hears other
-  windows' broadcasts) — without the preserve line, the next sort click in this window would
+  windows' broadcasts) — without the preserve line, the next order change in this window would
   silently turn the toggle back.
 - **The dock side defaults to LEFT** (it was RIGHT when the panel first landed). The struct
   default and `AppSettingsFromJson`'s absent-key fallback deliberately agree, so a fresh install
   and a settings.json from before the key both dock left. A PRESENT value always wins, `false`
   included — and because every settings write serializes the WHOLE struct, an install that ran
   the original RIGHT-default build and saved anything since stores `false`, which is
-  indistinguishable from choosing RIGHT on purpose. It is honored, never migrated: one `⇄` click
-  moves it (and persists). The RIGHT default never shipped in a public release, so only
+  indistinguishable from choosing RIGHT on purpose. It is honored, never migrated: one dock flip
+  (`⋯` ▸ Dock on the left) moves it (and persists). The RIGHT default never shipped in a public release, so only
   locally-built installs can carry one.
 
 ## 5. Perf + safety rules upheld
@@ -1306,3 +1381,8 @@ below).
   `AgentMaster/SessionModels.h` + `Persistence.cpp` (`sidePanelAiMode` both halves, `sessionsAiParkMinutes`,
   `ClampSessionsAiParkMinutes`), `AgentMaster/SessionSearchAgent.{h,cpp}` (`LoadSessionIndexEntryById`),
   `tests/tests_persistence.cpp`.
+  The `⋯` menu (§2i): `TerminalPage.AgentSidePanel.cpp` (the button and its lazily filled menu, `_SidePanelFillMoreMenu`,
+  `_SidePanelRunMenuCommand`, `_SidePanelSetScope` in place of the scope toggle, `_SidePanelSetSort`, the menu's symbols
+  and `kSidePanelOrderChoices`), `TerminalPage.h` (`_sidePanelMoreBtn` in place of the four button members, the
+  declarations), `AgentManagerContent.{h,Tree.cpp}` (`SetBoardSort`, the order by name), `e2e/amdriver/ui/sidepanel.py`
+  (the menu by AutomationId, both header shapes), `e2e/suites/test_side_panel.py` (SP-10).

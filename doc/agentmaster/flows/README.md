@@ -27,7 +27,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | File | Area (code) | Flows | P0 / P1 / P2 | Phases | Edge cases | Known defects |
 |---|---|---|---|---|---|---|
 | [01-agent-manager-page.md](01-agent-manager-page.md) | The Agent Manager page, Home, jump back, zero-tab windows (MGR) | 7 | 4 / 2 / 1 (+1 NOT BUILT) | 29 | 22 | 1 (fixed in code) |
-| [02-side-panel.md](02-side-panel.md) | The side panel, its cards, Sum, the + launcher, the AI search (SP) | 9 | 3 / 3 / 1 (+2 NOT BUILT) | 44 | 33 | 2 (fixed in code; SP-K2 reclassified as a feature) |
+| [02-side-panel.md](02-side-panel.md) | The side panel, its cards, Sum, the + launcher, the AI search, the header's ⋯ menu (SP) | 10 | 3 / 3 / 1 (+3 NOT BUILT) | 51 | 37 | 2 (fixed in code; SP-K2 reclassified as a feature) |
 | [03-prompt-queue-runner.md](03-prompt-queue-runner.md) | The Prompt Queue Runner (PQR) | 16 | 10 / 6 / 0 | 60 | 69 | 10 (1 fixed in code; PQR-K6 and PQR-K7 reclassified as accepted behavior) |
 | [04-drafts-and-delivery.md](04-drafts-and-delivery.md) | Unsent drafts, the draft swap, the mail button, the fork carry (DRF) | 9 | 5 / 3 / 1 | 33 | 42 | — |
 | [05-session-state.md](05-session-state.md) | Session state on every surface, through Claude Code's own events (STA) | 16 | 8 / 7 / 1 | 42 | 52 | 2 (STA-K2–K4 reclassified as accepted delays) |
@@ -50,7 +50,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [22-cli-and-session-database.md](22-cli-and-session-database.md) | The `agentmaster` CLI and the session database (CLI, SDB) | 6 | 0 / 1 / 5 | 18 | 7 | 2 (1 fixed in code) |
 | [23-tab-context-menu.md](23-tab-context-menu.md) | The tab's context menu: what it shows where, and what each item does (TCM) | 9 | 5 / 4 / 0 | 36 | 27 | 2 (1 fixed in code) |
 | [24-claude-lifecycle.md](24-claude-lifecycle.md) | Claude Code's life cycle in a tab: launch, `/exit`, a kill, Close and Resume here, a claude typed by hand, a restart, `/clear` (LIF) | 7 | 4 / 3 / 0 | 22 | 2 | — (its two are filed in 03 and 05: PQR-K8, fixed in code, and STA-K1) |
-| **Total** | | **194** | **82 / 80 / 26** (+7 NOT BUILT) | **≈ 707** | **≈ 577** | **31** (9 fixed in code) |
+| **Total** | | **195** | **82 / 80 / 26** (+8 NOT BUILT) | **≈ 714** | **≈ 581** | **31** (9 fixed in code) |
 
 ---
 
@@ -210,7 +210,8 @@ selected on the page too (MGR-07; MGR-K1) · ONE click on the + card's Launch wh
 phase 5; SP-K1) · a Shift+Click on a tab starts its session in place and keeps the selection (TAB-01 phase 4; TAB-K4)
 · a side-panel card menu's action (Move to Idle/Done, Esc, Show Transcript …) keeps that card selected and the list
 where it was (SP-02 phase 8; SP-K3) · a reopened window's sessions and a Resume here keep their own Prompt Queue Runner
-mode, an interrupt hold included (PQR-15 phase 2, PQR-07 E9, LIF-04 E1; PQR-K8).
+mode, an interrupt hold included (PQR-15 phase 2, PQR-07 E9, LIF-04 E1; PQR-K8) · the side panel's header is + · Sum · ⋯,
+the ⋯ menu holding the dock, ⌖, the card scope, the card order and the collapse (SP-10; SIDE_PANEL.md §2i).
 
 **The regression base** — older behaviors the recent releases build on, covered because every new feature leans on
 them: the /handover family (HND-01, HND-03, HND-04, HND-05, HND-07, HND-08), the Sessions browser (SES-01, SES-02,
@@ -373,7 +374,8 @@ stalled the app's UI thread) — reruns `pqr6`–`pqr8`.
 | SP-02 | phases 1–5 | `…::test_follow_peek_and_jump`, `…::test_card_context_menu` |
 | SP-04 | phases 1–2 (phase 2: no rich card on a card's hover — SP-K2, a feature since 2026-10-24) | `…::test_sum_off_lets_the_cards_fill_the_panel`, `…::test_sum_off_card_hover_opens_no_rich_card` |
 | SP-05 | phases 1, 3, 4, 5, E2, E3 (phase 5: `needs_fix`, a build with SP-K1's fix) | `…::test_plus_launcher_card`, `…::test_plus_card_launch_takes_one_click_with_its_menu_open` |
-| SP-06 | phases 3–5 | `…::test_collapse_and_dock`, `…::test_panel_state_survives_a_restart` |
+| SP-06 | phases 3–5 (through the ⋯ menu on a build that has it, the 0.8.x buttons otherwise) | `…::test_collapse_and_dock`, `…::test_panel_state_survives_a_restart` |
+| SP-10 | phases 1–7 (`needs_fix`: a build with the ⋯ menu, SP-F1) | `…::test_more_menu_holds_the_header_controls` |
 | TCM-01 | phases 1–3, E1 | `test_tab_menu.py::test_menu_fits_the_tab`, `…::test_triage_item_follows_the_state` |
 | TCM-02 | phases 1–3 | `…::test_position_decides_what_is_enabled` |
 | TCM-03 | phases 1–2, E2, E3; TCM-K1 | `…::test_rename_renames_the_session_everywhere`, `…::test_restart_restores_the_renamed_tab_dormant`, `…::test_known_defect_blank_rename_shows_claudes_own_title` |

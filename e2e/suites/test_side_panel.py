@@ -11,7 +11,7 @@ import pytest
 from amdriver import inputs
 from amdriver.session import wait_new_session
 from amdriver.ui.menus import Menu
-from amdriver.ui.sidepanel import COUNT_RE
+from amdriver.ui.sidepanel import COUNT_RE, MORE_ID, MORE_ITEM_IDS, MORE_ITEM_ORDER, ORDER_TOKENS
 from amdriver.waits import hold_true, wait_until
 
 SHELL = "Administrator: Windows PowerShell"
@@ -270,8 +270,9 @@ def test_plus_card_launch_takes_one_click_with_its_menu_open(am, s1, mock):
 @pytest.mark.p1
 @pytest.mark.flow("SP-06")
 def test_collapse_and_dock(am, s1):
-    """SP-06 phases 3 and 4: « collapses the panel to its strip and » restores it; ⇄ docks it on the other
-    side and back.
+    """SP-06 phases 3 and 4: the collapse shrinks the panel to its strip and the strip's chevron restores it; the
+    dock moves it to the other side and back. The driver takes whichever header the build has: the ⋯ menu's
+    "Collapse the side panel" and "Dock on the right / left" (SP-10), or the « and ⇄ buttons of 0.8.x.
 
     Args:
         am: The app.
@@ -280,17 +281,107 @@ def test_collapse_and_dock(am, s1):
     w = am.window
     panel = w.side_panel
     assert panel.dock_side() == "left"
-    panel.button("«").click()
-    wait_until(panel.collapsed, 5, what="the panel collapsed")
+    panel.collapse()
     # The strip's chevron: » on 0.8.0, "Expand the side panel" (am.side.expand) on a build with the accessibility
     # metadata — SidePanel.strip_button finds either.
     expand = wait_until(panel.strip_button, 5, what="the collapsed strip's chevron")
     expand.click()
     wait_until(lambda: not panel.collapsed(), 5, what="the panel back")
-    panel.button("⇄").click()
-    wait_until(lambda: panel.dock_side() == "right", 5, what="docked right", describe=panel.dock_side)
-    panel.button("⇄").click()
-    wait_until(lambda: panel.dock_side() == "left", 5, what="docked left again", describe=panel.dock_side)
+    assert panel.flip_dock() == "right"
+    assert panel.flip_dock() == "left"
+
+
+@pytest.mark.p1
+@pytest.mark.flow("SP-10")
+@pytest.mark.needs_fix("SP-F1")
+def test_more_menu_holds_the_header_controls(am, s2):
+    """SP-10 phases 1–7 (SP-F1, the user's layout of 2026-11-03 — a build with the ⋯ menu; 0.8.x has none): the header
+    line is +, Sum and ⋯; the ⋯ menu lists the dock, ⌖, Card scope ▸, Card order ▸ and the collapse, in that order, each
+    showing the current state in its text or its check; Esc closes it and changes nothing; each item does what its
+    button did — the scope (the count line), the order (the cards and settings.json), ⌖ (settings.json and the check),
+    the dock (the panel's side and the item's words), the collapse (the strip).
+
+    Args:
+        am: The app.
+        s2: F-S2 (t1 launched before t2, so NEWEST and OLDEST order the two cards differently).
+    """
+    w = am.window
+    panel = w.side_panel
+    wait_until(lambda: sorted(panel.titles()) == ["t1", "t2"], 10, what="both cards", describe=panel.titles)
+    settings = am.profile.settings()
+    order_word = {token: word for word, token in ORDER_TOKENS.items()}.get(settings.get("boardSort", "active"), "MOST ACTIVE")
+    scroll_on = settings.get("sidePanelScrollToSelectedTab", True)
+    assert panel.dock_side() == "left"
+
+    # 1. The header line: +, Sum, ⋯ — no other button above the filter box (the AI toggle sits inside the box).
+    top = panel.filter_box().rect[1]
+    header = sorted((k for k in panel.controls() if k.role == "button" and k.rect[1] < top), key=lambda k: k.rect[0])
+    assert [k.automation_id for k in header] == ["am.side.launch", "am.side.sum", MORE_ID], \
+        [(k.name, k.automation_id) for k in header]
+    assert header[-1].name == "More options"
+
+    # 2. The menu: five items in the user's order, the state in their texts and checks.
+    menu = panel.open_more_menu()
+    items = menu.stable_items()
+    assert [i.el.automation_id for i in items] == [MORE_ITEM_IDS[k] for k in MORE_ITEM_ORDER], \
+        [(i.name, i.el.automation_id) for i in items]
+    by_id = {i.el.automation_id: i for i in items}
+    assert by_id[MORE_ITEM_IDS["dock"]].name == "Dock on the right"
+    assert by_id[MORE_ITEM_IDS["scroll"]].name == "Scroll to the selected tab"
+    assert by_id[MORE_ITEM_IDS["scroll"]].el.toggle_state == (1 if scroll_on else 0)
+    assert by_id[MORE_ITEM_IDS["scope"]].is_sub and by_id[MORE_ITEM_IDS["scope"]].name == "Card scope: LOCAL"
+    assert by_id[MORE_ITEM_IDS["order"]].is_sub and by_id[MORE_ITEM_IDS["order"]].name == f"Card order: {order_word}"
+    assert by_id[MORE_ITEM_IDS["collapse"]].name == "Collapse the side panel"
+    # 3. Card scope ▸: LOCAL checked, GLOBAL not; Esc on every level changes nothing.
+    sub = menu.submenu(by_id[MORE_ITEM_IDS["scope"]].name)
+    assert [(i.el.automation_id, i.el.toggle_state) for i in sub.stable_items()] == \
+        [("am.side.scope.local", 1), ("am.side.scope.global", 0)]
+    menu.close()
+    assert not panel.collapsed() and panel.scope() == "LOCAL" and panel.dock_side() == "left"
+
+    # 4. Card scope ▸ GLOBAL: the count line names every window, the menu's header says GLOBAL; then LOCAL again.
+    panel.set_scope("GLOBAL")
+    assert re.match(r"^2 sessions across all windows", panel.count_line()), panel.count_line()
+    menu = panel.open_more_menu()
+    assert panel.more_item(menu, MORE_ITEM_IDS["scope"]).name == "Card scope: GLOBAL"
+    menu.close()
+    panel.set_scope("LOCAL")
+
+    # 5. Card order ▸: the five orders, the current one checked; NEWEST and OLDEST sort t1 / t2 both ways and are saved.
+    menu = panel.open_more_menu()
+    sub = menu.submenu(panel.more_item(menu, MORE_ITEM_IDS["order"]).name)
+    entries = sub.stable_items()
+    assert [i.name for i in entries] == list(ORDER_TOKENS), [i.name for i in entries]
+    assert [i.el.automation_id for i in entries] == [f"am.side.sort.{t}" for t in ORDER_TOKENS.values()]
+    assert [i.name for i in entries if i.el.toggle_state == 1] == [order_word]
+    menu.close()
+    for word, titles in (("NEWEST", ["t2", "t1"]), ("OLDEST", ["t1", "t2"])):
+        panel.choose_more(MORE_ITEM_IDS["order"], f"am.side.sort.{ORDER_TOKENS[word]}")
+        wait_until(lambda token=ORDER_TOKENS[word]: am.profile.settings().get("boardSort") == token, 5,
+                   what=f"boardSort {word} in settings.json")
+        wait_until(lambda want=titles: panel.titles() == want, 5, what=f"the cards in {word} order", describe=panel.titles)
+    menu = panel.open_more_menu()
+    assert panel.more_item(menu, MORE_ITEM_IDS["order"]).name == "Card order: OLDEST"
+    menu.close()
+    panel.choose_more(MORE_ITEM_IDS["order"], f"am.side.sort.{ORDER_TOKENS[order_word]}")  # the order it had
+
+    # 6. ⌖: each pick flips the saved setting, and the next open shows the new check.
+    for want in (not scroll_on, scroll_on):
+        panel.choose_more(MORE_ITEM_IDS["scroll"])
+        wait_until(lambda want_on=want: am.profile.settings().get("sidePanelScrollToSelectedTab", True) == want_on, 5,
+                   what=f"scroll-to-tab {'on' if want else 'off'} in settings.json")
+        menu = panel.open_more_menu()
+        assert panel.more_item(menu, MORE_ITEM_IDS["scroll"]).el.toggle_state == (1 if want else 0)
+        menu.close()
+
+    # 7. The dock: the item says where the panel goes and takes it there; the collapse leaves the strip, which restores.
+    assert panel.flip_dock() == "right"
+    menu = panel.open_more_menu()
+    assert panel.more_item(menu, MORE_ITEM_IDS["dock"]).name == "Dock on the left"
+    menu.close()
+    assert panel.flip_dock() == "left"
+    panel.collapse()
+    panel.expand()
 
 
 # ---- batch 2: restart, the hover card -----------------------------------------------------------------------

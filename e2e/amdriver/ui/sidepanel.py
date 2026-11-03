@@ -19,6 +19,15 @@ am.side.expand), and the glyph-only ones NAMES instead of their glyphs (⌖ "Scr
 the chevrons "Collapse the side panel" / "Expand the side panel"); `button` and `strip_button` find them by id first and
 by their 0.8.0 glyphs second. A card's TITLE text carries am.side.card.<key> and the card's ItemStatus (the state word,
 then "codex", "unread", "unsent draft", "cache warm", "tags: …", "selected" as they hold).
+
+The ⋯ menu (SIDE_PANEL.md §2i; a build of 2026-11-03 or later — NOT in 0.8.x): the header line is only '+' · 'Sum' ·
+'⋯' (button "More options", am.side.more). The ⋯ opens a MenuFlyout whose items keep the ids of the buttons they
+replaced: 'Dock on the right' / 'Dock on the left' (am.side.dock) · 'Scroll to the selected tab' (am.side.scrollToTab, a
+ToggleMenuFlyoutItem: its toggle state is the setting) · 'Card scope: LOCAL' ▸ (am.side.scope; entries
+am.side.scope.local / .global) · 'Card order: MOST ACTIVE' ▸ (am.side.sort; entries am.side.sort.<active | recent | newest
+| oldest | alpha>, the settings.json tokens) · 'Collapse the side panel' (am.side.collapse). The panel's own methods
+(scope, toggle_scope, set_scope, flip_dock, collapse) work on both header shapes: through the ⋯ menu when the build has
+it, through the old buttons otherwise.
 """
 from __future__ import annotations
 
@@ -30,6 +39,7 @@ from typing import Optional
 from .. import inputs, uia
 from ..waits import wait_until
 from .manager import STATE_WORDS
+from .menus import Menu, MenuItem
 
 PLUS_NAME = "Launch a session"
 COUNT_RE = re.compile(r"^(\d+)(?: of (\d+))? sessions? (in this window|across all windows)")
@@ -41,6 +51,15 @@ CARD_ID_PREFIX = "am.side.card."
 """The AutomationId prefix of a card's title text (the session id's first 8 characters follow)."""
 STRIP_ID = "am.side.expand"
 """The collapsed strip's chevron (» docked left, « docked right) by AutomationId."""
+MORE_ID = "am.side.more"
+"""The header's ⋯ button (a build with the ⋯ menu, SIDE_PANEL.md §2i) by AutomationId."""
+MORE_ITEM_IDS = {"dock": "am.side.dock", "scroll": "am.side.scrollToTab", "scope": "am.side.scope",
+                 "order": "am.side.sort", "collapse": "am.side.collapse"}
+"""The ⋯ menu's items by what they do -> their AutomationIds (the ids of the header buttons they replaced)."""
+MORE_ITEM_ORDER = ["dock", "scroll", "scope", "order", "collapse"]
+"""The ⋯ menu's items top to bottom (the user's order of 2026-11-03; the separator before the collapse is not reported)."""
+ORDER_TOKENS = {"MOST ACTIVE": "active", "MOST RECENT": "recent", "NEWEST": "newest", "OLDEST": "oldest", "A–Z": "alpha"}
+"""The Card order submenu's words, top to bottom -> the settings.json `boardSort` token (its entry is am.side.sort.<token>)."""
 
 
 @dataclass
@@ -215,7 +234,9 @@ class SidePanel:
         """A header button by its name ('Sum', 'LOCAL', '⌖', '⇄', '«' ...).
 
         A glyph name (GLYPH_IDS) is looked up by its AutomationId first: a build with the accessibility metadata names
-        those buttons by what they do ("Dock side"), and only 0.8.0 still names them by their glyphs.
+        those buttons by what they do ("Dock side"), and only 0.8.0 still names them by their glyphs. On a build with
+        the ⋯ menu only '+', 'Sum' and '⋯' are buttons: reach the others through the methods below (scope, set_scope,
+        flip_dock, collapse) or open_more_menu, which work on both header shapes.
 
         Args:
             name: The exact name (a glyph as 0.8.0 names it, or the button's word).
@@ -238,24 +259,146 @@ class SidePanel:
 
     # ---- the header -------------------------------------------------------------------------------
 
+    def more_button(self, kids: Optional[list] = None) -> Optional[uia.Element]:
+        """The header's ⋯ button.
+
+        Args:
+            kids: The content's children, when read already.
+        Returns:
+            The button, or None on a build whose header still shows every control as a button (0.8.x), and while the
+            panel is collapsed.
+        """
+        return next((k for k in self.controls(kids) if k.role == "button" and k.automation_id == MORE_ID), None)
+
+    def open_more_menu(self) -> Menu:
+        """Click ⋯ and wait for its menu (read once it stopped moving: the menu slides into place).
+
+        Returns:
+            The open menu.
+        Raises:
+            LookupError: When this build has no ⋯ button, or the panel is collapsed.
+            WaitTimeout: When no menu opened.
+        """
+        btn = self.more_button()
+        if btn is None:
+            raise LookupError("the side panel has no ⋯ button (a build before the ⋯ menu shows each control as a "
+                              "button, and a collapsed panel shows none)")
+        before = Menu.open_hwnds(self.window.app)
+        btn.click()
+        menu = Menu.wait_new(self.window.app, before)
+        menu.stable_items()
+        return menu
+
+    @staticmethod
+    def more_item(menu: Menu, aid: str) -> MenuItem:
+        """An item of the ⋯ menu (or one of its submenus) by its AutomationId — its TEXT changes with the state ("Dock on
+        the right", "Card scope: LOCAL"), its id does not.
+
+        Args:
+            menu: The open menu level.
+            aid: The AutomationId (MORE_ITEM_IDS, am.side.scope.<local|global>, am.side.sort.<token>).
+        Returns:
+            The item, read once the menu stopped moving.
+        Raises:
+            LookupError: When no item of that level has the id (the message lists the level's ids).
+        """
+        items = menu.stable_items()
+        for it in items:
+            if it.el.automation_id == aid:
+                return it
+        raise LookupError(f"no menu item {aid!r}; the menu: {[(i.name, i.el.automation_id) for i in items]}")
+
+    def choose_more(self, *aids: str) -> None:
+        """Walk the ⋯ menu by AutomationIds and choose the last: choose_more("am.side.scope", "am.side.scope.global").
+
+        Every menu is closed (Esc) when a step fails, so the next step of a test starts from a closed menu.
+
+        Args:
+            *aids: The submenus' ids, then the command's.
+        Returns:
+            None (the menus closed; the command runs one dispatcher tick later — wait for its effect).
+        Raises:
+            LookupError / AssertionError / WaitTimeout: As open_more_menu, more_item, Menu.submenu and Menu.choose.
+        """
+        menu = self.open_more_menu()
+        try:
+            for aid in aids[:-1]:
+                menu = menu.submenu(self.more_item(menu, aid).name)
+            menu.choose(self.more_item(menu, aids[-1]).name)
+        except Exception:
+            Menu.dismiss_all(self.window.app)
+            raise
+
     def scope(self) -> str:
         """LOCAL or GLOBAL.
 
+        Read from the LOCAL / GLOBAL button on a build that has one, else from the count line, which names the scope
+        ("… in this window" / "… across all windows") and needs no menu to be opened.
+
         Returns:
-            The toggle's text.
+            "LOCAL", "GLOBAL", or "" when neither tells (a collapsed panel, the AI view's count line).
         """
-        return next((k.name for k in self.controls() if k.role == "button" and k.name in ("LOCAL", "GLOBAL")), "")
+        controls = self.controls()
+        word = next((k.name for k in controls if k.role == "button" and k.name in ("LOCAL", "GLOBAL")), "")
+        if word:
+            return word
+        for k in controls:
+            m = COUNT_RE.match(k.name) if k.role == "text" else None
+            if m:
+                return "LOCAL" if m.group(3) == "in this window" else "GLOBAL"
+        return ""
+
+    def set_scope(self, scope: str) -> None:
+        """Put the card list on a scope: ⋯ ▸ Card scope ▸ LOCAL / GLOBAL, or a click on the old toggle when it differs.
+
+        Args:
+            scope: "LOCAL" or "GLOBAL".
+        Returns:
+            None, once scope() reads it.
+        Raises:
+            ValueError: For another word.
+            WaitTimeout: When the scope did not change.
+        """
+        if scope not in ("LOCAL", "GLOBAL"):
+            raise ValueError(f"no such scope: {scope!r}")
+        if self.more_button() is not None:
+            self.choose_more(MORE_ITEM_IDS["scope"], f"am.side.scope.{scope.lower()}")
+        elif self.scope() != scope:
+            self.button(self.scope()).click()
+        wait_until(lambda: self.scope() == scope, 5.0, what=f"the panel's scope {scope}", describe=self.count_line)
 
     def toggle_scope(self) -> str:
-        """Click LOCAL / GLOBAL.
+        """Switch LOCAL <-> GLOBAL (the ⋯ menu's Card scope, or the old toggle).
 
         Returns:
             The new scope.
+        Raises:
+            LookupError: When the scope cannot be read.
+            WaitTimeout: When it did not change.
         """
         before = self.scope()
-        self.button(before).click()
-        return wait_until(lambda: (lambda s: s if s and s != before else None)(self.scope()), 5.0,
-                          what="the panel's scope to change")
+        if not before:
+            raise LookupError("the panel's scope cannot be read (collapsed, or the AI view's count line)")
+        after = "GLOBAL" if before == "LOCAL" else "LOCAL"
+        self.set_scope(after)
+        return after
+
+    def flip_dock(self) -> str:
+        """Dock the panel on the other side: ⋯ ▸ Dock on the right / left, or the old ⇄ button.
+
+        Returns:
+            The new side ("left" / "right").
+        Raises:
+            WaitTimeout: When the panel did not move.
+        """
+        before = self.dock_side()
+        want = "right" if before == "left" else "left"
+        if self.more_button() is not None:
+            self.choose_more(MORE_ITEM_IDS["dock"])
+        else:
+            self.button("⇄").click()
+        return wait_until(lambda: (lambda s: s if s == want else None)(self.dock_side()), 5.0,
+                          what=f"the panel docked {want}", describe=self.dock_side)
 
     def sum_on(self) -> bool:
         """Whether Sum is on (the summary shows under the cards).
@@ -319,14 +462,17 @@ class SidePanel:
         return self.plus() is None
 
     def collapse(self) -> None:
-        """Click « and wait for the strip.
+        """Collapse the panel (⋯ ▸ Collapse the side panel, or the old « button) and wait for the strip.
 
         Returns:
             None.
         Raises:
             WaitTimeout: When the panel stayed expanded.
         """
-        self.button("«").click()
+        if self.more_button() is not None:
+            self.choose_more(MORE_ITEM_IDS["collapse"])
+        else:
+            self.button("«").click()
         wait_until(self.collapsed, 5.0, what="the panel collapsed")
 
     def strip_button(self) -> Optional[uia.Element]:

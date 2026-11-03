@@ -321,11 +321,26 @@ namespace winrt::TerminalApp::implementation
         // MOST ACTIVE -> NEWEST -> OLDEST -> A-Z -> wrap) — the SAME cycle + persist + re-sort path the
         // board header's own sort toggle runs (_CycleBoardSort: mutate, persist via the settings sink
         // — which preserves out-of-form fields, saves settings.json, and broadcasts to other windows —
-        // then refresh this lens). Exposed so the side panel's order button shares ONE sort spec with
-        // the board instead of growing a second, drift-prone setting. The sink runs synchronously on
-        // the UI thread, so on return the page's AppSettings copy already carries the new order — the
-        // caller can re-read boardSort and re-sort its own list immediately. UI thread only.
+        // then refresh this lens). Exposed so the side panel's order button shared ONE sort spec with
+        // the board instead of growing a second, drift-prone setting; that button is now the ⋯ menu's
+        // Card order submenu, which names the order it wants through SetBoardSort (below), so nothing
+        // outside the board calls this today. The sink runs synchronously on the UI thread, so on return
+        // the page's AppSettings copy already carries the new order — the caller can re-read boardSort
+        // and re-sort its own list immediately. UI thread only.
         void CycleBoardSort() { _CycleBoardSort(); }
+        // Agentmaster (SIDE PANEL, SIDE_PANEL.md §2i): put the GLOBAL Triage-Board card sort (AppSettings::boardSort) on
+        // `order` itself. The side panel's ⋯ ▸ Card order submenu names every order and the user picks one, where the
+        // board's own button (and CycleBoardSort) steps to the next. It runs _CycleBoardSort's tail: relabel the board's
+        // button, persist + broadcast through the settings sink, refresh this lens. So a pick and a cycle land the same way
+        // in every window, and the board and the side panel still share ONE sort spec.
+        // A pick of the order already set does nothing: nothing to save, and no broadcast to wake every other window for
+        // no change. The sink runs synchronously on the UI thread, so on return the page's AppSettings copy carries the new
+        // order and the caller can re-sort its own list at once. UI thread only.
+        //   order   - the order to set. ByPid is accepted (the board labels it MOST ACTIVE), though no menu offers it.
+        //   returns - nothing.
+        //   throws  - what the settings sink and _Refresh throw (bad_alloc, hresult_error); the side panel's menu command
+        //             contains it (TerminalPage::_SidePanelRunMenuCommand).
+        void SetBoardSort(::Agentmaster::ExplorerSort order);
         // Agentmaster (SIDE PANEL): build the full session context menu — the SAME lazily-populated
         // MenuFlyout the Triage-Board card / Explorer-tree row shows (_MakeLazySessionMenu: Jump to
         // Tab / Rename / Restart / Close ▸ / Open New Session Here ▸ model picker / Tags / Copy ▸ /

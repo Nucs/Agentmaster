@@ -10,15 +10,18 @@
 // independent scrolling:
 //   TOP    — the LIVE session CARDS (the Triage-Board integration re-hosted vertically): a search
 //            box (the Sessions browser's ParseSessionQuery grammar over title / dir / branch / id)
-//            + an order toggle (the SHARED AppSettings::boardSort, cycled through
-//            AgentManagerContent::CycleBoardSort so the board and this list can never sort by
-//            different specs) over a scrollable card list. A card single-click SELECTS (Linked
+//            over a scrollable card list, ordered by the SHARED AppSettings::boardSort (the header's
+//            ⋯ ▸ Card order sets it through AgentManagerContent::SetBoardSort, so the board and this
+//            list can never sort by different specs). A card single-click SELECTS (Linked
 //            Lenses: it also drives the Manager lens), double-click ACTIVATES (jump to the tab,
 //            cross-window), right-click shows THE session context menu — the exact lazily-filled
 //            MenuFlyout the board card / tree row shows (AgentManagerContent::BuildSessionMenuFor).
-//            The header's ⌖ icon toggle (GLOBAL AppSettings::sidePanelScrollToSelectedTab, default ON)
+//            The ⋯ menu's ⌖ item (GLOBAL AppSettings::sidePanelScrollToSelectedTab, default ON)
 //            makes SELECTING A TAB scroll this list to that tab's card — one scroll per selection,
 //            deferred to a clean tick, never moving a card that is already fully visible.
+//   "⋯"   (SIDE_PANEL.md §2i) — the header's last button: a menu with the panel's settings and the
+//            collapse (Dock on the left / right · Scroll to the selected tab · Card scope ▸ · Card
+//            order ▸ · Collapse the side panel), rebuilt from the live state at every open.
 //   BOTTOM — the SELECTED session's summary: a REAL AgentTabOverlay in fill-host mode
 //            (SetSummaryFillHost), i.e. the per-tab pencil panel's whole business logic — analyze/
 //            render off-thread, times bar, wrap/truncate/history toggles, JUMP buttons, context
@@ -38,7 +41,7 @@
 // HORIZONTAL one (cards/summary split) — persist PER WINDOW (WindowRecord::sidePanel*, riding the
 // window-record autosave), and EVERY adjustment additionally RMWs the GLOBAL AppSettings defaults
 // ("the last one to resize sets the default for new windows"). Collapse follows the same rule; the
-// dock side (LEFT by default; the header ⇄ flips it) is GLOBAL-only.
+// dock side (LEFT by default; the ⋯ menu's Dock item flips it) is GLOBAL-only.
 //
 // PERF DISCIPLINE (the Manager-lens rebuild-tax lesson): list updates are COALESCED off the page's
 // already-batched registry drain, min-gap throttled, and deferred entirely while collapsed; and
@@ -201,9 +204,9 @@ namespace
     constexpr double kSidePanelCardDefaultStride = 66.0;
     // _SidePanelSyncRealizedCards' anchorRow when the plan follows the viewport (no row to realize around).
     constexpr size_t kSidePanelNoAnchorRow = SIZE_MAX;
-    // The header's ICON buttons (⌖ scroll-to-tab, ⇄ dock flip, «/» collapse) and the collapsed strip's chevron:
-    // one size above the 11px text buttons (Sum / LOCAL / sort), so the single-glyph controls read as clearly as
-    // the worded ones beside them. One place, so the three header icons and the strip can never drift apart.
+    // The header's ICON buttons (+ launcher, ⋯ menu) and the collapsed strip's chevron: one size above the 11px
+    // worded button (Sum), so the single-glyph controls read as clearly as the word beside them. One place, so the
+    // header's icons and the strip can never drift apart.
     constexpr double kSidePanelIconFontSize = 12.0;
     // The room the card tooltip ("Sum" off) leaves between itself and the window edge, beyond the framework's own
     // gap: ToolTip placement inflates the dock rect by DEFAULT_MOUSE_OFFSET (20px, WinUI ToolTip_Partial.h) for a
@@ -247,13 +250,14 @@ namespace
 
     // How long the pointer must REST on one of the side panel's BUTTONS before its tooltip opens: 3 s (2026-10-10,
     // the user's request), where most other AgentSetTip tips open after ~133 ms. The buttons: the header's "+" · Sum ·
-    // LOCAL / GLOBAL · the sort · ⌖ · ⇄ · the collapse chevron, and the collapsed strip's expand chevron. Every one
-    // of their tips is a paragraph, and at ~133 ms it opened over the panel each time the pointer reached a button
-    // on its way to a click; after 3 s it shows only for someone who stops on the button to read it. Any move
-    // restarts the wait (AgentTipHelpers' rest rule), and the delay is recorded on the element, so the tip keeps it
-    // for the element's life.
-    // ⚠ A NEW button in the panel must pass this constant to its AgentSetTip / AgentSetTitledTip, or its tip opens
-    // after ~133 ms. Not covered on purpose: the filter box (a text box, not a button), the cards (kCardTipDelay,
+    // ⋯, every item of the ⋯ menu (SIDE_PANEL.md §2i: the dock, ⌖, the scope and order submenus and their orders, the
+    // collapse — the buttons they replaced waited 3 s, and a menu is crossed on the way to an item just the same), and
+    // the collapsed strip's expand chevron. Every one of their tips is a paragraph, and at ~133 ms it opened over the
+    // panel each time the pointer reached a button on its way to a click; after 3 s it shows only for someone who stops
+    // on the button to read it. Any move restarts the wait (AgentTipHelpers' rest rule), and the delay is recorded on
+    // the element, so the tip keeps it for the element's life.
+    // ⚠ A NEW button in the panel, or a new ⋯ menu item, must pass this constant to its AgentSetTip /
+    // AgentSetTitledTip, or its tip opens after ~133 ms. Not covered on purpose: the filter box (a text box, not a button), the cards (kCardTipDelay,
     // 4 s), the two drag separators (kSidePanelSplitterTipDelay, 7 s), the summary area's own buttons (the per-tab
     // summary panel's, AgentTabOverlay — shared with every tab) and the "+" launcher card (the Agent Manager's own
     // launch bar, AgentLaunchBar — SIDE_PANEL.md §2e keeps the two surfaces identical).
@@ -266,6 +270,65 @@ namespace
         L"Drag to resize the side panel.\nThis window remembers its own width; the last resize anywhere becomes the default for new windows.";
     constexpr const wchar_t* kSidePanelSplitSplitterTip =
         L"Drag to rebalance the cards list and the summary.\nThis window remembers its own split; the last resize anywhere becomes the default for new windows.";
+
+    // --- The header's ⋯ MENU (SIDE_PANEL.md §2i) ------------------------------------------------------------------------
+    // Its symbols, all from Segoe UI Symbol: the font the panel's glyph buttons draw from by fallback (the ⋯ itself, the
+    // strip's chevron, and the ⌖ / ⇄ / « buttons the menu replaced), so each item keeps the symbol its button wore and the
+    // two new ones look like them. ⧉ (two joined squares) stands for "windows" on the card scope, ⇅ for "sort" on the order.
+    constexpr const wchar_t* kSidePanelMoreGlyph = L"\x22EF"; // ⋯ MIDLINE HORIZONTAL ELLIPSIS — the button's own face
+    constexpr const wchar_t* kSidePanelDockGlyph = L"\x21C4"; // ⇄ — the dock flip
+    constexpr const wchar_t* kSidePanelScrollToTabGlyph = L"\x2316"; // ⌖ POSITION INDICATOR — "find my tab's card"
+    constexpr const wchar_t* kSidePanelScopeGlyph = L"\x29C9"; // ⧉ TWO JOINED SQUARES — this window / every window
+    constexpr const wchar_t* kSidePanelOrderGlyph = L"\x21C5"; // ⇅ — the card order
+    constexpr const wchar_t* kSidePanelCollapseLeftGlyph = L"\x00AB"; // « — collapse toward a LEFT dock
+    constexpr const wchar_t* kSidePanelCollapseRightGlyph = L"\x00BB"; // » — collapse toward a RIGHT dock
+
+    // One entry of the ⋯ ▸ Card order submenu.
+    struct SidePanelOrderChoice
+    {
+        ::Agentmaster::ExplorerSort order; // the AppSettings::boardSort value a pick sets
+        const wchar_t* label; // the item's text: the Triage Board sort button's word for the order (SidePanelOrderLabel)
+        const wchar_t* tip; // what the order sorts by — SortKeyLess (AgentManagerContent.Internal.h) in words
+    };
+    // The five orders, in the board cycle's own sequence (_CycleBoardSort), so the submenu reads in the order the old
+    // button's clicks visited them. BY PID is not offered: the board never cycles to it either (grouping by pid means
+    // nothing once the board splits the cards across its state columns).
+    constexpr SidePanelOrderChoice kSidePanelOrderChoices[] = {
+        { ::Agentmaster::ExplorerSort::MostActive, L"MOST ACTIVE", L"Running sessions first, then the most recent activity of any kind \x2014 a tool call or a subagent's work moves a card up too." },
+        { ::Agentmaster::ExplorerSort::MostRecent, L"MOST RECENT", L"By the last turn boundary only: the prompt you last sent or the reply that last finished. Tool calls and subagent work never move a card, and a running session is not lifted." },
+        { ::Agentmaster::ExplorerSort::Newest, L"NEWEST", L"Newest conversation first, by when it was created. A session with no transcript yet counts as just created." },
+        { ::Agentmaster::ExplorerSort::Oldest, L"OLDEST", L"Oldest conversation first, by when it was created." },
+        { ::Agentmaster::ExplorerSort::Alpha, L"A\x2013Z", L"By title, A to Z; case does not matter." },
+    };
+
+    // The word for `order` on the ⋯ ▸ Card order header — the Triage Board sort button's mapping verbatim (this panel's own
+    // order button carried the same until the ⋯ menu), so the board and the panel name one order with one word, and the
+    // submenu checks the entry whose word the header shows.
+    //   order   - AppSettings::boardSort.
+    //   returns - the word. BY PID (a stray stored value no cycle produces) reads MOST ACTIVE, as on the board.
+    //   throws  - nothing.
+    const wchar_t* SidePanelOrderLabel(::Agentmaster::ExplorerSort order) noexcept
+    {
+        using ::Agentmaster::ExplorerSort;
+        return (order == ExplorerSort::Newest)     ? L"NEWEST" :
+               (order == ExplorerSort::Oldest)     ? L"OLDEST" :
+               (order == ExplorerSort::Alpha)      ? L"A\x2013Z" :
+               (order == ExplorerSort::MostRecent) ? L"MOST RECENT" : // the turn-boundary order
+                                                     L"MOST ACTIVE"; // MostActive (the default) + a stray ByPid
+    }
+
+    // A ⋯ menu item's icon: `glyph` drawn in Segoe UI Symbol, left of the item's text. The family is named on purpose: a
+    // FontIcon draws from the icon font by default (Segoe MDL2 Assets / Fluent Icons), which has none of these symbols.
+    //   glyph   - one of the kSidePanel*Glyph symbols above.
+    //   returns - a new FontIcon for MenuFlyoutItem::Icon (the item's 16 DIP icon box scales it to fit).
+    //   throws  - hresult_error / bad_alloc from creating the element; the menu's Opening handler contains it.
+    FontIcon SidePanelMenuGlyph(const wchar_t* glyph)
+    {
+        FontIcon icon{};
+        icon.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ L"Segoe UI Symbol" });
+        icon.Glyph(glyph);
+        return icon;
+    }
 
     // --- The AI SEARCH (SIDE_PANEL.md §2h) ------------------------------------------------------------------------------
     // The "AI" toggle sits INSIDE the slim filter box, at its right end (the Sessions page's idiom, scaled to the ~22 DIP
@@ -1010,7 +1073,7 @@ namespace winrt::TerminalApp::implementation
         _sidePanelHost.RequestedTheme(ElementTheme::Dark);
         _sidePanelHost.Background(Fill(0xFF, 0x2E, 0x2E, 0x2E));
 
-        // EXPANDED content: header (search + sort + dock + collapse) / count line / body.
+        // EXPANDED content: header (the buttons line + the filter box) / count line / body.
         _sidePanelExpandedRoot = Grid{};
         {
             RowDefinition r0{};
@@ -1025,11 +1088,11 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Header: TWO lines.
-        //   line 1 (row 0): [ spacer * ][ + ][ Sum ][ scope ][ sort ][ ⌖ ][ ⇄ ][ chevron ] — the buttons keep the
-        //     right-aligned places they had when the filter box shared this line (column 0, the star, is
-        //     now an empty spacer), "+" first (the launcher card — SIDE_PANEL.md §2e; the user's "leftmost,
-        //     to Sum"), then "Sum" (left of LOCAL/GLOBAL — it reshapes the whole panel), the three icons
-        //     together at the end, the collapse chevron outermost.
+        //   line 1 (row 0): [ spacer * ][ + ][ Sum ][ ⋯ ] — right-aligned (column 0, the star, is an empty spacer):
+        //     "+" first (the launcher card — SIDE_PANEL.md §2e; the user's "leftmost, to Sum"), then "Sum" (it reshapes
+        //     the whole panel), then ⋯ outermost, where the collapse chevron was (SIDE_PANEL.md §2i, the user's layout of
+        //     2026-11-03): its menu holds the dock flip, ⌖, the card scope, the card order and the collapse, which were
+        //     five more buttons on this line and made it wider than a narrow panel.
         //   line 2 (row 1): the filter box across the FULL width. On a line of its own it no longer
         //     competes with the buttons for room — sharing one line, a narrow panel squeezed the box down
         //     to its minimum while the buttons kept their natural widths.
@@ -1043,28 +1106,16 @@ namespace winrt::TerminalApp::implementation
             header.RowDefinitions().Append(hr1);
             ColumnDefinition c0{};
             c0.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
-            ColumnDefinition c1{};
+            ColumnDefinition c1{}; // "+" — the launcher (SIDE_PANEL.md §2e)
             c1.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-            ColumnDefinition c2{};
+            ColumnDefinition c2{}; // "Sum" — the summary area (SIDE_PANEL.md §2d)
             c2.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-            ColumnDefinition c3{};
+            ColumnDefinition c3{}; // "⋯" — the menu (SIDE_PANEL.md §2i)
             c3.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-            ColumnDefinition c4{};
-            c4.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-            ColumnDefinition c5{};
-            c5.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-            ColumnDefinition c6{}; // the "Sum" toggle's column (column 1) pushed the others one to the right
-            c6.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-            ColumnDefinition c7{}; // the "+" launcher's column (column 1, SIDE_PANEL.md §2e) pushed them one more
-            c7.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
             header.ColumnDefinitions().Append(c0);
             header.ColumnDefinitions().Append(c1);
             header.ColumnDefinitions().Append(c2);
             header.ColumnDefinitions().Append(c3);
-            header.ColumnDefinitions().Append(c4);
-            header.ColumnDefinitions().Append(c5);
-            header.ColumnDefinitions().Append(c6);
-            header.ColumnDefinitions().Append(c7);
             header.Padding(ThicknessHelper::FromLengths(4, 4, 4, 2));
             header.ColumnSpacing(3);
             header.RowSpacing(3); // a little air between the buttons line and the filter line
@@ -1312,9 +1363,10 @@ namespace winrt::TerminalApp::implementation
         // The "Sum" toggle — the summary area below the cards ON (checked, the default) / OFF. OFF hides the
         // bottom area and its splitter so the cards fill the body, and each card then shows the RICH session
         // tooltip beside the panel on hover — the very card a tab header shows (SIDE_PANEL.md §2d). A REAL
-        // ToggleButton (the ⌖ idiom), so its accent fill IS the state; IsChecked is seeded by
+        // ToggleButton (the Sessions page's scope-toggle idiom), so its accent fill IS the state; IsChecked is seeded by
         // _SidePanelUpdateSumButton once the panel is built (a programmatic IsChecked raises no Click, so
-        // seeding can never persist anything). A worded button like LOCAL/sort, so it keeps their 11px size.
+        // seeding can never persist anything). The line's one WORDED button, so it keeps the 11px size the worded
+        // buttons had (the "+" and "⋯" icons beside it are 12px).
         _sidePanelSumBtn = winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton{};
         _sidePanelSumBtn.FontSize(11);
         _sidePanelSumBtn.Padding(ThicknessHelper::FromLengths(8, 1, 8, 1));
@@ -1331,114 +1383,54 @@ namespace winrt::TerminalApp::implementation
         Grid::SetColumn(_sidePanelSumBtn, 2);
         header.Children().Append(_sidePanelSumBtn);
 
-        // The card-list SCOPE toggle — LOCAL (this window's tabs; the default, always) / GLOBAL
-        // (every window's). The board's own LOCAL/GLOBAL words + accent look, but a SEPARATE state:
-        // it re-scopes only this list, never the Manager's tree/board (which answer a different
-        // question — what the fleet lens shows, not what sits beside your terminal), and it is
-        // remembered per window with NO global default (see _SidePanelToggleScope).
-        _sidePanelScopeBtn = Button{};
-        _sidePanelScopeBtn.FontSize(11);
-        _sidePanelScopeBtn.Padding(ThicknessHelper::FromLengths(8, 1, 8, 1));
-        _sidePanelScopeBtn.VerticalAlignment(VerticalAlignment::Center);
-        _sidePanelScopeBtn.IsTabStop(false);
-        EmphasizeScopeButton(_sidePanelScopeBtn); // the board's accent-blue scope look — this is the panel's primary toggle, louder than sort/dock/collapse
-        AgentSetTitledTip(_sidePanelScopeBtn, L"Card scope", winrt::hstring{ L"Which sessions the cards list: LOCAL = only the sessions open in THIS window (the default), GLOBAL = every window's.\nRemembered for this window only \x2014 a new window always starts LOCAL \x2014 and independent of the Triage Board's own scope." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
-        _sidePanelScopeBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
-            if (const auto self = weakThis.get())
-            {
-                self->_SidePanelToggleScope();
-            }
-        });
-        Grid::SetColumn(_sidePanelScopeBtn, 3);
-        header.Children().Append(_sidePanelScopeBtn);
-
-        _sidePanelSortBtn = Button{};
-        _sidePanelSortBtn.FontSize(11);
-        _sidePanelSortBtn.Padding(ThicknessHelper::FromLengths(8, 1, 8, 1));
-        _sidePanelSortBtn.VerticalAlignment(VerticalAlignment::Center);
-        _sidePanelSortBtn.IsTabStop(false);
-        AgentSetTitledTip(_sidePanelSortBtn, L"Card order", winrt::hstring{ L"Order the session cards. Click to cycle: MOST ACTIVE (last activity of any kind, running sessions on top) \xB7 MOST RECENT (by the last turn boundary only: the prompt you last sent or the reply that last finished \x2014 tool calls and subagent work never move it) \xB7 NEWEST \xB7 OLDEST \xB7 A\x2013Z.\nThe SAME saved order as the Triage Board's card sort \x2014 changing it here re-sorts the board too (and every window)." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
-        _sidePanelSortBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
-            const auto self = weakThis.get();
-            if (!self)
-            {
-                return;
-            }
-            // ONE sort spec: delegate to the Manager content's own cycle (mutate boardSort ->
-            // persist via the settings sink, which also updates this page's _appSettings copy and
-            // broadcasts — the exact path the board header's sort toggle runs). On return the new
-            // order is already in _appSettings, so relabel + resort immediately.
-            if (const auto ipc = self->_agentManagerContent.get())
-            {
-                if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+        // The "⋯" MENU button (SIDE_PANEL.md §2i) — the last of the right-aligned buttons, where the collapse chevron
+        // was (the user's layout of 2026-11-03). Its menu holds the five controls that were buttons on this line: Dock on
+        // the left / right (⇄) · Scroll to the selected tab (⌖) · Card scope ▸ · Card order ▸ · Collapse the side panel
+        // (« / »), so the line reads "+ Sum ⋯" and fits a narrow panel. An ICON button (the "+" size and padding);
+        // IsTabStop false like its siblings: a click must never pull keyboard focus out of the terminal by itself (the
+        // open menu holds the keyboard while it shows and hands it back as it closes).
+        // The menu is an EMPTY MenuFlyout that fills itself at every open (_SidePanelFillMoreMenu; the Agent Manager's
+        // lazy session menus' idiom): its checks and labels are read from the live settings at that moment, so a change
+        // made in another window (the order, ⌖, the dock) never leaves it stale, and a window that never opens it builds
+        // no items. Its handler reaches the menu through `sender` and the page through a weak reference — never by
+        // capture, which would make the menu own itself (the islands leak class). It opens BELOW the button with the
+        // right edges aligned, so it spreads over the panel's own width in either dock (the header's buttons sit at the
+        // panel's right end) instead of out over the terminal. Button::Flyout opens it on the button's Click — a pointer,
+        // or UI Automation's Invoke — and owns it for the button's life.
+        _sidePanelMoreBtn = Button{};
+        _sidePanelMoreBtn.FontSize(kSidePanelIconFontSize); // an ICON button: one size above the 11px "Sum"
+        _sidePanelMoreBtn.Padding(ThicknessHelper::FromLengths(6, 1, 6, 1));
+        _sidePanelMoreBtn.VerticalAlignment(VerticalAlignment::Center);
+        _sidePanelMoreBtn.IsTabStop(false);
+        _sidePanelMoreBtn.Content(winrt::box_value(kSidePanelMoreGlyph)); // ⋯
+        AgentSetTitledTip(_sidePanelMoreBtn, L"More options", winrt::hstring{ L"Dock the panel on the other side, scroll the cards to the selected tab's card, choose which sessions the cards list (Card scope) and their order (Card order), or collapse the panel to a thin strip." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        {
+            MenuFlyout moreMenu{};
+            moreMenu.Placement(winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedRight);
+            moreMenu.Opening([weakThis](const IInspectable& sender, const IInspectable&) {
+                const auto self = weakThis.get();
+                const auto menu = sender.try_as<MenuFlyout>();
+                if (!self || !menu)
                 {
-                    mgr->CycleBoardSort();
+                    return;
                 }
-            }
-            self->_SidePanelUpdateSortButton();
-            self->_SidePanelScheduleRebuild(/*force*/ true);
-        });
-        Grid::SetColumn(_sidePanelSortBtn, 4);
-        header.Children().Append(_sidePanelSortBtn);
-
-        // The ⌖ SCROLL-TO-TAB icon toggle: while ON (the GLOBAL AppSettings::sidePanelScrollToSelectedTab,
-        // default ON) selecting a tab scrolls this list to that tab's card. A REAL ToggleButton — the
-        // Sessions page's scope-toggle idiom (SessToggle) — so the accent fill of its checked state IS the
-        // on/off readout; its plain-Button siblings don't need one (their labels carry their state, and ⇄ /
-        // the chevron are actions, not modes). Sized exactly like the ⇄ dock button beside it (same
-        // FontSize/Padding; ⌖ even comes from the same Segoe UI Symbol fallback as ⇄), so the three icons
-        // read as one group. IsChecked is seeded by _SidePanelUpdateScrollToTabButton once the panel is
-        // built — a programmatic IsChecked raises no Click, so seeding can never persist or broadcast.
-        _sidePanelScrollToTabBtn = winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton{};
-        _sidePanelScrollToTabBtn.FontSize(kSidePanelIconFontSize); // an ICON button: one size above the 11px worded buttons
-        _sidePanelScrollToTabBtn.Padding(ThicknessHelper::FromLengths(6, 1, 6, 1));
-        _sidePanelScrollToTabBtn.VerticalAlignment(VerticalAlignment::Center);
-        _sidePanelScrollToTabBtn.IsTabStop(false); // like its siblings: a click must never pull keyboard focus out of the terminal
-        _sidePanelScrollToTabBtn.Content(winrt::box_value(L"\x2316")); // ⌖ POSITION INDICATOR — "find my tab's card"
-        AgentSetTitledTip(_sidePanelScrollToTabBtn, L"Scroll to the selected tab", winrt::hstring{ L"On: selecting a tab scrolls these cards to that tab's card \x2014 a card already on screen stays put. Clicking back into the terminal after peeking at another card scrolls back to your tab's card too.\nOff: the list keeps whatever scroll position you left it at.\nSaved globally \x2014 every open window follows it at once." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
-        _sidePanelScrollToTabBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
-            if (const auto self = weakThis.get())
-            {
-                self->_SidePanelToggleScrollToTab();
-            }
-        });
-        Grid::SetColumn(_sidePanelScrollToTabBtn, 5);
-        header.Children().Append(_sidePanelScrollToTabBtn);
-
-        Button dockBtn{};
-        dockBtn.FontSize(kSidePanelIconFontSize); // an ICON button: one size above the 11px worded buttons
-        dockBtn.Padding(ThicknessHelper::FromLengths(6, 1, 6, 1));
-        dockBtn.VerticalAlignment(VerticalAlignment::Center);
-        dockBtn.IsTabStop(false);
-        dockBtn.Content(winrt::box_value(L"\x21C4")); // ⇄ — flip which side the panel docks on
-        AgentSetTitledTip(dockBtn, L"Dock side", winrt::hstring{ L"Move the panel to the other side of the terminal (left \x21C4 right).\nSaved globally \x2014 other windows adopt it on their next launch or settings change." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
-        // Agentmaster (accessibility, E2E_TESTING.md §6.3): a ⇄ reads as noise to a screen reader — say what it does.
-        AgentSetAutomationId(dockBtn, L"am.side.dock");
-        AgentSetAccessibleName(dockBtn, L"Dock side");
-        dockBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
-            if (const auto self = weakThis.get())
-            {
-                self->_SidePanelFlipDock();
-            }
-        });
-        Grid::SetColumn(dockBtn, 6);
-        header.Children().Append(dockBtn);
-
-        _sidePanelCollapseBtn = Button{};
-        _sidePanelCollapseBtn.FontSize(kSidePanelIconFontSize); // an ICON button: one size above the 11px worded buttons
-        _sidePanelCollapseBtn.Padding(ThicknessHelper::FromLengths(6, 1, 6, 1));
-        _sidePanelCollapseBtn.VerticalAlignment(VerticalAlignment::Center);
-        _sidePanelCollapseBtn.IsTabStop(false);
-        // Glyph set by _SidePanelApplyLayout (it points TOWARD the docked edge, so it flips with the dock).
-        AgentSetTip(_sidePanelCollapseBtn, winrt::hstring{ L"Collapse the side panel to a thin strip (click the strip to bring it back)." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
-        _sidePanelCollapseBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
-            if (const auto self = weakThis.get())
-            {
-                self->_SidePanelToggleCollapsed();
-            }
-        });
-        Grid::SetColumn(_sidePanelCollapseBtn, 7);
-        header.Children().Append(_sidePanelCollapseBtn);
+                try
+                {
+                    // Rebuilt from scratch at every open, so no item outlives the open it was made for.
+                    menu.Items().Clear();
+                    self->_SidePanelFillMoreMenu(menu);
+                }
+                catch (...)
+                {
+                    // The menu opens with whatever was built before the throw (possibly nothing): a short menu
+                    // rather than a dead button. Recorded (Rule #18).
+                    ::Agentmaster::AgentLogCaughtException(L"side panel more menu: fill at open");
+                }
+            });
+            _sidePanelMoreBtn.Flyout(moreMenu);
+        }
+        Grid::SetColumn(_sidePanelMoreBtn, 3);
+        header.Children().Append(_sidePanelMoreBtn);
         Grid::SetRow(header, 0);
         _sidePanelExpandedRoot.Children().Append(header);
 
@@ -1644,7 +1636,7 @@ namespace winrt::TerminalApp::implementation
         _sidePanelStrip.VerticalAlignment(VerticalAlignment::Center);
         _sidePanelStrip.HorizontalAlignment(HorizontalAlignment::Center);
         _sidePanelStripBtn = Button{};
-        _sidePanelStripBtn.FontSize(kSidePanelIconFontSize); // the collapsed strip's chevron — the same icon size as the header's collapse chevron it pairs with
+        _sidePanelStripBtn.FontSize(kSidePanelIconFontSize); // the collapsed strip's chevron — the same icon size as the header's icon buttons (+, ⋯)
         _sidePanelStripBtn.Padding(ThicknessHelper::FromLengths(2, 10, 2, 10));
         _sidePanelStripBtn.IsTabStop(false);
         AgentSetTip(_sidePanelStripBtn, winrt::hstring{ L"Expand the side panel (session cards + the selected session's summary)." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
@@ -1658,21 +1650,18 @@ namespace winrt::TerminalApp::implementation
         _sidePanelStrip.Visibility(Visibility::Collapsed);
         _sidePanelHost.Children().Append(_sidePanelStrip);
 
-        // Agentmaster (accessibility, E2E_TESTING.md §6.3, 2026-10-23): the panel's stable AutomationIds, in ONE place
-        // (⇄'s is set where it is built: it is a local there). NAMES only for the glyph-only buttons — ⌖ and the two
-        // chevrons read as noise to a screen reader (the e2e driver finds them by these ids, and by their glyphs on
-        // older builds); the worded buttons keep the names their content gives them (Sum, LOCAL / GLOBAL, MOST ACTIVE),
-        // and the filter box keeps its placeholder as its name. "+" was named before ("Launch a session").
+        // Agentmaster (accessibility, E2E_TESTING.md §6.3, 2026-10-23): the panel's stable AutomationIds, in ONE place.
+        // NAMES only for the glyph-only buttons — ⋯ and the strip's chevron read as noise to a screen reader (the e2e
+        // driver finds them by these ids); "Sum" keeps the name its content gives it, and the filter box keeps its
+        // placeholder as its name. "+" was named before ("Launch a session"). The ⋯ menu's items keep the ids the header
+        // buttons they replaced had (am.side.dock / scrollToTab / scope / sort / collapse — ids are added, never renamed)
+        // and are set where the menu builds them, at every open (_SidePanelFillMoreMenu); their texts name them.
         AgentSetAutomationId(_sidePanelLaunchBtn, L"am.side.launch");
         AgentSetAutomationId(_sidePanelSearchBox, L"am.side.filter");
         AgentSetAutomationId(_sidePanelAiBtn, L"am.side.ai"); // the filter box's "AI" toggle (SIDE_PANEL.md §2h); its content "AI" names it
         AgentSetAutomationId(_sidePanelSumBtn, L"am.side.sum");
-        AgentSetAutomationId(_sidePanelScopeBtn, L"am.side.scope");
-        AgentSetAutomationId(_sidePanelSortBtn, L"am.side.sort");
-        AgentSetAutomationId(_sidePanelScrollToTabBtn, L"am.side.scrollToTab");
-        AgentSetAccessibleName(_sidePanelScrollToTabBtn, L"Scroll to the selected tab");
-        AgentSetAutomationId(_sidePanelCollapseBtn, L"am.side.collapse");
-        AgentSetAccessibleName(_sidePanelCollapseBtn, L"Collapse the side panel");
+        AgentSetAutomationId(_sidePanelMoreBtn, L"am.side.more"); // the ⋯ menu button (SIDE_PANEL.md §2i)
+        AgentSetAccessibleName(_sidePanelMoreBtn, L"More options");
         AgentSetAutomationId(_sidePanelStripBtn, L"am.side.expand");
         AgentSetAccessibleName(_sidePanelStripBtn, L"Expand the side panel");
 
@@ -1820,9 +1809,7 @@ namespace winrt::TerminalApp::implementation
         _sidePanelBuilt = true;
         _SidePanelApplyDock(); // assigns the three columns per the global dock side + applies widths/glyphs (and the summary rows per "Sum")
         _SidePanelUpdateSumButton(); // "Sum" checked == the summary area shown (no Click => nothing persisted)
-        _SidePanelUpdateSortButton();
-        _SidePanelUpdateScopeButton(); // LOCAL / GLOBAL per the seeded per-window scope
-        _SidePanelUpdateScrollToTabButton(); // ⌖ checked per the GLOBAL setting (no Click => nothing persisted)
+        // Nothing to seed for the ⋯ menu: it reads the dock, ⌖, the scope and the order when it opens (SIDE_PANEL.md §2i).
         _SidePanelRebuildCards(); // with "Sum" off, every new card is armed with its rich tooltip as it is built
         // Re-select the lens's restored session so a reopened window's summary shows immediately
         // (the same restored selection SetManagerState seeded into the Manager lens).
@@ -1853,7 +1840,7 @@ namespace winrt::TerminalApp::implementation
 
     // Assign TabContent / the splitter / the panel host to ContentArea's three columns per the
     // GLOBAL AppSettings::sidePanelOnLeft (dock-right: [content *][splitter][panel]; dock-left is
-    // the mirror), then re-apply widths + the direction-dependent chevrons via _SidePanelApplyLayout.
+    // the mirror), then re-apply widths + the strip's direction-dependent chevron via _SidePanelApplyLayout.
     // Idempotent — re-running with an unchanged dock just re-applies the same assignments.
     void TerminalPage::_SidePanelApplyDock()
     {
@@ -1872,7 +1859,7 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Derive the three ContentArea column widths + the cards/summary star ratios + the collapse
-    // visibility + the direction-dependent chevron glyphs from the live state. Every write is
+    // visibility + the strip chevron's direction-dependent glyph from the live state. Every write is
     // CHANGE-GATED so re-running from the deferred SizeChanged tick converges instead of cycling.
     // Pre-layout (ContentArea width still 0) the pixel width falls back to the minimum — corrected
     // by the first real SizeChanged.
@@ -1994,14 +1981,10 @@ namespace winrt::TerminalApp::implementation
             _sidePanelSplitter.Visibility(_sidePanelCollapsed ? Visibility::Collapsed : Visibility::Visible);
         }
 
-        // Chevrons point TOWARD the docked edge to collapse, AWAY to expand — so they flip with
-        // the dock. (Plain text glyphs — no icon-font guessing; any UI font carries » «.)
-        const wchar_t* const towardEdge = left ? L"\x00AB" : L"\x00BB"; // « / »
-        const wchar_t* const awayFromEdge = left ? L"\x00BB" : L"\x00AB";
-        if (_sidePanelCollapseBtn)
-        {
-            _sidePanelCollapseBtn.Content(winrt::box_value(towardEdge));
-        }
+        // The strip's chevron points AWAY from the docked edge (it expands), so it flips with the dock. (A plain text
+        // glyph — no icon-font guessing; any UI font carries » «.) Its twin pointing TOWARD the edge, the collapse, is
+        // the ⋯ menu's last item now, and that menu picks its glyph from the dock when it opens.
+        const wchar_t* const awayFromEdge = left ? kSidePanelCollapseRightGlyph : kSidePanelCollapseLeftGlyph; // » / «
         if (_sidePanelStripBtn)
         {
             _sidePanelStripBtn.Content(winrt::box_value(awayFromEdge));
@@ -2037,50 +2020,57 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Reflect the current GLOBAL board sort on the order button — the board header's own label
-    // mapping, verbatim, so the two toggles always read the same word for the same order.
-    void TerminalPage::_SidePanelUpdateSortButton()
-    {
-        if (!_sidePanelSortBtn)
-        {
-            return;
-        }
-        const wchar_t* label = (_appSettings.boardSort == ExplorerSort::Newest)     ? L"NEWEST" :
-                               (_appSettings.boardSort == ExplorerSort::Oldest)     ? L"OLDEST" :
-                               (_appSettings.boardSort == ExplorerSort::Alpha)      ? L"A\x2013Z" :
-                               (_appSettings.boardSort == ExplorerSort::MostRecent) ? L"MOST RECENT" : // the turn-boundary order (ExplorerSort::MostRecent)
-                                                                                      L"MOST ACTIVE"; // MostActive (default) + any stray ByPid
-        _sidePanelSortBtn.Content(winrt::box_value(label));
-    }
-
-    // Reflect THIS window's card-list scope on the scope toggle — the board's own LOCAL/GLOBAL
-    // words (_UpdateBoardScopeButton), so the two surfaces read the same label for the same idea.
-    void TerminalPage::_SidePanelUpdateScopeButton()
-    {
-        if (!_sidePanelScopeBtn)
-        {
-            return;
-        }
-        _sidePanelScopeBtn.Content(winrt::box_value(_sidePanelGlobal ? L"GLOBAL" : L"LOCAL"));
-    }
-
-    // Flip the card list between LOCAL (only the sessions hosted in this window) and GLOBAL (every
-    // window's) — for THIS window only. Persists through the window-record autosave ALONE: there is
-    // deliberately no _SidePanelPersistDefaults call and no AppSettings field, because the scope has
-    // no global default by design — every new window starts LOCAL, so one window's fleet-wide view can
-    // never seed another window's list (the "my list shows another window's tabs" bug this scope
-    // exists to prevent). The Manager's own tree/board scope is NOT touched: it answers a different
-    // question (what the fleet lens shows), and a click here must not re-scope the Manager under
-    // the user. Logged as a [sidepanel] mechanism line like the width/split commits — not [nav]: a
-    // scope flip is a pure view filter (the board's LOCAL/GLOBAL toggle is unlogged for the same reason).
-    void TerminalPage::_SidePanelToggleScope()
+    // The ⋯ ▸ Card order pick (SIDE_PANEL.md §2i): put the GLOBAL board sort on `order` through the Manager content's own
+    // setter — ONE sort spec, so the board and this list can never sort by different orders: AgentManagerContent::
+    // SetBoardSort sets boardSort, persists it through the settings sink (which also updates this page's _appSettings copy
+    // and broadcasts to the other windows) and re-sorts the board. On return the new order is in _appSettings, so this
+    // list re-sorts at once (a forced rebuild: the user's action skips the throttle). No [nav] line: an order is a pure
+    // view choice (the board's own sort button is unlogged for the same reason).
+    //   order   - the picked order.
+    //   returns - nothing; a no-op before the panel is built. A window without its Manager page (none built yet — the page
+    //             is built at the window's first layout, before this panel) sets nothing and logs one [sidepanel] line,
+    //             so a pick that changed nothing says why.
+    //   throws  - what the setter's sink, the board refresh and the rebuild throw; the menu command contains and logs it.
+    void TerminalPage::_SidePanelSetSort(::Agentmaster::ExplorerSort order)
     {
         if (!_sidePanelBuilt)
         {
             return;
         }
-        _sidePanelGlobal = !_sidePanelGlobal;
-        _SidePanelUpdateScopeButton();
+        implementation::AgentManagerContent* mgr = nullptr;
+        if (const auto ipc = _agentManagerContent.get())
+        {
+            mgr = winrt::get_self<implementation::AgentManagerContent>(ipc);
+        }
+        if (!mgr)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[sidepanel] card order " + ::Agentmaster::ToString(order) + L" not set: this window has no Agent Manager page yet (window " + ::Agentmaster::ShortId(_windowId) + L")\n");
+            return;
+        }
+        mgr->SetBoardSort(order); // a pick of the order already set returns at once: nothing saved, nothing broadcast
+        _SidePanelScheduleRebuild(/*force*/ true);
+    }
+
+    // The ⋯ ▸ Card scope pick (SIDE_PANEL.md §2i): put the card list on LOCAL (only the sessions hosted in this window) or
+    // GLOBAL (every window's) — for THIS window only. Persists through the window-record autosave ALONE: there is
+    // deliberately no _SidePanelPersistDefaults call and no AppSettings field, because the scope has
+    // no global default by design — every new window starts LOCAL, so one window's fleet-wide view can
+    // never seed another window's list (the "my list shows another window's tabs" bug this scope
+    // exists to prevent). The Manager's own tree/board scope is NOT touched: it answers a different
+    // question (what the fleet lens shows), and a pick here must not re-scope the Manager under
+    // the user. Logged as a [sidepanel] mechanism line like the width/split commits — not [nav]: a
+    // scope change is a pure view filter (the board's LOCAL/GLOBAL toggle is unlogged for the same reason).
+    //   global  - true = GLOBAL, false = LOCAL.
+    //   returns - nothing; a no-op before the panel is built and when the list is already on that scope (a pick of the
+    //             checked entry: nothing to rebuild or save).
+    //   throws  - bad_alloc from the log line only; the menu command contains it.
+    void TerminalPage::_SidePanelSetScope(bool global)
+    {
+        if (!_sidePanelBuilt || _sidePanelGlobal == global)
+        {
+            return;
+        }
+        _sidePanelGlobal = global;
         _SidePanelScheduleRebuild(/*force*/ true); // user action — past the throttle; the rebuild re-snapshots the hosted set
         _ScheduleWindowRecordSave(); // the per-window half is the ONLY half (see above)
         ::Agentmaster::AppendStateLog(L"hooks.log", std::wstring{ L"[sidepanel] scope -> " } + (_sidePanelGlobal ? L"global" : L"local") + L" (window " + ::Agentmaster::ShortId(_windowId) + L"; per-window only)\n");
@@ -2100,8 +2090,9 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::LogNav(_sidePanelCollapsed ? L"sidepanel collapse" : L"sidepanel expand");
         if (_sidePanelCollapsed)
         {
-            // The "+" launcher card belongs to the header that is going away (SIDE_PANEL.md §2e). The chevron's own
-            // press already closed it as an outside press; this is the belt for a collapse with no press.
+            // The "+" launcher card belongs to the header that is going away (SIDE_PANEL.md §2e). The press on ⋯ (the
+            // menu that holds the collapse) already closed it as an outside press; this is the belt for a collapse with no
+            // press (UI Automation, the keyboard in the menu).
             _SidePanelCloseLaunchCard(L"panel collapsed");
         }
         _SidePanelApplyLayout();
@@ -2203,7 +2194,7 @@ namespace winrt::TerminalApp::implementation
     // build and after every click (the ToggleButton flips its own IsChecked before Click fires, so the member,
     // not the button, is the truth). A programmatic IsChecked raises no Click, so re-pinning can't loop or persist.
     // No parameters; returns nothing; a no-op before the panel is built. Throws only what a property write on a
-    // live UI-thread control can (the sibling label updaters' exposure).
+    // live UI-thread control can.
     void TerminalPage::_SidePanelUpdateSumButton()
     {
         if (!_sidePanelSumBtn)
@@ -2230,12 +2221,13 @@ namespace winrt::TerminalApp::implementation
         _appSettings.sidePanelOnLeft = next;
         ::Agentmaster::LogNav(next ? L"sidepanel dock -> left" : L"sidepanel dock -> right");
         // The "+" launcher card was opened from the header that is moving to the other side (SIDE_PANEL.md §2e). The
-        // ⇄ press already closed it as an outside press; this is the belt for a flip with no press.
+        // press on ⋯ (the menu that holds the dock item) already closed it as an outside press; this is the belt for a
+        // flip with no press (UI Automation, the keyboard in the menu).
         _SidePanelCloseLaunchCard(L"dock flip");
         _SidePanelApplyDock();
     }
 
-    // The ⌖ header toggle's click: flip the GLOBAL "scroll to the selected tab" preference
+    // The ⋯ menu's ⌖ item (SIDE_PANEL.md §2i): flip the GLOBAL "scroll to the selected tab" preference
     // (AppSettings::sidePanelScrollToSelectedTab). Persisted as a freshest-disk RMW of that ONE field — the
     // dock flip's recipe, because another window may have saved other settings since this one loaded, and
     // writing this window's whole copy back would regress them. Then, UNLIKE the dock flip, broadcast LIVE:
@@ -2260,14 +2252,13 @@ namespace winrt::TerminalApp::implementation
         s.sidePanelScrollToSelectedTab = next;
         ::Agentmaster::SaveAppSettings(s);
         _appSettings.sidePanelScrollToSelectedTab = next;
-        // The ToggleButton flipped its own IsChecked before Click fired; re-pin it to the stored truth anyway,
-        // so a button that ever drifted from the setting (a missed broadcast) can't stay inverted.
-        _SidePanelUpdateScrollToTabButton();
+        // Nothing to re-pin: the ⋯ menu's ⌖ check is read from this setting at the menu's next open.
         ::Agentmaster::LogNav(next ? L"sidepanel scroll-to-tab -> on" : L"sidepanel scroll-to-tab -> off");
         try
         {
-            // Every OTHER window (the source is excluded): each hops to its own UI thread and re-pins its
-            // toggle through _ApplyBroadcastSettings -> _SidePanelApplySettings.
+            // Every OTHER window (the source is excluded): each hops to its own UI thread and adopts it through
+            // _ApplyBroadcastSettings -> _SidePanelApplySettings (an owed reveal dropped when it turned off; its ⋯ menu
+            // shows the new check at its next open).
             ::Agentmaster::BroadcastSettingsChanged(s, _windowId);
         }
         catch (...)
@@ -2291,19 +2282,189 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Pin the ⌖ toggle's checked state to the GLOBAL setting — the setting is the truth, the
-    // ToggleButton's own click-flip is not. Called at build, after a click, and whenever a cog Save or
-    // another window's broadcast replaced _appSettings (_SidePanelApplySettings). A programmatic IsChecked
-    // raises Checked/Unchecked but never Click, so re-pinning can't loop back into the toggle handler or
-    // persist anything. No parameters; returns nothing; a no-op before the panel is built. Throws only
-    // what a XAML property set on a live UI-thread control can (the sibling label updaters' exposure).
-    void TerminalPage::_SidePanelUpdateScrollToTabButton()
+    // Fill the header's ⋯ menu (SIDE_PANEL.md §2i) from the live state. The Opening handler empties the menu and calls this
+    // at EVERY open, so no check or label can be stale: another window may have moved the order, ⌖ or the dock since the
+    // last open. The items, in the user's order of 2026-11-03, each with its symbol LEFT of its text (the item's icon slot:
+    // a Segoe UI Symbol glyph, SidePanelMenuGlyph) and the tooltip of the button it replaced (3 s of rest,
+    // kSidePanelButtonTipDelay):
+    //   ⇄ Dock on the right / left   — the dock flip, worded as where the panel goes;
+    //   ⌖ Scroll to the selected tab — a check item, checked while the GLOBAL setting is on;
+    //   ⧉ Card scope: LOCAL ▸        — LOCAL / GLOBAL for this window's list, the current one checked;
+    //   ⇅ Card order: MOST ACTIVE ▸  — the five board orders, the current one checked, each with what it sorts by;
+    //   ─────
+    //   « Collapse the side panel    — the glyph points toward the docked edge, like the chevron it replaced.
+    // The submenu headers carry the current scope and order in their text, because the line no longer shows them. Every
+    // item keeps the AutomationId of the button it replaced (am.side.dock / scrollToTab / scope / sort / collapse — ids
+    // are added, never renamed: the e2e driver knows them), and the submenus' entries add am.side.scope.<local|global> and
+    // am.side.sort.<the order's settings.json token>.
+    // Every command runs one dispatcher tick later (_SidePanelRunMenuCommand) and first re-checks the state its item was
+    // built for, so a menu left open while another window changed the setting acts on what it showed and never inverts it.
+    //   menu    - the ⋯ button's MenuFlyout, empty.
+    //   returns - nothing.
+    //   throws  - what creating and wiring the XAML elements throws (hresult_error, bad_alloc); the Opening handler
+    //             contains and logs it (the menu then opens with the items built so far).
+    void TerminalPage::_SidePanelFillMoreMenu(const MenuFlyout& menu)
     {
-        if (!_sidePanelScrollToTabBtn)
+        auto weakThis = get_weak();
+        // The state the items are built for, captured by each command so it can tell a still-valid click from a stale one.
+        const bool dockedLeft = _appSettings.sidePanelOnLeft;
+        const bool scrollToTabOn = _appSettings.sidePanelScrollToSelectedTab;
+
+        // ⇄ — the dock flip, named by where the panel goes (the symbol alone says only "swap").
+        MenuFlyoutItem dock{};
+        dock.Text(dockedLeft ? L"Dock on the right" : L"Dock on the left");
+        dock.Icon(SidePanelMenuGlyph(kSidePanelDockGlyph));
+        AgentSetTitledTip(dock, L"Dock side", winrt::hstring{ L"Move the panel to the other side of the terminal (left \x21C4 right).\nSaved globally \x2014 other windows adopt it on their next launch or settings change." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        AgentSetAutomationId(dock, L"am.side.dock");
+        dock.Click([weakThis, dockedLeft](const IInspectable&, const RoutedEventArgs&) {
+            if (const auto self = weakThis.get())
+            {
+                self->_SidePanelRunMenuCommand(L"dock", [dockedLeft](TerminalPage& page) {
+                    // Flip only away from the side the item named: when a settings broadcast already moved the panel there,
+                    // a flip would bring it back.
+                    if (page._appSettings.sidePanelOnLeft == dockedLeft)
+                    {
+                        page._SidePanelFlipDock();
+                    }
+                });
+            }
+        });
+        menu.Items().Append(dock);
+
+        // ⌖ — the scroll-to-tab preference, a check item.
+        ToggleMenuFlyoutItem scrollToTab{};
+        scrollToTab.Text(L"Scroll to the selected tab");
+        scrollToTab.IsChecked(scrollToTabOn);
+        scrollToTab.Icon(SidePanelMenuGlyph(kSidePanelScrollToTabGlyph));
+        AgentSetTitledTip(scrollToTab, L"Scroll to the selected tab", winrt::hstring{ L"On: selecting a tab scrolls these cards to that tab's card \x2014 a card already on screen stays put. Clicking back into the terminal after peeking at another card scrolls back to your tab's card too.\nOff: the list keeps whatever scroll position you left it at.\nSaved globally \x2014 every open window follows it at once." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        AgentSetAutomationId(scrollToTab, L"am.side.scrollToTab");
+        scrollToTab.Click([weakThis, scrollToTabOn](const IInspectable&, const RoutedEventArgs&) {
+            if (const auto self = weakThis.get())
+            {
+                self->_SidePanelRunMenuCommand(L"scroll to the selected tab", [scrollToTabOn](TerminalPage& page) {
+                    // The item flipped its own check before Click; the setting is the truth. Flip only from the state the
+                    // check showed, so another window's change made while the menu was open is not undone.
+                    if (page._appSettings.sidePanelScrollToSelectedTab == scrollToTabOn)
+                    {
+                        page._SidePanelToggleScrollToTab();
+                    }
+                });
+            }
+        });
+        menu.Items().Append(scrollToTab);
+
+        // ⧉ — the card scope: LOCAL / GLOBAL for THIS window's list.
+        MenuFlyoutSubItem scope{};
+        scope.Text(_sidePanelGlobal ? L"Card scope: GLOBAL" : L"Card scope: LOCAL");
+        scope.Icon(SidePanelMenuGlyph(kSidePanelScopeGlyph));
+        AgentSetTitledTip(scope, L"Card scope", winrt::hstring{ L"Which sessions the cards list: LOCAL = only the sessions open in THIS window (the default), GLOBAL = every window's.\nRemembered for this window only \x2014 a new window always starts LOCAL \x2014 and independent of the Triage Board's own scope." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        AgentSetAutomationId(scope, L"am.side.scope");
+        for (const bool global : { false, true })
         {
-            return;
+            // A check item per scope, the current one checked. A click on the checked one changes nothing (its own
+            // check clears as the menu closes; the next open reads the scope again).
+            ToggleMenuFlyoutItem choice{};
+            choice.Text(global ? L"GLOBAL \x2014 every window's sessions" : L"LOCAL \x2014 this window's sessions");
+            choice.IsChecked(global == _sidePanelGlobal);
+            AgentSetAutomationId(choice, global ? L"am.side.scope.global" : L"am.side.scope.local");
+            choice.Click([weakThis, global](const IInspectable&, const RoutedEventArgs&) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelRunMenuCommand(L"card scope", [global](TerminalPage& page) { page._SidePanelSetScope(global); });
+                }
+            });
+            scope.Items().Append(choice);
         }
-        _sidePanelScrollToTabBtn.IsChecked(_appSettings.sidePanelScrollToSelectedTab);
+        menu.Items().Append(scope);
+
+        // ⇅ — the card order: the SHARED board sort, picked by name.
+        const std::wstring_view currentOrder = SidePanelOrderLabel(_appSettings.boardSort);
+        MenuFlyoutSubItem order{};
+        order.Text(winrt::hstring{ std::wstring{ L"Card order: " }.append(currentOrder) });
+        order.Icon(SidePanelMenuGlyph(kSidePanelOrderGlyph));
+        AgentSetTitledTip(order, L"Card order", winrt::hstring{ L"Order the session cards. The SAME saved order as the Triage Board's card sort \x2014 a pick here re-sorts the board too (and every window)." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        AgentSetAutomationId(order, L"am.side.sort");
+        for (const auto& entry : kSidePanelOrderChoices)
+        {
+            // Checked by the WORD the header shows, so a stray BY PID (shown as MOST ACTIVE, as on the board) checks
+            // MOST ACTIVE; picking it then really sets MOST ACTIVE (the setter compares the orders, not the words).
+            ToggleMenuFlyoutItem choice{};
+            choice.Text(entry.label);
+            choice.IsChecked(currentOrder == entry.label);
+            AgentSetTip(choice, winrt::hstring{ entry.tip }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+            AgentSetAutomationId(choice, L"am.side.sort." + ::Agentmaster::ToString(entry.order));
+            choice.Click([weakThis, picked = entry.order](const IInspectable&, const RoutedEventArgs&) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelRunMenuCommand(L"card order", [picked](TerminalPage& page) { page._SidePanelSetSort(picked); });
+                }
+            });
+            order.Items().Append(choice);
+        }
+        menu.Items().Append(order);
+
+        menu.Items().Append(MenuFlyoutSeparator{});
+
+        // « / » — the collapse, pointing toward the docked edge like the chevron it replaced; the strip's chevron (pointing
+        // away) brings the panel back.
+        MenuFlyoutItem collapse{};
+        collapse.Text(L"Collapse the side panel");
+        collapse.Icon(SidePanelMenuGlyph(dockedLeft ? kSidePanelCollapseLeftGlyph : kSidePanelCollapseRightGlyph));
+        AgentSetTip(collapse, winrt::hstring{ L"Collapse the side panel to a thin strip (click the strip to bring it back)." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        AgentSetAutomationId(collapse, L"am.side.collapse");
+        collapse.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+            if (const auto self = weakThis.get())
+            {
+                self->_SidePanelRunMenuCommand(L"collapse", [](TerminalPage& page) {
+                    // _SidePanelToggleCollapsed toggles: a menu built for the expanded panel must never expand it.
+                    if (!page._sidePanelCollapsed)
+                    {
+                        page._SidePanelToggleCollapsed();
+                    }
+                });
+            }
+        });
+        menu.Items().Append(collapse);
+    }
+
+    // Run one ⋯ menu command one dispatcher tick after its item's Click (SIDE_PANEL.md §2i). Inside the Click the menu is
+    // still closing and about to hand focus back, and two of the commands re-lay the very header the menu is anchored to
+    // (the collapse hides it, the dock flip moves it to the other column): no tree change inside a pointer handler, and the
+    // Agent Manager's menus defer every item one tick for the same reason. Normal priority: the command lands right after
+    // the menu's own close work, so the click still feels immediate.
+    //   what    - the command's name for the log line a failure writes ("dock", "card scope", ...).
+    //   command - the work, handed this page when the tick runs; written inside a TerminalPage member, it may call private
+    //             members. Not run when the page is gone by then (the window closed).
+    //   returns - nothing.
+    //   throws  - nothing: a refused enqueue (the window tearing down) and a throwing command are both contained and
+    //             logged (Rule #18) — the click is lost and nothing else changes.
+    void TerminalPage::_SidePanelRunMenuCommand(std::wstring_view what, std::function<void(TerminalPage&)> command)
+    {
+        try
+        {
+            Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis = get_weak(), whatText = std::wstring(what), run = std::move(command)]() {
+                const auto page = weakThis.get();
+                if (!page)
+                {
+                    return; // the window closed before the tick: nothing left to change
+                }
+                try
+                {
+                    run(*page);
+                }
+                catch (...)
+                {
+                    // The command stopped part-way; what it changed before the throw stays (each command saves its own
+                    // change first). Recorded with the command's name (Rule #18).
+                    ::Agentmaster::AgentLogCaughtException((L"side panel more menu: " + whatText).c_str());
+                }
+            });
+        }
+        catch (...)
+        {
+            // The dispatcher refused the hop (the window is tearing down): the click is lost. Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"side panel more menu: queue a command");
+        }
     }
 
     // The selected TAB now shows session `id` (a tab switch, or a terminal touch that ended a peek): when
@@ -4514,19 +4675,19 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Adopt GLOBAL settings changes for the side panel — called from the cog-save sink and the
-    // cross-window settings broadcast (both run after _appSettings was replaced): re-label the
-    // shared sort, re-dock if sidePanelOnLeft changed elsewhere, re-pin the ⌖ scroll-to-tab toggle
-    // (dropping an owed reveal when it turned off), push the summary content flags +
-    // color mode into the fill-hosted overlay (it is outside the _claudeOverlays broadcast loops),
-    // and rebuild the cards (sort/color rules may have changed). Per-window layout (fractions /
-    // collapse) is deliberately NOT touched — a global-default change only affects NEW windows.
+    // cross-window settings broadcast (both run after _appSettings was replaced): re-dock if
+    // sidePanelOnLeft changed elsewhere, drop an owed ⌖ reveal when scroll-to-tab turned off, push the
+    // summary content flags + color mode into the fill-hosted overlay (it is outside the _claudeOverlays
+    // broadcast loops), and rebuild the cards (the shared order / color rules may have changed). The
+    // header's ⋯ menu needs nothing here: it reads the order, ⌖ and the dock from _appSettings at its next
+    // open (SIDE_PANEL.md §2i). Per-window layout (fractions / collapse) is deliberately NOT touched — a
+    // global-default change only affects NEW windows.
     void TerminalPage::_SidePanelApplySettings()
     {
         if (!_sidePanelBuilt)
         {
             return;
         }
-        _SidePanelUpdateSortButton();
         // The "+" launcher card (SIDE_PANEL.md §2e) stays open across a settings broadcast — the user may be typing in
         // it while another window saves — unless the broadcast MOVED the dock: its "+" button then sits on the other
         // side of the window, away from the card it opened.
@@ -4535,10 +4696,8 @@ namespace winrt::TerminalApp::implementation
             _SidePanelCloseLaunchCard(L"dock moved by a settings change");
         }
         _SidePanelApplyDock(); // no-op when the dock side didn't change (idempotent assignments)
-        // ⌖ scroll-to-tab is GLOBAL: re-pin this window's toggle to the adopted value (another window's
-        // click broadcast it here), and if it just turned OFF, drop a reveal still owed so nothing scrolls
-        // after the user asked it not to.
-        _SidePanelUpdateScrollToTabButton();
+        // ⌖ scroll-to-tab is GLOBAL (another window's ⋯ menu may have broadcast it here): if it just turned OFF,
+        // drop a reveal still owed so nothing scrolls after the user asked it not to.
         if (!_appSettings.sidePanelScrollToSelectedTab)
         {
             _sidePanelRevealPendingId.clear();

@@ -10,7 +10,9 @@ a feature, SP-K2); **+** opens the
 launch row in a card at the click; per-window splitters; « collapses. 0.8.0: the card list is virtualized and
 a card costs no composition node; the **+** card opens with its folder list ready; one click on Launch
 while its preset menu is open. After 0.8.0 (NOT BUILT): each card's dot is the tab strip's status icon — the
-draft's three dots under it, the red unread ring, the cache-warm spark crown (SP-08).
+draft's three dots under it, the red unread ring, the cache-warm spark crown (SP-08). After 0.8.x (2026-11-03, NOT
+BUILT): the header line is **+** · **Sum** · **⋯**, and the ⋯ menu holds the dock, ⌖, the card scope, the card order
+and the collapse that were buttons on it (SP-10).
 
 ## Lifecycle model
 
@@ -20,7 +22,7 @@ draft's three dots under it, the red unread ring, the cache-warm spark crown (SP
    ├─ cards: one per session in scope; edited in place on registry changes (≥ 500 ms apart), timing texts every ~30 s
    ├─ summary: FOLLOWS the focused tab's session ──card click──► PEEK (pinned) ──click into the terminal──► FOLLOW
    ├─ + ─► launcher card at the click (folder list open) ─► launch / Esc×2 / outside / + / tab switch ─► closed
-   └─ « ─► 20 px strip ─► » ─► panel (updates deferred while collapsed, one catch-up)
+   └─ ⋯ ▸ Collapse (« on 0.8.x) ─► 20 px strip ─► » ─► panel (updates deferred while collapsed, one catch-up)
 
  per window (windows/<id>.json): width, split, collapsed, Sum, LOCAL/GLOBAL      global: dock side, ⌖, the defaults
 ```
@@ -42,8 +44,8 @@ folder color, draft dots, timing and tags; GLOBAL widens one window's list to ev
    panel), `leaf / branch`, tag ribbons in the band's top-right corner, three dots while a draft exists (since
    SP-08, NOT BUILT: under the dot, in the tab's status icon).
 3. **State follows.** *Do:* run a turn in A. *Expect:* A's dot and word follow STA-01 within a scan tick.
-4. **GLOBAL.** *Do:* window 1's LOCAL → GLOBAL. *Expect:* A, B, C; count `… across all windows`; window 2
-   stays LOCAL (no leak).
+4. **GLOBAL.** *Do:* window 1's ⋯ ▸ Card scope ▸ GLOBAL (its LOCAL → GLOBAL button on 0.8.x). *Expect:* A, B, C;
+   count `… across all windows`; window 2 stays LOCAL (no leak).
 5. **Restart.** *Expect:* window 1 reopens GLOBAL, window 2 LOCAL; a NEW window starts LOCAL.
 
 **Edge cases**
@@ -132,8 +134,8 @@ click back into the terminal; double-click jumps to a card's tab.
 **Phases**
 1. **Far card.** *Do:* 40 sessions; select a tab whose card is far below the view. *Expect:* the list jumps
    (unanimated) so that card is in view; the rows around it exist (virtualized list).
-2. **Toggle off.** *Do:* click ⌖ (global, broadcast to every window). *Expect:* selecting tabs no longer
-   scrolls the list.
+2. **Toggle off.** *Do:* ⋯ ▸ Scroll to the selected tab (the ⌖ button on 0.8.x; global, broadcast to every
+   window). *Expect:* selecting tabs no longer scrolls the list.
 3. **A new session** (launch) → its card starts at the TOP (MOST ACTIVE / MOST RECENT), so ⌖ does not drag
    the list to the bottom.
 
@@ -212,14 +214,16 @@ switch closes it; no keystroke leaks into the terminal.
    drag (they open only after 7 s of rest).
 2. **New window.** *Expect:* a new window uses the LAST resize as its default; the first window keeps its
    own.
-3. **Collapse.** *Do:* «. *Expect:* a 20 px strip; » restores; per window, last change seeds new windows.
-4. **Dock.** *Do:* ⇄. *Expect:* the panel moves to the right of the terminal in EVERY window (global); the
-   chevrons flip.
+3. **Collapse.** *Do:* ⋯ ▸ Collapse the side panel (« on 0.8.x). *Expect:* a 20 px strip; » restores; per window,
+   last change seeds new windows.
+4. **Dock.** *Do:* ⋯ ▸ Dock on the right (⇄ on 0.8.x). *Expect:* the panel moves to the right of the terminal in
+   EVERY window (global); the strip's chevron and the menu's collapse symbol flip.
 5. **Restart.** *Expect:* everything as left, per window.
 
 **Edge cases**
 - **E1 A corrupt record value** (width 0.9 in a window record) → falls back to the global default.
-- **E2 Button tooltips** (+, Sum, LOCAL/GLOBAL, sort, ⌖, ⇄, «) → open only after 3 s of rest.
+- **E2 Button tooltips** (+, Sum, ⋯ and every item of the ⋯ menu; on 0.8.x +, Sum, LOCAL/GLOBAL, sort, ⌖, ⇄, «) →
+  open only after 3 s of rest.
 
 ---
 
@@ -316,6 +320,43 @@ in Settings ▸ Sessions ▸ AI SEARCH (2 hours by default).
 - **E5 A restored list of unknown sessions** → their cards read "session <id8> — reading…" and fill in from disk within a
   moment.
 - **E6 No native claude.exe** → AI on shows the "Claude not detected" notice and the toggle stays off.
+
+---
+
+### SP-10 · The header's ⋯ menu
+
+> **Since** after 0.8.x (2026-11-03, NOT BUILT) · **P1** · **Needs** F-S2 · **Spec** SIDE_PANEL.md §2i
+
+**Promise.** The header line is **+**, **Sum** and **⋯**. The ⋯ menu holds what the other five buttons did, in the user's
+order — Dock on the right / left (⇄) · Scroll to the selected tab (⌖, a check) · Card scope ▸ · Card order ▸ · Collapse
+the side panel — each with its symbol left of its text and the current state in its text or its check; each item does
+exactly what its button did.
+
+**Phases**
+1. **The line.** *Expect:* `+ Sum ⋯`, right-aligned, whole on a narrow panel; ⋯ is named "More options"
+   (`am.side.more`); its tip opens after 3 s.
+2. **The menu.** *Do:* click ⋯. *Expect:* below the button, inside the panel: `Dock on the right` · `Scroll to the selected
+   tab` (checked: ⌖ is on by default) · `Card scope: LOCAL ›` · `Card order: MOST ACTIVE ›` · a separator · `Collapse the
+   side panel`. *Do:* Esc. *Expect:* the menu closes and nothing changed (no keystroke reached the terminal).
+3. **Card scope.** *Do:* ⋯ ▸ Card scope ▸ GLOBAL. *Expect:* the count line `… across all windows`; the next open reads
+   `Card scope: GLOBAL` with GLOBAL checked. LOCAL again restores the count line.
+4. **Card order.** *Do:* ⋯ ▸ Card order ▸ NEWEST, then OLDEST. *Expect:* the cards re-sort at once (t2 above t1, then t1
+   above t2), the Triage Board follows, settings.json `boardSort` reads `newest`, then `oldest`; the next open reads
+   `Card order: OLDEST` with OLDEST checked; each entry's tip says what it sorts by.
+5. **Scroll to the selected tab.** *Do:* pick it twice. *Expect:* settings.json `sidePanelScrollToSelectedTab` off, then
+   on; the next open shows the check that matches (every open window follows — SP-03).
+6. **Dock.** *Do:* ⋯ ▸ Dock on the right. *Expect:* the panel moves right; the next open reads `Dock on the left` and the
+   collapse symbol is `»`. *Do:* Dock on the left. *Expect:* back.
+7. **Collapse.** *Do:* ⋯ ▸ Collapse the side panel. *Expect:* the 20 px strip; its chevron restores the panel.
+
+**Edge cases**
+- **E1 Another window changes a setting while this menu is open** (the order, ⌖, the dock) → the pick acts on what the menu
+  showed: a dock or ⌖ item that no longer matches the state does nothing (never flips it back), an order or scope already
+  set does nothing; the next open shows the new state.
+- **E2 The + launcher card is open** → the press on ⋯ closes it (an outside press), then the menu opens.
+- **E3 A card peek** → opening and closing the menu keeps the peeked card selected (the menu's focus hand-back is no touch
+  of the terminal, SP-02 phase 8).
+- **E4 Docked right** → the menu still opens inside the panel (right edges aligned with ⋯).
 
 ---
 

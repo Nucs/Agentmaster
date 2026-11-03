@@ -1342,8 +1342,8 @@ namespace winrt::TerminalApp::implementation
     // MOST ACTIVE (it never visits BY PID — pid grouping is meaningless once cards split across the state
     // columns). MOST RECENT orders by the newest TURN BOUNDARY only (SessionInfo::turnStart/EndUnixMs —
     // the user's last prompt SENT / the assistant's last turn FINISHED), never mid-turn tool or subagent
-    // activity and with no Running pin — the sharper twin of MOST ACTIVE. The side panel's order button
-    // shares this setting and cycle (AgentManagerContent::CycleBoardSort).
+    // activity and with no Running pin — the sharper twin of MOST ACTIVE. The side panel's ⋯ ▸ Card order
+    // submenu shares this setting, picking an order by name (AgentManagerContent::SetBoardSort, below).
     // A SEPARATE global setting from the tree's sort (AppSettings::boardSort), so the board and tree
     // remember their own order. Like treeSort it is GLOBAL + persisted: mutate _appSettings.boardSort,
     // refresh the label, push it through the settings sink (the page persists settings.json), so the
@@ -1375,6 +1375,29 @@ namespace winrt::TerminalApp::implementation
         if (_settingsSink)
         {
             _settingsSink(_appSettings); // persist globally (settings.json) + re-materialize
+        }
+        _Refresh();
+    }
+
+    // Agentmaster (SIDE_PANEL.md §2i): the side panel's ⋯ ▸ Card order pick — the board sort set to the order the user
+    // named, where _CycleBoardSort steps to the next one. Same tail as the cycle, so the board's label, settings.json, the
+    // other windows (the sink broadcasts) and this lens all follow one pick exactly as they follow one cycle step.
+    //   order   - the picked order (any ExplorerSort; the menu offers the five the cycle visits).
+    //   returns - nothing.
+    //   throws  - what the settings sink and _Refresh throw; the side panel's menu command contains and logs it (Rule #18).
+    void AgentManagerContent::SetBoardSort(::Agentmaster::ExplorerSort order)
+    {
+        if (_appSettings.boardSort == order)
+        {
+            // Already the order (a pick of the checked item): nothing to save, and a broadcast would wake every other
+            // window to re-sort for no change.
+            return;
+        }
+        _appSettings.boardSort = order;
+        _UpdateBoardSortButton();
+        if (_settingsSink)
+        {
+            _settingsSink(_appSettings); // persist globally (settings.json) + broadcast + re-materialize — the cycle's path
         }
         _Refresh();
     }
