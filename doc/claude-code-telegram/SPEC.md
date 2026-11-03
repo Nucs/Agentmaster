@@ -81,7 +81,8 @@ Claude's final reply — rich Markdown (tables render), quoting the prompt it an
   own recorded commands (`/compact`, `/model x`, skills) are queued like prompts; commands that leave no record are refused.
 - **Buttons** answer Claude Code's `AskUserQuestion` dialogs (options, own words, notes, several questions as tabs) and its
   `/add-dir` dialog; the card's buttons restart, reactivate, interrupt (Esc), park, fork, and draw the screen.
-- **Voice notes** are transcribed with the session's own vocabulary and read as the prompt they say.
+- **Voice notes** are transcribed with the session's own vocabulary and read as the prompt they say (in the Search topic: with
+  the fleet's names, as the search they say).
 - **Only a turn's final message makes a sound.** Everything else is silent, an edit, or deleted after use.
 
 ### 1.2 The picture
@@ -469,7 +470,7 @@ Every default reproduces the behavior of a settings file that lacks the field.
 | `voiceWorkerCommand` | "" | The voice worker's command line. |
 | `voiceEndpoint` / `voiceModel` | "" | An OpenAI-compatible transcription endpoint and model. |
 | `voiceLanguage` | en | "" = detect. |
-| `voiceUseSessionContext` | on | The session's folder and CLAUDE.md join the vocabulary. |
+| `voiceUseSessionContext` | on | The session's folder and CLAUDE.md join the vocabulary (a Search note's: the fleet's folders and tab titles, §19.3). |
 | `voiceDictionary` | "" | The owner's own spellings (§19.4). |
 | `voiceWorkerIdleMinutes` | 10 | The worker ends after this long without a note. |
 | `voiceEchoTranscript` | on | Post the transcript under the note. |
@@ -1700,8 +1701,9 @@ window does not know (an older host) reads as a failure.
 
 ### 14.1 What it does
 
-A message in the Search topic is a REQUEST in plain words ("the session where I fixed the tab drag crash"); follow-ups refine
-it. A search agent — an LLM with session-search tools (the reference: Claude Sonnet 5.5 through a headless Claude Code process
+A message in the Search topic is a REQUEST in plain words ("the session where I fixed the tab drag crash"), typed or said in a
+voice note (§19: transcribed with the fleet's names as its vocabulary, its transcript echoed under it is the request); follow-ups
+refine it. A search agent — an LLM with session-search tools (the reference: Claude Sonnet 5.5 through a headless Claude Code process
 with in-process MCP tools, no user settings, no hooks, no session persistence) — reads the sessions it finds BEFORE it shows
 them, and answers with evidence. The topic is the phone's way to find any Claude Code session ever run on the PC and bring
 it back into a tab, and so into a topic.
@@ -1820,7 +1822,7 @@ project-a · 11 Oct · 14 prompts
 - Not done (answered where typed, nothing deleted): with no Search topic yet; for a `/search` older than the backlog limit.
   A new thread whose ONLY message was such a command is deleted once the command left it.
 - Notes that land in Search: the start note (§23.2), the recreation and replay notes ("✅ History added to N topic(s) (M
-  message(s)) …"), the secretary probe's verdict. A voice note there is answered ("reads typed searches only").
+  message(s)) …"), the secretary probe's verdict. A voice note there is a request like a typed one (§19.2).
 
 ---
 
@@ -2232,24 +2234,27 @@ byte-level filter parses only the transcript lines that can carry a fact (a 10.8
 
 ### 19.1 What happens
 
-1. A voice note (an audio file, a round video note) in a session's topic gets **👀** (heard).
+1. A voice note (an audio file, a round video note) in a session's topic — or in the Search topic — gets **👀** (heard).
 2. The voice thread downloads it (`getFile` — paced by the chat's slot — and the file download, ≤ **20 MB**), transcribes it with
-   the SESSION'S VOCABULARY (§19.3), runs the dictionary pass (§19.4) and the correction (§19.5), and deletes the file.
+   the SESSION'S VOCABULARY (§19.3; a Search note's is the FLEET's), runs the dictionary pass (§19.4) and the correction
+   (§19.5), and deletes the file.
 3. The transcript is posted silently under the note: `🎤 <i>Check why the ConPTY host drops …</i>` (a setting); a correction that
    ran and failed adds `⚠️ not corrected: <why>` and the engine's words go on.
 4. The note is then read EXACTLY like a typed message of that topic: a queued prompt whose reactions land on the NOTE, or the
    answer an open question card takes, or the backlog question for a note sent while the bridge was down — judged by when the
-   note ARRIVED, so a slow transcription never makes a live note backlog. A caption typed under the recording follows the
-   transcript.
+   note ARRIVED, so a slow transcription never makes a live note backlog. In the Search topic it is a search typed there
+   (§14: a request, `/clear`, a fleet command; "Searching…", then the answer), with the backlog rule judged at arrival too. A
+   caption typed under the recording follows the transcript.
 
 ### 19.2 Routing and order
 
-- A note goes where a typed message of its thread goes: a session's topic → transcribed; a thread whose bind is handing over →
-  held in the bind; a thread no session owns (writing in "All" opens one) → HELD by the new-thread wizard, untranscribed (its
-  folder picker goes up with it: "Your message waits here and becomes the session's first prompt"), and transcribed at the
-  hand-over WITH the new session (its folder and CLAUDE.md are the vocabulary), then queued as its first prompt, read as a held
-  message (no backlog question); the main view, the Search topic, a recreated topic's old thread → answered, never queued (each
-  answer says where a note IS read).
+- A note goes where a typed message of its thread goes: a session's topic → transcribed; the Search topic → transcribed with
+  no session (the fleet's vocabulary, §19.3) and read as a search typed there; a thread whose bind is handing over → held in
+  the bind; a thread no session owns (writing in "All" opens one) → HELD by the new-thread wizard, untranscribed (its folder
+  picker goes up with it: "Your message waits here and becomes the session's first prompt"), and transcribed at the hand-over
+  WITH the new session (its folder and CLAUDE.md are the vocabulary), then queued as its first prompt, read as a held message
+  (no backlog question); the main view, a recreated topic's old thread → answered, never queued (each answer says where a note
+  IS read: the main view's names the session topics, the Search topic and a new thread).
 - Answered at ARRIVAL, never after a wait (a held note too): voice notes off, no transcriber, the bot stopping, no file, over
   20 MB. A failed transcription: "🎤 I could not transcribe this voice note: <why>".
 - **Order**: a message of the same thread that arrives while a note is being transcribed WAITS behind it in that thread's lane
@@ -2284,6 +2289,13 @@ byte-level filter parses only the transcript lines that can carry a fact (a 10.8
   weight first.
 - **The owner's dictionary**: one entry per line, `Word` (boost it, respell its generated forms) or `spoken form, other form =>
   Word` (an explicit trigger); `#` starts a comment.
+- **A note in the Search topic** goes to no session, so it has no folder, title or CLAUDE.md of its own: the names a spoken search
+  says are the FLEET's. Its vocabulary is the glossary, the name of every folder a session worked in (live and closed sessions,
+  the launch and the inferred folder, each once by the folder key, the most recently active first) by the folder rule above
+  (weight 3, respellable; a lowercase or everyday name adds nothing), the open tabs' titles (the most recent first, each once)
+  by the title rule (weight 2), and the owner's dictionary. At most **40** folder names join and **40** titles are read — the
+  prompt, the hotwords and the glossary are shared with the built-in glossary, and a request names a project or two. The
+  setting that keeps a session's folder out keeps the fleet's names out too.
 
 ### 19.4 The dictionary pass
 
@@ -2292,7 +2304,9 @@ looked up among the curated triggers, the canonical spellings and the GENERATED 
 case-split parts "con pty", its acronyms spelled out "con p t y", a long name's two-part splits "tele bridge"). A single
 everyday word is never rewritten; several everyday words respell only into a CURATED term (the folder name, the glossary, the
 owner's dictionary — never a mined identifier); a curated trigger is a decision someone made and passes ("clawed" → Claude,
-"jason l" → JSONL). Punctuation around a window is kept; a canonical window is left alone (the pass is idempotent).
+"jason l" → JSONL). Punctuation around a window is kept; a canonical window is left alone (the pass is idempotent — except
+beside a mined term that holds a curated one: with a title's `ConPTY-fix`, "con pty fix" becomes "ConPTY fix", and only a SECOND
+pass would make it "ConPTY-fix"; the bridge runs the pass once per hearing).
 
 ### 19.5 The correction (fusion)
 
@@ -2935,5 +2949,5 @@ line).
   `renameThread`, `deleteThread`, `send`, `edit`, `delete`, `react`, `draft`, `ack`; inbound events), one-way alert webhooks.
 - **F.6 Plan approval** through the same PermissionRequest hook (measured to approve and reject `ExitPlanMode`); outside this
   design's scope.
-- **F.7 Voice**: a bundled native worker (§19.6); spoken commands ("slash compact" → `/compact`); voice in the Search topic; other
-  languages.
+- **F.7 Voice**: a bundled native worker (§19.6); spoken commands ("slash compact" → `/compact`); other languages. (Voice in the
+  Search topic is in: §19.2.)

@@ -6458,7 +6458,7 @@ includes it: an added inline function, no layout change).
 13. (2026-11-01) A turn resumed mid-way by the restore wake: the spinner never holds still, so the picture comes after ~3 looks
     (`moving=3` in the census for it), not after 120 s.
 
-### 21.43 🎤 Voice notes: a voice note in a session's topic is read as the prompt it says (2026-10-27; in dev since 0.0.1.38, in production since 0.8.0.1; a note in a NEW thread since dev 0.0.1.39)
+### 21.43 🎤 Voice notes: a voice note in a session's topic is read as the prompt it says (2026-10-27; in dev since 0.0.1.38, in production since 0.8.0.1; a note in a NEW thread since dev 0.0.1.39; a note in the 🔎 Search topic is a search since 2026-11-03, NOT BUILT — the next build must purge: `Messaging.h`, `VoiceBridge.h`)
 
 The design, the FluidVoice study, the POC and its measurements: [`VOICE.md`](VOICE.md). Here, what the bot does.
 
@@ -6483,10 +6483,22 @@ The design, the FluidVoice study, the POC and its measurements: [`VOICE.md`](VOI
   first prompt, read as a held message (no backlog question however long the pick took). A typed message held after it
   follows it in order (it waits in the lane, still read as held). A note sent while the thread's bind hands over waits in
   the bind the same way (before: "send the voice note again in a moment").
-* **Answered, never queued:** a note in the chat's main view, in the 🔎 Search topic or in a recreated topic's old thread
-  (each answer says where a note IS read), with voice notes off, with no transcriber (the m5 harness), with no file, over
-  20 MB — all of these at the note's ARRIVAL, a held note too, so it never waits through a folder pick to fail — or a failed
-  transcription ("🎤 I could not transcribe this voice note: <why>").
+* **In the 🔎 Search topic** (2026-11-03, the owner's "the search topic cannot read the voice messages"; NOT BUILT): a note is a
+  SEARCH, like a typed message there (`VoiceNoteRoute::TranscribeForSearch`). It gets 👀 and is transcribed now with no session —
+  the Search topic has no folder, title or CLAUDE.md, so the vocabulary is the FLEET's: every folder the registry's sessions
+  worked in (live and archived, the launch and the inferred folder, each once by `NormDirKey`, the most recently active first)
+  and the open tabs' titles (the most recent first, each once), by the same folder and title rules as a session's, at most 40
+  names and 40 titles (`FillVoiceSearchContext`, `SearchVocabulary`; VOICE.md §5.6). The 🎤 echo comes under the note, then
+  `_handleSearchMessage` reads the transcript like a typed request: "Searching…" and the answer with its numbered cards (or
+  `/clear` / a fleet command, when that is what it says); a note sent while Agentmaster was closed gets the backlog answer,
+  judged at its ARRIVAL (`am_voice_live`). A typed follow-up waits behind the note in the topic's lane. The search is asked from
+  the tick thread, which is safe: `_search` is written only under `_mtx`, and `SearchBridge`'s methods may be called from any
+  of the service's threads. The topic's `/help` says a voice note is a search too. Before: "The 🔎 Search topic reads typed
+  searches only — type it, or send the voice note in a session's topic."
+* **Answered, never queued:** a note in the chat's main view (its answer names where a note IS read: a session's topic, the
+  🔎 Search topic, a new thread) or in a recreated topic's old thread, with voice notes off, with no transcriber (the m5
+  harness), with no file, over 20 MB — all of these at the note's ARRIVAL, a held note too, so it never waits through a folder
+  pick to fail — or a failed transcription ("🎤 I could not transcribe this voice note: <why>").
 * **Engines** (VOICE.md §6): a local VOICE WORKER (`voiceEngine = worker`: `voiceWorkerCommand`, or the bundled worker once it
   ships) spoken to in JSON lines, which may return a second engine's hearing (`alternatives`) for the correction's fusion; or
   an OpenAI-compatible endpoint (`openai`; the key in Credential Manager). One note at a time across every topic (the voice
@@ -6496,8 +6508,10 @@ The design, the FluidVoice study, the POC and its measurements: [`VOICE.md`](VOI
 * **Stop:** `_voiceStop` runs first and kills the engine (a note in flight fails fast); the notes and held messages still in
   the lanes are logged and dropped (send them again).
 * **Logs:** `hooks.log` `[msg] <sid> voice note queued for transcription …` / `… transcribed (N chars, <engine>, … ms, N
-  vocabulary fix(es)[, corrected in N ms | , correction kept it, N ms | , correction failed: <why>])` / `… not transcribed …`,
-  `[nav] remote telegram voice …`; the engine's and the correction's own lines in `voice.log`.
+  vocabulary fix(es)[, corrected in N ms | , correction kept it, N ms | , correction failed: <why>])` / `… not transcribed …`
+  (a Search note's: `[msg] Search topic voice note …`), `[nav] remote telegram voice <sid8 | search> …`; the engine's and the
+  correction's own lines in `voice.log` (a Search note's: `[voice] search … N terms (the fleet's: F folder(s), T title(s)
+  offered)`).
 
 **Check after the build** (dev, the dev bot; `voiceWorkerCommand` = the POC worker WITH `--fuse`, VOICE.md §6.2):
 1. A voice note in a session's topic: 👀 at once; within seconds the 🎤 line under it, then ✍ on the NOTE and the prompt in
@@ -6510,7 +6524,14 @@ The design, the FluidVoice study, the POC and its measurements: [`VOICE.md`](VOI
    the note is still queued.
 4. A voice note, then at once a typed message: the session's queue holds the transcript FIRST.
 5. An open question card answered by a voice note: the card takes the transcript as its answer.
-6. A voice note in the 🔎 Search topic: the "reads typed searches only" answer, nothing queued.
+6. A voice note in the 🔎 Search topic ("find the Agentmaster sessions about voice notes"): 👀 at once, then the 🎤 line under
+   it, "Searching…" and the answer with its numbered cards — as for the same words typed; nothing is queued in any session.
+   Right after it a typed follow-up ("only the ones from this week"): it is asked AFTER the note's search. `hooks.log`:
+   `[msg] Search topic voice note queued for transcription (…, a search: the fleet's names are its vocabulary)`, then `…
+   transcribed …`; `voice.log`: `[voice] search … N terms (the fleet's: F folder(s), T title(s) offered)` with F and T above
+   zero, and the 🎤 line spelling Agentmaster as one word (when the engine wrote it split, `voice.log`'s fixes show
+   `[agent master → Agentmaster]`). `/help` there names voice notes. A voice note in the chat's main view: the answer names the
+   Search topic among the places a note is read.
 7. The worker command broken (a wrong path): "I could not transcribe this voice note: the voice worker could not start …".
 8. The cog's VOICE NOTES status line: the engine, "running" after a note, the last failure when there was one; the worker
    ends after the idle minutes (`voice.log`: "idle for … min").

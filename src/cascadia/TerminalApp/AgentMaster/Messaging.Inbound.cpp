@@ -797,8 +797,8 @@ namespace Agentmaster::Msg
         }
         // §21.43 (VOICE.md §6): a VOICE NOTE (an audio file, a round video note) goes to the voice thread and its thread's lane,
         // and any later message of a thread whose lane still holds something waits there behind it — so a note and a typed
-        // follow-up reach the session in the order the user sent them. The tick hands a held message back here with
-        // fromVoiceLane set, which skips this step (it must never be held twice).
+        // follow-up reach the session (or, in the 🔎 Search topic, the Search agent) in the order the user sent them. The tick
+        // hands a held message back here with fromVoiceLane set, which skips this step (it must never be held twice).
         if (!fromVoiceLane && _voiceTake(msg, sessionId, threadId, bindHandingOver, edited))
         {
             return;
@@ -2067,9 +2067,11 @@ namespace Agentmaster::Msg
         // refused because this conversation is not a session, and Claude Code's commands have no session here.
         const SearchTopicMessage m = ClassifySearchTopicMessage(text);
         // The backlog rule (D2, M9) for what acts on the conversation: a request or a clear sent while Agentmaster was
-        // closed is answered, never carried out unasked.
+        // closed is answered, never carried out unasked. §21.43: a VOICE NOTE's transcript carries "am_voice_live" when the note
+        // was no backlog when it ARRIVED (_voiceTake) — a slow transcription (a first worker start loading its model, a long
+        // note) must not turn a spoken search sent live into an "ask again" answer.
         const int64_t dateMs = msg.I64At(L"date", 0) * 1000;
-        const bool backlog = IsBacklogUpdate(dateMs, WallMs());
+        const bool backlog = !msg.BoolAt(L"am_voice_live") && IsBacklogUpdate(dateMs, WallMs());
         switch (m.verb)
         {
         case SearchTopicVerb::Clear:
@@ -2327,8 +2329,11 @@ namespace Agentmaster::Msg
             _searchLastUsedMs = WallMs();
             _searchParked = false;
         }
-        // `_search` is read outside `_mtx`: it is created and used only on this (the poll) thread, and Stop() resets it
-        // only after it has joined this thread.
+        // `_search` is read outside `_mtx`, which holds because it is WRITTEN only under `_mtx` — made once by
+        // _ensureSearchBridge (just above, through `_mtx`, which orders this read after the write, whichever thread made it)
+        // and reset only by Stop() after it has joined the poll and tick threads. The asking thread is the poll thread for a
+        // typed request, or the tick thread for a voice note's transcript and a message that waited behind one in a voice
+        // lane (§21.43); SearchBridge's methods may be called from any of the service's threads.
         const uint64_t turn = _search->Ask(text);
         LogNav(L"remote telegram search turn=" + std::to_wstring(turn) + L" chars=" + std::to_wstring(text.size()));
         _reply(threadId, L"<i>Searching\x2026</i>", false);
@@ -2342,8 +2347,8 @@ namespace Agentmaster::Msg
         {
             return;
         }
-        // Outside `_mtx`, like Ask (the poll thread owns `_search`): Reset ends a running request, deletes the record and
-        // the view file, and restarts the process when one was up.
+        // Outside `_mtx`, like Ask (see _askSearch for why the unlocked read holds on the poll and the tick thread alike):
+        // Reset ends a running request, deletes the record and the view file, and restarts the process when one was up.
         _search->Reset();
         {
             std::lock_guard lk{ _mtx };
@@ -5823,8 +5828,9 @@ namespace Agentmaster::Msg
         std::wstring html;
         if (searchTopic)
         {
-            // §21.38: a pick's menu fits where the session stands, so the help names each first button.
-            html = L"<b>\U0001F50E Search</b>\nWrite what you look for in plain words; the agent reads the sessions it finds and answers with one numbered card each, quoting the evidence it saw. Tap a number to pick one: its menu fits where the session stands \x2014 \x25B6 Resume a closed one, \x25B6 Activate a deactivated tab, \x23F0 Wake an idle one, \U0001F4AC Go to topic \x2014 or \x2442 Fork it. A follow-up refines the last answer.\n"
+            // §21.38: a pick's menu fits where the session stands, so the help names each first button. §21.43: a voice note is
+            // a search too (its transcript, echoed under it, is the request).
+            html = L"<b>\U0001F50E Search</b>\nWrite what you look for in plain words, or say it in a voice note; the agent reads the sessions it finds and answers with one numbered card each, quoting the evidence it saw. Tap a number to pick one: its menu fits where the session stands \x2014 \x25B6 Resume a closed one, \x25B6 Activate a deactivated tab, \x23F0 Wake an idle one, \U0001F4AC Go to topic \x2014 or \x2442 Fork it. A follow-up refines the last answer.\n"
                    L"It is one conversation for the whole app: it carries on after a restart, and /clear (or \x2298 Clear under an answer) starts it over.\n"
                    L"/idle \x2014 the idle tabs\n/board \x2014 counts per state\n/newsession &lt;folder&gt; [model] \x2014 or open a new thread and pick its folder\n/pauseall \x00B7 /resumeall\n/status \x2014 the bot, then Claude Code's account and plan usage\n/clear \x2014 forget the search conversation\n/verbose on|off \x2014 the default for all topics: the work too, or the conversation only\n/recreate \x2014 make the session topics again in MOST RECENT order, with their history, verbose or not (asks first)\n"
                    // §21.19: the hyphenated spelling only inside <code>: a client makes a command LINK of "/search-tab" only up

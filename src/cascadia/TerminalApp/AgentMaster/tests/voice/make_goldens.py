@@ -34,7 +34,7 @@ TERMS = [
     "SHA-256", "MSIX", "XAML", "kHz", "regex", "Ogg", "Opus", "NVMe", "cuDNN", "Win32", "ARM64",
 ]
 
-#: Transcripts the dictionary pass rewrites (or must leave alone), across the three vocabularies below.
+#: Transcripts the dictionary pass rewrites (or must leave alone), across every vocabulary below.
 TRANSCRIPTS = [
     "Check why the Con PTY host in Agent Master drops the hook events from the named pipe after a session resumes.",
     "Check why the ConPTY host in AgentMaster drops the hook events.",
@@ -55,10 +55,27 @@ TRANSCRIPTS = [
     "we go on and the server rejects it",
     "(con PTY),",
     "fluid boys said hi",
+    # Spoken SEARCH requests (search_vocabulary): the fleet's names respelled, the everyday words around them left alone.
+    # ("con pty HOST", not "con pty fix": next to the title term ConPTY-fix the pass is not idempotent - VOICE.md §5.4 - and
+    # tests_voice.cpp's second pass would ask a spelling this script never records.)
+    "find the agent master sessions about the con pty host and the better clipboard tab",
+    "open the fluid voice one, then the num sharp np where port",
 ]
 
-#: The owner's dictionary text the third vocabulary carries.
+#: The owner's dictionary text the "+dictionary" vocabularies carry.
 DICTIONARY = "# my words\nFluidVoice\nfluid voice, fluid boys => FluidVoice\n\njay son el => JSONL\nRunPod\n"
+
+#: A spoken search's FLEET (search_vocabulary): the folders, most recently active first. Every slot rule is here: a name
+#: that joins (Agentmaster, BetterClipboard with its trailing separator, FluidVoice with forward slashes), a generic leaf
+#: ("src" of NumSharp\src), a second clone of a name already judged (agentmaster: never asked again), a drive root (no
+#: name) and a lowercase name (kvnode, catalog).
+SEARCH_FOLDERS = [
+    r"K:\source\Agentmaster", r"K:\source\NumSharp\src", r"Q:\tmp\agentmaster", "K:\\", r"K:\source\kvnode",
+    "C:\\Users\\me\\BetterClipboard\\", r"K:\source\catalog", "K:/work/FluidVoice",
+]
+
+#: ...and the tabs' titles, most recently active first (an empty one adds nothing).
+SEARCH_TITLES = ["fluidvoice telegram ConPTY-fix", "Proxmox backup (fork)", "NumSharp np.where port", "Telegram voice notes", ""]
 
 
 def main() -> int:
@@ -112,6 +129,12 @@ def main() -> int:
         "session+dictionary": vocab.session_vocabulary(workdir=Path(r"K:\source\Agentmaster"), title="",
                                                        claude_md_text=sample,
                                                        dictionary=vocab.parse_dictionary(DICTIONARY)),
+        # A spoken search (the Search topic): the fleet's names, at the default caps; with the owner's dictionary; and
+        # capped hard (2 names: the folders after BetterClipboard are never read; 1 title).
+        "search": vocab.search_vocabulary(SEARCH_FOLDERS, SEARCH_TITLES),
+        "search+dictionary": vocab.search_vocabulary(SEARCH_FOLDERS, SEARCH_TITLES,
+                                                     dictionary=vocab.parse_dictionary(DICTIONARY)),
+        "search-capped": vocab.search_vocabulary(SEARCH_FOLDERS, SEARCH_TITLES, max_folders=2, max_titles=1),
     }
     for name, v in vocabularies.items():
         entry = {
@@ -162,6 +185,16 @@ def main() -> int:
         "session": {"workdir": r"K:\source\Agentmaster", "title": "fluidvoice telegram ConPTY-fix", "dictionary": False},
         "session+dictionary": {"workdir": r"K:\source\Agentmaster", "title": "", "dictionary": True},
     }
+    # The search vocabularies' inputs. "defaults" means the C++ builds it WITHOUT passing caps, so its own default caps are
+    # what is checked; "search_defaults" pins those defaults to the reference's.
+    goldens["search_args"] = {
+        "folders": SEARCH_FOLDERS,
+        "titles": SEARCH_TITLES,
+        "search": {"dictionary": False, "defaults": True},
+        "search+dictionary": {"dictionary": True, "defaults": True},
+        "search-capped": {"dictionary": False, "defaults": False, "max_folders": 2, "max_titles": 1},
+    }
+    goldens["search_defaults"] = {"max_folders": vocab.SEARCH_MAX_FOLDERS, "max_titles": vocab.SEARCH_MAX_TITLES}
 
     (HERE / "vocab_goldens.json").write_text(json.dumps(goldens, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     lines = [f"{w}\t{1 if a else 0}" for w, a in sorted(asked.items())]

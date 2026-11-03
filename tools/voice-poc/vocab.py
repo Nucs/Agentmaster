@@ -12,7 +12,9 @@ FluidVoice (altic-dev/FluidVoice, GPLv3; studied, not copied) gets technical wor
 3. **AI Enhancement**: an optional LLM pass over the text (``llm_fix.py`` here).
 
 Here the same three layers take their words from WHERE THE PROMPT GOES - the session's working folder (its name, its
-CLAUDE.md) - plus a built-in developer glossary, so nobody has to maintain a word list per project:
+CLAUDE.md) - plus a built-in developer glossary, so nobody has to maintain a word list per project. A spoken SEARCH
+request (Agentmaster's Search topic) goes to no session: its words are the FLEET's - the folders its sessions worked in
+and its tabs' titles (``search_vocabulary``, by the same folder and title rules). The three uses:
 
 * ``Vocabulary.whisper_prompt`` - Whisper's ``initial_prompt`` (the decoder conditions on it, ~224 tokens at most).
 * ``Vocabulary.hotwords`` - sherpa-onnx's per-stream hotwords for Parakeet TDT (modified beam search + an Aho-Corasick
@@ -649,6 +651,91 @@ def parse_dictionary(text: str) -> list[tuple[str, list[str]]]:
     return out
 
 
+#: A spoken SEARCH request's vocabulary (``search_vocabulary``) takes at most this many folder NAMES - the first ones the
+#: folder rule accepts, most recently active first - and reads at most this many titles. Whisper's ~700-character prompt,
+#: the 96 hotwords and the correction's 160-term glossary are shared with the built-in glossary, and a request names a
+#: project or two, not the whole fleet: past these, the names that were active longest ago would only push the glossary
+#: out. VoiceVocabulary.h's kSearchVocabularyMaxFolders / kSearchVocabularyMaxTitles are the C++ twins (the goldens pin both).
+SEARCH_MAX_FOLDERS = 40
+SEARCH_MAX_TITLES = 40
+
+
+def _add_folder_name(v: Vocabulary, leaf: str) -> bool:
+    """The FOLDER RULE: a working folder's own name joins at weight 3, respellable ("agent master" -> Agentmaster), when it
+    is distinctive; an everyday or all-lowercase name ("src", "catalog", "kvnode") adds nothing - the casing is the only
+    thing the pass could fix there, and it never re-cases (``is_distinctive``). ``session_vocabulary`` and
+    ``search_vocabulary`` both use it, so a session's folder and a fleet's folder are judged alike.
+
+    Args:
+        v: The vocabulary to add to.
+        leaf: The folder's last component (``Path(workdir).name``; "" for a drive root, which has no name).
+
+    Returns:
+        True when the name joined (a name already in the vocabulary is raised to weight 3 and counts as joined).
+    """
+    if leaf and is_distinctive(leaf):
+        v.add(leaf, 3.0, "context")
+        return True
+    return False
+
+
+def _add_title_words(v: Vocabulary, title: str) -> None:
+    """The TITLE RULE: a session title's distinctive, hard words join at weight 2, mined - so never respelled from a
+    window of plain English words (``Term.respell_split``). ``session_vocabulary`` and ``search_vocabulary`` both use it.
+
+    Args:
+        v: The vocabulary to add to.
+        title: The title ("" or None adds nothing).
+    """
+    for word in re.findall(r"[A-Za-z][A-Za-z0-9+#.-]+", title or ""):
+        if is_distinctive(word) and is_hard(word):
+            v.add(word, 2.0, "context", respell_split=False)
+
+
+def search_vocabulary(folders: Iterable[str | Path] = (), titles: Iterable[str] = (), include_builtin: bool = True,
+                      dictionary: Iterable[tuple[str, list[str]]] = (), max_folders: int = SEARCH_MAX_FOLDERS,
+                      max_titles: int = SEARCH_MAX_TITLES) -> Vocabulary:
+    """The vocabulary of a spoken SEARCH request (Agentmaster's Search topic; VOICE.md §5.6). It goes to no session, so
+    there is no folder, title or CLAUDE.md of its own: the names a search says are the FLEET's - the folders its sessions
+    worked in and its tabs' titles. The built-in glossary, then each folder's name by the folder rule
+    (``_add_folder_name``: weight 3, respellable), each title's hard words by the title rule (``_add_title_words``:
+    weight 2), and the owner's dictionary (weight 3).
+
+    Both lists come most relevant first (Agentmaster passes the most recently active first). Within a weight the terms
+    keep the order they joined in, so every use that truncates (Whisper's prompt, the hotwords, the glossary line) keeps
+    the most recent names.
+
+    Args:
+        folders: The fleet's folders. A name already judged (case-insensitively: another clone, a case variant), a drive
+            root and a name the folder rule refuses take no slot; a judged name is never asked about again.
+        titles: The tabs' titles.
+        include_builtin: False for a context-only vocabulary (an ablation in the evaluation).
+        dictionary: The owner's dictionary entries (``parse_dictionary``), weight 3 with their triggers.
+        max_folders: At most this many folder names join; the folders after the last one are not read.
+        max_titles: At most this many titles are read (the first ones).
+
+    Returns:
+        The vocabulary.
+    """
+    v = Vocabulary.builtin() if include_builtin else Vocabulary()
+    names = 0
+    seen: set[str] = set()
+    for folder in folders:
+        if names >= max_folders:
+            break
+        leaf = Path(folder).name
+        if not leaf or leaf.lower() in seen:
+            continue
+        seen.add(leaf.lower())
+        if _add_folder_name(v, leaf):
+            names += 1
+    for title in list(titles)[:max_titles]:
+        _add_title_words(v, title)
+    for term, triggers in dictionary:
+        v.add(term, 3.0, "user", True, triggers)
+    return v
+
+
 def session_vocabulary(workdir: Path | None = None, title: str = "", claude_md_text: str | None = None,
                        include_builtin: bool = True, extra: Iterable[str] = (),
                        dictionary: Iterable[tuple[str, list[str]]] = ()) -> Vocabulary:
@@ -669,9 +756,8 @@ def session_vocabulary(workdir: Path | None = None, title: str = "", claude_md_t
     """
     v = Vocabulary.builtin() if include_builtin else Vocabulary()
     if workdir is not None:
-        leaf = Path(workdir).name
-        if leaf and is_distinctive(leaf):
-            v.add(leaf, 3.0, "context")
+        # The folder rule (shared with search_vocabulary): the leaf name, weight 3, when it is distinctive.
+        _add_folder_name(v, Path(workdir).name)
         if claude_md_text is None:
             md = Path(workdir) / "CLAUDE.md"
             claude_md_text = md.read_text(encoding="utf-8", errors="replace") if md.is_file() else ""
@@ -679,9 +765,8 @@ def session_vocabulary(workdir: Path | None = None, title: str = "", claude_md_t
         for word, _count in extract_context_terms(claude_md_text):
             # Mined, not curated: a split of plain English words never respells into it (Term.respell_split).
             v.add(word, 2.0, "context", respell_split=False)
-    for word in re.findall(r"[A-Za-z][A-Za-z0-9+#.-]+", title or ""):
-        if is_distinctive(word) and is_hard(word):
-            v.add(word, 2.0, "context", respell_split=False)
+    # The title rule (shared with search_vocabulary): its distinctive, hard words, weight 2, never respelled from plain words.
+    _add_title_words(v, title)
     for word in extra:
         v.add(word, 3.0, "user")
     for term, triggers in dictionary:

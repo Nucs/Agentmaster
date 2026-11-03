@@ -48,12 +48,14 @@ auth	1
 await	1
 bash	1
 before	1
+better	1
 boolean	0
 bs	1
 c	1
 ci	1
 claude	0
 cli	1
+clipboard	1
 cloudflare	0
 code	1
 codec	1
@@ -138,9 +140,11 @@ namespace	1
 net	1
 node	1
 not	1
+np	1
 npm	0
 nu	1
 nullptr	0
+num	1
 nv	0
 nvidia	0
 o	1
@@ -187,6 +191,7 @@ scheduler	1
 script	1
 sdk	0
 session	1
+sharp	1
 shell	1
 shouted	1
 slack	1
@@ -231,6 +236,7 @@ wav	1
 web	1
 webpack	1
 whats	0
+where	1
 whisper	1
 win	1
 windows	1

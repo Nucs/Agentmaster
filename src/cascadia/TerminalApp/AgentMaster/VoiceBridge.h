@@ -4,7 +4,8 @@
 // Agentmaster — VoiceBridge: the seam between the Telegram service and speech-to-text (VOICE.md §6.1). Pure (std only).
 //
 // The messaging service (Messaging.Voice.cpp) knows only this interface: it hands a downloaded voice note and the session
-// it is for, and gets the transcript back — already corrected by the session's vocabulary. Behind it the app wires
+// it is for (or, for a note in the 🔎 Search topic, the fleet's folders and tab titles), and gets the transcript back —
+// already corrected by that vocabulary. Behind it the app wires
 // VoiceTranscriber (VoiceTranscriber.{h,cpp}: the vocabulary, the engines, the dictionary pass) through
 // MessagingService::SetVoiceFactory, from TerminalPage.AgentEngine.cpp, exactly like the Search topic's agent
 // (SetSearchFactory): Engine.cpp never names it, and the m5 harness drives the service with a fake bridge instead.
@@ -43,15 +44,26 @@ namespace Agentmaster::Voice
         std::wstring correctionEffort{ L"low" };
     };
 
-    /// <summary>One voice note to transcribe, and the session it is for.</summary>
+    /// <summary>
+    /// One voice note to transcribe, and what it is for: a session (its folder, title and CLAUDE.md shape the vocabulary), or
+    /// the 🔎 Search topic (`forSearch`: no session — the fleet's folders and tab titles shape it instead, VOICE.md §5.6).
+    /// </summary>
     struct VoiceNote
     {
         std::wstring audioPath; // the downloaded file (Opus in Ogg for a voice note)
         int64_t durationSec{ 0 }; // Telegram's duration (sizes the engine's timeout); 0 = unknown
-        std::wstring sessionId;
+        std::wstring sessionId; // "" for a Search note
         std::wstring workdir; // the session's effective working folder (its CLAUDE.md and its name join the vocabulary)
         std::wstring title; // the session title (its hard words join the vocabulary)
         std::wstring claudeExe; // the engine's claude.exe, resolved for THIS note (the correction runs it; "" = none found)
+        // MESSAGING.md §21.43 / VOICE.md §5.6: a note in the 🔎 Search topic. It has no session, so `workdir` and `title` stay
+        // empty and the transcriber builds VoiceVocabulary.h's SearchVocabulary from the two lists below instead (both only
+        // while voiceUseSessionContext is on): every folder the registry's sessions worked in and the open tabs' titles, each
+        // the most recently active first — the vocabulary reads the FIRST ones (kSearchVocabularyMaxFolders names,
+        // kSearchVocabularyMaxTitles titles), so the order is the priority. Both empty for a session's note.
+        bool forSearch{ false };
+        std::vector<std::wstring> searchFolders;
+        std::vector<std::wstring> searchTitles;
     };
 
     /// <summary>One respelling the dictionary pass made (VoiceVocabulary.h's VoiceReplacement, repeated so this header stays

@@ -16,6 +16,10 @@
 > **2026-10-28, in dev since 0.0.1.39, not in production:** a note in a NEW thread (writing in "All" opens one) starts its
 > session like a typed message there and becomes its first prompt (§3). Production 0.8.0.1 still answers such a note "this
 > thread has no session".
+>
+> **2026-11-03, NOT BUILT (the next build must purge: `Messaging.h`, `VoiceBridge.h`):** a note in the 🔎 **Search topic** is a
+> search, like a typed message there (§3), transcribed with the FLEET's names as its vocabulary (§5.6). Every build before it
+> answers such a note "The 🔎 Search topic reads typed searches only".
 
 ## 1. The ask and the shape of the answer
 
@@ -79,10 +83,21 @@ card's). Messages typed after it in the thread were held behind it and follow it
 the note). A note sent while the thread's session is being bound waits in the bind the same way. The routing is one pure
 rule, `DecideVoiceNoteRoute` (`MessagingVoice.h`): a note goes where a typed message of its thread goes.
 
-A note that cannot be read is answered and queued nowhere: the chat's main view (a typed message gets the help line there),
-the 🔎 Search topic (a search is typed), a recreated topic's old thread, voice notes off, no engine set, a file over 20 MB
-(the Bot API's getFile limit) — each of these at the note's ARRIVAL, a held one too, so it never waits through a folder
-pick to fail — and a failed transcription ("🎤 I could not transcribe this voice note: <why>").
+**A note in the 🔎 Search topic is a search, like a typed message there** (2026-11-03; MESSAGING.md §21.7 / §21.43). It gets
+👀 and is transcribed now, with no session: the Search topic has no folder, title or CLAUDE.md of its own, so the vocabulary is
+the FLEET's — the folders its sessions worked in and its tabs' titles (§5.6). The transcript is echoed under the note (🎤)
+and read by the Search topic's own function (`_handleSearchMessage`) like a typed request: "Searching…", then the answer with
+its numbered cards; `/clear` or a fleet command when that is what the text is; for a note sent while Agentmaster was closed,
+the backlog answer — judged at the note's ARRIVAL (`am_voice_live`), so a slow transcription never makes a live spoken search
+an "ask again". A typed follow-up sent right after the note waits behind it in the topic's lane, so the search gets them in
+order. Its search is asked from the tick thread (the Search agent's bridge is safe from any of the service's threads).
+Before 2026-11-03 the note was answered "The 🔎 Search topic reads typed searches only".
+
+A note that cannot be read is answered and queued nowhere: the chat's main view (a typed message gets the help line there;
+the answer names where notes ARE read: a session's topic, the Search topic, a new thread), a recreated topic's old thread,
+voice notes off, no engine set, a file over 20 MB (the Bot API's getFile limit) — each of these at the note's ARRIVAL, a held
+one too, so it never waits through a folder pick to fail — and a failed transcription ("🎤 I could not transcribe this voice
+note: <why>").
 
 ## 4. The POC (`tools/voice-poc/`)
 
@@ -181,7 +196,8 @@ What the recordings taught the design:
 ## 5. The session vocabulary
 
 The reference is `tools/voice-poc/vocab.py`; `VoiceVocabulary.h` is its line-for-line C++ port, held to it by goldens
-(§7.5). A rule changes in `vocab.py` first.
+(§7.5). A rule changes in `vocab.py` first. A note in the 🔎 Search topic has no session: it gets the FLEET's vocabulary,
+built by the same folder and title rules (§5.6).
 
 ### 5.1 Where the words come from
 
@@ -232,7 +248,12 @@ distinctive term (its case-split parts "con pty", its acronyms spelled out "con 
 "agent master"). Guards for a generated form: a single everyday word is never rewritten ("go", "on", "rejects"); several
 everyday words respell only into a curated term (folder name, glossary, the owner's dictionary — never a mined identifier).
 A curated trigger is a decision someone made and passes the guards ("clawed" → Claude, "jason l" → JSONL). Punctuation around
-a window is kept; a canonical window is left alone (the pass is idempotent).
+a window is kept; a canonical window is left alone (the pass is idempotent — with one known exception, found 2026-11-03 and
+left as it is: beside a MINED term that holds a curated one, such as a title's `ConPTY-fix`, the first pass refuses the three
+plain words "con pty fix" for the mined term and respells the shorter "con pty" to ConPTY, and a second pass would then take
+"ConPTY fix" — no longer all plain — to `ConPTY-fix`. The app runs the pass once per hearing, so the prompt keeps "ConPTY
+fix"; the goldens' transcripts avoid the pair, because `tests_voice.cpp`'s idempotence check asks spellings no first pass
+asked).
 
 The owner's dictionary (`voiceDictionary`): one entry per line — `Word` (boost it, respell its generated forms) or
 `spoken form, other form => Word` (FluidVoice's trigger → replacement, explicit); `#` starts a comment.
@@ -291,6 +312,41 @@ large-v3-turbo on the GPU + Parakeet v2 (beam search + the session's hotwords) o
 default (`voiceCorrectionModel`), Haiku 5.5 or off in the cog. The TEXT reaches Anthropic — the same text then becomes the
 session's prompt, which reaches Anthropic anyway; the audio never does.
 
+### 5.6 A note in the 🔎 Search topic: the fleet's vocabulary (2026-11-03)
+
+A spoken search goes to no session, so there is no folder, title or CLAUDE.md to read — and the words it says are the
+fleet's: "find the Agentmaster sessions about the BetterClipboard tab". `vocab.py`'s `search_vocabulary` (ported line for line
+as `VoiceVocabulary.h`'s `SearchVocabulary`, pinned by the same goldens) builds it from two lists, each most relevant first:
+
+| Source | Weight | Respell from everyday words? | Rule |
+|---|---|---|---|
+| The built-in glossary | 1 | yes (curated) | §5.1 |
+| The name of every folder a session worked in | 3 | yes ("better clipboard" → BetterClipboard) | the FOLDER RULE a session's own folder follows (`_add_folder_name` / `AddFolderNameTerm`): a distinctive name only — an everyday or all-lowercase one ("src", "catalog", "kvnode") adds nothing |
+| The open tabs' titles' hard words | 2 | no | the TITLE RULE a session's title follows (`_add_title_words` / `AddTitleTerms`) |
+| The owner's dictionary | 3 | yes, plus its triggers | §5.4 |
+
+* **The folders** (`FillVoiceSearchContext`, `Messaging.Voice.cpp`, on the voice thread for each note): every record of the
+  registry — live AND archived, since a search finds closed sessions too — gives its launch folder and its inferred one
+  (`SessionRegistry::PlaceSamples`, the lean read the new-thread picker uses), each folder once by `NormDirKey` (Rule #8) and the
+  most recently active first (`SessionFolderFilter.h`: `CollectSessionFolders` + `SortFoldersByRecency`).
+* **The titles**: the open tabs' (`SnapshotLiveForCards`), the most recent first, each once ignoring ASCII case, trimmed, blanks
+  dropped (`OrderVoiceSearchTitles`, `MessagingVoice.h`) — ten tabs named "Agentmaster" take one title slot.
+* **The caps**: at most `SEARCH_MAX_FOLDERS` = **40** folder NAMES join (`kSearchVocabularyMaxFolders`; a name counts when it
+  joins, so a generic leaf, a drive root or a second clone of a name already judged takes no slot, and the folders after the
+  40th name are not read), and at most `SEARCH_MAX_TITLES` = **40** titles are read. Whisper's ~700-character prompt, the 96
+  hotwords and the correction's 160-term glossary are shared with the built-in glossary, and a request names a project or two:
+  past these, the names active longest ago would only push the glossary out. Within a weight the terms keep the order they
+  joined in, so every truncating use keeps the MOST RECENT names (in Whisper's prompt they come last, where it weighs most).
+* **The switch**: `voiceUseSessionContext` off keeps the fleet's names out too (glossary + dictionary only).
+* **The cache**: the transcriber keeps one vocabulary (`_vocabularyFor` / `_searchVocabularyFor`); a Search note's key holds
+  every folder and title it was given and the dictionary, so a burst of Search notes builds it once, and a session's note in
+  between rebuilds it (cheap: a few hundred terms).
+* **The logs**: `voice.log` names a Search note `search` (a session's note by its id) and says how many folders and titles were
+  offered (`N terms (the fleet's: F folder(s), T title(s) offered)`); hooks.log says `[msg] Search topic voice note …`.
+
+The folder and title rules are SHARED with `session_vocabulary` (two helpers in both languages), so a fleet's folder is judged
+exactly like a session's; the goldens prove the session vocabularies unchanged by the move.
+
 ## 6. The integration
 
 ### 6.1 The seam
@@ -299,7 +355,8 @@ session's prompt, which reaches Anthropic anyway; the audio never does.
 → the corrected transcript, `Configure(settings)`, `Tick()` (the idle end), `Shutdown()`, `Describe()`. The app layer sets the
 factory (`TerminalPage.AgentEngine.cpp`, beside the Search agent's): `Voice::MakeVoiceTranscriber()` (`VoiceTranscriber.cpp`)
 — for each note it builds the session vocabulary (cached while the session's folder, title, CLAUDE.md stamp and the
-dictionary are unchanged), runs the engine, runs the dictionary pass on every hearing, runs the correction (§5.5, with the
+dictionary are unchanged; a Search note's is the fleet's, `VoiceNote::forSearch` with its folders and titles, §5.6), runs the
+engine, runs the dictionary pass on every hearing, runs the correction (§5.5, with the
 note's `claudeExe`, which the service reads from `MessagingHooks::claudeExe` for each note) and folds the text into one
 paragraph. The result carries the engine's own text (`raw`), the respellings, the other hearings, whether the correction
 changed the text, its time and its failure. Engine.cpp never names it; the harness has no factory and answers "not
@@ -360,20 +417,25 @@ A worker that ships with Agentmaster, so a fresh install reads voice notes with 
 
 * **Poll thread** — `_voiceTake`: a note goes where a typed message of its thread goes (`DecideVoiceNoteRoute`). In a
   session's topic it becomes a job (FIFO across every topic: one engine, one note at a time) and a pending item at the end of
-  its thread's LANE; any other message of a thread whose lane holds something joins the lane (an edit replaces the held
-  message it edits). In a thread no session owns yet, or a topic whose bind still hands over, it is held there
+  its thread's LANE; in the 🔎 Search topic too, with no session and `forSearch` on the job and its lane item (never inferred
+  from the empty session id); any other message of a thread whose lane holds something joins the lane (an edit replaces the
+  held message it edits). In a thread no session owns yet, or a topic whose bind still hands over, it is held there
   (`_holdForNewThread`), after the checks that would refuse it anyway (voice off, no transcriber, no file, over 20 MB).
 * **Tick thread, the hand-over** — `_adoptBoundThreads`: each held message goes through `_voiceTake(…, heldByNewThread)` first:
   a held note becomes a job with the new session (its lane item marked `held`), and a held message behind it joins the lane
   marked `held` too; a held message no lane holds goes straight to the topic as before.
 * **Voice thread** — `_voiceLoop` (COM multithreaded apartment, for the spell checker): `getFile` (paced by the chat's call
   slot), the download (`TelegramApi::DownloadFile`, 20 MB cap) into `<profile>\messaging\telegram\voice\<message id>.oga`,
-  the transcriber, the file DELETED, the lane item marked done, the tick woken; between jobs the transcriber's idle end.
+  the transcriber (a Search job's note first gets the fleet's folders and titles, `FillVoiceSearchContext`, §5.6), the file
+  DELETED, the lane item marked done, the tick woken; between jobs the transcriber's idle end.
 * **Tick thread** — `_voiceTick`: takes each lane's ready items in order (a done note → `_voiceDeliver`: the echo, then
-  `_handleTopicMessage` with the text — `held = true` for a note a new thread held; a held message → `_handleMessage(…,
-  fromVoiceLane=true)`, or, one a new thread held, `_handleTopicMessage(…, held = true)` like the hand-over's own), one at a
-  time under the leaf lock `_voiceMtx`, delivered outside it. A lane leaves the map only when found empty, so a message read
-  meanwhile joins it BEHIND what is being delivered.
+  `_handleTopicMessage` with the text — `held = true` for a note a new thread held — or, a Search note, `_handleSearchMessage`;
+  a held message → `_handleMessage(…, fromVoiceLane=true)`, or, one a new thread held, `_handleTopicMessage(…, held = true)`
+  like the hand-over's own), one at a time under the leaf lock `_voiceMtx`, delivered outside it. A lane leaves the map only
+  when found empty, so a message read meanwhile joins it BEHIND what is being delivered. A Search note's search is thus ASKED
+  from the tick thread: `_search` is written only under `_mtx` (made once, reset by Stop after joining the poll and tick
+  threads) and `SearchBridge`'s methods are safe from any of the service's threads, so the unlocked read in `_askSearch` holds
+  there as on the poll thread (a `/search <words>` held behind a session's note already took that path).
 * **Stop** — `_voiceStop` runs first: it kills the engine (a note in flight fails fast), joins the voice thread, and drops
   the queue and the lanes (logged). ⚠ Their notes and held messages are not read: the owner sends them again.
 
@@ -384,7 +446,7 @@ A worker that ships with Agentmaster, so a fresh install reads voice notes with 
 | A downloaded note | `<profile>\messaging\telegram\voice\<message id>.oga`, deleted right after its transcription |
 | The correction's system prompt | `<profile>\voice\correct-system.txt`, rewritten when an update changes the prompt; `<profile>\voice\` is also the correction's working folder |
 | The worker's stderr, its start / stop / idle end, each transcription's timings, other hearings, respellings and correction (`, correction N ms (changed)` / `(unchanged)` / `FAILED after N ms: <why>`), a correction the guard refused | `<profile>\voice.log` |
-| The service's lines | `hooks.log`: `[msg] <sid> voice note queued for transcription …`, `… transcribed (… chars, <engine>, … ms, N vocabulary fix(es)[, corrected in N ms \| , correction kept it, N ms \| , correction failed: <why>])`, `… not transcribed …`; `[nav] remote telegram voice …` |
+| The service's lines | `hooks.log`: `[msg] <sid> voice note queued for transcription …`, `… transcribed (… chars, <engine>, … ms, N vocabulary fix(es)[, corrected in N ms \| , correction kept it, N ms \| , correction failed: <why>])`, `… not transcribed …`; a Search note's say `[msg] Search topic voice note …` (queued with `, a search: the fleet's names are its vocabulary)`); `[nav] remote telegram voice <sid8 \| search> …` |
 
 ## 7. Evaluation and tests
 
@@ -428,11 +490,13 @@ join `references.json` (`s4`…).
 
 * `TestVoiceVocabulary` — `VoiceVocabulary.h` against `tests\voice\vocab_goldens.json`, which
   `tests\voice\make_goldens.py` writes by running `vocab.py`: 33 terms' rules, the context terms of
-  `tests\voice\context_sample.md`, three vocabularies (terms, weights, sources, respell flags; Whisper's prompt at two
-  budgets; the hotwords at two limits; the dictionary pass over 18 transcripts, text + respellings, idempotent), the owner's
-  dictionary text. The word test answers from `tests\voice\plain_words.txt`: the spell checker's answers the reference
-  recorded, so the suite does not depend on the machine's dictionary; a word the port asks that the reference never did
-  fails the suite (parity drift).
+  `tests\voice\context_sample.md`, six vocabularies (the glossary; a session's, with and without the owner's dictionary; a
+  spoken SEARCH's, §5.6 — a fleet sample with every slot rule in it, at the default caps, with the dictionary, and capped to
+  2 names and 1 title — each with its terms, weights, sources, respell flags; Whisper's prompt at two budgets; the hotwords
+  at two limits; the dictionary pass over 20 transcripts, text + respellings, idempotent), the search's default caps against
+  the reference's, the owner's dictionary text, and the search's slot rules as properties. The word test answers from
+  `tests\voice\plain_words.txt`: the spell checker's answers the reference recorded, so the suite does not depend on the
+  machine's dictionary; a word the port asks that the reference never did fails the suite (parity drift).
 * `TestVoiceProtocol` — the request lines (one line each, escaped), the answer reader (`alternatives` included: strings
   kept, empty ones dropped), the prompt text.
 * `TestVoiceCorrection` — `VoiceCorrect.h` against the goldens' `correction` section, which `make_goldens.py` writes from
@@ -442,13 +506,15 @@ join `references.json` (`s4`…).
   line breaks, an empty argument) and the whole command (21 arguments, the JSON `--settings` intact, the user prompt last);
   the JSON answer reader (an object, the last item of an array, `is_error`, not JSON, an empty array).
 * `TestVoiceNoteRoute` — `MessagingVoice.h`: a note goes where a typed message of its thread goes (a new thread's wizard
-  holds it — the owner's note in "All" of 2026-10-28 —, a binding topic's bind holds it, a session's topic transcribes it,
-  the main view / the Search topic / a recreated topic's old thread refuse), the refusal texts (each says where a note IS
-  read; nothing HTML would read as markup), why a note cannot be read and in which order, and which messages are notes.
+  holds it — the owner's note in "All" of 2026-10-28 —, a binding topic's bind holds it, a session's topic transcribes it, the
+  Search topic transcribes it as a search — the owner's request of 2026-11-03 — and before the orphan mark, the main view / a
+  recreated topic's old thread refuse), the refusal texts (each says where a note IS read — the main view's names the Search
+  topic; nothing HTML would read as markup), why a note cannot be read and in which order, which messages are notes, and the
+  titles a Search note's vocabulary reads (`OrderVoiceSearchTitles`: the most recent first, once each, trimmed, ties stable).
 
-All four pass standalone (253 checks; `cl` of `tests_voice.cpp` alone) and in the whole isolated suite. No test calls a
-model (the correction's call, `VoiceCorrect.cpp`, is not linked into the harness): §7.3 is the test that does. The
-service's voice path needs Telegram: e2e.
+All four pass standalone (412 checks on 2026-11-03; `cl` of `tests_voice.cpp` alone, also at `/W4` with no warning) and in
+the whole isolated suite. No test calls a model (the correction's call, `VoiceCorrect.cpp`, is not linked into the
+harness): §7.3 is the test that does. The service's voice path needs Telegram: e2e.
 
 ### 7.6 E2E (later)
 
@@ -456,9 +522,10 @@ A fake Bot API in the e2e host (`getUpdates` serving one `message` with a `voice
 serving the fixture, `sendMessage` / `setMessageReaction` recorded) and a fake worker (`voice_worker.py` with a canned
 engine, or the real one on the guest's CPU with Parakeet) drive: the echo's text, the queued prompt's text and its
 `remoteSource` (the note's id), a typed message sent after the note queued AFTER it, an open question card answered by
-voice, a failing worker answered in the topic, a note in the main view or the Search topic answered and nothing queued, and
-a note that OPENS a new thread: held with the folder picker, then transcribed and queued as the new session's first prompt
-once the pick launched it, a typed message sent after the note queued after it.
+voice, a failing worker answered in the topic, a note in the main view answered and nothing queued, a note in the Search
+topic searched (the echo, "Searching…", the answer; a typed follow-up asked after it; the worker's request carrying the
+fleet's folder names in its prompt), and a note that OPENS a new thread: held with the folder picker, then transcribed and
+queued as the new session's first prompt once the pick launched it, a typed message sent after the note queued after it.
 
 ## 8. Privacy and security
 
@@ -489,7 +556,7 @@ once the pick launched it, a typed message sent after the note queued after it.
 | `voiceWorkerCommand` | "" | The worker's command line; "" = the bundled worker when present. |
 | `voiceEndpoint` / `voiceModel` | "" / "" | The endpoint's URL (OpenAI's) and model (`whisper-1`). Its key: Credential Manager. |
 | `voiceLanguage` | `en` | "" = the engine detects it. |
-| `voiceUseSessionContext` | on | The folder's name and CLAUDE.md join the vocabulary. |
+| `voiceUseSessionContext` | on | The folder's name and CLAUDE.md join the vocabulary (a Search note's: the fleet's folders and tab titles, §5.6). |
 | `voiceDictionary` | "" | The owner's dictionary (§5.4). |
 | `voiceWorkerIdleMinutes` | 10 | 0–1440; the worker ends after this long without a note. |
 | `voiceEchoTranscript` | on | The transcript is posted under the note before it is read. |
@@ -509,7 +576,10 @@ later). To change a voice setting on a running instance, use the cog.
    method's.
 3. **The correction's latency** — 3–11 s per note with Sonnet 5.5; a resident `claude` (stream-json, the agent harness's
    process) would save claude's start on each call (not measured), if notes feel slow.
-4. **Voice in the 🔎 Search topic** — a spoken search request (today: "voice notes are read in a session's topic").
+4. ~~**Voice in the 🔎 Search topic**~~ — done 2026-11-03 (§3, §5.6; NOT BUILT yet): a spoken search request, with the
+   fleet's names as its vocabulary. Still open beside it: a `/search <words>` RELAYED from another topic is asked at once, not
+   behind a Search voice note that is still being transcribed, so it can overtake that note (the relay does not join the
+   Search topic's lane).
 5. **Hebrew** — Whisper large-v3 (or an ivrit.ai fine-tune) with `voiceLanguage = he`; Parakeet has no Hebrew; the
    correction's prompt is English-only.
 6. **Spoken commands** — "slash compact" → `/compact` (today a transcript is always prompt text).

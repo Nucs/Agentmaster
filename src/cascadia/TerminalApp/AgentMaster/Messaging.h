@@ -1622,6 +1622,21 @@ namespace Agentmaster::Msg
         /// <param name="held">§21.17: the message was HELD by a new thread's picker and is handed over now that the session is up —
         /// it was read live when it came, so it is never asked about as backlog, however long the folder pick took.</param>
         void _handleTopicMessage(const std::wstring& sessionId, const json::Value& msg, int64_t threadId, bool held = false);
+        /// <summary>
+        /// A message in the 🔎 Search topic, read by the topic's own rules (§21.7, ClassifySearchTopicMessage): /clear and /reset
+        /// clear THIS conversation, a fleet command runs, a session's or Claude Code's command is answered (this conversation is
+        /// not a session), and anything else is a REQUEST asked of the Search agent (_askSearch). A request or a clear sent while
+        /// Agentmaster was closed (D2, IsBacklogUpdate) is answered, never carried out unasked — judged by the message's date, or,
+        /// for a VOICE NOTE's transcript (§21.43), when the note ARRIVED (its "am_voice_live" mark), so a slow transcription (a
+        /// first worker start loads its model) never turns a live spoken search into backlog. Poll thread for a typed message;
+        /// tick thread for a voice note's transcript and for a message that waited behind one in the topic's lane. Never called
+        /// for an edit (an edited request is not asked again).
+        /// </summary>
+        /// <param name="msg">The Telegram message (a voice note's carries its transcript as the text).</param>
+        /// <param name="threadId">The Search topic's thread.</param>
+        /// <exception cref="std::bad_alloc">If a reply or the request cannot be allocated.</exception>
+        /// <exception cref="std::exception">Whatever the Search agent's factory throws when the agent cannot be made
+        /// (_ensureSearchBridge); the caller logs it (Rule #18) and the next message tries again.</exception>
         void _handleSearchMessage(const json::Value& msg, int64_t threadId);
         bool _queueRemotePrompt(const std::wstring& sessionId, const std::wstring& text, int64_t messageId, int64_t threadId, bool fromBacklog);
         /// <summary>
@@ -2369,7 +2384,10 @@ namespace Agentmaster::Msg
         struct VoiceJob
         {
             uint64_t seq{ 0 }; // its lane item's number (the arrival order)
-            std::wstring sessionId; // the topic's session
+            std::wstring sessionId; // the topic's session ("" for a note in the Search topic)
+            // §21.43: a note in the 🔎 Search topic — no session; _voiceRun gives the transcriber the fleet's folders and tab
+            // titles as its vocabulary instead (VOICE.md §5.6). Said explicitly: an empty sessionId must never be read as it.
+            bool forSearch{ false };
             int64_t threadId{ 0 };
             int64_t messageId{ 0 }; // the voice note's message (the reply quotes it; the queued prompt's reactions land on it)
             std::wstring fileId; // Telegram's file_id (getFile names the download)
@@ -2390,7 +2408,11 @@ namespace Agentmaster::Msg
             // _handleTopicMessage(…, held = true): live however long the folder pick took, never a question card's — and a held
             // plain message goes straight to the topic, never through _handleMessage again.
             bool held{ false };
-            std::wstring sessionId;
+            // §21.43: a voice note of the 🔎 Search topic — its transcript is read as a search typed there
+            // (_handleSearchMessage), never queued for a session; false for every held plain message (those go through
+            // _handleMessage again, which finds the Search topic by their thread).
+            bool forSearch{ false };
+            std::wstring sessionId; // "" for a Search note
             json::Value msg; // the update's message (a voice item's is read again with the transcript as its text)
             Voice::VoiceTranscript result; // a done voice item's outcome
         };
@@ -3070,23 +3092,27 @@ namespace Agentmaster::Msg
         //
         // A voice note (or an audio file, or a round video note) in a session's topic is DOWNLOADED and TRANSCRIBED on the voice
         // thread, then read exactly like the text it says (_handleTopicMessage: a queued prompt, an answer to an open question
-        // card, a backlog question). Its thread's later messages wait behind it in a LANE, so the session gets them in the order
-        // the user wrote them; the tick hands a lane's items over as each becomes ready (a transcript arrived, or a plain message
-        // whose voice notes ahead of it are done). Lock order: `_voiceMtx` is a LEAF — nothing is called while it is held. The
-        // job and lane item types are declared with the members they shape (VoiceJob, VoiceLaneItem, below `_files*`).
+        // card, a backlog question). A note in the 🔎 Search topic is transcribed the same way with the FLEET's names as its
+        // vocabulary (it has no session; VOICE.md §5.6) and read as a search typed there (_handleSearchMessage). Its thread's
+        // later messages wait behind it in a LANE, so the session — or the search — gets them in the order the user wrote them;
+        // the tick hands a lane's items over as each becomes ready (a transcript arrived, or a plain message whose voice notes
+        // ahead of it are done). Lock order: `_voiceMtx` is a LEAF — nothing is called while it is held. The job and lane item
+        // types are declared with the members they shape (VoiceJob, VoiceLaneItem, below `_files*`).
 
         /// <summary>
         /// _handleMessage, for every message of the owner before it is read as text: takes a VOICE NOTE (or audio, video note) where
         /// a typed message of its thread would go (MessagingVoice.h, DecideVoiceNoteRoute) — a session's topic: the voice thread's
-        /// queue and the thread's lane; a thread no session owns yet (one the user opened, e.g. by writing in "All"): HELD by its
-        /// new-thread wizard (_holdForNewThread), untranscribed until the session is up so ITS vocabulary reads it; a topic whose
-        /// bind still hands over: held by the bind. It answers a note that cannot be read (the main view, the Search topic, a
-        /// recreated topic's old thread, voice notes off, no transcriber, too large) — a held note is asked that at ARRIVAL too, so
-        /// it never waits through a folder pick to fail — and HOLDS any other message whose thread's lane is not empty (an edit
-        /// replaces the held message it edits). Poll thread; also the tick thread, for the hand-over (`heldByNewThread`).
+        /// queue and the thread's lane; the 🔎 Search topic: the same, with no session (VoiceJob::forSearch: the fleet's names
+        /// are its vocabulary, and its transcript is read as a search); a thread no session owns yet (one the user opened, e.g.
+        /// by writing in "All"): HELD by its new-thread wizard (_holdForNewThread), untranscribed until the session is up so ITS
+        /// vocabulary reads it; a topic whose bind still hands over: held by the bind. It answers a note that cannot be read (the
+        /// main view, a recreated topic's old thread, voice notes off, no transcriber, too large) — a held note is asked that at
+        /// ARRIVAL too, so it never waits through a folder pick to fail — and HOLDS any other message whose thread's lane is not
+        /// empty (an edit replaces the held message it edits), the Search topic's included. Poll thread; also the tick thread,
+        /// for the hand-over (`heldByNewThread`).
         /// </summary>
         /// <param name="msg">The Telegram message.</param>
-        /// <param name="sessionId">The session whose topic the thread is ("" = none).</param>
+        /// <param name="sessionId">The session whose topic the thread is ("" = none: the Search topic, a new thread, the main view).</param>
         /// <param name="threadId">The message's thread.</param>
         /// <param name="bindHandingOver">The thread's new-thread bind still hands its messages over (§21.17).</param>
         /// <param name="edited">The update is an edit (an edited note is never read again; a held copy takes the edit).</param>
@@ -3112,17 +3138,25 @@ namespace Agentmaster::Msg
         void _voiceStop() noexcept;
         /// <summary>The voice thread: one job at a time, FIFO across every topic; the transcriber's idle tick between jobs.</summary>
         void _voiceLoop() noexcept;
-        /// <summary>One job: getFile, the download into &lt;profile&gt;\messaging\telegram\voice\, the transcriber, the file deleted.</summary>
+        /// <summary>
+        /// One job: getFile, the download into &lt;profile&gt;\messaging\telegram\voice\, the transcriber, the file deleted. The
+        /// transcriber gets the job's session (its folder and title shape the vocabulary) or, for a 🔎 Search job, the fleet's
+        /// folders and open tabs' titles, read from the registry's lean snapshots now (VOICE.md §5.6).
+        /// </summary>
         /// <param name="job">The job.</param>
         /// <returns>The transcript or the failure; never throws.</returns>
         Voice::VoiceTranscript _voiceRun(const VoiceJob& job) noexcept;
         /// <summary>
         /// The tick: hands over every lane's ready items in order (a done voice note: its echo, then its text read like a typed
-        /// message; a held message: _handleMessage again — or, one a new thread held, straight to its topic as a held message),
-        /// and drops an empty lane. Tick thread. Never throws.
+        /// message — a Search note's as a search; a held message: _handleMessage again — or, one a new thread held, straight to
+        /// its topic as a held message), and drops an empty lane. Tick thread: a Search note's search is ASKED from here
+        /// (_askSearch; SearchBridge's methods are safe from any of the service's threads). Never throws.
         /// </summary>
         void _voiceTick() noexcept;
-        /// <summary>One done voice item: the failure answered, or the transcript echoed and read like the message it says.</summary>
+        /// <summary>
+        /// One done voice item: the failure answered, or the transcript echoed and read like the message it says — by
+        /// _handleTopicMessage for a session's note, by _handleSearchMessage for a 🔎 Search note (VoiceLaneItem::forSearch).
+        /// </summary>
         /// <param name="threadId">Its thread.</param>
         /// <param name="item">The item.</param>
         void _voiceDeliver(int64_t threadId, VoiceLaneItem& item) noexcept;

@@ -5,7 +5,9 @@
 // Windows, no WinRT), header-only, harness-tested against the POC's goldens (tests\voice\, tests_voice.cpp).
 //
 // A Telegram voice note becomes a prompt for ONE session, so the words to get right are that session's: its folder's
-// name, the hard names of its CLAUDE.md, a built-in developer glossary and the owner's own dictionary. FluidVoice
+// name, the hard names of its CLAUDE.md, a built-in developer glossary and the owner's own dictionary (SessionVocabulary).
+// A note in the 🔎 Search topic is a search request for no session: its words are the FLEET's — the folders its sessions
+// worked in and its tabs' titles, judged by the same folder and title rules (SearchVocabulary). FluidVoice
 // (altic-dev/FluidVoice, GPLv3 — studied, not copied) gets technical words right with three layers, and this header is
 // the first two of them, rebuilt for Agentmaster:
 //
@@ -1406,47 +1408,73 @@ namespace Agentmaster::Voice
     }
 
     /// <summary>
-    /// vocab.py's session_vocabulary: the vocabulary of one session — the built-in glossary, the working folder's name
-    /// (weight 3, respellable), the hard words of the folder's CLAUDE.md (weight 2, mined: never respelled from everyday
-    /// words), the hard words of the session title (weight 2), and the owner's dictionary (weight 3, curated).
+    /// vocab.py's SEARCH_MAX_FOLDERS: a spoken SEARCH request's vocabulary (SearchVocabulary) takes at most this many folder
+    /// NAMES — the first ones the folder rule accepts, most recently active first. Whisper's ~700-character prompt, the 96
+    /// hotwords and the correction's 160-term glossary are shared with the built-in glossary, and a request names a project
+    /// or two: past this, the names active longest ago would only push the glossary out. The goldens pin it to the reference.
     /// </summary>
-    /// <param name="test">The plain-English test.</param>
-    /// <param name="workdir">The session's working folder ("" = none); only its last component is read here.</param>
-    /// <param name="title">The session title.</param>
-    /// <param name="claudeMd">The folder's CLAUDE.md text ("" = none; the caller reads the file, VoiceContext.h).</param>
-    /// <param name="dictionary">The owner's dictionary entries.</param>
-    /// <param name="includeBuiltin">False for a context-only vocabulary (an evaluation ablation).</param>
-    /// <returns>The vocabulary.</returns>
-    /// <exception cref="std::bad_alloc">If the vocabulary cannot be built.</exception>
-    inline VoiceVocabulary SessionVocabulary(WordTest test, std::wstring_view workdir, std::wstring_view title, std::wstring_view claudeMd,
-                                             const std::vector<DictionaryEntry>& dictionary = {}, bool includeBuiltin = true)
+    inline constexpr size_t kSearchVocabularyMaxFolders = 40;
+    /// <summary>vocab.py's SEARCH_MAX_TITLES: SearchVocabulary reads at most this many titles (the first, most recent ones).</summary>
+    inline constexpr size_t kSearchVocabularyMaxTitles = 40;
+
+    namespace detail
     {
-        using namespace detail;
-        VoiceVocabulary v = includeBuiltin ? VoiceVocabulary::Builtin(std::move(test)) : VoiceVocabulary{ std::move(test) };
-        // Python: Path(workdir).name — the last component, trailing separators ignored ("K:\src\App\" → "App"; "K:\" → "").
-        std::wstring dir{ workdir };
-        while (!dir.empty() && (dir.back() == L'\\' || dir.back() == L'/'))
+        /// <summary>
+        /// Python's `Path(workdir).name` for the folder rule: the last component, trailing separators ignored ("K:\src\App\" →
+        /// "App", "K:/work/x" → "x"); a drive ("K:\", "K:") has no name. ⚠ A UNC share root ("\\server\share") gives "share"
+        /// here and "" in Python: keep such a path out of the goldens (no session runs at a share root).
+        /// </summary>
+        /// <param name="workdir">The folder ("" = none).</param>
+        /// <returns>Its name, or "".</returns>
+        /// <exception cref="std::bad_alloc">If the copy cannot be allocated.</exception>
+        inline std::wstring FolderLeafName(std::wstring_view workdir)
         {
-            dir.pop_back();
+            std::wstring dir{ workdir };
+            while (!dir.empty() && (dir.back() == L'\\' || dir.back() == L'/'))
+            {
+                dir.pop_back();
+            }
+            const size_t slash = dir.find_last_of(L"\\/");
+            std::wstring leaf = slash == std::wstring::npos ? dir : dir.substr(slash + 1);
+            if (leaf.size() == 2 && leaf[1] == L':')
+            {
+                leaf.clear(); // a drive ("K:") has no name
+            }
+            return leaf;
         }
-        const size_t slash = dir.find_last_of(L"\\/");
-        std::wstring leaf = slash == std::wstring::npos ? dir : dir.substr(slash + 1);
-        if (leaf.size() == 2 && leaf[1] == L':')
-        {
-            leaf.clear(); // a drive ("K:") has no name
-        }
+    }
+
+    /// <summary>
+    /// vocab.py's _add_folder_name — the FOLDER RULE: a working folder's own name joins at weight 3, respellable ("agent master"
+    /// → Agentmaster), when it is distinctive; an everyday or all-lowercase name ("src", "catalog", "kvnode") adds nothing, since
+    /// the pass never re-cases. SessionVocabulary and SearchVocabulary both use it, so a session's folder and a fleet's folder are
+    /// judged alike.
+    /// </summary>
+    /// <param name="v">The vocabulary to add to.</param>
+    /// <param name="leaf">The folder's name (detail::FolderLeafName; "" adds nothing and asks nothing).</param>
+    /// <returns>True when the name joined (one already in the vocabulary is raised to weight 3 and counts as joined).</returns>
+    /// <exception cref="std::bad_alloc">If the term cannot be stored.</exception>
+    inline bool AddFolderNameTerm(VoiceVocabulary& v, const std::wstring& leaf)
+    {
         if (!leaf.empty() && IsDistinctive(leaf, v.Plain()))
         {
             v.Add(leaf, 3.0, L"context", true);
+            return true;
         }
-        if (!claudeMd.empty())
-        {
-            for (const auto& [word, count] : ExtractContextTerms(claudeMd, v.Plain()))
-            {
-                (void)count;
-                v.Add(word, 2.0, L"context", false);
-            }
-        }
+        return false;
+    }
+
+    /// <summary>
+    /// vocab.py's _add_title_words — the TITLE RULE: a session title's distinctive, hard words join at weight 2, mined, so never
+    /// respelled from a window of plain English words (VoiceTerm::respellSplit). SessionVocabulary and SearchVocabulary both
+    /// use it.
+    /// </summary>
+    /// <param name="v">The vocabulary to add to.</param>
+    /// <param name="title">The title ("" adds nothing).</param>
+    /// <exception cref="std::bad_alloc">If a term cannot be stored.</exception>
+    inline void AddTitleTerms(VoiceVocabulary& v, std::wstring_view title)
+    {
+        using namespace detail;
         // Python: re.findall(r"[A-Za-z][A-Za-z0-9+#.-]+", title) — an ASCII letter and at least one more class character.
         for (size_t i = 0; i < title.size();)
         {
@@ -1473,6 +1501,93 @@ namespace Agentmaster::Voice
             {
                 ++i;
             }
+        }
+    }
+
+    /// <summary>
+    /// vocab.py's session_vocabulary: the vocabulary of one session — the built-in glossary, the working folder's name
+    /// (weight 3, respellable), the hard words of the folder's CLAUDE.md (weight 2, mined: never respelled from everyday
+    /// words), the hard words of the session title (weight 2), and the owner's dictionary (weight 3, curated).
+    /// </summary>
+    /// <param name="test">The plain-English test.</param>
+    /// <param name="workdir">The session's working folder ("" = none); only its last component is read here.</param>
+    /// <param name="title">The session title.</param>
+    /// <param name="claudeMd">The folder's CLAUDE.md text ("" = none; the caller reads the file, VoiceContext.h).</param>
+    /// <param name="dictionary">The owner's dictionary entries.</param>
+    /// <param name="includeBuiltin">False for a context-only vocabulary (an evaluation ablation).</param>
+    /// <returns>The vocabulary.</returns>
+    /// <exception cref="std::bad_alloc">If the vocabulary cannot be built.</exception>
+    inline VoiceVocabulary SessionVocabulary(WordTest test, std::wstring_view workdir, std::wstring_view title, std::wstring_view claudeMd,
+                                             const std::vector<DictionaryEntry>& dictionary = {}, bool includeBuiltin = true)
+    {
+        VoiceVocabulary v = includeBuiltin ? VoiceVocabulary::Builtin(std::move(test)) : VoiceVocabulary{ std::move(test) };
+        // The folder rule (shared with SearchVocabulary): the folder's name ("K:\src\App\" → "App"; "K:\" → none), weight 3,
+        // when it is distinctive.
+        AddFolderNameTerm(v, detail::FolderLeafName(workdir));
+        if (!claudeMd.empty())
+        {
+            for (const auto& [word, count] : ExtractContextTerms(claudeMd, v.Plain()))
+            {
+                (void)count;
+                v.Add(word, 2.0, L"context", false);
+            }
+        }
+        // The title rule (shared with SearchVocabulary): the title's distinctive, hard words, weight 2, never respelled.
+        AddTitleTerms(v, title);
+        for (const auto& e : dictionary)
+        {
+            v.Add(e.term, 3.0, L"user", true, e.triggers);
+        }
+        return v;
+    }
+
+    /// <summary>
+    /// vocab.py's search_vocabulary: the vocabulary of a spoken SEARCH request (the Telegram 🔎 Search topic; VOICE.md §5.6,
+    /// MESSAGING.md §21.43). It goes to no session, so it has no folder, title or CLAUDE.md of its own: the names a search says
+    /// are the FLEET's. The built-in glossary, then each folder's name by the folder rule (AddFolderNameTerm: weight 3,
+    /// respellable), each title's hard words by the title rule (AddTitleTerms: weight 2), and the owner's dictionary (weight 3).
+    /// Within a weight the terms keep the order they joined in, so every use that truncates (Whisper's prompt, the hotwords,
+    /// the glossary line) keeps the FIRST folders and titles: pass both lists most relevant first.
+    /// </summary>
+    /// <param name="test">The plain-English test.</param>
+    /// <param name="folders">The fleet's folders, most recently active first. A name already judged (ignoring case: another
+    /// clone, a case variant), a drive root and a name the folder rule refuses take no slot; a judged name is never asked about
+    /// again (the word test sees exactly the reference's questions).</param>
+    /// <param name="titles">The tabs' titles, most recently active first.</param>
+    /// <param name="dictionary">The owner's dictionary entries.</param>
+    /// <param name="includeBuiltin">False for a context-only vocabulary (an evaluation ablation).</param>
+    /// <param name="maxFolders">At most this many folder names join; the folders after the last one are not read.</param>
+    /// <param name="maxTitles">At most this many titles are read (the first ones).</param>
+    /// <returns>The vocabulary.</returns>
+    /// <exception cref="std::bad_alloc">If the vocabulary cannot be built.</exception>
+    inline VoiceVocabulary SearchVocabulary(WordTest test, const std::vector<std::wstring>& folders, const std::vector<std::wstring>& titles,
+                                            const std::vector<DictionaryEntry>& dictionary = {}, bool includeBuiltin = true,
+                                            size_t maxFolders = kSearchVocabularyMaxFolders, size_t maxTitles = kSearchVocabularyMaxTitles)
+    {
+        VoiceVocabulary v = includeBuiltin ? VoiceVocabulary::Builtin(std::move(test)) : VoiceVocabulary{ std::move(test) };
+        size_t names = 0;
+        // Python: leaf.lower() in seen — a name is judged once, whatever the case it comes in; the first spelling decides.
+        std::set<std::wstring> seen;
+        for (const auto& folder : folders)
+        {
+            if (names >= maxFolders)
+            {
+                break;
+            }
+            const std::wstring leaf = detail::FolderLeafName(folder);
+            if (leaf.empty() || !seen.insert(detail::Lower(leaf)).second)
+            {
+                continue;
+            }
+            if (AddFolderNameTerm(v, leaf))
+            {
+                ++names;
+            }
+        }
+        const size_t read = (std::min)(titles.size(), maxTitles); // parenthesized: <windows.h> without NOMINMAX (the m5 harness) defines a min() macro
+        for (size_t i = 0; i < read; ++i)
+        {
+            AddTitleTerms(v, titles[i]);
         }
         for (const auto& e : dictionary)
         {

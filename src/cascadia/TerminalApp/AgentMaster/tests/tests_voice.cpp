@@ -7,12 +7,15 @@
 //      aliases, distinctive, hard;
 //   2. the context terms mined from a sample CLAUDE.md (every filter: code-only spellings, shouted English, compounds of
 //      everyday words, one-off mentions, two-letter acronyms);
-//   3. three vocabularies (the glossary; a session's; a session's with the owner's dictionary): their terms, weights,
-//      sources and respell flags in order, Whisper's prompt at two budgets, the hotwords at two limits, and the dictionary
-//      pass over 15 transcripts — the text AND the respellings it made;
+//   3. six vocabularies (the glossary; a session's, with and without the owner's dictionary; a spoken SEARCH request's —
+//      the fleet's folders and titles, VOICE.md §5.6 — at the default caps, with the owner's dictionary, and capped hard):
+//      their terms, weights, sources and respell flags in order, Whisper's prompt at two budgets, the hotwords at two
+//      limits, and the dictionary pass over 20 transcripts — the text AND the respellings it made; the search's default
+//      caps are the reference's;
 //   4. the owner's dictionary text read like the reference reads it;
 //   5. properties the goldens do not spell out: the pass is idempotent, never rewrites an everyday word, keeps the
-//      punctuation around a window, and asks the word test about nothing the reference never asked.
+//      punctuation around a window, a search's fleet takes a slot only for a name that joins (a drive root, a judged name
+//      and a lowercase one take none; the cap stops the reading), and nothing is asked that the reference never asked.
 // The word test answers from tests\voice\plain_words.txt (the spell checker's answers the reference recorded), so this
 // suite does not depend on the machine's dictionary; the live spell checker is VoiceSpellWords.h's (app-only).
 
@@ -253,13 +256,31 @@ void TestVoiceVocabulary()
               "a name nobody dictates is not (lowerCamelCase, three or more word parts, two characters): they crowded Whisper's prompt");
     }
 
-    // ---- 3. the three vocabularies ----
+    // ---- 3. the vocabularies: the glossary; a session's, with and without the owner's dictionary; a spoken search's ----
     const std::wstring dictText = goldens->StrAt(L"dictionary_text");
     const auto dictionary = ParseDictionary(dictText);
+    // MESSAGING.md §21.43 / VOICE.md §5.6: a note in the Search topic has no session; the fleet's folders and titles are its
+    // vocabulary (SearchVocabulary), and the goldens carry the fleet they were computed from.
+    const json::Value* searchArgs = goldens->Find(L"search_args");
+    const std::vector<std::wstring> searchFolders = searchArgs ? Strings(searchArgs->Find(L"folders")) : std::vector<std::wstring>{};
+    const std::vector<std::wstring> searchTitles = searchArgs ? Strings(searchArgs->Find(L"titles")) : std::vector<std::wstring>{};
+    int searchVocabularies = 0;
     const auto build = [&](const std::wstring& name) -> VoiceVocabulary {
         if (name == L"builtin")
         {
             return VoiceVocabulary::Builtin(frozen.Test());
+        }
+        if (const json::Value* sargs = searchArgs ? searchArgs->Find(name) : nullptr; sargs && sargs->type == json::Value::Type::Obj)
+        {
+            ++searchVocabularies;
+            const std::vector<DictionaryEntry> dict = sargs->BoolAt(L"dictionary") ? dictionary : std::vector<DictionaryEntry>{};
+            if (sargs->BoolAt(L"defaults"))
+            {
+                // Built WITHOUT caps: the port's own defaults must give the reference's vocabulary (search_defaults pins them).
+                return SearchVocabulary(frozen.Test(), searchFolders, searchTitles, dict);
+            }
+            return SearchVocabulary(frozen.Test(), searchFolders, searchTitles, dict, true, static_cast<size_t>(sargs->I64At(L"max_folders")),
+                                    static_cast<size_t>(sargs->I64At(L"max_titles")));
         }
         const json::Value* args = goldens->Find(L"session_args") ? goldens->Find(L"session_args")->Find(name) : nullptr;
         const std::wstring workdir = args ? args->StrAt(L"workdir") : std::wstring{};
@@ -344,6 +365,13 @@ void TestVoiceVocabulary()
             CHECK(applied >= 15, "every golden transcript was replayed");
         }
     }
+    CHECK(searchVocabularies >= 3, "the spoken search's vocabularies were replayed (at the default caps, with the owner's dictionary, capped hard)");
+    {
+        const json::Value* d = goldens->Find(L"search_defaults");
+        CHECK(d && static_cast<size_t>(d->I64At(L"max_folders")) == kSearchVocabularyMaxFolders &&
+                  static_cast<size_t>(d->I64At(L"max_titles")) == kSearchVocabularyMaxTitles,
+              "a spoken search's default caps (folder names, titles read) are the reference's");
+    }
 
     // ---- 4. the owner's dictionary text ----
     {
@@ -385,6 +413,17 @@ void TestVoiceVocabulary()
         CHECK(v.Apply(L"") == L"" && v.Apply(L"   ") == L"   ", "empty and blank transcripts come back as they were");
         CHECK(SessionVocabulary(frozen.Test(), L"K:\\", L"", L"").Terms().size() == VoiceVocabulary::Builtin(frozen.Test()).Terms().size(),
               "a drive root adds no folder name to the vocabulary");
+        // A spoken search (SearchVocabulary): only the spellings the goldens asked about, so the frozen list answers each.
+        const size_t builtinCount = VoiceVocabulary::Builtin(frozen.Test()).Terms().size();
+        CHECK(SearchVocabulary(frozen.Test(), {}, {}).Terms().size() == builtinCount, "a search with no fleet (an empty registry) gets the glossary alone");
+        const VoiceVocabulary fleet = SearchVocabulary(frozen.Test(), { L"K:\\", L"K:\\source\\Agentmaster", L"q:\\x\\agentmaster", L"K:\\source\\kvnode" }, {});
+        CHECK(fleet.Terms().size() == builtinCount + 1 && fleet.Terms().back().text == L"Agentmaster" && fleet.Terms().back().weight == 3.0,
+              "a drive root, a second clone of a name already judged (another case) and a lowercase name add nothing; the first spelling wins");
+        const VoiceVocabulary one = SearchVocabulary(frozen.Test(), { L"K:\\source\\Agentmaster", L"C:\\Users\\me\\BetterClipboard" }, {}, {}, true, 1, 0);
+        CHECK(one.Terms().size() == builtinCount + 1 && one.Terms().back().text == L"Agentmaster",
+              "the folder-name cap counts names that JOINED: one name, and the folders after it are not read");
+        CHECK(fleet.Apply(L"find the agent master sessions") == L"find the Agentmaster sessions",
+              "a fleet folder's name is respelled from its spoken split, like a session's own folder");
     }
     if (!frozen.unknown.empty())
     {
@@ -569,10 +608,12 @@ void TestVoiceCorrection()
 
 // MESSAGING.md §21.43 / VOICE.md §3 — where a voice note goes (MessagingVoice.h): where a TYPED message of its thread goes. The
 // owner's report of 2026-10-28: a voice note sent in the chat's "All" view (which opens a new thread with it) was answered
-// "this thread has no session", while a typed message there starts the session and becomes its first prompt.
+// "this thread has no session", while a typed message there starts the session and becomes its first prompt. The owner's
+// request of 2026-11-03: a voice note in the 🔎 Search topic was answered "reads typed searches only", while a typed message
+// there is a search; it is now transcribed (the fleet's names as its vocabulary) and read as that search.
 void TestVoiceNoteRoute()
 {
-    std::wprintf(L"\n== TestVoiceNoteRoute (MESSAGING.md 21.43: a voice note goes where a typed message of its thread goes - a new thread holds it for its session) ==\n");
+    std::wprintf(L"\n== TestVoiceNoteRoute (MESSAGING.md 21.43: a voice note goes where a typed message of its thread goes - a new thread holds it for its session, the Search topic searches it) ==\n");
     using Msg::DecideVoiceNoteRoute;
     using Msg::VoiceNoteRoute;
     constexpr int64_t kSearch = 5;
@@ -589,16 +630,19 @@ void TestVoiceNoteRoute()
     CHECK(DecideVoiceNoteRoute(false, false, 0, kSearch, false) == VoiceNoteRoute::RefuseMainView &&
               DecideVoiceNoteRoute(false, false, 0, 0, false) == VoiceNoteRoute::RefuseMainView,
           "the chat's main view (thread 0) refuses, with or without a Search topic");
-    CHECK(DecideVoiceNoteRoute(false, false, kSearch, kSearch, false) == VoiceNoteRoute::RefuseSearchTopic, "the Search topic refuses (a search is typed)");
+    CHECK(DecideVoiceNoteRoute(false, false, kSearch, kSearch, false) == VoiceNoteRoute::TranscribeForSearch,
+          "the Search topic transcribes the note now and reads it as a search request (until 2026-11-03 it refused: 'a search is typed')");
+    CHECK(DecideVoiceNoteRoute(false, false, kSearch, kSearch, true) == VoiceNoteRoute::TranscribeForSearch,
+          "the Search topic is read before the orphan mark, in _handleMessage's order");
     CHECK(DecideVoiceNoteRoute(false, false, kNewThread, kSearch, true) == VoiceNoteRoute::RefuseOrphanTopic,
           "a recreated topic's old thread refuses, pointing at the new topic");
 
     // ---- the refusals say where a note IS read; a route that takes the note answers nothing ----
-    for (const VoiceNoteRoute r : { VoiceNoteRoute::Transcribe, VoiceNoteRoute::HoldForNewThread, VoiceNoteRoute::HoldInBind })
+    for (const VoiceNoteRoute r : { VoiceNoteRoute::Transcribe, VoiceNoteRoute::TranscribeForSearch, VoiceNoteRoute::HoldForNewThread, VoiceNoteRoute::HoldInBind })
     {
         CHECK(Msg::VoiceNoteRouteRefusalText(r).empty(), "a route that takes the note posts no refusal");
     }
-    for (const VoiceNoteRoute r : { VoiceNoteRoute::RefuseMainView, VoiceNoteRoute::RefuseSearchTopic, VoiceNoteRoute::RefuseOrphanTopic })
+    for (const VoiceNoteRoute r : { VoiceNoteRoute::RefuseMainView, VoiceNoteRoute::RefuseOrphanTopic })
     {
         const std::wstring t = Msg::VoiceNoteRouteRefusalText(r);
         CHECK(!t.empty() && t.find_first_of(L"<>&") == std::wstring::npos, "a refusal is posted, and holds nothing the HTML reply would read as markup");
@@ -606,6 +650,20 @@ void TestVoiceNoteRoute()
     }
     CHECK(Msg::VoiceNoteRouteRefusalText(VoiceNoteRoute::RefuseMainView).find(L"new thread") != std::wstring::npos,
           "the main view's answer says a new thread takes a note");
+    CHECK(Msg::VoiceNoteRouteRefusalText(VoiceNoteRoute::RefuseMainView).find(L"Search") != std::wstring::npos,
+          "the main view's answer says the Search topic takes a note too");
+
+    // ---- VOICE.md §5.6: the titles a Search note's vocabulary reads (the open tabs', most recently active first) ----
+    {
+        const std::vector<Msg::VoiceSearchTitleSample> samples{
+            { L"older tab", 100 }, { L"Agentmaster", 300 }, { L"agentmaster", 200 }, { L"   ", 400 }, { L"", 500 },
+            { L" newest\r", 600 }, { L"tie A", 50 }, { L"tie B", 50 },
+        };
+        const std::vector<std::wstring> want{ L"newest", L"Agentmaster", L"older tab", L"tie A", L"tie B" };
+        CHECK(Msg::OrderVoiceSearchTitles(samples) == want,
+              "the most recent first, each once ignoring ASCII case (the newer spelling kept), trimmed, blanks dropped, ties in input order");
+        CHECK(Msg::OrderVoiceSearchTitles({}).empty(), "no open tab: no title");
+    }
 
     // ---- why a note cannot be read at all: asked at arrival, in this order ----
     CHECK(Msg::VoiceNoteUnreadableText(true, true, false, true, 300000).empty(), "voice on, a transcriber, a file under the cap: readable");

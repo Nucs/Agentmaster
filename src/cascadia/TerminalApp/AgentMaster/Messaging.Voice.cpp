@@ -2,18 +2,22 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster — the Telegram service's VOICE NOTES (MESSAGING.md §21.43, VOICE.md §6): a voice note in a session's topic is
-// downloaded, transcribed and read like the text it says. See Messaging.h's §21.43 section for the shape (the voice thread,
-// the lanes, the leaf lock); VoiceBridge.h for the seam to the transcriber. Plain C++ (no WinRT, no PCH).
+// downloaded, transcribed and read like the text it says; one in the 🔎 Search topic the same way, as the search it says.
+// See Messaging.h's §21.43 section for the shape (the voice thread, the lanes, the leaf lock); VoiceBridge.h for the seam to
+// the transcriber. Plain C++ (no WinRT, no PCH).
 //
 // The flow of one note:
 //   poll thread  _voiceTake: 👀 on the note, a VoiceJob queued, a pending item at the end of its thread's lane
-//   voice thread _voiceLoop → _voiceRun: getFile, the download, the transcriber (vocabulary → engine → dictionary pass)
-//                → the lane item marked done, the tick woken
+//   voice thread _voiceLoop → _voiceRun: getFile, the download, the transcriber (vocabulary → engine → dictionary pass) —
+//                the session's vocabulary, or for a Search note the FLEET's (FillVoiceSearchContext: the registry's folders
+//                and open tabs' titles, VOICE.md §5.6) → the lane item marked done, the tick woken
 //   tick thread  _voiceTick → _voiceDeliver: the transcript echoed under the note ("🎤 …"), then the note read as that text by
 //                _handleTopicMessage — the same path as a typed message (a queued prompt with its reactions on the NOTE, an
-//                answer to an open question card, a backlog question for a note sent while Agentmaster was closed)
+//                answer to an open question card, a backlog question for a note sent while Agentmaster was closed) — or, for a
+//                Search note, by _handleSearchMessage, the path of a search typed there (a request asked of the Search agent,
+//                /clear, a fleet command; the backlog answer for a note sent while Agentmaster was closed)
 // Messages of the same thread that arrive while a note is pending wait in its lane and are handed to _handleMessage again in
-// arrival order, so "voice, then a typed follow-up" reaches the session in that order.
+// arrival order, so "voice, then a typed follow-up" reaches the session (or the search) in that order.
 
 #include "Messaging.h"
 
@@ -30,7 +34,8 @@
 #include <fstream>
 
 #include "ClaudeSpawn.h" // AppendStateLog, LogNav, ShortId, LogSwallowedException
-#include "MessagingVoice.h" // where a note goes (DecideVoiceNoteRoute), why one cannot be read, kVoiceMaxBytes, VoiceNoteMedia
+#include "MessagingVoice.h" // where a note goes (DecideVoiceNoteRoute), why one cannot be read, kVoiceMaxBytes, VoiceNoteMedia, OrderVoiceSearchTitles
+#include "SessionFolderFilter.h" // a Search note's fleet folders: CollectSessionFolders + SortFoldersByRecency (NormDirKey, Rule #8)
 #include "SessionRegistry.h"
 
 namespace Agentmaster::Msg
@@ -49,6 +54,66 @@ namespace Agentmaster::Msg
         int64_t WallMs()
         {
             return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        }
+
+        /// <summary>
+        /// Who a voice note's hooks.log line names: its session's short id, or "Search topic" for a note of the 🔎 Search topic
+        /// (it has no session: ShortId of "" would name nobody, and the line would read like a session's).
+        /// </summary>
+        /// <param name="forSearch">The note is the Search topic's (VoiceJob / VoiceLaneItem::forSearch).</param>
+        /// <param name="sessionId">Its session ("" for a Search note).</param>
+        /// <returns>The label.</returns>
+        /// <exception cref="std::bad_alloc">If the label cannot be allocated.</exception>
+        std::wstring VoiceLogWho(bool forSearch, const std::wstring& sessionId)
+        {
+            return forSearch ? std::wstring{ L"Search topic" } : ShortId(sessionId);
+        }
+
+        /// <summary>Who a voice note's [nav] line names: its session's short id, or "search" for the Search topic's note.</summary>
+        /// <param name="forSearch">The note is the Search topic's.</param>
+        /// <param name="sessionId">Its session ("" for a Search note).</param>
+        /// <returns>The label.</returns>
+        /// <exception cref="std::bad_alloc">If the label cannot be allocated.</exception>
+        std::wstring VoiceNavWho(bool forSearch, const std::wstring& sessionId)
+        {
+            return forSearch ? std::wstring{ L"search" } : ShortId(sessionId);
+        }
+
+        /// <summary>
+        /// The FLEET's names for a 🔎 Search note's vocabulary (VOICE.md §5.6): the note has no session, and the names a spoken
+        /// search says are the fleet's. Every folder a session of the registry worked in — live AND archived (a search finds
+        /// closed sessions too), its launch folder and its inferred one — each once by NormDirKey (Rule #8) and the most recently
+        /// active first (SessionFolderFilter.h: the Sessions page's and the new-thread picker's own collection and order); and
+        /// the open tabs' titles, the most recent first, each once (OrderVoiceSearchTitles). The transcriber reads only the first
+        /// ones (kSearchVocabularyMaxFolders names, kSearchVocabularyMaxTitles titles), so the order is the priority. Both reads
+        /// are the registry's LEAN snapshots — PlaceSamples (two folders and a stamp per record) and SnapshotLiveForCards (the
+        /// live records without their queues or transcript texts) — taken once per note, on the voice thread, never the UI's.
+        /// </summary>
+        /// <param name="registry">The engine's registry.</param>
+        /// <param name="note">The note: its searchFolders and searchTitles are replaced.</param>
+        /// <exception cref="std::bad_alloc">If a snapshot or a list cannot be allocated.</exception>
+        void FillVoiceSearchContext(const SessionRegistry& registry, Voice::VoiceNote& note)
+        {
+            std::vector<SessionFolderFacts> facts;
+            for (const auto& sample : registry.PlaceSamples())
+            {
+                facts.push_back(SessionFolderFacts{ sample.workingDir, sample.inferredWorkingDir, sample.lastActivityUnixMs });
+            }
+            std::vector<SessionFolderUse> folders = CollectSessionFolders(facts);
+            SortFoldersByRecency(folders);
+            note.searchFolders.clear();
+            note.searchFolders.reserve(folders.size());
+            for (auto& f : folders)
+            {
+                note.searchFolders.push_back(std::move(f.path));
+            }
+            std::vector<VoiceSearchTitleSample> titles;
+            for (const auto& s : registry.SnapshotLiveForCards())
+            {
+                // The newer of the hook-side and the transcript-side stamp: how the registry's own headlines rank a session.
+                titles.push_back(VoiceSearchTitleSample{ s.title, (std::max)(s.lastActivityUnixMs, s.convLastActivityUnixMs) });
+            }
+            note.searchTitles = OrderVoiceSearchTitles(std::move(titles));
         }
     }
 
@@ -265,7 +330,9 @@ namespace Agentmaster::Msg
         }
         // §21.17 / §21.25: the note goes where a TYPED message of its thread goes (MessagingVoice.h) — a thread no session owns
         // yet holds it in its new-thread wizard (writing in "All" opens such a thread with that very note), a topic whose bind
-        // still hands over holds it in the bind. Before 2026-10-28 both answered "no session" / "still starting" instead.
+        // still hands over holds it in the bind. Before 2026-10-28 both answered "no session" / "still starting" instead. The 🔎
+        // Search topic transcribes it now with no session (the fleet's names are its vocabulary, _voiceRun); before 2026-11-03
+        // it answered "reads typed searches only".
         VoiceNoteRoute route = VoiceNoteRoute::Transcribe;
         if (sessionId.empty())
         {
@@ -283,6 +350,9 @@ namespace Agentmaster::Msg
             route = DecideVoiceNoteRoute(true, bindHandingOver, threadId, 0, false);
         }
         const bool holdForSession = route == VoiceNoteRoute::HoldForNewThread || route == VoiceNoteRoute::HoldInBind;
+        // A Search note takes the transcribe path below with an EMPTY session: the job, its lane item and every line about it
+        // carry this flag, so nothing downstream reads "no session" as "a session's note gone missing".
+        const bool forSearch = route == VoiceNoteRoute::TranscribeForSearch;
         if (edited)
         {
             // An edited note (its caption) is never read again — but a copy a wizard or a bind still holds takes the edit, so the
@@ -301,6 +371,7 @@ namespace Agentmaster::Msg
         }
         VoiceJob job;
         job.sessionId = sessionId;
+        job.forSearch = forSearch;
         job.threadId = threadId;
         job.messageId = messageId;
         job.fileId = media->StrAt(L"file_id");
@@ -341,6 +412,7 @@ namespace Agentmaster::Msg
                 item.seq = ++_voiceSeq;
                 item.isVoice = true;
                 item.held = heldByNewThread;
+                item.forSearch = forSearch;
                 item.sessionId = sessionId;
                 item.msg = msg;
                 // D2 is judged at ARRIVAL: a note read live stays live however long its transcription takes (a first worker start
@@ -355,16 +427,22 @@ namespace Agentmaster::Msg
         if (!refusal.empty())
         {
             _reply(threadId, refusal, false, json::Value{}, messageId);
-            LogNav(L"remote telegram voice " + ShortId(sessionId) + L" -> refused");
+            LogNav(L"remote telegram voice " + VoiceNavWho(forSearch, sessionId) + L" -> refused");
             return true;
         }
         _voiceCv.notify_all();
-        // The note is heard: 👀 until its transcript is read (then the queued prompt's own reactions take over, §7.1).
+        // The note is heard: 👀 until its transcript is read (then the queued prompt's own reactions take over, §7.1; a Search
+        // note's then gets the "Searching…" line, as a typed search does).
         _react(messageId, kVoiceHeardReaction);
-        _registry->UpdateQuiet(sessionId, [](SessionInfo& s) { s.readUnixMs = WallMs(); });
-        _log(L"[msg] " + ShortId(sessionId) + L" voice note queued for transcription (message " + std::to_wstring(messageId) + L", " + kind + L", " +
-             std::to_wstring(job.durationSec) + L" s" + (heldByNewThread ? L", held by its new thread until the session came up)" : L")"));
-        LogNav(L"remote telegram voice " + ShortId(sessionId) + L" seconds=" + std::to_wstring(job.durationSec));
+        if (!forSearch)
+        {
+            // Any action in a topic marks its session READ on the PC; the Search topic has no session to mark.
+            _registry->UpdateQuiet(sessionId, [](SessionInfo& s) { s.readUnixMs = WallMs(); });
+        }
+        _log(L"[msg] " + VoiceLogWho(forSearch, sessionId) + L" voice note queued for transcription (message " + std::to_wstring(messageId) + L", " + kind + L", " +
+             std::to_wstring(job.durationSec) + L" s" +
+             (forSearch ? L", a search: the fleet's names are its vocabulary)" : heldByNewThread ? L", held by its new thread until the session came up)" : L")"));
+        LogNav(L"remote telegram voice " + VoiceNavWho(forSearch, sessionId) + L" seconds=" + std::to_wstring(job.durationSec));
         return true;
     }
 
@@ -528,12 +606,18 @@ namespace Agentmaster::Msg
                     return out;
                 }
             }
-            // 3. The transcriber, with the session the note is for (its folder and title shape the vocabulary).
+            // 3. The transcriber, with the session the note is for (its folder and title shape the vocabulary) — or, for a 🔎
+            //    Search note, with the fleet's folders and open tabs' titles (VOICE.md §5.6), read now so the newest tabs count.
             Voice::VoiceNote note;
             note.audioPath = path;
             note.durationSec = job.durationSec;
             note.sessionId = job.sessionId;
-            if (const auto s = _session(job.sessionId))
+            if (job.forSearch)
+            {
+                note.forSearch = true;
+                FillVoiceSearchContext(*_registry, note);
+            }
+            else if (const auto s = _session(job.sessionId))
             {
                 // The folder claude runs in (where Claude Code reads its CLAUDE.md), not the inferred one: the vocabulary is
                 // the project's the session works in.
@@ -648,8 +732,8 @@ namespace Agentmaster::Msg
                 _react(messageId, L"");
                 _reply(threadId, L"\U0001F3A4 I could not transcribe this voice note: " + TgEscapeHtml(r.error) + L". Send it again, or as text.", false,
                        json::Value{}, messageId);
-                _log(L"[msg] " + ShortId(item.sessionId) + L" voice note not transcribed (message " + std::to_wstring(messageId) + L"): " + r.error);
-                LogNav(L"remote telegram voice " + ShortId(item.sessionId) + L" -> failed");
+                _log(L"[msg] " + VoiceLogWho(item.forSearch, item.sessionId) + L" voice note not transcribed (message " + std::to_wstring(messageId) + L"): " + r.error);
+                LogNav(L"remote telegram voice " + VoiceNavWho(item.forSearch, item.sessionId) + L" -> failed");
                 return;
             }
             bool echo = true;
@@ -680,9 +764,9 @@ namespace Agentmaster::Msg
                                             : r.correctionMs > 0       ? (r.corrected ? L", corrected in " : L", correction kept it, ") +
                                                                        std::to_wstring(r.correctionMs) + L" ms"
                                                                        : std::wstring{};
-            _log(L"[msg] " + ShortId(item.sessionId) + L" voice note transcribed (message " + std::to_wstring(messageId) + L", " + std::to_wstring(r.text.size()) +
-                 L" chars, " + r.engine + L", " + std::to_wstring(r.totalMs) + L" ms, " + std::to_wstring(r.fixes.size()) + L" vocabulary fix(es)" + correction +
-                 L")");
+            _log(L"[msg] " + VoiceLogWho(item.forSearch, item.sessionId) + L" voice note transcribed (message " + std::to_wstring(messageId) + L", " +
+                 std::to_wstring(r.text.size()) + L" chars, " + r.engine + L", " + std::to_wstring(r.totalMs) + L" ms, " + std::to_wstring(r.fixes.size()) +
+                 L" vocabulary fix(es)" + correction + L")");
             // The note, read as the text it says: every rule of a typed message applies (a question card takes it as its answer,
             // a note sent while Agentmaster was closed is asked about, a queued prompt's reactions land on the note itself).
             json::Value said = item.msg;
@@ -693,10 +777,21 @@ namespace Agentmaster::Msg
                 said.Set(L"am_voice_live", json::Value::MkBool(true));
             }
             _react(messageId, L"");
-            // A note a new thread HELD (the session's first prompt, maybe) is handed over like the typed messages it held: as a
-            // held message, which no question card takes and no backlog question asks about.
-            _handleTopicMessage(item.sessionId, said, threadId, item.held);
-            LogNav(L"remote telegram voice " + ShortId(item.sessionId) + L" -> read chars=" + std::to_wstring(text.size()));
+            if (item.forSearch)
+            {
+                // §21.43: the 🔎 Search topic's note is read as a search TYPED there — the topic's own reading (a request asked
+                // of the Search agent, /clear, a fleet command), with the backlog rule judged at the note's arrival (the mark
+                // above). This runs on the tick thread, which is safe: SearchBridge's methods may be called from any of the
+                // service's threads, and `_search` changes only under `_mtx` (_askSearch says why its unlocked read holds).
+                _handleSearchMessage(said, threadId);
+            }
+            else
+            {
+                // A note a new thread HELD (the session's first prompt, maybe) is handed over like the typed messages it held: as a
+                // held message, which no question card takes and no backlog question asks about.
+                _handleTopicMessage(item.sessionId, said, threadId, item.held);
+            }
+            LogNav(L"remote telegram voice " + VoiceNavWho(item.forSearch, item.sessionId) + L" -> read chars=" + std::to_wstring(text.size()));
         }
         catch (...)
         {

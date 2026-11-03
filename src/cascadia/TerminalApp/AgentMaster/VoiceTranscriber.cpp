@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Agentmaster — VoiceTranscriber (see VoiceTranscriber.h): one voice note → the session vocabulary → the engine → the
-// dictionary pass → the correction (VoiceCorrect.h) → the prompt text.
+// Agentmaster — VoiceTranscriber (see VoiceTranscriber.h): one voice note → the session vocabulary (a 🔎 Search note: the
+// fleet's, VoiceVocabulary.h SearchVocabulary) → the engine → the dictionary pass → the correction (VoiceCorrect.h) → the
+// prompt text.
 
 #include "VoiceTranscriber.h"
 
@@ -56,6 +57,18 @@ namespace Agentmaster::Voice
             {
                 // ⚠ DELIBERATELY BARE: the logger itself failed; nothing left to report through.
             }
+        }
+
+        /// <summary>
+        /// Who a voice.log line names: a session's note by its id's first 8 characters, a 🔎 Search note (it has no session,
+        /// VoiceNote::forSearch) as "search" — so the log tells the two apart and a Search line never shows an empty id.
+        /// </summary>
+        /// <param name="note">The note.</param>
+        /// <returns>The label.</returns>
+        /// <exception cref="std::bad_alloc">If the label cannot be allocated.</exception>
+        std::wstring NoteLogLabel(const VoiceNote& note)
+        {
+            return note.forSearch ? std::wstring{ L"search" } : note.sessionId.substr(0, 8);
         }
 
         /// <summary>A file's bytes, up to `cap` ("" when it cannot be read).</summary>
@@ -130,7 +143,7 @@ namespace Agentmaster::Voice
                 }
                 if (!out.ok)
                 {
-                    VoiceLog(L"[voice] " + note.sessionId.substr(0, 8) + L" failed: " + out.error);
+                    VoiceLog(L"[voice] " + NoteLogLabel(note) + L" failed: " + out.error);
                 }
                 return out;
             }
@@ -154,8 +167,8 @@ namespace Agentmaster::Voice
                         out.error = L"voice notes are off (\x2699 Settings \x203A Messaging \x203A Voice notes)";
                         return out;
                     }
-                    // 1. The vocabulary of THIS session (cached while its inputs are unchanged: a burst of notes to one
-                    //    session builds it once).
+                    // 1. The vocabulary of THIS session — or, for a 🔎 Search note, of the fleet (VOICE.md §5.6) — cached while
+                    //    its inputs are unchanged: a burst of notes to one session (or to Search) builds it once.
                     const VoiceVocabulary& vocab = _vocabularyFor(cfg, note);
                     out.vocabularyTerms = vocab.Terms().size();
                     const std::wstring prompt = vocab.WhisperPrompt();
@@ -292,10 +305,19 @@ namespace Agentmaster::Voice
                                              ? L", correction " + std::to_wstring(out.correctionMs) + L" ms" + (out.corrected ? L" (changed)" : L" (unchanged)")
                                              : L", correction FAILED after " + std::to_wstring(out.correctionMs) + L" ms: " + out.correctionError;
                     }
-                    VoiceLog(L"[voice] " + note.sessionId.substr(0, 8) + L" " + out.engine + L": " + std::to_wstring(out.audioMs) + L" ms of audio, engine " +
+                    // A Search note names what its vocabulary was offered (how many fleet folders and titles; the terms count says
+                    // how many joined), or that the context switch kept the fleet's names out.
+                    std::wstring fleetText;
+                    if (note.forSearch)
+                    {
+                        fleetText = cfg.useSessionContext ? L" (the fleet's: " + std::to_wstring(note.searchFolders.size()) + L" folder(s), " +
+                                                                std::to_wstring(note.searchTitles.size()) + L" title(s) offered)"
+                                                          : std::wstring{ L" (the fleet's names off: voiceUseSessionContext)" };
+                    }
+                    VoiceLog(L"[voice] " + NoteLogLabel(note) + L" " + out.engine + L": " + std::to_wstring(out.audioMs) + L" ms of audio, engine " +
                              std::to_wstring(out.engineMs) + L" ms, total " + std::to_wstring(out.totalMs) + L" ms, " + std::to_wstring(out.vocabularyTerms) +
-                             L" terms, " + std::to_wstring(out.alternatives.size()) + L" other hearing(s), " + std::to_wstring(out.fixes.size()) + L" fix(es)" +
-                             fixesText + correctionText);
+                             L" terms" + fleetText + L", " + std::to_wstring(out.alternatives.size()) + L" other hearing(s), " + std::to_wstring(out.fixes.size()) +
+                             L" fix(es)" + fixesText + correctionText);
                     return out;
                 }
                 catch (...)
@@ -449,10 +471,16 @@ namespace Agentmaster::Voice
             /// is read and written there and nowhere else.
             /// </summary>
             /// <param name="cfg">The settings in force.</param>
-            /// <param name="note">The note (its session's folder and title).</param>
+            /// <param name="note">The note (its session's folder and title; a 🔎 Search note goes to _searchVocabularyFor).</param>
             /// <returns>The vocabulary (owned by the transcriber; valid until the next call).</returns>
+            /// <exception cref="std::bad_alloc">If the key or the vocabulary cannot be built.</exception>
             const VoiceVocabulary& _vocabularyFor(const VoiceEngineConfig& cfg, const VoiceNote& note)
             {
+                if (note.forSearch)
+                {
+                    // MESSAGING.md §21.43: a Search note has no session — no folder, title or CLAUDE.md to read here.
+                    return _searchVocabularyFor(cfg, note);
+                }
                 std::wstring workdir = cfg.useSessionContext ? note.workdir : std::wstring{};
                 std::wstring title = cfg.useSessionContext ? note.title : std::wstring{};
                 std::wstring claudeMdPath;
@@ -497,6 +525,52 @@ namespace Agentmaster::Voice
                 }
                 _vocab = std::make_unique<VoiceVocabulary>(SessionVocabulary(SpellCheckerWordTest(), workdir, title, claudeMd, ParseDictionary(cfg.dictionary)));
                 _vocabKey = key;
+                return *_vocab;
+            }
+
+            /// <summary>
+            /// A 🔎 Search note's vocabulary (VOICE.md §5.6; VoiceVocabulary.h SearchVocabulary): the built-in glossary, the
+            /// fleet's folder names and tab titles the service read for THIS note (VoiceNote::searchFolders / searchTitles, the
+            /// most recently active first) and the owner's dictionary. Rebuilt only when one of them changed — every one is in
+            /// the key — so a burst of Search notes builds it once; a session's note in between rebuilds the one shared cache
+            /// (it is cheap: a few hundred terms). voiceUseSessionContext covers the fleet's names too: off, a Search note gets
+            /// the glossary and the dictionary alone, as a session's note gets them without its folder. Voice thread only, like
+            /// the cache.
+            /// </summary>
+            /// <param name="cfg">The settings in force.</param>
+            /// <param name="note">The Search note.</param>
+            /// <returns>The vocabulary (owned by the transcriber; valid until the next call).</returns>
+            /// <exception cref="std::bad_alloc">If the key or the vocabulary cannot be built.</exception>
+            const VoiceVocabulary& _searchVocabularyFor(const VoiceEngineConfig& cfg, const VoiceNote& note)
+            {
+                const std::vector<std::wstring> none;
+                const std::vector<std::wstring>& folders = cfg.useSessionContext ? note.searchFolders : none;
+                const std::vector<std::wstring>& titles = cfg.useSessionContext ? note.searchTitles : none;
+                // The key starts with U+0001 — a session's key starts with its folder path, which never holds a control
+                // character, so the two never match — and every part follows a NUL, with both lists' lengths, so no title (a
+                // lone CR or line break included) can make two different fleets read as one.
+                std::wstring key{ L"\x01" L"search" };
+                const auto part = [&key](const std::wstring& text) {
+                    key.push_back(L'\0');
+                    key += text;
+                };
+                part(std::to_wstring(folders.size()));
+                for (const auto& f : folders)
+                {
+                    part(f);
+                }
+                part(std::to_wstring(titles.size()));
+                for (const auto& t : titles)
+                {
+                    part(t);
+                }
+                part(cfg.dictionary);
+                if (_vocab && key == _vocabKey)
+                {
+                    return *_vocab;
+                }
+                _vocab = std::make_unique<VoiceVocabulary>(SearchVocabulary(SpellCheckerWordTest(), folders, titles, ParseDictionary(cfg.dictionary)));
+                _vocabKey = std::move(key);
                 return *_vocab;
             }
 
