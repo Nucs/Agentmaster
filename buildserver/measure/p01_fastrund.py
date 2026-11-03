@@ -33,6 +33,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 import secrets
 import subprocess
 import sys
@@ -44,8 +45,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "site"))
 import sitectl as _site  # noqa: E402  (buildserver/site/sitectl.py: the site's own helpers)
 
-REGISTRY = "registry.example.com"
-"""The homelab registry that holds fastrund's image and the runtime images its slots run."""
+REGISTRY_ENV = "AMB_MEASURE_REGISTRY"
+"""Names the homelab registry (its host name): the owner's own domain, so it lives in the environment, never in the repo
+(Agentmaster's Global env sets it for every session of both installs)."""
+
+REGISTRY = os.environ.get(REGISTRY_ENV, "").strip() or "registry.example.com"
+"""The homelab registry that holds fastrund's image and the runtime images its slots run. The stand-in default reaches
+nothing: without the variable the proof fails at its first pull and says so in the result file."""
 
 IMAGE = f"{REGISTRY}/fastrund:20261012-2"
 """Production's fastrund image (deploy/k8s/fastrun.yaml in K:\\source\\fastrun, 2026-10-12)."""

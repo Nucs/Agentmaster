@@ -4528,6 +4528,12 @@ that went back counts as due.
 
 ### 21.32 A file link that downloads the file — what Telegram allows (2026-10-19; RESEARCH ONLY, nothing built)
 
+> **Names in §21.32–§21.32.4.** The owner's own domain is not published: `example.com` stands for BOTH the owner's
+> Cloudflare zone and its hosted file-link name (one placeholder for the two), `catalog.example.com` / `vpn.example.com` /
+> `*.example.com` for the zone's other names, `registry.example.com` for the homelab registry, and `192.168.1.x` for the
+> home network's addresses. A sentence that seems to compare `example.com` with itself compares the zone with the hosted
+> name. A user's own hosted address is set in the cog (§21.32.5).
+
 > The user's request (2026-10-19): "The hyperlinks to a file should download that file when user clicks on the file name.
 > Check if thats possible to do with telegram without sending a message with a file".
 
@@ -4889,7 +4895,7 @@ fallback if it fails; the Worker for exact hashes (optional); a link's lifetime 
 linked set of a session closed for N days?); one link (hosted when on, else LAN) or two; the station names of dev and
 production. (As built: §21.32.4.)
 
-### 21.32.4 File links as built: downloads through `example.com` or the home network (2026-10-20; the Agentmaster half in production since 0.8.0.0 and dev since 0.0.1.33; the route home LIVE)
+### 21.32.4 File links as built: downloads through the hosted address or the home network (2026-10-20; the Agentmaster half in production since 0.8.0.0 and dev since 0.0.1.33; the route home LIVE)
 
 > The user (2026-10-20): "Implement and host using fastrun and the tunnel on this machine".
 
@@ -4951,9 +4957,11 @@ segment that ends in a dot or a space (Win32 strips it: `key.pem.` would open `k
 port moves the server): `messagingFileLinksMode` (`off` | `lan` | `hosted`, default `off`), `messagingFileLinkStation`
 (`""` = the install's default), `messagingFileLinkPort` (0 = the default), `messagingFileLinkLanBase` (`""` = the first
 private address; the dropdown lists the PC's private addresses, physical adapters first, and its name),
-`messagingFileLinkHostedBase` (`""` = `https://example.com`; only `http(s)://` and URL-safe characters are taken), and
-`messagingFileLinksExclude` (one folder per line). The cog previews a link's shape, says what in a box is not valid, and
-shows the service's status line (`FileLinksStatusText`).
+`messagingFileLinkHostedBase` (`""` = `https://example.com`, a PLACEHOLDER that reaches nothing — every hosted install
+names its own address, the owner's two installs included; only `http(s)://` and URL-safe characters are taken), and
+`messagingFileLinksExclude` (one folder per line). The cog previews a link's shape, says what in a box is not valid (the
+placeholder too), and shows the service's status line (`FileLinksStatusText`). The third mode reads "Through your hosted
+address (anywhere)", and the section's texts name no infrastructure of the owner's.
 
 **State:** `<profile>\messaging\telegram\filelinks.json` (`{"v":1,"sessions":{"<id>":[["<path>",<ms>],…]}}`), written at
 most every 10 s when it changed, at Stop and at the app's last window; pruned hourly. Read once per process; a damaged file
@@ -5004,6 +5012,60 @@ body at 256 KB/s — 50 MB gets ~205 s).
 - A layout outside the four folders has no firewall rule (its first listen asks).
 - ⚠ **The build must PURGE:** `SessionModels.h` changed (`AppSettings` gained six fields) and `MessagingService` gained
   data members.
+
+### 21.32.5 Copy AI Impl Instructions: a one-copy brief that sets up a hosted address (2026-11-03; NOT BUILT)
+
+> The user (2026-11-03): "Add a 'Copy AI Impl Instructions' which will copy an .md that teaches the AI that wants to expose
+> download, on how to do it, similar to how we do [the owner's hosted name] - the point is having one-copy prompt to set up a
+> system user can then use to set access to his system or files for serving download."
+
+**What it is.** A button under FILE LINKS ▸ Hosted address. One click puts on the clipboard a Markdown brief for an AI agent
+with a shell on this PC (Claude Code, Codex, …): its task (give this install's file server a public HTTPS address that
+forwards ONLY the download links, have the user point Agentmaster at it, prove the chain), its ground rules, THIS install's
+facts, the link contract, four routes, the firewall, the setting, the checks, the failure signs and the undo. The user pastes
+it into a session on the PC; the brief has the agent show its plan and ask before anything that costs money or changes DNS, a
+router, a firewall, a service or an account. The button then reads "Copied ✓ Paste it into an AI agent's session on this PC"
+(or "The clipboard is busy — click again" when another program held the clipboard past the writer's retries). It changes no
+setting and writes no file; `hooks.log` gets `[nav] file-links copy-ai-guide copied N chars`.
+
+**The facts written in** (`FileLinksGuideFacts`, read from the boxes AS THEY ARE, saved or not — the preview line's own
+reading, so the two never disagree): the install (release / dev), the station and the port (an invalid box reads as the
+default, as the service would run it), the mode, the typed hosted address, this PC's LAN choices in the dropdown's words
+(address and adapter; the first is the LAN forwarder's target), the running `Agentmaster.exe` (for a firewall rule), the
+profile's `hooks.log` and `settings.json`, the service's status line, and the Credential Manager target of the session-key
+secret — NAMED only (deleting it voids every link); its value, the bot token and a tunnel's token are never read. With the
+hosted address empty (or the placeholder itself) the commands use `https://files.example.com`, marked as the one to replace.
+
+**The contract the brief states** (from §21.32.4): `<hosted address>/station-<station>/<64 lowercase hex>/<path>`; the URL is
+the credential (no login, basic auth, client certificate, cookie or challenge in front: Telegram's in-app browser and
+Android's download manager cannot pass them); the server takes loopback and RFC 1918 peers only — Tailscale's 100.64.x
+addresses are refused too — so the forwarder runs ON the PC or on the LAN; GET/HEAD, `/healthz`, Range, attachment, no-store.
+The filter: GET or HEAD, path `^/station-<station>/[0-9a-f]{64}/` (`FileLinkRoutePathRegex`), no query; 404 for the rest.
+
+**The routes:** A — a Cloudflare Tunnel on the user's own domain (recommended; the owner's own shape): `winget install --id
+Cloudflare.cloudflared`, a dashboard-managed tunnel installed as a service, a public hostname with the path regex (or the
+same as a config.yml ingress with the `http_status:404` catch-all), and a WAF block rule (Free-plan expressions:
+`starts_with`, the method set, an empty query). B — Tailscale Funnel (`--set-path /station-<station>/` onto the same path of
+the server; the brief has the agent prove that the server receives the FULL path, since versions differ in stripping the
+mount). C — the user's own reverse proxy (Caddy with `path_regexp`, or nginx), never a router port-forward straight to the PC
+(refused by the peer rule, and it would skip the filter). D — `cloudflared tunnel --url http://127.0.0.1:<port>`, a throwaway
+trial address. The firewall: nothing to open for a forwarder on the PC; an elevated `New-NetFirewallRule -Program <exe>
+-LocalPort <port> -RemoteAddress LocalSubnet` for one on the LAN.
+
+**The checks, all without the secret:** (1) `/healthz` locally → 200; (2) through the route, a well-formed key no session
+has (64 zeros) → 404 AND a new `[file-link] 404` line in hooks.log — the request reached this PC; (3) through the route, `/`,
+`/healthz`, a short key, a query and a POST → refused with NO new line — the filter holds; (4) a real `/download` link
+tapped on the phone with Wi-Fi off → the file, and `[file-link] 200`.
+
+**The placeholder warning.** With the hosted mode picked and the address empty (or `https://example.com` typed), the preview
+line now starts with "⚠ https://example.com is a placeholder that reaches nothing: enter your public address (Copy AI Impl
+Instructions has an AI agent set one up)."
+
+**The code:** `AgentMaster/MessagingFileLinksGuide.h` (new, pure: `FileLinksGuideFacts`, `FileLinkRoutePathRegex`,
+`BuildFileLinksAiGuide`; its words are ASCII so commands survive any console code page), the cog's button and
+`_CopyFileLinksAiGuide` (`AgentManagerContent.Settings.cpp`, through `RobustCopyTextToClipboard`), the preview's warning in
+`_RefreshFileLinksPreview`. The m5 suite's `TestMessagingFiles` checks the brief: every fact lands, the filter regex, the
+probe URL, no stand-in replaces a typed address, the empty facts' wording, ASCII words, and no private name.
 
 ### 21.33 `/steer`: a message sent NOW, into a running turn too (2026-10-19; in production since 0.6.8.23 and dev since 0.0.1.32)
 

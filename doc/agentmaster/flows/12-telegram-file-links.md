@@ -1,8 +1,7 @@
 # 12 · Telegram: file links (TGF)
 
 > Conventions and fixtures: [README.md](README.md). Spec: MESSAGING.md §21.32.4 (as built). Needs **F-TG**, an HTTP
-> client on the test machine standing in for the phone, and (hosted mode) the `example.com` route — or a local
-> stand-in for it.
+> client on the test machine standing in for the phone, and (hosted mode) a hosted route — or a local stand-in for it.
 
 **What shipped (0.8.0, off by default).** With **Settings → Messaging → FILE LINKS** on, every `[name](file:///…)`
 link in Claude's own text to an existing, allowed file becomes a download link served by a small server inside
@@ -82,10 +81,26 @@ its session linked, for 30 days after its last mention; secrets and excluded fol
 > **Since** 0.8.0 · **P2** · **Needs** the relay or a stand-in · **Spec** MESSAGING.md §21.32.4
 
 **Phases**
-1. **Hosted.** Mode "Through example.com" → links use the hosted base; a request through the relay reaches the station.
+1. **Hosted.** Mode "Through your hosted address" → links use the hosted base; a request through the relay reaches the station.
 2. **Off.** Mode Off → no rewrite; the server stops; existing links stop working.
 3. **Void every link.** Delete the credential `Agentmaster:messaging:telegram-filelinks:<profile leaf>`, restart the bot →
    a new secret; old links 404.
 
 **Known open item** (MESSAGING.md §21.32.4): whether Android's DownloadManager passes the post-quantum guard — a manual
 check on a phone, out of the automated suite.
+
+---
+
+### TGF-05 · Copy AI Impl Instructions
+
+> **Since** — (not in a build yet) · **P3** · **Needs** nothing beyond the cog · **Spec** MESSAGING.md §21.32.5
+
+**Phases**
+1. **Copy.** Settings → Messaging → FILE LINKS → **Copy AI Impl Instructions** → the clipboard holds a Markdown brief whose
+   "This install" list names the station, the port, the health URL and this PC's LAN addresses as the boxes show them
+   (typed, not yet saved values included); the button reads "Copied ✓ …"; `hooks.log` gains `[nav] file-links
+   copy-ai-guide copied N chars`.
+2. **Placeholder warning.** Mode "Through your hosted address" with the address empty → the preview line warns that
+   `https://example.com` is a placeholder; a typed address removes the warning and the brief's commands use it.
+3. **No secret.** The brief names the credential `Agentmaster:messaging:telegram-filelinks:<profile leaf>` and nothing of
+   its value, nor the bot token.

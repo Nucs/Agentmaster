@@ -47,9 +47,13 @@ from datetime import datetime
 from pathlib import Path
 
 E2E = Path(__file__).resolve().parents[1]
-FLEET_URL = "http://192.168.1.150:7800/mcp"
+FLEET_HUB_URL_ENV = "AM_E2E_FLEET_HUB_URL"
+"""The claude-fleet hub's MCP endpoint (http://<hub>:7800/mcp), whose token comes from the cluster (kubectl). The hub's
+address is the owner's LAN, so it lives in the environment, never in the repo: Agentmaster's Global env sets it for every
+session of both installs (the cog's Environment variables). Unset, the hub is the `claude-fleet` MCP server of the user's
+own Claude Code config (fleet_hub_url)."""
 FLEET_URL_ENV = "AM_E2E_FLEET_URL"
-"""Overrides FLEET_URL: e.g. this PC's own Windows host, http://127.0.0.1:7790/mcp, which serves the same fleet tools for
+"""Overrides the hub: e.g. this PC's own Windows host, http://127.0.0.1:7790/mcp, which serves the same fleet tools for
 its Windows desktops when the homelab's hub is down (found 2026-10-26: the cluster unreachable, the desktops fine)."""
 FLEET_TOKEN_FILE_ENV = "AM_E2E_FLEET_TOKEN_FILE"
 """A file holding the token for the FLEET_URL_ENV endpoint (the Windows host's is Q:\\claude-desktops\\windows\\host\\token);
@@ -103,6 +107,34 @@ _INVALID_HANDLE = wintypes.HANDLE(-1).value
 """INVALID_HANDLE_VALUE as ctypes returns a HANDLE (an int)."""
 
 
+def fleet_hub_url() -> str:
+    """The claude-fleet hub's MCP endpoint: AM_E2E_FLEET_HUB_URL, else the user's own Claude Code `claude-fleet` server.
+
+    The fallback is the hub the claude-desktops skill already drives from this PC (a user-scope MCP server in
+    <CLAUDE_CONFIG_DIR or home>\\.claude.json), so a session started before its Agentmaster set the variable still
+    finds it. Only that server's `url` is read; no other member of the config (tokens among them) is touched.
+
+    Returns:
+        The endpoint's URL.
+    Raises:
+        RuntimeError: When neither names the hub; the message says which variable to set.
+    """
+    url = os.environ.get(FLEET_HUB_URL_ENV, "").strip()
+    if url:
+        return url
+    config = Path(os.environ.get("CLAUDE_CONFIG_DIR", "") or Path.home()) / ".claude.json"
+    try:
+        servers = json.loads(config.read_text(encoding="utf-8")).get("mcpServers", {})
+        url = str(servers.get("claude-fleet", {}).get("url", "")).strip()
+    except (OSError, ValueError, AttributeError):
+        # No config, a config that does not parse, or one shaped differently: the same answer as no server at all.
+        url = ""
+    if url:
+        return url
+    raise RuntimeError(f"set {FLEET_HUB_URL_ENV} to the claude-fleet hub's MCP endpoint (http://<hub>:7800/mcp), "
+                       f"or {FLEET_URL_ENV} with {FLEET_TOKEN_FILE_ENV}")
+
+
 class Fleet:
     """The claude-fleet hub, through its MCP endpoint — or, when AM_E2E_FLEET_URL and AM_E2E_FLEET_TOKEN_FILE are set, any
     endpoint that serves the same fleet tools (this PC's Windows host while the hub is down).
@@ -125,6 +157,7 @@ class Fleet:
             OSError: When the override's token file cannot be read.
             ValueError: When only one of the two override variables is set (a half override would send the cluster's
                 token to another endpoint, or the file's token to the hub).
+            RuntimeError: When no override is set and nothing names the hub (fleet_hub_url).
         """
         sys.path.insert(0, str(FLEET_CLIENT))
         from mcp_client import McpClient  # the repo's stdlib client
@@ -134,7 +167,8 @@ class Fleet:
         if url:
             token = Path(token_file).read_text(encoding="ascii").strip()
         else:
-            url = FLEET_URL
+            # The hub's address before the cluster's token: an unset address must fail on its own words, not on kubectl.
+            url = fleet_hub_url()
             raw = subprocess.check_output(["kubectl", "-n", "claude-desktops", "get", "secret", "fleet-token",
                                            "-o", "jsonpath={.data.token}"])
             token = base64.b64decode(raw).decode()

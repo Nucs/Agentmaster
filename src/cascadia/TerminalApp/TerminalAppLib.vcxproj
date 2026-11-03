@@ -258,6 +258,9 @@
     <!-- Agentmaster (MESSAGING.md section 21.32.4): the Telegram FILE LINKS - the pure rules (the link, the session key, the
          linked set, the request parsing; header-only) and the server's interface (no Windows header). -->
     <ClInclude Include="AgentMaster\MessagingFileLinks.h" />
+    <!-- Agentmaster (MESSAGING.md section 21.32.5): FILE LINKS' "Copy AI Impl Instructions" - the brief an AI agent follows to
+         give the links a public address (pure, header-only; the cog's button copies it). -->
+    <ClInclude Include="AgentMaster\MessagingFileLinksGuide.h" />
     <ClInclude Include="AgentMaster\MessagingFileServer.h" />
     <ClInclude Include="AgentMaster\TelegramApi.h" />
     <ClInclude Include="AgentMaster\Messaging.h" />

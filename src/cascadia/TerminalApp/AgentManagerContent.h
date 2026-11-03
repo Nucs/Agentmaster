@@ -1501,15 +1501,16 @@ namespace winrt::TerminalApp::implementation
         bool _msgForgetSecretaryToken{ false }; // "Forget secretary token" was clicked: Save removes it
         void _CheckTelegramBot(); // the "Check bot" button: getMe with the typed (else stored) token on a worker thread; the result lands in _setMsgStatus
         // MESSAGING.md §21.32.4: the FILE LINKS section — how Claude's links to files on this PC reach the phone: Off, a LAN
-        // address of this PC (the dropdown lists them), or through example.com (Cloudflare -> the tunnel on this PC -> the fastrun
-        // relay -> this install's server). The station and the port name this install to the relay; the excluded folders are
-        // never linked. A live line previews a link's shape and says what is wrong with a box; the status line is the service's
-        // FileLinksStatusText, read when the cog opens.
-        winrt::Windows::UI::Xaml::Controls::ComboBox _setMsgFilesMode{ nullptr }; // 0 Off, 1 home network, 2 example.com
+        // address of this PC (the dropdown lists them), or through the hosted address (a public route of the user's own: a
+        // tunnel or a reverse proxy -> this install's server; §21.32.5's "Copy AI Impl Instructions" has an AI agent build one).
+        // The station and the port name this install to that route; the excluded folders are never linked. A live line
+        // previews a link's shape and says what is wrong with a box; the status line is the service's FileLinksStatusText, read
+        // when the cog opens.
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setMsgFilesMode{ nullptr }; // 0 Off, 1 home network, 2 hosted
         winrt::Windows::UI::Xaml::Controls::TextBox _setMsgFilesStation{ nullptr }; // "" = the install's default station
         winrt::Windows::UI::Xaml::Controls::TextBox _setMsgFilesPort{ nullptr }; // "" = the install's default port
         winrt::Windows::UI::Xaml::Controls::ComboBox _setMsgFilesLanBase{ nullptr }; // item 0 = automatic; the rest = _msgFilesLanUrls
-        winrt::Windows::UI::Xaml::Controls::TextBox _setMsgFilesHostedBase{ nullptr }; // "" = https://example.com
+        winrt::Windows::UI::Xaml::Controls::TextBox _setMsgFilesHostedBase{ nullptr }; // "" = https://example.com, a placeholder that reaches nothing
         winrt::Windows::UI::Xaml::Controls::TextBox _setMsgFilesExclude{ nullptr }; // one folder per line
         winrt::Windows::UI::Xaml::Controls::TextBlock _setMsgFilesPreview{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBlock _setMsgFilesStatus{ nullptr };
@@ -1547,10 +1548,24 @@ namespace winrt::TerminalApp::implementation
         void _RebuildFileLinkLanChoices(const std::wstring& keepUrl);
         /// <summary>
         /// The FILE LINKS preview line: what a link will look like with the boxes as they are, and what in them is not valid (a
-        /// station, a port or an address the service would replace with the default). Also enables the dropdown in the home
-        /// network mode only and the hosted address in the example.com mode only.
+        /// station, a port or an address the service would replace with the default, and the placeholder hosted address that
+        /// reaches nothing). Also enables the dropdown in the home network mode only and the hosted address in the hosted mode
+        /// only.
         /// </summary>
         void _RefreshFileLinksPreview();
+        /// <summary>
+        /// MESSAGING.md §21.32.5, the FILE LINKS' "Copy AI Impl Instructions": copies to the clipboard the Markdown brief an AI
+        /// agent on this PC follows to give these links a public HTTPS address (Msg::BuildFileLinksAiGuide), with this install's
+        /// facts read from the boxes AS THEY ARE NOW, saved or not — the same reading as the preview line, so the brief names the
+        /// station, port and address the user sees. Then the button's text says whether the clipboard took it.
+        /// </summary>
+        /// <remarks>
+        /// Writes nothing but the clipboard (no setting, no file) and never puts a secret in the brief: the session keys' secret
+        /// is only NAMED, by its Credential Manager target. Logs one [nav] line with the brief's length. A clipboard held by
+        /// another program past the writer's retries leaves the button saying so; a second click tries again.
+        /// </remarks>
+        /// <param name="button">The clicked button (its text reports the result); null leaves only the log line.</param>
+        void _CopyFileLinksAiGuide(const winrt::Windows::UI::Xaml::Controls::Button& button);
         // COMMANDS tab (COMMANDS.md §6a): the /handover slash-command family — each command's
         // Enable toggle + Command-name box + a status line reading the LIVE vs CONFIGURED state
         // ("Active as /x" / "becomes /y after restart" / "disabled after restart"). Rename +

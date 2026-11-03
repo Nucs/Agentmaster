@@ -11,8 +11,9 @@
 //     https://example.com/station-homepc/3f9a...c2/K/source/Agentmaster/doc/agentmaster/MESSAGING.md
 //
 //   <base>     the LAN URL of this PC's own file server (picked in the cog from the addresses it listens on), or the
-//              hosted name https://example.com (Cloudflare -> a tunnel -> the fastrun relay -> this PC's server).
-//   <station>  this PC in the path ("homepc"; the dev install "homepc-dev"): the relay routes on it.
+//              hosted address, a public route of the user's own (the owner's: Cloudflare -> a tunnel -> a relay -> this
+//              PC's server; MessagingFileLinksGuide.h is the brief that has an AI agent build one).
+//   <station>  this PC in the path ("homepc"; the dev install "homepc-dev"): a public route forwards on it.
 //   <hash>     the SESSION's key: a custom SHA-256 of "<station>:<session id>", 64 lowercase hex characters
 //              (Sha256WithInitialState with eight SECRET initial words -- the owner's "custom modified sha256").
 //   <path>     the file's own path, the drive letter as the first segment, each segment percent-encoded.
@@ -53,11 +54,16 @@ namespace Agentmaster::Msg
     inline constexpr std::string_view kFileLinkStationPrefix = "/station-";
     /// <summary>The longest station name (the relay's and the edge's checks assume at most this).</summary>
     inline constexpr size_t kFileLinkMaxStationChars = 32;
-    /// <summary>The release install's station name, the owner's ("example.com/station-homepc/...").</summary>
+    /// <summary>The release install's station name ("&lt;hosted address&gt;/station-homepc/..."): the segment a public route forwards on.</summary>
     inline constexpr std::wstring_view kDefaultFileLinkStation = L"homepc";
     /// <summary>The dev install's station name: its own server, its own port, its own links (both installs run together).</summary>
     inline constexpr std::wstring_view kDefaultFileLinkStationDev = L"homepc-dev";
-    /// <summary>The hosted base, the owner's choice of 2026-10-19 ("Lets do example.com").</summary>
+    /// <summary>
+    /// The hosted base when messagingFileLinkHostedBase is empty: a PLACEHOLDER (example.com reaches no file server), so a
+    /// hosted install must name its own public address. The cog's preview warns while the placeholder is in effect, and the
+    /// "Copy AI Impl Instructions" brief never uses it in a command (a check against example.com proves nothing about the
+    /// user's route).
+    /// </summary>
     inline constexpr std::wstring_view kDefaultFileLinkHostedBase = L"https://example.com";
     /// <summary>The release install's server port (beside the catalog's 32593; the relay's station map names it).</summary>
     inline constexpr uint16_t kDefaultFileLinkPortRelease = 32594;
@@ -79,7 +85,7 @@ namespace Agentmaster::Msg
         Off,
         /// <summary>This PC's own server on the LAN: works at home and through the sysd VPN, nowhere else.</summary>
         Lan,
-        /// <summary>The hosted name (example.com): works anywhere the edge rules allow; the PC must be on.</summary>
+        /// <summary>The hosted address (messagingFileLinkHostedBase): works anywhere its public route allows; the PC must be on.</summary>
         Hosted,
     };
 

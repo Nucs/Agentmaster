@@ -193,10 +193,12 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
   update (a changed screen is uploaded with the card's own edit, an unchanged one reused by `file_id`, a parked tab keeps its
   last picture); off = text-only cards. Needs rich messages. Costs upload bandwidth (~0.1–0.6 MB a new picture; a running card
   updates every ~20 s). Applied live (MESSAGING.md §21.42).
-- File links: `messagingFileLinksMode` (`off` / home network / through `example.com`),
+- File links: `messagingFileLinksMode` (`off` / home network / through the hosted address),
   `messagingFileLinkStation`, `messagingFileLinkPort`, `messagingFileLinkLanBase`,
-  `messagingFileLinkHostedBase` (empty = `https://example.com`), `messagingFileLinksExclude` (folders
-  never linked; secret-looking files never are).
+  `messagingFileLinkHostedBase` (the user's own public address; empty = `https://example.com`, a placeholder that reaches
+  nothing, and the cog's preview says so), `messagingFileLinksExclude` (folders never linked; secret-looking files never
+  are). The section's **Copy AI Impl Instructions** button copies the brief that has an AI agent set the hosted address up
+  (MESSAGING.md §21.32.5); it changes no setting.
 - Voice notes (MESSAGING.md §21.43, [VOICE.md](VOICE.md) §9): `messagingVoiceEnabled` (true: a voice note in a session's
   topic is transcribed and read like the text it says), `voiceEngine` (`worker` — a local voice worker process — or `openai`
   — an OpenAI-compatible endpoint, which receives the audio — or `off`), `voiceWorkerCommand` (empty = the bundled worker

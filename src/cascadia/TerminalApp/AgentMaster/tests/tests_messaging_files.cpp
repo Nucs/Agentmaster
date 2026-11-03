@@ -17,7 +17,9 @@
 //   8. the LAN choices, the peer filter, the base each mode uses; /download's argument; the command's reading;
 //   9. the server END TO END on loopback: a real file served whole, by HEAD and by range, every refusal, a "secret" final path,
 //      the totals, a stop and a second start;
-//  10. the secret in Credential Manager: made, read again, replaced (a scratch target, deleted after).
+//  10. the secret in Credential Manager: made, read again, replaced (a scratch target, deleted after);
+//  11. §21.32.5's "Copy AI Impl Instructions" brief: every fact lands in it, the route's filter regex and probe URL, a typed
+//      address is never replaced by a stand-in, empty facts read as defaults or stand-ins, ASCII words, no private name.
 // The service's half (the mirror's rewrite, /download's reply, the button's upload) needs Telegram: the live check is the dev bot.
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -37,6 +39,7 @@
 #include <vector>
 
 #include "../MessagingFileLinks.h"
+#include "../MessagingFileLinksGuide.h" // §21.32.5: the "Copy AI Impl Instructions" brief
 #include "../MessagingFileServer.h"
 #include "../MessagingModels.h" // ParseRemoteCommand, kAgentmasterCommands (/download)
 
@@ -527,4 +530,73 @@ void TestMessagingFiles()
         listed = listed || c == L"download";
     }
     CHECK(listed, "file links: /download is in kAgentmasterCommands");
+
+    // §21.32.5: the "Copy AI Impl Instructions" brief. A full set of facts first: each must land where the agent reads it.
+    {
+        const auto has = [](const std::wstring& text, std::wstring_view part) { return text.find(part) != std::wstring::npos; };
+        CHECK(FileLinkRoutePathRegex(L"homepc") == L"^/station-homepc/[0-9a-f]{64}/", "guide: the route's filter regex names the station and 64 hex characters");
+
+        FileLinksGuideFacts f;
+        f.station = L"mystation";
+        f.port = 40123;
+        f.mode = FileLinkMode::Hosted;
+        f.hostedBase = L"https://files.mine.test";
+        f.lanChoices = { L"http://192.168.1.17:40123  --  Ethernet", L"http://desk:40123  --  this PC's name" };
+        f.lanUrl = L"http://192.168.1.17:40123";
+        f.exePath = L"Q:\\layouts\\Release\\Agentmaster.exe";
+        f.profileDir = L"C:\\Users\\someone\\.agentmaster";
+        f.secretTarget = L"Agentmaster:messaging:telegram-filelinks:.agentmaster";
+        f.serverStatus = L"Serving on 0.0.0.0:40123";
+        const std::wstring g = BuildFileLinksAiGuide(f);
+        CHECK(has(g, L"# Give Agentmaster's file links a public download address"), "guide: the title");
+        CHECK(has(g, L"`mystation`") && has(g, L"^/station-mystation/[0-9a-f]{64}/"), "guide: the station and its filter regex");
+        CHECK(has(g, L"http://127.0.0.1:40123/healthz") && has(g, L"0.0.0.0:40123"), "guide: the port, the local server and its health check");
+        CHECK(has(g, L"`http://192.168.1.17:40123  --  Ethernet`") && has(g, L"`http://desk:40123  --  this PC's name`"), "guide: every LAN choice in the dropdown's words");
+        CHECK(has(g, L"reverse_proxy 192.168.1.17:40123") && has(g, L"proxy_pass http://192.168.1.17:40123;"), "guide: the LAN forwarders target the first LAN choice");
+        CHECK(has(g, L"hostname: files.mine.test") && has(g, L"http.host eq \"files.mine.test\"") && has(g, L"    files.mine.test {"),
+              "guide: a typed hosted address becomes the tunnel's hostname, the WAF's host and the Caddy site");
+        CHECK(has(g, L"https://files.mine.test/station-mystation/" + std::wstring(64, L'0') + L"/agentmaster-route-check.txt"), "guide: the probe is a well-formed key no session has");
+        CHECK(!has(g, L"files.example.com"), "guide: a typed address is never replaced by the stand-in");
+        CHECK(has(g, L"-Program \"Q:\\layouts\\Release\\Agentmaster.exe\" -Protocol TCP -LocalPort 40123"), "guide: the firewall rule names the running exe and the port");
+        CHECK(has(g, L"C:\\Users\\someone\\.agentmaster\\hooks.log") && has(g, L"C:\\Users\\someone\\.agentmaster\\settings.json"), "guide: the profile's log and settings");
+        CHECK(has(g, L"`Agentmaster:messaging:telegram-filelinks:.agentmaster`") && has(g, L"Never read, print or move a secret"),
+              "guide: the secret is NAMED, and reading it is forbidden");
+        CHECK(has(g, L"Serving on 0.0.0.0:40123") && has(g, L"through the hosted address; hosted address: `https://files.mine.test`"), "guide: the status line and the mode");
+        CHECK(has(g, L"Through your hosted address") && has(g, L"winget install --id Cloudflare.cloudflared") && has(g, L"tailscale funnel --bg --set-path /station-mystation/ http://127.0.0.1:40123/station-mystation/"),
+              "guide: the cog's mode name, the tunnel's install and the funnel's mount");
+        CHECK(has(g, L"Tailscale's 100.64.x addresses included") && has(g, L"service: http_status:404"), "guide: the peer rule and the tunnel's catch-all");
+        bool ascii = true;
+        for (const wchar_t c : g)
+        {
+            ascii = ascii && (c == L'\n' || (c >= 0x20 && c < 0x7F));
+        }
+        CHECK(ascii, "guide: ASCII words only (the facts here are ASCII too), no tab, no CR");
+        std::wstring lower = g;
+        for (auto& c : lower)
+        {
+            c = (c >= L'A' && c <= L'Z') ? static_cast<wchar_t>(c - L'A' + L'a') : c;
+        }
+        // The owner's subnet is spelled in two literals: the history scrub's literal rules (192.168.<owner's>. -> 192.168.1.)
+        // must not rewrite this check into one the facts above (192.168.1.17) would fail.
+        CHECK(!has(lower, L"sysd") && !has(lower, L"192.168." L"50.") && !has(lower, L"homepc"), "guide: no private name, address or the owner's station when facts name others");
+
+        // Empty facts: the install's defaults, the stand-ins the agent must replace, and the words for what is unknown.
+        FileLinksGuideFacts e;
+        e.devInstall = true;
+        const std::wstring ge = BuildFileLinksAiGuide(e);
+        CHECK(has(ge, L"Agentmaster Dev") && has(ge, L"`homepc-dev`") && has(ge, L"http://127.0.0.1:32595/healthz"), "guide: no facts -> the dev install's default station and port");
+        CHECK(has(ge, L"https://files.example.com/station-homepc-dev/") && has(ge, L"hosted address: not set (the default, https://example.com, is a placeholder"),
+              "guide: no address -> the stand-in in commands, the placeholder named as such");
+        CHECK(has(ge, L"none found") && has(ge, L"reverse_proxy <this PC's LAN address>:32595") && has(ge, L"<the full path of Agentmaster.exe>"), "guide: no LAN address, no exe -> stand-ins");
+        CHECK(has(ge, L"Off (the server is not running)") && !has(ge, L"The server's status line"), "guide: Off says the server is not running; an unknown status prints no line");
+        FileLinksGuideFacts p;
+        p.hostedBase = std::wstring{ kDefaultFileLinkHostedBase };
+        const std::wstring gp = BuildFileLinksAiGuide(p);
+        CHECK(has(gp, L"https://files.example.com/station-homepc/") && !has(gp, L"`https://example.com/station-"), "guide: the placeholder typed as the address still gets the stand-in, never a check against it");
+        FileLinksGuideFacts q;
+        q.hostedBase = L"https://dl.mine.test:8443/files";
+        const std::wstring gq = BuildFileLinksAiGuide(q);
+        CHECK(has(gq, L"hostname: dl.mine.test\n") && has(gq, L"https://dl.mine.test:8443/files/station-homepc/" + std::wstring(64, L'0')),
+              "guide: a port and a path in the address: the bare host for the route, the whole base for the probe");
+    }
 }

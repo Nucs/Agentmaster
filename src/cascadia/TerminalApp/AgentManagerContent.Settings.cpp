@@ -40,6 +40,8 @@ static constexpr std::wstring_view kSpecifyModelSentinel = L"" "specify-model";
 #include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
 #include "AgentMaster/SessionDbRefresher.h" // SESSIONS_DB.md — the cog's SESSION DATABASE status line
 #include "AgentMaster/Messaging.h" // MESSAGING.md — the cog's MESSAGING tab: the token (Credential Manager), Check bot, the status line
+#include "AgentMaster/MessagingFileLinksGuide.h" // MESSAGING.md §21.32.5 — FILE LINKS' "Copy AI Impl Instructions" brief
+#include "AgentClipboard.h" // RobustCopyTextToClipboard — the retry-looped clipboard writer the brief's copy goes through
 #include "AgentMaster/TelegramApi.h" // MaskToken — the token box's "stored: 7221…bZ8" placeholder
 #include "AgentMaster/VoiceHttp.h" // MESSAGING.md §21.43 — the VOICE NOTES endpoint's API key in Credential Manager (read, store, forget)
 #include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Auto Testing of an external) + BringClaudeWindowToFront (EXTERNAL menu)
@@ -1312,7 +1314,7 @@ namespace winrt::TerminalApp::implementation
         // (nothing secret: the session keys' secret lives in Credential Manager and is made by the service on first use).
         panel.Children().Append(SettingsSeparator(L"FILE LINKS"));
         {
-            auto intro = Text(L"Claude links files as file:///K:/\x2026, which a phone cannot open. With file links on, each such link to a file that exists (and does not look like a key or a credentials file) becomes a download link, and /download <path> in a topic links any file of the session, with a \U0001F4E4 Send as file button. On the home network: the links point at this PC. Through example.com: the links work anywhere \x2014 Cloudflare lets through only a link of this exact shape with a session's key, and the tunnel on this PC and the relay on the home cluster bring it here (K:\\source\\proxmox\\cc-sysd).", 11, false, 0.75);
+            auto intro = Text(L"Claude links files as file:///K:/\x2026, which a phone cannot open. With file links on, each such link to a file that exists (and does not look like a key or a credentials file) becomes a download link, and /download <path> in a topic links any file of the session, with a \U0001F4E4 Send as file button. On the home network: the links point at this PC. Through your hosted address: the links work anywhere \x2014 a public HTTPS address of yours (a tunnel or a reverse proxy) forwards only links of this exact shape, each with a session's key, to this install's server. Copy AI Impl Instructions (below) copies a brief an AI agent on this PC follows to set that address up.", 11, false, 0.75);
             intro.TextWrapping(TextWrapping::Wrap);
             panel.Children().Append(intro);
         }
@@ -1320,18 +1322,18 @@ namespace winrt::TerminalApp::implementation
         _setMsgFilesMode.Header(winrt::box_value(L"File links"));
         _setMsgFilesMode.Items().Append(winrt::box_value(L"Off"));
         _setMsgFilesMode.Items().Append(winrt::box_value(L"On the home network (a LAN address of this PC)"));
-        _setMsgFilesMode.Items().Append(winrt::box_value(L"Through example.com (anywhere)"));
-        AgentSetTip(_setMsgFilesMode, L"Off (the default): links stay as Claude wrote them. On the home network: a small server of this install answers on the port below, and the links point at the address you pick \x2014 they open on the home Wi-Fi (or the sysd VPN). Through example.com: the same server, reached from anywhere through Cloudflare, which refuses every request that is not exactly /station-<station>/<a session's 64-character key>/<path>. Either way a link opens only a file Claude linked in that session's messages (or /download linked), for 30 days after its last mention.");
+        _setMsgFilesMode.Items().Append(winrt::box_value(L"Through your hosted address (anywhere)"));
+        AgentSetTip(_setMsgFilesMode, L"Off (the default): links stay as Claude wrote them. On the home network: a small server of this install answers on the port below, and the links point at the address you pick \x2014 they open on the home Wi-Fi (or a VPN into it). Through your hosted address: the same server, reached from anywhere through a public address of yours that forwards only /station-<station>/<a session's 64-character key>/<path> (Copy AI Impl Instructions below sets one up). Either way a link opens only a file Claude linked in that session's messages (or /download linked), for 30 days after its last mention.");
         _setMsgFilesMode.SelectionChanged([this](const IInspectable&, const SelectionChangedEventArgs&) { _RefreshFileLinksPreview(); });
         panel.Children().Append(_setMsgFilesMode);
         _setMsgFilesStation = TextBox{};
         _setMsgFilesStation.Header(winrt::box_value(L"Station (this install's name in the links)"));
-        AgentSetTip(_setMsgFilesStation, L"The name the relay routes to this install: 1\x2013" L"32 of a\x2013z, 0\x2013" L"9 and \x2018-\x2019. The release install is homepc and the dev install homepc-dev by default; the relay (cc-sysd/deploy.sh STATIONS) and Cloudflare's rule (sysd/cloudflare/10-zone.sh SYSD_CC_STATIONS) must know a station before its links work. A new station voids every link posted before.");
+        AgentSetTip(_setMsgFilesStation, L"The name the links carry for this install: 1\x2013" L"32 of a\x2013z, 0\x2013" L"9 and \x2018-\x2019. The release install is homepc and the dev install homepc-dev by default. A public route forwards one station's links, so it must name this one (with several installs, one route rule per station). A new station voids every link posted before.");
         _setMsgFilesStation.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _RefreshFileLinksPreview(); });
         panel.Children().Append(_setMsgFilesStation);
         _setMsgFilesPort = TextBox{};
         _setMsgFilesPort.Header(winrt::box_value(L"Port of this install's file server"));
-        AgentSetTip(_setMsgFilesPort, L"The TCP port the server listens on, for the home network and for the relay: 32594 for the release install and 32595 for the dev install by default (the relay's STATIONS list and the firewall rules of cc-sysd/workstation/agentmaster-firewall.ps1 name these). It answers only private addresses (the home network, the relay, the VPN).");
+        AgentSetTip(_setMsgFilesPort, L"The TCP port the server listens on, for the home network and for a public route's forwarder: 32594 for the release install and 32595 for the dev install by default. It answers only loopback and private addresses (this PC, the home network, a tunnel or a proxy on it); a forwarder on another machine needs a firewall rule for this port.");
         _setMsgFilesPort.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) {
             // The dropdown's URLs carry the port: refill it, keeping the picked address.
             const int32_t sel = _setMsgFilesLanBase ? _setMsgFilesLanBase.SelectedIndex() : -1;
@@ -1346,10 +1348,21 @@ namespace winrt::TerminalApp::implementation
         panel.Children().Append(_setMsgFilesLanBase);
         _setMsgFilesHostedBase = TextBox{};
         _setMsgFilesHostedBase.Header(winrt::box_value(L"Hosted address"));
-        _setMsgFilesHostedBase.PlaceholderText(L"https://example.com");
-        AgentSetTip(_setMsgFilesHostedBase, L"The public address the example.com links start with. Leave it empty for https://example.com; another address must route /station-<station>/\x2026 to this install's server the same way. Used in the example.com mode only.");
+        _setMsgFilesHostedBase.PlaceholderText(L"https://files.example.com \x2014 your public address");
+        AgentSetTip(_setMsgFilesHostedBase, L"The public address the hosted links start with, scheme and host (https://files.example.com): it must forward /station-<station>/\x2026 to this install's server \x2014 Copy AI Impl Instructions below has an AI agent set one up. Empty = https://example.com, a placeholder that reaches nothing. Used in the hosted mode only.");
         _setMsgFilesHostedBase.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _RefreshFileLinksPreview(); });
         panel.Children().Append(_setMsgFilesHostedBase);
+        {
+            // §21.32.5: one click copies the Markdown brief an AI agent on this PC follows to give these links a public HTTPS
+            // address (MessagingFileLinksGuide.h), this install's facts written in from the boxes as they are now (saved or
+            // not). The button reaches itself through the sender, never a capture (a handler that captures its own element is
+            // never freed: Gotcha "A handler that captures its own element").
+            auto copyGuide = Button{};
+            copyGuide.Content(winrt::box_value(L"Copy AI Impl Instructions"));
+            AgentSetTip(copyGuide, L"Copies a Markdown brief for an AI agent with a shell on this PC (Claude Code, Codex, \x2026): how to give these links a public HTTPS address of yours \x2014 a Cloudflare Tunnel on your domain (how Agentmaster's author runs it), Tailscale Funnel or a reverse proxy you run \x2014 that forwards only the download links to this install's server, and the checks that prove it works. This install's station, port, addresses and paths are written in. Paste it into a session on this PC: the agent shows its plan and asks before it changes anything.");
+            copyGuide.Click([this](const IInspectable& sender, const RoutedEventArgs&) { _CopyFileLinksAiGuide(sender.try_as<Button>()); });
+            panel.Children().Append(copyGuide);
+        }
         _setMsgFilesExclude = TextBox{};
         _setMsgFilesExclude.Header(winrt::box_value(L"Never link files under these folders (one per line)"));
         _setMsgFilesExclude.PlaceholderText(L"K:\\private\n# a line starting with # is a note");
@@ -6734,6 +6747,12 @@ namespace winrt::TerminalApp::implementation
                 {
                     base = std::wstring{ M::kDefaultFileLinkHostedBase };
                 }
+                if (std::wstring_view{ base } == M::kDefaultFileLinkHostedBase)
+                {
+                    // The default is only a placeholder (example.com reaches no file server): links built on it go nowhere, and
+                    // nothing else in the cog would say so before a phone tries one.
+                    problems += L"\x26A0 https://example.com is a placeholder that reaches nothing: enter your public address (Copy AI Impl Instructions has an AI agent set one up).\n";
+                }
             }
             _setMsgFilesPreview.Text(winrt::hstring{ problems + L"A link will look like: " + (base.empty() ? std::wstring{ L"(nowhere)" } : base) +
                                                      L"/station-" + station + L"/<the session's 64-character key>/K/source/project/notes.md" });
@@ -6742,6 +6761,56 @@ namespace winrt::TerminalApp::implementation
         {
             // Rule #18. Recovery: the preview line keeps its last text.
             ::Agentmaster::AgentLogCaughtException(L"AgentManagerContent::_RefreshFileLinksPreview");
+        }
+    }
+
+    // MESSAGING.md §21.32.5: the FILE LINKS' "Copy AI Impl Instructions". The facts come from the boxes as they are now (what
+    // the user sees, saved or not), exactly as the preview line reads them, so the brief and the preview never disagree about
+    // the station, the port or the address; the text itself is the pure MessagingFileLinksGuide.h.
+    void AgentManagerContent::_CopyFileLinksAiGuide(const winrt::Windows::UI::Xaml::Controls::Button& button)
+    {
+        try
+        {
+            namespace M = ::Agentmaster::Msg;
+            M::FileLinksGuideFacts facts;
+            facts.devInstall = ::Agentmaster::Profiles::IsDevPackage();
+            // An invalid station or port box reads as the default, as the service itself would run it (the preview warns).
+            facts.station = M::NormalizeFileLinkStation(TrimFileLinkBox(_setMsgFilesStation ? std::wstring_view{ _setMsgFilesStation.Text() } : std::wstring_view{}));
+            facts.port = ParseFileLinkPortBox(_setMsgFilesPort ? std::wstring_view{ _setMsgFilesPort.Text() } : std::wstring_view{})
+                             .value_or(M::DefaultFileLinkPort(facts.devInstall));
+            const int32_t modeIdx = _setMsgFilesMode ? _setMsgFilesMode.SelectedIndex() : 0;
+            facts.mode = modeIdx == 1 ? M::FileLinkMode::Lan : (modeIdx == 2 ? M::FileLinkMode::Hosted : M::FileLinkMode::Off);
+            facts.hostedBase = M::NormalizeFileLinkBase(TrimFileLinkBox(_setMsgFilesHostedBase ? std::wstring_view{ _setMsgFilesHostedBase.Text() } : std::wstring_view{}));
+            // The dropdown's own wording (address and adapter) on the port the brief names. The first choice is the target a LAN
+            // forwarder points at: the first private address (physical adapters first) -- the PC's DNS name comes last, so it is
+            // the target only when the PC has no private address at all.
+            const auto choices = M::ComposeFileLinkLanChoices(_msgFilesLanAddresses, _msgFilesHostName, facts.port);
+            for (const auto& choice : choices)
+            {
+                facts.lanChoices.push_back(choice.label);
+            }
+            if (!choices.empty())
+            {
+                facts.lanUrl = choices.front().url;
+            }
+            facts.exePath = ::Agentmaster::PortableInstall::detail::SelfExePath();
+            facts.profileDir = ::Agentmaster::AgentmasterStateDir();
+            facts.secretTarget = M::MessagingService::FileLinksCredentialTarget(facts.profileDir);
+            facts.serverStatus = _setMsgFilesStatus ? std::wstring{ _setMsgFilesStatus.Text() } : std::wstring{};
+            const std::wstring guide = M::BuildFileLinksAiGuide(facts);
+            const bool copied = RobustCopyTextToClipboard(guide);
+            ::Agentmaster::LogNav(L"file-links copy-ai-guide " + std::wstring{ copied ? L"copied " : L"REFUSED by the clipboard, " } + std::to_wstring(guide.size()) + L" chars");
+            if (button)
+            {
+                // The button says what happened: a refused clipboard (another program holding it past the retries) is retried
+                // by a second click, and a success tells where the text goes.
+                button.Content(winrt::box_value(copied ? L"Copied \x2713 Paste it into an AI agent's session on this PC" : L"The clipboard is busy \x2014 click again"));
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: nothing is copied and the button keeps its text; a second click tries again.
+            ::Agentmaster::AgentLogCaughtException(L"AgentManagerContent::_CopyFileLinksAiGuide");
         }
     }
 
