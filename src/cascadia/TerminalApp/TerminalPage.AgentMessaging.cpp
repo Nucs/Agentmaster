@@ -9,7 +9,8 @@
 // reading its screen, the unread ring, a rename that pins the tab title, the tag badges, answering a local
 // command's dialog (§21.34: /add-dir's menu, pressed only after the screen shows it), pressing ONE Esc into
 // its terminal and parking its tab (§21.41: the card's ⎋ Esc and 🌙 Deactivate, each judged again here and
-// answered with a word), and opening a
+// answered with a word), pressing ONE Enter on the prompt that sits in its input box (§21.47: /enter, pressed
+// only on a prompt and read back), and opening a
 // session as a background tab — arrives here through the two sinks TerminalPage.AgentEngine.cpp registers
 // (session actions fanned out to every window, launches aimed at the most recently activated one).
 
@@ -18,6 +19,7 @@
 
 #include "AgentCatchLog.h" // AgentLogCaughtException (Rule #18)
 #include "AgentMaster/ClaudeSpawn.h" // LogNav, ShortId
+#include "AgentMaster/MessagingEnter.h" // MESSAGING.md §21.47: /enter (kPressEnterAction, DecideRemoteEnter, RemoteEnterVerify, kDeliveryGateEnterTag)
 #include "AgentMaster/MessagingSessionControl.h" // MESSAGING.md §21.41: the card's ⎋ Esc and 🌙 Deactivate (kPressEscAction / kDeactivateAction, DecideRemoteEsc / DecideRemotePark)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/TuiMenus.h" // MESSAGING.md §21.34: the menu actions (kMenuScreenAction / kMenuAnswerAction, DecideMenuAnswer)
@@ -36,6 +38,9 @@ namespace winrt::TerminalApp::implementation
             }
             ::Agentmaster::LogNav(L"remote session-action " + action + L" " + ::Agentmaster::ShortId(sessionId));
             std::wstring answer;
+            // True when an action answers LATER, from a coroutine that owns its own copy of `reply` (§21.47's read-back after an
+            // Enter): the tail below must not reply for it, or the bot would get two answers - the first one an empty word.
+            bool replyLater = false;
             if (action == L"start")
             {
                 // A dormant tab (window-restored, revived, parked): start its claude in place, no focus change, so a
@@ -135,6 +140,75 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[esc] " + ::Agentmaster::ShortId(sessionId) + L" Telegram's Esc -> " + answer +
                                                                 (result == RemoteEscResult::Busy ? std::wstring{ L" (a delivery or a draft swap holds the input box: nothing typed)" } : std::wstring{}) + L"\n");
             }
+            else if (action == ::Agentmaster::Msg::kPressEnterAction)
+            {
+                // MESSAGING.md §21.47 (/enter): ONE Enter in the session's terminal, so the prompt that sits unsent in its input box is
+                // submitted - judged HERE, on the UI thread every keystroke of this tab goes through, from the box as it reads at this
+                // moment (DecideRemoteEnter). Only a PROMPT in the box is pressed on: into an empty box there is nothing to submit,
+                // and into a menu or a dialog an Enter would PICK the option it highlights (an answer nobody chose; the Enter rescue's
+                // rule too: "never press into a menu"). The box test is Esc's (a delivery's or a draft swap's keystrokes must not
+                // interleave), and the key goes through the session's own injector, never "the active pane" of a split. No argument.
+                using ::Agentmaster::Msg::RemoteEnterAnswer;
+                using ::Agentmaster::Msg::RemoteEnterResult;
+                const auto info = _sessionRegistry ? _sessionRegistry->GetWithoutQueue(sessionId) : std::nullopt;
+                const bool boxHeld = _draftSwapsInFlight.count(sessionId) != 0 || (_sessionRegistry && _sessionRegistry->DeliveryGateHeld(sessionId));
+                // The tri-state read (a prompt / an empty box / a menu in its place / no box), with the delivery's raised window so a
+                // tall prompt is still found as a box. It is the same read the delivery trusts before it types anything.
+                auto [boxState, boxText] = _ReadInputBoxProbeForSession(sessionId, ::Agentmaster::Msg::kRemoteEnterProbeRows);
+                const auto box = static_cast<::Agentmaster::InputBoxState>(boxState);
+                // The screen's text is read only to NAME the option a menu highlights in the refusal; it never decides a press.
+                const std::wstring focused = box == ::Agentmaster::InputBoxState::MenuOpen ?
+                                                 ::Agentmaster::Msg::FocusedMenuOption(_ReadScreenTextForSession(sessionId, ::Agentmaster::Msg::kMenuScreenRows)) :
+                                                 std::wstring{};
+                // `info` is set only with a registry, so a Pressed verdict always has one to write through.
+                RemoteEnterAnswer verdict = info ? ::Agentmaster::Msg::DecideRemoteEnter(*info, boxHeld, box, boxText, focused) : RemoteEnterAnswer{ RemoteEnterResult::NotRunning, {} };
+                std::wstring why; // what the [enter] line adds for a verdict that pressed nothing
+                if (verdict.result == RemoteEnterResult::Pressed)
+                {
+                    // The delivery gate FIRST (one owner of the box at a time): while it is held no runner send, Send now, /steer,
+                    // swap or fill types into the box, so the read-back below judges this Enter alone. The claim is atomic against the
+                    // scheduler's thread, which may have opened the gate since the look above: then the box is that delivery's.
+                    const std::wstring gateTag{ ::Agentmaster::Msg::kDeliveryGateEnterTag };
+                    if (!_sessionRegistry->TryOpenDeliveryGate(sessionId, gateTag))
+                    {
+                        verdict = RemoteEnterAnswer{ RemoteEnterResult::Busy, {} };
+                        why = L" (a delivery claimed the input box a moment ago: nothing typed)";
+                    }
+                    else if (!_sessionRegistry->Inject(sessionId, std::wstring(1, L'\r')))
+                    {
+                        // No injector any more (the tab closes or parks right now): nothing was written, so the gate goes at once.
+                        _sessionRegistry->CloseDeliveryGate(sessionId, gateTag);
+                        verdict = RemoteEnterAnswer{ RemoteEnterResult::Failed, {} };
+                        why = L" (no injector is bound to the session: nothing typed)";
+                    }
+                    else
+                    {
+                        // "\r" is Claude Code's submit (a lone "\n" would only break the line). The coroutine reads the box back,
+                        // closes the gate and replies with the verdict; this function must not reply for it (replyLater). It starts
+                        // BEFORE the log line, so a throw while that line is built can no longer strand the gate or the reply: both
+                        // are the coroutine's from here on. (It suspends at its first wait inside this call, and its first read of
+                        // the box runs on this UI thread only after this dispatcher item has returned.)
+                        _AwaitRemoteEnterSubmit(sessionId, verdict.detail, reply);
+                        replyLater = true;
+                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[enter] " + ::Agentmaster::ShortId(sessionId) + L" Telegram's Enter -> pressed on the prompt in the box (chars=" +
+                                                                        std::to_wstring(verdict.detail.size()) + L"), reading the box back\n");
+                    }
+                }
+                else if (verdict.result == RemoteEnterResult::Busy)
+                {
+                    why = L" (a delivery or a draft swap holds the input box: nothing typed)";
+                }
+                else if (verdict.result == RemoteEnterResult::MenuOpen)
+                {
+                    why = L" (an Enter would pick the highlighted option" + (verdict.detail.empty() ? std::wstring{} : L" \"" + verdict.detail + L"\"") + L": nothing typed)";
+                }
+                if (!replyLater)
+                {
+                    answer = ::Agentmaster::Msg::BuildRemoteEnterReply(verdict);
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[enter] " + ::Agentmaster::ShortId(sessionId) + L" Telegram's Enter -> " +
+                                                                    std::wstring{ ::Agentmaster::Msg::RemoteEnterResultWord(verdict.result) } + why + L"\n");
+                }
+            }
             else if (action == ::Agentmaster::Msg::kDeactivateAction)
             {
                 // MESSAGING.md §21.41 (the card's 🌙 Deactivate, /deactivate): park this tab exactly as the tab menu's "Deactivate ▸
@@ -213,7 +287,7 @@ namespace winrt::TerminalApp::implementation
             {
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[msg] unknown remote session action: " + action + L"\n");
             }
-            if (reply)
+            if (reply && !replyLater)
             {
                 reply(std::move(answer));
             }
@@ -223,6 +297,97 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::AgentLogCaughtException(L"_RemoteSessionAction");
             return false;
+        }
+    }
+
+    winrt::fire_and_forget TerminalPage::_AwaitRemoteEnterSubmit(std::wstring sessionId, std::wstring pressedPrompt, std::function<void(std::wstring)> reply)
+    {
+        using ::Agentmaster::Msg::RemoteEnterAnswer;
+        using ::Agentmaster::Msg::RemoteEnterResult;
+        // A WEAK page across the waits, held strongly only on this UI thread inside one read: a window closed during the watch is then
+        // never destroyed by this coroutine on a pool thread (Gotcha "A fire_and_forget coroutine can drop the LAST page reference on a
+        // pool thread"). The dispatcher is agile, and the registry is the engine's - it outlives every window - so both are kept.
+        const auto weakThis = get_weak();
+        const auto dispatcher = Dispatcher();
+        const auto registry = _sessionRegistry;
+        // The verdict until a read says otherwise: the key went, unverified - what a watch cut short (a closed window, a throw) reports.
+        RemoteEnterAnswer verdict{ RemoteEnterResult::Pressed, pressedPrompt };
+        const uint64_t pressedAtMs = ::GetTickCount64(); // monotonic: a wall-clock step must not stretch or cut the watch
+        try
+        {
+            ::Agentmaster::Msg::RemoteEnterVerify verify{ pressedPrompt };
+            while (true)
+            {
+                co_await winrt::resume_after(std::chrono::milliseconds(::Agentmaster::Msg::kRemoteEnterPollMs));
+                co_await wil::resume_foreground(dispatcher);
+                std::optional<RemoteEnterAnswer> done;
+                {
+                    const auto self = weakThis.get();
+                    if (!self)
+                    {
+                        break; // the window closed: nothing can read the box any more, and the verdict stays "pressed, unverified"
+                    }
+                    const auto [state, box] = self->_ReadInputBoxProbeForSession(sessionId, ::Agentmaster::Msg::kRemoteEnterProbeRows);
+                    done = verify.Observe(static_cast<::Agentmaster::InputBoxState>(state), box);
+                } // the strong page reference goes here, on this UI thread, before the next wait
+                if (done)
+                {
+                    verdict = std::move(*done);
+                    break;
+                }
+                if (static_cast<int64_t>(::GetTickCount64() - pressedAtMs) >= ::Agentmaster::Msg::kRemoteEnterVerifyMs)
+                {
+                    verdict = verify.Expire(); // the prompt never left (or left at the last read): Kept, or Submitted
+                    break;
+                }
+            }
+        }
+        catch (...)
+        {
+            // Rule #18 (and a fire_and_forget must let nothing escape: that would be winrt::terminate). Recovery: the answer says the
+            // Enter went unverified (it did go), and the gate and the reply below still run.
+            ::Agentmaster::AgentLogCaughtException(L"_AwaitRemoteEnterSubmit");
+        }
+        // The box is free again BEFORE the answer goes: the retry an answer invites ("send /enter again") must not meet this gate.
+        try
+        {
+            if (registry)
+            {
+                registry->CloseDeliveryGate(sessionId, std::wstring{ ::Agentmaster::Msg::kDeliveryGateEnterTag });
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the gate expires by itself (kDeliveryGateTimeoutMs, 75 s); until then the box reads held, and an Esc,
+            // a park, a delivery or another /enter for this session answers "busy".
+            ::Agentmaster::AgentLogCaughtException(L"_AwaitRemoteEnterSubmit gate close");
+        }
+        // The verdict's log line, then the answer - in two containments, so a line that fails to build never costs the user the answer.
+        try
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[enter] " + ::Agentmaster::ShortId(sessionId) + L" Telegram's Enter -> " +
+                                                            std::wstring{ ::Agentmaster::Msg::RemoteEnterResultWord(verdict.result) } + L" (" +
+                                                            std::to_wstring(::GetTickCount64() - pressedAtMs) + L" ms after the press" +
+                                                            (verdict.result == RemoteEnterResult::Kept ? L", the box still holds chars=" + std::to_wstring(verdict.detail.size()) : std::wstring{}) +
+                                                            L")\n");
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: hooks.log misses this one verdict line; the answer below still goes.
+            ::Agentmaster::AgentLogCaughtException(L"_AwaitRemoteEnterSubmit log");
+        }
+        try
+        {
+            if (reply)
+            {
+                reply(::Agentmaster::Msg::BuildRemoteEnterReply(verdict));
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the topic gets no line for this /enter (the bot's guard stays silent once its reply claimed the
+            // answer, and fires "no window answered" when the reply never ran). The Enter stands; the card shows what came of it.
+            ::Agentmaster::AgentLogCaughtException(L"_AwaitRemoteEnterSubmit reply");
         }
     }
 

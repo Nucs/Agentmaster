@@ -34,7 +34,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [06-interrupted-work.md](06-interrupted-work.md) | API-error rewinds, the restore wake, interrupted turns (INT) | 7 | 2 / 2 / 0 (+3 NOT BUILT) | 21 | 37 | — |
 | [07-tabs-park-close-dock.md](07-tabs-park-close-dock.md) | Deactivate, Close, drag / dock, the strip, quitting (TAB) | 10 | 5 / 2 / 3 | 39 | 27 | 4 (3 fixed in code; TAB-K2 reclassified as a feature) |
 | [08-telegram-topics.md](08-telegram-topics.md) | Telegram: setup, topics, history, the mirror (TGT) | 11 | 4 / 6 / 1 | 37 | 25 | 2 |
-| [09-telegram-card-and-control.md](09-telegram-card-and-control.md) | Telegram: the card, prompts, /steer, /commands, the screen (TGC) | 6 | 4 / 2 / 0 | 25 | 25 | 2 |
+| [09-telegram-card-and-control.md](09-telegram-card-and-control.md) | Telegram: the card, prompts, /steer, /enter, /commands, the screen (TGC) | 7 | 4 / 2 / 0 (+1 NOT BUILT) | 30 | 31 | 2 |
 | [10-telegram-questions-and-menus.md](10-telegram-questions-and-menus.md) | Telegram: question cards, /add-dir menu cards (TGQ) | 6 | 3 / 3 / 0 | 24 | 21 | — |
 | [11-telegram-search-and-new-threads.md](11-telegram-search-and-new-threads.md) | Telegram: 🔎 Search, fleet commands, the new-thread wizard, the pick menu (TGS) | 5 | 2 / 1 / 1 (+1 NOT BUILT) | 25 | 29 | — |
 | [12-telegram-file-links.md](12-telegram-file-links.md) | Telegram: file links and the file server (TGF) | 4 | 0 / 3 / 1 | 7 | 6 | — |
@@ -50,7 +50,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [22-cli-and-session-database.md](22-cli-and-session-database.md) | The `agentmaster` CLI and the session database (CLI, SDB) | 6 | 0 / 1 / 5 | 18 | 7 | 2 (1 fixed in code) |
 | [23-tab-context-menu.md](23-tab-context-menu.md) | The tab's context menu: what it shows where, and what each item does (TCM) | 9 | 5 / 4 / 0 | 36 | 27 | 2 (1 fixed in code) |
 | [24-claude-lifecycle.md](24-claude-lifecycle.md) | Claude Code's life cycle in a tab: launch, `/exit`, a kill, Close and Resume here, a claude typed by hand, a restart, `/clear` (LIF) | 7 | 4 / 3 / 0 | 22 | 2 | — (its two are filed in 03 and 05: PQR-K8, fixed in code, and STA-K1) |
-| **Total** | | **195** | **82 / 80 / 26** (+8 NOT BUILT) | **≈ 714** | **≈ 581** | **31** (9 fixed in code) |
+| **Total** | | **196** | **82 / 80 / 26** (+9 NOT BUILT) | **≈ 719** | **≈ 587** | **31** (9 fixed in code) |
 
 ---
 
@@ -211,7 +211,9 @@ phase 5; SP-K1) · a Shift+Click on a tab starts its session in place and keeps 
 · a side-panel card menu's action (Move to Idle/Done, Esc, Show Transcript …) keeps that card selected and the list
 where it was (SP-02 phase 8; SP-K3) · a reopened window's sessions and a Resume here keep their own Prompt Queue Runner
 mode, an interrupt hold included (PQR-15 phase 2, PQR-07 E9, LIF-04 E1; PQR-K8) · the side panel's header is + · Sum · ⋯,
-the ⋯ menu holding the dock, ⌖, the card scope, the card order and the collapse (SP-10; SIDE_PANEL.md §2i).
+the ⋯ menu holding the dock, ⌖, the card scope, the card order and the collapse (SP-10; SIDE_PANEL.md §2i) · Telegram's
+`/enter` presses ONE Enter on the prompt waiting in the box, never into a menu, a dialog or an empty box (TGC-07;
+MESSAGING.md §21.47).
 
 **The regression base** — older behaviors the recent releases build on, covered because every new feature leans on
 them: the /handover family (HND-01, HND-03, HND-04, HND-05, HND-07, HND-08), the Sessions browser (SES-01, SES-02,

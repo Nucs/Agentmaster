@@ -782,6 +782,8 @@ As built (§21.39): `/allscreen [minimal|compact|default|full|max]` (the whole c
 As built (§21.40): `/status` sends the card copy, then what Claude Code's own `/status` dialog shows — the Status tab's facts,
 the account and the plan usage; in 🔎 Search and the main view, the bot's line, then the account and the plan usage. Claude
 Code's `/status` itself stays in the refusal table: nothing is typed into the session.
+As built (§21.47): `/enter` presses ONE Enter at the PC on the prompt already waiting in the session's input box (the hosting
+window reads the box first: never into a menu, a dialog or an empty box), and its reply says whether the prompt went.
 
 ### 7.4 Questions, plans and permission prompts as buttons (D9)
 
@@ -6842,6 +6844,155 @@ The history replay yields to them, as it does to any rename.
    “Search”`), and keeps its pin.
 3. A session that starts a turn: its icon turns ✍️ about 8 s later, and 🔥 after the turn.
 4. hooks.log holds neither `Telegram refused the Search topic's icon` nor `Telegram refused a topic icon`.
+
+### 21.47 ⏎ `/enter`: the prompt waiting in the box, submitted from the phone (2026-11-03; NOT BUILT)
+
+> The user's request (2026-11-03): "I want you to create a new slash command for Telegram. I want you to do slash enter, which
+> will send an enter to the terminal. So let's say there's a prompt written to the screen. If I send slash enter, it should
+> submit the prompt so Claude Code will start running with it."
+
+**What it is for.** A prompt can sit UNSENT in a session's input box at the PC: typed there and left, typed in by
+`/handover-standby` for the user to review ("you review it and press Enter"), carried into a fork's box (PENDING_INPUT.md §11),
+typed back after a restart (§10 there). Until now the phone could see it (the card's draft line, `/draft`, the screenshot) and
+copy it into the queue (`/takedraft`), but not send it. `/enter` presses Enter at the PC: Claude Code then does what its own
+Enter does — at rest a turn starts; while a turn runs it holds the prompt, and the running turn takes it in at its next step (a
+`queued_command` attachment), or the next turn starts with it (§21.33's mechanism).
+
+**Only a prompt is pressed on.** The window that hosts the tab reads the input box ON ITS UI THREAD at the press — the thread
+every keystroke of the tab goes through, the one that owns the draft swap's lock — with the delivery's own tri-state read
+(`ReadInputBoxProbe`, the verification window of 1,000 rows, so a tall briefing is still found as a box), and decides
+(`DecideRemoteEnter`, `AgentMaster/MessagingEnter.h`):
+
+| The box reads | `/enter` |
+|---|---|
+| a prompt (Draft) | presses ONE `\r` (Claude Code's submit) through the session's own injector, then reads the box back |
+| empty | nothing: "Its input box is empty: there is no prompt to submit, so nothing was pressed." A dim suggestion is not a prompt (PENDING_INPUT.md §2d), and what Enter does to one is not this command's business |
+| a menu or a dialog (MenuOpen) | nothing: an Enter would PICK the option it highlights — an answer nobody chose. The line names that option ("1. Yes, for this session", read from the screen by `FocusedMenuOption`, the bottom-most caret row, so a sent prompt's "❯ 2. …" echo above a menu is not taken for it). The Enter rescue keeps the same rule (DELIVERY_PLAN.md R8: "never press into a menu"), and a plan or a permission prompt is not answered from Telegram (SPEC.md §12.4) |
+| no box (NoBox; Unknown) | nothing: a dialog over the box, claude still drawing, a screen not up yet |
+| held (a delivery, a draft swap, a mail move, a fill) | nothing: "A prompt is being typed into its input box right now — send /enter again in a few seconds." |
+
+Before the box: a parked tab, an exited claude (Done: its tab may hold the shell that hosted it, where an Enter RUNS whatever
+the shell's line holds) and a closed session read the key nowhere (`DecideRemoteEnterTarget`, ⎋ Esc's rule); a Codex session
+takes no keys (no injector is bound to Codex); an adopted claude does (the injector bound at the adoption writes into that tab).
+The service answers these itself, with no round trip to a window.
+
+**One owner of the box.** Right before it writes, the window takes the delivery gate with the reserved tag `#telegram-enter`
+(`kDeliveryGateEnterTag`; the `#` convention of `kDeliveryGateClearTag`), and keeps it until the read-back ends: no runner send,
+Send now, `/steer`, swap or fill types into the box meanwhile — they would type into a box whose content is being submitted,
+and their own box reads would take the submit for their work. A claim the scheduler's thread won in between answers busy. While
+it is held, ⎋ Esc and 🌙 Deactivate answer busy too (~0.2 s when the prompt goes, 4 s at most). A window that dies while it holds
+the gate leaves it to the gate's 75 s expiry.
+
+**The read-back** (`RemoteEnterVerify`; `TerminalPage::_AwaitRemoteEnterSubmit`, a coroutine of the hosting window). Every
+100 ms for up to 4 s after the press it reads the box again:
+- **Submitted:** the box holds no prompt for TWO reads in a row — empty (the submit), a dialog in its place (a submitted
+  `/add-dir x` or `/model` opens one) or no box (a submitted `/exit`). One read is not enough: Claude Code mid-repaint reads
+  empty or box-less for a moment (the fork carry's "never merely the text changed").
+- **Kept:** a prompt is still in the box after 4 s — the same one, or a CHANGED one: an entry Enter picked from a list Claude Code
+  showed (`@src/fi` completed to a file, `/mo` to `/model `), a new line after a trailing `\` (its line continuation), or the
+  clean-out of invisible characters that cancels a submit (Claude Code 2.1.277+, DELIVERY.md §15). None of them was submitted,
+  so a changed text is never read as a submit. One gone read right at the deadline reads as submitted (a late submit is far
+  likelier than a repaint frame at exactly that moment).
+- **Pressed, unverified:** the screen became unreadable (the tab closes or parks) or the window closed during the watch.
+- A Ctrl+S stash that Claude Code puts back ~0.4 s after a real submit refills the box only after the two empty reads that
+  decided it.
+
+The coroutine holds the page only WEAKLY across its waits (a strong reference lives one read, on the UI thread), closes the gate
+on every path before it replies, and answers "pressed" when anything throws (Rule #18). The window's reply is
+`<word>[\n<detail>]` (`BuildRemoteEnterReply`): `submitted` / `kept` / `pressed` / `empty` / `menu-open` / `no-box` / `busy` /
+`not-running` / `not-claude` / `failed`, the detail the prompt pressed on, the text kept, or the highlighted option. Anything
+else — an empty reply, a garbled word — reads as failed with no detail, never as a press (`ParseRemoteEnterReply`).
+
+**The answer in the topic** — a silent reply to the `/enter` message (`RemoteEnterOutcomeHtml`; the quote is the prompt's first
+line, 100 characters, escaped):
+- "⏎ Submitted: «fix the drag crash»"; while a turn ran: "⏎ Submitted into the running turn: «…» — Claude Code takes it in at
+  its next step, or starts the next turn with it."
+- "⏎ Enter pressed, but the box still holds «…» — Claude Code did not submit it. An Enter can also pick from a list it shows (a
+  file, a command), start a new line after a \, or only clean out invisible characters: send /enter again to submit it as it is
+  now."
+- The refusals name their reason and the way out: the empty box, the highlighted option ("… ⎋ Esc on ⚙️ Session's page closes a
+  dialog"), no box ("/screenimage shows what is there"), busy, "Its claude is not running (a parked tab, or claude exited), so
+  there is no input box to press Enter in — /activate starts a parked tab.", Codex, no injector.
+- No window answered (every window's copy of the reply went uncalled): "⏎ No window answered for its tab (it is closing, or the
+  PC is busy) — the Enter may not have been pressed." (`SessionActionAnswer`, §21.41's guard; the hosting window keeps its copy
+  until its read-back ends, so the guard never fires while it reads.)
+
+The mirror then posts the submitted prompt as the turn's `👤 You` line, as for any prompt typed at the PC.
+
+**Never later, never with words.**
+- An `/enter` older than the backlog age (10 min, D2) is answered "This /enter is 2 h old (sent while Agentmaster was closed), so
+  nothing was pressed: an Enter belongs to the screen of its moment. Send /enter again to press it now." — no button: pressing now
+  is one more `/enter`. A message a new thread's picker HELD is no backlog (§21.17), and neither is a voice note's transcript that
+  was live when the note arrived (§21.43's `am_voice_live`), so `/enter` is taken in `_handleTopicMessage`, which knows both, as
+  `/steer` is (`_runSessionCommand` keeps a belt branch).
+- `/enter fix it` presses nothing: its words would be dropped while the box's own prompt went. The usage line points at `/steer
+  <text>` (words sent now) and a plain message (words queued).
+- The 🔎 Search topic refuses it as a session's command; `/cc /enter` forces the word through to Claude Code, which has no
+  `/enter` of its own (no `name:"enter"` in the 2.1.310 binary's command table, read 2026-11-03).
+- A host without the window round trip (the m5 harness) answers "Not available here." — no fallback press: a blind Enter is what
+  this command must never write (unlike `/interrupt`'s fire-and-forget Esc there).
+
+**Where.** The pure half: `AgentMaster/MessagingEnter.h` (the words, the gate's tag, the reply's format, the two decisions, the
+highlighted option, the read-back, the texts). The service: `Messaging.Inbound.cpp` `MessagingService::_enterRemote` (the
+refusals it can make alone), `_pressEnterRemote` (the round trip and its guard), `_onEnterAnswered` (the line). The window:
+`TerminalPage.AgentMessaging.cpp` — `_RemoteSessionAction`'s `kPressEnterAction` branch (the read, the decision, the gate, the
+press) and `_AwaitRemoteEnterSubmit` (the read-back); `_RemoteSessionAction` no longer replies for an action whose coroutine
+answers later (`replyLater`). The command is in `kAgentmasterCommands`, the chat's "/" menu (`setMyCommands`: "press Enter at the
+PC: submit the prompt waiting in the input box") and the topic's `/help`.
+
+**Logs.** `[nav] remote telegram /enter <sid8> -> asked the hosting window`, the window's `[nav] remote session-action
+press-enter <sid8>`, hooks.log `[enter] <sid8> Telegram's Enter -> pressed on the prompt in the box (chars=N), reading the box
+back` and `[enter] <sid8> Telegram's Enter -> submitted (230 ms after the press)` (or `kept`, with the box's chars), then `[nav]
+remote telegram /enter <sid8> -> submitted`. A press refused at the window logs `[enter] <sid8> Telegram's Enter -> menu-open (an
+Enter would pick the highlighted option "1. Yes": nothing typed)` (or `empty`, `no-box`, `busy`, …); one refused by the service
+logs only its `[nav]` line (`usage`, `refused:backlog`, `refused:closed`, `not-running`, `not-claude`, `refused:no-window-hook`).
+
+**Tests and checks** (2026-11-03, nothing built):
+- **m5 `TestMessagingEnter`** (`tests/tests_messaging_enter.cpp`, new):
+  - the command: any case, a `@bot` suffix, words kept for the usage line, blanks as none, a longer word not taken, `/cc /enter`
+    forced through, refused in the Search topic; the action word distinct from Esc's, Deactivate's and the menu card's; the
+    gate's tag reserved and distinct;
+  - the words: every result round-trips with and without a detail, a multi-line detail survives, an empty, differently cased or
+    padded word and an explicit `failed` read as failed with no detail;
+  - the decisions on every kind of session (Running, a dialog, at rest, Error, Done, parked, Codex, a parked Codex tab, adopted,
+    closed) and every box read; the order of the checks;
+  - the highlighted option: the probe-shaped `/add-dir` dialog with the caret on each option, CRLF, a preview layout, a sent
+    prompt's echo above the menu, no caret, a long label, the older caret;
+  - the read-back: two gone reads, a repaint frame, a dialog or no box in the prompt's place, the same prompt kept, a changed one
+    kept, one gone read at the deadline, an unreadable screen, no read at all;
+  - the texts: every result has a line, the quote escaped and cut to its first line and 100 characters, the running-turn
+    wording, no refusal claims a press, the backlog line (its age escaped), the usage line, the closed and unanswered lines free
+    of markup.
+- **The harness, on an isolated copy** (HEAD plus this change alone, its own profile, under a commit guard): on 6a9faa284
+  11,681 checks, and again on 8f23157ba (another session's delivery commit landed while this was checked) 11,726 checks — each
+  time only the 3 known `TestTaskbarBadge` failures. `TestMessagingEnter` alone (a one-group runner at `/W4`): 57 checks, 0
+  failures; `MessagingEnter.h` raises no warning.
+- **`cl /Zs` with the last Debug build's recorded lines** (`/W3 /WX` + the `/we` list): all 119 recorded TerminalAppLib units
+  pass (`TerminalPage.h`, `Messaging.h` and `MessagingModels.h` reach most of them); on 8f23157ba again the changed units and
+  `TerminalPage.AgentObserver.cpp`. No unit of the CLI (`/W4 /WX`) reaches a changed header.
+- **Negative controls** (scratch copies outside the tree): an unknown member in the window's new branch and one in the read-back
+  coroutine (C2039), `_pressEnterRemote` called with two arguments (C2660) and a `static_assert` on `kRemoteEnterGoneReads` in
+  `_onEnterAnswered` (C2338) each failed at exactly its line.
+- No data member changed (`TerminalPage` and `MessagingService` gained member functions only), so this change needs no purge of
+  its own; the next build purges anyway (§21.43, §21.46, SIDE_PANEL.md §2i).
+
+**Not changed, still open.**
+- No card button: `/enter` is typed only (a ⏎ beside ⎋ Esc on the Session page would share the path, the window's answer then
+  being the toast).
+- An Enter into a menu or a dialog cannot be forced from the phone (by design here; a "press anyway" would answer plans and
+  permission prompts, which SPEC.md §12.4 keeps at the PC).
+- The mirror's `👤 You` line of the submitted prompt reads "typed at the PC" (its source comes from the queue, and this prompt
+  never was in it).
+
+**Check after the build** (dev, the bot):
+1. Type a prompt into a session's box at the PC without Enter; `/enter` in its topic → "⏎ Submitted: «…»", the turn starts at
+   the PC, hooks.log `[enter] <sid8> Telegram's Enter -> submitted (… ms after the press)`.
+2. The same during a running turn → "⏎ Submitted into the running turn: …"; Claude Code takes it in (the transcript's
+   `queued_command`).
+3. `/enter` on an empty box → "Its input box is empty …"; on an open question dialog → "A menu or dialog is open … («1. …»)", the
+   dialog still open at the PC; on a parked tab → "/activate starts a parked tab".
+4. `/handover-standby`, then `/enter` in the successor's topic → the briefing goes.
+5. `/enter fix it` → the usage line; the chat's "/" menu lists `enter`.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

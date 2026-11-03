@@ -65,6 +65,7 @@
 #include "MessagingTaps.h" // §21.28: a tapped button's answer, held while its work runs (TapAnswer, TapHold, TapScope)
 #include "MessagingSteer.h" // §21.33: /steer, the words sent NOW (the decision, the texts, the prompt, the watch's verdict)
 #include "MessagingSessionControl.h" // §21.41: the card's ⎋ Esc and 🌙 Deactivate (the window actions, its decisions, the answers' words and texts)
+#include "MessagingEnter.h" // §21.47: /enter, ONE Enter in the terminal (the window action, its decision, the read-back, the answers and texts)
 #include "MessagingFromQueue.h" // §21.44: a topic message that waited in the queue (when it waits, the mirror's test, its 🫡)
 #include "TuiMenus.h" // §21.34: a local command's dialog answered from Telegram (/add-dir: the screen parser, the press, the card)
 #include "RemoteLaunch.h"
@@ -228,9 +229,11 @@ namespace Agentmaster::Msg
         // the tab's tag badges after a remote tag edit), "refresh-favorite", and §21.34's "menu-screen"
         // (the terminal's last rows, for the dialog a delivered /add-dir opened) and "menu-answer" (press
         // that dialog's option — only after the screen shows it: TuiMenus.h DecideMenuAnswer; its reply is
-        // MenuAnswerResultWord), and §21.41's "press-esc" (ONE Esc into the terminal: DecideRemoteEsc, replied as a
+        // MenuAnswerResultWord), §21.41's "press-esc" (ONE Esc into the terminal: DecideRemoteEsc, replied as a
         // RemoteEscResultWord) and "deactivate" (park the tab: DecideRemotePark, its argument "cut-off-turn" only after
-        // the user's "Park now", replied as a RemoteParkResultWord — MessagingSessionControl.h). `reply` is called by
+        // the user's "Park now", replied as a RemoteParkResultWord — MessagingSessionControl.h), and §21.47's
+        // "press-enter" (ONE Enter, pressed only on a prompt in the box and read back: DecideRemoteEnter, replied in
+        // BuildRemoteEnterReply's format up to kRemoteEnterVerifyMs after the request — MessagingEnter.h). `reply` is called by
         // the hosting window with the action's text answer (may be empty); a window that does not host the session
         // calls nothing — so a request that needs an answer guards for none coming (SessionActionAnswer).
         std::function<void(const std::wstring& sessionId, const std::wstring& action, const std::wstring& arg, std::function<void(std::wstring)> reply)> sessionAction;
@@ -1975,6 +1978,55 @@ namespace Agentmaster::Msg
         /// <param name="taps">The request's tap holds.</param>
         /// <exception cref="std::bad_alloc">If the toast or the line cannot be allocated.</exception>
         void _tellRemoteOutcome(int64_t threadId, bool fromCard, const std::wstring& text, const std::vector<TapHoldRef>& taps);
+        /// <summary>
+        /// /enter (§21.47): ONE Enter pressed in the session's terminal, so the prompt that sits unsent in its input box at the PC is
+        /// submitted as if the user pressed Enter there. What the service can refuse alone is answered here, as a reply to the
+        /// /enter message: words after the command (the usage line: they would be dropped, and /steer is the way to send words now),
+        /// an /enter written while Agentmaster was closed (the backlog rule: never pressed later, unless a new thread HELD it), a
+        /// closed session, a parked tab or an exited claude, a Codex session, a host with no window round trip. Everything else
+        /// goes to the hosting window (_pressEnterRemote), which reads the box, presses only on a prompt, and reads it back. Poll
+        /// thread (from _handleTopicMessage, which knows `held`; _runSessionCommand keeps a branch for any other path). Logs one
+        /// [nav] outcome per path.
+        /// </summary>
+        /// <param name="sessionId">The topic's session.</param>
+        /// <param name="cmd">The command as read (its args must be empty).</param>
+        /// <param name="msg">The /enter message (its id: every reply answers it; its date: the backlog rule); an empty object when no
+        /// message stands behind it (a date of 0 is never backlog).</param>
+        /// <param name="threadId">The topic.</param>
+        /// <param name="held">The message was held by a new thread's picker (§21.17): it is never backlog.</param>
+        /// <exception cref="std::bad_alloc">If a reply, the record or the request cannot be allocated.</exception>
+        void _enterRemote(const std::wstring& sessionId, const RemoteCommand& cmd, const json::Value& msg, int64_t threadId, bool held);
+        /// <summary>
+        /// §21.47: sends kPressEnterAction to the windows; the one that hosts the tab decides on its UI thread (DecideRemoteEnter),
+        /// presses ONE Enter only on a prompt in the box, reads the box back (RemoteEnterVerify) and replies - up to
+        /// kRemoteEnterVerifyMs after the request, from its own UI thread - and _onEnterAnswered posts the outcome. When no window
+        /// answers at all (every window's copy of the reply goes without a call: no window hosts the tab), the reply's guard
+        /// (SessionActionAnswer) posts kRemoteEnterUnansweredText instead, so an /enter is never left unanswered.
+        /// </summary>
+        /// <remarks>
+        /// A typed command has no tap, so no tap hold rides on the request (§21.28 holds a tapped button's answer; /enter has no
+        /// button). The window holds the delivery gate (kDeliveryGateEnterTag) from right before the press until the read-back ends,
+        /// so the outcome is the box's own, never another delivery's typing.
+        /// </remarks>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="threadId">The topic (the outcome's line goes there).</param>
+        /// <param name="replyTo">The /enter message the line answers (0 = none).</param>
+        /// <param name="stateAtAsk">The session's state when the user sent /enter (the outcome's wording: a running turn holds a
+        /// submitted prompt until its next step).</param>
+        /// <exception cref="std::bad_alloc">If the request, its reply or its guard cannot be allocated.</exception>
+        void _pressEnterRemote(const std::wstring& sessionId, int64_t threadId, int64_t replyTo, SessionState stateAtAsk);
+        /// <summary>
+        /// §21.47: the window's answer to an /enter, on THAT window's UI thread: reads the reply (ParseRemoteEnterReply: an unknown
+        /// word reads as Failed, never as a press), posts the outcome as a silent reply to the /enter message (RemoteEnterOutcomeHtml)
+        /// and logs the [nav] outcome. Never throws: a failure is logged (Rule #18), and the topic then gets no line - an Enter the
+        /// window pressed stands, and the card's next state shows what Claude Code did with it.
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="threadId">The topic.</param>
+        /// <param name="replyTo">As _pressEnterRemote's.</param>
+        /// <param name="stateAtAsk">As _pressEnterRemote's.</param>
+        /// <param name="reply">The window's reply, raw (parsed here, inside the containment).</param>
+        void _onEnterAnswered(const std::wstring& sessionId, int64_t threadId, int64_t replyTo, SessionState stateAtAsk, const std::wstring& reply) noexcept;
         /// <summary>
         /// HOOKS.md "Interrupted turns" — the restart question, asked IN THE TOPIC (the PC shows no dialog for a restart the
         /// phone asked for). When the session's active branch ends in a turn the USER interrupted and a rewind would let Claude

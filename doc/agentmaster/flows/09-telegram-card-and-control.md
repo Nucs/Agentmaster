@@ -1,7 +1,7 @@
 # 09 · Telegram: the card and driving a session (TGC)
 
 > Conventions and fixtures: [README.md](README.md). Spec: MESSAGING.md §7.1–§7.3, §21.5–§21.6, §21.24,
-> §21.26–§21.28, §21.33; DELIVERY.md §18; the command list in `Messaging.cpp` (`setMyCommands`). Needs **F-TG**.
+> §21.26–§21.28, §21.33, §21.47; DELIVERY.md §18; the command list in `Messaging.cpp` (`setMyCommands`). Needs **F-TG**.
 
 **What shipped (0.8.0).** A status card that stays the topic's last message (state and since when, title,
 folder · branch · model · effort · context, a queued prompt, the unsent draft at the PC, Claude Code's recap),
@@ -17,6 +17,8 @@ menu's actions are `/commands`; Claude Code's own commands are queued like promp
         (any runner mode, past Pause all, past the question guard; dormant tab started; settle 5 s) ─► 👨‍💻 taken
         └─► 👎 failed (+ the reason as a reply)
  /steer <words> ─► ⚡ sending ─► 👨‍💻 taken          (or ✍ waits first: dormant / ended / a menu / the box held)
+ /enter ─► the box read at the PC ─► a prompt: ONE Enter, the box read back ─► ⏎ submitted / kept
+                                  └─► empty / a menu / no box / held / parked / Codex: nothing pressed, the reason
  the card: posted ─► edited on a real change ─► deleted + re-sent as the last message once newer posts settle
            ─► re-sent WITH SOUND on exit / Error / Needs approval (one sound per needs-you)
 ```
@@ -172,6 +174,45 @@ the session is ready — whatever its runner mode — with its status shown as a
 **Edge cases**
 - **E1 A dormant tab** → says nothing is on screen / starts nothing (verify).
 - **E2 Privacy:** the picture is NOT redacted (documented).
+
+---
+
+### TGC-07 · `/enter` submits the prompt waiting in the box
+
+> **Since** NOT BUILT (2026-11-03) · **P1** · **Needs** F-TG, mock · **Spec** MESSAGING.md §21.47
+
+**Promise.** `/enter` presses ONE Enter at the PC only when the session's input box holds a prompt, and its reply says
+what came of it: it never picks a menu's option, never presses into an empty box, and never fires later.
+
+**Phases**
+1. **A prompt typed at the PC.** *Do:* type `from the box [[mock reply "ok"]]` into F-S's box at the PC without
+   pressing Enter; send `/enter` in its topic. *Expect:* a reply to the `/enter`: "⏎ Submitted: «from the box …»"; the
+   turn starts and the mock gets the prompt; the mirror posts its `👤 You … typed at the PC` line. *Check:* [LOG]
+   hooks.log `[enter] <sid8> Telegram's Enter -> pressed on the prompt in the box (chars=N), reading the box back`, then
+   `… -> submitted (N ms after the press)`; `[nav] remote telegram /enter <sid8> -> submitted`.
+2. **Into a running turn.** *Do:* a long turn (`[[mock bash "echo 1"; delay 20s; reply "end"]]`); type a prompt into the
+   box at the PC; `/enter`. *Expect:* "⏎ Submitted into the running turn: «…» — Claude Code takes it in at its next
+   step, or starts the next turn with it."; the transcript has its `queued_command` attachment, or the next turn starts
+   with it.
+3. **An empty box.** *Do:* `/enter` with nothing typed. *Expect:* "Its input box is empty: there is no prompt to submit,
+   so nothing was pressed. …"; no turn. *Check:* [LOG] `… Telegram's Enter -> empty`.
+4. **A dialog on the screen.** *Do:* a question dialog is open (the mock's AskUserQuestion); `/enter`. *Expect:* "A menu
+   or dialog is open on its screen, and Enter would pick the option it highlights («1. …»), so nothing was pressed …";
+   the dialog is still open at the PC.
+5. **A handover in standby.** *Do:* `/handover-standby` in a session; `/enter` in the successor's topic. *Expect:* the
+   pre-typed briefing is submitted (the reply quotes its first line, or its `[Pasted text #1 +N lines]` placeholder).
+
+**Edge cases**
+- **E1 `/enter fix it`** → the usage line (it points at `/steer`); nothing pressed.
+- **E2 A parked tab** → "Its claude is not running … /activate starts a parked tab."; nothing is started.
+- **E3 While a delivery types** (Auto, a long queued prompt, `/enter` as it goes) → "A prompt is being typed into its
+  input box right now — send /enter again in a few seconds."; [LOG] `-> busy`.
+- **E4 From the backlog** (sent while Agentmaster was closed, older than 10 min) → "This /enter is N old … nothing was
+  pressed …"; nothing is pressed at the start.
+- **E5 A prompt with an invisible character** (pasted at the PC) → Claude Code only cleans the box on the first Enter:
+  "⏎ Enter pressed, but the box still holds «…» — Claude Code did not submit it. …"; a second `/enter` submits it.
+- **E6 A Codex topic** → "Enter goes to Claude Code sessions only …"; in 🔎 Search → refused as a session's command;
+  `/cc /enter` → queued for Claude Code as text.
 
 ---
 

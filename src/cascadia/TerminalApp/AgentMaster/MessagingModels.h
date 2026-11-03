@@ -3714,7 +3714,8 @@ namespace Agentmaster::Msg
         L"search-tab", L"search_tab", // §21.19: jump to the 🔎 Search topic from any topic (kSearchTabCommands)
         L"search", // §21.19: /search <words> asks the Search topic's agent from any topic; a bare /search jumps (kSearchCommand)
         L"steer", // §21.33: /steer <message> sends the words NOW, into a running turn too (kSteerCommand, MessagingSteer.h)
-        L"download" // §21.32.4: /download <path>, a file's download link and "📤 Send as file" (Messaging.Files.cpp)
+        L"download", // §21.32.4: /download <path>, a file's download link and "📤 Send as file" (Messaging.Files.cpp)
+        L"enter" // §21.47: /enter presses ONE Enter in the terminal, submitting the prompt that sits in its box (kEnterCommand, MessagingEnter.h)
     };
 
     // Claude Code commands that leave NO record in the session (§7.2, provisional until P0-19): run at

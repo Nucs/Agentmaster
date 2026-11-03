@@ -77,8 +77,9 @@ Claude's final reply — rich Markdown (tables render), quoting the prompt it an
 
 - **A message in a topic is the session's next prompt**: queued, delivered at the next ready moment, never typed into a
   running turn (`/steer <text>` is the one explicit exception).
-- **`/commands`** run the host's actions for that session (rename, pin, restart, fork, transcript, screen…); Claude Code's
-  own recorded commands (`/compact`, `/model x`, skills) are queued like prompts; commands that leave no record are refused.
+- **`/commands`** run the host's actions for that session (rename, pin, restart, fork, transcript, screen…, and `/enter`, which
+  submits the prompt already waiting in the box at the PC); Claude Code's own recorded commands (`/compact`, `/model x`, skills)
+  are queued like prompts; commands that leave no record are refused.
 - **Buttons** answer Claude Code's `AskUserQuestion` dialogs (options, own words, notes, several questions as tabs) and its
   `/add-dir` dialog; the card's buttons restart, reactivate, interrupt (Esc), park, fork, and draw the screen.
 - **Voice notes** are transcribed with the session's own vocabulary and read as the prompt they say (in the Search topic: with
@@ -1215,6 +1216,7 @@ expand into prompts. They must be re-checked when Claude Code changes its comman
 | `/queue` | the Pending prompts, numbered (📱 marks the phone's), with `[✖ n]` buttons and `[▶ Send next now]` |
 | `/sendnow` | sends the NEXT QUEUED prompt now (the PC's Send now) |
 | `/steer <text>` | sends NEW words now, into a running turn too (§11.4) |
+| `/enter` | presses ONE Enter at the PC: the prompt already waiting in the input box is submitted — only a prompt is pressed on, never a menu, a dialog or an empty box (§13.8); words after it get the usage line |
 | `/unqueue <n>` | removes queued prompt n |
 | `/runner auto\|paused` | the session's runner mode |
 | `/pin` · `/unpin` | never idle (§8.12) |
@@ -1245,7 +1247,7 @@ The Search topic's commands: §14.5. The main view takes `/start`, `/help` and `
 #### 11.3.3 The "/" menu
 
 Set once per start (one `setMyCommands` call, chat scope — so a command a release adds reaches an existing chat):
-`queue`, `sendnow`, `steer`, `runner`, `pin`, `unpin`, `wake`, `transcript`, `summary`, `screen`, `screenimage`, `allscreen`,
+`queue`, `sendnow`, `steer`, `enter`, `runner`, `pin`, `unpin`, `wake`, `transcript`, `summary`, `screen`, `screenimage`, `allscreen`,
 `download`, `status`, `search`, `search_tab`, `rename`, `restartsession`, `deactivate`, `activate`, `reactivate`,
 `forksession`, `newsession`, `interrupt`, `idle`, `board`, `recreate`, `pauseall`, `resumeall`, `help` — each with a one-line
 description (Appendix D.3). `/clear` is deliberately absent (in a session's topic it is Claude Code's own).
@@ -1694,6 +1696,41 @@ goes out (the answer may come back from another thread at once). The answer (App
 Every window-hosted action whose reply is never called (no window hosts the tab: closing, frozen) MUST be reported — "No window
 answered for its tab (it is closing, or the PC is busy) — …" — not left as a button that just stops spinning. An answer word a
 window does not know (an older host) reads as a failure.
+
+### 13.8 ⏎ `/enter`: the prompt in the box, submitted
+
+- **What it is for:** a prompt that sits UNSENT in the session's input box at the PC — typed there and left, typed in by
+  `/handover-standby` for review, carried into a fork's box, typed back after a restart — is submitted from the phone, as if the
+  user pressed Enter at the PC. Claude Code does what its Enter does: at rest a turn starts; in a running turn the prompt is held
+  and taken in at the turn's next step (§4.6).
+- **Only a prompt is pressed on.** The hosting window reads the box at the press (`press-enter`; the delivery's tri-state read,
+  1,000 rows) and writes ONE `\r` through the session's own injector only when the box holds a prompt:
+
+  | The box reads | `/enter` does |
+  |---|---|
+  | a prompt | presses, then reads the box back (below) |
+  | empty | nothing — "there is no prompt to submit" (a dim suggestion is not a prompt) |
+  | a menu or a dialog | nothing — Enter would PICK the option it highlights (named in the line); plans and permission prompts are not answered from Telegram (§12.4) |
+  | no box (a dialog over it, claude still drawing) | nothing |
+  | held by a delivery, a swap, a mail move or a fill | nothing — "send /enter again in a few seconds" |
+
+  A parked tab, an exited claude (its tab may hold a shell) and a closed session read the key nowhere; a Codex session takes no
+  keys; an adopted claude does.
+- **One owner of the box.** The window takes the delivery gate (`#telegram-enter`) before it writes, and keeps it until the
+  read-back ends: no runner send, Send now, `/steer`, swap or fill types into the box meanwhile (and ⎋ Esc / 🌙 Deactivate answer
+  busy for that moment, ~0.2 s when the prompt goes, 4 s at most).
+- **The read-back**, every 100 ms for up to 4 s: the box holding no prompt for TWO reads in a row (empty, a dialog, no box — one
+  read can be a repaint frame) is **submitted**; a prompt still there at the end — the same one, or a changed one (an entry picked
+  from a list Claude Code shows, a new line after a trailing `\`, the clean-out of invisible characters that cancels a submit) — is
+  **kept**; an unreadable screen ends the watch as **pressed, unverified**.
+- **The answer** is a silent reply to the `/enter` message: "⏎ Submitted: «first line»" ("… into the running turn: «…» — Claude
+  Code takes it in at its next step, or starts the next turn with it." while a turn ran), "⏎ Enter pressed, but the box still
+  holds «…» — Claude Code did not submit it. … send /enter again to submit it as it is now.", or the refusal's reason. When no
+  window answers: "⏎ No window answered for its tab … — the Enter may not have been pressed." (§13.7).
+- **Never later:** an `/enter` older than the backlog age (§11.2.6) is answered "nothing was pressed: an Enter belongs to the
+  screen of its moment" (a new thread's held message is no backlog). `/enter <words>` presses nothing: the usage line points at
+  `/steer`. The Search topic refuses it; `/cc /enter` forces the word through (Claude Code has no `/enter`).
+- A host without the window round trip has no fallback press (a blind Enter is what the command must never write).
 
 ---
 
@@ -2760,6 +2797,7 @@ the user id hashed where a user is named.
 | Command echo skew | 2 s | §12.2.6 |
 | Launch timeout | 3 min | §13.6 |
 | Esc gap | 3 s | §13.3 |
+| `/enter` read-back: poll / limit / gone reads / box rows | 100 ms / 4 s / 2 in a row / 1,000 | §13.8 |
 | Search cards / rest pack | 10 / 3,500 chars | §14.4 |
 | Search action TTL | 2 h | §14.5 |
 | Front double-tap window | 10 s | §16.4 |
@@ -2846,6 +2884,8 @@ All ≤ 64 bytes; every parser refuses anything that does not match exactly.
 > /add-dir &lt;path&gt; adds a folder to the workspace: Claude Code's question comes here as buttons, and "Yes, for this session" is
 > picked by itself after 60 s.
 > /download &lt;path&gt; — a file's download link (absolute, or relative to the session's folder), with 📤 Send as file
+> /enter — press Enter at the PC: the prompt waiting in the session's input box is submitted (nothing is pressed into a menu, a
+> dialog or an empty box)
 > /queue · /sendnow · /steer &lt;text&gt; · /unqueue n
 > /runner auto|paused
 > /pin · /unpin — never idle
@@ -2885,7 +2925,7 @@ bot, then Claude Code's account and plan usage; `/clear`; `/verbose on|off` — 
 ### D.3 The "/" menu's descriptions
 
 `queue` the queued prompts (session topic) · `sendnow` send the next queued prompt now · `steer` send a message NOW, into a running
-turn too: /steer <text> · `runner` runner auto|paused · `pin` never idle: keep this topic · `unpin` let the session idle again ·
+turn too: /steer <text> · `enter` press Enter at the PC: submit the prompt waiting in the input box · `runner` runner auto|paused · `pin` never idle: keep this topic · `unpin` let the session idle again ·
 `wake` Idle -> Waiting for you · `transcript` the session as a .md file [minimal|compact|default|full|max] · `summary` the session's
 summary · `screen` the terminal's visible text · `screenimage` the terminal's screen as a picture · `allscreen` the whole
 conversation as tall pictures [minimal|compact|default|full|max] [diffs] [last] (bare: the default level) · `download` a file's

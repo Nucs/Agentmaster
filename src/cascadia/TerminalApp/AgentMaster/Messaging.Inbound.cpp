@@ -1002,6 +1002,14 @@ namespace Agentmaster::Msg
                 _steerRemotePrompt(sessionId, cmd.args, msg, threadId, held);
                 return;
             }
+            if (cmd.name == kEnterCommand)
+            {
+                // §21.47: /enter is taken here for /steer's reason: only this path knows whether a new thread held the message, and a
+                // held one is no backlog (an Enter written hours ago is never pressed, one the folder pick held is). _runSessionCommand
+                // keeps a branch for it.
+                _enterRemote(sessionId, cmd, msg, threadId, held);
+                return;
+            }
             _runSessionCommand(sessionId, cmd, msg, threadId);
             return;
         case RemoteKind::RefusedNoRecord:
@@ -1420,6 +1428,13 @@ namespace Agentmaster::Msg
             // §21.33: the belt for a path that reaches a session command without _handleTopicMessage, which takes /steer itself.
             // _steerRemotePrompt logs its own outcome.
             _steerRemotePrompt(sessionId, cmd.args, msg, threadId, false);
+            return;
+        }
+        if (name == kEnterCommand)
+        {
+            // §21.47: the belt for a path that reaches a session command without _handleTopicMessage, which takes /enter itself (and
+            // knows whether a new thread held it). _enterRemote logs its own outcome.
+            _enterRemote(sessionId, cmd, msg, threadId, false);
             return;
         }
         if (name == L"unqueue")
@@ -3641,6 +3656,105 @@ namespace Agentmaster::Msg
         }
     }
 
+    // ===== §21.47: /enter - ONE Enter in the terminal, submitting the prompt that sits in its box ==========================
+
+    void MessagingService::_enterRemote(const std::wstring& sessionId, const RemoteCommand& cmd, const json::Value& msg, int64_t threadId, bool held)
+    {
+        const int64_t msgId = msg.I64At(L"message_id", 0);
+        const int64_t dateMs = msg.I64At(L"date", 0) * 1000;
+        const auto nav = [&](std::wstring_view outcome) {
+            LogNav(L"remote telegram /enter " + ShortId(sessionId) + L" -> " + std::wstring{ outcome });
+        };
+        // Every answer below replies to the /enter message itself: in a busy topic the line then says which /enter it answers.
+        const auto answer = [&](const std::wstring& html) { _reply(threadId, html, false, json::Value{}, msgId); };
+        if (!cmd.args.empty())
+        {
+            // "/enter fix it" would press Enter on whatever the box holds while the words went nowhere: never pressed, the usage
+            // line instead (ParseRemoteCommand trims the args, so blanks alone read as none).
+            answer(RemoteEnterUsageHtml());
+            nav(L"usage");
+            return;
+        }
+        if (!held && !msg.BoolAt(L"am_voice_live") && IsBacklogUpdate(dateMs, WallMs()))
+        {
+            // D2: written while Agentmaster was closed. Unlike a message it is not offered for later: an Enter belongs to the screen
+            // of its moment, and the box may hold a different prompt by now (a restart types the remembered draft back). A voice
+            // note's transcript that was live when the note ARRIVED is no backlog however long its transcription took (§21.43's
+            // flag, the plain message's rule).
+            answer(RemoteEnterBacklogHtml(TgShortSpan(WallMs() - dateMs)));
+            nav(L"refused:backlog");
+            return;
+        }
+        // The lean read: nothing here needs the queue.
+        const auto s = _registry->GetWithoutQueue(sessionId);
+        if (!s || !s->live)
+        {
+            answer(std::wstring{ kRemoteEnterClosedText }); // no markup in it: posted as is
+            nav(L"refused:closed");
+            return;
+        }
+        // The record's own checks first (a parked tab, an exited claude, Codex): answered at once, with no round trip to a window.
+        if (const RemoteEnterResult early = DecideRemoteEnterTarget(*s); early != RemoteEnterResult::Pressed)
+        {
+            answer(RemoteEnterOutcomeHtml(RemoteEnterAnswer{ early, {} }, s->state));
+            nav(RemoteEnterResultWord(early));
+            return;
+        }
+        if (!_hooks.sessionAction)
+        {
+            // A host without the window round trip (the m5 harness): nothing can read the box, and a blind Enter is exactly what this
+            // command must never write, so there is no fallback press (unlike /interrupt's fire-and-forget Esc).
+            answer(L"Not available here.");
+            nav(L"refused:no-window-hook");
+            return;
+        }
+        _pressEnterRemote(sessionId, threadId, msgId, s->state);
+    }
+
+    void MessagingService::_pressEnterRemote(const std::wstring& sessionId, int64_t threadId, int64_t replyTo, SessionState stateAtAsk)
+    {
+        const auto self = weak_from_this();
+        // The guard reports "no window answered" when every window's copy of the reply goes without a call (no window hosts the tab),
+        // so the /enter is never left without a line. The hosting window keeps its copy until its read-back ends (up to
+        // kRemoteEnterVerifyMs), so the guard can only fire after that, never while the window is still reading.
+        const auto once = std::make_shared<SessionActionAnswer>([self, sessionId, threadId, replyTo]() {
+            if (const auto me = self.lock())
+            {
+                me->_reply(threadId, std::wstring{ kRemoteEnterUnansweredText }, false, json::Value{}, replyTo); // no markup in it
+                LogNav(L"remote telegram /enter " + ShortId(sessionId) + L" -> no-answer (no window hosts its tab)");
+            }
+        });
+        LogNav(L"remote telegram /enter " + ShortId(sessionId) + L" -> asked the hosting window");
+        _hooks.sessionAction(sessionId, std::wstring{ kPressEnterAction }, std::wstring{}, [self, sessionId, threadId, replyTo, stateAtAsk, once](std::wstring reply) {
+            // The hosting window's UI thread, once its read-back has a verdict (or at once, when it pressed nothing). The claim comes
+            // first, so the guard stays silent once a window has answered.
+            if (!once->Claim())
+            {
+                return;
+            }
+            if (const auto me = self.lock())
+            {
+                me->_onEnterAnswered(sessionId, threadId, replyTo, stateAtAsk, reply);
+            }
+        });
+    }
+
+    void MessagingService::_onEnterAnswered(const std::wstring& sessionId, int64_t threadId, int64_t replyTo, SessionState stateAtAsk, const std::wstring& reply) noexcept
+    {
+        try
+        {
+            const RemoteEnterAnswer answer = ParseRemoteEnterReply(reply);
+            _reply(threadId, RemoteEnterOutcomeHtml(answer, stateAtAsk), false, json::Value{}, replyTo);
+            LogNav(L"remote telegram /enter " + ShortId(sessionId) + L" -> " + std::wstring{ RemoteEnterResultWord(answer.result) });
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the topic gets no line for this /enter. An Enter the window pressed stands (nothing is retried), and
+            // the card's next state shows what Claude Code did with it.
+            LogSwallowedException(L"MessagingService::_onEnterAnswered");
+        }
+    }
+
     bool MessagingService::_askUninterruptBeforeRestart(const std::wstring& sessionId, const SessionInfo& s, int64_t threadId)
     {
         if (s.kind != AgentKind::Claude)
@@ -5846,6 +5960,8 @@ namespace Agentmaster::Msg
                    L"/add-dir &lt;path&gt; adds a folder to the workspace: Claude Code's question comes here as buttons, and \x201CYes, for this session\x201D is picked by itself after 60 s.\n"
                    // §21.32.4: the file links (on in the settings' FILE LINKS section).
                    L"/download &lt;path&gt; \x2014 a file's download link (absolute, or relative to the session's folder), with \U0001F4E4 Send as file\n"
+                   // §21.47: /enter submits what already sits in the box at the PC (one Enter, read back; never into a menu or dialog).
+                   L"/enter \x2014 press Enter at the PC: the prompt waiting in the session's input box is submitted (nothing is pressed into a menu, a dialog or an empty box)\n"
                    L"/queue \x00B7 /sendnow \x00B7 /steer &lt;text&gt; \x00B7 /unqueue n\n/runner auto|paused\n/pin \x00B7 /unpin \x2014 never idle\n/wake \x00B7 /moveidle \x00B7 /markunread\n/rename &lt;title&gt;\n/favorite \x00B7 /tags \x00B7 /tag x \x00B7 /untag x\n"
                    L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /screenimage\n"
                    // §21.40: /status sends the card copy, then what Claude Code's own /status dialog shows.

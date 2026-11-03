@@ -2365,12 +2365,33 @@ namespace winrt::TerminalApp::implementation
         // "rename" = `arg` is the new title, through _RenameClaudeSession (Rule #11); "refresh-tags" /
         // "refresh-favorite" = repaint after a remote store edit; MESSAGING.md §21.41's kPressEscAction = write ONE Esc and
         // kDeactivateAction = park the tab, each judged again here - DecideRemoteEsc / DecideRemotePark - and answered with a
-        // RemoteEscResultWord / RemoteParkResultWord through `reply`). Also two non-bot words from other windows: the session
+        // RemoteEscResultWord / RemoteParkResultWord through `reply`; MESSAGING.md §21.47's kPressEnterAction = ONE Enter, only
+        // on a prompt in the input box (DecideRemoteEnter), answered LATER by _AwaitRemoteEnterSubmit's read-back when it
+        // pressed, at once otherwise). Also two non-bot words from other windows: the session
         // menu's (kSessionMenuDeactivateAction / kSessionMenuCloseAction, -> _RunSessionMenuScopeHere) and
         // kDeactivateIdleSessionAction ("Deactivate All Idle Tabs" answered "All windows", -> _DeactivateIdleSessionLocal).
         // Returns false, calling nothing, when this window does not host the session (the fan-out's other windows). UI
         // thread; never throws (Rule #18 inside).
         bool _RemoteSessionAction(const std::wstring& sessionId, const std::wstring& action, const std::wstring& arg, const std::function<void(std::wstring)>& reply);
+        /// <summary>
+        /// Agentmaster (MESSAGING.md §21.47, /enter): the READ-BACK after the Enter _RemoteSessionAction pressed on the prompt in a
+        /// session's input box. Every kRemoteEnterPollMs it reads the box on this UI thread (RemoteEnterVerify): the prompt gone for
+        /// kRemoteEnterGoneReads reads in a row is "submitted", a prompt still there after kRemoteEnterVerifyMs is "kept", an
+        /// unreadable screen (the tab closing or parking) or a closed window is "pressed" (unverified). Then it closes the delivery
+        /// gate the press took (kDeliveryGateEnterTag) and replies once, in BuildRemoteEnterReply's format.
+        /// </summary>
+        /// <param name="sessionId">The session whose box is read back.</param>
+        /// <param name="pressedPrompt">The box's text at the press (the reference the reads are judged against, quoted by the answer).</param>
+        /// <param name="reply">The bot's reply (its own copy: the bot's "no window answered" guard waits until this coroutine let it go);
+        /// may be empty.</param>
+        /// <remarks>
+        /// The caller must have opened the gate with kDeliveryGateEnterTag and written the Enter; this coroutine owns both from then on
+        /// - it closes the gate on every path, a throw included, before it replies (so the retry the answer invites finds the box
+        /// free). It holds the page only WEAKLY across its waits (a strong reference lives one read, on this UI thread), so a window
+        /// closed meanwhile is never destroyed by it on a pool thread. Never lets anything escape (a fire_and_forget escape is
+        /// winrt::terminate): every failure is logged (Rule #18) and answered as "pressed".
+        /// </remarks>
+        winrt::fire_and_forget _AwaitRemoteEnterSubmit(std::wstring sessionId, std::wstring pressedPrompt, std::function<void(std::wstring)> reply);
         /// <summary>
         /// Agentmaster (MESSAGING.md §5.4 / D27 / §21.23): open a session the Telegram bot asked for — resume / fork / a new
         /// one — as a BACKGROUND tab of this window (no focus change: the user is at the phone, and the Sessions page's
