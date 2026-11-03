@@ -16,7 +16,7 @@
 | Install | Identity | Version | Runs from | Commit |
 |---|---|---|---|---|
 | production | `Agentmaster` | 0.8.0.2 | the loose layout `Q:\agentmaster-layouts\Release-B` (build server build `b20261101-1`, installed by `amb install`) | `f80ac468e` (its binaries carry `b9780db43`) |
-| dev | `AgentmasterDev` | 0.0.1.41 | the loose layout `Q:\agentmaster-layouts\Debug-B` (build server build `b20261031-1`, installed by `amb install`) | `81df9c3be` (its binaries carry `d1da872d1`) |
+| dev | `AgentmasterDev` | 0.0.1.42 | the loose layout `Q:\agentmaster-layouts\Debug` (build server build `b20261103-2`, installed by `amb install`) | `8f23157ba` |
 
 - Whether a commit is in a build: `git merge-base --is-ancestor <commit> <build commit>`.
 - A hash in parentheses is the one a build's binaries (and the build server's records) carry for that commit before the private-data scrub of the history; `refs/backup/pre-scrub-2026-11-03/` keeps those commits in this clone only (never push it). The table's first hash is the commit in the published history.
