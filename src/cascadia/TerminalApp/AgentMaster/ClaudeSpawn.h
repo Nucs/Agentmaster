@@ -521,7 +521,11 @@ namespace Agentmaster
     // Persistence::SeedSessionEnvDefaults).
     //   v1: CLAUDE_CODE_MAX_RETRIES=50000 — the API-retry ceiling. (Claude clamps the EFFECTIVE value to 15
     //       since CLI v2.1.186; the literal 50000 is intentional + harmless, and the user may change it.)
-    inline constexpr uint32_t kEnvDefaultsVersion = 1;
+    //   v2: CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 — Claude Code loads the CLAUDE.md of a folder added to
+    //       the session (/add-dir, --add-dir, remembered additionalDirectories; MESSAGING.md §21.25.9's ➕ folders)
+    //       only when this is truthy. An install already at v1 gets ONLY this one on its next start (a user who
+    //       deleted the v1 default keeps it deleted); deleting it in the cog makes it stay deleted too.
+    inline constexpr uint32_t kEnvDefaultsVersion = 2;
     std::pair<std::wstring, uint32_t> ApplyEnvDefaults(std::wstring_view envText, uint32_t seededVersion);
 
     // --- OS-touching ---

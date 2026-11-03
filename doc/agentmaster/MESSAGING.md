@@ -4096,11 +4096,14 @@ both messages (a refused delete deletes both; the ➕ message's queued edit is d
 - "for this session" is Claude Code's own session scope; whether a claude that Agentmaster resumes later (a restart, a
   Deactivate, a reopened window) still has the folder is Claude Code's business, not verified here. "remember" lasts for
   every later session in that folder.
-- ⚠ **The added folder's `CLAUDE.md` is read only when `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` is truthy** in the
-  session's environment (`RYe()`: the host's `claudeMdAdditionalDirectoriesAsked()`, else that variable). Neither this PC nor
-  Agentmaster sets it (2026-11-03), so the folder becomes readable but its `CLAUDE.md` is not loaded. One line in the user's
-  `~/.claude/settings.json` turns it on for every Claude Code session: `"env": { "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "1" }`.
-  That is the user's call, so nothing here sets it.
+- **The added folder's `CLAUDE.md` is read only when `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` is truthy** in the
+  session's environment (`RYe()`: the host's `claudeMdAdditionalDirectoriesAsked()`, else that variable). Nothing on this
+  PC set it (2026-11-03), so an added folder became readable but its `CLAUDE.md` did not load. The user then asked for it as
+  a default env var: Agentmaster ships `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` as its v2 shipped GLOBAL env default
+  ([`ENV_VARS.md`](ENV_VARS.md) §8, `ApplyEnvDefaults`). It is seeded once into the cog's Global env at the first start of a
+  build that has it, so every session Agentmaster launches after that start gets it. A user who deletes it keeps it deleted,
+  and a value in Claude Code's own settings files outranks it (ENV_VARS.md §2). A claude started outside Agentmaster does not
+  get it.
 
 **Persistence:** `NewThreadWizard::extraFolders` (`"extraFolders"`: `path`, `option`; only options 1 and 2 load, at most 10)
 rides the record and the bind. The record keeps the ➕ message:
@@ -4190,8 +4193,7 @@ NOT BUILT; nothing tried live. ⚠ The messaging service's class gained members 
 
 **Not done.** No ➕ in the topic's `/newsession` / `/forksession` or Search's `/newsession <folder>` (§21.21: no wizard
 there; `/add-dir` in the topic covers a running session). The ➕ message offers no Create for a missing folder. A held
-`/add-dir <path>` typed during the wizard keeps §21.34's card with its 60 s default. Agentmaster does not set
-`CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` (above).
+`/add-dir <path>` typed during the wizard keeps §21.34's card with its 60 s default.
 
 ### 21.26 The card leads with its state, the title under it (2026-10-19; in production since 0.6.8.23 and dev since 0.0.1.31)
 

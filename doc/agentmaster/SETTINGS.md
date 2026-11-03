@@ -68,8 +68,9 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
   `NAME=VALUE` per line, live-lexed by `LexEnvText`). The global set is `env`; per-folder overrides live
   in `<profile>\dir-env.json` (keyed by `NormDirKey`). They merge at spawn, the folder winning
   (`ResolveSessionEnv`), for Claude and Codex alike; `CCMGR_*` names are dropped. `envDefaultsVersion`
-  records which shipped defaults were seeded into `env` once (v1: `CLAUDE_CODE_MAX_RETRIES=50000`); a
-  user's edit or deletion sticks.
+  records which shipped defaults were seeded into `env` once (v1: `CLAUDE_CODE_MAX_RETRIES=50000`; v2:
+  `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`, so an added folder's `CLAUDE.md` is read); a user's edit or
+  deletion sticks.
 - `defaultLaunchDir` (empty = `%USERPROFILE%`): seeds the Launch box.
 - `recentDirsLimit` (10): the folder picker's RECENT rows.
 - `carryDraftOnFork` (true): a fork carries the source's unsent draft into its own box (PENDING_INPUT.md

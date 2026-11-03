@@ -205,8 +205,10 @@ prompt runs.
 5. **The folders go first.** *Expect:* when the session is up, two SILENT cards "⏳ Answering · … (chosen when this thread
    was opened)" → "✅ Added for this session" / "✅ Added and remembered · chosen when this thread was opened"; only then the
    held message goes, with its "📤 sent from the queue" line. *Check:* [ENG] the queue sends `/add-dir B`, `/add-dir C`,
-   then `look at both`, each after the one before is echoed; [MOCK] the first model request comes after both echoes;
-   A's `.claude\settings.local.json` lists C under `permissions.additionalDirectories`.
+   then `look at both`, each after the one before is echoed; [MOCK] the first model request comes after both echoes
+   and carries B's and C's `CLAUDE.md` (the v2 shipped env default `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`,
+   ENV_VARS.md §8 — in the session's env, and in the cog's Global env); A's `.claude\settings.local.json` lists C under
+   `permissions.additionalDirectories`.
    [LOG] `[msg] new thread N: 2 of 2 extra folder(s) go to S as /add-dir, ahead of its held messages`,
    `[menu] S /add-dir dialog open (…): option 2 (yes-remember) is pressed now, as the new thread's ➕ message chose`.
 
@@ -229,3 +231,5 @@ prompt runs.
 - **E12 A restart mid-wizard** (at Scope) → the ➕ message's buttons still work, the folder asked about kept.
 - **E13 A folder already readable when the session starts** (in its remembered settings) → no dialog; "ℹ️ Already in the
   workspace" over Claude Code's message; the held message still goes.
+- **E14 The env default deleted in the cog** (Global env without `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD`) → the
+  folders are still added, but their `CLAUDE.md` does not reach the model; after a restart the line does NOT come back.

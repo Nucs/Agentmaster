@@ -617,22 +617,43 @@ void TestSpawnBuilders()
 
     // ApplyEnvDefaults (ENV_VARS.md §8): one-time seed of the shipped GLOBAL env defaults, version-gated.
     {
-        // Fresh install (version 0, empty env): CLAUDE_CODE_MAX_RETRIES=50000 appended; version -> current.
+        // Fresh install (version 0, empty env): every shipped default appended, in introduction order; version -> current.
         auto [env1, ver1] = ApplyEnvDefaults(L"", 0);
         CHECK(ver1 == kEnvDefaultsVersion, "env-defaults: version bumped to current");
         CHECK(env1.find(L"CLAUDE_CODE_MAX_RETRIES=50000") != std::wstring::npos, "env-defaults: seeds CLAUDE_CODE_MAX_RETRIES=50000");
+        CHECK(env1 == L"CLAUDE_CODE_MAX_RETRIES=50000\nCLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1",
+              "env-defaults: a fresh install gets v1 then v2 (CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1), one per line");
 
         // Already current: nothing re-added (a user who deleted it keeps it gone).
         auto [env2, ver2] = ApplyEnvDefaults(L"", kEnvDefaultsVersion);
         CHECK(env2.empty() && ver2 == kEnvDefaultsVersion, "env-defaults: no re-seed once current version reached");
 
-        // User already has the NAME (any case): never duplicated; version still advances.
+        // User already has the NAME (any case): never duplicated; version still advances (the v2 default still comes).
         auto [env3, ver3] = ApplyEnvDefaults(L"claude_code_max_retries=7", 0);
-        CHECK(env3 == L"claude_code_max_retries=7" && ver3 == kEnvDefaultsVersion, "env-defaults: existing NAME (case-insensitive) not duplicated");
+        CHECK(env3 == L"claude_code_max_retries=7\nCLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1" && ver3 == kEnvDefaultsVersion,
+              "env-defaults: existing NAME (case-insensitive) not duplicated");
 
-        // Non-empty env without the default: appended on its OWN line (no run-together).
+        // Non-empty env without the defaults: appended on their OWN lines (no run-together).
         auto [env4, ver4] = ApplyEnvDefaults(L"FOO=bar", 0);
-        CHECK(env4 == L"FOO=bar\nCLAUDE_CODE_MAX_RETRIES=50000", "env-defaults: appended on a fresh line");
+        CHECK(env4 == L"FOO=bar\nCLAUDE_CODE_MAX_RETRIES=50000\nCLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1", "env-defaults: appended on a fresh line");
+
+        // MESSAGING.md 21.25.9 / ENV_VARS.md 8, v2: an install seeded at v1 gets ONLY the new default on its next start.
+        CHECK(kEnvDefaultsVersion == 2, "env-defaults: v2 is the current set");
+        auto [env5, ver5] = ApplyEnvDefaults(L"CLAUDE_CODE_MAX_RETRIES=50000", 1);
+        CHECK(env5 == L"CLAUDE_CODE_MAX_RETRIES=50000\nCLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1" && ver5 == 2,
+              "env-defaults: an updater at v1 gets v2 only, on its own line");
+        auto [env6, ver6] = ApplyEnvDefaults(L"", 1);
+        CHECK(env6 == L"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1" && ver6 == 2,
+              "env-defaults: a v1 default the user deleted stays deleted while v2 is added");
+        auto [env7, ver7] = ApplyEnvDefaults(L"claude_code_additional_directories_claude_md=0", 1);
+        CHECK(env7 == L"claude_code_additional_directories_claude_md=0" && ver7 == 2,
+              "env-defaults: a user's own value for the v2 name (any case, even 0) is kept, never duplicated");
+        // What a session gets: the seeded global line reaches the spawn's merged env (a per-folder value would win).
+        const auto merged = MergeSessionEnv(env6, L"");
+        CHECK(merged.size() == 1 && merged[0].first == L"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD" && merged[0].second == L"1",
+              "env-defaults: the v2 default is in the env a session is spawned with");
+        const auto overridden = MergeSessionEnv(env6, L"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=0");
+        CHECK(overridden.size() == 1 && overridden[0].second == L"0", "env-defaults: a per-folder value overrides the seeded one");
     }
 
     // UpsertJsonNumberKey (ENV_VARS.md §8): the PURE RMW core of the Claude user settings.json repository.

@@ -36,7 +36,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [08-telegram-topics.md](08-telegram-topics.md) | Telegram: setup, topics, history, the mirror (TGT) | 11 | 4 / 6 / 1 | 37 | 25 | 2 |
 | [09-telegram-card-and-control.md](09-telegram-card-and-control.md) | Telegram: the card, prompts, /steer, /enter, /commands, the screen (TGC) | 7 | 4 / 2 / 0 (+1 NOT BUILT) | 30 | 31 | 2 |
 | [10-telegram-questions-and-menus.md](10-telegram-questions-and-menus.md) | Telegram: question cards, /add-dir menu cards (TGQ) | 6 | 3 / 3 / 0 | 24 | 21 | — |
-| [11-telegram-search-and-new-threads.md](11-telegram-search-and-new-threads.md) | Telegram: 🔎 Search, fleet commands, the new-thread wizard and its ➕ folders, the pick menu (TGS) | 6 | 2 / 1 / 1 (+2 NOT BUILT) | 30 | 42 | — |
+| [11-telegram-search-and-new-threads.md](11-telegram-search-and-new-threads.md) | Telegram: 🔎 Search, fleet commands, the new-thread wizard and its ➕ folders, the pick menu (TGS) | 6 | 2 / 1 / 1 (+2 NOT BUILT) | 30 | 43 | — |
 | [12-telegram-file-links.md](12-telegram-file-links.md) | Telegram: file links and the file server (TGF) | 4 | 0 / 3 / 1 | 7 | 6 | — |
 | [13-ai-search.md](13-ai-search.md) | The Sessions page's AI search (AIS) | 5 | 2 / 3 / 0 | 20 | 10 | — |
 | [14-presets.md](14-presets.md) | Presets: other models and providers (PRE) | 5 | 3 / 2 / 0 | 15 | 11 | — |

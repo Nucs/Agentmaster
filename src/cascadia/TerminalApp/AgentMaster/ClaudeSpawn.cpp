@@ -4540,6 +4540,14 @@ send - nothing is submitted until the user presses Enter in that tab.
         // and give a new entry introVersion = the new version when adding one.
         static const Default kDefaults[] = {
             { 1, L"CLAUDE_CODE_MAX_RETRIES", L"50000" },
+            // v2 (2026-11-03, the user's "add it to default env vars"): Claude Code reads the CLAUDE.md of a folder
+            // added to a session (/add-dir, --add-dir, a project's remembered permissions.additionalDirectories) ONLY
+            // when this is truthy (2.1.310: the host's claudeMdAdditionalDirectoriesAsked(), else this variable) — so
+            // without it a folder that MESSAGING.md §21.25.9's ➕ message (or any /add-dir) adds is readable, but its
+            // CLAUDE.md never loads. Consequence: every managed session whose project REMEMBERS added folders now
+            // loads their CLAUDE.md too (more context, by design); a user who does not want that deletes the line in
+            // the cog, and it stays deleted (the version gate).
+            { 2, L"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", L"1" },
         };
 
         // Names already present in the editor (case-insensitive — Windows env semantics, the same fold

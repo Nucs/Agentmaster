@@ -3350,7 +3350,8 @@ namespace Agentmaster
         // record that the one-time seed ran, so a default a user deletes never returns:
         //  * envDefaultsVersion — the highest kEnvDefaultsVersion already seeded into `env`. 0 == none yet
         //    (a new install OR a pre-feature settings.json), so the seed runs once and bumps it. See
-        //    ApplyEnvDefaults / SeedSessionEnvDefaults. v1 seeds CLAUDE_CODE_MAX_RETRIES=50000.
+        //    ApplyEnvDefaults / SeedSessionEnvDefaults. v1 seeds CLAUDE_CODE_MAX_RETRIES=50000; v2
+        //    CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 (an added folder's CLAUDE.md is read).
         //  * claudeCleanupDaysSeeded — whether we've already written the default cleanupPeriodDays=36500
         //    into the user's GLOBAL ~/.claude/settings.json (so Claude never purges global history). Only
         //    seeded when the user hasn't set it themselves; never re-seeded after they change/remove it.

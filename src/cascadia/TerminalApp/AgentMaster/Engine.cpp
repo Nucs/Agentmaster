@@ -260,9 +260,10 @@ namespace Agentmaster
             }
 
             // Agentmaster (ENV_VARS.md §8): one-time shipped defaults, for NEW installs AND updaters
-            // alike. CLAUDE_CODE_MAX_RETRIES=50000 is appended to the global env, and cleanupPeriodDays=
+            // alike. CLAUDE_CODE_MAX_RETRIES=50000 and CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 are
+            // appended to the global env (each once, by its version: ApplyEnvDefaults), and cleanupPeriodDays=
             // 36500 is written into the user's ~/.claude/settings.json (so Claude never purges global
-            // history). Both are marker-gated, so a user who edits or deletes either keeps it gone.
+            // history). All are marker-gated, so a user who edits or deletes one keeps it gone.
             // Process-once, before any window seeds the cog or a session spawns.
             {
                 Startup::ScopedPhase _t{ L"  seed session/claude defaults" };
