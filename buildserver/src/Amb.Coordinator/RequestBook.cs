@@ -303,7 +303,8 @@ public sealed class RequestBook
     /// <summary>Checks a deploy request's inputs and fills its defaults.</summary>
     /// <param name="inputs">The inputs as asked.</param>
     /// <returns>The inputs with the instance in its canonical spelling ("dev" / "production"), the wait for other sessions
-    /// set (default 0, the owner's "cut off at once"), and a dry run spelled out.</returns>
+    /// set (default 0, the owner's "cut off at once"), and a dry run and a reinstall spelled out (default false: a build
+    /// the instance already runs is then left alone by the Windows side).</returns>
     /// <exception cref="RequestRejectedException">The build id is missing or unsafe, the instance unknown, a number out
     /// of range, or the injected failure unknown.</exception>
     /// <remarks>No default instance: an install stops the instance it targets and ends every claude it hosts, so the
@@ -334,7 +335,12 @@ public sealed class RequestBook
         {
             throw new RequestRejectedException($"inputs.injectFailure must be after-stop, not {inputs.InjectFailure}");
         }
-        return inputs with { Instance = instance, WaitOthersMinutes = waitOthers, DryRun = inputs.DryRun ?? false, InjectFailure = inject };
+        // Reinstall is spelled out like DryRun, so the record says which way the install was asked to go.
+        return inputs with
+        {
+            Instance = instance, WaitOthersMinutes = waitOthers, DryRun = inputs.DryRun ?? false, Reinstall = inputs.Reinstall ?? false,
+            InjectFailure = inject,
+        };
     }
 
     /// <summary>Reads a request's record.</summary>

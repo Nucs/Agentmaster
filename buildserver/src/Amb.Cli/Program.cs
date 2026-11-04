@@ -21,7 +21,7 @@ using Amb.Core.Protocol;
 //   amb build --snapshot [--config ...] [-- <paths>]     (uncommitted work: the whole working tree, or only <paths>)
 //   amb artifacts <build id>
 //   amb fetch <build id> [--kind portable-zip|layout-zip|symbols-zip|build-log|build-binlog|build-json|all] [--to DIR]
-//   amb install <build id> --instance dev|production [--dry-run] [--wait-others MIN] [--wait] [--wait-max S]
+//   amb install <build id> --instance dev|production [--dry-run] [--reinstall] [--wait-others MIN] [--wait] [--wait-max S]
 //   import, smoke, e2e, build and install also take --run-timeout MIN and --wait-timeout MIN (1-1440; else the kind's
 //   defaults, e.g. e2e 120 / 120, build 180 / 60: the whole e2e suite needs a longer run timeout).
 //   build resolves <rev> (default HEAD) in K:\source\Agentmaster (AMB_REPO overrides) and sends that commit: a build id
@@ -32,6 +32,9 @@ using Amb.Core.Protocol;
 //   install (alias deploy) moves an instance onto a build through the swap script (Jobs/DeployJob.cs): it stops the
 //   instance and ends every claude it hosts. Run from a session INSIDE that instance it waits for this session's turn to
 //   end; --wait then returns as soon as the install starts that wait (end the turn; `amb logs <id> -f` from elsewhere).
+//   The session is the nearest claude.exe ancestor, else the claude.exe its CLAUDE_PID names (a script run with
+//   `bash script.sh` breaks the process chain: ProcessAncestry.cs). A build the instance already runs is not installed
+//   again (nothing is stopped; the request succeeds) unless --reinstall says so.
 //   --json on any command prints the coordinator's JSON instead of the text form; AMB_URL overrides the address.
 //
 // Exit codes: 0 succeeded (or accepted, without --wait); 1 the request ended otherwise; 2 usage; 97 still running when
@@ -122,7 +125,7 @@ internal sealed class Options
 
     /// <summary>The flags amb knows (options without a value). Any other "-x" is refused, and so is a value option given
     /// without its value (it lands among the flags).</summary>
-    private static readonly HashSet<string> KnownFlags = ["--wait", "-f", "--json", "--snapshot", "--dry-run", "--help", "-h"];
+    private static readonly HashSet<string> KnownFlags = ["--wait", "-f", "--json", "--snapshot", "--dry-run", "--reinstall", "--help", "-h"];
 
     /// <summary>What `amb --help` prints: every command and option (the header of Program.cs says more).</summary>
     public const string UsageText = """
@@ -134,7 +137,7 @@ internal sealed class Options
           amb build --snapshot [--config ...] [--identity ...] [--purge ...] [--wait] [-- <paths>]
           amb artifacts <build id>
           amb fetch <build id> [--kind portable-zip|layout-zip|symbols-zip|build-log|build-binlog|build-json|all] [--to DIR]
-          amb install <build id> --instance dev|production [--dry-run] [--wait-others MIN] [--wait]   (alias: deploy)
+          amb install <build id> --instance dev|production [--dry-run] [--reinstall] [--wait-others MIN] [--wait]   (alias: deploy)
           amb import <portable zip> [--commit SHA] [--wait]
           amb e2e <build id> [--image am-e2e] [--suite PATH] [--ram GB] [--guest-ram GB] [--vcpus N] [--wait] [-- pytest arguments]
           amb smoke [--image am-base] [--ram GB] [--guest-ram GB] [--vcpus N] [--wait]
@@ -145,7 +148,8 @@ internal sealed class Options
           (tuned: 1.15x the time of 8 GB uncapped); --ram 8 asks for the old uncapped 8 GB VM.
           Requests also take --run-timeout MIN and --wait-timeout MIN (1-1440); --wait-max S stops watching after S
           seconds (exit 97); --json prints the coordinator's JSON. build and install are a build and a deploy: ask the
-          owner first. An unknown option is refused: nothing is sent.
+          owner first. install leaves an instance that already runs the build alone (nothing is stopped) unless
+          --reinstall. An unknown option is refused: nothing is sent.
         """;
 
     /// <summary>Whether --help or -h was given: the usage is printed and nothing else happens.</summary>
@@ -476,8 +480,11 @@ internal static class Commands
                     return 2;
                 }
                 // The claude.exe this CLI runs under (a Claude session's tool call): when it is one of the instance's
-                // sessions, the install waits for its turn to end, because the swap ends its claude.
-                int? requestedBy = ProcessAncestry.NearestAncestor("claude.exe");
+                // sessions, the install waits for its turn to end, because the swap ends its claude. The process chain
+                // first, then the session's CLAUDE_PID: a script run with `bash script.sh` breaks the chain, and an
+                // install that missed its requester cut that session's turn off (2026-11-04, ProcessAncestry.cs).
+                (int Pid, bool FromEnvironment)? requester = ProcessAncestry.RequestingClaude();
+                int? requestedBy = requester?.Pid;
                 body = new CreateRequest(RequestKind.Deploy, new RequestInputs
                 {
                     BuildId = options.Positional[0],
@@ -485,11 +492,16 @@ internal static class Commands
                     RequestedByPid = requestedBy,
                     WaitOthersMinutes = waitOthers,
                     DryRun = options.Flags.Contains("--dry-run") ? true : null,
+                    Reinstall = options.Flags.Contains("--reinstall") ? true : null,
                     InjectFailure = options.Values.GetValueOrDefault("--inject-failure"),
                 });
                 if (requestedBy is { } claudePid)
                 {
-                    Console.WriteLine($"requested from the Claude session of claude.exe pid {claudePid}");
+                    // How it was found goes to the output: a requester named by the variable alone is the case the walk
+                    // missed, worth seeing when an install waits (or does not) for a session.
+                    Console.WriteLine(requester is { FromEnvironment: true }
+                        ? $"requested from the Claude session of claude.exe pid {claudePid} (its {ProcessAncestry.ClaudePidVariable}: the process chain to it is broken, as under `bash script.sh`)"
+                        : $"requested from the Claude session of claude.exe pid {claudePid}");
                     // A --wait from inside the instance would hold this very turn open while the install waits for it to
                     // end: the watch stops where the install starts that wait.
                     stopAt = e => e.Message.Contains($"claude pid {claudePid}) to end its turn", StringComparison.Ordinal)

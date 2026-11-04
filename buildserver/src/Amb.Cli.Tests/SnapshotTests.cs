@@ -148,6 +148,8 @@ public sealed class SnapshotTests : IDisposable
         Assert.Equal(["--instance"], global::Options.Parse(["install", "b1", "--instance"]).UnknownOptions);
         global::Options good = global::Options.Parse(["install", "b1", "--instance", "dev", "--dry-run", "--wait"]);
         Assert.Empty(good.UnknownOptions);
+        // --reinstall is a flag of install's (the same build installed again on purpose), never a typo to refuse.
+        Assert.Empty(global::Options.Parse(["install", "b1", "--instance", "production", "--reinstall"]).UnknownOptions);
         Assert.False(good.Help);
         Assert.Equal("dev", good.Values["--instance"]);
         // What follows "--" belongs to pytest or names snapshot paths: never options of amb's.

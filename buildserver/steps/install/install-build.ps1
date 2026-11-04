@@ -10,6 +10,9 @@
       1. The registration: the instance must be a LOOSE registration (an installed MSIX needs the swap's
          -ReplaceInstalledPackage and a rollback bundle: a person's decision, CLAUDE.md "Hot deploy") running from one
          folder of its pair; the build goes into the OTHER one.
+     1b. The same build: when the running TerminalApp.dll is the build's, byte for byte, the instance already runs this
+         build. Nothing is staged or stopped and the run succeeds (unless -Reinstall): a swap onto it would only
+         restart the instance and cut off every running turn.
       2. That folder must not run anything; the zip's SHA-256 must be the store's.
       3. Stage: an older build in that folder is moved aside (<slot>.amb-prev-<stamp>), the zip extracted into a fresh
          folder (.NET's ZipFile, which refuses an entry that would land outside it).
@@ -80,6 +83,10 @@
 .PARAMETER DryRun
     Stage, check and run the swap's -WhatIf, then put the slot back.
 
+.PARAMETER Reinstall
+    Install even when the instance already runs this very build (step 1b): to repair a damaged layout or registration.
+    Without it such a run changes nothing and succeeds.
+
 .PARAMETER InjectFailureAfterStop
     A test: pass -InjectFailureAfterStop to the swap, which must then roll back.
 
@@ -95,7 +102,8 @@
     rollback, the cut-off turns, the watch's findings, a message).
 
 .NOTES
-    PowerShell 7 (the swap script requires it). Exit codes: 0 installed (or the dry run passed); 1 refused or failed
+    PowerShell 7 (the swap script requires it). Exit codes: 0 installed (or the dry run passed, or the instance already
+    runs this build: nothing done, the result's alreadyInstalled is true); 1 refused or failed
     before anything was stopped (the instance and its slots unchanged); 2 the swap failed after the stop and the old
     version came back; 3 the swap failed and its rollback did not finish, or the new instance is not running: look at
     the instance now; 4 cancelled before the swap.
@@ -117,6 +125,7 @@ param(
     [ValidateRange(1, 240)][int]$OwnWaitMinutes = 45,
     [ValidateRange(0, 600)][int]$WatchSeconds = 60,
     [switch]$DryRun,
+    [switch]$Reinstall,
     [switch]$InjectFailureAfterStop,
     [Parameter(Mandatory)][string]$Result,
     [Parameter(Mandatory)][string]$CancelFile
@@ -134,6 +143,7 @@ $facts = [ordered]@{
     fromVersion = $null; fromLocation = $null; toVersion = $null; toLocation = $null
     downtimeSeconds = $null; newPid = $null; rolledBack = $false; cutOff = @(); asking = @()
     waitedSeconds = 0; alive = $null; reopenDialog = $false; trouble = @(); swapScript = $SwapScript; message = ''
+    alreadyInstalled = $false
 }
 $exitCode = 1
 $token = $null
@@ -233,6 +243,58 @@ function Restore-Slot {
     }
     catch { Say "COULD NOT PUT $($script:slot) BACK ($($_.Exception.Message)); its earlier contents are in $($script:aside)" }
     $script:extracted = $false
+}
+
+<#
+.SYNOPSIS
+    Whether the instance already runs this very build: its running TerminalApp.dll is the build's, byte for byte.
+.DESCRIPTION
+    Every build links TerminalApp.dll anew and bakes its commit into it, so two builds never share it, while the same
+    build always does (it comes from the same zip). The bytes are compared, never the baked commit: a local build of a
+    dirty tree bakes HEAD's commit too, and such a layout must still be replaced. A different length settles it without
+    reading either file. Never throws: anything that cannot be read counts as "not the same build", and the install goes
+    on through its own checks (a damaged zip is refused by step 2's SHA-256).
+.PARAMETER Running
+    The layout folder the instance runs from.
+.PARAMETER Zip
+    The build's layout zip (the layout at its root).
+.OUTPUTS
+    [bool] $true only when both files were read and are identical.
+#>
+function Test-RunsThisBuild([string]$Running, [string]$Zip) {
+    $live = Join-Path $Running 'TerminalApp.dll'
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $archive = [IO.Compression.ZipFile]::OpenRead($Zip)
+        try {
+            # By the name the extraction gives it, never GetEntry's exact one: the build VM's archiver writes every entry
+            # as "./<path>" (seen in b20261104-1's layout zip), and an archive may use '\' and another case.
+            $entry = $archive.Entries | Where-Object { (($_.FullName -replace '\\', '/') -replace '^(\./)+', '') -ieq 'TerminalApp.dll' } |
+                Select-Object -First 1
+            if (-not $entry) {
+                Say "the build's zip holds no TerminalApp.dll at its root: not compared with the running layout"
+                return $false
+            }
+            $liveFile = Get-Item -LiteralPath $live -ErrorAction Stop
+            if ($entry.Length -ne $liveFile.Length) { return $false }
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try {
+                $buildStream = $entry.Open()
+                try { $buildHash = [Convert]::ToHexString($sha.ComputeHash($buildStream)) } finally { $buildStream.Dispose() }
+                # The running app maps this DLL as an image: read it while sharing everything, so the loader's hold and
+                # the app itself are never disturbed.
+                $liveStream = [IO.File]::Open($live, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+                try { $liveHash = [Convert]::ToHexString($sha.ComputeHash($liveStream)) } finally { $liveStream.Dispose() }
+            }
+            finally { $sha.Dispose() }
+            return $buildHash -eq $liveHash
+        }
+        finally { $archive.Dispose() }
+    }
+    catch {
+        Say "could not compare the running TerminalApp.dll with the build's ($($_.Exception.Message)): installing"
+        return $false
+    }
 }
 
 <#
@@ -383,6 +445,23 @@ try {
     if ($pair.Count -ne 2) { Stop-Run 1 "expected two layout folders, not '$Slots'. Nothing changed." }
     if (-not ($pair | Where-Object { $_ -ieq $running })) {
         Stop-Run 1 "$Package runs from $running, which is not one of its folders ($($pair -join ', ')): install by hand. Nothing changed."
+    }
+
+    # 1b. The instance may run this very build already: a swap onto it would only restart the instance, ending every
+    #     claude it hosts and cutting off their running turns, for nothing. 2026-11-04: a session inside production
+    #     re-ran its install after every restart (the swap had cut its own turn off, and Claude Code continued the turn),
+    #     and production restarted 6 times in 9 hours on one build. Before the stage, so nothing on disk moves either.
+    if (Test-RunsThisBuild -Running $running -Zip $Zip) {
+        if (-not $Reinstall) {
+            $facts.phase = 'already'
+            $facts.alreadyInstalled = $true
+            $facts.ok = $true
+            $exitCode = 0
+            $facts.message = "$(if ($DryRun) { 'dry run: ' })$Package already runs $BuildId ($short): its TerminalApp.dll is the build's, byte for byte ($($reg.Version) @ $running). Nothing was stopped; amb install --reinstall installs it again."
+            Say $facts.message
+            return
+        }
+        Say "$Package already runs this build: installing it again (-Reinstall)"
     }
     $target = $pair | Where-Object { $_ -ine $running } | Select-Object -First 1
     $facts.slot = $target

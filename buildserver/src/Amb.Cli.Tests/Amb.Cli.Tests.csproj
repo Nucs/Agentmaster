@@ -1,8 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!--
     Unit tests of amb's own parts: the snapshot of uncommitted work (WorkingTreeSnapshot: its git plumbing against a
-    throwaway repository in %TEMP%, never the user's), and the process-ancestry walk. Windows only, like amb itself:
-    net10.0-windows and win-x64 to match the referenced executable.
+    throwaway repository in %TEMP%, never the user's), the process-ancestry walk, and the requester named by Claude
+    Code's CLAUDE_PID when that walk is broken (ProcessAncestryTests). Windows only, like amb itself: net10.0-windows
+    and win-x64 to match the referenced executable.
   -->
   <PropertyGroup>
     <TargetFramework>net10.0-windows</TargetFramework>

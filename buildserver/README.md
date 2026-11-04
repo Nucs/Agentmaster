@@ -29,7 +29,7 @@ amb build [<rev>] [--config Release|Debug] [--identity dev|release] [--purge non
 amb build --snapshot [--config ...] [-- <paths>]    # build uncommitted work: a snapshot commit of HEAD + the work
 amb artifacts <build id>                     # a build's files: portable zip, layout zip, symbols zip, logs, binlog, build.json
 amb fetch <build id> [--kind KIND|all] [--to DIR]   # copy them to Q:\buildserver\out\<build id> (never K:), SHA-checked
-amb install <build id> --instance dev|production [--dry-run] [--wait-others MIN] [--wait]
+amb install <build id> --instance dev|production [--dry-run] [--reinstall] [--wait-others MIN] [--wait]
                                              # install a build on this PC's dev or production instance (alias: deploy)
 amb status                                   # the coordinator, Windows' numbers, homepc's free share, active requests
 amb import <portable zip> [--commit SHA]     # a hand-built zip or a GitHub release's zip becomes a build id (b<date>-<n>)
@@ -136,12 +136,16 @@ amb list | show <id> | cancel <id>
   swapped. The stage goes when the request ends; `install.log` and `install.json` stay in `store/requests/<id>/`.
 - **What it does:** (1) the instance must be a loose registration running from one folder of its pair (`AMB_DEV_SLOTS`,
   `AMB_PRODUCTION_SLOTS`: `Debug` / `Debug-B` and `Release` / `Release-B` under `Q:\agentmaster-layouts`); an installed
-  MSIX is refused (its swap needs `-ReplaceInstalledPackage` and a rollback bundle: by hand). (2) The other folder must
-  run nothing; an older build there moves aside (`<folder>.amb-prev-<time>`) and the zip is extracted. (3) The checks:
-  the manifest names the instance's package at 0.0.1.0, the key binaries exist, `TerminalApp.dll` bakes the build's
-  commit, and no DLL or EXE of the running layout is missing. (4) A session of the instance that asked (the CLI sends
-  its nearest `claude.exe` ancestor) must not be Running for 15 s, up to 45 min; the other sessions' running turns are
-  cut off (the owner's choice of 2026-10-20) and named, unless `--wait-others MIN`. (5) The build-launch mutex, and the
+  MSIX is refused (its swap needs `-ReplaceInstalledPackage` and a rollback bundle: by hand). (1b) An instance that
+  already runs this build (its running `TerminalApp.dll` is the zip's, byte for byte) is left alone: nothing is staged
+  or stopped, and the request succeeds with `… already runs <build id> …` (`--reinstall` installs it anyway). (2) The
+  other folder must run nothing; an older build there moves aside (`<folder>.amb-prev-<time>`) and the zip is
+  extracted. (3) The checks: the manifest names the instance's package at 0.0.1.0, the key binaries exist,
+  `TerminalApp.dll` bakes the build's commit, and no DLL or EXE of the running layout is missing. (4) A session of the
+  instance that asked must not be Running for 15 s, up to 45 min. The CLI names it: its nearest `claude.exe` ancestor,
+  else the `claude.exe` its `CLAUDE_PID` names (Claude Code sets it in every tool call; `bash script.sh` breaks the
+  process chain, `ProcessAncestry.cs`), and prints which. The other sessions' running turns are cut off (the owner's
+  choice of 2026-10-20) and named, unless `--wait-others MIN`. (5) The build-launch mutex, and the
   registration checked again under it. (6) The swap: stamp, stop the GUI only, drain, register, launch; a failure after
   the stop relaunches the old version. (7) A 60 s watch: the new GUI alive, a "Reopen your N windows?" dialog (it holds
   the restore until answered), the instance's new trouble lines in `hooks.log`. Any failure before the swap's success
@@ -149,9 +153,15 @@ amb list | show <id> | cancel <id>
 - **Refused before anything is staged:** a build without a layout zip (an import), a build of the other identity
   (production takes `amb build --identity release` builds), an instance other than dev / production (`release` means
   production).
-- **Outcomes:** `Succeeded: installed …`; `Failed: ROLLED BACK: …` (the swap failed after the stop, and the old version
-  runs again); `Failed: LOOK AT THE INSTANCE NOW: …` (the rollback did not finish, or the new instance died during the
-  watch); any other `Failed` stopped nothing.
+- **Outcomes:** `Succeeded: installed …`; `Succeeded: … already runs <build id> …` (nothing was stopped);
+  `Failed: ROLLED BACK: …` (the swap failed after the stop, and the old version runs again); `Failed: LOOK AT THE
+  INSTANCE NOW: …` (the rollback did not finish, or the new instance died during the watch); any other `Failed` stopped
+  nothing.
+- **Why the same build is a no-op:** a swap onto the build that already runs only restarts the instance and cuts off
+  every running turn. On 2026-11-04 a session inside production ran its install from a script, so the CLI found no
+  requester and the swap cut the session's own turn off; Claude Code continued that turn after the restart
+  (`CLAUDE_CODE_RESUME_INTERRUPTED_TURN`), the turn ran the script again, and production got build `b20261104-1` seven
+  times in 9 hours, six of them repeats that only restarted it. Either fix alone breaks that loop.
 - **`--dry-run`:** stage, check and the swap's own `-WhatIf`, then the folder is put back. **`--inject-failure
   after-stop`** (a test): the swap fails after the stop and the drain (`Swap-AgentmasterLayout.ps1
   -InjectFailureAfterStop`), so the real rollback runs.
@@ -252,7 +262,7 @@ python buildserver/site/sitectl.py run -- podman ps
 | [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API (artifacts streamed by name), the scheduler (admission by priority × availability, wait and run timeouts, cancel, one build at a time, existing builds answered without a slot), the guest broker, the jobs (import, smoke, install, layer, e2e, build, deploy), the source mirror (snapshots too) and its bundles, the slot manager and its drivers (podman + dockur, kept VMs with a data disk, capped slots with the site's swap file; local, for tests) | runs in the site; 51 unit tests (`src/Amb.Coordinator.Tests`) |
 | [`src/Amb.GuestAgent`](src/Amb.GuestAgent) | `amb-guest.exe` (Native AOT, 7 MB): the agent in every VM; hello, heartbeat with the guest's memory, one step at a time by long poll (run, fetch, expand, put, shutdown) | in every slot |
 | [`src/Amb.HostFacts`](src/Amb.HostFacts) | `amb-hostfacts.exe` (Native AOT): Windows' available memory, free commit, Q: free space and a full-screen game, as one line of JSON; the coordinator runs it every 10 s through WSL's interop | in use |
-| [`src/Amb.Cli`](src/Amb.Cli) | `amb.exe`: the command line above; `WorkingTreeSnapshot.cs` (`--snapshot`), `ProcessAncestry.cs` (the requesting claude.exe of `amb install`) | in use; 8 unit tests (`src/Amb.Cli.Tests`) |
+| [`src/Amb.Cli`](src/Amb.Cli) | `amb.exe`: the command line above; `WorkingTreeSnapshot.cs` (`--snapshot`), `ProcessAncestry.cs` (the requesting claude.exe of `amb install`: the process chain, else `CLAUDE_PID`) | in use; 11 unit tests (`src/Amb.Cli.Tests`) |
 | [`tests/local_chain.py`](tests/local_chain.py) | the whole chain on this PC without a VM: the coordinator with the local slot driver, the real guest agent, the real API | 15 checks pass |
 | [`tests/site_outcomes.py`](tests/site_outcomes.py) | Phase 1's done-when on the real site: e2e runs that pass, fail, are cancelled and lose their VM, each leaving nothing behind | 14 checks passed (2026-10-25) |
 | [`tests/site_build.py`](tests/site_build.py) | the build MVP's done-when on the real site: a build of HEAD, its manifest, an identical request, e2e on the build, fetch, no slot left, K: only read | 7 checks passed (2026-10-26, `b20261026-3`) |

@@ -628,13 +628,19 @@ swap's stop (the old version relaunched, the staged folder put back, the request
   (`refs/heads/agentmaster`, from the mirror), not a copy under `buildserver/steps/`: one swap script, with every rollback
   fix, and never a working tree's half-done edit.
 - **Whom it waits for:** the session that asked, when it is one of the instance's (found by the CLI's nearest
-  claude.exe ancestor), must be at rest for 15 s (its last message is written before the swap ends its claude); the other
-  sessions are not waited for unless asked (`--wait-others`), the owner's choice of 2026-10-20.
+  claude.exe ancestor, else by the claude.exe its `CLAUDE_PID` names: a script run with `bash script.sh` breaks the
+  Windows process chain), must be at rest for 15 s (its last message is written before the swap ends its claude); the
+  other sessions are not waited for unless asked (`--wait-others`), the owner's choice of 2026-10-20.
 - **Its checks** are the hand installs': the instance a loose registration on one folder of its pair, the other folder
   idle, the zip's SHA-256, the manifest's package and version, the key binaries, the commit baked in TerminalApp.dll, no
   binary of the running layout missing; then the build-launch mutex and the registration checked again under it, and a
   60 s watch of the new instance. A failure before the swap puts the folder back; a folder the instance runs from is
   never removed.
+- **The same build is left alone** (2026-11-04): an instance whose running TerminalApp.dll is the build's, byte for
+  byte, is not swapped (nothing staged or stopped; the request succeeds) unless `--reinstall`. The day it was added, a
+  session inside production ran its install from a script: the CLI missed the requester, the swap cut that session's
+  turn off, Claude Code continued the turn after the restart and it ran the script again, six repeats of one build in
+  9 hours ([`README.md`](README.md) "Installs").
 - **Not built:** an installed MSIX as the starting point (refused: `-ReplaceInstalledPackage` and its rollback bundle
   stay a person's step), the install lane and `am-install` (P4's other half), a weekly full run.
 

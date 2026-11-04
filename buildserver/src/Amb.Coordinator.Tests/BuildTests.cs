@@ -65,6 +65,9 @@ public sealed class BuildTests : IDisposable
     {
         RequestInputs dev = RequestBook.NormalizeDeploy(new RequestInputs { BuildId = "b20261028-3", Instance = "Dev" });
         Assert.Equal(("dev", 0, false, null), (dev.Instance, dev.WaitOthersMinutes, dev.DryRun, dev.InjectFailure));
+        // A reinstall is spelled out too: off unless asked, so the same build is left alone by default.
+        Assert.False(dev.Reinstall);
+        Assert.True(RequestBook.NormalizeDeploy(new RequestInputs { BuildId = "b1", Instance = "production", Reinstall = true }).Reinstall);
         Assert.Equal("production", RequestBook.NormalizeDeploy(new RequestInputs { BuildId = "b1", Instance = "release" }).Instance);
         Assert.Equal("after-stop", RequestBook.NormalizeDeploy(new RequestInputs
         {
@@ -127,11 +130,18 @@ public sealed class BuildTests : IDisposable
         Assert.Equal(Commit, args[args.ToList().IndexOf("-Commit") + 1]);
         Assert.DoesNotContain("-DryRun", args);
         Assert.DoesNotContain("-InjectFailureAfterStop", args);
+        Assert.DoesNotContain("-Reinstall", args);
         IReadOnlyList<string> test = DeployJob.ScriptArguments(new RequestInputs { Instance = "dev", DryRun = true, InjectFailure = "after-stop" },
             dev, build, layout, @"Q:\buildserver\install\r2", "r2");
         Assert.Contains("-DryRun", test);
         Assert.Contains("-InjectFailureAfterStop", test);
         Assert.Equal("0", test[test.ToList().IndexOf("-RequestedByPid") + 1]);
+        Assert.DoesNotContain("-Reinstall", test);
+        // The reinstall reaches the Windows side only when the request asks for it (a normalized "false" stays out).
+        Assert.Contains("-Reinstall", DeployJob.ScriptArguments(new RequestInputs { Instance = "dev", Reinstall = true }, dev, build, layout,
+            @"Q:\buildserver\install\r3", "r3"));
+        Assert.DoesNotContain("-Reinstall", DeployJob.ScriptArguments(new RequestInputs { Instance = "dev", Reinstall = false }, dev, build,
+            layout, @"Q:\buildserver\install\r4", "r4"));
     }
 
     /// <summary>The outcome comes from the script's result; a rollback and a "look now" say so first.</summary>

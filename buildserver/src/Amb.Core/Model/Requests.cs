@@ -199,6 +199,13 @@ public sealed record RequestInputs
     /// is stopped or registered.</summary>
     public bool? DryRun { get; init; }
 
+    /// <summary>Deploy: install even when the instance already runs this very build (its running TerminalApp.dll is
+    /// byte-identical to the build's). Without it such an install changes nothing and succeeds: a swap onto the same
+    /// build would only restart the instance, ending every claude it hosts and cutting off their running turns
+    /// (2026-11-04: a session re-ran its install after every restart, and production restarted 6 times on one build).
+    /// Use it to repair a damaged layout or registration.</summary>
+    public bool? Reinstall { get; init; }
+
     /// <summary>Deploy, for tests only: "after-stop" makes the swap fail after it stopped the instance (the swap
     /// script's -InjectFailureAfterStop), to prove that the old version comes back (DESIGN.md §13 P4's done-when).</summary>
     public string? InjectFailure { get; init; }

@@ -21,6 +21,10 @@ namespace Amb.Coordinator.Jobs;
 /// interop and streams its lines as the request's progress. The script does the rest (stage into the free slot, check,
 /// wait for the requesting session, the build-launch mutex, the swap, the watch) and ends with an "INSTALL {json}" line
 /// and a result file.</para>
+/// <para><b>The same build twice is a no-op:</b> when the instance's running TerminalApp.dll is byte-identical to the
+/// build's, the script stops before staging anything and reports success with nothing stopped, unless the request asks
+/// for a <see cref="RequestInputs.Reinstall"/>. A swap onto the build that already runs only restarts the instance and
+/// cuts off every running turn; on 2026-11-04 a session that re-ran its install after each restart did that 6 times.</para>
 /// <para><b>Outside every instance:</b> a Windows program started through the distro's interop descends from
 /// wslhost.exe and wslservice.exe (measured 2026-10-29), never from an Agentmaster GUI, so the swap's self-hosting guard
 /// passes and the stop cannot kill the swap, even when the session that asked lives in the instance being swapped. It
@@ -163,7 +167,8 @@ public sealed class DeployJob : IJob
         return null;
     }
 
-    /// <summary>The Windows-side script's arguments (after pwsh's own).</summary>
+    /// <summary>The Windows-side script's arguments (after pwsh's own): -DryRun, -Reinstall and the injected failure only
+    /// when the request asks for them.</summary>
     /// <param name="inputs">The request's inputs.</param>
     /// <param name="target">The instance.</param>
     /// <param name="build">The build.</param>
@@ -190,6 +195,11 @@ public sealed class DeployJob : IJob
         if (inputs.DryRun == true)
         {
             args.Add("-DryRun");
+        }
+        if (inputs.Reinstall == true)
+        {
+            // Only when asked: without it the Windows side leaves an instance that already runs this build alone.
+            args.Add("-Reinstall");
         }
         if (inputs.InjectFailure == "after-stop")
         {

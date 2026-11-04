@@ -11,9 +11,23 @@ namespace Amb.Cli;
 /// <para>A parent process id outlives its process: Windows reuses ids, so a listed "parent" may be a newer, unrelated
 /// process (seen on this PC: an explorer.exe whose recorded parent id belonged to a later OpenConsole.exe). The walk
 /// therefore stops at a parent that started AFTER its child.</para>
+/// <para><b>The walk alone misses a session that ran amb from a script</b> (<see cref="RequestingClaude"/> adds the
+/// fallback): when an MSYS program (Git Bash) runs another one (`bash script.sh`), the Windows process that bash forked
+/// for it exits as soon as the new program starts, so the new bash's recorded parent is gone and the chain ends before
+/// claude.exe. Measured 2026-11-04: every production install from 2026-11-03 21:34 on came from such a script and
+/// carried no requester, so none waited for its session's turn; one session's swap cut its own turn off, Claude Code
+/// continued the turn after the restart, and the turn re-ran its install: production restarted 6 times in 9 hours.</para>
 /// </remarks>
 internal static partial class ProcessAncestry
 {
+    /// <summary>The variable Claude Code puts in the environment of every tool call it runs: its own process id
+    /// (<c>CLAUDE_PID: String(process.pid)</c> in claude.exe's bundle, read 2026-11-04). Every descendant inherits it,
+    /// however broken the Windows parent chain between them is.</summary>
+    internal const string ClaudePidVariable = "CLAUDE_PID";
+
+    /// <summary>The executable name of a Claude Code session's process.</summary>
+    internal const string ClaudeExe = "claude.exe";
+
     /// <summary>Toolhelp32's flag for a snapshot of every process.</summary>
     private const uint SnapProcess = 0x00000002;
 
@@ -115,6 +129,77 @@ internal static partial class ProcessAncestry
         return null;
     }
 
+    /// <summary>The Claude session this CLI runs under: the nearest claude.exe ancestor, else the claude.exe that this
+    /// process's <see cref="ClaudePidVariable"/> names.</summary>
+    /// <returns>The claude.exe's process id and whether it came from the environment (the walk found none), or null
+    /// when neither names a living claude.exe (amb run by hand, by a scheduled task, by a Codex session).</returns>
+    /// <remarks>
+    /// <para>The walk comes first: it is proof by the process tree itself. The variable covers the chain a script
+    /// breaks (see the class remarks).</para>
+    /// <para>⚠ The variable can be stale: a long-lived program started from a session's tool call keeps it after that
+    /// claude ended, and the id may since belong to another claude.exe that started earlier than this CLI. The install
+    /// then waits for that session's turn too (at most its own-wait limit, then it refuses and changes nothing): an
+    /// extra wait, never a swap that cuts a requester off.</para>
+    /// </remarks>
+    internal static (int Pid, bool FromEnvironment)? RequestingClaude()
+    {
+        if (NearestAncestor(ClaudeExe) is int ancestor)
+        {
+            return (ancestor, false);
+        }
+        Dictionary<int, (int Parent, string Name)> table = Snapshot();
+        int? named = ClaudeFromVariable(Environment.GetEnvironmentVariable(ClaudePidVariable), ClaudeExe, id => LookUp(table, id),
+            StartTime(Environment.ProcessId) ?? DateTime.MaxValue);
+        return named is int pid ? (pid, true) : null;
+    }
+
+    /// <summary>A living process's executable name (from a <see cref="Snapshot"/>) and start time.</summary>
+    /// <param name="table">The process list.</param>
+    /// <param name="processId">The process.</param>
+    /// <returns>Its name and start time, or null when the list lacks it or its start time may not be read (it ended
+    /// since the snapshot, or belongs to another user): such a process cannot be vouched for as the requester.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="table"/> is null.</exception>
+    internal static (string Name, DateTime Start)? LookUp(IReadOnlyDictionary<int, (int Parent, string Name)> table, int processId)
+    {
+        ArgumentNullException.ThrowIfNull(table);
+        return table.TryGetValue(processId, out var entry) && StartTime(processId) is { } start ? (entry.Name, start) : null;
+    }
+
+    /// <summary>The process a <see cref="ClaudePidVariable"/> value names, when it can be the session that started this
+    /// process: alive, running <paramref name="exeName"/>, and started no later than this process.</summary>
+    /// <param name="value">The variable's value (null when it is not set).</param>
+    /// <param name="exeName">The executable the process must run (claude.exe), compared without case.</param>
+    /// <param name="lookUp">A living process's executable name and start time by id; null when it is gone or its start
+    /// time may not be read.</param>
+    /// <param name="selfStart">When this process started (<see cref="DateTime.MaxValue"/> when unknown: every living
+    /// process then passes the age test, as in <see cref="NearestAncestor"/>).</param>
+    /// <returns>The process id, or null when the value is missing, not a positive number, or names a process that
+    /// cannot be the requester.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="lookUp"/> is null.</exception>
+    /// <remarks>Pure apart from <paramref name="lookUp"/>, so every refusal is unit-tested. The age test is the
+    /// reused-id guard of <see cref="NearestAncestor"/>: a session's tool call starts after its claude, so a claude.exe
+    /// that started after this process holds a reused id and is a stranger.</remarks>
+    internal static int? ClaudeFromVariable(string? value, string exeName, Func<int, (string Name, DateTime Start)?> lookUp,
+        DateTime selfStart)
+    {
+        ArgumentNullException.ThrowIfNull(lookUp);
+        // Invariant parsing: the variable is machine text (String(process.pid)); a sign, a fraction or garbage is refused.
+        if (!int.TryParse(value?.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture,
+                out int pid) || pid <= 0)
+        {
+            return null;
+        }
+        if (lookUp(pid) is not { } process)
+        {
+            return null;
+        }
+        if (!string.Equals(process.Name, exeName, StringComparison.OrdinalIgnoreCase) || process.Start > selfStart)
+        {
+            return null;
+        }
+        return pid;
+    }
+
     /// <summary>When a process started.</summary>
     /// <param name="processId">The process.</param>
     /// <returns>Its start time, or null when it is gone or may not be read (another user's, an elevated one).</returns>
@@ -133,9 +218,9 @@ internal static partial class ProcessAncestry
         }
     }
 
-    /// <summary>Every process's parent id and executable name.</summary>
+    /// <summary>Every process's parent id and executable name (internal for the tests of <see cref="LookUp"/>).</summary>
     /// <returns>The table, keyed by process id; empty when the snapshot cannot be taken.</returns>
-    private static unsafe Dictionary<int, (int Parent, string Name)> Snapshot()
+    internal static unsafe Dictionary<int, (int Parent, string Name)> Snapshot()
     {
         var table = new Dictionary<int, (int Parent, string Name)>();
         nint snapshot = CreateToolhelp32Snapshot(SnapProcess, 0);
