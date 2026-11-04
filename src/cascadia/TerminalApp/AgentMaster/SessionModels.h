@@ -18,6 +18,7 @@
 #include "ClaudeInvisibleChars.h" // DELIVERY.md §15: SanitizeForClaudeInput (the paste) + NormalizePromptTextForCompare (every prompt compare) — declarations only; ICU stays in the .cpp
 #include "PendingInput.h" // InputBoxState (the R5 tri-state box read) + the ws/normalize detail helpers
 #include "PendingPaste.h" // FindPasteMarkers + segment helpers (the R4 collapse-tolerant fill verify)
+#include "ReopenWindowsAtStart.h" // AppSettings::reopenWindowsAtStart (PERSISTENCE.md §18) — pure, std only; shared with the exe's startup question
 
 namespace Agentmaster
 {
@@ -2741,6 +2742,18 @@ namespace Agentmaster
         // human notices. OFF => the watchdog still detects/logs/rescues, but never restarts.
         // No cog UI (deliberately — a corrective backstop, not a preference); set in settings.json.
         bool uiStallAutoRestart{ true };
+        // Agentmaster (PERSISTENCE.md §18 — several windows at start): what a start does when MORE THAN ONE window was open
+        // at the last exit. Ask (the default, and every settings.json from before the setting) shows "Reopen your N
+        // previous Agentmaster windows?"; ReopenAll reopens them without asking; OneWindow starts with a single window (as
+        // the question's No does) and leaves the rest behind the Manager's "Reopen Windows (N)". A lone window always
+        // reopens, whatever this says.
+        // WRITTEN BY TWO PLACES: the cog (Behavior -> STARTUP) and the startup question's "Remember my choice" check box —
+        // the latter by the app exe's own settings.json read-modify-write (ReopenWindowsPrompt.h), BEFORE this process
+        // creates its engine, so the engine's first load already holds it and the cog owns it from then on (no preserve-
+        // from-disk on Save is needed: nothing writes it while the app runs). READ ONLY at start, by the exe, from disk:
+        // a change applies at the next start. Stored as a word (ReopenWindowsAtStartToken: "ask" / "reopen" /
+        // "oneWindow"); an unknown word reads Ask.
+        ReopenWindowsAtStart reopenWindowsAtStart{ ReopenWindowsAtStart::Ask };
         // Agentmaster (RENDERING.md — "Software rendering"): draw EVERY terminal on the CPU (Direct3D's
         // WARP rasterizer) instead of the GPU, in every window, live (no restart). OFF (the default)
         // keeps the GPU.

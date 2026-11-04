@@ -322,6 +322,48 @@ SHELL, the last Claude tab (E1, by design).
 
 ---
 
+### TAB-11 · Several windows at start: the question remembers, and the Behavior setting answers it
+
+> **Since** NOT BUILT (2026-11-04) · **P1** · **Needs** F-W2, F-RS · **Spec** PERSISTENCE.md §18; `ReopenWindowsPrompt.h`
+
+**Promise.** With several windows open at the quit, the next start asks "Reopen your N previous Agentmaster windows?"
+until the user ticks **Remember my choice** in it, or picks an answer in ⚙ Settings → Behavior → STARTUP; from then on the
+start answers by itself, as remembered. A lone window always comes back without a question.
+
+**Phases**
+1. **The question.** *Do:* F-W2; quit (Close All Windows); start. *Expect:* before any window, a task dialog titled
+   "Agentmaster": "Reopen your 2 previous Agentmaster windows?", a line on what Yes and No do, Yes (the default) / No, the
+   UNTICKED box "Remember my choice and don't ask again", a footer naming Settings → Behavior → Startup; no Cancel, and
+   Esc does nothing. Answer Yes. *Check:* [UIA] the dialog (class `#32770`) and its texts; [LOG]
+   `[reopen] asked about 2 windows: Yes, reopened them`; both windows back.
+2. **Remember Yes.** *Do:* quit; start; tick the box; Yes. *Expect:* both windows back. *Check:* [FILE] `settings.json`
+   holds `settings.reopenWindowsAtStart` = `reopen`, every other setting as before, and still starts with `{"writer":`;
+   [LOG] `…; remember reopenWindowsAtStart=reopen: saved: …`.
+3. **No question.** *Do:* quit; start. *Expect:* both windows back and no dialog at all. *Check:* [LOG]
+   `[reopen] 2 windows reopened without asking (remembered: reopenWindowsAtStart=reopen; …)`; [UI] the cog's Behavior →
+   STARTUP reads "Reopen them all".
+4. **The cog's other answer.** *Do:* pick "Start with a single window"; Save; quit; start. *Expect:* ONE window (the first
+   saved record, as No gives) and no dialog; **Reopen Windows (1)** offers the other. *Check:* [LOG]
+   `[reopen] 2 windows were open at the last exit: started with a single window without asking, … =oneWindow …`.
+5. **Back to asking.** *Do:* Reopen Windows → the other window; pick "Ask every time"; Save; quit; start. *Expect:* the
+   question of phase 1 again.
+
+**Edge cases**
+- **E1 One window open at the quit** → it comes back without a question whatever the setting ("Start with a single window"
+  too); no `[reopen]` line.
+- **E2 Remember + No** → `oneWindow` is saved; the next start is phase 4's.
+- **E3 `settings.json` held by another program at the start** (one that denies readers) → the question is asked, since no
+  remembered choice can be seen; [LOG] `(settings.json could not be read, …)`; a ticked answer counts for this start only:
+  `NOT saved: settings.json exists but could not be read …`, and the file is unchanged.
+- **E4 `settings.json` from a newer build in a newer format** (root `version` 2) → a ticked answer counts for this start
+  only (`NOT saved: a newer Agentmaster wrote settings.json in a newer format …`); the file byte for byte.
+- **E5 A start whose command has a console** (CLI.md §2b) → the console reads `[agentmaster dialog] opened: Agentmaster …`
+  with `| [ ] Remember my choice and don't ask again`, then `answered: Agentmaster: Yes; check box: ticked` (or not ticked).
+- **E6 Automation** → `tools/Launch-AgentmasterDev.ps1` answers the task dialog (`REOPEN_CLICK=Yes … kind=taskdialog`) and
+  never ticks the box; a profile that remembers a choice gives `REOPEN_NODIALOG`.
+
+---
+
 ## Known defects (expected failures until fixed)
 
 ### TAB-K1 · A close can save the window's Claude tabs as plain shell tabs — FIXED in code 2026-10-23 (NOT BUILT into a release)

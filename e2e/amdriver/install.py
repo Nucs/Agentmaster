@@ -1831,8 +1831,11 @@ def start_direct(exe: Path, *args: str, env: Optional[dict] = None) -> subproces
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-REOPEN_PROMPT = r"^Reopen your \d+ previous Agentmaster windows\?"
-"""The start-up question of a profile whose last run left more than one window open (WindowEmperor.cpp)."""
+REOPEN_PROMPT = r"(?m)^Reopen your \d+ previous Agentmaster windows\?"
+"""The start-up question of a profile whose last run left more than one window open (WindowEmperor.cpp ->
+ReopenWindowsPrompt.h). A task dialog: its instruction is one of the texts MessageBox.text() joins with newlines, so the
+pattern anchors at the start of ANY line ((?m)), not only of the whole text. A profile that remembers a choice
+(settings.reopenWindowsAtStart) is never asked."""
 
 
 def wait_app(under: Path, timeout_s: float = 90.0, newer_than: float = 0.0, window: bool = True,

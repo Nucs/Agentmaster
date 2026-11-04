@@ -327,9 +327,13 @@ bash tools/am-lock.sh release --token "$TOKEN"
   rerun the swap at once, while the rollback instance is still on its splash and has restored
   nothing.
 - **The new instance can then PARK on the "Reopen your N previous Agentmaster windows?" dialog**
-  (a `#32770` window, nothing else — the engine/bridge start only after the answer; it appears when
-  >1 window was open at the stop). The measured downtime ends at the new GUI's START, not at the
-  answer, so tell the user to click it (or ask before clicking it for them).
+  (a `#32770` task dialog, nothing else — the engine/bridge start only after the answer; it appears when
+  >1 window was open at the stop AND the profile remembers no choice). The measured downtime ends at the
+  new GUI's START, not at the answer, so tell the user to click it (or ask before clicking it for them).
+  A profile whose `settings.json` holds `settings.reopenWindowsAtStart` = `reopen` / `oneWindow` (the
+  dialog's "Remember my choice", or the cog's Behavior → STARTUP) is never asked: hooks.log then reads
+  `[reopen] … without asking (remembered: …)` (doc/agentmaster/PERSISTENCE.md §18). Never tick that box
+  for the user: it changes every later start of their instance.
 - **Rollback is one command**: the previous slot is untouched, so
   `Swap-AgentmasterLayout.ps1 -LayoutDir <previous slot>` re-registers it (the next version
   number) — seconds, no rebuild. If anything fails after the stop (the register, the drain, an

@@ -811,6 +811,7 @@ void TestAppSettings()
         in.confirmBeforeKill = false;
         in.reapOrphanedSessions = false; // non-default (default true = the §13a orphan reaper is armed) — OBSERVER.md
         in.uiStallAutoRestart = false; // non-default (default true = the ui-stall RESTART tier is armed) — Engine.h escalation
+        in.reopenWindowsAtStart = ReopenWindowsAtStart::OneWindow; // non-default (default Ask = the question) — PERSISTENCE.md §18
         in.softwareRendering = true; // non-default (default false = the GPU) — RENDERING.md: every terminal on the CPU (WARP)
         in.pauseHiddenTerminals = false; // non-default (default true) — RENDERING.md §4c: hidden terminals keep drawing
         in.releaseHiddenTerminalDevices = false; // non-default (default true) — RENDERING.md §4c: hidden terminals keep their GPU device
@@ -893,6 +894,13 @@ void TestAppSettings()
         CHECK(out.confirmBeforeKill == false, "settings confirmBeforeKill round-trip");
         CHECK(out.reapOrphanedSessions == false, "settings reapOrphanedSessions round-trip (orphan reaper OFF)");
         CHECK(out.uiStallAutoRestart == false, "settings uiStallAutoRestart round-trip (restart tier OFF)");
+        // PERSISTENCE.md §18: the remembered choice round-trips as its word, and an absent key (every settings.json from
+        // before the setting) reads Ask, so an upgrade keeps asking exactly as before.
+        CHECK(out.reopenWindowsAtStart == ReopenWindowsAtStart::OneWindow, "settings reopenWindowsAtStart round-trip (start with a single window)");
+        CHECK(SerializeAppSettings(in).find(L"\"reopenWindowsAtStart\":\"oneWindow\"") != std::wstring::npos,
+              "settings reopenWindowsAtStart is stored as its word inside the settings object");
+        CHECK(DeserializeAppSettings(L"{\"version\":1,\"settings\":{}}").reopenWindowsAtStart == ReopenWindowsAtStart::Ask,
+              "settings reopenWindowsAtStart: an absent key reads Ask (the question, as before the setting)");
         CHECK(out.softwareRendering == true, "settings softwareRendering round-trip (CPU rendering ON)");
         CHECK(DeserializeAppSettings(L"{\"version\":1,\"settings\":{}}").softwareRendering == false,
               "settings softwareRendering: an absent key (every pre-RENDERING.md settings.json) reads OFF = the GPU");

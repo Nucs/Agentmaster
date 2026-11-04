@@ -1155,3 +1155,107 @@ purge (§16's data members). Live checks owed after it:
 - the first start of the new build logs `[migrate] … first start …` and leaves a `backups\` folder with a README;
 - `shadow\` fills as the run saves;
 - `sessions.json`, `settings.json` and a window record start with `{"writer":`.
+
+## 18. Several windows at start: "Remember my choice" and the Behavior setting (2026-11-04)
+
+**The task.** The owner: "Can we add checkbox to that dialog to Remember Choice and to control that also via settings. This
+way agentmaster will launch and not ask if i have two or more windows to open but remember the choice we made for the
+future." The dialog is the start's "Reopen your N previous Agentmaster windows?" (§13.5, §6a).
+
+**The rule** (`AgentMaster/ReopenWindowsAtStart.h`, pure: `DecideReopenAtStart`). N = the open-at-exit windows the
+Emperor's scan found (`open-windows.json` ∩ `windows\*.json`, §13.5).
+
+| N | Ask (default) | Reopen them all | Start with a single window |
+|---|---|---|---|
+| 0 | the default window | the same | the same |
+| 1 | reopened, no question | the same | the same |
+| 2 or more | the question | all reopened, no question | a single window, no question |
+
+- A lone window always comes back by itself, whatever the setting: the question exists for several windows only.
+- "A single window" is what the question's No has always given: the Emperor dispatches no saved window, so its
+  `_windows.empty()` fallback opens Windows Terminal's one default window, and that window takes over the first saved
+  record no other window claimed (`ClaimWindowRecord()`'s front-pop, `TerminalPage.AgentEngine.cpp`). The other windows
+  stay behind **Reopen Windows (N)**. Nothing is deleted.
+- Only in Windows Terminal's default startup mode (`FirstWindowPreference == DefaultProfile`): with WT's "open windows from
+  a previous session" the Agentmaster reopen does not run at all.
+
+**The setting.** `AppSettings::reopenWindowsAtStart` (GLOBAL), stored as `settings.reopenWindowsAtStart` = `ask` /
+`reopen` / `oneWindow` (`ReopenWindowsAtStartToken`, the one spelling for every writer and reader). A missing or unknown
+word reads `ask`: an unreadable choice must never silently reopen ten windows, nor silently leave them closed. The cog:
+Behavior ▸ STARTUP ▸ "When several windows were open at the last exit" (Ask every time · Reopen them all · Start with a
+single window). Read only at start, so a change applies at the next start.
+
+**The question** (`AgentMaster/ReopenWindowsPrompt.h`, `ReopenQuestion` + `AskToReopenWindows`).
+- A task dialog: the title "Agentmaster", the instruction "Reopen your N previous Agentmaster windows?", a line saying what
+  Yes and No do, Yes (the default) / No, the check box "Remember my choice and don't ask again" (unticked) and a footer
+  naming where the choice is changed (⚙ Settings → Behavior → Startup).
+- No Cancel, no Esc, no close button (the MessageBox's `MB_YESNO` behavior): every answer is a real Yes or No, so a
+  dismissal can never be remembered as No.
+- Its callback keeps it TOPMOST and asks for the foreground on `TDN_CREATED`, the twin of the old box's
+  `MB_TOPMOST | MB_SETFOREGROUND`. Load-bearing: the question is the process's only surface (no window, no splash yet),
+  and without it the 2026-07-03 launch sat 74 s behind the foreground window.
+- When `TaskDialogIndirect` fails (no Common Controls v6: the exe's manifest declares it, so in practice never), the
+  original message box asks, with its original words and flags and without a check box.
+- Echoed to the console of the command that started the process, like every dialog (DialogEcho.h, CLI.md §2b): the echo
+  lists the buttons and `[ ] Remember my choice and don't ask again`, and the answer reads e.g. `Yes; check box: ticked`.
+
+**Remembering** (`WriteReopenWindowsAtStart`). A ticked Yes stores `reopen`, a ticked No `oneWindow`
+(`RememberedReopenChoice`).
+- The exe writes it itself: the question runs in `WindowEmperor`'s prelude, before this process has an engine, and the exe
+  links TerminalApp.dll, not the engine library — the updater's Skip / Postpone precedent (`Updater::WriteUpdateState`),
+  whose file helpers it reuses.
+- No race with the engine: the write lands before this process creates its engine, so the engine's first load holds the
+  choice, and the cog owns the setting from then on (no preserve-from-disk on the cog's Save). A second process on the
+  profile hands its command line over and exits before the question.
+- A freshest-disk read-modify-write that sets only this key inside the `settings` object. A missing file becomes the
+  envelope `{"version":1,"settings":{...}}`; a `settings` member that is no object is replaced by one.
+- Every other member is kept as it is: the user's settings, a newer build's members (the residue of §17 is the whole
+  document here), and the writer stamp, still FIRST and unchanged — re-stamping a one-key change would hide an older
+  build's save from §17's older-writer repair, which acts only on stamp-less files.
+- Refused, the file left byte for byte: a file that exists but cannot be read (§15; the updater's lesson in §17), text that
+  is not a JSON object, and a newer format (a root `version` above `kSettingsDocumentVersion`, §17's format guard).
+- A ticked answer is honored for that start even when it cannot be remembered; the log line says the next start asks
+  again.
+
+**Reading** (`ReadReopenWindowsAtStart`). Only the nested key counts (the setting is newer than the envelope, so no build
+wrote it at the top level). It uses the updater's lock-aware read, which retries a sharing violation for ~400 ms: a scan
+that holds `settings.json` at logon must not bring the question back. A file that cannot be read asks, and says so. One
+window or none reads nothing.
+
+**Log lines** (`hooks.log`, through `Startup::Note`; a start with one window or none logs nothing, as before):
+- `[reopen] N windows reopened without asking (remembered: reopenWindowsAtStart=reopen; Settings, Behavior, Startup changes it)`;
+- `[reopen] N windows were open at the last exit: started with a single window without asking, the others wait behind Reopen Windows (remembered: reopenWindowsAtStart=oneWindow; …)`;
+- `[reopen] asked about N windows[ (settings.json could not be read, …)]: Yes, reopened them | No, a single window[; remember reopenWindowsAtStart=<word>: saved: … | NOT saved: <why>; the next start asks again]`;
+- `[reopen] remembering the choice CRASHED (exception): settings.json was not changed`.
+
+**What answers the question automatically.** The e2e driver (`e2e/amdriver`: UI Automation names a task dialog's Yes /
+No like a message box's; `REOPEN_PROMPT` matches the instruction at any line start), `tools/Launch-AgentmasterDev.ps1`
+(`TDM_CLICK_BUTTON` to the task dialog, `WM_COMMAND` to the fallback box; it never ticks the check box) and the build
+server's install watch (it sees a `#32770` dialog; a profile that remembers a choice shows none).
+
+**Tests (m5).** `TestReopenWindowsAtStart` (tests_reopen.cpp): the words both ways, the rule's table, the format guard's
+constant against the engine's settings document, the question's words through DialogEcho's description, the read (nested
+only, unknown words, a held file reported), the write (the envelope, the stamp kept first, other and newer members kept, the
+key replaced in place, every refusal byte for byte — the unreadable case with §17's deny-read ACL), and the start's decision
+for none, one and a remembered Yes or No with its `[reopen]` lines. The asking path is modal, so it is never run there:
+flows 07, TAB-11. The settings round trip (tests_persistence.cpp) covers the field.
+
+**Checked, not built.**
+- The m5 harness, run in an isolated copy with a scratch profile: 11,880 checks, 3 failures, all three the known
+  `TestTaskbarBadge` baseline. `TestReopenWindowsAtStart` adds 82 checks.
+- Its negative control removed the write's unreadable refusal in the copy, and exactly the two unreadable checks failed.
+  ⚠ A runner that links tests_reopen.cpp without tests_spawn_sched.cpp needs that unit's comctl32 v6
+  `/manifestdependency`: without it the exe dies at load with exit 127 and no output (TaskDialogIndirect is imported by
+  ordinal).
+- `cl /Zs` with the last Debug build's recorded flags (`/W3 /WX`) passes on `AgentManagerContent.Settings.cpp` and
+  `WindowEmperor.cpp` (which compiles `ReopenWindowsPrompt.h`). In each, a planted unknown name failed with C2039 at its
+  line. `Persistence.cpp` (with `SessionModels.h` and `ReopenWindowsAtStart.h`) passes at `/W4 /WX`, the CLI's strictness.
+- Nothing is built or run in the app. The next build must purge: `SessionModels.h` changed, and `AgentManagerContent.h`
+  gains a data member.
+
+Live checks owed after the build:
+- the question's look: the check box, the footer, Yes as the default, TOPMOST and in front;
+- a ticked Yes / No written into `settings.json`, with the stamp still first;
+- the next start silent, with its `[reopen]` line;
+- the cog's STARTUP choice read and saved;
+- the e2e driver's and `Launch-AgentmasterDev.ps1`'s clicks on the task dialog (TAB-11).

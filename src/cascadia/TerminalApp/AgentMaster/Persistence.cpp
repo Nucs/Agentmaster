@@ -878,6 +878,9 @@ namespace Agentmaster
         o.Set(L"confirmBeforeKill", json::Value::MkBool(s.confirmBeforeKill));
         o.Set(L"reapOrphanedSessions", json::Value::MkBool(s.reapOrphanedSessions));
         o.Set(L"uiStallAutoRestart", json::Value::MkBool(s.uiStallAutoRestart));
+        // PERSISTENCE.md §18: several windows at start (the cog's Behavior -> STARTUP; also written before the engine exists by
+        // the startup question's "Remember my choice", ReopenWindowsPrompt.h) — the word, through the ONE shared spelling.
+        o.Set(std::wstring{ kReopenWindowsAtStartKey }, json::Value::MkStr(std::wstring{ ReopenWindowsAtStartToken(s.reopenWindowsAtStart) }));
         o.Set(L"softwareRendering", json::Value::MkBool(s.softwareRendering)); // RENDERING.md — CPU (WARP) instead of the GPU
         // RENDERING.md §4c ("Hidden tabs"): off-screen terminals draw nothing, and give back their GPU
         // device after the delay.
@@ -1097,6 +1100,8 @@ namespace Agentmaster
         s.confirmBeforeKill = v.BoolAt(L"confirmBeforeKill", true);
         s.reapOrphanedSessions = v.BoolAt(L"reapOrphanedSessions", true);
         s.uiStallAutoRestart = v.BoolAt(L"uiStallAutoRestart", true);
+        // PERSISTENCE.md §18: absent (every settings.json before the setting) or an unknown word => Ask, the question as before.
+        s.reopenWindowsAtStart = ReopenWindowsAtStartFromToken(v.StrAt(kReopenWindowsAtStartKey));
         // Absent (every settings.json before this setting existed) => the GPU, the historical renderer.
         s.softwareRendering = v.BoolAt(L"softwareRendering", false);
         // RENDERING.md §4c: absent (every settings.json before these settings existed) => ON, ON, 60 s —

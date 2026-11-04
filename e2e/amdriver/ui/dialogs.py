@@ -5,8 +5,13 @@ TITLE ("Close session?"), a child of the window's InputSite pane; inside it a Sc
 with the title and the body as TextBlocks, and the buttons `#PrimaryButton` / `#SecondaryButton` /
 `#CloseButton` named by their texts ("Close", "★ Favorite & Close", "Cancel").
 
-Message box: the "Reopen your N previous Agentmaster windows?" prompt is a Win32 MessageBox (class #32770,
-title "Agentmaster", Yes / No) shown BEFORE the first window exists (WindowEmperor.cpp).
+Message box: the "Reopen your N previous Agentmaster windows?" prompt is a Win32 TASK DIALOG (class #32770, like a
+MessageBox; title "Agentmaster"; the instruction "Reopen your N previous Agentmaster windows?" as its first text; the
+buttons Yes / No; a "Remember my choice and don't ask again" check box), shown BEFORE the first window exists
+(WindowEmperor.cpp -> AgentMaster/ReopenWindowsPrompt.h, PERSISTENCE.md section 18). MessageBox below finds and answers it
+through UI Automation, which names a task dialog's buttons by their words just as it does a MessageBox's. A profile whose
+settings.json remembers a choice (settings.reopenWindowsAtStart "reopen" / "oneWindow") is never asked: the start then
+reopens all or starts with a single window by itself.
 """
 from __future__ import annotations
 

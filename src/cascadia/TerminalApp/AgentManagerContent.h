@@ -1466,6 +1466,10 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBlock _setSessionDbStatus{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setConfirmKill{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setReapOrphans{ nullptr }; // OBSERVER.md §13a: shut down a session whose terminal host died (reapOrphanedSessions)
+        // PERSISTENCE.md §18: Behavior tab -> STARTUP, "When several windows were open at the last exit" — Ask every time /
+        // Reopen them all / Start with a single window (AppSettings::reopenWindowsAtStart; item index == the enum's value).
+        // Read by the app exe at the next start; the question's "Remember my choice" writes the same setting.
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setReopenWindows{ nullptr };
         // RENDERING.md: draw every terminal on the CPU (WARP) instead of the GPU (AppSettings::softwareRendering,
         // default OFF). Behavior tab -> RENDERING; the page applies a change live to every window on Save.
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setSoftwareRendering{ nullptr };

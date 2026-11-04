@@ -1640,6 +1640,17 @@ namespace winrt::TerminalApp::implementation
         _setReapOrphans.Header(winrt::box_value(L"Shut down sessions whose terminal host has died"));
         AgentSetTip(_setReapOrphans, L"A session Agentmaster launched runs inside a hidden console host (OpenConsole.exe). If that host is killed outright \x2014 a force-kill of the app that also killed its console hosts, a crashed host \x2014 the session's pwsh + claude.exe never get the close signal a normal exit sends them, and they keep running with a DEAD console: no terminal can ever reach them again, they hold memory and their MCP servers, and their hooks can feed a newer instance phantom events for a conversation it has since resumed itself.\n\nWhen on (the default), the Fleet Observer ends such a session \x2014 only a process Agentmaster itself launched (its AM_SESSION stamp) whose console host is provably gone, after a 5-second grace \x2014 exactly what the missed close signal would have done. A hand-typed claude, a real Windows Terminal tab or any other program is never touched; a normal window close or app quit never trips this (the host exits AFTER its clients did).\n\nOff: such a session is still recognized as an orphan (it is not shown as an external) but is left running for you to end by hand. Logged as [orphan] / [orphan-reap] in hooks.log.");
         panel.Children().Append(_setReapOrphans);
+        // Agentmaster (PERSISTENCE.md §18): what a start does with SEVERAL windows that were open at the last exit. The
+        // same setting the startup question's "Remember my choice" writes (the app exe, before any window exists), so this
+        // box is also where a remembered answer is seen and undone. Read only at the next start: nothing to apply live.
+        panel.Children().Append(SettingsSeparator(L"STARTUP"));
+        _setReopenWindows = ComboBox{};
+        _setReopenWindows.Header(winrt::box_value(L"When several windows were open at the last exit"));
+        _setReopenWindows.Items().Append(winrt::box_value(L"Ask every time")); // index 0 == ReopenWindowsAtStart::Ask (default)
+        _setReopenWindows.Items().Append(winrt::box_value(L"Reopen them all")); // index 1 == ReopenWindowsAtStart::ReopenAll
+        _setReopenWindows.Items().Append(winrt::box_value(L"Start with a single window")); // index 2 == ReopenWindowsAtStart::OneWindow
+        AgentSetTip(_setReopenWindows, L"What Agentmaster does when it starts and MORE THAN ONE window was open the last time it exited. A single window always comes back by itself.\n\nAsk every time (the default): the question \x201CReopen your N previous Agentmaster windows?\x201D. Tick \x201CRemember my choice\x201D in it and your answer is saved here.\n\nReopen them all: every window comes back with its tabs, without asking.\n\nStart with a single window: one window opens without asking, as the question's No does; the other previous windows are kept, one click away behind the Manager's \x201CReopen Windows (N)\x201D button.\n\nApplies at the next start.");
+        panel.Children().Append(_setReopenWindows);
         // (The "Tab rename: commit with" combo that sat here moved to the Tabs & Overlay tab's TAB TITLES
         // section — renaming is a tab-strip interaction, and that tab is where users look for it.)
         // Agentmaster (Waiting-for-you "unread" model): the Waiting-for-you -> Idle timeout. A "Never"
@@ -2941,7 +2952,7 @@ namespace winrt::TerminalApp::implementation
         // govern EVERY send path (draft swap, Ctrl+S stash, verified placement, restore re-fill): an
         // ordinary release ran them at their defaults with no way to change them.
         addSettingsTab(L"Prompt Queue Runner", L"Prompt Queue Runner defaults stamped onto every new session \x2014 the starting mode and its backstops \x2014 and how a sent prompt treats a draft that is already in the input box.", autorunnerPanel);
-        addSettingsTab(L"Behavior", L"Interaction + session-state behavior \x2014 close confirms, cleaning up orphaned sessions, the Waiting-for-you \x201Cunread\x201D timeout, and GPU or CPU rendering.", behaviorPanel);
+        addSettingsTab(L"Behavior", L"Interaction + session-state behavior \x2014 close confirms, cleaning up orphaned sessions, reopening several windows at start, the Waiting-for-you \x201Cunread\x201D timeout, and GPU or CPU rendering.", behaviorPanel);
         // COMMANDS is the first tab to offer a per-tab RESET: put every control back to the
         // SHIPPED DEFAULTS, read from a default-constructed AppSettings so there is ONE source of
         // truth (no hand-copied literals to drift). It touches the FORM only — Save commits it,
@@ -3289,6 +3300,13 @@ namespace winrt::TerminalApp::implementation
         if (_setReapOrphans)
         {
             _setReapOrphans.IsOn(_appSettings.reapOrphanedSessions);
+        }
+        if (_setReopenWindows)
+        {
+            // PERSISTENCE.md §18: the items are in ReopenWindowsAtStart's order (0 ask / 1 reopen / 2 one window). A value
+            // outside it (only a cast could make one: the loader maps every unknown word to Ask) shows Ask, the default.
+            const auto reopen = static_cast<int32_t>(_appSettings.reopenWindowsAtStart);
+            _setReopenWindows.SelectedIndex(reopen >= 0 && reopen <= 2 ? reopen : 0);
         }
         if (_setSoftwareRendering)
         {
@@ -4250,6 +4268,15 @@ namespace winrt::TerminalApp::implementation
         if (_setReapOrphans)
         {
             _appSettings.reapOrphanedSessions = _setReapOrphans.IsOn();
+        }
+        if (_setReopenWindows)
+        {
+            // PERSISTENCE.md §18: the cog owns the setting from engine init on (the startup question wrote it, if at all,
+            // before the engine loaded), so the form's value is saved as picked. Index -1 (nothing selected) saves Ask.
+            const int32_t reopen = _setReopenWindows.SelectedIndex();
+            _appSettings.reopenWindowsAtStart = reopen == 1 ? ::Agentmaster::ReopenWindowsAtStart::ReopenAll :
+                                                reopen == 2 ? ::Agentmaster::ReopenWindowsAtStart::OneWindow :
+                                                              ::Agentmaster::ReopenWindowsAtStart::Ask;
         }
         if (_setSoftwareRendering)
         {

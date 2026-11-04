@@ -279,6 +279,12 @@
     <ClInclude Include="AgentMaster\UpdaterReleaseNotes.h" />
     <ClInclude Include="AgentMaster\UpdaterPromptWindow.h" />
     <ClInclude Include="AgentMaster\StartupTiming.h" />
+    <!-- Agentmaster (PERSISTENCE.md section 18): several windows at start - the three choices, their settings.json words and the
+         startup rule (ReopenWindowsAtStart.h, pure, included by SessionModels.h) and the exe's "Reopen your N previous
+         Agentmaster windows?" question with its "Remember my choice" box and settings.json read / write (ReopenWindowsPrompt.h,
+         header-only Win32; compiled into the app exe by WindowEmperor.cpp). -->
+    <ClInclude Include="AgentMaster\ReopenWindowsAtStart.h" />
+    <ClInclude Include="AgentMaster\ReopenWindowsPrompt.h" />
     <ClInclude Include="AgentMaster\Splash.h" />
     <ClInclude Include="AgentMaster\TaskbarBadge.h" />
     <ClInclude Include="AgentMaster\PointerCardPlacement.h" />

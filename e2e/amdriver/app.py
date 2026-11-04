@@ -312,8 +312,8 @@ class App:
             timeout_s: How long to wait for the window.
             maximize: Maximize the first window (every layout the page objects read assumes room).
             reopen_answer: The button pressed when "Reopen your N previous Agentmaster windows?" asks (it asks
-                before any window exists, when more than one window was open at the last exit); None makes
-                that prompt a failure.
+                before any window exists, when more than one window was open at the last exit and the profile
+                remembers no choice in settings.reopenWindowsAtStart); None makes that prompt a failure.
         Returns:
             self.
         Raises:

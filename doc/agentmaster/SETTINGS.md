@@ -16,7 +16,7 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
 | Sessions | How new Claude sessions launch: permissions, model, environment variables, the Launch box's directory history. |
 | Presets | Named ways to start a Claude session on another provider, its models, limits and arguments ([HARNESSES.md](HARNESSES.md)). |
 | Prompt Queue Runner | The runner defaults stamped onto every new session, and how a sent prompt treats a draft already in the input box. |
-| Behavior | Close confirms, cleaning up orphaned sessions, the Waiting-for-you "unread" timeout, GPU or CPU rendering. |
+| Behavior | Close confirms, cleaning up orphaned sessions, reopening several windows at start, the Waiting-for-you "unread" timeout, GPU or CPU rendering. |
 | Commands | The /handover family ([COMMANDS.md](COMMANDS.md) §6). A **Reset** restores this tab's shipped defaults (form only: Save commits, Cancel discards). |
 | Notifications | Which state changes notify, the focused-tab skip, the sound. |
 | Messaging | The Telegram bot ([MESSAGING.md](MESSAGING.md) §21). |
@@ -119,6 +119,12 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
 - `uiStallAutoRestart` (true): when every window's UI lane is dead for 3+ minutes while the Win32 pump is
   provably alive and repeated rescues failed, the app restarts itself (the workspace persists); off = the
   watchdog only detects, logs and attempts rescues.
+- `reopenWindowsAtStart` (`ask`; STARTUP ▸ "When several windows were open at the last exit"): Ask every time (the
+  question "Reopen your N previous Agentmaster windows?") · Reopen them all (`reopen`, no question) · Start with a single
+  window (`oneWindow`: the question's No, no question; the others wait behind Reopen Windows (N)). A lone window always
+  reopens. The question's "Remember my choice" writes the same key, from the app exe before the engine starts
+  (`ReopenWindowsPrompt.h`), so the cog shows a remembered answer and undoes it. Read at start only; an unknown word reads
+  `ask`. [PERSISTENCE.md](PERSISTENCE.md) §18.
 - `waitingForYouTimeoutMinutes` (4320 = 3 days; a 1 min – 7 d slider, a free-text box such as `12h5m`
   that may exceed 7 d, and "Never"): a WaitingForInput session demotes to Idle only once the timeout
   elapsed **and** its tab was visited since the last turn (`ShouldDecayWaitingToIdle`); an unread or
@@ -316,5 +322,7 @@ Every color surface — tabs, board bands, Sessions chips, the pending dots — 
   `sidePanelSummaryHidden` (false), `sidePanelAiMode` (false: the filter box's AI toggle, SIDE_PANEL.md §2h).
 - The tab color flyout: `tabColorPickerCustomOpen`, `tabColorPickerAdvancedOpen` (true).
 - The updater: `updateSkippedVersion`, `updatePostponedUntilUnixMs`.
+- The reopen question's "Remember my choice": `reopenWindowsAtStart` (also the cog's, Behavior above; the question writes it
+  before the engine exists, so the cog's Save needs no preserve-from-disk for it).
 - `hiddenSessionIds`: the Sessions page's hidden rows.
 - `archiveSplitFraction`: unused; kept so an older file round-trips unchanged.

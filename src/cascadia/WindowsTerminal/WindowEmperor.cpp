@@ -58,6 +58,10 @@
 // started it (DialogEcho.h + CallerSink.h), and a dialog the running app opens for a command line handed to it is sent
 // back to the sender (HandoffReply). Header-only, plain Win32.
 #include "../TerminalApp/AgentMaster/DialogEcho.h"
+// Agentmaster (PERSISTENCE.md §18): the "Reopen your N previous Agentmaster windows?" question with its "Remember my
+// choice" check box, and the remembered choice (AppSettings::reopenWindowsAtStart) read and written in settings.json.
+// Header-only, plain Win32, for the same reason as Updater.h: the exe cannot reach the engine's settings code.
+#include "../TerminalApp/AgentMaster/ReopenWindowsPrompt.h"
 
 using namespace winrt;
 using namespace winrt::Microsoft::Terminal;
@@ -1018,23 +1022,13 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
             // decide"); a lone window restores silently (it's just remembering where it was). On "No" we
             // dispatch nothing -> the _windows.empty() guard opens one default window, and the Manager's
             // "Reopen Windows" recover button can bring the rest back.
-            auto doRestore = !reopenIdx.empty();
-            if (reopenIdx.size() > 1)
-            {
-                const std::wstring prompt = L"Reopen your " + std::to_wstring(reopenIdx.size()) +
-                                            L" previous Agentmaster windows?\r\n\r\n(Choose No to start with a single window; the Manager's “Reopen Windows” button can bring the rest back later.)";
-                // MB_TOPMOST + MB_SETFOREGROUND are LOAD-BEARING, not cosmetic: this box is the ONLY
-                // user-facing surface the process has at this point — no terminal window exists yet, the
-                // splash deliberately starts AFTER this prompt (a TOPMOST splash would cover it), and a
-                // null-owner MessageBox from a freshly launched process (which has no foreground rights
-                // when started from a shell/alias/automation) opens BEHIND the current foreground window.
-                // The launch then sits blocked on an invisible modal with zero taskbar presence — the
-                // 2026-07-03 "dev is not launching" report: a 3-window reopen stalled 74s until the box
-                // was found and clicked (hooks.log: reopen-scan +566ms -> prelude-done +74573ms).
-                // Echoed to the command's console (DialogEcho.h): a launch from a shell or an agent stops here, and the
-                // caller now reads why, and the answer.
-                doRestore = ::Agentmaster::DialogEcho::ShowMessageBox(nullptr, prompt.c_str(), L"Agentmaster", MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST) == IDYES;
-            }
+            // Agentmaster (PERSISTENCE.md §18): the question is a task dialog with a "Remember my choice" check box, and a
+            // remembered answer — ticked there, or picked in the cog (Settings → Behavior → Startup:
+            // AppSettings::reopenWindowsAtStart) — answers it without a dialog at every later start. The question, its
+            // TOPMOST + foreground handling (load-bearing: the 2026-07-03 "dev is not launching" stall), its message-box
+            // fallback, the settings.json read and write and the "[reopen]" log line all live in ReopenWindowsPrompt.h; the
+            // profile dir is the one the scan above read, so the remembered choice belongs to the same profile.
+            const bool doRestore = ::Agentmaster::ReopenPrompt::DecideReopenAtStartup(::Agentmaster::Profiles::ResolveProfileDir(), reopenIdx.size());
 
             if (doRestore)
             {
