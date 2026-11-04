@@ -921,7 +921,9 @@ scratch program that links the repository's `SessionStore.cpp` unchanged.
   activity for the asked sessions only. The Tags panel asks for the tagged sessions; the hover panel asks
   once for all carriers. (Since 2026-10-24 it also returns `started` and `external`: "Deactivate All Idle
   Tabs" sorts a whole window's sessions, and every other window's, with it at each menu open — a dormant
-  or adopted one is dropped there, before any whole-record read.)
+  or adopted one is dropped there, before any whole-record read. Since 2026-11-04 "Deactivate All
+  Waiting-for-you" does the same, so a Deactivate ▸ open makes these reads once per state item:
+  `TerminalPage::_AnyStateTabToDeactivate`.)
 - **The panel answers first.** A tag edit rebuilds the panel's list at once. The Sessions page, the Manager
   board and the side panel are repainted ~40 ms after the last edit (`_QueueTagSurfacesRefresh`, a one-shot
   timer; a burst of edits is one repaint). The session's own tab badges are still repainted at once.

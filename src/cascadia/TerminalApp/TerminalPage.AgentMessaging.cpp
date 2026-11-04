@@ -245,13 +245,14 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::LogNav(L"remote session-action deactivate " + ::Agentmaster::ShortId(sessionId) + L" -> " + answer +
                                       (cutOffTurn ? std::wstring{ L" (the user allowed cutting a turn off)" } : std::wstring{}));
             }
-            else if (action == kDeactivateIdleSessionAction)
+            else if (action == kDeactivateIdleSessionAction || action == kDeactivateWaitingSessionAction)
             {
-                // Agentmaster ("Deactivate All Idle Tabs" answered "All windows" — not the bot): another window handed out
-                // one of its idle sessions, and this window hosts its tab. Judged again here (still idle? a turn that started
-                // since is never cut off) and parked through the single-tab path (_DeactivateIdleSessionLocal), so this
-                // window's focused-tab rule applies. No argument; no answer.
-                _DeactivateIdleSessionLocal(sessionId);
+                // Agentmaster ("Deactivate All Idle Tabs" / "Deactivate All Waiting-for-you" answered "All windows" — not the
+                // bot): another window handed out one of its sessions in that state, and this window hosts its tab. The WORD
+                // names the scope (no argument is read, so a malformed one cannot turn one item into the other). Judged again
+                // here (still in that state? a turn that started since is never cut off) and parked through the single-tab
+                // path (_DeactivateStateSessionLocal), so this window's focused-tab rule applies. No answer.
+                _DeactivateStateSessionLocal(sessionId, action == kDeactivateIdleSessionAction ? implementation::Tab::kDeactivateScopeIdleTabs : implementation::Tab::kDeactivateScopeWaitingTabs);
             }
             else if (action == kSessionMenuDeactivateAction || action == kSessionMenuCloseAction)
             {

@@ -76,7 +76,8 @@ click back into the terminal; double-click jumps to a card's tab.
 6. **Deactivate ▸ on a card** (2026-10-23, NOT BUILT). *Do:* right-click B's card (B running, in this window,
    neither the left-most nor the right-most tab). *Expect:* **Deactivate ▸** directly above **Close ▸**, as in
    the tab menu, holding Deactivate Tab · Tabs to the Left · Tabs to the Right · Other Tabs · Of Same Folder ·
-   Other of Same Folder · All Tabs · Deactivate All Idle Tabs (no glyphs; the last item since 2026-10-24);
+   Other of Same Folder · All Tabs · Deactivate All Idle Tabs · Deactivate All Waiting-for-you (no glyphs; the
+   idle item since 2026-10-24, the Waiting-for-you item — the last one — since 2026-11-04, NOT BUILT);
    **Deactivate Tab** parks B with no confirm, its tab kept, exactly like the tab menu's item. *Check:* [LOG]
    `[nav] session-menu deactivate this <B8>`, then `[nav] deactivate-begin scope=this` / `deactivate-done …
    parked=1`.
@@ -124,6 +125,15 @@ click back into the terminal; double-click jumps to a card's tab.
 - **E10 The window comes back to the foreground** (Alt+Tab away and back while peeking B; NOT BUILT) → B stays
   selected: returning to the window is not a touch of the terminal (since the second version of SP-K3's fix; the
   first version, a0e892b90, followed there).
+- **E11 Deactivate All Waiting-for-you on a card** (2026-11-04, NOT BUILT; the item after Deactivate All Idle
+  Tabs) → the tab menu's item (flows/07 TAB-02 phase 9) run from the card, by E7's rules: in the window whose side
+  panel or page the card is on, whichever window hosts the card's session. Its Waiting-for-you sessions park and
+  keep that state (the goldenrod dot, the unread ring), every other one keeps running; when other windows hold
+  Waiting-for-you tabs too, it asks first in this window ("Deactivate Waiting-for-you tabs": This window (N) · All
+  windows (M) · Cancel — flows/07 TAB-02 phase 10); grayed while no window holds one to park, on its own gate (the
+  idle item can be enabled while it is grayed). *Check:* [LOG] `[nav] session-menu deactivate waiting <B8>`, then
+  `[nav] deactivate-waiting-ask from=session menu here=N elsewhere=M` and `[nav] deactivate-done scope=waiting
+  parked=N`.
 
 ---
 

@@ -92,7 +92,8 @@ with a local-time `[HH:MM:SS.mmm]` stamp (only at a line boundary, so a partial 
   - **Close and quit decisions:** `close-cancelled <sid8>`, `close-confirm <sid8> (favorite & close |
     unfavorite & close)`, `close-all cancelled …`, `window-close cancelled|confirmed|-> close ALL windows
     (quit requested)`, `quit cancelled|confirmed (closing all windows)`, `deactivate-idle-ask` /
-    `deactivate-idle-answer`.
+    `deactivate-idle-answer` and `deactivate-waiting-ask` / `deactivate-waiting-answer` (the two
+    Deactivate ▸ state items' "This window / All windows" question).
   - **Clipboard and shell:** `copy <field>` (the one `CopySessionField` chokepoint behind every copy menu;
     each Transcript level adds a `[transcript] <sid8> copy <level>: chars=N rendered in Xms` line or the
     reason nothing was copied; Current Prompt adds a `[pending] … copy current prompt: live|remembered

@@ -2914,18 +2914,20 @@ namespace winrt::TerminalApp::implementation
         // 1 == other tabs · 2 == all tabs · 3 == tabs to the left · 4 == tabs to the right · 5 == of
         // same folder · 6 == other of same folder (Tab.h's kDeactivateScope* codes — the "Close ▸"
         // submenu's scopes; the two folder ones reach every window, see _DeactivateTabsFromMenu) ·
-        // 7 == the Idle tabs ("Deactivate All Idle Tabs", no Close twin), which goes through
-        // _DeactivateIdleTabsAsking: it asks "This window / All windows" first when other windows hold idle
-        // tabs too (the user's request of 2026-10-24), and parks this window's (_IdleTabsToDeactivate) at once
-        // otherwise.
+        // 7 == the Idle tabs ("Deactivate All Idle Tabs") · 8 == the Waiting-for-you tabs ("Deactivate All
+        // Waiting-for-you", 2026-11-04). Those two STATE scopes have no Close twin and go through
+        // _DeactivateStateTabsAsking: it asks "This window / All windows" first when other windows hold tabs in
+        // that state too (the user's request of 2026-10-24), and parks this window's (_StateTabsToDeactivate) at
+        // once otherwise. _DeactivateStateScopeFor is the one test of "a state scope", so a third one needs no
+        // change here.
         hostingTab.DeactivateTabsRequested([weakTab, weakThis](int32_t scope) {
             auto page{ weakThis.get() };
             auto tab{ weakTab.get() };
             if (page && tab)
             {
-                if (scope == implementation::Tab::kDeactivateScopeIdleTabs)
+                if (_DeactivateStateScopeFor(scope))
                 {
-                    page->_DeactivateIdleTabsAsking(*tab, L"tab menu");
+                    page->_DeactivateStateTabsAsking(*tab, scope, L"tab menu");
                 }
                 else
                 {
@@ -3160,14 +3162,17 @@ namespace winrt::TerminalApp::implementation
                     // (computed above for "Activate Tab") grays its "Deactivate Tab" item when this
                     // session is already parked; the batch items stay clickable (other tabs may run).
                     tab->SetAgentDeactivateState(isSession && !isExternal, dormant);
-                    // Agentmaster (deactivate — "Deactivate All Idle Tabs"): grayed while no window holds a tab it
-                    // would park — this window's list (_IdleTabsToDeactivate, the one the click acts on) or the
-                    // other windows' (_IdleSessionsElsewhere, which the click offers under "All windows"; read only
-                    // when this window has none). Counted only when the submenu shows at all, so a shell or adopted
-                    // tab's menu pays nothing for it.
+                    // Agentmaster (deactivate — "Deactivate All Idle Tabs" and, since 2026-11-04, "Deactivate All
+                    // Waiting-for-you"): each grayed while no window holds a tab it would park — this window's list
+                    // (_StateTabsToDeactivate, the one the click acts on) or the other windows' (_StateSessionsElsewhere,
+                    // which the click offers under "All windows"; read only when this window has none), both through
+                    // _AnyStateTabToDeactivate with the item's state, the gate the session menu's provider uses too.
+                    // Counted only when the submenu shows at all, so a shell or adopted tab's menu pays nothing for
+                    // either.
                     if (isSession && !isExternal)
                     {
-                        tab->SetAgentDeactivateIdleEnabled(!page->_IdleTabsToDeactivate().empty() || !page->_IdleSessionsElsewhere().empty());
+                        tab->SetAgentDeactivateIdleEnabled(page->_AnyStateTabToDeactivate(::Agentmaster::SessionState::Idle));
+                        tab->SetAgentDeactivateWaitingEnabled(page->_AnyStateTabToDeactivate(::Agentmaster::SessionState::WaitingForInput));
                     }
                 }
             });

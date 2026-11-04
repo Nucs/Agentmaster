@@ -1937,8 +1937,9 @@ namespace winrt::TerminalApp::implementation
     // DeactivateTabsRequested with its scope and the page does the work (_DeactivateTabsFromMenu).
     // The items mirror the "Close ▸" submenu's scopes one for one, in the same order: this tab · tabs to
     // the left · tabs to the right · other tabs · of same folder · other of same folder · all tabs — and
-    // then "Deactivate All Idle Tabs" (2026-10-24), a filter by session STATE that has no Close twin. The
-    // scope codes are Tab.h's kDeactivateScope* constants — the menu <-> page contract.
+    // then the two filters by session STATE that have no Close twin: "Deactivate All Idle Tabs"
+    // (2026-10-24) and "Deactivate All Waiting-for-you" (2026-11-04). The scope codes are Tab.h's
+    // kDeactivateScope* constants — the menu <-> page contract.
     //   flyout — the tab's context menu; the submenu is appended at its current end, so the caller's
     //            call order decides where it sits (directly above "Close ▸").
     // Returns nothing. Throws the WinRT errors of the XAML calls (winrt::hresult_error); it is called once
@@ -2036,7 +2037,7 @@ namespace winrt::TerminalApp::implementation
         // strip, this one included when it is idle. A Running / Waiting-for-you / Needs-approval / Error / Done
         // session keeps running, so the item parks what nobody is using without cutting a turn off, hiding an
         // answer not read yet, or dropping a question. When OTHER windows hold idle tabs too, the page first asks
-        // "This window / All windows" (TerminalPage::_DeactivateIdleTabsAsking, the user's request the same day) —
+        // "This window / All windows" (TerminalPage::_DeactivateStateTabsAsking, the user's request the same day) —
         // the one Deactivate scope that can ask; with idle tabs here only it parks them at once. Grayed while no
         // window holds a tab it would park (SetAgentDeactivateIdleEnabled, decided by the page at flyout-open):
         // unlike the strip items above, this gate needs session states, which only the page knows.
@@ -2049,6 +2050,25 @@ namespace winrt::TerminalApp::implementation
         _deactivateIdleTabsMenuItem.Text(L"Deactivate All Idle Tabs");
         WUX::Controls::ToolTipService::SetToolTip(_deactivateIdleTabsMenuItem, box_value(winrt::hstring{ L"Deactivate every session tab whose session is Idle (the gray dot) \x2014 sessions that are running, waiting for you, need approval, show an error or are done keep running. When other windows hold idle tabs too, you are asked whether to park this window's or every window's. Each parked tab resumes its conversation when you focus or activate it." }));
 
+        // Deactivate All Waiting-for-you (2026-11-04, the user's "In menu items with 'Deactivate' ->, I want Deactivate
+        // All Waiting-for-you") — the idle item's twin for the sessions WAITING FOR YOU (the goldenrod dot: the turn is
+        // done and the session waits for the user's next message), wherever they sit in the strip, this one included when
+        // it waits. Such a session runs nothing, so the park cuts no turn off; and a parked tab KEEPS its Waiting-for-you
+        // state (the park's RestoredSessionState preserves it), so its dot, its unread ring and its Telegram topic stay —
+        // nothing the user has not read yet is marked read. Running / Needs-approval / Error / Idle / Done sessions keep
+        // running. A prompt queued for a parked tab waits until the tab is woken (the runner never sends into a dormant
+        // tab), which the tooltip says. It asks "This window / All windows" exactly like the idle item when other windows
+        // hold such tabs too (TerminalPage::_DeactivateStateTabsAsking), and is grayed the same way while no window holds
+        // one it would park (SetAgentDeactivateWaitingEnabled, decided by the page at flyout-open).
+        _deactivateWaitingTabsMenuItem.Click([weakThis](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->DeactivateTabsRequested.raise(kDeactivateScopeWaitingTabs);
+            }
+        });
+        _deactivateWaitingTabsMenuItem.Text(L"Deactivate All Waiting-for-you");
+        WUX::Controls::ToolTipService::SetToolTip(_deactivateWaitingTabsMenuItem, box_value(winrt::hstring{ L"Deactivate every session tab whose session is Waiting-for-you (the goldenrod dot: its turn is done and it waits for your next message) \x2014 sessions that are running, need approval, show an error, are idle or are done keep running. A parked tab stays Waiting-for-you (its dot and unread ring stay), a prompt queued for it waits until you wake it, and focusing or activating it resumes the conversation. When other windows hold Waiting-for-you tabs too, you are asked whether to park this window's or every window's." }));
+
         // The submenu header. Moon glyph (QuietHours) — "asleep, waiting": deactivation is dormancy,
         // not an ending (that is Close's X). Kept as a member so the page can show/hide it
         // (SetAgentDeactivateState).
@@ -2060,8 +2080,9 @@ namespace winrt::TerminalApp::implementation
         _deactivateSubMenu.Visibility(WUX::Visibility::Collapsed); // shown only for a managed, non-adopted session tab (page-driven)
         WUX::Controls::ToolTipService::SetToolTip(_deactivateSubMenu, box_value(winrt::hstring{ L"Park session tabs in the dormant waiting-for-focus state a freshly reopened window's tabs sit in \x2014 the agent process shuts down, the tab stays where it is, and focusing or activating it resumes the conversation" }));
         // The "Close ▸" submenu's order, so the two submenus read alike: this tab first, then left,
-        // right, other, the two folder scopes, and the whole window last — followed by the idle filter,
-        // which has no Close twin.
+        // right, other, the two folder scopes, and the whole window last — followed by the two state
+        // filters, which have no Close twin: Idle, then Waiting-for-you (the order they were added in, so
+        // the idle item keeps its place for the hand that knows it).
         _deactivateSubMenu.Items().Append(_deactivateTabMenuItem);
         _deactivateSubMenu.Items().Append(_deactivateTabsBeforeMenuItem);
         _deactivateSubMenu.Items().Append(_deactivateTabsAfterMenuItem);
@@ -2070,6 +2091,7 @@ namespace winrt::TerminalApp::implementation
         _deactivateSubMenu.Items().Append(_deactivateOtherSessionsOfSameFolderMenuItem); // the same folder batch minus this session
         _deactivateSubMenu.Items().Append(_deactivateAllTabsMenuItem);
         _deactivateSubMenu.Items().Append(_deactivateIdleTabsMenuItem); // the window's Idle sessions only (2026-10-24)
+        _deactivateSubMenu.Items().Append(_deactivateWaitingTabsMenuItem); // the window's Waiting-for-you sessions only (2026-11-04)
         flyout.Items().Append(_deactivateSubMenu);
     }
 
@@ -2988,9 +3010,9 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster (deactivate — "Deactivate All Idle Tabs"): gray that item while no window holds a tab it would
     // park — see Tab.h. Page-driven at flyout-open right after SetAgentDeactivateState (the page counts the tabs
-    // it would park now: this window's, TerminalPage::_IdleTabsToDeactivate, else the other windows',
-    // _IdleSessionsElsewhere, which the click's "All windows" answer reaches). Kept apart from that setter so its
-    // two callers' contract stays as it was. The page re-checks the states at the click, so a session that
+    // it would park now: this window's, TerminalPage::_StateTabsToDeactivate(Idle), else the other windows',
+    // _StateSessionsElsewhere(Idle), which the click's "All windows" answer reaches). Kept apart from that setter
+    // so its two callers' contract stays as it was. The page re-checks the states at the click, so a session that
     // changed between the open and the click is judged by its state THEN.
     //   enabled — true when at least one tab of this window or another one would park now.
     // Returns nothing. Throws the WinRT error of the property write; UI thread only (asserted).
@@ -2999,6 +3021,19 @@ namespace winrt::TerminalApp::implementation
         ASSERT_UI_THREAD();
 
         _deactivateIdleTabsMenuItem.IsEnabled(enabled);
+    }
+
+    // Agentmaster (deactivate — "Deactivate All Waiting-for-you", 2026-11-04): the same gate for the Waiting-for-you
+    // item — see Tab.h. Page-driven at flyout-open right after SetAgentDeactivateIdleEnabled, from the same two lists
+    // read for SessionState::WaitingForInput (TerminalPage::_AnyStateTabToDeactivate). The click reads them again, so
+    // a session that answered or started a turn between the open and the click is judged by its state then.
+    //   enabled — true when at least one tab of this window or another one would park now.
+    // Returns nothing. Throws the WinRT error of the property write; UI thread only (asserted).
+    void Tab::SetAgentDeactivateWaitingEnabled(bool enabled)
+    {
+        ASSERT_UI_THREAD();
+
+        _deactivateWaitingTabsMenuItem.IsEnabled(enabled);
     }
 
     // Agentmaster (launch-model picker): choose which "New Session Here" form this tab's context menu

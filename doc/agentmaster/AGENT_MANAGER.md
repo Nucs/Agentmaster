@@ -223,21 +223,22 @@ Id, Path, Branch, Current Prompt, Launch CLI, Summary, Transcript ▸ Show + Def
   scope to GLOBAL for a session hosted elsewhere): the in-place editor lives in the tree.
 - **Deactivate ▸ and Close ▸** list the tab menu's scopes row for row: Deactivate Tab / Close Tab ·
   Tabs to the Left · Tabs to the Right · Other Tabs · Of Same Folder · Other of Same Folder · All Tabs,
-  plus **★ Favorite & Close All Tabs** under Close and **Deactivate All Idle Tabs** under Deactivate.
-  They are grayed by the tab menu's rules: Deactivate Tab on a dormant session, the strip items by where
-  the session's tab sits in this window's strip (`SetSessionTabSpotProvider`; nothing grayed for a
-  session another window hosts). Deactivate ▸ shows only for a live, non-adopted session; Close ▸
-  always.
+  plus **★ Favorite & Close All Tabs** under Close and the two state items under Deactivate, **Deactivate
+  All Idle Tabs** and **Deactivate All Waiting-for-you**. They are grayed by the tab menu's rules:
+  Deactivate Tab on a dormant session, the strip items by where the session's tab sits in this window's
+  strip (`SetSessionTabSpotProvider`; nothing grayed for a session another window hosts), each state item
+  while no window holds a tab it would park (`SetStateTabsProvider`). Deactivate ▸ shows only for a live,
+  non-adopted session; Close ▸ always.
 - Every item but Close's two folder items goes through `TerminalPage::_RunSessionMenuScope` and makes
   the tab menu's own call (`_DeactivateTabsFromMenu`, `_HandleCloseTabRequested`, `_CloseTabsBefore`,
   `_RemoveTabs`, `_CloseAllTabs`) on the session's tab in the window that hosts it. Another window's tab
   is handed over through the session-action fan-out (`RequestSessionActionInWindows` with
   `session-menu-deactivate` / `session-menu-close` and the scope code → `_RemoteSessionAction` →
   `_RunSessionMenuScopeHere`), where a Close first brings that window to the front to ask. A Close Tab
-  of a session whose agent exited and that no window hosts archives the record in place. Deactivate All
-  Idle Tabs runs in the window the menu is open in.
+  of a session whose agent exited and that no window hosts archives the record in place. The two state
+  items run in the window the menu is open in.
 - The content's `SessionMenuScope` values are `Tab::kDeactivateScope*` (static_asserted in the wiring),
-  plus the page's `kSessionMenuScopeFavoriteAllTabs` (8). Logs `[nav] session-menu <verb> <scope>
+  plus the page's `kSessionMenuScopeFavoriteAllTabs` (9). Logs `[nav] session-menu <verb> <scope>
   <sid8>` (+ `-> handed to the window that hosts its tab`); the hosting window logs
   `[nav] session-menu-remote …`.
 
@@ -290,14 +291,27 @@ tags, queue and runner mode, and the conversation resumes when the tab is entere
   `_DeactivateSessionLocal`, one dispatcher item per session). ⚠ No confirmation: a folder scope also
   stops sessions in windows the user is not looking at, and a turn in progress is cut off (the tooltips
   say so).
-- **Deactivate All Idle Tabs** (scope `kDeactivateScopeIdleTabs` = 7): every tab of the window the menu
-  is open in whose session is Idle (the gray dot) and that the park accepts. The one list is
-  `_IdleTabsToDeactivate` (one lean `HeadlinesOf` read; dormant and adopted sessions dropped; strip
-  order); it also grays the item (`Tab::SetAgentDeactivateIdleEnabled`, the card menu's
-  `SetIdleTabsProvider`). When other windows hold idle tabs too (`_IdleSessionsElsewhere`), it asks
-  "Deactivate idle tabs" — This window (N) (default) · All windows (M) · Cancel
-  (`_DeactivateIdleTabsAsking`); All windows hands each session to its host (`kDeactivateIdleSessionAction`
-  → `_DeactivateIdleSessionLocal`, which parks it only if it is still live and Idle).
+- **The state items** pick tabs by their session's STATE, not by where they sit; both have no Close twin
+  and run one engine, each from its row of `_DeactivateStateScopeFor` (scope code, state, log word, item
+  text, question, action word):
+  - **Deactivate All Idle Tabs** (scope `kDeactivateScopeIdleTabs` = 7, the word `idle`): the tabs whose
+    session is Idle (the gray dot).
+  - **Deactivate All Waiting-for-you** (scope `kDeactivateScopeWaitingTabs` = 8, the word `waiting`): the
+    tabs whose session is Waiting-for-you (the goldenrod dot: the turn is done, the session waits for the
+    next message). No turn is cut off, and the park keeps the state (`RestoredSessionState` preserves
+    WaitingForInput), so the dot, the unread ring, the taskbar count and the Telegram topic stay; a prompt
+    queued for it waits until the tab is woken (the runner never sends into a dormant tab).
+  - **The list** is `_StateTabsToDeactivate(state)`: every tab of the window the menu is open in whose
+    session is live, in exactly that state, and accepted by the park (one lean `HeadlinesOf` read; dormant
+    and adopted sessions dropped, so a tab the item already parked is never counted again; strip order).
+  - **The gray-out** is `_AnyStateTabToDeactivate(state)`, this window's list or the other windows'
+    (`_StateSessionsElsewhere`), for both menus (`Tab::SetAgentDeactivateIdleEnabled` /
+    `SetAgentDeactivateWaitingEnabled`, the card menu's `SetStateTabsProvider`).
+  - **The question:** when other windows hold such tabs too, `_DeactivateStateTabsAsking` asks "Deactivate
+    idle tabs" / "Deactivate Waiting-for-you tabs" — This window (N) (default) · All windows (M) · Cancel;
+    All windows hands each session to its host (`kDeactivateIdleSessionAction` /
+    `kDeactivateWaitingSessionAction` → `_DeactivateStateSessionLocal`, which parks it only if it is still
+    live and in that state). With such tabs in this window only, nothing asks.
 - **The park** (`_DeactivateManagedTab`) produces a restored tab's own object: it builds the resume-gated
   connection (resume / re-fork a never-messaged fork / fresh with the same id), wraps it in a donor pane
   (`_MakePane(NewTerminalArgs{}, nullptr, conn)`) and swaps the donor's never-initialized control into
@@ -324,9 +338,10 @@ tags, queue and runner mode, and the conversation resumes when the tab is entere
   (`_KeepTabHeaderInView`); each `[strip] deactivate:` line records the offset and scrollable width.
 - An app restart reopens a deactivated tab as a plain restored-dormant tab.
 - Logs: `[nav] deactivate-begin` / `deactivate-done` (scope `this` / `others` / `all` / `left` / `right` /
-  `folder` / `folder-others` / `idle`; a folder scope adds `elsewhere=<N> dir=<folder>`),
-  `[nav] deactivate-idle-ask` / `deactivate-idle-answer`, per tab `[deactivate] <sid8> … parked dormant …`,
-  and the `[retired-host]` lines.
+  `folder` / `folder-others` / `idle` / `waiting`; a folder scope adds `elsewhere=<N> dir=<folder>`),
+  `[nav] deactivate-idle-ask` / `deactivate-idle-answer` and `[nav] deactivate-waiting-ask` /
+  `deactivate-waiting-answer`, per tab `[deactivate] <sid8> … parked dormant …`, and the `[retired-host]`
+  lines.
 
 ## The Prompt Queue
 

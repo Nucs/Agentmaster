@@ -59,7 +59,7 @@ Turn on the **Telegram** bot (**Settings → Messaging**, with a bot of your own
 - **AI search** — the Sessions page's **AI** toggle takes a request in plain words; a hosted Sonnet 5.5 reads your sessions, shows the ones that fit with the evidence, and can reopen them into the window you choose.
 - **Presets** — launch or fork a session on other models and providers (OpenRouter, Xiaomi MiMo, NanoGPT, your own RunPod endpoint, any Anthropic-compatible URL), keys kept in Windows Credential Manager.
 - **Show Transcript** — any conversation as Markdown in a reading view; **Copy ▸ Transcript** at five detail levels.
-- **Deactivate** — park a session's claude while its tab keeps its place; entering the tab resumes the conversation. **Deactivate All Idle Tabs** parks every idle tab, in this window or all of them.
+- **Deactivate** — park a session's claude while its tab keeps its place; entering the tab resumes the conversation. **Deactivate All Idle Tabs** parks every idle tab, and **Deactivate All Waiting-for-you** every tab waiting for you (each stays Waiting-for-you), in this window or all of them.
 - **`agentmaster` CLI** — query the fleet from any shell, app up or down (`show` / `list` / `sessions` / `tabs` / `windows` / `external`, `--self`, `--json`).
 - **In-app updater** — checks GitHub on launch and from Settings → Updates; one-click update, pre-release and (warning-gated) nightly opt-ins, and uninstall. Nightly builds — unstable dev versions, tag contains `nightly` — are always skipped unless you accept the nightly opt-in.
 - **Keep Awake** — toolbar toggle (Off / Always / While-Running) so the machine won't sleep mid-run.

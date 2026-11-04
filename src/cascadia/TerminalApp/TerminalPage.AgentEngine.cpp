@@ -2161,9 +2161,10 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (session menu "Deactivate ▸" / "Close ▸" — the board card / tree row / side-panel card twins of the WT
         // tab menu's two submenus): every item but Close's two folder ones (SetCloseFolderHandler above) runs as the
         // session's own tab menu would, in the window that hosts its tab (_RunSessionMenuScope: here, or handed to that
-        // window) — except "Deactivate All Idle Tabs", which runs in THIS window and asks here (_DeactivateIdleTabsAsking).
-        // The content's scope values ARE the tab menu's codes — asserted here, so the two menus can never name different
-        // tabs for one item — and FavoriteAllTabs is the page's one extra code.
+        // window) — except the two state items, "Deactivate All Idle Tabs" and "Deactivate All Waiting-for-you", which run
+        // in THIS window and ask here (_DeactivateStateTabsAsking). The content's scope values ARE the tab menu's codes —
+        // asserted here, so the two menus can never name different tabs for one item — and FavoriteAllTabs is the page's one
+        // extra code.
         using SessionMenuScope = implementation::AgentManagerContent::SessionMenuScope;
         using SessionMenuVerb = implementation::AgentManagerContent::SessionMenuVerb;
         static_assert(static_cast<int32_t>(SessionMenuScope::ThisTab) == implementation::Tab::kDeactivateScopeThisTab, "the session menu's ThisTab must be the tab menu's code");
@@ -2174,6 +2175,7 @@ namespace winrt::TerminalApp::implementation
         static_assert(static_cast<int32_t>(SessionMenuScope::SameFolder) == implementation::Tab::kDeactivateScopeSameFolder, "the session menu's SameFolder must be the tab menu's code");
         static_assert(static_cast<int32_t>(SessionMenuScope::OtherSameFolder) == implementation::Tab::kDeactivateScopeOtherSameFolder, "the session menu's OtherSameFolder must be the tab menu's code");
         static_assert(static_cast<int32_t>(SessionMenuScope::IdleTabs) == implementation::Tab::kDeactivateScopeIdleTabs, "the session menu's IdleTabs must be the tab menu's code");
+        static_assert(static_cast<int32_t>(SessionMenuScope::WaitingTabs) == implementation::Tab::kDeactivateScopeWaitingTabs, "the session menu's WaitingTabs must be the tab menu's code");
         static_assert(static_cast<int32_t>(SessionMenuScope::FavoriteAllTabs) == kSessionMenuScopeFavoriteAllTabs, "the session menu's FavoriteAllTabs must be the page's code");
         content->SetSessionMenuScopeHandler([weakThis](winrt::hstring id, SessionMenuVerb verb, SessionMenuScope scope) {
             if (auto self = weakThis.get())
@@ -2200,14 +2202,18 @@ namespace winrt::TerminalApp::implementation
             }
             return implementation::AgentManagerContent::SessionTabSpot{ index, self->_tabs.Size() };
         });
-        // "Deactivate All Idle Tabs" in the session menu: enabled while a tab of THIS window (_IdleTabsToDeactivate, the list
-        // its click parks) or of another window (_IdleSessionsElsewhere, what the click's "All windows" answer reaches; read
-        // only when this window has none) would park — the tab menu's flyout-open gate, for a menu that acts in this window
-        // whatever window hosts its session (_RunSessionMenuScope keeps the idle scope here). Read on the UI thread each time
-        // a session menu builds its Deactivate ▸. A dead page answers false: nothing it could park.
-        content->SetIdleTabsProvider([weakThis]() -> bool {
+        // The session menu's two state items ("Deactivate All Idle Tabs", "Deactivate All Waiting-for-you"): each enabled while a
+        // tab of THIS window (_StateTabsToDeactivate, the list its click parks) or of another window (_StateSessionsElsewhere,
+        // what the click's "All windows" answer reaches; read only when this window has none) would park — the tab menu's
+        // flyout-open gate (_AnyStateTabToDeactivate, the one definition both menus share), for a menu that acts in this window
+        // whatever window hosts its session (_RunSessionMenuScope keeps the state scopes here). Asked once per item each time
+        // a session menu builds its Deactivate ▸, on the UI thread. A dead page answers false: nothing it could park. A scope
+        // that is not a state scope answers false too (no state item raises one; the content would gray a stray row rather
+        // than offer a click that parks by a guess).
+        content->SetStateTabsProvider([weakThis](SessionMenuScope scope) -> bool {
             const auto self = weakThis.get();
-            return self && (!self->_IdleTabsToDeactivate().empty() || !self->_IdleSessionsElsewhere().empty());
+            const auto* const stateScope = _DeactivateStateScopeFor(static_cast<int32_t>(scope));
+            return self && stateScope && self->_AnyStateTabToDeactivate(stateScope->state);
         });
         content->SetRestoreHandler([weakThis](winrt::hstring id) {
             if (auto self = weakThis.get())

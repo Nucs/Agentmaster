@@ -212,8 +212,11 @@ since=mark)`), then the UI.
 - A NEW FEATURE that no published release holds takes the same marker with an `-F<n>` id, so the same deselection
   covers it: TAB-F1 = Deactivate ▸ "Deactivate All Idle Tabs" and its "This window / All windows" question (2026-10-24,
   `test_tab_lifecycle.py::test_deactivate_all_idle_tabs` + `::test_deactivate_idle_tabs_asks_which_windows`; flows/07
-  TAB-02 phases 7–8). An existing test whose exact
-  list the feature extends accepts both forms meanwhile (`test_tab_menu.py::test_menu_fits_the_tab`, `DEACTIVATE_IDLE`).
+  TAB-02 phases 7–8; 0.8.1 holds it); TAB-F2 = Deactivate ▸ "Deactivate All Waiting-for-you" and its question
+  (2026-11-04, `::test_deactivate_all_waiting_tabs` + `::test_deactivate_waiting_tabs_asks_which_windows`; flows/07
+  TAB-02 phases 9–10). An existing test whose exact list the feature extends accepts every form meanwhile
+  (`test_tab_menu.py::test_menu_fits_the_tab`, `DEACTIVATE_IDLE` / `DEACTIVATE_WAITING`;
+  `test_tab_lifecycle.py::test_deactivate_all_idle_tabs` reads what follows All Tabs).
 - A new surface: open it in a probe, `python -m amdriver dump --out Z:\e2e\out\dumps\<name>.txt`, read the names and
   the structure, then add a page object method — never pixel positions.
 

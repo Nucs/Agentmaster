@@ -104,8 +104,9 @@ namespace winrt::TerminalApp::implementation
             TabsAfter = 4, // the tabs RIGHT of it; it and the tabs left of it are kept
             SameFolder = 5, // every live session whose effective work dir is this session's, in EVERY window, this one included
             OtherSameFolder = 6, // the same folder batch minus this session, which is kept
-            IdleTabs = 7, // Deactivate only ("Deactivate All Idle Tabs", 2026-10-24): every tab whose session is Idle (the gray dot) in the window the menu was opened in — or in every window, when other windows hold idle tabs too and the page's question is answered so (TerminalPage::_DeactivateIdleTabsAsking); never routed to the session's own window; Close has no twin
-            FavoriteAllTabs = 8, // Close only ("★ Favorite & Close All Tabs"): AllTabs with every managed session of that window starred first; Deactivate has no twin. Was 7 until IdleTabs took that number (never stored: the code lives one click long)
+            IdleTabs = 7, // Deactivate only ("Deactivate All Idle Tabs", 2026-10-24): every tab whose session is Idle (the gray dot) in the window the menu was opened in — or in every window, when other windows hold idle tabs too and the page's question is answered so (TerminalPage::_DeactivateStateTabsAsking); never routed to the session's own window; Close has no twin
+            WaitingTabs = 8, // Deactivate only ("Deactivate All Waiting-for-you", 2026-11-04): IdleTabs' twin for the sessions WAITING FOR YOU (the goldenrod dot) — every such tab in the window the menu was opened in, or in every window when the page's question is answered so (TerminalPage::_DeactivateStateTabsAsking); a parked tab keeps its Waiting-for-you state; never routed to the session's own window; Close has no twin
+            FavoriteAllTabs = 9, // Close only ("★ Favorite & Close All Tabs"): AllTabs with every managed session of that window starred first; Deactivate has no twin. Was 7 until IdleTabs took that number, then 8 until WaitingTabs took that one (never stored: the code lives one click long)
         };
         // Agentmaster: the verb of a SessionMenuScope item — what happens to the tabs it reaches. Deactivate PARKS them
         // (the agent shuts down, the tab keeps its place and resumes the conversation when it is focused or activated;
@@ -120,8 +121,9 @@ namespace winrt::TerminalApp::implementation
         // it exactly as the WT tab menu grays its own (Tab::_EnableMenuItems): "Tabs to the Left" on the left-most tab,
         // "Tabs to the Right" on the right-most one, "Other Tabs" on a window's only tab. A session hosted in ANOTHER
         // window has no spot here, and its strip items then stay enabled — that window applies them, and a scope with no
-        // tab in it does nothing (its hooks.log line says so). "Deactivate All Idle Tabs" does not read the spot: it acts
-        // in the window the menu is open in, whatever window hosts the session, so its gray-out is SetIdleTabsProvider's.
+        // tab in it does nothing (its hooks.log line says so). The two state items ("Deactivate All Idle Tabs", "Deactivate
+        // All Waiting-for-you") do not read the spot: they act in the window the menu is open in, whatever window hosts the
+        // session, so their gray-out is SetStateTabsProvider's.
         struct SessionTabSpot
         {
             uint32_t index{ 0 }; // the tab's index in the strip (0 == the left-most tab)
@@ -144,15 +146,19 @@ namespace winrt::TerminalApp::implementation
         //              enabled). Unwired => the same. Replaces any previous provider.
         // Returns nothing; throws nothing (a std::function move).
         void SetSessionTabSpotProvider(std::function<std::optional<SessionTabSpot>(const std::wstring&)> provider);
-        // Agentmaster (session menu "Deactivate ▸ Deactivate All Idle Tabs", 2026-10-24): install the page's answer to
-        // "would that item park anything?" — read each time a session menu builds its Deactivate ▸, to gray the item like
-        // the tab menu grays its own (TerminalPage.cpp's tab-flyout Opening handler).
-        //   provider — () -> true when at least one tab in THIS window or another one would park now (TerminalPage::
-        //              _IdleTabsToDeactivate / _IdleSessionsElsewhere: the lists the click acts on and offers). A throw is
-        //              caught and logged by the menu, which then leaves the item enabled (the click reads the states again
-        //              and parks nothing when there is nothing). Unwired => enabled. Replaces any previous provider.
+        // Agentmaster (session menu "Deactivate ▸" — its two STATE items, "Deactivate All Idle Tabs" (2026-10-24) and
+        // "Deactivate All Waiting-for-you" (2026-11-04)): install the page's answer to "would that item park anything?" —
+        // asked once per item each time a session menu builds its Deactivate ▸, to gray each item like the tab menu grays
+        // its own (TerminalPage.cpp's tab-flyout Opening handler). One provider keyed by the item's scope, so both items (and
+        // any later state item) share the page's one gate and can never be grayed by two different rules.
+        //   provider — (scope) -> true when at least one tab in THIS window or another one would park now for that item
+        //              (TerminalPage::_AnyStateTabToDeactivate: _StateTabsToDeactivate / _StateSessionsElsewhere with the
+        //              item's state — the lists its click acts on and offers); scope is SessionMenuScope::IdleTabs or
+        //              WaitingTabs. A throw is caught and logged by the menu, which then leaves that item enabled (the click
+        //              reads the states again and parks nothing when there is nothing). Unwired => both enabled. Replaces
+        //              any previous provider.
         // Returns nothing; throws nothing (a std::function move).
-        void SetIdleTabsProvider(std::function<bool()> provider);
+        void SetStateTabsProvider(std::function<bool(SessionMenuScope)> provider);
         void SetRestoreHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> re-launch (resume) a closed session
         // Agentmaster: the Launch box accepts EITHER a working dir OR a session id. A FOUND session id
         // turns the launch button into "Resume session" (resume the conversation) and reveals a "Fork"
@@ -1063,8 +1069,10 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (session menu "Deactivate ▸" / "Close ▸" — the WT tab menu's two submenus): build ONE of the two
         // for _PopulateSessionMenu. Both list the tab menu's scopes in ONE order, so they line up row for row: this tab ·
         // tabs to the left · tabs to the right · other tabs · of same folder · other of same folder · all tabs (Close ends
-        // with the tab menu's "★ Favorite & Close All Tabs"). Items are grayed by the tab menu's own rules: "Deactivate
-        // Tab" while the session is dormant, the strip items by `spot`. Every click runs one dispatcher tick later through
+        // with the tab menu's "★ Favorite & Close All Tabs"; Deactivate with its two state items, "Deactivate All Idle Tabs"
+        // and "Deactivate All Waiting-for-you"). Items are grayed by the tab menu's own rules: "Deactivate Tab" while the
+        // session is dormant, the strip items by `spot`, the two state items by _stateTabsProvider (a provider that throws
+        // is logged and leaves its item enabled). Every click runs one dispatcher tick later through
         // _sessionMenuScopeHandler — except Close's two folder items, which keep _CloseSessionsInFolder (the existing
         // confirm-then-cross-window folder close).
         //   verb           — which submenu: Deactivate (park, never asks) or Close (end, asks where the tab menu asks).
@@ -1114,7 +1122,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring, winrt::hstring)> _closeFolderHandler; // Agentmaster ("Close ▸ Of Same Folder" / "Other of Same Folder"): (folder, excludeId) -> the page closes every live managed session in that folder (cross-window) SKIPPING excludeId, the content having already shown the one confirm
         std::function<void(winrt::hstring, SessionMenuVerb, SessionMenuScope)> _sessionMenuScopeHandler; // Agentmaster (session menu "Deactivate ▸" / "Close ▸"): (sessionId, verb, scope) -> the page runs that item as the session's own tab menu would, in the window hosting the tab (SetSessionMenuScopeHandler); null until wired — the items then do nothing
         std::function<std::optional<SessionTabSpot>(const std::wstring&)> _sessionTabSpotProvider; // Agentmaster (session menu "Deactivate ▸" / "Close ▸"): (sessionId) -> where its tab sits in THIS window's strip, nullopt when another window hosts it — grays the strip items like the tab menu (SetSessionTabSpotProvider); null => nothing grayed
-        std::function<bool()> _idleTabsProvider; // Agentmaster (session menu "Deactivate All Idle Tabs"): () -> would that item park a tab in this window or another one now — grays the item like the tab menu (SetIdleTabsProvider); null => enabled
+        std::function<bool(SessionMenuScope)> _stateTabsProvider; // Agentmaster (session menu "Deactivate All Idle Tabs" / "Deactivate All Waiting-for-you"): (scope) -> would that item park a tab in this window or another one now — grays each item like the tab menu (SetStateTabsProvider); null => both enabled
         std::function<void(winrt::hstring)> _restoreHandler;
         std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _resumeSessionHandler; // Agentmaster: launch box holds a FOUND session id -> resume it (id, dir, title)
         std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _forkSessionHandler; // Agentmaster: launch box Fork -> fork the session id (id, dir, title)

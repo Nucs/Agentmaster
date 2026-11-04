@@ -379,10 +379,16 @@ def test_deactivate_scopes(am, mock):
 
 
 DEACTIVATE_IDLE = "Deactivate All Idle Tabs"
-"""Deactivate ▸'s last item since 2026-10-24 (test_tab_menu.py has the same constant for the submenu's list)."""
+"""Deactivate ▸'s item after All Tabs since 2026-10-24 (test_tab_menu.py has the same constant for the submenu's list)."""
 
 IDLE_QUESTION = "Deactivate idle tabs"
 """The title of the question DEACTIVATE_IDLE asks while other windows hold idle tabs too (2026-10-24)."""
+
+DEACTIVATE_WAITING = "Deactivate All Waiting-for-you"
+"""Deactivate ▸'s last item since 2026-11-04, after DEACTIVATE_IDLE (test_tab_menu.py has the same constant)."""
+
+WAITING_QUESTION = "Deactivate Waiting-for-you tabs"
+"""The title of the question DEACTIVATE_WAITING asks while other windows hold Waiting-for-you tabs too (2026-11-04)."""
 
 
 @pytest.mark.p1
@@ -405,9 +411,12 @@ def test_deactivate_all_idle_tabs(am, mock):
     s["t2"].wait_state("WaitingForInput", timeout_s=30)
     for ses in s.values():
         ses.wait_running()  # every claude runs before the park, so "parked" below means this item parked it
-    # The item is the submenu's last one, after All Tabs, and enabled: two Idle sessions are there to park.
+    # The item follows All Tabs — the submenu's last one on 0.8.1, the one before DEACTIVATE_WAITING since 2026-11-04
+    # (TAB-F2) — and is enabled: two Idle sessions are there to park.
     sub = w.tabs.context_menu("t2").submenu("Deactivate")
-    assert sub.names()[-2:] == ["All Tabs", DEACTIVATE_IDLE], sub.names()
+    names = sub.names()
+    after_all = names[names.index("All Tabs") + 1:] if "All Tabs" in names else names
+    assert after_all in ([DEACTIVATE_IDLE], [DEACTIVATE_IDLE, DEACTIVATE_WAITING]), names
     assert sub.enabled(DEACTIVATE_IDLE)
     Menu.dismiss_all(am)
     # 7. From t2's menu (t2 itself is not Idle): t1 and t3 park, t2 keeps running. t3 is the focused tab, so the
@@ -506,6 +515,173 @@ def test_deactivate_idle_tabs_asks_which_windows(am, mock):
     # E1: no window holds an Idle tab a park would take now: the item is grayed.
     sub = w1.tabs.context_menu("t4").submenu("Deactivate")
     assert not sub.enabled(DEACTIVATE_IDLE)
+    Menu.dismiss_all(am)
+
+
+def _wait_parked_waiting(window, ses, title: str) -> None:
+    """Check that a session parked by DEACTIVATE_WAITING kept its Waiting-for-you state: its record still says
+    WaitingForInput for two seconds (the closing claude's SessionEnd must not turn it into Done — its host token is
+    retired), and its tab's status (a build since 2026-10-23) reads "waiting-for-you" first and "not started" (the
+    dormant dot).
+
+    Args:
+        window: The window whose strip holds the tab.
+        ses: The Session.
+        title: Its tab's title.
+    Returns:
+        None.
+    Raises:
+        AssertionError / WaitTimeout: When the state or the tab's status differs.
+    """
+    hold_true(lambda: ses.state == "WaitingForInput", 2.0, what=f"{title} still Waiting-for-you after its park",
+              describe=lambda: ses.state)
+
+    def facets() -> list[str]:
+        """The tab's status facets now ([] when the tab is not in the strip this instant).
+
+        Returns:
+            The facets.
+        """
+        tab = window.tabs.find(title)
+        return tab.facets() if tab is not None else []
+
+    wait_until(lambda: facets()[:1] == ["waiting-for-you"] and "not started" in facets(), 10,
+               what=f"{title}'s tab showing a dormant Waiting-for-you dot", describe=facets)
+
+
+@pytest.mark.p1
+@pytest.mark.flow("TAB-02")
+@pytest.mark.needs_fix("TAB-F2")
+def test_deactivate_all_waiting_tabs(am, mock):
+    """TAB-02 phase 9 and E1's content gate (2026-11-04, the user's "In menu items with 'Deactivate' ->, I want
+    Deactivate All Waiting-for-you"): Deactivate ▸ ends with "Deactivate All Waiting-for-you", which parks every session
+    of the window in the Waiting-for-you state and nothing else — t1 and t3 are Waiting for you (each answered its first
+    prompt), t2 is Idle (launched with no prompt). Each parked session KEEPS its Waiting-for-you state; the item is then
+    grayed (a parked tab is dormant and no longer counts) while the idle item, on its own gate, stays enabled for t2.
+    No published release holds the item (0.8.1's submenu ends at "Deactivate All Idle Tabs"), hence
+    needs_fix("TAB-F2").
+
+    Args:
+        am: The app.
+        mock: The scripted model (t1's and t3's first turns).
+    """
+    s = {"t1": am.launch("t1"), "t2": am.launch("t2", prompt=None), "t3": am.launch("t3")}
+    w = am.window
+    for title in ("t1", "t3"):
+        s[title].wait_state("WaitingForInput", timeout_s=30)
+    s["t2"].wait_state("Idle", timeout_s=30)
+    for ses in s.values():
+        ses.wait_running()  # every claude runs before the park, so "parked" below means this item parked it
+    # The item is the submenu's last one, right after the idle item, and enabled: two Waiting-for-you sessions to park.
+    sub = w.tabs.context_menu("t2").submenu("Deactivate")
+    assert sub.names()[-3:] == ["All Tabs", DEACTIVATE_IDLE, DEACTIVATE_WAITING], sub.names()
+    assert sub.enabled(DEACTIVATE_WAITING)
+    Menu.dismiss_all(am)
+    # 9. From t2's menu (t2 itself is Idle): t1 and t3 park, t2 keeps running. t3 is the focused tab, so the window
+    #    shows its Agent Manager page before t3's control is swapped (the scope's focused-tab rule). One window only:
+    #    "All windows" would park the same tabs, so nothing asks (phase 10 has the question).
+    mark = am.profile.hooks.mark()
+    w.tabs.deactivate("t2", DEACTIVATE_WAITING)
+    am.profile.hooks.wait(r"\[nav\] deactivate-done scope=waiting parked=2 skipped=0", since=mark, timeout_s=20)
+    am.profile.hooks.wait(r"\[nav\] deactivate-waiting-answer this-window \(no other window holds a Waiting-for-you "
+                          r"tab; nothing asked\)", since=mark)
+    assert Dialog.find(am, title=WAITING_QUESTION) is None
+    s["t1"].wait_parked(since=mark)
+    s["t3"].wait_parked(since=mark)
+    hold_true(lambda: s["t2"].running(), 2.0, what="t2 (Idle) still running after the Waiting-for-you park")
+    for title in ("t1", "t3"):
+        _wait_parked_waiting(w, s[title], title)
+    # E1: no Waiting-for-you session is left that a park would take (t1 and t3 are dormant, though still Waiting for
+    #     you), so the item is grayed — on its own gate: the idle item stays enabled, t2 being Idle and running.
+    sub = w.tabs.context_menu("t2").submenu("Deactivate")
+    assert not sub.enabled(DEACTIVATE_WAITING)
+    assert sub.enabled(DEACTIVATE_IDLE)
+    Menu.dismiss_all(am)
+
+
+@pytest.mark.p1
+@pytest.mark.flow("TAB-02")
+@pytest.mark.needs_fix("TAB-F2")
+def test_deactivate_waiting_tabs_asks_which_windows(am, mock):
+    """TAB-02 phase 10 and E1 (2026-11-04): phase 8 with the states swapped. While another window holds Waiting-for-you
+    tabs too, "Deactivate All Waiting-for-you" asks first — a dialog "Deactivate Waiting-for-you tabs" with This window
+    (N) · All windows (M) · Cancel. Window 1 holds t1 and t2 (Waiting for you) and t4 (Idle, launched with no prompt);
+    window 2 holds t3 (Waiting for you). Cancel parks nothing; This window parks t1 and t2 only; asked again with no
+    Waiting-for-you tab left in window 1, "This window (0)" is grayed and All windows parks window 2's t3 (its only tab:
+    window 2 shows its Agent Manager page first); then no window holds one and the item is grayed. t4 keeps running
+    throughout, and every parked session stays Waiting for you. No published release holds the item or its question,
+    hence needs_fix("TAB-F2").
+
+    Args:
+        am: The app.
+        mock: The scripted model (t1's, t2's and t3's first turns).
+    """
+    s = {"t1": am.launch("t1"), "t2": am.launch("t2"), "t3": am.launch("t3"), "t4": am.launch("t4", prompt=None)}
+    w1 = am.window
+    for title in ("t1", "t2", "t3"):
+        s[title].wait_state("WaitingForInput", timeout_s=30)
+    s["t4"].wait_state("Idle", timeout_s=30)
+    w2 = w1.tabs.move_to_new_window("t3")
+    w1.tabs.wait_gone("t3")
+    for ses in s.values():
+        ses.wait_running()  # every claude runs first, so "parked" below means the question's answer parked it
+    s["t3"].wait_state("WaitingForInput", timeout_s=10)  # the move keeps the session and its state
+
+    def ask(buttons: list) -> Dialog:
+        """Choose the item from t4's tab menu (t4 is Idle, not Waiting for you) and return the question it asks.
+
+        Args:
+            buttons: The button texts the dialog must show, in order (primary, secondary, close).
+        Returns:
+            The open Dialog.
+        Raises:
+            WaitTimeout: When no question appeared.
+            AssertionError: When its buttons differ.
+        """
+        w1.tabs.deactivate("t4", DEACTIVATE_WAITING)
+        dlg = Dialog.wait(am, title=WAITING_QUESTION, timeout_s=10)
+        assert dlg.buttons() == buttons, dlg.buttons()
+        return dlg
+
+    # 10a. Cancel parks nothing; the counts read "This window: 2 • All windows: 3.".
+    mark = am.profile.hooks.mark()
+    dlg = ask(["This window (2)", "All windows (3)", "Cancel"])
+    assert "This window: 2" in dlg.text() and "All windows: 3" in dlg.text(), dlg.text()
+    am.profile.hooks.wait(r"\[nav\] deactivate-waiting-ask from=tab menu here=2 elsewhere=1", since=mark)
+    dlg.press("Cancel")
+    am.profile.hooks.wait(r"\[nav\] deactivate-waiting-answer cancelled", since=mark)
+    hold_true(lambda: all(ses.running() for ses in s.values()), 2.0, what="every session still running after Cancel")
+    # 10b. This window: t1 and t2 park (and stay Waiting for you); window 2's t3 and the Idle t4 keep running.
+    mark = am.profile.hooks.mark()
+    ask(["This window (2)", "All windows (3)", "Cancel"]).press("This window (2)")
+    am.profile.hooks.wait(r"\[nav\] deactivate-waiting-answer this-window", since=mark)
+    am.profile.hooks.wait(r"\[nav\] deactivate-done scope=waiting parked=2 skipped=0", since=mark, timeout_s=20)
+    s["t1"].wait_parked(since=mark)
+    s["t2"].wait_parked(since=mark)
+    hold_true(lambda: s["t3"].running() and s["t4"].running(), 2.0, what="t3 (window 2) and t4 still running")
+    for title in ("t1", "t2"):
+        _wait_parked_waiting(w1, s[title], title)
+    # 10c / E1: window 1 holds no Waiting-for-you tab to park now but window 2 does, so the item stays enabled and asks
+    #     again, with "This window (0)" grayed; All windows hands t3 to window 2, which parks it.
+    sub = w1.tabs.context_menu("t4").submenu("Deactivate")
+    assert sub.enabled(DEACTIVATE_WAITING)
+    Menu.dismiss_all(am)
+    mark = am.profile.hooks.mark()
+    dlg = ask(["This window (0)", "All windows (1)", "Cancel"])
+    this_window = dlg.element().find(role="button", name="This window (0)")
+    assert this_window is not None and not this_window.enabled
+    dlg.press("All windows (1)")
+    am.profile.hooks.wait(r"\[nav\] deactivate-waiting-answer all-windows \(1 Waiting-for-you session", since=mark)
+    am.profile.hooks.wait(rf"\[nav\] deactivate-remote {s['t3'].short} \(a waiting-for-you deactivate started in "
+                          r"another window\)", since=mark, timeout_s=20)
+    s["t3"].wait_parked(since=mark)
+    w2.manager.wait_showing()
+    hold_true(lambda: s["t4"].running(), 2.0, what="t4 (Idle) still running")
+    hold_true(lambda: s["t3"].state == "WaitingForInput", 2.0, what="t3 still Waiting-for-you after its park",
+              describe=lambda: s["t3"].state)
+    # E1: no window holds a Waiting-for-you tab a park would take now: the item is grayed.
+    sub = w1.tabs.context_menu("t4").submenu("Deactivate")
+    assert not sub.enabled(DEACTIVATE_WAITING)
     Menu.dismiss_all(am)
 
 

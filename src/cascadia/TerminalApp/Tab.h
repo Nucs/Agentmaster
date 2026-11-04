@@ -211,13 +211,23 @@ namespace winrt::TerminalApp::implementation
         void SetAgentDeactivateState(bool visible, bool thisTabDormant); // Agentmaster (deactivate): show/hide the "Deactivate ▸" submenu (managed, NON-adopted session tabs only; page-driven at flyout-open) + gray its "Deactivate Tab" item while THIS session is already dormant (nothing running to stop — "Activate Tab" is the offered verb then; the batch items do not follow it, because OTHER tabs may be running — the strip-position ones are gated by tab index in _EnableMenuItems instead)
         // Agentmaster (deactivate — "Deactivate All Idle Tabs"): gray that item of the "Deactivate ▸" submenu while no window
         // holds a tab it would park, so it is never a silent no-op; the page decides at flyout-open
-        // (TerminalPage::_IdleTabsToDeactivate: Idle, live, ours, not adopted, running, not mid-delivery — and, when this
-        // window has none, _IdleSessionsElsewhere: the other windows' idle tabs, which the click's "This window / All
-        // windows" question offers). Unlike the strip items, which _EnableMenuItems gates by position, this gate needs
-        // session states, which only the page knows.
+        // (TerminalPage::_AnyStateTabToDeactivate(Idle): its _StateTabsToDeactivate — Idle, live, ours, not adopted, running,
+        // not mid-delivery — and, when this window has none, its _StateSessionsElsewhere: the other windows' idle tabs, which
+        // the click's "This window / All windows" question offers). Unlike the strip items, which _EnableMenuItems gates by
+        // position, this gate needs session states, which only the page knows.
         //   enabled — true when at least one tab of this window or another one would park now.
         // Returns nothing. Throws the WinRT error of the property write; UI thread only (asserted).
         void SetAgentDeactivateIdleEnabled(bool enabled);
+        // Agentmaster (deactivate — "Deactivate All Waiting-for-you", 2026-11-04): the same gate for the item that parks the
+        // tabs whose session is WAITING FOR YOU (SessionState::WaitingForInput, the goldenrod dot), decided by the page at
+        // flyout-open with the very lists that item's click acts on and offers (TerminalPage::_AnyStateTabToDeactivate
+        // (WaitingForInput)). A tab that item parked stays Waiting-for-you but is dormant, and a dormant tab is never counted,
+        // so the item grays itself once every such tab is parked — it can never be clicked into a no-op twice.
+        // Kept apart from SetAgentDeactivateIdleEnabled so each item keeps a gate of its own: one state can have tabs to park
+        // while the other has none.
+        //   enabled — true when at least one tab of this window or another one would park now.
+        // Returns nothing. Throws the WinRT error of the property write; UI thread only (asserted).
+        void SetAgentDeactivateWaitingEnabled(bool enabled);
         void SetNewSessionModels(const std::vector<std::pair<std::wstring, std::wstring>>& models, bool isCodex, std::function<void(std::function<void(winrt::hstring)>)> specify = nullptr, std::function<void()> addPresets = nullptr); // Agentmaster (launch-model picker): swap the plain "New Session Here" item for a submenu — Default + one item per configured {displayName, modelId} — and (re)populate it; page-driven at flyout-open from ParseLaunchModels(AppSettings.launchModels). isCodex (or an empty list) keeps the PLAIN item (the models are Claude models — a codex spawn takes no --model) PRESETS: `addPresets` = the page's "Add presets…" opener, passed only while the user has no preset (ShouldOfferAddPresets); its presence is part of the rebuild key
         void SetForkSessionModels(const std::vector<std::pair<std::wstring, std::wstring>>& models, bool isManagedClaude, std::function<void(std::function<void(winrt::hstring)>)> specify = nullptr, std::function<void()> addPresets = nullptr); // Agentmaster (launch-model picker): same swap for "Fork session" — the submenu (Default + models) shows ONLY for a managed CLAUDE tab with a non-empty list (a fork is a launch, so --model applies); a Codex tab (codex fork takes no --model) and a plain shell tab (whose "Fork session" is really WT's duplicate-tab) keep the PLAIN item. Page-driven at flyout-open PRESETS: `addPresets` = the page's "Add presets…" opener, passed only while the user has no preset (ShouldOfferAddPresets); its presence is part of the rebuild key
         void SetFavoriteAndCloseAllVisible(bool visible); // Agentmaster (FAVORITES.md): show/hide the "★ Favorite & close all tabs" close-submenu item (shown only when the window hosts >=1 managed session; page-driven at flyout-open)
@@ -249,11 +259,15 @@ namespace winrt::TerminalApp::implementation
         til::event<winrt::delegate<>> RenamerOpenChanged; // Agentmaster (tab title fit): the header's rename box just OPENED (ActivateTabRenamer, after BeginRename) or CLOSED (the header's RenameEnded) -> page re-applies this tab's width bounds (TerminalPage::_ApplyTabSizingToTab), which hold the SELECTED tab of an Equal-width strip at the maximum tab width while the box is open (RenamingTabWidth) and drop that hold when it closes, then keeps the tab in the strip's view while the box is open (TerminalPage::_TrackRenamingTabInStrip — the strip ignores bring-into-view requests, so focusing the box no longer scrolls it into view). Raised AFTER the box's visibility flipped, so a handler reading the header's InRename() sees the new state
         til::event<winrt::delegate<>> ActivateSessionRequested; // Agentmaster (eager-init): context-menu "Activate Tab" -> page starts this tab's DORMANT session's claude IN PLACE (TermControl::InitializeWithSize), no focus change
         // Agentmaster (deactivate): the SCOPE codes DeactivateTabsRequested carries — which tabs the page
-        // parks (TerminalPage::_DeactivateTabsFromMenu). They mirror the "Close ▸" submenu's scopes one for
-        // one. The five strip scopes act on THIS window only; the two folder scopes reach EVERY window,
-        // like their Close twins. ⚠ The values are part of the menu <-> page contract: add a new scope at
-        // the end and teach the page's dispatcher about it, never renumber (an unknown code is refused and
-        // logged, so a mismatch parks nothing rather than the wrong tabs).
+        // parks (TerminalPage::_DeactivateTabsFromMenu). Codes 0–6 mirror the "Close ▸" submenu's scopes one
+        // for one. The five strip scopes act on THIS window only; the two folder scopes reach EVERY window,
+        // like their Close twins. The two STATE scopes (7 = Idle, 8 = Waiting-for-you) have no Close twin:
+        // they pick tabs by their session's state, in this window or — answered so — in every window
+        // (TerminalPage::_DeactivateStateTabsAsking). ⚠ The values are part of the menu <-> page contract: add
+        // a new scope at the end and teach the page's dispatcher about it, never renumber (an unknown code is
+        // refused and logged, so a mismatch parks nothing rather than the wrong tabs). The session menu mirrors
+        // these codes (AgentManagerContent::SessionMenuScope, static_asserted where the page wires it), and its
+        // one extra code (kSessionMenuScopeFavoriteAllTabs) takes the next free number after them.
         static constexpr int32_t kDeactivateScopeThisTab{ 0 }; // the right-clicked tab alone
         static constexpr int32_t kDeactivateScopeOtherTabs{ 1 }; // every other tab of this window; the right-clicked one keeps running
         static constexpr int32_t kDeactivateScopeAllTabs{ 2 }; // every tab of this window, the right-clicked one included
@@ -261,7 +275,8 @@ namespace winrt::TerminalApp::implementation
         static constexpr int32_t kDeactivateScopeTabsAfter{ 4 }; // every tab RIGHT of the right-clicked one (a higher strip index); it keeps running
         static constexpr int32_t kDeactivateScopeSameFolder{ 5 }; // every live session of the right-clicked session's effective work dir, in every window, itself included
         static constexpr int32_t kDeactivateScopeOtherSameFolder{ 6 }; // the same folder batch minus the right-clicked session, which keeps running
-        static constexpr int32_t kDeactivateScopeIdleTabs{ 7 }; // "Deactivate All Idle Tabs": every tab of this window whose session is IDLE (the gray dot, SessionState::Idle) and can be parked now; a Running / Waiting-for-you / Needs-approval / Error / Done session keeps running, the right-clicked one included. The page asks "This window / All windows" first when other windows hold idle tabs too (TerminalPage::_DeactivateIdleTabsAsking)
+        static constexpr int32_t kDeactivateScopeIdleTabs{ 7 }; // "Deactivate All Idle Tabs": every tab of this window whose session is IDLE (the gray dot, SessionState::Idle) and can be parked now; a Running / Waiting-for-you / Needs-approval / Error / Done session keeps running, the right-clicked one included. The page asks "This window / All windows" first when other windows hold idle tabs too (TerminalPage::_DeactivateStateTabsAsking)
+        static constexpr int32_t kDeactivateScopeWaitingTabs{ 8 }; // "Deactivate All Waiting-for-you" (2026-11-04): the idle scope's twin for the WAITING-FOR-YOU state (the goldenrod dot, SessionState::WaitingForInput: the turn is done and the session waits for the user's next message) — every tab of this window in that state that can be parked now; a Running / Needs-approval / Error / Idle / Done session keeps running, the right-clicked one included. A parked tab KEEPS the state (RestoredSessionState preserves it), so its dot, unread ring and Telegram topic stay; a prompt queued for it waits until the tab is woken. Asks "This window / All windows" like the idle scope (TerminalPage::_DeactivateStateTabsAsking). The session menu's own extra code, kSessionMenuScopeFavoriteAllTabs, moved from 8 to 9 for it
         til::event<winrt::delegate<int32_t /*scope*/>> DeactivateTabsRequested; // Agentmaster (deactivate): context-menu "Deactivate ▸ ..." -> page parks tabs back in the DORMANT waiting-for-focus state a freshly reopened window's tabs sit in (claude shut down, tab kept in place; focusing/activating it resumes the conversation). scope: one of the kDeactivateScope* codes above
         til::event<winrt::delegate<>> CloseTabsBeforeRequested; // Agentmaster: context-menu "Close > Close tabs to the left" -> page closes every tab left of this one
         til::event<winrt::delegate<>> CloseAllTabsRequested; // Agentmaster: context-menu "Close > Close all tabs" -> page closes every tab in this window (the window then stays on its Agent Manager page)
@@ -330,6 +345,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _deactivateOtherSessionsOfSameFolderMenuItem{}; // Agentmaster (deactivate): "Deactivate ▸ Other of Same Folder" — the same folder batch minus this tab's session, which keeps running
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _deactivateAllTabsMenuItem{}; // Agentmaster (deactivate): "Deactivate ▸ All Tabs" — every managed session tab in this window ("as if the app had just opened")
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _deactivateIdleTabsMenuItem{}; // Agentmaster (deactivate): "Deactivate ▸ Deactivate All Idle Tabs" — every tab of this window whose session is Idle (kDeactivateScopeIdleTabs), or of every window when the page's question is answered so; grayed while none would park in any window (SetAgentDeactivateIdleEnabled)
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _deactivateWaitingTabsMenuItem{}; // Agentmaster (deactivate, 2026-11-04): "Deactivate ▸ Deactivate All Waiting-for-you" — every tab of this window whose session is Waiting-for-you (kDeactivateScopeWaitingTabs), or of every window when the page's question is answered so; the submenu's last item; grayed while none would park in any window (SetAgentDeactivateWaitingEnabled)
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closePaneMenuItem{};
         // Agentmaster: the "Move tab" / "Close" sub-menus and the "Close tab" item are members (not
         // locals in _CreateContextMenu). They were promoted so the old pinned Manager tab could gray

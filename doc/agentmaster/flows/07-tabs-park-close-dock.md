@@ -99,19 +99,49 @@ queue and runner mode — exactly a window-restored tab; entering or activating 
    `[nav] deactivate-idle-answer cancelled …` / `… this-window` / `… all-windows (1 idle session(s) handed to the
    windows that host them)`; window 2 logs `[nav] deactivate-remote <T3> (an idle-tabs deactivate started in
    another window)` and its own `deactivate-begin scope=this` / `deactivate-done … parked=1`.
+9. **Deactivate All Waiting-for-you** (2026-11-04, NOT BUILT; the user's "In menu items with 'Deactivate' ->, I
+   want Deactivate All Waiting-for-you"; Deactivate ▸'s last item, after Deactivate All Idle Tabs, here and in
+   the card / row menu — flows/02 SP-02 E11; test `test_deactivate_all_waiting_tabs`, `needs_fix("TAB-F2")`) →
+   with T1 and T3 Waiting for you (each answered one prompt), T2 Idle (launched with no prompt) and no
+   Waiting-for-you tab in any other window: from any tab of window 1, T1 and T3 park at once — nothing asks —
+   and T2 keeps running. Each parked tab KEEPS its Waiting-for-you state: the goldenrod dot (dormant), its unread
+   ring when it had one, and its Telegram topic. Running, Needs-approval, Error, Idle and Done sessions keep
+   running. *Check:* [LOG] `[nav] deactivate-waiting-answer this-window (no other window holds a Waiting-for-you
+   tab; nothing asked)`, then `[nav] deactivate-done scope=waiting parked=2 skipped=0`; [ENG] T1 and T3
+   `started=false`, `state=WaitingForInput`; the item is grayed afterwards (E1).
+10. **This window or All windows, for Waiting-for-you** (2026-11-04, NOT BUILT; test
+   `test_deactivate_waiting_tabs_asks_which_windows`, `needs_fix("TAB-F2")`) → phase 8 with the states swapped:
+   window 1 holds T1, T2 (Waiting for you) and T4 (Idle), window 2 holds T3 (Waiting for you). From T4's menu the
+   item asks first: a dialog **Deactivate Waiting-for-you tabs** — "This window: 2 • All windows: 3." — with
+   **This window (2)** (the default) · **All windows (3)** · **Cancel**, and the same three answers: Cancel parks
+   nothing; This window parks T1 and T2; asked again, **This window (0)** is grayed and *All windows (1)* parks T3
+   in window 2 (window 2 shows its Agent Manager page first); T4 keeps running throughout. *Check:* [LOG] `[nav]
+   deactivate-waiting-ask from=tab menu here=2 elsewhere=1`, `[nav] deactivate-waiting-answer cancelled …` / `…
+   this-window` / `… all-windows (1 Waiting-for-you session(s) handed to the windows that host them)`; window 2
+   logs `[nav] deactivate-remote <T3> (a waiting-for-you deactivate started in another window)`.
 
 **Edge cases**
 - **E1 Gates:** Tabs to the Left grayed on the left-most tab, Tabs to the Right on the right-most, Other Tabs
   on a window's only tab; an enabled item can still park nothing (`parked=0`). Deactivate All Idle Tabs is
   grayed while NO window holds an Idle session it would park (phase 8 leaves none: T1, T2 and T3 are dormant);
-  with Idle tabs in other windows only, it stays enabled and asks (phase 8's second question).
+  with Idle tabs in other windows only, it stays enabled and asks (phase 8's second question). Deactivate All
+  Waiting-for-you follows the same rule for Waiting-for-you sessions; a tab it parked stays Waiting-for-you but
+  is dormant, and a dormant tab is never counted, so the item grays itself once every such tab is parked
+  (phases 9–10). Each state item has its own gate: with only Idle tabs left, the Waiting-for-you item is grayed
+  while the idle item is enabled.
 - **E2 A running turn** in a folder-scoped tab of window 2 → cut off without asking (the tooltip warns "in
   EVERY window, without asking first").
 - **E3 Shell tabs in scope** → untouched (only managed sessions park).
-- **E4 A session that is busy again when the answer reaches its window** (phase 8, All windows) → it keeps
-  running; that window logs `[deactivate] <sid8> left running - another window's "Deactivate All Idle Tabs" (all
-  windows) named it, but it is no longer idle (<state>)`. The prompt's counts are read at the click (the other
-  windows' from the registry: Idle, started, not adopted), so a window may then park one fewer than it said.
+- **E4 A session that is busy again when the answer reaches its window** (phases 8 and 10, All windows) → it
+  keeps running; that window logs `[deactivate] <sid8> left running - another window's "Deactivate All Idle Tabs"
+  (all windows) named it, but it is no longer idle (<state>)` — or, for phase 10, `… "Deactivate All
+  Waiting-for-you" (all windows) named it, but it is no longer waiting for you (<state>)` (its next message
+  arrived meanwhile). The prompt's counts are read at the click (the other windows' from the registry: in the
+  state, started, not adopted), so a window may then park one fewer than it said.
+- **E5 A Waiting-for-you tab with a queued prompt and the runner on Auto** (phase 9) → parked anyway; the prompt
+  stays Pending and nothing is sent while the tab is parked (PQR-10); waking the tab (a click, Activate Tab)
+  lets the runner send it after the settle. The item's tooltip and question say so ("a prompt queued for it
+  waits until you wake it").
 
 ---
 

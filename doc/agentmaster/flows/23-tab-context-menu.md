@@ -49,7 +49,7 @@ command does; the deeper behavior of Deactivate, Close and the strip lives in [0
 | New Session Here ▸ | ✓ (plain for Codex) | ✓ | Default · Specify… · the launch models · (presets) · Add presets… |
 | Restart session | ✓ | ✓ | |
 | Fork session ▸ | ✓ (plain for Codex) | plain = Windows Terminal's duplicate tab | Default · Specify… · the launch models · (presets) · Add presets… |
-| Deactivate ▸ | ✓, never for an ADOPTED session | — | Deactivate Tab (disabled when dormant) · Tabs to the Left · Tabs to the Right · Other Tabs · Of Same Folder · Other of Same Folder · All Tabs · Deactivate All Idle Tabs (2026-10-24, NOT BUILT: the window's Idle sessions — asking "This window / All windows" first when other windows hold Idle tabs too; disabled while none would park in any window — flows/07 TAB-02 phases 7–8) |
+| Deactivate ▸ | ✓, never for an ADOPTED session | — | Deactivate Tab (disabled when dormant) · Tabs to the Left · Tabs to the Right · Other Tabs · Of Same Folder · Other of Same Folder · All Tabs · Deactivate All Idle Tabs (2026-10-24, NOT BUILT: the window's Idle sessions — asking "This window / All windows" first when other windows hold Idle tabs too; disabled while none would park in any window — flows/07 TAB-02 phases 7–8) · Deactivate All Waiting-for-you (2026-11-04, NOT BUILT: the same for the window's Waiting-for-you sessions, which keep that state when parked; its own gate — flows/07 TAB-02 phases 9–10) |
 | Close ▸ | ✓ | ✓ | Close tabs to the left · Close tabs to the right · Close other tabs · Of Same Folder · Other of Same Folder (session) · Close all tabs · ★ Favorite & close all tabs (when the window holds a managed session) · Close pane (only when the tab is split) |
 | Close tab | ✓ | ✓ | |
 
@@ -108,10 +108,12 @@ Deactivate); a parked tab offers Activate; every item reflects the tab NOW, not 
 **Edge cases**
 - **E1 An enabled scope that reaches only shells** (Deactivate ▸ Tabs to the Right over shell tabs) parks nothing:
   `[nav] deactivate-done … parked=0` — enabled by position, not by content (documented, not a defect).
-- **E2 Deactivate All Idle Tabs is the one item gated by CONTENT** (2026-10-24, NOT BUILT): enabled only while a
-  window — this one, or another one, which the click's "This window / All windows" question reaches (flows/07 TAB-02
-  phase 8) — holds a session in the Idle state that a park would accept (the page counts them at the flyout's
-  Opening), whatever the tab's position. It is also the one Deactivate item that can ask before it parks.
+- **E2 The two state items are the ones gated by CONTENT** (Deactivate All Idle Tabs since 2026-10-24, in 0.8.1;
+  Deactivate All Waiting-for-you 2026-11-04, NOT BUILT): each enabled only while a window — this one, or another one, which the
+  click's "This window / All windows" question reaches (flows/07 TAB-02 phases 8 and 10) — holds a session in its
+  state (Idle / Waiting-for-you) that a park would accept (the page counts them at the flyout's Opening), whatever
+  the tab's position; each has its own gate, so one can be enabled while the other is grayed. They are also the
+  only Deactivate items that can ask before they park.
 
 ---
 
