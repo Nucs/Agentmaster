@@ -10,9 +10,11 @@ a feature, SP-K2); **+** opens the
 launch row in a card at the click; per-window splitters; « collapses. 0.8.0: the card list is virtualized and
 a card costs no composition node; the **+** card opens with its folder list ready; one click on Launch
 while its preset menu is open. After 0.8.0 (NOT BUILT): each card's dot is the tab strip's status icon — the
-draft's three dots under it, the red unread ring, the cache-warm spark crown (SP-08). After 0.8.x (2026-11-03, NOT
-BUILT): the header line is **+** · **Sum** · **⋯**, and the ⋯ menu holds the dock, ⌖, the card scope, the card order
-and the collapse that were buttons on it (SP-10).
+draft's three dots under it, the red unread ring, the cache-warm spark crown (SP-08). After 0.8.x (2026-11-03; in dev
+0.0.1.42 and production 0.8.0.9): the header line is **+** · **Sum** · **⋯**, and the ⋯ menu holds the dock, ⌖, the
+card scope, the card order and the collapse that were buttons on it (SP-10). 2026-11-04 (NOT BUILT): the line mirrors
+with the dock — **⋯** · **Sum** · **+** from the window's left edge docked left, ⋯ always at the window's edge — the
+menu hangs from ⋯'s outer edge, and the dock item sits below the separator, just above the collapse (SP-10).
 
 ## Lifecycle model
 
@@ -227,7 +229,8 @@ switch closes it; no keystroke leaks into the terminal.
 3. **Collapse.** *Do:* ⋯ ▸ Collapse the side panel (« on 0.8.x). *Expect:* a 20 px strip; » restores; per window,
    last change seeds new windows.
 4. **Dock.** *Do:* ⋯ ▸ Dock on the right (⇄ on 0.8.x). *Expect:* the panel moves to the right of the terminal in
-   EVERY window (global); the strip's chevron and the menu's collapse symbol flip.
+   EVERY window (global); the strip's chevron and the menu's collapse symbol flip; on a 2026-11-04 build the header
+   line mirrors too (`⋯ Sum +` → `+ Sum ⋯`, ⋯ at the window's edge — SP-10).
 5. **Restart.** *Expect:* everything as left, per window.
 
 **Edge cases**
@@ -335,19 +338,22 @@ in Settings ▸ Sessions ▸ AI SEARCH (2 hours by default).
 
 ### SP-10 · The header's ⋯ menu
 
-> **Since** after 0.8.x (2026-11-03, NOT BUILT) · **P1** · **Needs** F-S2 · **Spec** SIDE_PANEL.md §2i
+> **Since** after 0.8.x (2026-11-03: dev 0.0.1.42, production 0.8.0.9; the mirrored line and the dock item's place
+> 2026-11-04, NOT BUILT) · **P1** · **Needs** F-S2 · **Spec** SIDE_PANEL.md §2i
 
-**Promise.** The header line is **+**, **Sum** and **⋯**. The ⋯ menu holds what the other five buttons did, in the user's
-order — Dock on the right / left (⇄) · Scroll to the selected tab (⌖, a check) · Card scope ▸ · Card order ▸ · Collapse
-the side panel — each with its symbol left of its text and the current state in its text or its check; each item does
-exactly what its button did.
+**Promise.** The header line is **+**, **Sum** and **⋯**, mirrored with the dock so ⋯ is always at the window's edge:
+`⋯ Sum +` from the left edge docked left, `+ Sum ⋯` against the right edge docked right. The ⋯ menu hangs from ⋯'s outer
+edge and holds what the other five buttons did, in the user's order — Scroll to the selected tab (⌖, a check) · Card
+scope ▸ · Card order ▸ · a separator · Dock on the right / left (⇄) · Collapse the side panel — each with its symbol left
+of its text and the current state in its text or its check; each item does exactly what its button did.
 
 **Phases**
-1. **The line.** *Expect:* `+ Sum ⋯`, right-aligned, whole on a narrow panel; ⋯ is named "More options"
-   (`am.side.more`); its tip opens after 3 s.
-2. **The menu.** *Do:* click ⋯. *Expect:* below the button, inside the panel: `Dock on the right` · `Scroll to the selected
-   tab` (checked: ⌖ is on by default) · `Card scope: LOCAL ›` · `Card order: MOST ACTIVE ›` · a separator · `Collapse the
-   side panel`. *Do:* Esc. *Expect:* the menu closes and nothing changed (no keystroke reached the terminal).
+1. **The line.** *Expect:* docked left (the default) `⋯ Sum +` from the window's left edge, whole on a narrow panel; ⋯ is
+   named "More options" (`am.side.more`); its tip opens after 3 s.
+2. **The menu.** *Do:* click ⋯. *Expect:* below the button, its left edge on ⋯'s, inside the panel: `Scroll to the
+   selected tab` (checked: ⌖ is on by default) · `Card scope: LOCAL ›` · `Card order: MOST ACTIVE ›` · a separator · `Dock
+   on the right` · `Collapse the side panel`. *Do:* Esc. *Expect:* the menu closes and nothing changed (no keystroke
+   reached the terminal).
 3. **Card scope.** *Do:* ⋯ ▸ Card scope ▸ GLOBAL. *Expect:* the count line `… across all windows`; the next open reads
    `Card scope: GLOBAL` with GLOBAL checked. LOCAL again restores the count line.
 4. **Card order.** *Do:* ⋯ ▸ Card order ▸ NEWEST, then OLDEST. *Expect:* the cards re-sort at once (t2 above t1, then t1
@@ -355,8 +361,9 @@ exactly what its button did.
    `Card order: OLDEST` with OLDEST checked; each entry's tip says what it sorts by.
 5. **Scroll to the selected tab.** *Do:* pick it twice. *Expect:* settings.json `sidePanelScrollToSelectedTab` off, then
    on; the next open shows the check that matches (every open window follows — SP-03).
-6. **Dock.** *Do:* ⋯ ▸ Dock on the right. *Expect:* the panel moves right; the next open reads `Dock on the left` and the
-   collapse symbol is `»`. *Do:* Dock on the left. *Expect:* back.
+6. **Dock.** *Do:* ⋯ ▸ Dock on the right. *Expect:* the panel moves right and the line reads `+ Sum ⋯` against the
+   window's right edge; the next open hangs from ⋯'s right edge, reads `Dock on the left`, and the collapse symbol is
+   `»`. *Do:* Dock on the left. *Expect:* back, the line `⋯ Sum +` again.
 7. **Collapse.** *Do:* ⋯ ▸ Collapse the side panel. *Expect:* the 20 px strip; its chevron restores the panel.
 
 **Edge cases**
@@ -366,7 +373,8 @@ exactly what its button did.
 - **E2 The + launcher card is open** → the press on ⋯ closes it (an outside press), then the menu opens.
 - **E3 A card peek** → opening and closing the menu keeps the peeked card selected (the menu's focus hand-back is no touch
   of the terminal, SP-02 phase 8).
-- **E4 Docked right** → the menu still opens inside the panel (right edges aligned with ⋯).
+- **E4 Docked right** → the menu still opens inside the panel (right edges aligned with ⋯; docked left the left edges).
+- **E5 Another window moves the dock** (a settings broadcast) → this window's panel moves and its line mirrors with it.
 
 ---
 

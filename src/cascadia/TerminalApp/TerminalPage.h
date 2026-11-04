@@ -666,19 +666,26 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Grid _sidePanelBody{ nullptr }; // rows: cards area (star*split) / horizontal splitter / summary area (star*(1-split)); hidden while collapsed
         winrt::Windows::UI::Xaml::Controls::Border _sidePanelHSplitter{ nullptr }; // the draggable HORIZONTAL separator between the cards list and the summary area
         winrt::Windows::UI::Xaml::Controls::TextBox _sidePanelSearchBox{ nullptr }; // the header's SECOND line: the full-width filter box (ParseSessionQuery grammar over title/dir/branch/id) — slim (FontSize 11, a ~22px floor via a per-box TextControlThemeMinHeight override) so it sits cleanly under the buttons
-        // top-row "Sum" toggle (the second of the right-aligned buttons — after the "+" launcher, left of the ⋯ menu button): checked == the
+        // top-row "Sum" toggle (the middle one of the three buttons — between the "+" launcher and the ⋯ menu button in either dock): checked == the
         // selected session's summary area is SHOWN below the cards (the default); unchecked == hidden, the cards
         // fill the panel and each card shows the rich session tooltip beside the panel on hover (SIDE_PANEL.md
         // §2d). A REAL ToggleButton (the Sessions page's scope-toggle idiom) so the accent fill IS the state — kept pinned to
         // !_sidePanelSummaryHidden by _SidePanelUpdateSumButton (a click flips IsChecked itself before Click fires).
         winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sidePanelSumBtn{ nullptr };
-        // top-row ⋯ button, the last of the right-aligned buttons, where the collapse chevron was (SIDE_PANEL.md §2i). Its
-        // MenuFlyout (held by the button's Flyout property) carries what the header's other buttons did: Dock on the left /
-        // right (⇄) · Scroll to the selected tab (⌖, a check) · Card scope ▸ (LOCAL / GLOBAL) · Card order ▸ (the five
-        // board orders) · Collapse the side panel (« / »). The menu keeps no state: _SidePanelFillMoreMenu rebuilds its
-        // items from the live settings at every open. A member (not a local, like ⇄ was) so the one AutomationId block
-        // names it with the panel's other controls.
+        // top-row ⋯ button, the OUTERMOST of the three — at the window's edge, where the collapse chevron was (SIDE_PANEL.md
+        // §2i): the rightmost docked right, the leftmost docked left (the line mirrors with the dock,
+        // _SidePanelApplyHeaderOrder). Its MenuFlyout (held by the button's Flyout property) carries what the header's other
+        // buttons did: Scroll to the selected tab (⌖, a check) · Card scope ▸ (LOCAL / GLOBAL) · Card order ▸ (the five
+        // board orders) · a separator · Dock on the left / right (⇄) · Collapse the side panel (« / »). The menu keeps no
+        // state: _SidePanelFillMoreMenu rebuilds its items from the live settings at every open; only its placement
+        // (aligned on ⋯'s outer edge) is set ahead, by the dock apply. A member (not a local, like ⇄ was) so the one
+        // AutomationId block names it with the panel's other controls.
         winrt::Windows::UI::Xaml::Controls::Button _sidePanelMoreBtn{ nullptr };
+        // The header grid (SIDE_PANEL.md §1): line 1 = the three buttons and a star spacer in four columns, line 2 = the
+        // filter box (with the AI toggle over its right end) spanning all four. Kept so every dock apply can mirror line 1
+        // (_SidePanelApplyHeaderOrder: the spacer's column, each button's column, the menu's placement); nothing else
+        // re-lays the header after the build.
+        winrt::Windows::UI::Xaml::Controls::Grid _sidePanelHeader{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _sidePanelStripBtn{ nullptr }; // the collapsed strip's expand chevron (points AWAY from the docked edge)
         // The vertical card list (inside its own ScrollViewer). VIRTUALIZED (SIDE_PANEL.md §2f): its children are
         // ALWAYS [top spacer][the cards of the realized rows, in row order][bottom spacer] — the spacers stand in
@@ -780,7 +787,8 @@ namespace winrt::TerminalApp::implementation
         // panel without leaving the tab. The card is built on the FIRST click (_SidePanelEnsureLaunchCard) and kept for
         // the window's life; a window that never opens it pays nothing. Closed by a press outside it, Esc, "+" again,
         // a launch, a tab switch, a collapse and a dock flip. UI-thread-only, like every side panel member.
-        // The "+" header button (line 1, column 1: the first of the right-aligned buttons, left of "Sum").
+        // The "+" header button (line 1: the innermost of the three buttons, beside "Sum" on the terminal's side — column 1
+        // docked right, left of "Sum"; column 2 docked left, right of it: the line mirrors, _SidePanelApplyHeaderOrder).
         winrt::Windows::UI::Xaml::Controls::Button _sidePanelLaunchBtn{ nullptr };
         // The card's Popup, parented into Root() across its three rows (the tag editor's recipe), so its offsets are
         // Root-relative and it can sit anywhere in the window; null until the first click.
@@ -3120,10 +3128,20 @@ namespace winrt::TerminalApp::implementation
         // defaults so the last window to adjust seeds new windows — the card scope is the exception
         // (per-window only, no global default: a new window always starts LOCAL). The ⋯ menu's ⌖ item
         // (GLOBAL, default ON) makes selecting a tab scroll the list to that tab's card. The header line is
-        // "+ Sum ⋯": the ⋯ menu holds the dock flip, ⌖, the card scope, the card order and the collapse
-        // (SIDE_PANEL.md §2i).
+        // "+ Sum ⋯" docked right and its mirror "⋯ Sum +" docked left (⋯ at the window's edge): the ⋯ menu holds ⌖,
+        // the card scope, the card order, then the dock flip and the collapse (SIDE_PANEL.md §2i).
         void _InitAgentSidePanel(); // build the panel UI into ContentArea (once, from _OnFirstLayout after the engine + window-record claim); seeds layout from the claimed record, else the AppSettings defaults
-        void _SidePanelApplyDock(); // assign TabContent / splitter / panel host to the ContentArea columns per the GLOBAL AppSettings::sidePanelOnLeft, then re-apply widths (a dock flip rotates which column is the star)
+        void _SidePanelApplyDock(); // assign TabContent / splitter / panel host to the ContentArea columns per the GLOBAL AppSettings::sidePanelOnLeft, mirror the header's button line to match (_SidePanelApplyHeaderOrder), then re-apply widths (a dock flip rotates which column is the star)
+        // Lay the header's button line out for the dock in effect (SIDE_PANEL.md §2i): the mirror image of itself in the
+        // other dock, so ⋯ is always at the window's edge — docked right [ spacer * ][ + ][ Sum ][ ⋯ ], docked left
+        // [ ⋯ ][ Sum ][ + ][ spacer * ] — and the ⋯ menu opens aligned on ⋯'s outer edge (BottomEdgeAlignedRight /
+        // BottomEdgeAlignedLeft), spreading over the panel. Moves columns only (the star, each button's Grid.Column, the
+        // placement), never the Children order (appended + · Sum · ⋯; a reader of the line's order goes by screen position,
+        // not by the UI Automation tree); every write change-gated.
+        // Called by every _SidePanelApplyDock (the build's first apply runs before the panel is drawn).
+        //   returns - nothing; a no-op before the panel is built or when the header lacks its four columns.
+        //   throws  - nothing: a failed XAML write is logged (Rule #18) and leaves the line as the writes before it left it.
+        void _SidePanelApplyHeaderOrder() noexcept;
         void _SidePanelApplyLayout(); // re-derive the three column widths + the cards/summary row ratios from the live fractions + collapse state; safe pre-layout (a 0-width area defers to the next SizeChanged)
         void _SidePanelQueueLayout(); // coalesced _SidePanelApplyLayout on a clean dispatcher tick — the ONLY legal path from a layout-driven trigger (ContentArea.SizeChanged): a synchronous column-width write inside the layout pass risks XAML's E_LAYOUTCYCLE fail-fast (the tag-badge lesson)
         void _SidePanelRebuildCards(); // bring the card list up to date IN PLACE (SIDE_PANEL.md §2c): SnapshotLiveForCards -> scope -> search filter (ParseSessionQuery/MatchesQueryText) -> boardSort order (MakeSortKey/SortKeyLess) -> one model per ROW (stored in _sidePanelRowIds / _sidePanelRowModels) -> _SidePanelSyncRealizedCards (only the rows near the viewport get cards, §2f: update only the changed values of the realized cards that stay, create only the newly realized ones, the fewest removes/inserts/moves to the new order); also refreshes the count line and pays an owed ⌖ reveal. Never throws: a failure is logged (Rule #18), the list reset, and the next tick rebuilds it
@@ -3204,9 +3222,9 @@ namespace winrt::TerminalApp::implementation
         void _SidePanelToggleCollapsed(); // collapse to the thin expander strip / expand back; persists per window (record autosave) AND as the global default (RMW)
         void _SidePanelFlipDock(); // flip left<->right: RMW the GLOBAL sidePanelOnLeft, re-dock THIS window live (other windows re-dock via the settings broadcast)
         // --- The header's ⋯ MENU (SIDE_PANEL.md §2i) ---
-        // Fill the ⋯ button's MenuFlyout from the live state, at every open (the caller emptied it): Dock on the left /
-        // right (⇄) · Scroll to the selected tab (⌖, checked while on) · Card scope ▸ (LOCAL / GLOBAL, the current one
-        // checked) · Card order ▸ (MOST ACTIVE · MOST RECENT · NEWEST · OLDEST · A–Z, the current one checked) · a separator ·
+        // Fill the ⋯ button's MenuFlyout from the live state, at every open (the caller emptied it): Scroll to the selected
+        // tab (⌖, checked while on) · Card scope ▸ (LOCAL / GLOBAL, the current one checked) · Card order ▸ (MOST ACTIVE ·
+        // MOST RECENT · NEWEST · OLDEST · A–Z, the current one checked) · a separator · Dock on the left / right (⇄) ·
         // Collapse the side panel (« / », pointing toward the docked edge). Each icon is a Segoe UI Symbol glyph left of its
         // text; each item carries the old button's AutomationId and tooltip (3 s, kSidePanelButtonTipDelay); every command
         // runs through _SidePanelRunMenuCommand.

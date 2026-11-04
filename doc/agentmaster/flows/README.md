@@ -211,7 +211,8 @@ phase 5; SP-K1) · a Shift+Click on a tab starts its session in place and keeps 
 · a side-panel card menu's action (Move to Idle/Done, Esc, Show Transcript …) keeps that card selected and the list
 where it was (SP-02 phase 8; SP-K3) · a reopened window's sessions and a Resume here keep their own Prompt Queue Runner
 mode, an interrupt hold included (PQR-15 phase 2, PQR-07 E9, LIF-04 E1; PQR-K8) · the side panel's header is + · Sum · ⋯,
-the ⋯ menu holding the dock, ⌖, the card scope, the card order and the collapse (SP-10; SIDE_PANEL.md §2i) · Telegram's
+mirrored with the dock (⋯ · Sum · + docked left, ⋯ always at the window's edge), the ⋯ menu hanging from ⋯'s outer edge
+and holding ⌖, the card scope, the card order, then the dock and the collapse (SP-10; SIDE_PANEL.md §2i) · Telegram's
 `/enter` presses ONE Enter on the prompt waiting in the box, never into a menu, a dialog or an empty box (TGC-07;
 MESSAGING.md §21.47) · a new thread's ➕ message adds more folders to the session, each sent as `/add-dir` with its answer
 chosen before the session starts, and before its first prompt (TGS-06; MESSAGING.md §21.25.9).
@@ -378,7 +379,7 @@ stalled the app's UI thread) — reruns `pqr6`–`pqr8`.
 | SP-04 | phases 1–2 (phase 2: no rich card on a card's hover — SP-K2, a feature since 2026-10-24) | `…::test_sum_off_lets_the_cards_fill_the_panel`, `…::test_sum_off_card_hover_opens_no_rich_card` |
 | SP-05 | phases 1, 3, 4, 5, E2, E3 (phase 5: `needs_fix`, a build with SP-K1's fix) | `…::test_plus_launcher_card`, `…::test_plus_card_launch_takes_one_click_with_its_menu_open` |
 | SP-06 | phases 3–5 (through the ⋯ menu on a build that has it, the 0.8.x buttons otherwise) | `…::test_collapse_and_dock`, `…::test_panel_state_survives_a_restart` |
-| SP-10 | phases 1–7 (`needs_fix`: a build with the ⋯ menu, SP-F1) | `…::test_more_menu_holds_the_header_controls` |
+| SP-10 | phases 1–7, E4 (`needs_fix`: a build with the ⋯ menu's 2026-11-04 shape — the mirrored line, the menu on ⋯'s outer edge, the dock below the separator — SP-F1; a 2026-11-03 build fails phases 1, 2 and 6) | `…::test_more_menu_holds_the_header_controls` |
 | TCM-01 | phases 1–3, E1 | `test_tab_menu.py::test_menu_fits_the_tab`, `…::test_triage_item_follows_the_state` |
 | TCM-02 | phases 1–3 | `…::test_position_decides_what_is_enabled` |
 | TCM-03 | phases 1–2, E2, E3; TCM-K1 | `…::test_rename_renames_the_session_everywhere`, `…::test_restart_restores_the_renamed_tab_dormant`, `…::test_known_defect_blank_rename_shows_claudes_own_title` |

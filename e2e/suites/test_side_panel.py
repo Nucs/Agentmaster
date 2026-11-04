@@ -11,7 +11,7 @@ import pytest
 from amdriver import inputs
 from amdriver.session import wait_new_session
 from amdriver.ui.menus import Menu
-from amdriver.ui.sidepanel import COUNT_RE, MORE_ID, MORE_ITEM_IDS, MORE_ITEM_ORDER, ORDER_TOKENS
+from amdriver.ui.sidepanel import COUNT_RE, HEADER_ORDER, MORE_ITEM_IDS, MORE_ITEM_ORDER, ORDER_TOKENS
 from amdriver.waits import hold_true, wait_until
 
 SHELL = "Administrator: Windows PowerShell"
@@ -291,15 +291,77 @@ def test_collapse_and_dock(am, s1):
     assert panel.flip_dock() == "left"
 
 
+def _assert_header_line(panel, side: str) -> None:
+    """The header line for a dock side (SIDE_PANEL.md §2i, the user's layout of 2026-11-04): exactly +, Sum and ⋯ above
+    the filter box, HEADER_ORDER[side] from left to right — ⋯ leftmost docked left, rightmost docked right — with ⋯ in
+    the panel's OUTER half, at the window's edge. Waits up to 5 s: a dock flip re-lays the line in the layout pass that
+    moves the panel, and UI Automation can report the old positions for a moment.
+
+    Args:
+        panel: The side panel.
+        side: The dock side the line is read for, "left" or "right".
+    Returns:
+        None.
+    Raises:
+        WaitTimeout: When the line does not read HEADER_ORDER[side] with ⋯ in the outer half within 5 s (the message lists
+            the buttons as last read, with their rectangles).
+        AssertionError: When ⋯ is not named "More options".
+    """
+    def line_at_the_outer_end():
+        header = panel.header_buttons()
+        band = panel.band()
+        if band is None or [k.automation_id for k in header] != HEADER_ORDER[side]:
+            return None
+        more = header[0] if side == "left" else header[-1]
+        middle = (band[0] + band[1]) / 2
+        return header if (more.center[0] < middle if side == "left" else more.center[0] > middle) else None
+
+    header = wait_until(line_at_the_outer_end, 5, what=f"the header line docked {side}",
+                        describe=lambda: [(k.name, k.automation_id, k.rect) for k in panel.header_buttons()])
+    more = header[0] if side == "left" else header[-1]
+    assert more.name == "More options", (more.name, more.automation_id)
+
+
+def _assert_menu_hangs_from_the_outer_edge(panel, menu: Menu, side: str) -> None:
+    """The ⋯ menu opens BELOW ⋯ and hangs from the button's OUTER edge (SIDE_PANEL.md §2i): docked left its left edge is
+    ⋯'s and it spreads right, over the panel; docked right its right edge is ⋯'s and it spreads left. Aligned on the
+    other edge, it would reach past the window's edge (where the framework slides or flips it, often over the terminal).
+
+    Args:
+        panel: The side panel.
+        menu: The open ⋯ menu, read once it stopped moving (open_more_menu waits for that).
+        side: The dock side, "left" or "right".
+    Returns:
+        None.
+    Raises:
+        AssertionError: When there is no ⋯ button, the menu opens over or above it, or it hangs from the other edge (the
+            message carries both rectangles).
+    """
+    more = panel.more_button()
+    assert more is not None, "no ⋯ button"
+    mx, my, mw, _ = menu.element().rect
+    bx, by, bw, bh = more.rect
+    where = f"menu {menu.element().rect} vs ⋯ {more.rect}"
+    # 4 px of overlap and 12 px of edge offset absorb the presenter's border and shadow insets; the other edge of the
+    # button is a whole button width (~26 px) away, so a menu aligned on it still fails.
+    assert my >= by + bh - 4, f"the menu opens over or above ⋯: {where}"
+    if side == "left":
+        assert abs(mx - bx) <= 12 and mx + mw > bx + bw, f"docked left the menu must hang from ⋯'s LEFT edge: {where}"
+    else:
+        assert abs((mx + mw) - (bx + bw)) <= 12 and mx < bx, f"docked right the menu must hang from ⋯'s RIGHT edge: {where}"
+
+
 @pytest.mark.p1
 @pytest.mark.flow("SP-10")
 @pytest.mark.needs_fix("SP-F1")
 def test_more_menu_holds_the_header_controls(am, s2):
-    """SP-10 phases 1–7 (SP-F1, the user's layout of 2026-11-03 — a build with the ⋯ menu; 0.8.x has none): the header
-    line is +, Sum and ⋯; the ⋯ menu lists the dock, ⌖, Card scope ▸, Card order ▸ and the collapse, in that order, each
-    showing the current state in its text or its check; Esc closes it and changes nothing; each item does what its
+    """SP-10 phases 1–7 (SP-F1, the user's layouts of 2026-11-03 and 2026-11-04 — a build with the ⋯ menu; 0.8.x has none,
+    and a 2026-11-03 build fails phases 1, 2 and 6 by design: its line does not mirror and its menu lists the dock
+    first): docked left the header line is ⋯, Sum and + from the window's edge, docked right its mirror +, Sum, ⋯; the
+    ⋯ menu hangs from ⋯'s outer edge and lists ⌖, Card scope ▸, Card order ▸, the dock and the collapse, in that order,
+    each showing the current state in its text or its check; Esc closes it and changes nothing; each item does what its
     button did — the scope (the count line), the order (the cards and settings.json), ⌖ (settings.json and the check),
-    the dock (the panel's side and the item's words), the collapse (the strip).
+    the dock (the panel's side, the line's mirror, the menu's edge and the item's words), the collapse (the strip).
 
     Args:
         am: The app.
@@ -313,15 +375,14 @@ def test_more_menu_holds_the_header_controls(am, s2):
     scroll_on = settings.get("sidePanelScrollToSelectedTab", True)
     assert panel.dock_side() == "left"
 
-    # 1. The header line: +, Sum, ⋯ — no other button above the filter box (the AI toggle sits inside the box).
-    top = panel.filter_box().rect[1]
-    header = sorted((k for k in panel.controls() if k.role == "button" and k.rect[1] < top), key=lambda k: k.rect[0])
-    assert [k.automation_id for k in header] == ["am.side.launch", "am.side.sum", MORE_ID], \
-        [(k.name, k.automation_id) for k in header]
-    assert header[-1].name == "More options"
+    # 1. The header line, docked left: ⋯, Sum, + from the window's edge (the docked-right line's mirror) — no other button
+    #    above the filter box (the AI toggle sits inside the box).
+    _assert_header_line(panel, "left")
 
-    # 2. The menu: five items in the user's order, the state in their texts and checks.
+    # 2. The menu: below ⋯, hanging from its left edge over the panel; five items in the user's order, the state in their
+    #    texts and checks.
     menu = panel.open_more_menu()
+    _assert_menu_hangs_from_the_outer_edge(panel, menu, "left")
     items = menu.stable_items()
     assert [i.el.automation_id for i in items] == [MORE_ITEM_IDS[k] for k in MORE_ITEM_ORDER], \
         [(i.name, i.el.automation_id) for i in items]
@@ -374,12 +435,17 @@ def test_more_menu_holds_the_header_controls(am, s2):
         assert panel.more_item(menu, MORE_ITEM_IDS["scroll"]).el.toggle_state == (1 if want else 0)
         menu.close()
 
-    # 7. The dock: the item says where the panel goes and takes it there; the collapse leaves the strip, which restores.
+    # 7. The dock: the item says where the panel goes and takes it there; docked right the line is +, Sum, ⋯ with ⋯ at the
+    #    window's right edge and the menu hangs from ⋯'s right edge; back on the left the line mirrors again. The collapse
+    #    leaves the strip, which restores.
     assert panel.flip_dock() == "right"
+    _assert_header_line(panel, "right")
     menu = panel.open_more_menu()
+    _assert_menu_hangs_from_the_outer_edge(panel, menu, "right")
     assert panel.more_item(menu, MORE_ITEM_IDS["dock"]).name == "Dock on the left"
     menu.close()
     assert panel.flip_dock() == "left"
+    _assert_header_line(panel, "left")
     panel.collapse()
     panel.expand()
 

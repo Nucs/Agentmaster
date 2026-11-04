@@ -1088,15 +1088,22 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Header: TWO lines.
-        //   line 1 (row 0): [ spacer * ][ + ][ Sum ][ ⋯ ] — right-aligned (column 0, the star, is an empty spacer):
-        //     "+" first (the launcher card — SIDE_PANEL.md §2e; the user's "leftmost, to Sum"), then "Sum" (it reshapes
-        //     the whole panel), then ⋯ outermost, where the collapse chevron was (SIDE_PANEL.md §2i, the user's layout of
-        //     2026-11-03): its menu holds the dock flip, ⌖, the card scope, the card order and the collapse, which were
-        //     five more buttons on this line and made it wider than a narrow panel.
+        //   line 1 (row 0): the three buttons at the panel's OUTER end — the window's edge, away from the terminal — in a
+        //     line that MIRRORS with the dock (SIDE_PANEL.md §2i, the user's layout of 2026-11-04), so ⋯ is always the
+        //     outermost button: docked right [ spacer * ][ + ][ Sum ][ ⋯ ] (right-aligned), docked left
+        //     [ ⋯ ][ Sum ][ + ][ spacer * ] (left-aligned). "+" is the innermost (the launcher card — SIDE_PANEL.md §2e;
+        //     the user's "leftmost, to Sum" of the right-aligned line), "Sum" the middle (it reshapes the whole panel), ⋯
+        //     the outermost, where the collapse chevron was (the user's layout of 2026-11-03): its menu holds ⌖, the card
+        //     scope, the card order, the dock flip and the collapse, which were five more buttons on this line and made it
+        //     wider than a narrow panel. The build below seeds the docked-right shape; _SidePanelApplyHeaderOrder (run by
+        //     every _SidePanelApplyDock, the first one at the end of this build, before the panel is ever drawn) moves the
+        //     star and the three buttons to the columns of the dock in effect.
         //   line 2 (row 1): the filter box across the FULL width. On a line of its own it no longer
         //     competes with the buttons for room — sharing one line, a narrow panel squeezed the box down
         //     to its minimum while the buttons kept their natural widths.
         Grid header{};
+        // Kept as a member too (the same element): every dock apply re-lays line 1 for its side (_SidePanelApplyHeaderOrder).
+        _sidePanelHeader = header;
         {
             RowDefinition hr0{};
             hr0.Height(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
@@ -1104,13 +1111,15 @@ namespace winrt::TerminalApp::implementation
             hr1.Height(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
             header.RowDefinitions().Append(hr0);
             header.RowDefinitions().Append(hr1);
-            ColumnDefinition c0{};
+            // FOUR columns: one star spacer and three Auto button columns. Seeded docked right (the spacer first); docked
+            // left the star is the LAST column and the buttons fill columns 0-2 in mirror order (_SidePanelApplyHeaderOrder).
+            ColumnDefinition c0{}; // the spacer docked right; "⋯" docked left
             c0.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
-            ColumnDefinition c1{}; // "+" — the launcher (SIDE_PANEL.md §2e)
+            ColumnDefinition c1{}; // "+" (the launcher, SIDE_PANEL.md §2e) docked right; "Sum" docked left
             c1.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-            ColumnDefinition c2{}; // "Sum" — the summary area (SIDE_PANEL.md §2d)
+            ColumnDefinition c2{}; // "Sum" (the summary area, SIDE_PANEL.md §2d) docked right; "+" docked left
             c2.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-            ColumnDefinition c3{}; // "⋯" — the menu (SIDE_PANEL.md §2i)
+            ColumnDefinition c3{}; // "⋯" (the menu, SIDE_PANEL.md §2i) docked right; the spacer docked left
             c3.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
             header.ColumnDefinitions().Append(c0);
             header.ColumnDefinitions().Append(c1);
@@ -1297,11 +1306,12 @@ namespace winrt::TerminalApp::implementation
         Grid::SetColumnSpan(_sidePanelAiBtn, static_cast<int32_t>(header.ColumnDefinitions().Size())); // the box's own cell, so HorizontalAlignment Right lands on the box's right end
         header.Children().Append(_sidePanelAiBtn); // after the box: drawn over it
 
-        // The "+" LAUNCHER (SIDE_PANEL.md §2e) — the first of the right-aligned buttons, left of "Sum" (the user's
-        // "leftmost, to Sum"): a click opens a card AT the click point holding the Agent Manager's own launch row
-        // ([● Claude] [ box ] [Launch Claude] [Fork] — the shared AgentLaunchBar, Claude only), so a session starts
-        // from the side panel without leaving the tab. Built on the first click (_SidePanelEnsureLaunchCard): a window
-        // that never opens it pays nothing. An ICON button (the ⌖ / ⇄ size and padding). IsTabStop false like its
+        // The "+" LAUNCHER (SIDE_PANEL.md §2e) — the INNERMOST of the three buttons, beside "Sum" on the terminal's side
+        // (docked right it is the leftmost, the user's "leftmost, to Sum"; docked left the line mirrors and it is the
+        // rightmost, _SidePanelApplyHeaderOrder): a click opens a card AT the click point holding the Agent Manager's own
+        // launch row ([● Claude] [ box ] [Launch Claude] [Fork] — the shared AgentLaunchBar, Claude only), so a session
+        // starts from the side panel without leaving the tab. Built on the first click (_SidePanelEnsureLaunchCard): a
+        // window that never opens it pays nothing. An ICON button (the ⌖ / ⇄ size and padding). IsTabStop false like its
         // siblings: a click must never pull keyboard focus out of the terminal by itself (the card focuses its own
         // box when it opens, and hands focus back when it closes).
         _sidePanelLaunchBtn = Button{};
@@ -1357,7 +1367,7 @@ namespace winrt::TerminalApp::implementation
                 self->_SidePanelToggleLaunchCard();
             }
         });
-        Grid::SetColumn(_sidePanelLaunchBtn, 1);
+        Grid::SetColumn(_sidePanelLaunchBtn, 1); // the docked-right seed; docked left it is column 2 (_SidePanelApplyHeaderOrder)
         header.Children().Append(_sidePanelLaunchBtn);
 
         // The "Sum" toggle — the summary area below the cards ON (checked, the default) / OFF. OFF hides the
@@ -1380,32 +1390,36 @@ namespace winrt::TerminalApp::implementation
                 self->_SidePanelToggleSummary();
             }
         });
-        Grid::SetColumn(_sidePanelSumBtn, 2);
+        Grid::SetColumn(_sidePanelSumBtn, 2); // the docked-right seed; docked left it is column 1 (_SidePanelApplyHeaderOrder)
         header.Children().Append(_sidePanelSumBtn);
 
-        // The "⋯" MENU button (SIDE_PANEL.md §2i) — the last of the right-aligned buttons, where the collapse chevron
-        // was (the user's layout of 2026-11-03). Its menu holds the five controls that were buttons on this line: Dock on
-        // the left / right (⇄) · Scroll to the selected tab (⌖) · Card scope ▸ · Card order ▸ · Collapse the side panel
-        // (« / »), so the line reads "+ Sum ⋯" and fits a narrow panel. An ICON button (the "+" size and padding);
-        // IsTabStop false like its siblings: a click must never pull keyboard focus out of the terminal by itself (the
-        // open menu holds the keyboard while it shows and hands it back as it closes).
+        // The "⋯" MENU button (SIDE_PANEL.md §2i) — the OUTERMOST of the three buttons, at the window's edge, where the
+        // collapse chevron was (the user's layout of 2026-11-03): the rightmost docked right, the leftmost docked left (the
+        // line mirrors with the dock, the user's layout of 2026-11-04 — _SidePanelApplyHeaderOrder). Its menu holds the
+        // five controls that were buttons on this line: Scroll to the selected tab (⌖) · Card scope ▸ · Card order ▸ · a
+        // separator · Dock on the left / right (⇄) · Collapse the side panel (« / »), so the line reads "+ Sum ⋯" (or
+        // "⋯ Sum +") and fits a narrow panel. An ICON button (the "+" size and padding); IsTabStop false like its siblings:
+        // a click must never pull keyboard focus out of the terminal by itself (the open menu holds the keyboard while it
+        // shows and hands it back as it closes).
         // The menu is an EMPTY MenuFlyout that fills itself at every open (_SidePanelFillMoreMenu; the Agent Manager's
         // lazy session menus' idiom): its checks and labels are read from the live settings at that moment, so a change
         // made in another window (the order, ⌖, the dock) never leaves it stale, and a window that never opens it builds
         // no items. Its handler reaches the menu through `sender` and the page through a weak reference — never by
-        // capture, which would make the menu own itself (the islands leak class). It opens BELOW the button with the
-        // right edges aligned, so it spreads over the panel's own width in either dock (the header's buttons sit at the
-        // panel's right end) instead of out over the terminal. Button::Flyout opens it on the button's Click — a pointer,
-        // or UI Automation's Invoke — and owns it for the button's life.
+        // capture, which would make the menu own itself (the islands leak class). It opens BELOW the button, aligned on
+        // the button's OUTER edge — the right edges docked right, the left edges docked left: the placement follows the
+        // dock (_SidePanelApplyHeaderOrder; the docked-right one is seeded here) — so it spreads over the panel's own width
+        // instead of out past the window's edge. Button::Flyout opens it on the button's Click — a pointer, or UI
+        // Automation's Invoke — and owns it for the button's life.
         _sidePanelMoreBtn = Button{};
         _sidePanelMoreBtn.FontSize(kSidePanelIconFontSize); // an ICON button: one size above the 11px "Sum"
         _sidePanelMoreBtn.Padding(ThicknessHelper::FromLengths(6, 1, 6, 1));
         _sidePanelMoreBtn.VerticalAlignment(VerticalAlignment::Center);
         _sidePanelMoreBtn.IsTabStop(false);
         _sidePanelMoreBtn.Content(winrt::box_value(kSidePanelMoreGlyph)); // ⋯
-        AgentSetTitledTip(_sidePanelMoreBtn, L"More options", winrt::hstring{ L"Dock the panel on the other side, scroll the cards to the selected tab's card, choose which sessions the cards list (Card scope) and their order (Card order), or collapse the panel to a thin strip." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        AgentSetTitledTip(_sidePanelMoreBtn, L"More options", winrt::hstring{ L"Scroll the cards to the selected tab's card, choose which sessions the cards list (Card scope) and their order (Card order), dock the panel on the other side, or collapse it to a thin strip." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
         {
             MenuFlyout moreMenu{};
+            // The docked-right placement; _SidePanelApplyHeaderOrder sets the one for the dock in effect before any open.
             moreMenu.Placement(winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedRight);
             moreMenu.Opening([weakThis](const IInspectable& sender, const IInspectable&) {
                 const auto self = weakThis.get();
@@ -1429,7 +1443,7 @@ namespace winrt::TerminalApp::implementation
             });
             _sidePanelMoreBtn.Flyout(moreMenu);
         }
-        Grid::SetColumn(_sidePanelMoreBtn, 3);
+        Grid::SetColumn(_sidePanelMoreBtn, 3); // the docked-right seed; docked left it is column 0 (_SidePanelApplyHeaderOrder)
         header.Children().Append(_sidePanelMoreBtn);
         Grid::SetRow(header, 0);
         _sidePanelExpandedRoot.Children().Append(header);
@@ -1809,7 +1823,8 @@ namespace winrt::TerminalApp::implementation
         _sidePanelBuilt = true;
         _SidePanelApplyDock(); // assigns the three columns per the global dock side + applies widths/glyphs (and the summary rows per "Sum")
         _SidePanelUpdateSumButton(); // "Sum" checked == the summary area shown (no Click => nothing persisted)
-        // Nothing to seed for the ⋯ menu: it reads the dock, ⌖, the scope and the order when it opens (SIDE_PANEL.md §2i).
+        // Nothing to seed for the ⋯ menu: it reads the dock, ⌖, the scope and the order when it opens (SIDE_PANEL.md §2i);
+        // its placement, the one thing about it that follows the dock before an open, was set by _SidePanelApplyDock above.
         _SidePanelRebuildCards(); // with "Sum" off, every new card is armed with its rich tooltip as it is built
         // Re-select the lens's restored session so a reopened window's summary shows immediately
         // (the same restored selection SetManagerState seeded into the Manager lens).
@@ -1840,7 +1855,8 @@ namespace winrt::TerminalApp::implementation
 
     // Assign TabContent / the splitter / the panel host to ContentArea's three columns per the
     // GLOBAL AppSettings::sidePanelOnLeft (dock-right: [content *][splitter][panel]; dock-left is
-    // the mirror), then re-apply widths + the strip's direction-dependent chevron via _SidePanelApplyLayout.
+    // the mirror), mirror the header's button line to match (_SidePanelApplyHeaderOrder: ⋯ at the
+    // window's edge), then re-apply widths + the strip's direction-dependent chevron via _SidePanelApplyLayout.
     // Idempotent — re-running with an unchanged dock just re-applies the same assignments.
     void TerminalPage::_SidePanelApplyDock()
     {
@@ -1855,7 +1871,93 @@ namespace winrt::TerminalApp::implementation
         }
         Grid::SetColumn(_sidePanelSplitter, 1);
         Grid::SetColumn(_sidePanelHost, left ? 0 : 2);
+        _SidePanelApplyHeaderOrder(); // never throws: a failure leaves the line as it was, logged
         _SidePanelApplyLayout();
+    }
+
+    // Lay the header's button line out for the dock in effect (SIDE_PANEL.md §2i, the user's layout of 2026-11-04): the line
+    // is the MIRROR image of itself in the other dock, so ⋯ is always the outermost button — at the window's edge — and "+"
+    // the innermost, on the terminal's side:
+    //   docked right: [ spacer * ][ + ][ Sum ][ ⋯ ]   the menu opens below ⋯ with the RIGHT edges aligned;
+    //   docked left:  [ ⋯ ][ Sum ][ + ][ spacer * ]   the menu opens below ⋯ with the LEFT edges aligned.
+    // Either way the menu spreads over the panel's own width, never out past the window's edge (a flyout pushed off the
+    // window is slid or flipped by the framework, and lands over the terminal). Only the columns move: which column is the
+    // star spacer, which column each button sits in, and the menu's placement. The three buttons keep their place in the
+    // header's Children (appended + · Sum · ⋯), so every handler stays as the build made them and the e2e driver's walk
+    // ("+" comes before the cards) holds in either dock — but the tree order need not follow the screen, so a reader of
+    // the line's order goes by position (the driver's header_buttons). The filter box and the AI toggle span all four
+    // columns, so neither moves.
+    // Every write is change-gated (a same-value Width or Grid.Column write still invalidates layout), so a re-apply with an
+    // unchanged dock — a settings broadcast that moved nothing, the build's first apply over its docked-right seed when the
+    // panel docks right — writes nothing. Called by every _SidePanelApplyDock: the panel's build (before its first frame,
+    // so a left-docked panel is never drawn with the seed), a dock flip here and a settings broadcast that moved the dock.
+    //   returns - nothing; a no-op before the panel is built or when the header lacks its four columns.
+    //   throws  - nothing: a failed XAML write (a window tearing down) is logged (Rule #18) and leaves the line in whatever
+    //             shape the writes before it made — a cosmetic loss; the panel itself has already moved.
+    void TerminalPage::_SidePanelApplyHeaderOrder() noexcept
+    {
+        if (!_sidePanelBuilt || !_sidePanelHeader)
+        {
+            return;
+        }
+        try
+        {
+            const bool left = _appSettings.sidePanelOnLeft;
+            const auto cols = _sidePanelHeader.ColumnDefinitions();
+            if (cols.Size() < 4)
+            {
+                return; // the build's four columns are the contract: with fewer there is no line to mirror
+            }
+            // The star spacer is the line's TERMINAL end: column 0 docked right, column 3 docked left. The other three are
+            // Auto, each as wide as its button.
+            const uint32_t spacerColumn = left ? 3u : 0u;
+            for (uint32_t i = 0; i < 4u; ++i)
+            {
+                const auto col = cols.GetAt(i);
+                const auto cur = col.Width();
+                if (i == spacerColumn)
+                {
+                    if (cur.GridUnitType != GridUnitType::Star || std::abs(cur.Value - 1.0) > 0.001)
+                    {
+                        col.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+                    }
+                }
+                else if (cur.GridUnitType != GridUnitType::Auto)
+                {
+                    col.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+                }
+            }
+            // The buttons, outermost first: ⋯ (3 / 0), Sum (2 / 1), + (1 / 2) — docked right / docked left.
+            const auto place = [](const FrameworkElement& button, int32_t column) {
+                if (button && Grid::GetColumn(button) != column)
+                {
+                    Grid::SetColumn(button, column);
+                }
+            };
+            place(_sidePanelMoreBtn, left ? 0 : 3);
+            place(_sidePanelSumBtn, left ? 1 : 2);
+            place(_sidePanelLaunchBtn, left ? 2 : 1);
+            // The menu's placement is read when it opens, so setting it now (the menu is closed: a dock change comes from a
+            // menu command that runs after the menu closed, or from another window's broadcast) takes effect at the next open.
+            if (_sidePanelMoreBtn)
+            {
+                if (const auto menu = _sidePanelMoreBtn.Flyout())
+                {
+                    using winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutPlacementMode;
+                    const auto placement = left ? FlyoutPlacementMode::BottomEdgeAlignedLeft : FlyoutPlacementMode::BottomEdgeAlignedRight;
+                    if (menu.Placement() != placement)
+                    {
+                        menu.Placement(placement);
+                    }
+                }
+            }
+        }
+        catch (...)
+        {
+            // The line keeps the shape the writes before the throw left it in (possibly the old dock's): cosmetic, and the
+            // next dock apply re-lays it. Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelApplyHeaderOrder");
+        }
     }
 
     // Derive the three ContentArea column widths + the cards/summary star ratios + the collapse
@@ -2284,15 +2386,17 @@ namespace winrt::TerminalApp::implementation
 
     // Fill the header's ⋯ menu (SIDE_PANEL.md §2i) from the live state. The Opening handler empties the menu and calls this
     // at EVERY open, so no check or label can be stale: another window may have moved the order, ⌖ or the dock since the
-    // last open. The items, in the user's order of 2026-11-03, each with its symbol LEFT of its text (the item's icon slot:
-    // a Segoe UI Symbol glyph, SidePanelMenuGlyph) and the tooltip of the button it replaced (3 s of rest,
-    // kSidePanelButtonTipDelay):
-    //   ⇄ Dock on the right / left   — the dock flip, worded as where the panel goes;
+    // last open. The items, in the user's order (2026-11-03; the dock moved below the separator, before the collapse, on
+    // 2026-11-04), each with its symbol LEFT of its text (the item's icon slot: a Segoe UI Symbol glyph,
+    // SidePanelMenuGlyph) and the tooltip of the button it replaced (3 s of rest, kSidePanelButtonTipDelay):
     //   ⌖ Scroll to the selected tab — a check item, checked while the GLOBAL setting is on;
     //   ⧉ Card scope: LOCAL ▸        — LOCAL / GLOBAL for this window's list, the current one checked;
     //   ⇅ Card order: MOST ACTIVE ▸  — the five board orders, the current one checked, each with what it sorts by;
     //   ─────
+    //   ⇄ Dock on the right / left   — the dock flip, worded as where the panel goes;
     //   « Collapse the side panel    — the glyph points toward the docked edge, like the chevron it replaced.
+    // Above the separator: what the cards show (all three only change the list). Below it: where the panel itself goes
+    // (both move or shrink the whole panel, and the header this menu hangs from).
     // The submenu headers carry the current scope and order in their text, because the line no longer shows them. Every
     // item keeps the AutomationId of the button it replaced (am.side.dock / scrollToTab / scope / sort / collapse — ids
     // are added, never renamed: the e2e driver knows them), and the submenus' entries add am.side.scope.<local|global> and
@@ -2309,27 +2413,6 @@ namespace winrt::TerminalApp::implementation
         // The state the items are built for, captured by each command so it can tell a still-valid click from a stale one.
         const bool dockedLeft = _appSettings.sidePanelOnLeft;
         const bool scrollToTabOn = _appSettings.sidePanelScrollToSelectedTab;
-
-        // ⇄ — the dock flip, named by where the panel goes (the symbol alone says only "swap").
-        MenuFlyoutItem dock{};
-        dock.Text(dockedLeft ? L"Dock on the right" : L"Dock on the left");
-        dock.Icon(SidePanelMenuGlyph(kSidePanelDockGlyph));
-        AgentSetTitledTip(dock, L"Dock side", winrt::hstring{ L"Move the panel to the other side of the terminal (left \x21C4 right).\nSaved globally \x2014 other windows adopt it on their next launch or settings change." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
-        AgentSetAutomationId(dock, L"am.side.dock");
-        dock.Click([weakThis, dockedLeft](const IInspectable&, const RoutedEventArgs&) {
-            if (const auto self = weakThis.get())
-            {
-                self->_SidePanelRunMenuCommand(L"dock", [dockedLeft](TerminalPage& page) {
-                    // Flip only away from the side the item named: when a settings broadcast already moved the panel there,
-                    // a flip would bring it back.
-                    if (page._appSettings.sidePanelOnLeft == dockedLeft)
-                    {
-                        page._SidePanelFlipDock();
-                    }
-                });
-            }
-        });
-        menu.Items().Append(dock);
 
         // ⌖ — the scroll-to-tab preference, a check item.
         ToggleMenuFlyoutItem scrollToTab{};
@@ -2404,6 +2487,28 @@ namespace winrt::TerminalApp::implementation
         menu.Items().Append(order);
 
         menu.Items().Append(MenuFlyoutSeparator{});
+
+        // ⇄ — the dock flip, named by where the panel goes (the symbol alone says only "swap"). Below the separator, the
+        // last but one: the user's place for it (2026-11-04), beside the collapse — the two items that move the panel itself.
+        MenuFlyoutItem dock{};
+        dock.Text(dockedLeft ? L"Dock on the right" : L"Dock on the left");
+        dock.Icon(SidePanelMenuGlyph(kSidePanelDockGlyph));
+        AgentSetTitledTip(dock, L"Dock side", winrt::hstring{ L"Move the panel to the other side of the terminal (left \x21C4 right).\nSaved globally \x2014 other windows adopt it on their next launch or settings change." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        AgentSetAutomationId(dock, L"am.side.dock");
+        dock.Click([weakThis, dockedLeft](const IInspectable&, const RoutedEventArgs&) {
+            if (const auto self = weakThis.get())
+            {
+                self->_SidePanelRunMenuCommand(L"dock", [dockedLeft](TerminalPage& page) {
+                    // Flip only away from the side the item named: when a settings broadcast already moved the panel there,
+                    // a flip would bring it back.
+                    if (page._appSettings.sidePanelOnLeft == dockedLeft)
+                    {
+                        page._SidePanelFlipDock();
+                    }
+                });
+            }
+        });
+        menu.Items().Append(dock);
 
         // « / » — the collapse, pointing toward the docked edge like the chevron it replaced; the strip's chevron (pointing
         // away) brings the panel back.

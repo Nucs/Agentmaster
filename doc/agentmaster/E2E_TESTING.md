@@ -537,11 +537,14 @@ differs from the plan above, and why:
   `am.mgr.queue.row.<promptKey>`, `am.tab.<key>` (the `TabViewItem`; cleared when the tab stops hosting a session),
   `am.badge.<key>.{mode,up,down,folder,mail,copy,pencil}`,
   `am.side.{launch,filter,sum,scope,sort,scrollToTab,dock,collapse,expand}`, `am.side.card.<key>` (the card's title);
-  the side panel's `⋯` menu (SIDE_PANEL.md §2i, NOT BUILT): `am.side.more` (the header's `⋯` button, named "More
-  options"), and `scope` / `sort` / `scrollToTab` / `dock` / `collapse` move from header buttons to that menu's items
-  (the same ids; their texts carry the state: "Card scope: LOCAL", "Dock on the right"), plus the submenus' entries
-  `am.side.scope.{local,global}` and `am.side.sort.{active,recent,newest,oldest,alpha}` (the settings.json tokens) —
-  a menu item exists only while the menu is open;
+  the side panel's `⋯` menu (SIDE_PANEL.md §2i; in dev 0.0.1.42 and production 0.8.0.9): `am.side.more` (the header's
+  `⋯` button, named "More options"), and `scope` / `sort` / `scrollToTab` / `dock` / `collapse` move from header buttons
+  to that menu's items (the same ids; their texts carry the state: "Card scope: LOCAL", "Dock on the right"), plus the
+  submenus' entries `am.side.scope.{local,global}` and `am.side.sort.{active,recent,newest,oldest,alpha}` (the
+  settings.json tokens) — a menu item exists only while the menu is open. From 2026-11-04 (NOT BUILT) the header line
+  mirrors with the dock by moving grid columns, never the header's children (appended `launch` · `sum` · `more`), so
+  the tree order need not follow the screen: read the line's order from screen positions (the driver's
+  `header_buttons`);
   the side panel's AI search (SIDE_PANEL.md §2h, NOT BUILT): `am.side.ai` (the filter box's AI toggle, named by its "AI"),
   `am.side.ai.{status,thinking,reset}` (the strip's text, the thinking toggle, ⊘ — named "New conversation"),
   `am.side.ai.result.<key>` (a result card's title; its item status is the state word or "closed", the tags, "selected").

@@ -22,12 +22,20 @@ then "codex", "unread", "unsent draft", "cache warm", "tags: …", "selected" as
 
 The ⋯ menu (SIDE_PANEL.md §2i; a build of 2026-11-03 or later — NOT in 0.8.x): the header line is only '+' · 'Sum' ·
 '⋯' (button "More options", am.side.more). The ⋯ opens a MenuFlyout whose items keep the ids of the buttons they
-replaced: 'Dock on the right' / 'Dock on the left' (am.side.dock) · 'Scroll to the selected tab' (am.side.scrollToTab, a
-ToggleMenuFlyoutItem: its toggle state is the setting) · 'Card scope: LOCAL' ▸ (am.side.scope; entries
-am.side.scope.local / .global) · 'Card order: MOST ACTIVE' ▸ (am.side.sort; entries am.side.sort.<active | recent | newest
-| oldest | alpha>, the settings.json tokens) · 'Collapse the side panel' (am.side.collapse). The panel's own methods
-(scope, toggle_scope, set_scope, flip_dock, collapse) work on both header shapes: through the ⋯ menu when the build has
-it, through the old buttons otherwise.
+replaced: 'Scroll to the selected tab' (am.side.scrollToTab, a ToggleMenuFlyoutItem: its toggle state is the setting) ·
+'Card scope: LOCAL' ▸ (am.side.scope; entries am.side.scope.local / .global) · 'Card order: MOST ACTIVE' ▸ (am.side.sort;
+entries am.side.sort.<active | recent | newest | oldest | alpha>, the settings.json tokens) · a separator (not reported) ·
+'Dock on the right' / 'Dock on the left' (am.side.dock) · 'Collapse the side panel' (am.side.collapse). The panel's own
+methods (scope, toggle_scope, set_scope, flip_dock, collapse) work on both header shapes: through the ⋯ menu when the
+build has it, through the old buttons otherwise.
+
+The line MIRRORS with the dock (the user's layout of 2026-11-04, a build of that day or later): ⋯ sits at the window's
+edge, so docked right the line reads '+' · 'Sum' · '⋯' (right-aligned) and docked left '⋯' · 'Sum' · '+' (left-aligned),
+and the menu hangs from ⋯'s outer edge (its left edge docked left, its right edge docked right). The dock moves grid
+columns only, never the header's children, so read the line's order from the buttons' screen positions (header_buttons),
+not from the tree; cards_view's "the ScrollViewer after +" walk holds in either dock, since the three buttons precede
+the cards whatever their order. The 2026-11-03 build kept '+ Sum ⋯' right-aligned in both docks and listed the dock
+item first, above Scroll to the selected tab.
 """
 from __future__ import annotations
 
@@ -56,8 +64,13 @@ MORE_ID = "am.side.more"
 MORE_ITEM_IDS = {"dock": "am.side.dock", "scroll": "am.side.scrollToTab", "scope": "am.side.scope",
                  "order": "am.side.sort", "collapse": "am.side.collapse"}
 """The ⋯ menu's items by what they do -> their AutomationIds (the ids of the header buttons they replaced)."""
-MORE_ITEM_ORDER = ["dock", "scroll", "scope", "order", "collapse"]
-"""The ⋯ menu's items top to bottom (the user's order of 2026-11-03; the separator before the collapse is not reported)."""
+MORE_ITEM_ORDER = ["scroll", "scope", "order", "dock", "collapse"]
+"""The ⋯ menu's items top to bottom (the user's order of 2026-11-04: the dock moved below the separator, before the
+collapse; the separator after the card order is not reported). The 2026-11-03 build listed the dock first."""
+HEADER_ORDER = {"right": ["am.side.launch", "am.side.sum", MORE_ID],
+                "left": [MORE_ID, "am.side.sum", "am.side.launch"]}
+"""The header line's buttons LEFT TO RIGHT on screen, per dock side -> their AutomationIds: the line mirrors with the dock,
+⋯ always at the window's edge (the user's layout of 2026-11-04; header_buttons reads it)."""
 ORDER_TOKENS = {"MOST ACTIVE": "active", "MOST RECENT": "recent", "NEWEST": "newest", "OLDEST": "oldest", "A–Z": "alpha"}
 """The Card order submenu's words, top to bottom -> the settings.json `boardSort` token (its entry is am.side.sort.<token>)."""
 
@@ -269,6 +282,22 @@ class SidePanel:
             panel is collapsed.
         """
         return next((k for k in self.controls(kids) if k.role == "button" and k.automation_id == MORE_ID), None)
+
+    def header_buttons(self) -> list[uia.Element]:
+        """The header line's buttons, LEFT TO RIGHT on screen: every button of the panel above the filter box (the AI
+        toggle sits inside the box, so it is not one of them). Ordered by position, not by tree order: the line mirrors
+        with the dock by moving grid columns, and the tree keeps the build's order (HEADER_ORDER has both shapes).
+
+        Returns:
+            The buttons ([] while the panel is collapsed or absent).
+        Raises:
+            LookupError: When the panel shows but has no filter box.
+        """
+        controls = self.controls()
+        if not controls:
+            return []
+        top = self.filter_box().rect[1]
+        return sorted((k for k in controls if k.role == "button" and k.rect[1] < top), key=lambda k: k.rect[0])
 
     def open_more_menu(self) -> Menu:
         """Click ⋯ and wait for its menu (read once it stopped moving: the menu slides into place).

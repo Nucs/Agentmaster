@@ -8,14 +8,15 @@ per-tab overlay's components, so it carries their business logic verbatim instea
 ## 1. Layout
 
 Shown in the DEFAULT dock (LEFT); the header's `⋯` ▸ **Dock on the right** flips it to the mirror image (dock
-RIGHT), which also flips the collapse symbols (the menu's `«` here and the collapsed strip's `»` — the collapse always
-points toward the docked edge).
+RIGHT), which also flips the header's button line (`⋯ Sum +` from the left edge here, `+ Sum ⋯` against the right edge
+docked right — `⋯` always at the window's edge, §2i) and the collapse symbols (the menu's `«` here and the collapsed
+strip's `»` — the collapse always points toward the docked edge).
 
 ```
 ┌ tab row ────────────────────────────────────────────────────────────┐
 ├───────────────────────────────┬──┬──────────────────────────────────┤
-│                   [+][Sum][⋯] │ ▌│                                  │  ← header line 1 (right-aligned): + launcher (§2e) /
-│                               │ ▌│                                  │    summary area (§2d) / ⋯ menu (§2i: dock, ⌖, scope, order, collapse)
+│ [⋯][Sum][+]                   │ ▌│                                  │  ← header line 1 (at the window's edge, mirrored with the dock):
+│                               │ ▌│                                  │    ⋯ menu (§2i: ⌖, scope, order, dock, collapse) / summary area (§2d) / + launcher (§2e)
 │ [filter sessions…]            │ ▌│                                  │  ← header line 2: the filter box, full width
 │ N of M (this window)          │ ▌│        terminal content          │  ← count line (names the scope)
 │ ┌───────────────────────────┐ │ ▌│          (TabContent)            │
@@ -37,7 +38,7 @@ the panel:
 ```
 ┌ tab row ────────────────────────────────────────────────────────────┐
 ├───────────────────────────────┬──┬──────────────────────────────────┤
-│                   [+][Sum][⋯] │ ▌│                                  │  ← "Sum" OFF (unchecked)
+│ [⋯][Sum][+]                   │ ▌│                                  │  ← "Sum" OFF (unchecked)
 │ [filter sessions…]            │ ▌│                                  │
 │ N of M (this window)          │ ▌│                                  │
 │ ┌───────────────────────────┐ │ ▌│ ┌──────────────────────────────┐ │  ← hover a card: the session's RICH card
@@ -57,7 +58,7 @@ model's answer and its list of sessions instead of the session cards; the summar
 ```
 ┌ tab row ────────────────────────────────────────────────────────────┐
 ├───────────────────────────────┬──┬──────────────────────────────────┤
-│                   [+][Sum][⋯] │ ▌│                                  │
+│ [⋯][Sum][+]                   │ ▌│                                  │
 │ [describe a session, Enter[AI]]│ ▌│                                  │  ← the filter box is the REQUEST line (AI checked)
 │ 3 sessions found              │ ▌│                                  │  ← the count line speaks for the AI view
 │ ╭───────────────────────────╮ │ ▌│                                  │
@@ -79,12 +80,15 @@ model's answer and its list of sessions instead of the session cards; the summar
   0 until `_InitAgentSidePanel` runs, so a build without the panel renders the pre-feature layout.
 - The whole panel forces the Agentmaster DARK theme (explicit fills, `RequestedTheme(Dark)`).
 - The header's line of buttons is **+** (the launcher, §2e), **Sum** (the summary-area toggle, §2d)
-  and **⋯** (§2i), a menu holding **Dock on the right / left** (`⇄`), **Scroll to the selected tab**
-  (`⌖`, §2a), **Card scope ▸** (LOCAL / GLOBAL, §2), **Card order ▸** (§2) and **Collapse the side
-  panel**, which shrinks the panel to a 20px expander strip (the strip's chevron brings it back).
-- The header is **two lines** (one 2-row grid): the buttons, right-aligned,
-  over the filter box, which spans every column. Sharing one line with the buttons, the box was
-  squeezed toward its minimum on a narrow panel while the buttons kept their natural widths.
+  and **⋯** (§2i), a menu holding **Scroll to the selected tab** (`⌖`, §2a), **Card scope ▸** (LOCAL /
+  GLOBAL, §2), **Card order ▸** (§2), then below a separator **Dock on the right / left** (`⇄`) and
+  **Collapse the side panel**, which shrinks the panel to a 20px expander strip (the strip's chevron
+  brings it back).
+- The header is **two lines** (one 2-row grid): the buttons, at the panel's OUTER end (the window's
+  edge) and in a line that mirrors with the dock — `⋯ Sum +` left-aligned docked left, `+ Sum ⋯`
+  right-aligned docked right, so `⋯` is always outermost (§2i) — over the filter box, which spans every
+  column. Sharing one line with the buttons, the box was squeezed toward its minimum on a narrow panel
+  while the buttons kept their natural widths.
 - **Two font sizes.** The worded button (Sum) is 11 px; the ICON buttons (`+`, `⋯`, and the
   collapsed strip's chevron) are 12 px
   (`kSidePanelIconFontSize`, 2026-10-05 — they were 11 px, and a symbol reads smaller than a word at
@@ -512,8 +516,9 @@ Built 2026-10-06 (commit f73481af7); in production 0.6.8.19 since 2026-10-12 and
 pre-release. The fix of item 5 below (2026-10-12, commit bd9ba2eae) is in dev since 0.0.1.6 and in
 production since 0.6.8.20. The folder list opening WITH the card (item 5, 2026-10-19) and the
 one-click Launch (item 8, 2026-10-19) are in no build yet. The
-header's **+** button (the first of the right-aligned buttons, left
-of **Sum** — the user's "leftmost, to Sum") opens a small card AT THE CLICK that holds the Agent
+header's **+** button (the innermost of the header's buttons, beside **Sum** on the terminal's side —
+left of it docked right, the user's "leftmost, to Sum"; right of it docked left, where the line
+mirrors, §2i) opens a small card AT THE CLICK that holds the Agent
 Manager's own launch row, so a session starts from the side panel without leaving the tab:
 
 ```
@@ -531,7 +536,9 @@ Manager's own launch row, so a session starts from the side panel without leavin
 1. **Where:** `+` in header column 1, left of **Sum**; Sum, LOCAL / GLOBAL, the sort, `⌖`, `⇄` and
    the chevron each moved one column right (column 7 is new). An ICON button: 12 px like `⌖` / `⇄`,
    `IsTabStop` false like its siblings, an automation name ("Launch a session"). (Since §2i the line is
-   `+` · Sum · `⋯`: LOCAL / GLOBAL, the sort, `⌖`, `⇄` and the chevron are the `⋯` menu's items; `+` keeps column 1.)
+   `+` · Sum · `⋯`: LOCAL / GLOBAL, the sort, `⌖`, `⇄` and the chevron are the `⋯` menu's items. Since 2026-11-04 the
+   line mirrors with the dock, `⋯` at the window's edge: `+` is column 1 docked right, left of Sum, and column 2 docked
+   left, right of Sum — the innermost button either way, `_SidePanelApplyHeaderOrder`.)
 2. **Placement — tooltip-like, but interactive.** The card's corner sits at the click point and the
    card extends toward the window's center: a click in the left half opens it rightward (its left
    edge at the click), in the right half leftward (its right edge at the click), and the same with
@@ -1036,38 +1043,72 @@ past a day → 1440, a hand-edited 0, a write of an unclamped value).
   park line; Settings ▸ Sessions ▸ AI SEARCH changes the minutes.
 - No `[exc] _SidePanelAi…` / `[exc] side panel AI …` line in hooks.log.
 
-### 2i. The `⋯` menu — the header's settings and the collapse (2026-11-03, NOT BUILT yet)
+### 2i. The `⋯` menu — the header's settings and the collapse (2026-11-03; the mirrored line and the dock item's place 2026-11-04)
 
-The user's layout of 2026-11-03: the header's first line keeps **+** and **Sum** where they were and ends in **⋯**, in the
-collapse chevron's place. The other five buttons (LOCAL / GLOBAL, the sort, `⌖`, `⇄`, `«`) are its menu's items, so the
-line reads `+ Sum ⋯` and fits a narrow panel (the sort button alone was up to 11 characters wide, and its width jumped
-as it cycled).
+The 2026-11-03 menu (commit a5191c30d) is in dev 0.0.1.42 and production 0.8.0.9; the 2026-11-04 changes below — the
+line mirrors with the dock, and the dock item sits below the separator — are NOT BUILT yet.
+
+The user's layout of 2026-11-03: the header's first line keeps **+** and **Sum** and ends in **⋯**, in the collapse
+chevron's place. The other five buttons (LOCAL / GLOBAL, the sort, `⌖`, `⇄`, `«`) are its menu's items, so the line
+reads `+ Sum ⋯` and fits a narrow panel (the sort button alone was up to 11 characters wide, and its width jumped as it
+cycled). The user's changes of 2026-11-04: the dock item moved from the top of the menu to below the separator, just
+above the collapse; and the whole line mirrors with the dock, so `⋯` is always at the window's edge — the LEFTMOST
+button docked left (`⋯ Sum +`, left-aligned), the RIGHTMOST docked right (`+ Sum ⋯`, right-aligned, as before).
+
+Docked LEFT (the default):
 
 ```
-                 [+][Sum][⋯]
-       ┌───────────────────────────────────┐
-       │     ⇄  Dock on the right          │
-       │  ✓  ⌖  Scroll to the selected tab │
-       │     ⧉  Card scope: LOCAL        › │──► ✓ LOCAL — this window's sessions
-       │     ⇅  Card order: MOST ACTIVE  › │      GLOBAL — every window's sessions
-       │ ───────────────────────────────── │
-       │     «  Collapse the side panel    │    Card order ›: ✓ MOST ACTIVE · MOST RECENT · NEWEST · OLDEST · A–Z
-       └───────────────────────────────────┘
+ [⋯][Sum][+]
+ ┌───────────────────────────────────┐
+ │  ✓  ⌖  Scroll to the selected tab │
+ │     ⧉  Card scope: LOCAL        › │──► ✓ LOCAL — this window's sessions
+ │     ⇅  Card order: MOST ACTIVE  › │      GLOBAL — every window's sessions
+ │ ───────────────────────────────── │
+ │     ⇄  Dock on the right          │    Card order ›: ✓ MOST ACTIVE · MOST RECENT · NEWEST · OLDEST · A–Z
+ │     «  Collapse the side panel    │
+ └───────────────────────────────────┘
+```
+
+Docked RIGHT (the mirror; the menu hangs from `⋯`'s right edge):
+
+```
+                           [+][Sum][⋯]
+ ┌───────────────────────────────────┐
+ │  ✓  ⌖  Scroll to the selected tab │
+ │     ⧉  Card scope: LOCAL        › │
+ │     ⇅  Card order: MOST ACTIVE  › │
+ │ ───────────────────────────────── │
+ │     ⇄  Dock on the left           │
+ │     »  Collapse the side panel    │
+ └───────────────────────────────────┘
 ```
 
 - **The items**, top to bottom in the user's order, each with its symbol LEFT of its text (the item's icon slot; Segoe UI
   Symbol, the font the panel's glyph buttons draw from, so `⇄`, `⌖` and `«` are the symbols the buttons wore; `⧉` and `⇅`
   are new):
-  1. **Dock on the right** / **Dock on the left** (`⇄`) — the dock flip (`_SidePanelFlipDock`, GLOBAL), worded as where the
-     panel goes.
-  2. **Scroll to the selected tab** (`⌖`) — a check item, checked while the GLOBAL setting is on (§2a).
-  3. **Card scope: LOCAL / GLOBAL ▸** (`⧉`) — two check entries, the current one checked (`_SidePanelSetScope`, per
+  1. **Scroll to the selected tab** (`⌖`) — a check item, checked while the GLOBAL setting is on (§2a).
+  2. **Card scope: LOCAL / GLOBAL ▸** (`⧉`) — two check entries, the current one checked (`_SidePanelSetScope`, per
      window, §2).
-  4. **Card order: <the order> ▸** (`⇅`) — the five orders in the board cycle's sequence, the current one checked, each with
+  3. **Card order: <the order> ▸** (`⇅`) — the five orders in the board cycle's sequence, the current one checked, each with
      a tooltip saying what it sorts by (`_SidePanelSetSort` → `AgentManagerContent::SetBoardSort`: GLOBAL, shared with the
      Triage Board, §2). A stray stored BY PID reads MOST ACTIVE, as on the board, and a pick of MOST ACTIVE then sets it.
-  5. a separator, then **Collapse the side panel** (`«` docked left, `»` docked right — toward the docked edge, like the
-     chevron it replaced); the strip's chevron brings the panel back.
+  4. a separator, then **Dock on the right** / **Dock on the left** (`⇄`) — the dock flip (`_SidePanelFlipDock`, GLOBAL),
+     worded as where the panel goes.
+  5. **Collapse the side panel** (`«` docked left, `»` docked right — toward the docked edge, like the chevron it
+     replaced); the strip's chevron brings the panel back.
+
+  Above the separator, the three items that change the card list; below it, the two that move or shrink the panel itself
+  (and the header the menu hangs from).
+- **The line mirrors with the dock** (`_SidePanelApplyHeaderOrder`, run by every `_SidePanelApplyDock`: the panel's
+  build — before its first frame, so a left-docked panel is never drawn with the build's docked-right seed —, a dock flip
+  here and a settings broadcast that moved the dock): docked right `[ spacer * ][ + ][ Sum ][ ⋯ ]`, docked left
+  `[ ⋯ ][ Sum ][ + ][ spacer * ]`, so `⋯` is the outermost button and `+` the innermost, on the terminal's side, in both.
+  It moves grid columns only — which of the header's four columns is the star spacer, each button's `Grid.Column`, the
+  menu's placement — never the header's children (appended `+ · Sum · ⋯`, so the UI Automation tree need not follow the
+  screen: the e2e driver reads the line by position), every handler stays as built, and the filter box and the AI toggle,
+  which span all four columns, do not move. Every write is
+  change-gated, so a re-apply with an unchanged dock writes nothing; a failed write is logged
+  (`[exc] _SidePanelApplyHeaderOrder`) and the next dock apply re-lays the line.
 - **Built at every open** (`_SidePanelFillMoreMenu`, from the menu's `Opening`; the Agent Manager's lazy session menus'
   idiom): every text and check is read from the live settings then, so a change made in another window never leaves the
   menu stale, and nothing has to keep it in step. The submenu headers carry the current scope and order in their text,
@@ -1078,8 +1119,10 @@ as it cycled).
   was built for (the dock side, the `⌖` setting, an expanded panel; a scope or order already set does nothing), so a menu
   left open while another window changed a setting never inverts it. A failure is logged
   (`[exc] side panel more menu: <command>`; a fill that threw opens with the items built so far).
-- **Placement:** below `⋯` with the right edges aligned (`BottomEdgeAlignedRight`): the header's buttons sit at the panel's
-  right end in either dock, so the menu spreads over the panel, not over the terminal.
+- **Placement:** below `⋯`, hanging from its OUTER edge — the left edges aligned docked left (`BottomEdgeAlignedLeft`), the
+  right edges docked right (`BottomEdgeAlignedRight`) — so the menu spreads over the panel and never reaches past the
+  window's edge (a flyout pushed off the window is slid or flipped by the framework, over the terminal). Set by
+  `_SidePanelApplyHeaderOrder` with the dock, read at the next open; the build seeds the docked-right one.
 - **The keyboard:** `⋯` is `IsTabStop` false like its siblings (a click never pulls focus out of the terminal by itself); the
   open menu holds the keyboard and hands it back as it closes — a hand-back, which keeps a card peek (§3). The "+"
   launcher card closes at the press on `⋯` (an outside press, §2e).
@@ -1088,24 +1131,31 @@ as it cycled).
   they replaced (`am.side.dock`, `am.side.scrollToTab`, `am.side.scope`, `am.side.sort`, `am.side.collapse` — ids are added,
   never renamed), and the entries add `am.side.scope.<local|global>` and `am.side.sort.<active|recent|newest|oldest|alpha>`
   (the settings.json tokens). The e2e driver (`e2e/amdriver/ui/sidepanel.py`) drives both header shapes — the menu when
-  `am.side.more` exists, the 0.8.x buttons otherwise; the flow is SP-10, its test
-  `test_side_panel.py::test_more_menu_holds_the_header_controls` (`needs_fix("SP-F1")`).
+  `am.side.more` exists, the 0.8.x buttons otherwise — and reads the line's order by screen position (`header_buttons`,
+  `HEADER_ORDER`), since the tree order does not mirror; the flow is SP-10, its test
+  `test_side_panel.py::test_more_menu_holds_the_header_controls` (`needs_fix("SP-F1")`: it checks the 2026-11-04 shape —
+  the mirrored line in both docks, the menu's outer edge, the new item order — so a 2026-11-03 build fails it by design).
 - **Files:** `TerminalPage.AgentSidePanel.cpp` (the button, `_SidePanelFillMoreMenu`, `_SidePanelRunMenuCommand`,
-  `_SidePanelSetScope`, `_SidePanelSetSort`, the `kSidePanel*Glyph` symbols, `kSidePanelOrderChoices`), `TerminalPage.h`
-  (`_sidePanelMoreBtn` replaced four button members: a TerminalPage layout change, so the next build must purge),
-  `AgentManagerContent.{h,Tree.cpp}` (`SetBoardSort`).
+  `_SidePanelApplyHeaderOrder`, `_SidePanelSetScope`, `_SidePanelSetSort`, the `kSidePanel*Glyph` symbols,
+  `kSidePanelOrderChoices`), `TerminalPage.h` (`_sidePanelMoreBtn` replaced four button members on 2026-11-03, and
+  `_sidePanelHeader` — the header grid, kept for the mirror — is new on 2026-11-04: TerminalPage layout changes, so the
+  next build must purge), `AgentManagerContent.{h,Tree.cpp}` (`SetBoardSort`).
 
 **Check after the build** (a purged build: `TerminalPage.h`'s data members changed):
-- The line reads `+ Sum ⋯` (right-aligned), and stays whole on a panel at its narrowest; `⋯`'s tip ("More options") opens after 3 s.
-- `⋯` opens the menu below it, inside the panel, in both docks; each item's symbol sits left of its text; the `⌖` item is
-  checked while scroll-to-tab is on.
+- Docked left the line reads `⋯ Sum +` from the window's left edge; docked right `+ Sum ⋯` against its right edge; both stay
+  whole on a panel at its narrowest; `⋯`'s tip ("More options") opens after 3 s.
+- `⋯` opens the menu below it, hanging from its outer edge (the left edges aligned docked left, the right edges docked
+  right), inside the panel; the items read `⌖` · Card scope › · Card order › · a separator · Dock on the right / left ·
+  Collapse; each item's symbol sits left of its text; the `⌖` item is checked while scroll-to-tab is on.
 - Card scope ▸ GLOBAL: the count line reads `… across all windows` and the header text `Card scope: GLOBAL`; a new window
   still starts LOCAL.
 - Card order ▸ NEWEST / OLDEST / A–Z: the cards re-sort at once, the Triage Board follows, settings.json `boardSort` changes,
   another window's list re-sorts (the broadcast); each order's tip says what it sorts by.
 - Scroll to the selected tab: settings.json `sidePanelScrollToSelectedTab` flips, every open window follows (its menu shows
   the check at the next open).
-- Dock on the right: the panel moves, the item then reads "Dock on the left", the collapse symbol becomes `»`.
+- Dock on the right: the panel moves, the line becomes `+ Sum ⋯` against the window's right edge, the item then reads
+  "Dock on the left", the collapse symbol becomes `»`, and the menu now hangs from `⋯`'s right edge. Dock on the left
+  mirrors it all back. A dock moved by another window's settings broadcast re-lays this window's line too.
 - Collapse the side panel: the 20px strip; its chevron restores the panel.
 - Esc closes the menu (and its submenu) without a change; no keystroke reaches the terminal; no
   `[exc] side panel more menu` line in hooks.log.
@@ -1387,4 +1437,8 @@ below).
   `_SidePanelRunMenuCommand`, `_SidePanelSetScope` in place of the scope toggle, `_SidePanelSetSort`, the menu's symbols
   and `kSidePanelOrderChoices`), `TerminalPage.h` (`_sidePanelMoreBtn` in place of the four button members, the
   declarations), `AgentManagerContent.{h,Tree.cpp}` (`SetBoardSort`, the order by name), `e2e/amdriver/ui/sidepanel.py`
-  (the menu by AutomationId, both header shapes), `e2e/suites/test_side_panel.py` (SP-10).
+  (the menu by AutomationId, both header shapes), `e2e/suites/test_side_panel.py` (SP-10). The mirrored line and the dock
+  item's place (2026-11-04): `TerminalPage.AgentSidePanel.cpp` (`_SidePanelApplyHeaderOrder`, called by
+  `_SidePanelApplyDock`; the dock item moved in `_SidePanelFillMoreMenu`), `TerminalPage.h` (`_sidePanelHeader`, the
+  declaration), `e2e/amdriver/ui/sidepanel.py` (`header_buttons`, `HEADER_ORDER`, `MORE_ITEM_ORDER`),
+  `e2e/suites/test_side_panel.py` (the line in both docks, the menu's outer edge).
