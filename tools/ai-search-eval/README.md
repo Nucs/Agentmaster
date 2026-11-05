@@ -12,6 +12,7 @@ the engine fixes and the Search Procedure are in [`doc/agentmaster/SESSIONS.md`]
 | `queries.json` | The five queries the prompt was tuned on, one of each kind: a subject that is also a folder, words the user remembers, an error code within one project, a file CHANGED, a period with a folder; and q6, "find betterclipboard session", the Telegram request of 2026-10-18 that the dev bot first answered with nothing (a project word that is also a folder; added after the tuning, never tuned on). |
 | `heldout_queries.json` | Four more the prompt was never tuned on: a file changed, a day, an error, the user's words. |
 | `score.py` | Scores one round's results against a keys file (`--miss`: every missed session, seen by a tool or never; `--calls`: every tool call with its counts). |
+| `review_log.py` | Reads the app's own CONVERSATION LOG (debug mode, SESSIONS.md §9.17): a review of each REAL request, a summary, or the requests in this kit's results format (below, "Live requests"). |
 | `pieces.txt` | **The prompt's source.** The `AM_PROMPT_*` macros of `SessionSearchTools.cpp` ("the system prompts") are generated from it; the page prompt and the database prompt are two orders of the same pieces. |
 | `gen_prompt.py` | pieces.txt -> the macros, the two composed prompts, and the check that the composed page prompt equals a scored prompt file. |
 | `splice_prompt.py` + `compose.cpp.txt` | Puts generated macros into `SessionSearchTools.cpp`, with the two compositions and the `#undef`s. |
@@ -52,6 +53,27 @@ python -I tools\ai-search-eval\score.py Q:\tmp\am-eval\r1.json --keys <keys.json
   from running in parallel (the debug heap serializes their allocations). 2026-10-18: a grep that reads 363 files in
   4.5 s optimized read 1 in its 20 s there, and a read of 8 sessions that takes 0.6 s optimized left 2 to 5 unread.
   A Debug harness: the same `cl` line with `/Od /Ob1 /MDd /RTC1 /D_DEBUG /DDBG` instead of `/O2`.
+
+## Live requests: the conversation log
+
+In DEBUG MODE (the dev install always; a release with Settings ▸ About ▸ Enable Debug Mode, from its next start) the app
+writes every request of its two search conversations whole — the request, the plan, every tool call with its WHOLE result,
+the shown sessions with their whys, the reply, time, tokens and cost — to `<profile>\harness\logs\<conversation>-<date>.jsonl`
+(SESSIONS.md §9.17 has the line format). `review_log.py` reads it:
+
+```
+python -I tools\ai-search-eval\review_log.py                       :: every request of the dev / release profiles' logs
+python -I tools\ai-search-eval\review_log.py <folder> --since 2026-11-05 --conv sessions-search --full
+python -I tools\ai-search-eval\review_log.py <folder> --summary    :: one line per request + the totals
+python -I tools\ai-search-eval\review_log.py <folder> --last 5 --eval-json Q:\tmp\am-eval\live.json
+python -I tools\ai-search-eval\score.py Q:\tmp\am-eval\live.json --keys <keys.json> --calls --miss
+```
+
+- A request that went wrong in real use is the best new eval query: export it with `--eval-json`, build its `must` /
+  `optional` lists from the transcripts on disk (as for the kit's own keys), and score it; then add its words to
+  `queries.json` so the next prompt change is measured on it too.
+- `--eval-json` names each request `<date>-<conversation>-p<pid>e<epoch>t<turn>`: that is the query id its keys need.
+- The log is the user's own words and sessions: like the keys, keep exported files outside the repository.
 
 ## Changing the prompt
 

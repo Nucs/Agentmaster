@@ -301,8 +301,9 @@ Every color surface — tabs, board bands, Sessions chips, the pending dots — 
 - **Profile:** the active profile folder (read-only) and Change profile folder… (applied at the next
   start; PROFILES.md). The profile is not an `AppSettings` field: it is the pointer to `settings.json`.
 - `debugMode` (false): Enable Debug Mode, applied at the next start; it makes `Profiles::IsDevOrDebugPackage()`
-  true (as the `AgentmasterDev` package, the `--debug` flag or `AGENTMASTER_DEBUG` do). No feature reads it
-  today. ⚠ Its startup apply (`ApplyPersistedDebugMode`) exports `AGENTMASTER_DEBUG=1` into the process
+  true (as the `AgentmasterDev` package, the `--debug` flag or `AGENTMASTER_DEBUG` do). What it turns on: the AI
+  search's conversation log (SESSIONS.md §9.17 — every request, tool call and whole result in
+  `<profile>\harness\logs`). ⚠ Its startup apply (`ApplyPersistedDebugMode`) exports `AGENTMASTER_DEBUG=1` into the process
   env, because the `DebugForced` latch is module-local.
 - Uninstall (`--uninstall-portable`; PROFILES.md §2b).
 

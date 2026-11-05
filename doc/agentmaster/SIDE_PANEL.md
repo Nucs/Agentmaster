@@ -933,7 +933,9 @@ controls (an unknown member planted in the glyph and in `_SidePanelRefreshIndica
 The view of 2026-10-31 (commit 7bbb63137, and the box keeping its text, 7d8ed1043) is in dev 0.0.1.42 and production
 0.8.0.9. The user's two requests of 2026-11-05 — "a loading icon while the assistant is running" and "the ai assistant
 should update the list only at the end when the result is final" — are NOT BUILT yet (the strip's spinner, *The list
-changes only at a request's end* below).
+changes only at a request's end* below). So are the same day's two more: the AI strips' MOTION (the user's pick from five
+animated options: a light sweeping along the strip's bottom edge, plus a breathing dot — *The strip's motion* below) and
+"the cards in sidemenu with an explanation must not be trimmed and support multiline" (the whole why, *The results*).
 
 The user's request: "add a 'Search' area similarly how 'Sum' works … the same search agent we have, same lifecycle but
 custom UI matching a sidemenu". Their answers to the four design questions (design-ask, 2026-10-31):
@@ -982,7 +984,8 @@ shifts the box's own clear button (the template part `DeleteButton`) left by the
 - **The results** — one card per listed session, in the model's order: the side panel's card skeleton
   (`_SidePanelBuildCardSkeleton`, the same builder as the session cards, so the two can never drift apart) — folder-color
   band with the title and tag ribbons, the status icon and its label, the timing line, the folder / branch line — plus the
-  model's **why** under it (a 2 DIP quote bar and one italic line; the tip has it whole). A session with a live tab shows
+  model's **why** under it — the WHOLE text, italic, wrapped over as many lines as it needs and never trimmed, beside a
+  2 DIP quote bar as tall as the text (the user's rule of 2026-11-05; the card grows with it, and the tip repeats it). A session with a live tab shows
   its live state; one without reads **closed** in gray (`kSidePanelAiClosedColor`). An empty pick reads "No session fits
   this request."
 - **The list changes only at a request's end** (the user's rule of 2026-11-05, "the ai assistant should update the list
@@ -1000,6 +1003,15 @@ shifts the box's own clear button (the template part `DeleteButton`) left by the
 - **The loading icon spins only while it can be seen** (`_SidePanelAiShowWorking`, the status icons' host rule of §2g): AI
   mode on and the panel expanded; AI off and a collapse stop it (a ring left active would keep the compositor animating
   for nobody), and an expand repaints the strip from the conversation as it is then.
+- **The strip's motion** (the user's pick of 2026-11-05 for both AI strips, the Sessions page's too: SESSIONS.md §9.1;
+  `AgentWorkingIndicator` in `AgentAmbientAnimation.{h,cpp}`, `_sidePanelAiWorking`): while a request runs, a light 30% of
+  the strip's width **sweeps** along its bottom edge, left to right every 1.4 s (`AgentSweepBar`: a gradient sprite in a
+  clipped container of its own on a 2 DIP host just inside the border, `kSidePanelAiSweepInsetX` clear of the corner
+  curves; its travel follows the strip's width live, through the host's `SizeChanged`), and the state dot **breathes**
+  (Opacity 1 → 0.25 → 1 every 1.2 s) — but only while the dot is visible: the loading icon hides the dot while the
+  assistant works, so the side panel shows the spinner and the sweep. It runs only while the view can be seen (switched
+  last in every `_SidePanelAiUpdateStrip`; AI off and a collapse stop it, an expand starts it again) and costs the UI
+  thread nothing per frame (Composition animations, UI_THREAD.md §10c).
 - **The data of a card**: the registry's record when it has one (an open or a closed session: the managed title, its color,
   its state), else the index entry the agent sent with the list, else — a list restored when the window opens, before any
   search read the index — the entry read from disk off the UI thread (`_SidePanelAiFetchMissingEntries` →
@@ -1059,6 +1071,10 @@ past a day → 1440, a hand-edited 0, a write of an unclamped value).
   answer shows in the strip, the green dot is back and the cards are bright again. A follow-up answered in words leaves the
   cards as they are. With the panel collapsed during a request, an expand shows the spinner again; the summary area still
   follows the focused tab. `am.side.ai.busy` is in the UI Automation tree only while the icon shows.
+- The strip's motion: while the request runs a soft light sweeps along the strip's bottom edge, left to right, never past
+  its rounded corners; it stops (and leaves nothing drawn) at the answer, at Esc, at AI off and at a collapse, and comes
+  back at an expand while the request still runs. A why of two or three lines shows whole on its card, the bar beside
+  every line.
 - Click a result of an open session: the summary peeks it, the Manager lens follows; double-click: its tab comes up. A closed
   one: double-click resumes it as a new tab here; right-click shows the closed-session menu. A session never opened in
   Agentmaster: the click opens its transcript.
@@ -1464,7 +1480,11 @@ below).
   `_OnSidePanelAiEvent`, the dim and the candidate count in `_SidePanelAiUpdateStrip`, the collapse's strip repaint),
   `TerminalPage.h` (`_sidePanelAiSpinner` + `_sidePanelAiCandidateCount` in place of the preview's two members),
   `tests/tests_sidepanel.cpp` (`TestSidePanelAiList`),
-  `tests/tests_persistence.cpp`.
+  `tests/tests_persistence.cpp`;
+  the strip's motion and the whole why (2026-11-05): `AgentAmbientAnimation.{h,cpp}` (`AgentSweepBar`,
+  `AgentWorkingIndicator`), `TerminalPage.AgentSidePanel.cpp` (the sweep host in `_SidePanelAiEnsureView`, the switch at
+  the end of `_SidePanelAiUpdateStrip`, in `_SidePanelSetAiMode` and in `_SidePanelToggleCollapsed`; the why's wrap in
+  `_SidePanelAiApplyResultModel`), `TerminalPage.h` (`_sidePanelAiWorking`).
   The `⋯` menu (§2i): `TerminalPage.AgentSidePanel.cpp` (the button and its lazily filled menu, `_SidePanelFillMoreMenu`,
   `_SidePanelRunMenuCommand`, `_SidePanelSetScope` in place of the scope toggle, `_SidePanelSetSort`, the menu's symbols
   and `kSidePanelOrderChoices`), `TerminalPage.h` (`_sidePanelMoreBtn` in place of the four button members, the

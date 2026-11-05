@@ -553,6 +553,13 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
 > API's `between_tools`; 2.1.291 ran it). The toggle now rotates **low → medium → high → xhigh → max → low** on the page and
 > in the side panel, the default is low, a stored "off" runs as low (`OfferedHarnessThinkingLevel`), and the cog's Search
 > topic level lists no off (9.1; `SDK_HARNESS.md` 5.3).
+>
+> **2026-11-05 (the user's requests; NOT BUILT): the strip's motion, and a conversation log.** "We need a loading animation
+> while the agent is still running": from five animated options the user picked a light sweeping along the strip's bottom
+> edge, plus a breathing dot — on the page and in the side panel (9.1; SIDE_PANEL.md §2h). "Do we have logs of the sessions
+> of AI so we can review and analyze? say only enabled in debug mode": there were none that keep a request whole, so in debug
+> mode every request is now written down — the plan, every tool call with its whole result, the shown sessions, the reply,
+> the time and the cost (9.17).
 
 ### 9.1 What the user sees
 
@@ -564,6 +571,16 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
   model's one-sentence answer. Its right end reads **"thinking low  ctx 15k / 200k"**: the
   thinking toggle, then the size of the conversation (of the most it can hold before Claude Code
   compacts it: the model's own window or 500K, whichever is smaller).
+- **While a request runs, the strip moves** (2026-11-05, the user's pick from five animated options, the side panel's strip
+  too): its blue state dot **breathes** (Opacity 1 → 0.25 → 1 every 1.2 s) and a soft light 30% of the strip's width
+  **sweeps** along its bottom edge, left to right every 1.4 s, on the straight part of the edge (5 DIP clear of each end,
+  inside the border). Both stop on the answer, a failure, Esc, AI off, and whenever the page leaves the screen (closed, or
+  behind a tab: `_sessionsAiInUse`); a page that comes back while the request runs starts them again.
+  `AgentWorkingIndicator` (`AgentAmbientAnimation.{h,cpp}`) holds the two: the breath is an `AgentOpacityLoop` on the dot,
+  the light an `AgentSweepBar` — composition visuals of its own on a 2 DIP host over the strip's bottom edge, whose travel
+  follows the strip's width live (the host's `SizeChanged` → a property-set scalar its offset expression reads). Both are
+  Composition animations: no XAML storyboard, no per-frame UI-thread work (UI_THREAD.md §10c). The strip's padding became
+  its lines' margin, so the text sits where it did and the host can lie on the inside of the border.
 - **The thinking toggle** (the user's request of 2026-10-14; in dev and production) sets how much the
   model thinks before it searches. A click moves to the next level: **low → medium → high → xhigh →
   max → low** (off → low → … → max → off until 2026-11-01).
@@ -901,6 +918,10 @@ above.
   | parked … | reset …`. A process that could not get bypass says why in its `permission mode`
   line (`SDK_HARNESS.md` 5.1).
 - `[observer] skipping harness claude (sessions-search, not a session) pid=…`, once per process.
+- In DEBUG MODE (2026-11-05): `[ai-search] sessions-search: the conversation log is ON (debug mode): <folder>\sessions-search-<date>.jsonl`
+  once per process (and the Telegram Search topic's `telegram-search` twin), and the log itself — every request whole,
+  with each tool call's whole result (9.17). `[ai-search] …: the conversation log could not be written to …` (once) and
+  `… deleted N file(s) dated before …` say what the log did to its folder.
 
 ### 9.11 Limits and follow-ups
 
@@ -1629,6 +1650,74 @@ the windows' code (TerminalPage, whose header includes it) to the engine (Engine
 **Open:** nothing here has met the live model or a build; `turns` is not known in the database mode and for a Codex
 session (its rollout is not in the Claude index); the Telegram Search topic shows the model's reply only, so the
 overview's tables reach the user through the model's words.
+
+### 9.17 The conversation log: every request written down whole (debug mode; 2026-11-05, NOT BUILT yet)
+
+> **The user's question of 2026-11-05:** "Do we have logs of the sessions of AI so we can review and analyze? say only
+> enabled in debug mode."
+
+**What there was.** No record that keeps a request whole: the conversation's record (`<profile>\harness\<name>.json`,
+`HarnessRecord`, the digest's source) keeps 400 items and only a 2,000-character preview of each tool result, and a reset
+deletes it; hooks.log has one `[ai-search] ask[N]` line (the request's first 200 characters), the `shown N session(s)` line
+and the harness's `turn N done` line; the eval's `--eval-out` (9.15) records whole calls, but only for its own queries in a
+scratch run. Nothing showed why a REAL request missed a session or took 50 s.
+
+**What it is** (`AgentMaster/SessionSearchLog.{h,cpp}`): every request of a conversation as JSON lines —
+`<profile>\harness\logs\<conversation>-<yyyy-MM-dd>.jsonl`, one file per conversation per local day, appended
+(`FILE_APPEND_DATA`, readable and deletable while it is written; a crash costs at most the line being written, and a
+request that never ended still shows every step it took).
+
+- **When: debug mode only.** `SessionSearchLogDirIfDebug()` asks `Profiles::IsDevOrDebugPackage()`, the one gate of
+  developer-only features — the dev install always; a release with Settings ▸ About ▸ "Enable Debug Mode", `--debug` or
+  `AGENTMASTER_DEBUG`, from its next start. Off otherwise (no log object exists): the lines hold the user's own words and
+  whole transcript excerpts. Both conversations: `SharedSessionSearchAgent()` (the Sessions page and the side panel,
+  `sessions-search`) and the Telegram Search topic's (`telegram-search`, `MessagingSearchBridge.cpp`). It is the gate's first
+  consumer since the Prompt Queue Runner left it on 2026-10-09 (`ProfileBootstrap.h`, SETTINGS.md `debugMode`).
+- **Kept 30 days** (`kSessionSearchLogKeepDays`): at a log's first line of a process, its conversation's files dated before
+  today less 30 days are deleted — only names of the exact shape `<conversation>-yyyy-MM-dd.jsonl`, never another
+  conversation's or anything else in the folder.
+- **The lines** — every one has `v` (the format, 1), `kind`, `at` (local time), `t` (unix ms), `conv`, `epoch` and `turn`:
+
+| kind | When | Its fields |
+|---|---|---|
+| `start` | the log's first line in this process | `build` ("0.0.1.42 dev"), `pid`, `keep_days` |
+| `ask` | a request was sent | `text` (whole), `origin` (the asking window; "" from Telegram), `thinking`, `model` |
+| `narration` | the model wrote text before a tool call (its plan) | `text`, `at_ms` |
+| `call` | a tool call starts | `seq`, `tool`, `arguments` (as the model sent them), `at_ms` |
+| `result` | its answer | `seq` (its call's), `tool`, `at_ms`, `ms` (the call's own duration), `error`, `chars`, `result` (WHOLE) |
+| `show` | the model showed sessions | `ids` (whole), `whys` (index-aligned), `note`, `at_ms` |
+| `end` | the request ended | `status` (answered, failed, interrupted, reset), `answer`, `elapsed_ms`, `turn_ms`, `thinking_blocks`, `thinking_tokens`, `usage` (`input`, `output`, `cache_read`, `cache_write`, `cost_usd`: this request's share; `context`, `window`) |
+| `process` | a claude.exe came up | `model`, `cli`, `permission` |
+| `compacted` | Claude Code compacted the conversation | `pre`, `post`, `ms` |
+| `failure` | a start, protocol or turn failure | `text` |
+| `reset` | ⊘ threw the conversation away (`epoch` = the new one) | — (each request still open ended first, `reset`) |
+| `thinking` | the thinking level changed | `level` |
+
+- **How it is fed** (`SessionSearchAgent.cpp`): `Ask` (after `Send` gave the turn; the conversation's usage then is the base
+  of the request's share), `OnHarnessEvent` (the harness's own ToolCall / ToolResult events — ToolResult carries the WHOLE
+  text, where the record keeps 2,000 characters — and TurnCompleted, Ready, Compacted, Error and error notices; the
+  narration before its call), `OnShow` (the whole ids the model's short ones resolved to), `Reset` and `SetThinkingLevel`.
+  Every call is made OUTSIDE the agent's mutex, so the file writes (under the log's own lock) never hold up a page's
+  `Snapshot()`. A superseded request's end, which the agent ignores, still ends that request in the log.
+- **Pairing**: a call's `seq` pairs it with its result — the oldest open call of the same tool gets it (the SDK's reader
+  thread runs a tool's calls in order); a result whose call the log never saw has `seq` 0 and no `ms`.
+- **What it costs**: one file append per line (10 to 30 a request); a request with reads and greps writes 50 to 300 KB (the
+  whole results). Off, nothing.
+- **Reading it**: `tools/ai-search-eval/review_log.py [<file or folder> …]` — a review per request (the request, the plan,
+  every call with its own duration, its result's size and counts, the shown sessions with their whys, the reply, tokens and
+  cost); `--full` (every result whole); `--summary` (one line per request, then how requests ended, median and p90 time, the
+  calls per tool with their median durations, the why coverage, the cost); `--eval-json OUT.json` (harness_live's
+  `--eval` results format: `score.py` then scores REAL requests against an answer key — the eval kit's README, "Live
+  requests"); `--conv`, `--since`, `--last`. With no path it reads the dev profile's folder, then the release one's.
+- **Tests**: `TestSessionSearchLog` (`tests_harness.cpp`) on a scratch folder with a test clock — one request's whole story
+  in order (start, ask, narration, two calls of one tool, two results paired by seq with their own durations, a 5,000-
+  character result kept whole, show with index-aligned whys, end with the request's own usage share), a line break kept
+  inside one line, a superseded request ended as interrupted, a result no call opened, a reset ending the open request, a
+  file per local day with no second start line, the prune (only this conversation's dated files past 30 days), `keepDays` 0,
+  a folder created at the first line. `review_log.py` ran on a hand-written sample (every mode, a bad line, an open request).
+- **Not done**: no build; no line from a real request yet. After the dev build, a request should leave the `[ai-search]
+  sessions-search: the conversation log is ON (debug mode)` line in hooks.log and `<profile>\harness\logs\
+  sessions-search-<date>.jsonl` with a start line and the request's lines through its end.
 
 ---
 

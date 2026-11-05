@@ -311,6 +311,12 @@ void TestAgentHarnessCore();
 // on scratch folders (a gather that stops early says how far it got; steps always move forward; a refresh reads
 // only what changed)
 void TestSessionSearchTools();
+// SessionSearchLog.{h,cpp} (SESSIONS.md section 9.17), the AI search's conversation log (debug mode only): one request
+// written down whole (ask, narration, call, WHOLE result, show, end with the request's own usage share), a call paired with
+// its result by seq (two calls of one tool answered in order), a line that holds a line break staying ONE line, the
+// superseded request's end, a reset ending the open request, the file per local day, and the prune (only this
+// conversation's dated files older than the kept days)
+void TestSessionSearchLog();
 // tests_sessiondb.cpp
 void TestSessionDb(); // SESSIONS_DB.md — the session database's shared parts: protocol names + framing, the tool definitions, the settings clamps, the watcher's change set (D16), the facts epoch, the AI search's database mode
 void TestMessagingStateFileLoad(); // PERSISTENCE.md §16 (the 2026-10-28 audit): LoadMessagingStateFile - a missing state.json is a first start; a good one loads with its bytes; a torn one, JSON that is not a state object, and a LOCKED one fall back to state.json.prev (or an empty map, said so) and are kept aside before the first save; no save while the lock lasts

@@ -53,6 +53,7 @@ namespace winrt::Microsoft::Terminal::Settings
 #include "AgentMaster/TranscriptStore.h" // Agentmaster (Sessions page): SessionIndexEntry (by-value member)
 #include "AgentMaster/WindowTabTools.h" // Agentmaster (SESSIONS.md §9.14): WindowToolRequest / WindowToolOutcome — the AI search's window and tab tools
 #include "AgentLocalTooltip.h" // Agentmaster (LocalTooltip): the Sessions page's designated-area tooltip panel (by-value member)
+#include "AgentAmbientAnimation.h" // Agentmaster (SESSIONS.md §9.1, SIDE_PANEL.md §2h): AgentWorkingIndicator — the AI strips' "the agent is running" motion (by-value members)
 #include <optional>
 namespace Agentmaster
 {
@@ -232,7 +233,7 @@ namespace winrt::TerminalApp::implementation
     {
         AgentSidePanelCardView base; // the side panel card skeleton and the model it shows (base.tipHost stays null: a result card's tip is the floating one)
         winrt::Windows::UI::Xaml::Controls::Grid whyRow{ nullptr }; // [ bar ][ why * ] under the folder line; null when the card carries no why (a search's preview, or the model gave none)
-        winrt::Windows::UI::Xaml::Controls::TextBlock why{ nullptr }; // the model's evidence for this session (one line, trimmed with "…"; the tip holds it whole)
+        winrt::Windows::UI::Xaml::Controls::TextBlock why{ nullptr }; // the model's evidence for this session, WHOLE: wrapped over as many lines as it needs, never trimmed (the user's rule of 2026-11-05; the tip repeats it)
         std::wstring whyText; // what `why` shows ("" = no why row)
         bool open{ false }; // the session has a live tab somewhere (the registry's live flag): a double-click jumps to it, a right-click is the shared session menu
         bool shownOpen{ false }; // what the card's state line shows now (the live state, or "closed"): an in-place refresh rewrites the line only when this or the state moved
@@ -837,6 +838,10 @@ namespace winrt::TerminalApp::implementation
         // (WindowRecord::sidePanelAiMode) and the last change sets the new-window default (AppSettings::sidePanelAiMode) —
         // the "Sum" contract.
         bool _sidePanelAiMode{ false };
+        // The strip's "the agent is running" motion (the user's pick of 2026-11-05: the state dot breathes and a light sweeps
+        // along the strip's bottom edge): built with the AI view (_SidePanelAiEnsureView), switched by every strip repaint and
+        // by the AI toggle and the collapse — on only while a request runs AND the view can be seen. Inert until then.
+        AgentWorkingIndicator _sidePanelAiWorking;
         bool _sidePanelAiBoxPadded{ false }; // the filter box's right padding grew by the toggle's reserve (once: a second Loaded must not add it again)
         bool _sidePanelAiClearButtonMoved{ false }; // the box's own clear button (the template part DeleteButton) is shifted left of the toggle (once)
         winrt::Windows::UI::Xaml::Controls::Grid _sidePanelCardsHost{ nullptr }; // the cards area's one child: holds the card list's ScrollViewer and, once built, the AI view over it (one of the two is visible)
@@ -1278,6 +1283,10 @@ namespace winrt::TerminalApp::implementation
         // (AppSettings::sessionsAiThinkingLevel). Shown in AI mode only, with the strip.
         winrt::Windows::UI::Xaml::Controls::Button _sessAiThinkingBtn{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBlock _sessAiThinkingText{ nullptr }; // the toggle's label, "thinking low" ... "thinking max"
+        // The strip's "the agent is running" motion (the user's pick of 2026-11-05: the state dot breathes and a light sweeps
+        // along the strip's bottom edge): built with the strip (_BuildSessionsAiHeader), switched by every strip repaint and by
+        // the page leaving the screen — on only while a request runs AND this page shows the AI search. Inert until built.
+        AgentWorkingIndicator _sessAiWorking;
 
         // Agentmaster: IN-PLACE TITLE EDITING in the Sessions browser (the Manager's Explorer-tree
         // rename idiom, here over the Title cell). Two entry points — the row right-click "Edit

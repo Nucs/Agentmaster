@@ -204,6 +204,18 @@ namespace Agentmaster
         /// <remarks>Called on the SDK's reader thread, possibly from two read-only calls of one model step at the same
         /// time: it must be thread-safe, and must not throw (a throw is logged and swallowed).</remarks>
         std::function<void(const std::wstring& tool, const std::wstring& argumentsJson, const std::wstring& result, bool isError)> toolResultTap;
+
+        /// <summary>
+        /// The folder of this conversation's CONVERSATION LOG (SessionSearchLog.h, SESSIONS.md §9.17): every request, the
+        /// model's plan, every tool call with its WHOLE result, the shown sessions with their whys, the reply, and each
+        /// request's time, tokens and cost, as JSON lines in &lt;dir&gt;\&lt;name&gt;-&lt;yyyy-MM-dd&gt;.jsonl — for reviewing and
+        /// analyzing real requests (tools/ai-search-eval/review_log.py). Empty = no log (the default).
+        /// </summary>
+        /// <remarks>
+        /// The app passes SessionSearchLogDirIfDebug(): DEBUG MODE ONLY, because the lines hold the user's words and whole
+        /// transcript excerpts. Read once, by the constructor: the log is on for the agent's whole life, or never.
+        /// </remarks>
+        std::wstring conversationLogDir;
     };
 
     /// <summary>
@@ -470,6 +482,18 @@ namespace Agentmaster
     /// installed).
     /// </remarks>
     std::wstring SearchDatabaseProfileIfUsable(bool databaseModeOn, std::wstring_view who);
+
+    /// <summary>
+    /// The folder an AI search conversation's CONVERSATION LOG goes to (SessionSearchAgentOptions::conversationLogDir), or ""
+    /// when it must not be written: &lt;profile&gt;\harness\logs in DEBUG MODE — Profiles::IsDevOrDebugPackage(), the one gate of
+    /// developer-only features (the dev package always; a release with Settings ▸ About ▸ "Enable Debug Mode", --debug or
+    /// AGENTMASTER_DEBUG, from the next start) — else "". Both conversations of the app use it (the Sessions page's and the
+    /// Telegram Search topic's).
+    /// </summary>
+    /// <returns>The folder, or "".</returns>
+    /// <exception cref="std::bad_alloc">If the strings cannot be allocated (the gate's first call reads the package name).</exception>
+    /// <remarks>⚠ App-only: the folder is the ACTIVE profile's (HarnessStateDir); a test passes its own folder instead.</remarks>
+    std::wstring SessionSearchLogDirIfDebug();
 
     /// <summary>
     /// The index entry (title, folder, branch, times, counts) of ONE session by its whole id, read from DISK: its transcript

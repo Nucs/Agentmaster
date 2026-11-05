@@ -12,7 +12,9 @@
 //                                              side-panel card's crowns;
 //   * AgentDotsPulse                         — the three staggered dot loops of an unsent-draft cluster;
 //   * AgentLockstepBlink                     — the flash ring's blink, every ring following ONE shared clock;
-//   * AgentEmberSparks                       — the spark crown's rising embers, as composition visuals.
+//   * AgentEmberSparks                       — the spark crown's rising embers, as composition visuals;
+//   * AgentSweepBar                          — the AI search strip's sweeping light, as composition visuals;
+//   * AgentWorkingIndicator                  — that light plus the strip's breathing dot, behind one switch.
 #include "pch.h"
 #include "AgentAmbientAnimation.h"
 
@@ -610,6 +612,203 @@ namespace winrt::TerminalApp::implementation
             // behavior: hidden, back on its Canvas spot (a direct set also detaches anything still bound).
             ember.Opacity(0.0f);
             ember.Offset({ kEmbers[i].left, kEmbers[i].top, 0.0f });
+        }
+    }
+
+    AgentSweepBar::AgentSweepBar(winrt::Windows::UI::Xaml::UIElement host) :
+        _host{ std::move(host) }
+    {
+    }
+
+    void AgentSweepBar::SetColor(const winrt::Windows::UI::Color& color) noexcept
+    {
+        try
+        {
+            _color = color;
+            if (_stopPeak)
+            {
+                // The ends are the SAME color at alpha 0, not "transparent black": a gradient from #00000000 would pass
+                // through a gray, darkening the light's soft ends.
+                const winrt::Windows::UI::Color clear{ 0, color.R, color.G, color.B };
+                _stopLeft.Color(clear);
+                _stopPeak.Color(color);
+                _stopRight.Color(clear);
+            }
+        }
+        catch (...)
+        {
+            // The light keeps its previous color; the next SetColor retries (Rule #18: logged).
+            ::Agentmaster::AgentLogCaughtException(L"AgentSweepBar::SetColor");
+        }
+    }
+
+    void AgentSweepBar::SetWidth(float width) noexcept
+    {
+        try
+        {
+            // `!(width > 0)` also catches NaN, which a comparison with 0 alone would let through to Composition.
+            _width = !(width > 0.0f) ? 0.0f : width;
+            if (_container)
+            {
+                // The clip is the container's own bounds (a zero InsetClip), so its size IS where the light may draw.
+                _container.Size({ _width, kAgentSweepBarHeight });
+                _light.Size({ _width * kAgentSweepBarLightShare, kAgentSweepBarHeight });
+                // The offset expression reads this scalar on every frame it runs, so a light that travels now follows the
+                // new width at once, from where it is (no restart).
+                _travel.InsertScalar(L"Width", _width);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"AgentSweepBar::SetWidth");
+        }
+    }
+
+    void AgentSweepBar::_Build()
+    {
+        // The thread's cached compositor; the host is asked only by the thread's first animation.
+        const auto compositor = AgentCompositorOf(_host);
+        const winrt::Windows::UI::Color clear{ 0, _color.R, _color.G, _color.B };
+
+        // The light's paint: clear -> the color -> clear across the LIGHT's own width (the brush maps its points relative to
+        // the sprite it paints, the default mapping), so its two ends fade out.
+        auto stopLeft = compositor.CreateColorGradientStop(0.0f, clear);
+        auto stopPeak = compositor.CreateColorGradientStop(0.5f, _color);
+        auto stopRight = compositor.CreateColorGradientStop(1.0f, clear);
+        auto brush = compositor.CreateLinearGradientBrush();
+        brush.StartPoint({ 0.0f, 0.0f });
+        brush.EndPoint({ 1.0f, 0.0f });
+        brush.ColorStops().Append(stopLeft);
+        brush.ColorStops().Append(stopPeak);
+        brush.ColorStops().Append(stopRight);
+
+        auto light = compositor.CreateSpriteVisual();
+        light.Brush(brush);
+        light.Size({ _width * kAgentSweepBarLightShare, kAgentSweepBarHeight });
+
+        // The container is the host's area: sized to it, clipped to it (the light enters from beyond the left end and leaves
+        // beyond the right one, and must never draw over what lies next to the host), and invisible until Start().
+        auto container = compositor.CreateContainerVisual();
+        container.Size({ _width, kAgentSweepBarHeight });
+        container.Clip(compositor.CreateInsetClip());
+        container.IsVisible(false);
+        container.Children().InsertAtTop(light);
+
+        // The travel: "Progress" runs 0 -> 1 linearly and starts over at once (the light re-enters from the left as soon as it
+        // has left on the right), "Width" is the host's width. Offset.X = Width * (Progress * (1 + share) - share): at 0 the
+        // light lies just beyond the left end (-share x Width), at 1 just beyond the right end (Width).
+        auto travel = compositor.CreatePropertySet();
+        travel.InsertScalar(L"Width", _width);
+        travel.InsertScalar(L"Progress", 0.0f);
+        auto progress = AgentMakeScalarLoop(compositor, { { 0.0f, 0.0f }, { 1.0f, 1.0f } }, kAgentSweepBarCycle, std::chrono::milliseconds{ 0 }, nullptr);
+        auto offset = compositor.CreateExpressionAnimation(L"travel.Width * (travel.Progress * (1.0 + share) - share)");
+        offset.SetReferenceParameter(L"travel", travel);
+        offset.SetScalarParameter(L"share", kAgentSweepBarLightShare);
+
+        // Attach last, and keep the pieces only once everything is built: a refusal part-way leaves this object unbuilt, so
+        // the next Start() retries the whole build instead of using half of one.
+        winrt::Windows::UI::Xaml::Hosting::ElementCompositionPreview::SetElementChildVisual(_host, container);
+        _container = std::move(container);
+        _light = std::move(light);
+        _stopLeft = std::move(stopLeft);
+        _stopPeak = std::move(stopPeak);
+        _stopRight = std::move(stopRight);
+        _travel = std::move(travel);
+        _progress = std::move(progress);
+        _offset = std::move(offset);
+    }
+
+    void AgentSweepBar::Start()
+    {
+        if (!_host)
+        {
+            return; // inert
+        }
+        if (!_container)
+        {
+            _Build(); // the first request this strip shows: build its light now, never before
+        }
+        _container.IsVisible(true);
+        // Visual and property-set animations on objects XAML does not know about: no UI-thread work per frame. The loop
+        // first, so the expression's first frame already reads a running "Progress".
+        _travel.StartAnimation(L"Progress", _progress);
+        _light.StartAnimation(L"Offset.X", _offset);
+    }
+
+    void AgentSweepBar::Stop()
+    {
+        if (!_container)
+        {
+            return; // never built: nothing runs
+        }
+        _light.StopAnimation(L"Offset.X");
+        _travel.StopAnimation(L"Progress");
+        // Our own visuals, so the resting state is set outright: hidden, the light back at the left end (a direct set also
+        // detaches anything still bound), "Progress" at its start — the next Start() begins a clean sweep.
+        _container.IsVisible(false);
+        _light.Offset({ 0.0f, 0.0f, 0.0f });
+        _travel.InsertScalar(L"Progress", 0.0f);
+    }
+
+    AgentWorkingIndicator::AgentWorkingIndicator(winrt::Windows::UI::Xaml::UIElement dot, winrt::Windows::UI::Xaml::UIElement sweepHost, const winrt::Windows::UI::Color& color) :
+        _dot{ dot },
+        // 1.0 -> low -> 1.0: begun and ended on the dot's still 1.0 (see kAgentWorkingBreathLow). The sweep host is the anchor:
+        // it is not the dot, and it gets its own child visual anyway, so its asking for the compositor costs nothing more.
+        _breath{ sweepHost, std::move(dot), { { 0.0f, 1.0f }, { 0.5f, kAgentWorkingBreathLow }, { 1.0f, 1.0f } }, kAgentWorkingBreathCycle, std::chrono::milliseconds{ 0 } },
+        _sweep{ std::move(sweepHost) }
+    {
+        _sweep.SetColor(color); // kept until the light is built (never throws)
+    }
+
+    void AgentWorkingIndicator::SetWidth(float width) noexcept
+    {
+        _sweep.SetWidth(width);
+    }
+
+    void AgentWorkingIndicator::SetRunning(bool running) noexcept
+    {
+        // THE SWEEP: on the edges of `running` only. The flag is taken FIRST, so a refused start is still answered by the
+        // next "false" (Stop is safe on a bar that never started) and a refused stop is not retried on every repaint.
+        if (running != _running)
+        {
+            _running = running;
+            try
+            {
+                if (running)
+                {
+                    _sweep.Start();
+                }
+                else
+                {
+                    _sweep.Stop();
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(running ? L"AgentWorkingIndicator: start the sweep" : L"AgentWorkingIndicator: stop the sweep");
+            }
+        }
+        // THE BREATH: while running AND the dot shows, re-checked at every call (one Visibility read): a dot hidden by its
+        // owner is not animated for nobody, and it starts breathing once it shows again while the agent still runs.
+        try
+        {
+            const bool breathe = _running && _dot && _dot.Visibility() == winrt::Windows::UI::Xaml::Visibility::Visible;
+            if (breathe != _breathing)
+            {
+                _breathing = breathe; // first, for the same reason as the sweep's flag (Stop is safe on a loop that never ran)
+                if (breathe)
+                {
+                    _breath.Start();
+                }
+                else
+                {
+                    _breath.Stop();
+                }
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"AgentWorkingIndicator: the dot's breath");
         }
     }
 }

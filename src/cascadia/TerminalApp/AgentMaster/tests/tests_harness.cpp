@@ -29,17 +29,27 @@
 //   request leaving no trace, no index at all), and GatherSessionCatalog on scratch folders
 //   (a whole gather, a gather that stops early and says how far it got, steps that always move
 //   forward, a refresh that reads nothing).
+//
+// TestSessionSearchLog - SessionSearchLog.{h,cpp} (SESSIONS.md section 9.17), the conversation log
+//   of debug mode, on a scratch folder with a test clock: one request written down whole and in
+//   order (start, ask, narration, call, result with the WHOLE text, show, end with the request's
+//   own usage share), a line break kept inside one line, two calls of one tool paired with their
+//   results by seq, a superseded request's end, a result no call opened, a reset ending the open
+//   request, a file per local day, and the prune (only this conversation's dated files past the
+//   kept days; keepDays 0 keeps all; a missing folder is created).
 
 #include "m5_tests.h"
 
 #include "../AgentHarness.h" // HarnessToolServer / HarnessToolResult (types only: no SDK)
 #include "../AgentHarnessCore.h"
+#include "../SessionSearchLog.h" // the AI search's conversation log (TestSessionSearchLog)
 #include "../SessionSearchTools.h"
 
 #include <algorithm>
 #include <cstdio> // sprintf_s: the grep test's ISO timestamps
 #include <ctime> // _gmtime64_s
 #include <fstream>
+#include <iterator> // istreambuf_iterator: the conversation log test reads a whole file
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -1530,4 +1540,260 @@ void TestSessionSearchTools()
         CHECK(read(J(LR"({"ids":["a1a1a1a1"]})")).isError, "Reset forgets the short ids grep printed");
         std::filesystem::remove_all(root, ec);
     }
+}
+
+// ===== TestSessionSearchLog — the AI search's conversation log (SESSIONS.md §9.17) =====================================
+
+namespace
+{
+    // Every line of one log file, each parsed on its own — the JSON Lines contract (one object per line, split on "\n"
+    // only). A line that does not parse is one failed check, and an empty object in its place.
+    //   file    - the log file.
+    //   returns - the lines in file order; none when the file is missing.
+    std::vector<json::Value> ReadSearchLogLines(const std::filesystem::path& file)
+    {
+        std::vector<json::Value> out;
+        std::ifstream in(file, std::ios::binary);
+        const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        size_t start = 0;
+        while (start < bytes.size())
+        {
+            size_t end = bytes.find('\n', start);
+            if (end == std::string::npos)
+            {
+                end = bytes.size();
+            }
+            const std::string line = bytes.substr(start, end - start);
+            start = end + 1;
+            if (line.empty())
+            {
+                continue;
+            }
+            auto parsed = json::Parse(HarnessFromUtf8(line));
+            CHECK(parsed && parsed->type == json::Value::Type::Obj, "conversation log: every line is ONE whole JSON object");
+            out.push_back(parsed ? std::move(*parsed) : json::Value::MkObj());
+        }
+        return out;
+    }
+
+    // The "kind" of every line, joined with spaces ("start ask call ..."): a whole file's story in one comparable text.
+    std::wstring SearchLogKinds(const std::vector<json::Value>& lines)
+    {
+        std::wstring out;
+        for (const auto& line : lines)
+        {
+            out += (out.empty() ? L"" : L" ") + line.StrAt(L"kind");
+        }
+        return out;
+    }
+}
+
+void TestSessionSearchLog()
+{
+    std::wprintf(L"\n=== SessionSearchLog (the AI search's conversation log, SESSIONS.md 9.17) ===\n");
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path root = fs::temp_directory_path(ec) / L"agentmaster-m5-searchlog";
+    fs::remove_all(root, ec);
+    fs::create_directories(root, ec);
+
+    // The prune's fixtures, named by the log's own rule (the local date, whatever the machine's time zone): this
+    // conversation's file of 40 days ago (deleted) and of 3 days ago (kept), another conversation's old file, and two names
+    // that only LOOK like log files (kept: the prune matches the exact shape).
+    const std::wstring conv = L"sessions-search";
+    const std::wstring oldFile = SessionSearchLogFileName(conv, kNow - 40 * kDay);
+    const std::wstring recentFile = SessionSearchLogFileName(conv, kNow - 3 * kDay);
+    const std::wstring otherConvFile = SessionSearchLogFileName(L"telegram-search", kNow - 40 * kDay);
+    for (const std::wstring& name : { oldFile, recentFile, otherConvFile, std::wstring{ L"sessions-search-notes.txt" }, std::wstring{ L"sessions-search-2026-1x-01.jsonl" } })
+    {
+        std::ofstream(root / name, std::ios::binary) << "{}\n";
+    }
+
+    int64_t clock = kNow; // the test clock: every duration below is exact
+    SessionSearchLog::Options options;
+    options.dir = root.wstring();
+    options.conversation = conv;
+    options.keepDays = 30;
+    options.nowUnixMs = [&clock] { return clock; };
+    SessionSearchLog log{ options };
+    CHECK(log.Directory() == root.wstring(), "conversation log: Directory() is the folder it was given");
+    CHECK(fs::exists(root / oldFile), "conversation log: nothing is touched before the first line");
+
+    // ONE request, written down whole.
+    HarnessUsage atAsk;
+    atAsk.inputTokens = 1000;
+    atAsk.outputTokens = 100;
+    atAsk.cacheReadTokens = 5000;
+    atAsk.cacheCreationTokens = 200;
+    atAsk.costUsd = 0.10;
+    atAsk.contextTokens = 6000;
+    log.Asked(1, 1, L"find the tab drag crash\nand its fix", L"{48fa480a-0000-0000-0000-000000000000}", L"medium", L"claude-sonnet-5-5", atAsk);
+    CHECK(!fs::exists(root / oldFile), "the first line prunes this conversation's files older than the kept days");
+    CHECK(fs::exists(root / recentFile) && fs::exists(root / otherConvFile) && fs::exists(root / L"sessions-search-notes.txt") && fs::exists(root / L"sessions-search-2026-1x-01.jsonl"),
+          "... and nothing else: a recent file, another conversation's, a name of another shape");
+    clock += 1500;
+    log.Narration(1, 1, L"I'll 1. search, 2. read, 3. show.");
+    clock += 100;
+    HarnessEvent call;
+    call.kind = HarnessEventKind::ToolCall;
+    call.epoch = 1;
+    call.turn = 1;
+    call.toolName = L"mcp__sessions__search";
+    call.argumentsJson = LR"({"query":"tab drag"})";
+    log.Harness(call); // at +1600
+    clock += 10;
+    HarnessEvent call2 = call;
+    call2.argumentsJson = LR"({"query":"drag crash"})";
+    log.Harness(call2); // at +1610: a second call of the same tool before the first answered
+    clock += 300;
+    const std::wstring bigResult = L"{\"rows\":\"" + std::wstring(5000, L'r') + L"\"}"; // far past the record's 2,000-character preview
+    HarnessEvent result;
+    result.kind = HarnessEventKind::ToolResult;
+    result.epoch = 1;
+    result.turn = 1;
+    result.toolName = call.toolName;
+    result.text = bigResult;
+    log.Harness(result); // at +1910: answers the FIRST call
+    clock += 50;
+    HarnessEvent result2 = result;
+    result2.text = L"the search failed";
+    result2.isError = true;
+    log.Harness(result2); // at +1960: answers the second
+    clock += 1000;
+    log.Shown(1, 1, { L"aaaaaaaa-1111-2222-3333-444444444444", L"bbbbbbbb-1111-2222-3333-444444444444" }, { L"You asked: \"fix the drag\"" }, L"Two sessions");
+    clock += 900;
+    HarnessEvent done;
+    done.kind = HarnessEventKind::TurnCompleted;
+    done.epoch = 1;
+    done.turn = 1;
+    done.text = L"Two sessions fit.";
+    done.durationMs = 3800;
+    done.thinkingBlocks = 1;
+    done.thinkingTokens = 250;
+    done.usage = atAsk;
+    done.usage.inputTokens = 1600;
+    done.usage.outputTokens = 400;
+    done.usage.cacheReadTokens = 9000;
+    done.usage.costUsd = 0.25;
+    done.usage.contextTokens = 9500;
+    done.usage.contextWindow = 200000;
+    log.Harness(done); // at +3860
+    HarnessEvent ignored;
+    ignored.kind = HarnessEventKind::AssistantText; // the agent reports narration itself: the log ignores this kind
+    ignored.epoch = 1;
+    ignored.turn = 1;
+    ignored.text = L"text";
+    log.Harness(ignored);
+
+    const fs::path today = root / SessionSearchLogFileName(conv, kNow);
+    auto lines = ReadSearchLogLines(today);
+    CHECK(SearchLogKinds(lines) == L"start ask narration call call result result show end", "conversation log: a request's whole story, in order, one line each (an ignored kind writes nothing)");
+    if (lines.size() == 9)
+    {
+        const auto& start = lines[0];
+        CHECK(!start.StrAt(L"build").empty() && start.I64At(L"pid") == static_cast<int64_t>(::GetCurrentProcessId()) && start.I64At(L"keep_days") == 30,
+              "start: the build, this process and the kept days");
+        bool heads = true;
+        for (const auto& line : lines)
+        {
+            heads = heads && line.I64At(L"v") == kSessionSearchLogFormat && line.StrAt(L"conv") == conv && line.StrAt(L"at").size() == 23 && line.I64At(L"t") >= kNow;
+        }
+        CHECK(heads, "every line carries the format, the conversation, a local stamp and the instant");
+        const auto& ask = lines[1];
+        CHECK(ask.StrAt(L"text") == L"find the tab drag crash\nand its fix" && ask.I64At(L"epoch") == 1 && ask.I64At(L"turn") == 1 && ask.I64At(L"t") == kNow,
+              "ask: the request WHOLE (its line break kept, inside one line), its epoch and turn");
+        CHECK(ask.StrAt(L"origin") == L"{48fa480a-0000-0000-0000-000000000000}" && ask.StrAt(L"thinking") == L"medium" && ask.StrAt(L"model") == L"claude-sonnet-5-5",
+              "ask: the window, the thinking level and the model");
+        CHECK(lines[2].StrAt(L"text") == L"I'll 1. search, 2. read, 3. show." && lines[2].I64At(L"at_ms") == 1500, "narration: the plan, timed from the ask");
+        CHECK(lines[3].I64At(L"seq") == 1 && lines[3].StrAt(L"arguments") == LR"({"query":"tab drag"})" && lines[3].I64At(L"at_ms") == 1600, "call: seq 1, the arguments as sent, timed");
+        CHECK(lines[4].I64At(L"seq") == 2 && lines[4].StrAt(L"arguments") == LR"({"query":"drag crash"})", "call: a second call of the tool is seq 2");
+        const auto& r1 = lines[5];
+        CHECK(r1.I64At(L"seq") == 1 && r1.I64At(L"ms") == 310 && r1.I64At(L"at_ms") == 1910 && !r1.BoolAt(L"error", true), "result: the OLDEST open call of the tool gets it, with its own duration");
+        CHECK(r1.StrAt(L"result") == bigResult && r1.I64At(L"chars") == static_cast<int64_t>(bigResult.size()), "result: the WHOLE text the model read, not a preview");
+        const auto& r2 = lines[6];
+        CHECK(r2.I64At(L"seq") == 2 && r2.I64At(L"ms") == 350 && r2.BoolAt(L"error") && r2.StrAt(L"result") == L"the search failed", "result: the second call's, an error");
+        const auto& show = lines[7];
+        const auto* ids = show.Find(L"ids");
+        const auto* whys = show.Find(L"whys");
+        CHECK(ids && whys && ids->arr.size() == 2 && whys->arr.size() == 2 && ids->arr[1].str == L"bbbbbbbb-1111-2222-3333-444444444444" && whys->arr[0].str == L"You asked: \"fix the drag\"" &&
+                  whys->arr[1].str.empty() && show.StrAt(L"note") == L"Two sessions" && show.I64At(L"at_ms") == 2960,
+              "show: the whole ids with their whys index-aligned (a missing why is empty), the note, timed");
+        const auto& end = lines[8];
+        CHECK(end.StrAt(L"status") == L"answered" && end.StrAt(L"answer") == L"Two sessions fit." && end.I64At(L"elapsed_ms") == 3860 && end.I64At(L"turn_ms") == 3800 &&
+                  end.I64At(L"thinking_blocks") == 1 && end.I64At(L"thinking_tokens") == 250,
+              "end: answered, the reply, the elapsed and turn times, the thinking");
+        const auto* usage = end.Find(L"usage");
+        CHECK(usage && usage->I64At(L"input") == 600 && usage->I64At(L"output") == 300 && usage->I64At(L"cache_read") == 4000 && usage->I64At(L"cache_write") == 0 &&
+                  usage->NumAt(L"cost_usd") > 0.149 && usage->NumAt(L"cost_usd") < 0.151 && usage->I64At(L"context") == 9500 && usage->I64At(L"window") == 200000,
+              "end: the request's OWN share of the conversation's totals, and the conversation's size after it");
+    }
+
+    // A superseded request (turn 2 still runs when turn 3 is asked) ends when its own end arrives, interrupted; a reset then
+    // ends the open turn 3 itself — its own end would come with the old epoch, which the agent drops.
+    clock += 1000;
+    log.Asked(1, 2, L"first words", L"", L"medium", L"claude-sonnet-5-5", done.usage);
+    clock += 400;
+    log.Asked(1, 3, L"better words", L"", L"medium", L"claude-sonnet-5-5", done.usage);
+    clock += 100;
+    HarnessEvent superseded;
+    superseded.kind = HarnessEventKind::TurnCompleted;
+    superseded.epoch = 1;
+    superseded.turn = 2;
+    superseded.interrupted = true;
+    superseded.usage = done.usage;
+    log.Harness(superseded);
+    clock += 200;
+    HarnessEvent orphan;
+    orphan.kind = HarnessEventKind::ToolResult; // a result whose call this log never saw
+    orphan.epoch = 1;
+    orphan.turn = 3;
+    orphan.toolName = L"mcp__sessions__grep";
+    orphan.text = L"{}";
+    log.Harness(orphan);
+    clock += 300;
+    log.Reset(2);
+    lines = ReadSearchLogLines(today);
+    CHECK(SearchLogKinds(lines) == L"start ask narration call call result result show end ask ask end result end reset", "a superseded request, a stray result, a reset: one line each, in order");
+    if (lines.size() == 15)
+    {
+        CHECK(lines[11].StrAt(L"status") == L"interrupted" && lines[11].I64At(L"turn") == 2 && lines[11].I64At(L"elapsed_ms") == 500, "end: the superseded request, interrupted, timed from ITS ask");
+        CHECK(lines[12].I64At(L"seq") == 0 && lines[12].Find(L"ms") == nullptr && lines[12].I64At(L"at_ms") == 300, "result: a call this log never saw gets seq 0 and no duration");
+        CHECK(lines[13].StrAt(L"status") == L"reset" && lines[13].I64At(L"turn") == 3 && lines[13].I64At(L"elapsed_ms") == 600, "end: the request a reset threw away");
+        CHECK(lines[14].I64At(L"epoch") == 2 && lines[14].I64At(L"turn") == 0, "reset: the NEW epoch");
+    }
+
+    // The next local day writes a file of its own; the start line and the prune are once per log object.
+    clock = kNow + kDay;
+    log.ThinkingChanged(L"high");
+    const auto tomorrow = ReadSearchLogLines(root / SessionSearchLogFileName(conv, kNow + kDay));
+    CHECK(SearchLogKinds(tomorrow) == L"thinking" && !tomorrow.empty() && tomorrow[0].StrAt(L"level") == L"high", "a new day, a new file (no second start line)");
+
+    // A request that ended (or was never asked) is forgotten: its late event writes a line without its timing, never a crash.
+    HarnessEvent late = done;
+    log.Harness(late);
+    CHECK(ReadSearchLogLines(root / SessionSearchLogFileName(conv, kNow + kDay)).size() == 2, "a late end of an ended request still writes its line (no timing)");
+
+    // keepDays 0 keeps everything; a folder that does not exist yet is created at the first line.
+    const fs::path fresh = root / L"fresh";
+    SessionSearchLog::Options keepAll = options;
+    keepAll.dir = fresh.wstring();
+    keepAll.keepDays = 0;
+    clock = kNow;
+    fs::create_directories(fresh, ec);
+    const std::wstring ancient = SessionSearchLogFileName(conv, kNow - 400 * kDay);
+    std::ofstream(fresh / ancient, std::ios::binary) << "{}\n";
+    {
+        SessionSearchLog keeper{ keepAll };
+        keeper.ThinkingChanged(L"low");
+    }
+    CHECK(fs::exists(fresh / ancient) && fs::exists(fresh / SessionSearchLogFileName(conv, kNow)), "keepDays 0: nothing is pruned");
+    const fs::path absent = root / L"not-yet" / L"logs";
+    SessionSearchLog::Options created = options;
+    created.dir = absent.wstring();
+    {
+        SessionSearchLog maker{ created };
+        maker.ThinkingChanged(L"low");
+    }
+    CHECK(fs::exists(absent / SessionSearchLogFileName(conv, kNow)), "the folder is created at the first line");
+    fs::remove_all(root, ec);
 }

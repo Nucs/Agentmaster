@@ -108,6 +108,16 @@ namespace Agentmaster::Msg
                     // Rule #18. Recovery: the conversation starts at high thinking on the page search.
                     LogSwallowedException(L"telegram-search: read the settings");
                 }
+                // SESSIONS.md §9.17: the conversation log, in debug mode only — the page's agent's own rule, so a request
+                // from the phone can be reviewed like one from the PC (its own files: telegram-search-<date>.jsonl).
+                try
+                {
+                    options.conversationLogDir = SessionSearchLogDirIfDebug();
+                }
+                catch (...)
+                {
+                    LogSwallowedException(L"telegram-search: the conversation log's folder"); // Rule #18: no log this run
+                }
                 // SESSIONS.md §9.14: the window and tab tools over the app's windows — the same as the page's agent. From a
                 // phone no request has an origin window, so with several windows open the model must ask which one.
                 options.tabTools = MakeEngineTabTools();

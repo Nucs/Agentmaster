@@ -24,7 +24,9 @@
 // What the user sees: an "AI" toggle INSIDE the search box, at its right end, like the regex
 // toggle of an editor's find box (flat while off, accent-filled while on). With it on, the box
 // is a REQUEST line: "the session where I fixed the tab drag crash", Enter. A strip under the header shows
-// the request, what happens ("Searching: ..."), then the model's one-sentence answer; the table
+// the request, what happens ("Searching: ..."), then the model's one-sentence answer — and while a request runs,
+// its state dot breathes and a light sweeps along its bottom edge (AgentWorkingIndicator, the user's pick of
+// 2026-11-05: Composition motion, no XAML storyboard, only while the page is on screen); the table
 // shows exactly the sessions the model picked, in its order. A follow-up ("only the open ones")
 // refines the list, because the conversation keeps its context. The crossed circle beside the
 // toggle throws the conversation away and brings the normal list back. The box keeps its text
@@ -115,6 +117,13 @@ namespace winrt::TerminalApp::implementation
         constexpr double kSessionsAiToggleInset = 4.0;
         constexpr double kSessionsAiToggleGap = 2.0;
         constexpr double kSessionsAiToggleReserve = kSessionsAiToggleGap + kSessionsAiToggleWidth + kSessionsAiToggleInset;
+
+        // The strip's "the agent is running" motion (AgentWorkingIndicator, the user's pick of 2026-11-05): its sweep host
+        // lies along the strip's bottom edge, on the inside of its 1 DIP border, and stops this far short of each end — the
+        // strip's 6 DIP corner radius less that border — so the light runs on the straight part of the edge only.
+        constexpr double kSessionsAiSweepInsetX = 5.0;
+        // The light's color: the strip's working blue (the busy dot's and the busy status ink's hue).
+        constexpr Color kSessionsAiWorkingColor{ 0xFF, 0x4E, 0xA1, 0xFF };
 
         // The first element named `name` in the visual tree under `root`, depth first.
         //   root    - where to look; its own name is not tested.
@@ -294,10 +303,12 @@ namespace winrt::TerminalApp::implementation
         _sessAiStrip.BorderBrush(SessBrush(0xFF, 0x3A, 0x3A, 0x3A));
         _sessAiStrip.BorderThickness(Thickness{ 1, 1, 1, 1 });
         _sessAiStrip.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 6, 6, 6, 6 });
-        _sessAiStrip.Padding(Thickness{ 10, 6, 10, 6 });
+        // No padding of its own: the strip's content keeps the old 10 / 6 DIP inset as the margin of its lines (`inner`,
+        // below), so the strip's child fills the whole inside of the border and the sweep host can lie ON its bottom edge.
         _sessAiStrip.Margin(Thickness{ 0, 8, 0, 0 });
         _sessAiStrip.Visibility(Visibility::Collapsed); // AI mode only
         Grid inner;
+        inner.Margin(Thickness{ 10, 6, 10, 6 }); // the strip's former padding: the text sits exactly where it did
         {
             const auto col = [&](double v, GridUnitType t) {
                 ColumnDefinition c;
@@ -381,7 +392,31 @@ namespace winrt::TerminalApp::implementation
         Grid::SetColumn(rightEnd, 2);
         inner.Children().Append(rightEnd);
 
-        _sessAiStrip.Child(inner);
+        // The strip's child: the lines, and over their bottom edge the SWEEP HOST — a 2 DIP strip the "agent is running" light
+        // draws on (AgentSweepBar: composition visuals of its own, so XAML neither lays out nor hit-tests the moving light).
+        // A layer of its own in the same cell, so the lines' layout never changes when the light runs. Not hit-testable: a
+        // press there belongs to the strip (a selection in the status text), never to an empty Border.
+        Grid stripLayers;
+        stripLayers.Children().Append(inner);
+        Border sweepHost;
+        sweepHost.Height(kAgentSweepBarHeight);
+        sweepHost.VerticalAlignment(VerticalAlignment::Bottom);
+        sweepHost.HorizontalAlignment(HorizontalAlignment::Stretch);
+        sweepHost.Margin(Thickness{ kSessionsAiSweepInsetX, 0, kSessionsAiSweepInsetX, 0 });
+        sweepHost.IsHitTestVisible(false);
+        // The light's travel follows the host's width (AgentSweepBar::SetWidth): XAML does not size a child visual. Through a
+        // weak page reference, never the host itself (a handler capturing its own element would keep it alive forever).
+        sweepHost.SizeChanged([weakThis = get_weak()](const winrt::Windows::Foundation::IInspectable&, const SizeChangedEventArgs& e) {
+            if (auto self = weakThis.get())
+            {
+                self->_sessAiWorking.SetWidth(static_cast<float>(e.NewSize().Width)); // never throws
+            }
+        });
+        stripLayers.Children().Append(sweepHost); // second: drawn over the lines' bottom edge
+        _sessAiStrip.Child(stripLayers);
+        // The dot breathes and the host's light sweeps while a request runs (_UpdateSessionsAiStrip switches it). Nothing
+        // composition-side exists until the first request this page shows.
+        _sessAiWorking = AgentWorkingIndicator{ _sessAiDot, sweepHost, kSessionsAiWorkingColor };
         Grid::SetColumn(_sessAiStrip, 0);
         stripRow.Children().Append(_sessAiStrip);
 
@@ -782,6 +817,9 @@ namespace winrt::TerminalApp::implementation
         _SessionsAiSetInUse(shown);
         if (!shown)
         {
+            // A page off screen (closed, or behind a tab) animates nothing: the strip's motion stops here, and the strip's
+            // repaint when the page comes back starts it again if the request still runs. Never throws.
+            _sessAiWorking.SetRunning(false);
             return;
         }
         try
@@ -1089,6 +1127,12 @@ namespace winrt::TerminalApp::implementation
             // Nothing to throw away in a conversation that has not started.
             _sessAiResetBtn.IsEnabled(snapshot.turns > 0 || snapshot.busy || snapshot.hasShown);
         }
+        // The "agent is running" motion (the user's pick of 2026-11-05): the dot breathes and a light sweeps along the
+        // strip's bottom edge while a request runs — and only while this page shows the AI search on screen
+        // (_sessionsAiInUse: the tally's own flag, which a closed page and a page behind a tab both clear), so a strip nobody
+        // can see never keeps the compositor animating. Before the early return below: the mode going off must stop it.
+        // SetRunning acts on changes only (every agent event repaints the strip) and never throws.
+        _sessAiWorking.SetRunning(_sessionsAiMode && _sessionsAiInUse && snapshot.busy);
         if (!_sessionsAiMode || !_sessAiStatusText || !_sessAiQuestionText || !_sessAiDot || !_sessAiUsageText)
         {
             return;

@@ -367,6 +367,14 @@ namespace
     constexpr Color kSidePanelAiClosedColor{ 0xFF, 0x6A, 0x6A, 0x6A };
     // The why line's quote bar: the Sessions page's evidence-bar blue family, so the model's evidence reads the same on both.
     constexpr Color kSidePanelAiWhyBarColor{ 0xFF, 0x6B, 0x8F, 0xD6 };
+    // The strip's "the agent is running" motion (AgentWorkingIndicator, the user's pick of 2026-11-05): its sweep host lies
+    // along the strip's bottom edge, just inside the back Border's 1 DIP border line, and stops this far short of each end —
+    // the strip's 6 DIP corner radius — because the back Border is childless (no composition node, so nothing clips the light
+    // to the curve): the light runs on the straight part of the edge only.
+    constexpr double kSidePanelAiSweepInsetX = 6.0;
+    constexpr double kSidePanelAiSweepInsetBottom = 1.0;
+    // The light's color: the strip's working blue (the busy dot's and the busy status ink's hue).
+    constexpr Color kSidePanelAiWorkingColor{ 0xFF, 0x4E, 0xA1, 0xFF };
 
     // The first element named `name` in the visual tree under `root`, depth first — a template part of the filter box.
     //   root    - where to look; its own name is not tested.
@@ -2225,6 +2233,23 @@ namespace winrt::TerminalApp::implementation
             {
                 result.base.glyph->SetHostShown(!_sidePanelCollapsed);
             }
+        }
+        // ...and so does the AI strip's "agent is running" motion: a collapse stops it (nothing animates inside a collapsed
+        // panel), an expand starts it again when a request still runs. The agent is asked only when this window ever attached
+        // to it (no listener: nothing of its ever ran here, and the first call would CREATE the agent). Contained: the
+        // collapse chevron's click calls this with no catch of its own.
+        if (_sidePanelAiRoot)
+        {
+            bool busy = false;
+            try
+            {
+                busy = _sidePanelAiListenerToken != 0 && ::Agentmaster::SharedSessionSearchAgent().Snapshot().busy;
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"_SidePanelToggleCollapsed: the AI strip's motion"); // stays off until the next repaint
+            }
+            _sidePanelAiWorking.SetRunning(_sidePanelAiMode && !_sidePanelCollapsed && busy); // never throws
         }
         if (!_sidePanelCollapsed && _sidePanelDirty)
         {
@@ -5861,6 +5886,12 @@ namespace winrt::TerminalApp::implementation
                     view.glyph->SetHostShown(!_SidePanelCardsHidden());
                 }
             }
+            if (!on)
+            {
+                // The strip's "agent is running" motion goes with the view: a request may still run, but nobody sees the strip
+                // now. An AI-on starts it again through the strip repaint below when something runs. Never throws.
+                _sidePanelAiWorking.SetRunning(false);
+            }
             // The count line belongs to whichever view shows: each writes it from scratch after a switch (their "last written"
             // caches would otherwise skip a text that the other view overwrote).
             _sidePanelCountValue.clear();
@@ -6128,6 +6159,28 @@ namespace winrt::TerminalApp::implementation
         Grid::SetColumn(_sidePanelAiResetBtn, 2);
         inner.Children().Append(_sidePanelAiResetBtn);
         strip.Children().Append(inner); // second: over the back
+        // THE SWEEP HOST: a 2 DIP strip on the back's bottom edge, over the lines, that the "agent is running" light draws on
+        // (AgentSweepBar: composition visuals of its own, so XAML neither lays out nor hit-tests the moving light). A layer of
+        // its own in the strip's cell, so the lines' layout never changes when the light runs. Not hit-testable: a press there
+        // belongs to the strip, never to an empty Border.
+        Border sweepHost{};
+        sweepHost.Height(kAgentSweepBarHeight);
+        sweepHost.VerticalAlignment(VerticalAlignment::Bottom);
+        sweepHost.HorizontalAlignment(HorizontalAlignment::Stretch);
+        sweepHost.Margin(ThicknessHelper::FromLengths(kSidePanelAiSweepInsetX, 0, kSidePanelAiSweepInsetX, kSidePanelAiSweepInsetBottom));
+        sweepHost.IsHitTestVisible(false);
+        // The light's travel follows the host's width (AgentSweepBar::SetWidth): XAML does not size a child visual. Through the
+        // weak page reference, never the host itself (a handler capturing its own element would keep it alive forever).
+        sweepHost.SizeChanged([weakThis](const IInspectable&, const SizeChangedEventArgs& e) {
+            if (const auto self = weakThis.get())
+            {
+                self->_sidePanelAiWorking.SetWidth(static_cast<float>(e.NewSize().Width)); // never throws
+            }
+        });
+        strip.Children().Append(sweepHost); // third: over the lines' bottom edge
+        // The dot breathes and the host's light sweeps while a request runs (_SidePanelAiUpdateStrip switches it). Nothing
+        // composition-side exists until the first request this view shows.
+        _sidePanelAiWorking = AgentWorkingIndicator{ _sidePanelAiDot, sweepHost, kSidePanelAiWorkingColor };
         Grid::SetRow(strip, 0);
         root.Children().Append(strip);
 
@@ -6579,6 +6632,11 @@ namespace winrt::TerminalApp::implementation
             }
         }
         _sidePanelAiUsageText.Text(winrt::hstring{ usage });
+        // The "agent is running" motion (the user's pick of 2026-11-05): the dot breathes and a light sweeps along the strip's
+        // bottom edge while a request runs — and only while this view can be seen (AI mode on, the panel expanded; the status
+        // icons' host rule), so a strip nobody sees never keeps the compositor animating. LAST, so it reads the dot as this
+        // repaint left it: AgentWorkingIndicator never animates a dot that is not shown. Acts on changes only; never throws.
+        _sidePanelAiWorking.SetRunning(_sidePanelAiMode && !_sidePanelCollapsed && snapshot.busy);
     }
 
     void TerminalPage::_SidePanelAiShowWorking(bool working) noexcept
@@ -6984,8 +7042,11 @@ namespace winrt::TerminalApp::implementation
         {
             AgentSetTitledTip(b.card, winrt::hstring{ model.tipTitle }, winrt::hstring{ model.tipText }, kCardTipDelay);
         }
-        // The WHY row, under the folder line: [ a 2 DIP quote bar ][ the evidence, one line, "…" ]. Added on the first apply
-        // only — the why belongs to the list, which a new list replaces with new cards.
+        // The WHY row, under the folder line: [ a 2 DIP quote bar ][ the evidence, WHOLE ]. The evidence wraps over as many
+        // lines as it needs and is never trimmed (the user's rule of 2026-11-05: "the cards in sidemenu with an explanation must
+        // not be trimmed and support multiline"); the bar stretches beside every line, a quote block. The card grows with it:
+        // a card has no fixed height, and the result list is a plain StackPanel (a handful of cards, never virtualized). Added on
+        // the first apply only — the why belongs to the list, which a new list replaces with new cards.
         if (fresh && !view.whyText.empty() && !view.whyRow)
         {
             if (const auto body = b.card.Children().Size() >= 2 ? b.card.Children().GetAt(1).try_as<StackPanel>() : nullptr)
@@ -7005,7 +7066,11 @@ namespace winrt::TerminalApp::implementation
                 whyRow.Children().Append(bar);
                 view.why = Text(winrt::hstring{ view.whyText }, 10, false, 0.85);
                 view.why.FontStyle(winrt::Windows::UI::Text::FontStyle::Italic);
-                view.why.TextTrimming(TextTrimming::CharacterEllipsis); // one line on the card; the tip has it whole
+                // Text() makes a one-line, "…"-trimmed label: undo both for the evidence. Top-aligned, so its first line sits
+                // level with the bar's top whatever the number of lines.
+                view.why.TextWrapping(TextWrapping::Wrap);
+                view.why.TextTrimming(TextTrimming::None);
+                view.why.VerticalAlignment(VerticalAlignment::Top);
                 view.why.Foreground(Fill(0xFF, 0xC9, 0xD6, 0xEE));
                 Grid::SetColumn(view.why, 1);
                 whyRow.Children().Append(view.why);

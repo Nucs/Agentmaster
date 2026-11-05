@@ -358,12 +358,13 @@ namespace Agentmaster::Profiles
     // RELEASE (or unpackaged) build — the same "force a gated feature on for QA" escape hatch
     // Updater::IsUpdaterChannel exposes via AGENTMASTER_UPDATE_STARTUP. The persisted setting is the
     // durable, discoverable twin of the launch flag (no env/commandline needed).
-    // ⚠ NO FEATURE READS IT TODAY. Until 2026-10-09 it unlocked the Auto Testing / Tests Autorunner
-    // subsystem in a release build; that subsystem — the UI's "Prompt Queue" and "Prompt Queue Runner" —
-    // now runs in every build (Engine.cpp starts its scheduler unconditionally). The hatch, its three
-    // sources and the About toggle are KEPT ON PURPOSE for features that will be debug-only later: gate
-    // such a feature on IsDevOrDebugPackage() below, never on a new ad-hoc flag, so every debug-only
-    // surface agrees on what "debug" means. The only reader left is the About tab's own "Active now" note.
+    // ⚠ ONE FEATURE READS IT (through IsDevOrDebugPackage below): the AI search's CONVERSATION LOG
+    // (SessionSearchAgent.h SessionSearchLogDirIfDebug, SESSIONS.md §9.17, since 2026-11-05). Until 2026-10-09
+    // it unlocked the Auto Testing / Tests Autorunner subsystem in a release build; that subsystem — the UI's
+    // "Prompt Queue" and "Prompt Queue Runner" — now runs in every build (Engine.cpp starts its scheduler
+    // unconditionally). The hatch, its three sources and the About toggle are KEPT ON PURPOSE for debug-only
+    // features: gate such a feature on IsDevOrDebugPackage() below, never on a new ad-hoc flag, so every
+    // debug-only surface agrees on what "debug" means. The About tab's own "Active now" note reads it too.
     // WindowEmperor::_dispatchCommandlineCommon strips the `--debug` token
     // from the WT commandline (it is NOT a Windows Terminal option) BEFORE the args are parsed, but
     // GetCommandLineW() still returns the original string, so this scan stays valid regardless.
@@ -460,9 +461,10 @@ namespace Agentmaster::Profiles
     // process-once engine wiring (Engine.cpp — the cross-module belt). One-way + idempotent, so the
     // double application is harmless. This is what makes the cog toggle take effect on the NEXT start,
     // exactly like relaunching with --debug.
-    // (Since 2026-10-09 no feature reads the gate — the Tests Autorunner / "Prompt Queue Runner" it
-    // unlocked runs in every build — but this propagation is kept working on purpose: the next
-    // debug-only feature must find the verdict identical in the EXE and in TerminalApp.dll from day one.)
+    // (The Tests Autorunner / "Prompt Queue Runner" it unlocked runs in every build since 2026-10-09; its
+    // one reader now is the AI search's conversation log (since 2026-11-05), and this propagation is kept
+    // working on purpose: every debug-only feature must find the verdict identical in the EXE and in
+    // TerminalApp.dll.)
     //   returns — nothing; a missing or unparseable settings.json leaves Debug Mode as the launch flag /
     //             environment set it.
     //   throws  — std::bad_alloc only (the settings.json read); never a filesystem error (ReadUtf8File
@@ -479,10 +481,11 @@ namespace Agentmaster::Profiles
     // Dev package OR the debug escape hatch — the predicate a DEBUG-ONLY FEATURE gate uses, so such a
     // feature appears under the AgentmasterDev build AND in a release with Debug Mode on (the About
     // toggle, `--debug`, or AGENTMASTER_DEBUG).
-    // ⚠ It has NO production caller today. The Auto Testing / Tests Autorunner subsystem (the UI's
-    // "Prompt Queue" + "Prompt Queue Runner") was its only consumer — the scheduler start in Engine.cpp
-    // and ten UI gates — and left the gate on 2026-10-09: it runs in every build now. The predicate is
-    // kept as the ONE gate for future debug-only features. Its verdict is settled before any UI is built
+    // Its ONE production caller: the AI search's conversation log (SessionSearchAgent.cpp SessionSearchLogDirIfDebug,
+    // SESSIONS.md §9.17, since 2026-11-05) — every request, tool call and whole result written down for review, only
+    // here because the lines hold the user's words. The Auto Testing / Tests Autorunner subsystem (the UI's
+    // "Prompt Queue" + "Prompt Queue Runner") was its consumer until 2026-10-09 — the scheduler start in Engine.cpp
+    // and ten UI gates — and runs in every build now. The predicate is the ONE gate for debug-only features. Its verdict is settled before any UI is built
     // (the persisted toggle is applied in the EXE prelude and again at engine init), so a call site may
     // cache it for the process lifetime (a `static const bool`) — which also means a feature gated here
     // changes only at the NEXT start, like the toggle says.

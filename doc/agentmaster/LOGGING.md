@@ -28,6 +28,13 @@ with a local-time `[HH:MM:SS.mmm]` stamp (only at a line boundary, so a partial 
   `(changed)`, `(unchanged)` or `FAILED after N ms: <why>`), and a correction the guard refused with the start of the
   model's answer; `[voice-worker]` the worker's own stderr line by line (a Python traceback, a model download's progress).
   The service's side of each note is in hooks.log (`[msg] … voice note …`).
+- **`harness\logs\<conversation>-<yyyy-MM-dd>.jsonl`, DEBUG MODE ONLY:** the AI search's conversation log (SESSIONS.md
+  §9.17, `SessionSearchLog`) — every request of `sessions-search` (the Sessions page, the side panel) and `telegram-search`
+  (the Search topic) written down whole as JSON lines: the request, the model's plan, every tool call with its arguments
+  and its WHOLE result, the shown sessions with their whys, the reply, each request's time, tokens and cost. Not an
+  `AppendStateLog` file: one JSON object per line, no `[HH:MM:SS]` stamp (each line has `at` and `t`), one file per local
+  day, 30 days kept. Off outside debug mode (`Profiles::IsDevOrDebugPackage()`): the lines hold the user's words.
+  `tools/ai-search-eval/review_log.py` reads them back.
 
 ## hooks.log's three layers
 

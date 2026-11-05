@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Agentmaster (UI_THREAD.md §10a #1, §10i): AMBIENT animations on the Composition API — the looping,
-// decorative motions (the unsent-draft "3 dots" pulse on tab headers and on board / side-panel cards, and the
-// spark crown's glow breath + rising embers on tab headers) and the unread FLASH RING's blink on tab headers
+// decorative motions (the unsent-draft "3 dots" pulse on tab headers and on board / side-panel cards, the
+// spark crown's glow breath + rising embers on tab headers, and the AI search strip's "the agent is running"
+// breath + sweep bar) and the unread FLASH RING's blink on tab headers
 // run as Windows.UI.Composition animations, never as XAML storyboards or as a timer that flips a XAML property.
 // Since SIDE_PANEL.md §2g the side panel's cards carry the tab's whole status icon (AgentStatusGlyph), so the
 // crown and the ring's blink run on those cards too — through these same classes, with the same parameters.
@@ -372,5 +373,141 @@ namespace winrt::TerminalApp::implementation
         // The color to paint with; amber until the owner's first SetColor (the owner sets it before the first
         // Start, so this default is only ever seen if the tab's brush is missing).
         winrt::Windows::UI::Color _color{ 0xFF, 0xFF, 0xC1, 0x07 };
+    };
+
+    // ===== The AI search's "the agent is running" motion (SESSIONS.md §9.1, SIDE_PANEL.md §2h) ==============================
+    // The user's pick of 2026-11-05, from five animated options: while a request of the AI search runs, the strip's state dot
+    // BREATHES and a light SWEEPS along the strip's bottom edge. The Sessions page's strip and the side panel's strip share
+    // these numbers, so the two surfaces cannot drift apart.
+
+    // The breath: the dot's Opacity runs 1.0 -> kAgentWorkingBreathLow -> 1.0 once per kAgentWorkingBreathCycle. It begins and
+    // ends on 1.0, the dot's still Opacity (its XAML default, which neither strip ever sets — the strips set the dot's
+    // Background only), so a stopped breath lands on the still look.
+    inline constexpr float kAgentWorkingBreathLow = 0.25f;
+    inline constexpr std::chrono::milliseconds kAgentWorkingBreathCycle{ 1200 };
+
+    // The sweep: a light kAgentSweepBarLightShare of the host's width travels left to right once per kAgentSweepBarCycle — in
+    // from beyond the left end, out beyond the right end — like an indeterminate progress bar. kAgentSweepBarHeight is the
+    // host element's height in DIPs (its owner sizes the host with it, and the light is drawn exactly that tall).
+    inline constexpr float kAgentSweepBarHeight = 2.0f;
+    inline constexpr float kAgentSweepBarLightShare = 0.3f;
+    inline constexpr std::chrono::milliseconds kAgentSweepBarCycle{ 1400 };
+
+    // The SWEEP BAR as composition visuals of our own, drawn on a host XAML element (ElementCompositionPreview::
+    // SetElementChildVisual) — the AgentEmberSparks idiom, because the light MOVES and XAML would follow a moving XAML element
+    // on every frame (see the file header). The light is one sprite painted with a horizontal gradient (clear -> color ->
+    // clear), so it has soft ends; a container clipped to the host's width keeps it from drawing past the host's ends.
+    // HOW IT FOLLOWS A RESIZE: the light's Offset.X is an ExpressionAnimation of two scalars in a property set — "Progress",
+    // which a linear key-frame loop runs 0 -> 1 forever, and "Width", which SetWidth writes — so a strip that is resized while
+    // the light travels keeps sweeping smoothly over its new width (no restart, no jump). The host's width comes from its
+    // owner (the host's SizeChanged): XAML does not size a child visual, and asking XAML for the host's own visual would give
+    // the host a composition node for life (UI_THREAD.md §10h), which a plain width write does not.
+    // The visuals are built on the first Start(), so a strip whose agent never runs builds nothing. UI thread only.
+    class AgentSweepBar
+    {
+    public:
+        // An inert bar: SetColor / SetWidth / Start / Stop do nothing until a real one is assigned over it. Exists so an
+        // owner can declare the member before its XAML elements exist.
+        AgentSweepBar() = default;
+
+        // Parameters: host - the XAML element the light draws on (a kAgentSweepBarHeight-tall strip along the bottom
+        //             edge); it also supplies the compositor while the thread has none cached, and it must hold no other
+        //             child visual (SetElementChildVisual replaces it). Held strongly: its owner's tree holds it anyway.
+        explicit AgentSweepBar(winrt::Windows::UI::Xaml::UIElement host);
+
+        // Set the light's color (its middle; the ends are the same color, fully transparent). Kept and applied when the
+        // visuals are built; applied at once when they exist. Never throws: a refused color is logged (Rule #18) and the light
+        // keeps its previous color.
+        // Parameters: color - the light's color (opaque: its alpha is the peak's).
+        void SetColor(const winrt::Windows::UI::Color& color) noexcept;
+
+        // Set the host's width (the owner's host SizeChanged hands it NewSize().Width): the clip, the light's width and its
+        // travel follow it at once, also while the light sweeps. Kept until the visuals are built. Never throws: a refused
+        // write is logged and the bar keeps its previous width (a light wider or narrower than the strip for a moment).
+        // Parameters: width - the host's width in DIPs; a negative or NaN width counts as 0 (nothing is drawn).
+        void SetWidth(float width) noexcept;
+
+        // Start (or restart) the sweep, building the visuals on the first call: the light shows and travels. A restart jumps
+        // the light back to the left end, so the owner starts only on a real change (AgentWorkingIndicator keeps the flag).
+        // Throws winrt::hresult_error when XAML or Composition refuses (a torn-down host); a later Start() retries the build.
+        void Start();
+
+        // Stop the sweep and hide the light (the container is made invisible and the light put back at the left end, so a
+        // stopped bar draws nothing and the next Start() begins at the left). Safe when never started and twice in a row.
+        // Throws winrt::hresult_error when Composition refuses (a visual already closed).
+        void Stop();
+
+    private:
+        // Build the gradient brush, the light, its clipped container, the travel property set, the progress loop and the
+        // offset expression, and attach the container to the host. Throws winrt::hresult_error on refusal; nothing half-built
+        // is kept (the next call retries the whole build).
+        void _Build();
+
+        // The XAML element the light draws on; null for an inert bar.
+        winrt::Windows::UI::Xaml::UIElement _host{ nullptr };
+        // The container attached to the host (sized and clipped to the host's width, invisible while stopped) and the light
+        // inside it (null until built).
+        winrt::Windows::UI::Composition::ContainerVisual _container{ nullptr };
+        winrt::Windows::UI::Composition::SpriteVisual _light{ nullptr };
+        // The gradient's three stops (clear, the color, clear), kept so SetColor recolors them in place.
+        winrt::Windows::UI::Composition::CompositionColorGradientStop _stopLeft{ nullptr };
+        winrt::Windows::UI::Composition::CompositionColorGradientStop _stopPeak{ nullptr };
+        winrt::Windows::UI::Composition::CompositionColorGradientStop _stopRight{ nullptr };
+        // The two scalars the light's Offset.X expression reads ("Width", "Progress"), the loop that runs "Progress", and the
+        // expression itself (one object; Composition copies an animation when it starts it).
+        winrt::Windows::UI::Composition::CompositionPropertySet _travel{ nullptr };
+        winrt::Windows::UI::Composition::ScalarKeyFrameAnimation _progress{ nullptr };
+        winrt::Windows::UI::Composition::ExpressionAnimation _offset{ nullptr };
+        // The host's width as last given (SetWidth), applied when the visuals are built.
+        float _width{ 0.0f };
+        // The light's color; the strips' working blue until the owner's SetColor.
+        winrt::Windows::UI::Color _color{ 0xFF, 0x4E, 0xA1, 0xFF };
+    };
+
+    // The whole "the agent is running" motion of ONE AI strip: the state dot's breath (an AgentOpacityLoop) and the sweep bar
+    // (an AgentSweepBar), behind ONE switch. The owner says on every strip repaint whether its agent runs and the strip can be
+    // seen (SetRunning); this object acts only on what changed, so calling it on every agent event costs a flag test.
+    //   - The SWEEP starts and stops on the edges of `running` (a restart would jump the light back).
+    //   - The BREATH runs while `running` AND the dot is VISIBLE, re-checked at every call: a dot that something else hides for
+    //     a while (another indicator standing in its place) is never animated for nobody, and it breathes again once it shows
+    //     while the agent still runs.
+    // UI thread only (the thread that owns the elements).
+    class AgentWorkingIndicator
+    {
+    public:
+        // An inert indicator: SetWidth / SetRunning do nothing until a real one is assigned over it. Exists so an owner can
+        // declare the member before its XAML elements exist.
+        AgentWorkingIndicator() = default;
+
+        // Parameters:
+        //   dot       - the strip's state dot, whose Opacity breathes; its XAML Opacity must stay at the default 1.0 and be set
+        //               by nothing else (see AgentOpacityLoop: a static Opacity set would cancel the breath).
+        //   sweepHost - the kAgentSweepBarHeight-tall element along the strip's bottom edge that the light draws on; it is
+        //               also the breath's anchor (an element that is not the dot, see AgentCompositorOf).
+        //   color     - the light's color (the strip's working blue).
+        // Throws std::bad_alloc only (the breath's key-frame list is copied); nothing composition-side exists until the first
+        // SetRunning(true).
+        AgentWorkingIndicator(winrt::Windows::UI::Xaml::UIElement dot, winrt::Windows::UI::Xaml::UIElement sweepHost, const winrt::Windows::UI::Color& color);
+
+        // Hand the sweep host's width to the bar (AgentSweepBar::SetWidth). Never throws.
+        // Parameters: width - the host's width in DIPs (its SizeChanged's NewSize().Width).
+        void SetWidth(float width) noexcept;
+
+        // Say whether the motion should run now: true while a request of the agent runs AND the strip can be seen (the owner's
+        // rule — a page on screen, an expanded panel in AI mode). Acts on changes only (see the class comment).
+        // Never throws: a refused start or stop is logged (Rule #18), and the flags still follow the request, so the next edge
+        // tries again (a failed start leaves the strip without motion, never with a motion that cannot be stopped).
+        // Parameters: running - true: the agent runs and the strip shows; false: it does not (any reason).
+        void SetRunning(bool running) noexcept;
+
+    private:
+        // The state dot (its Visibility is read at every call); null for an inert indicator.
+        winrt::Windows::UI::Xaml::UIElement _dot{ nullptr };
+        // The dot's breath and whether it runs now.
+        AgentOpacityLoop _breath;
+        bool _breathing{ false };
+        // The sweep bar and whether the motion is switched on (the last SetRunning value).
+        AgentSweepBar _sweep;
+        bool _running{ false };
     };
 }

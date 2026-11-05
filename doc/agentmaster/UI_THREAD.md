@@ -349,6 +349,11 @@ XAML's frame loop can stop while a pulse or a crown is on screen.
     the sparks canvas with `ElementCompositionPreview::SetElementChildVisual`.
   - The header only declares; the `.cpp` is the one translation unit that includes the 1.1 MB
     `winrt/Windows.UI.Composition.h`.
+  - Added 2026-11-05 (NOT BUILT yet; SESSIONS.md §9.1, SIDE_PANEL.md §2h): `AgentSweepBar`, the AI search strip's
+    sweeping light — a gradient sprite in a clipped container of our own on a 2 DIP host, its `Offset.X` an expression
+    of a 0 → 1 loop and the host's width (a property-set scalar the owner writes from the host's `SizeChanged`, so no
+    hand-out visual and no extra composition node) — and `AgentWorkingIndicator`, that light plus an `AgentOpacityLoop`
+    breath of the strip's dot behind one change-gated switch (the breath only while the dot is visible).
 - **Changed:**
   - `TabHeaderControl.cpp` / `.h`: the two storyboards became `_pendingDotsPulse`, `_cacheWarmGlow` and
     `_cacheWarmEmbers`. The RENDERING.md §4c gates and the change gates are unchanged. The embers copy

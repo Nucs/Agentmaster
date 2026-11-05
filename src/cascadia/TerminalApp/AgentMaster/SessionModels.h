@@ -3183,10 +3183,11 @@ namespace Agentmaster
         // About-tab "Enable Debug Mode" toggle. The DURABLE, in-UI twin of the --debug /
         // AGENTMASTER_DEBUG launch flag — when ON, a RELEASE install answers
         // Profiles::IsDevOrDebugPackage() true, the gate for DEBUG-ONLY features.
-        // ⚠ No feature reads that gate today: until 2026-10-09 it unlocked the Auto Testing / Tests
-        // Autorunner subsystem, which is now the Prompt Queue + Prompt Queue Runner of every build.
-        // The field, the toggle and the flag are KEPT on purpose, for developer-only features that
-        // come later. Read ONCE at startup (WindowEmperor -> Profiles::ApplyPersistedDebugMode -> a
+        // ⚠ One feature reads that gate: the AI search's CONVERSATION LOG (SESSIONS.md §9.17, since
+        // 2026-11-05 — every request, tool call and whole result in <profile>\harness\logs). Until
+        // 2026-10-09 it unlocked the Auto Testing / Tests Autorunner subsystem, which is now the Prompt
+        // Queue + Prompt Queue Runner of every build. The field, the toggle and the flag are KEPT on
+        // purpose, for developer-only features. Read ONCE at startup (WindowEmperor -> Profiles::ApplyPersistedDebugMode -> a
         // process-local one-way override that IsDebugPackage() consults), so it takes effect on the
         // NEXT start — exactly like handing --debug to a fresh launch. Default OFF; a missing key =>
         // Debug Mode off. The FORM owns this field.

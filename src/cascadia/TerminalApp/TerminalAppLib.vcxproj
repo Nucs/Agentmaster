@@ -206,6 +206,8 @@
     <ClInclude Include="AgentMaster\SessionSearch.h" />
     <ClInclude Include="AgentMaster\SessionSearchTools.h" />
     <ClInclude Include="AgentMaster\SessionSearchAgent.h" />
+    <!-- Agentmaster (SESSIONS.md section 9.17): the AI search's conversation log, debug mode only (TestSessionSearchLog). -->
+    <ClInclude Include="AgentMaster\SessionSearchLog.h" />
     <ClInclude Include="AgentMaster\AgentHarness.h" />
     <ClInclude Include="AgentMaster\AgentHarnessCore.h" />
     <ClInclude Include="AgentMaster\SessionStore.h" />
@@ -573,6 +575,9 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\SessionSearchAgent.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\SessionSearchLog.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\SessionStore.cpp">

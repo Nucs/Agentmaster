@@ -8,10 +8,12 @@
 #include "ClaudeSpawn.h" // AppendStateLog, LogSwallowedException, ResolveClaudeTranscriptPath
 #include "Engine.h" // SharedEngine — the shared agent's registry
 #include "Persistence.h" // LoadAppSettings — the shared agent's persisted thinking level
+#include "ProfileBootstrap.h" // Profiles::IsDevOrDebugPackage — the conversation log's debug-only gate (SESSIONS.md §9.17)
 #include "Scheduler.h" // Scheduler::GlobalPaused — Pause all, which the status and overview tools report (SESSIONS.md §9.16)
 #include "SessionDbClient.h" // SESSIONS_DB.md §8.2 — the database mode's tool calls
 #include "SessionDbProtocol.h" // kToolCall / kResolveIds
 #include "SessionRegistry.h" // LiveTabBindings / HeadlinesOf — the open sessions
+#include "SessionSearchLog.h" // the conversation log: every request, call and result written down whole (debug mode)
 #include "SessionStore.h" // WarmSessionStore — the store's first read, kept off the search's path
 #include "TranscriptStore.h" // LoadOrRefreshSessionIndex — a shown session's row in the database mode
 
@@ -959,6 +961,12 @@ namespace Agentmaster
         // changed (SessionSearchToolset::Callbacks::generation).
         std::atomic<uint64_t> requestGeneration{ 0 };
 
+        // The CONVERSATION LOG (SessionSearchLog.h, SESSIONS.md §9.17): null unless SessionSearchAgentOptions::
+        // conversationLogDir names a folder (the app: debug mode only). Set once, by the constructor, and read without `mutex`
+        // (the log has its own, and every call to it is made OUTSIDE `mutex`, so its file writes never hold up a page's
+        // Snapshot()). Declared before `conversation`, so it outlives that object's threads, which write to it.
+        std::unique_ptr<SessionSearchLog> log;
+
         std::unique_ptr<SessionSearchToolset> toolset;
         // LAST: its threads call the toolset and this object; Shutdown stops it first.
         std::unique_ptr<HarnessConversation> conversation;
@@ -1175,6 +1183,7 @@ namespace Agentmaster
             {
                 withWhy += why.empty() ? 0 : 1;
             }
+            uint64_t epoch = 0; // the conversation the show belongs to, for the conversation log
             {
                 std::lock_guard lock{ mutex };
                 snapshot.hasShown = true;
@@ -1183,10 +1192,17 @@ namespace Agentmaster
                 snapshot.note = note;
                 snapshot.activity.clear();
                 e.turn = latestTurn;
+                epoch = snapshot.epoch;
             }
             // How many shown sessions came with evidence: a request answered with none is one where the model did
             // not follow rules 4 and 5 (read, then a why each) — the log is where a review of that starts.
             LogAgent(L"shown " + std::to_wstring(ids.size()) + L" session(s), " + std::to_wstring(withWhy) + L" with a why" + (note.empty() ? std::wstring{} : (L": " + note)));
+            // The conversation log (debug mode): the WHOLE ids the model's short ones resolved to, with their whys — the show
+            // call's own line has only what the model wrote. Outside `mutex` (see Impl::log). Never throws.
+            if (log)
+            {
+                log->Shown(epoch, e.turn, ids, e.reasons, note);
+            }
             SaveView();
             Notify(std::move(e));
         }
@@ -1310,6 +1326,18 @@ namespace Agentmaster
                     break;
                 }
             }
+            // The conversation log (debug mode): the narration first — it was written BEFORE the call it precedes — then the
+            // event itself (the log keeps only the kinds it records: calls, results, ends, process starts, compactions,
+            // failures). After the lock, never inside it (see Impl::log); an event of a thrown-away epoch never gets here (the
+            // early return above). A superseded request's end DOES: the agent ignores it, but its log line ends that request.
+            if (log)
+            {
+                if (e.kind == SessionSearchEventKind::Narration)
+                {
+                    log->Narration(h.epoch, h.turn, e.text);
+                }
+                log->Harness(h);
+            }
             if (save)
             {
                 SaveView();
@@ -1333,6 +1361,17 @@ namespace Agentmaster
         if (!IsValidHarnessName(impl->options.name))
         {
             throw std::invalid_argument("SessionSearchAgentOptions::name must be 1 to 48 characters of a-z, 0-9 and '-'.");
+        }
+        // The CONVERSATION LOG (SESSIONS.md §9.17), only when the host asks for it (the app: debug mode). Made before the
+        // conversation, whose threads write to it from their first event; after the name check, since the name is in its
+        // file names. One hooks.log line says where it writes, so a reviewer finds the files.
+        if (!impl->options.conversationLogDir.empty())
+        {
+            SessionSearchLog::Options logOptions;
+            logOptions.dir = impl->options.conversationLogDir;
+            logOptions.conversation = impl->options.name;
+            impl->log = std::make_unique<SessionSearchLog>(std::move(logOptions));
+            LogAgent(impl->options.name + L": the conversation log is ON (debug mode): " + impl->options.conversationLogDir + L"\\" + impl->options.name + L"-<date>.jsonl");
         }
 
         // The session index: the host's (the app passes SharedSessionCatalogKeeper() to both search conversations), else one
@@ -1514,12 +1553,34 @@ namespace Agentmaster
         // and return, or the interrupt that Send makes waits behind it.
         ++_impl->requestGeneration;
         const uint64_t turn = _impl->conversation->Send(text);
+        // What the conversation log's "ask" line says about the request, taken under the lock with the turn bookkeeping.
+        uint64_t epoch = 0;
+        std::wstring origin;
+        std::wstring model;
+        HarnessThinkingLevel thinking = HarnessThinkingLevel::Low;
+        HarnessUsage usage;
         {
             std::lock_guard lock{ _impl->mutex };
             _impl->latestTurn = (std::max)(_impl->latestTurn, turn);
             _impl->snapshot.turns = (std::max)(_impl->snapshot.turns, turn);
+            if (_impl->log)
+            {
+                epoch = _impl->snapshot.epoch;
+                origin = _impl->requestOrigin;
+                model = _impl->snapshot.model;
+                thinking = _impl->snapshot.thinkingLevel;
+                usage = _impl->snapshot.usage;
+            }
         }
         LogAgent(L"ask[" + std::to_wstring(turn) + L"]: " + text.substr(0, 200));
+        // The conversation log (debug mode): the request WHOLE (hooks.log keeps its first 200 characters), its window, the
+        // level and model it runs with, and the usage its "end" line subtracts. Outside the lock (see Impl::log); a request
+        // Send ignored (turn 0) writes nothing. Never throws. The model's first call is a model round trip away, so this line
+        // comes before the request's own lines.
+        if (_impl->log)
+        {
+            _impl->log->Asked(epoch, turn, text, origin, HarnessThinkingLevelWord(thinking), model, usage);
+        }
         SessionSearchEvent e;
         e.kind = SessionSearchEventKind::Asked;
         e.turn = turn;
@@ -1555,6 +1616,10 @@ namespace Agentmaster
                 _impl->conversation->SetThinking(HarnessThinkingLevelThinks(level) ? HarnessThinking::Adaptive : HarnessThinking::Disabled, HarnessThinkingLevelEffort(level));
             }
             LogAgent(std::wstring{ L"thinking -> " } + HarnessThinkingLevelWord(level) + L" (from the next request)");
+            if (_impl->log)
+            {
+                _impl->log->ThinkingChanged(HarnessThinkingLevelWord(level)); // the conversation log (debug mode); never throws
+            }
             SessionSearchEvent e;
             e.kind = SessionSearchEventKind::StateChanged; // every window repaints its strip from the snapshot
             _impl->Notify(std::move(e));
@@ -1578,6 +1643,7 @@ namespace Agentmaster
         ++_impl->requestGeneration; // a running search returns at once and records nothing
         _impl->toolset->Reset();
         _impl->conversation->Reset(); // raises the epoch at once; the worker ends the process
+        uint64_t newEpoch = 0; // the conversation log's "reset" line (debug mode)
         {
             std::lock_guard lock{ _impl->mutex };
             const std::wstring model = _impl->snapshot.model; // the next conversation uses the same one
@@ -1595,9 +1661,16 @@ namespace Agentmaster
             // The thrown-away conversation's half-written text and its request's window go with it.
             _impl->pendingAssistantText.clear();
             _impl->requestOrigin.clear();
+            newEpoch = _impl->snapshot.epoch;
         }
         _impl->SaveView(); // an empty conversation: deletes the file
         LogAgent(L"reset");
+        if (_impl->log)
+        {
+            // The conversation log (debug mode): a request still open ends as "reset" (its own end arrives with the old epoch,
+            // which the agent drops), then the "reset" line. Outside the lock; never throws.
+            _impl->log->Reset(newEpoch);
+        }
         SessionSearchEvent e;
         e.kind = SessionSearchEventKind::Reset;
         _impl->Notify(std::move(e));
@@ -1706,6 +1779,16 @@ namespace Agentmaster
             {
                 // Rule #18. Recovery: the agent starts at Low with the page search; the page's toggle still sets a level.
                 LogSwallowedException(L"SharedSessionSearchAgent: read the settings");
+            }
+            // SESSIONS.md §9.17: the conversation log, in debug mode only (SessionSearchLogDirIfDebug). Contained apart from the
+            // settings above: a failure here costs only the log, never the agent.
+            try
+            {
+                options.conversationLogDir = SessionSearchLogDirIfDebug();
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"SharedSessionSearchAgent: the conversation log's folder"); // Rule #18: no log this run
             }
             // SESSIONS.md §9.14: the window and tab tools over the app's windows (list, resume, fork, deactivate).
             options.tabTools = MakeEngineTabTools();
@@ -1929,6 +2012,18 @@ namespace Agentmaster
         LogAgent(std::wstring{ who } + L": the session database mode is On, but its service is not installed (agentmaster-sessiondb.exe with duckdb.dll beside it, in the package or in " + profile +
                  L"\\sessiondb\\bin): this conversation reads the transcripts directly");
         return {};
+    }
+
+    std::wstring SessionSearchLogDirIfDebug()
+    {
+        // The ONE gate of developer-only features (ProfileBootstrap.h): the dev package, or a release with Debug Mode on. Its
+        // verdict is settled before any agent exists (the EXE prelude and the engine init apply the persisted toggle), so the
+        // answer stands for the process — like the toggle says, a change applies at the next start.
+        if (!Profiles::IsDevOrDebugPackage())
+        {
+            return {};
+        }
+        return HarnessStateDir() + L"\\logs";
     }
 
     std::optional<SessionIndexEntry> LoadSessionIndexEntryById(const std::wstring& sessionId)

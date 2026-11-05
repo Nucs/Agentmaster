@@ -2852,11 +2852,11 @@ namespace winrt::TerminalApp::implementation
         // DEVELOPER — the debug escape hatch (ProfileBootstrap.h IsDebugPackage). "Enable Debug Mode" is the
         // durable, in-UI twin of the --debug / AGENTMASTER_DEBUG launch flag: it makes a RELEASE install
         // answer Profiles::IsDevOrDebugPackage() true, the gate for DEBUG-ONLY features.
-        // ⚠ NO feature reads that gate today. Until 2026-10-09 it unlocked the whole Auto Testing / Tests
-        // Autorunner subsystem (now the Prompt Queue + Prompt Queue Runner, shown and running in every
-        // build). The toggle, the flag and the persisted `debugMode` key are KEPT on purpose (the user's
-        // decision): a future feature that must stay developer-only gates on IsDevOrDebugPackage() and is
-        // switched on from here with no new plumbing. The verdict is latched ONCE at startup
+        // ⚠ ONE feature reads that gate: the AI search's conversation log (SESSIONS.md §9.17, since
+        // 2026-11-05). Until 2026-10-09 it unlocked the whole Auto Testing / Tests Autorunner subsystem (now
+        // the Prompt Queue + Prompt Queue Runner, shown and running in every build). The toggle, the flag and
+        // the persisted `debugMode` key are KEPT on purpose (the user's decision): a feature that must stay
+        // developer-only gates on IsDevOrDebugPackage() and is switched on from here with no new plumbing. The verdict is latched ONCE at startup
         // (Profiles::ApplyPersistedDebugMode, run by the EXE prelude and again by Engine.cpp), so a
         // change applies on the NEXT start — matching the flag's own "relaunch to persist" behaviour. On a
         // Dev build the gate is always true: _ShowSettings shows the toggle ON + disabled with a note, and
@@ -2864,7 +2864,7 @@ namespace winrt::TerminalApp::implementation
         panel.Children().Append(SettingsSeparator(L"DEVELOPER"));
         _setDebugMode = ToggleSwitch{};
         _setDebugMode.Header(winrt::box_value(L"Enable Debug Mode"));
-        AgentSetTip(_setDebugMode, L"Turn on features that are for developers only. No feature needs it at the moment \x2014 the Prompt Queue and the Prompt Queue Runner, which it used to unlock, are now always available \x2014 so today this switch changes nothing you can see. It is kept for developer-only features of later versions. The durable equivalent of launching with --debug (or setting the AGENTMASTER_DEBUG environment variable). Applies after you restart Agentmaster.");
+        AgentSetTip(_setDebugMode, L"Turn on features that are for developers only. Today that is the AI search's conversation log: every request of the AI search (the Sessions page, the side panel, the Telegram Search topic), the model's plan, every tool call with its whole result, the sessions it showed and its reply, written to the profile's harness\\logs folder for review (tools\\ai-search-eval\\review_log.py reads it). The lines hold your own words, so it stays off outside Debug Mode; a conversation's files older than 30 days are deleted. The Prompt Queue and the Prompt Queue Runner, which this switch used to unlock, are always available. The durable equivalent of launching with --debug (or setting the AGENTMASTER_DEBUG environment variable). Applies after you restart Agentmaster.");
         panel.Children().Append(_setDebugMode);
         _setDebugModeNote = Text(L"Applies after restart.", 11, false, 0.6);
         _setDebugModeNote.TextWrapping(TextWrapping::Wrap);
@@ -3930,8 +3930,8 @@ namespace winrt::TerminalApp::implementation
             // Debug Mode is always on (IsDevPackage) and can't be turned off — show ON + disabled with a
             // note. Otherwise it is user-controllable, and the caption reflects whether debug is ALREADY active
             // this session (persisted-on + applied at startup, or --debug / AGENTMASTER_DEBUG) so a live vs
-            // pending change reads unambiguously. (The note says "Debug Mode", not "developer tools": no
-            // tool hangs on the gate since the Prompt Queue Runner left it on 2026-10-09.)
+            // pending change reads unambiguously. (The note says "Debug Mode", not "developer tools": the one
+            // thing on the gate is the AI search's conversation log, since 2026-11-05.)
             if (::Agentmaster::Profiles::IsDevPackage())
             {
                 _setDebugMode.IsOn(true);
