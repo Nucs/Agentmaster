@@ -289,6 +289,9 @@
     <ClInclude Include="AgentMaster\TaskbarBadge.h" />
     <ClInclude Include="AgentMaster\PointerCardPlacement.h" />
     <ClInclude Include="AgentMaster\StatusIconMotion.h" />
+    <!-- Agentmaster (SIDE_PANEL.md section 2h): when the side panel's AI view changes its list - only when a request ends or the
+         conversation is reset, never for a running request's candidates or shows (pure, header-only; TestSidePanelAiList). -->
+    <ClInclude Include="AgentMaster\SidePanelAiList.h" />
     <ClInclude Include="SnippetsPaneContent.h">
       <DependentUpon>SnippetsPaneContent.xaml</DependentUpon>
     </ClInclude>

@@ -841,7 +841,11 @@ namespace winrt::TerminalApp::implementation
         bool _sidePanelAiClearButtonMoved{ false }; // the box's own clear button (the template part DeleteButton) is shifted left of the toggle (once)
         winrt::Windows::UI::Xaml::Controls::Grid _sidePanelCardsHost{ nullptr }; // the cards area's one child: holds the card list's ScrollViewer and, once built, the AI view over it (one of the two is visible)
         winrt::Windows::UI::Xaml::Controls::Grid _sidePanelAiRoot{ nullptr }; // the AI view: rows [strip Auto][results *]; null until the first AI-on
-        winrt::Windows::UI::Xaml::Controls::Border _sidePanelAiDot{ nullptr }; // the strip's state dot: blue working, green answered / ready, red failed, gray idle
+        winrt::Windows::UI::Xaml::Controls::Border _sidePanelAiDot{ nullptr }; // the strip's state dot: green answered / ready, red failed, gray idle (blue only while the spinner cannot show: a collapsed panel); the spinner stands in its place while the assistant works
+        // The strip's LOADING icon (the user's request of 2026-11-05): a spinning WinUI ProgressRing in the dot's place, shown and
+        // active only while a request runs or the process starts AND the view can be seen (_SidePanelAiShowWorking). Its spin is
+        // a Composition animation (an AnimatedVisualPlayer), so it keeps no XAML frame loop running (UI_THREAD.md).
+        winrt::Microsoft::UI::Xaml::Controls::ProgressRing _sidePanelAiSpinner{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBlock _sidePanelAiQuestionText{ nullptr }; // "❯ <the newest request>" (dim); collapsed until there is one
         winrt::Windows::UI::Xaml::Controls::TextBlock _sidePanelAiStatusText{ nullptr }; // the plan + what runs now, or the answer, or the failure, or how to start (selectable, wrapping; its ScrollViewer caps the strip's height)
         winrt::Windows::UI::Xaml::Controls::Button _sidePanelAiThinkingBtn{ nullptr }; // the flat "thinking <level>" toggle: the agent's level, rotated by a click (the Sessions page's _CycleSessionsAiThinking)
@@ -850,16 +854,19 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _sidePanelAiResetBtn{ nullptr }; // ⊘ — throw the conversation away (every window's view of it clears)
         winrt::Windows::UI::Xaml::Controls::ScrollViewer _sidePanelAiResultsScroll{ nullptr }; // the result cards' own scroll
         winrt::Windows::UI::Xaml::Controls::StackPanel _sidePanelAiResults{ nullptr }; // the result cards, in the model's order
-        // THE LIST: the sessions the view shows, in the model's order — its final pick (a show) or a search's preview — with
-        // the model's why per session (a pick only) and the index entries the agent sent along (title, folder, times for a
-        // session the registry does not know).
+        // THE LIST: the sessions the view shows, in the model's order — the pick of the conversation's last show, as it stood
+        // when the last request ENDED (the user's rule of 2026-11-05, AgentMaster/SidePanelAiList.h: a running request's
+        // candidates and shows never reach it) — with the model's why per session and the index entries of the listed
+        // sessions (title, folder, times for a session the registry does not know).
         std::vector<std::wstring> _sidePanelAiShownIds;
         std::unordered_map<std::wstring, std::wstring> _sidePanelAiReasons; // id -> the model's why ("" never stored)
         std::unordered_map<std::wstring, ::Agentmaster::SessionIndexEntry> _sidePanelAiEntries; // id -> its index entry (from the event, the agent's index, or the disk fetch)
         std::unordered_map<std::wstring, AgentSidePanelAiResultView> _sidePanelAiResultViews; // id -> its result card (the cards on screen)
         bool _sidePanelAiHasShown{ false }; // the model showed a list in this conversation (an EMPTY list then reads "nothing fits", not "no result yet")
-        bool _sidePanelAiPreview{ false }; // the list on screen is a search's candidates, not the model's pick (no why lines; "choosing…")
-        uint64_t _sidePanelAiListTurn{ 0 }; // the request the list on screen belongs to (a preview of an older request never replaces it)
+        // How many sessions the running request's newest search returned — the strip's "N candidates, choosing…" — counted,
+        // never drawn (the list waits for the request's end). 0 at rest, from the request's start, and once the model showed
+        // its pick.
+        size_t _sidePanelAiCandidateCount{ 0 };
         uint64_t _sidePanelAiEpoch{ 0 }; // the conversation epoch this view follows (an event of an epoch a reset left behind is dropped)
         uint64_t _sidePanelAiListenerToken{ 0 }; // this window's side-panel listener on the shared agent (0 = none); removed in ~TerminalPage (Rule #10)
         uint64_t _sidePanelAiAskedTurn{ 0 }; // the newest request THIS window's side panel sent: its end arms the park (only the asking window arms it)
@@ -3397,14 +3404,16 @@ namespace winrt::TerminalApp::implementation
         //   why - the cause, for the [ai-search] line ("request ended", "box left").
         // Never throws.
         void _SidePanelAiArmPark(std::wstring_view why) noexcept;
-        // One agent event on this window's UI thread: keep the epoch, take a preview / a pick / a reset into the list, end a
-        // preview the request did not turn into a pick, arm the park when THIS window's request ended, repaint the strip, the
-        // count line and (when the list changed) the result cards.
+        // One agent event on this window's UI thread: keep the epoch, arm the park when THIS window's request ended, apply the
+        // list rule (AgentMaster/SidePanelAiList.h — the user's "update the list only at the end when the result is final": a
+        // running request's candidates and shows leave the list alone; its end takes the conversation's list when it differs
+        // from the one on screen; a reset clears it at once), count the newest search's candidates for the strip, repaint the
+        // strip, the count line and (when the list changed) the result cards.
         //   e - the event, with the conversation's state after it.
         // Throws what the rebuild throws (hresult_error); the dispatched caller logs it.
         void _OnSidePanelAiEvent(const ::Agentmaster::SessionSearchEvent& e);
-        // Take the conversation's shown list as the view's list (AI on, a reset, an answer that ends a preview): its ids, its
-        // whys, and the index entries the agent's index holds for them (EntriesFor); ids neither the registry nor that index
+        // Take the conversation's shown list as the view's list (AI on, a reset, the end of a request that changed it): its ids,
+        // its whys, and the index entries the agent's index holds for them (EntriesFor); ids neither the registry nor that index
         // knows are fetched from disk off the UI thread (_SidePanelAiFetchMissingEntries).
         //   snapshot - the conversation's state.
         // Throws std::bad_alloc; what SharedSessionSearchAgent() throws on its first call.
@@ -3413,10 +3422,19 @@ namespace winrt::TerminalApp::implementation
         // when the view still shows the same list (`listSeq`) — keep them and rebuild the cards that lacked them. A
         // terminate-netted fire_and_forget that holds the page only weakly across the pool hop (the page-teardown rule).
         winrt::fire_and_forget _SidePanelAiFetchMissingEntries(std::vector<std::wstring> ids, uint64_t listSeq);
-        // Repaint the strip (dot, request, plan / status / answer, thinking level, context size, the reset's enabled state)
-        // from the conversation's state. A no-op before the view exists. Throws what XAML throws.
+        // Repaint the strip (the dot or the loading icon, request, plan / status / answer, thinking level, context size, the
+        // reset's enabled state) from the conversation's state, and dim the result cards while a request runs (they are the
+        // LAST answer's list until it ends). A no-op before the view exists. Throws what XAML throws.
         void _SidePanelAiUpdateStrip(const ::Agentmaster::SessionSearchSnapshot& snapshot);
-        // Write the count line for AI mode ("3 sessions found", "4 candidates, choosing…", the idle hint) — only when its text
+        // Show the strip's loading icon in the dot's place (working: the ring visible and spinning, the dot collapsed), or the
+        // dot (the ring collapsed and stopped). The caller decides `working` — a request runs or the process starts, AND the
+        // view can be seen (AI mode, the panel expanded) — so a ring nobody can see never keeps the compositor animating.
+        // Change-gated writes.
+        //   working - true: the ring; false: the dot.
+        //   returns - nothing; a no-op before the view exists.
+        //   throws  - nothing: a failed write (a window tearing down) is logged (Rule #18); the next strip repaint tries again.
+        void _SidePanelAiShowWorking(bool working) noexcept;
+        // Write the count line for AI mode ("3 sessions found", "AI search — searching…", the idle hint) — only when its text
         // changed. A no-op outside AI mode (the card list owns the line then). Throws what XAML throws.
         void _SidePanelAiUpdateCountLine(const ::Agentmaster::SessionSearchSnapshot& snapshot);
         // Rebuild the result cards from the list (_sidePanelAiShownIds): shut the old cards' status icons down, then one new

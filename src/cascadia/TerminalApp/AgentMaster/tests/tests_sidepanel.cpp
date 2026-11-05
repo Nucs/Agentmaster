@@ -36,12 +36,20 @@
 // section 2g) - the tab header's rule, which the side panel's card icon now shares: the named cases the rule exists for
 // (a collapsed panel, a card scrolled away, Windows' animation effects off, a dormant tab's remembered draft, the ring as
 // an alert), then all 128 combinations of the seven inputs against an independent statement of each motion's gates.
+//
+// TestSidePanelAiList pins WHEN the side panel's AI view changes its list (AgentMaster/SidePanelAiList.h, SIDE_PANEL.md
+// section 2h; the user's rule of 2026-11-05, "update the list only at the end when the result is final"): the step every
+// event kind takes, running or not; the comparison that decides whether a request's end replaces the list (the flag, the
+// ids, their order, each why); and whole requests replayed through a small model of the view - a request that searches,
+// shows, shows again and answers changes the list ONCE, at its end, to the last show; one that answers in words changes
+// nothing; a request that ends in a failure after a show still lands its pick; a reset clears at once.
 
 #include "m5_tests.h"
 
 #include "../KeyedListDiff.h"
 #include "../PointerCardPlacement.h" // the "+" launcher card's tooltip-like placement (TestPointerCardPlacement)
 #include "../SessionTimingText.h" // the cards' and rows' "created 4d1h, active 2m4s ago" (TestSessionTimingText)
+#include "../SidePanelAiList.h" // the AI view's list rule: only a request's end or a reset changes it (TestSidePanelAiList)
 #include "../StatusIconMotion.h" // the status icon's motion rule, shared by the tab header and the card icon (TestStatusIconMotion)
 #include "../VirtualListWindow.h" // the virtualized card list's realized rows (TestVirtualListWindow)
 
@@ -49,6 +57,7 @@
 #include <cmath> // std::fabs / std::nan / HUGE_VAL - TestPointerCardPlacement
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -1030,5 +1039,167 @@ void TestStatusIconMotion()
         static_assert(kAlertMotion.flashRingBlink && !kAlertMotion.pendingPulse && !kAlertMotion.cacheWarmCrown,
                       "the flash ring blinks with animations off; nothing else is shown");
         CHECK(kAlertMotion.flashRingBlink, "motion: the rule is constexpr (evaluated at compile time)");
+    }
+}
+
+namespace
+{
+    // A conversation state as the agent's events carry it: the shown flag, the ids and the index-aligned whys.
+    SessionSearchSnapshot AiConversation(bool busy, bool hasShown, std::vector<std::wstring> ids, std::vector<std::wstring> whys)
+    {
+        SessionSearchSnapshot s;
+        s.busy = busy;
+        s.hasShown = hasShown;
+        s.shownIds = std::move(ids);
+        s.shownReasons = std::move(whys);
+        return s;
+    }
+
+    // A small model of the side panel's AI view: the list it shows and how many times it replaced it. apply() is
+    // TerminalPage::_OnSidePanelAiEvent's list half, reduced to its data: the step, the comparison, then the adoption that
+    // _SidePanelAiAdoptSnapshot performs (the flag, the ids, a why per id that has one).
+    struct AiListView
+    {
+        bool hasShown = false;
+        std::vector<std::wstring> ids;
+        std::unordered_map<std::wstring, std::wstring> whys;
+        int replacements = 0; // list changes the user saw (each a rebuild of the cards)
+
+        void Adopt(const SessionSearchSnapshot& s)
+        {
+            hasShown = s.hasShown;
+            ids = s.hasShown ? s.shownIds : std::vector<std::wstring>{};
+            whys.clear();
+            for (size_t i = 0; i < ids.size() && i < s.shownReasons.size(); ++i)
+            {
+                if (!s.shownReasons[i].empty())
+                {
+                    whys.insert_or_assign(ids[i], s.shownReasons[i]);
+                }
+            }
+            ++replacements;
+        }
+
+        void Apply(SessionSearchEventKind kind, const SessionSearchSnapshot& s)
+        {
+            switch (SidePanelAiListStepFor(kind, s.busy))
+            {
+            case SidePanelAiListStep::AdoptNow:
+                Adopt(s);
+                break;
+            case SidePanelAiListStep::AdoptIfChanged:
+                if (SidePanelAiListDiffers(hasShown, ids, whys, s))
+                {
+                    Adopt(s);
+                }
+                break;
+            case SidePanelAiListStep::Keep:
+            default:
+                break;
+            }
+        }
+    };
+}
+
+void TestSidePanelAiList()
+{
+    std::wprintf(L"Side panel AI list (SidePanelAiList.h, SIDE_PANEL.md section 2h):\n");
+    using Kind = SessionSearchEventKind;
+    using Step = SidePanelAiListStep;
+
+    // The step of every kind, running or not.
+    {
+        CHECK(SidePanelAiListStepFor(Kind::Candidates, true) == Step::Keep, "ai list: a running search's candidates leave the list alone");
+        CHECK(SidePanelAiListStepFor(Kind::Candidates, false) == Step::Keep, "ai list: candidates are never drawn, even with nothing running");
+        CHECK(SidePanelAiListStepFor(Kind::Shown, true) == Step::Keep, "ai list: a show while its request runs is held (the model may show again)");
+        CHECK(SidePanelAiListStepFor(Kind::Shown, false) == Step::AdoptIfChanged, "ai list: a show with nothing running is final at once");
+        bool endsAdopt = true;
+        bool resetsAdopt = true;
+        bool stripOnlyKeeps = true;
+        for (const bool busy : { false, true })
+        {
+            endsAdopt = endsAdopt && SidePanelAiListStepFor(Kind::Answer, busy) == Step::AdoptIfChanged &&
+                        SidePanelAiListStepFor(Kind::Failed, busy) == Step::AdoptIfChanged;
+            resetsAdopt = resetsAdopt && SidePanelAiListStepFor(Kind::Reset, busy) == Step::AdoptNow;
+            for (const Kind k : { Kind::StateChanged, Kind::Asked, Kind::Searching, Kind::Compacting, Kind::Narration })
+            {
+                stripOnlyKeeps = stripOnlyKeeps && SidePanelAiListStepFor(k, busy) == Step::Keep;
+            }
+        }
+        CHECK(endsAdopt, "ai list: a request's end (Answer, Failed) takes the conversation's list when it differs");
+        CHECK(resetsAdopt, "ai list: a reset clears the list at once");
+        CHECK(stripOnlyKeeps, "ai list: state, asked, searching, compacting and narration events change only the strip");
+        // A kind the agent adds later: Keep until the rule names it (the default branch).
+        CHECK(SidePanelAiListStepFor(static_cast<Kind>(250), true) == Step::Keep, "ai list: an unknown event kind changes nothing");
+    }
+
+    // The comparison that decides whether a request's end replaces the cards.
+    {
+        const std::unordered_map<std::wstring, std::wstring> none;
+        const std::unordered_map<std::wstring, std::wstring> whyA{ { L"a", L"edited TabDrag.cpp" } };
+        CHECK(!SidePanelAiListDiffers(false, {}, none, AiConversation(false, false, {}, {})), "ai list diff: no list on either side - nothing to take");
+        CHECK(SidePanelAiListDiffers(false, {}, none, AiConversation(false, true, {}, {})), "ai list diff: an empty show ('nothing fits') differs from no list yet");
+        CHECK(!SidePanelAiListDiffers(true, {}, none, AiConversation(false, true, {}, {})), "ai list diff: 'nothing fits' on both sides - the same");
+        CHECK(SidePanelAiListDiffers(true, { L"a" }, none, AiConversation(false, false, {}, {})), "ai list diff: a list on screen against none differs");
+        CHECK(!SidePanelAiListDiffers(true, { L"a", L"b" }, whyA, AiConversation(false, true, { L"a", L"b" }, { L"edited TabDrag.cpp", L"" })), "ai list diff: the same ids and whys - the same");
+        CHECK(!SidePanelAiListDiffers(true, { L"a", L"b" }, whyA, AiConversation(false, true, { L"a", L"b" }, { L"edited TabDrag.cpp" })), "ai list diff: a shorter why vector reads as no why for the rest");
+        CHECK(SidePanelAiListDiffers(true, { L"a", L"b" }, whyA, AiConversation(false, true, { L"b", L"a" }, { L"", L"edited TabDrag.cpp" })), "ai list diff: the same sessions in another order differ");
+        CHECK(SidePanelAiListDiffers(true, { L"a", L"b" }, whyA, AiConversation(false, true, { L"a", L"b", L"c" }, { L"edited TabDrag.cpp" })), "ai list diff: one more session differs");
+        CHECK(SidePanelAiListDiffers(true, { L"a", L"b" }, whyA, AiConversation(false, true, { L"a" }, { L"edited TabDrag.cpp" })), "ai list diff: one session fewer differs");
+        CHECK(SidePanelAiListDiffers(true, { L"a", L"b" }, whyA, AiConversation(false, true, { L"a", L"b" }, { L"read the crash dump", L"" })), "ai list diff: a changed why differs (a show can relist the same sessions with new evidence)");
+        CHECK(SidePanelAiListDiffers(true, { L"a", L"b" }, whyA, AiConversation(false, true, { L"a", L"b" }, { L"edited TabDrag.cpp", L"grep: drag" })), "ai list diff: a why added differs");
+        CHECK(SidePanelAiListDiffers(true, { L"a", L"b" }, whyA, AiConversation(false, true, { L"a", L"b" }, { L"", L"" })), "ai list diff: a why dropped differs");
+    }
+
+    // Whole requests, replayed through the view's list half.
+    {
+        // The last answer's list is on screen: [x] with its why.
+        AiListView view;
+        view.Adopt(AiConversation(false, true, { L"x" }, { L"the old pick" }));
+        view.replacements = 0;
+        const auto old = AiConversation(true, true, { L"x" }, { L"the old pick" }); // the conversation while the next request runs, before its show
+        // A request: asked, searching, candidates (twice), a show, a second show, then the answer.
+        view.Apply(Kind::Asked, old);
+        view.Apply(Kind::Searching, old);
+        view.Apply(Kind::Candidates, old);
+        view.Apply(Kind::Narration, old);
+        view.Apply(Kind::Candidates, old);
+        CHECK(view.replacements == 0 && view.ids == std::vector<std::wstring>{ L"x" }, "ai request: a running search's candidates leave the last answer's list on screen");
+        view.Apply(Kind::Shown, AiConversation(true, true, { L"a", L"b", L"c" }, { L"w1", L"w2", L"w3" }));
+        CHECK(view.replacements == 0 && view.ids == std::vector<std::wstring>{ L"x" }, "ai request: the model's first show is held while the request runs");
+        view.Apply(Kind::Shown, AiConversation(true, true, { L"b" }, { L"w2 (narrowed)" }));
+        view.Apply(Kind::Compacting, AiConversation(true, true, { L"b" }, { L"w2 (narrowed)" }));
+        CHECK(view.replacements == 0 && view.ids == std::vector<std::wstring>{ L"x" }, "ai request: a second, narrowed show is held too");
+        view.Apply(Kind::Answer, AiConversation(false, true, { L"b" }, { L"w2 (narrowed)" }));
+        CHECK(view.replacements == 1, "ai request: the list changes exactly once per request - at its end");
+        CHECK(view.ids == std::vector<std::wstring>{ L"b" } && view.whys.count(L"b") == 1 && view.whys.at(L"b") == L"w2 (narrowed)", "ai request: the end shows the LAST show's pick with its why");
+        view.Apply(Kind::StateChanged, AiConversation(false, true, { L"b" }, { L"w2 (narrowed)" }));
+        CHECK(view.replacements == 1, "ai request: an event after the end leaves the final list alone");
+
+        // A follow-up the model answers in words, without a show: the cards stay as they are (no rebuild, no scroll jump).
+        view.Apply(Kind::Asked, AiConversation(true, true, { L"b" }, { L"w2 (narrowed)" }));
+        view.Apply(Kind::Candidates, AiConversation(true, true, { L"b" }, { L"w2 (narrowed)" }));
+        view.Apply(Kind::Answer, AiConversation(false, true, { L"b" }, { L"w2 (narrowed)" }));
+        CHECK(view.replacements == 1 && view.ids == std::vector<std::wstring>{ L"b" }, "ai request: an answer in words changes nothing on screen");
+
+        // A request that shows, then fails (an API error after the show): the pick is the conversation's list, and it lands at
+        // the failure - the request's end.
+        view.Apply(Kind::Asked, AiConversation(true, true, { L"b" }, { L"w2 (narrowed)" }));
+        view.Apply(Kind::Shown, AiConversation(true, true, { L"c", L"d" }, { L"w3", L"" }));
+        CHECK(view.replacements == 1, "ai request: a show before a failure is held while the request runs");
+        view.Apply(Kind::Failed, AiConversation(false, true, { L"c", L"d" }, { L"w3", L"" }));
+        // The expected list in parentheses: CHECK is a macro, and only parentheses keep the brace list's comma inside one argument.
+        CHECK(view.replacements == 2 && (view.ids == std::vector<std::wstring>{ L"c", L"d" }) && view.whys.count(L"d") == 0, "ai request: a failure after a show lands the pick (a session without a why keeps none)");
+
+        // An empty show ("nothing fits") is a result too: it replaces the list at the end with the empty list.
+        view.Apply(Kind::Asked, AiConversation(true, true, { L"c", L"d" }, { L"w3", L"" }));
+        view.Apply(Kind::Shown, AiConversation(true, true, {}, {}));
+        view.Apply(Kind::Answer, AiConversation(false, true, {}, {}));
+        CHECK(view.replacements == 3 && view.hasShown && view.ids.empty(), "ai request: an empty show replaces the list at the end ('no session fits')");
+
+        // A reset (the strip's crossed circle) clears at once, a request running or not.
+        view.Apply(Kind::Asked, AiConversation(true, true, {}, {}));
+        view.Apply(Kind::Reset, AiConversation(false, false, {}, {}));
+        CHECK(view.replacements == 4 && !view.hasShown && view.ids.empty(), "ai request: a reset clears the list at once");
     }
 }

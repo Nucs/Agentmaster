@@ -98,6 +98,7 @@
 #include "AgentMaster/SessionRegistry.h" // SnapshotLiveForCards / Get
 #include "AgentMaster/SessionSearch.h" // ParseSessionQuery / MatchesQueryText / MatchesPathQuery — the Sessions grammar, reused
 #include "AgentMaster/SessionSearchAgent.h" // SharedSessionSearchAgent / SessionSearchEvent / LoadSessionIndexEntryById — the side panel's AI search, a view of the process's one search conversation (SIDE_PANEL.md §2h)
+#include "AgentMaster/SidePanelAiList.h" // SidePanelAiListStepFor / SidePanelAiListDiffers — the AI view's list changes only when a request ends (SIDE_PANEL.md §2h)
 #include "AgentMaster/SessionStore.h" // GetSessionTags / LoadAllTagColors / SessionTagsEpoch — the cards' bookmark-tag strip (cached per card until a tag changes)
 
 #include <algorithm>
@@ -342,6 +343,13 @@ namespace
     // The strip's plan / answer text scrolls inside this height, so a long descriptive answer (the prompt asks for up to
     // ~1,200 characters) never pushes the result cards out of a narrow panel.
     constexpr double kSidePanelAiStatusMaxHeight = 150.0;
+    // The strip's loading icon (a WinUI ProgressRing in the state dot's place): 12 DIPs, with a 3 DIP gap to the text — the
+    // dot's own 8 + 7 footprint, so the text never moves when one replaces the other — and 2 DIPs from the top, so the two
+    // share their center (the dot's is 4 + 8 / 2 = 8 DIPs down).
+    constexpr double kSidePanelAiSpinnerSize = 12.0;
+    // The result cards' opacity while a request runs: they are the LAST answer's list until the request ends (the user's rule
+    // of 2026-11-05, SidePanelAiList.h), still readable and clickable, but never mistaken for this request's result.
+    constexpr double kSidePanelAiStaleListOpacity = 0.55;
     // The refresh cadence of the result cards while nothing owes one (the "ago" texts age): the session cards' own 30 s.
     constexpr uint64_t kSidePanelAiRefreshMs = 30'000;
     // The two meanings of the filter box, as its placeholder says them: filtering, or a request in the user's own words that
@@ -2227,6 +2235,21 @@ namespace winrt::TerminalApp::implementation
             // A collapsed AI view refreshed nothing (the periodic tick idles while collapsed): its cards' states and "ago"
             // texts catch up now that they are on screen again.
             _SidePanelAiRefreshResults();
+        }
+        if (_sidePanelAiMode && _sidePanelAiRoot)
+        {
+            // The strip's loading icon follows the panel like the status icons above: a collapse stops it (no ring animates
+            // inside a collapsed panel), an expand repaints the strip from the conversation as it is NOW — a request may have
+            // started or ended meanwhile, and the strip's repaints while collapsed kept the ring still. Contained: the strip's
+            // own click (the expand chevron) calls this with no catch of its own.
+            try
+            {
+                _SidePanelAiUpdateStrip(::Agentmaster::SharedSessionSearchAgent().Snapshot());
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"_SidePanelToggleCollapsed: the AI strip");
+            }
         }
         if (!_sidePanelCollapsed)
         {
@@ -5697,6 +5720,10 @@ namespace winrt::TerminalApp::implementation
     // then its answer; "thinking <level>" and the context size; ⊘ to start over) over the model's list of sessions, each a side
     // panel card with the model's evidence (its "why") under it. The summary area stays below and works with it: a result's
     // click peeks its summary like a card's. Clicking AI again brings the cards back; the conversation is kept.
+    // WHILE A REQUEST RUNS (the user's two requests of 2026-11-05): a loading icon spins in the strip's dot place
+    // (_SidePanelAiShowWorking), and the list does NOT change — not for a search's candidates, not for a show the model may
+    // still revise; it changes when the request ends, to the conversation's final list (AgentMaster/SidePanelAiList.h). Until
+    // then the last answer's cards stay, dimmed.
     // WHOSE CONVERSATION: the process's ONE search agent (SharedSessionSearchAgent) — the Sessions page's. Every surface is a view
     // of it, so a request asked here shows in a Sessions page with its AI search on, and the reverse.
     // LIFECYCLE (the user's "only after a request" rule, with a configurable park): a window that shows the AI view starts no
@@ -5855,8 +5882,12 @@ namespace winrt::TerminalApp::implementation
                 _sidePanelAiReasons.clear();
                 _sidePanelAiEntries.clear();
                 _sidePanelAiHasShown = false;
-                _sidePanelAiPreview = false;
-                _sidePanelAiListTurn = 0;
+                // The view drops the agent's events while it is off, so a count it can no longer follow is dropped too; the next
+                // AI-on starts at none (the strip says only what it saw).
+                _sidePanelAiCandidateCount = 0;
+                // The loading icon goes with the view: a ring left active under a collapsed view would keep the compositor
+                // animating for nobody (the next AI-on repaints the strip, which shows it again while something runs).
+                _SidePanelAiShowWorking(false);
                 ++_sidePanelAiListSeq; // a disk fetch still in flight now lands for a list that is gone, and is dropped
                 // The card list catches up at once: every update deferred while the view covered it (registry changes, tag
                 // edits, the sort, a settings Save) runs now, and an owed ⌖ reveal is paid on the list the user sees.
@@ -5947,6 +5978,27 @@ namespace winrt::TerminalApp::implementation
         _sidePanelAiDot.Background(Fill(0xFF, 0x80, 0x80, 0x80));
         Grid::SetColumn(_sidePanelAiDot, 0);
         inner.Children().Append(_sidePanelAiDot);
+        // The LOADING icon (the user's request of 2026-11-05: "a loading icon while the assistant is running"): a spinning ring in
+        // the dot's cell, shown instead of the dot while a request runs or the process starts (_SidePanelAiShowWorking; exactly
+        // one of the two shows). WinUI's ProgressRing — the one the tab header and the Sessions page's summary loader use — draws
+        // its indeterminate spin as a Composition animation (an AnimatedVisualPlayer), not a XAML storyboard, so it keeps no XAML
+        // frame loop running (the looping-animation rule, UI_THREAD.md); it is ACTIVE only while it shows, so it never animates
+        // for nobody. Its size and margins give it the dot's footprint and center (kSidePanelAiSpinnerSize), so the text never
+        // shifts when one replaces the other. Not a tab stop and not hit-testable (the style's own defaults): the status text
+        // says what runs.
+        _sidePanelAiSpinner = winrt::Microsoft::UI::Xaml::Controls::ProgressRing{};
+        _sidePanelAiSpinner.Width(kSidePanelAiSpinnerSize);
+        _sidePanelAiSpinner.Height(kSidePanelAiSpinnerSize);
+        _sidePanelAiSpinner.MinWidth(0.0); // the style's 16 DIP floor would win over the size (the tab header's ring clears it too)
+        _sidePanelAiSpinner.MinHeight(0.0);
+        _sidePanelAiSpinner.Margin(ThicknessHelper::FromLengths(0, 2, 3, 0));
+        _sidePanelAiSpinner.VerticalAlignment(VerticalAlignment::Top); // with the first line, like the dot
+        _sidePanelAiSpinner.HorizontalAlignment(HorizontalAlignment::Left);
+        _sidePanelAiSpinner.Foreground(Fill(0xFF, 0x4E, 0xA1, 0xFF)); // the strip's working blue (the dot's busy color, the status ink's hue)
+        _sidePanelAiSpinner.IsActive(false);
+        _sidePanelAiSpinner.Visibility(Visibility::Collapsed); // the strip's first repaint shows it when something runs
+        Grid::SetColumn(_sidePanelAiSpinner, 0);
+        inner.Children().Append(_sidePanelAiSpinner);
 
         StackPanel lines{};
         lines.Spacing(2);
@@ -6094,6 +6146,10 @@ namespace winrt::TerminalApp::implementation
         AgentSetAutomationId(_sidePanelAiThinkingBtn, L"am.side.ai.thinking");
         AgentSetAutomationId(_sidePanelAiResetBtn, L"am.side.ai.reset");
         AgentSetAccessibleName(_sidePanelAiResetBtn, L"New conversation");
+        // The loading icon: a progress control has no name of its own, and it is in the tree (visible) only while the
+        // assistant works — so "is am.side.ai.busy there" is the e2e driver's "is it running".
+        AgentSetAutomationId(_sidePanelAiSpinner, L"am.side.ai.busy");
+        AgentSetAccessibleName(_sidePanelAiSpinner, L"The AI search is working");
 
         root.Visibility(Visibility::Collapsed); // _SidePanelSetAiMode shows it
         _sidePanelCardsHost.Children().Append(root); // after the card list's ScrollViewer: drawn over it in the shared cell
@@ -6271,71 +6327,61 @@ namespace winrt::TerminalApp::implementation
         {
             return; // no view: turning the AI mode on adopts the conversation's whole state (_SidePanelSetAiMode)
         }
+        // THE LIST — the user's rule of 2026-11-05, "the ai assistant should update the list only at the end when the result is
+        // final" (AgentMaster/SidePanelAiList.h): a running request's candidates and shows never reach the cards (the model may
+        // still show another list, and a search's rows were read by nobody); the event that ENDS the request (Answer — an
+        // interrupted one too — or Failed) puts the conversation's list up, the pick of its last show, when it differs from
+        // the list on screen, so an answer in words leaves the cards and their scroll alone; a reset clears them at once.
+        // Until the end, the strip's loading icon says the request runs and the last answer's list stays, dimmed
+        // (_SidePanelAiUpdateStrip).
         bool rebuild = false;
-        bool newList = false; // a list the model picked, or a reset: it starts at its top
-        switch (e.kind)
+        bool newList = false; // a list that replaced the one on screen, or a reset: it starts at its top
+        switch (::Agentmaster::SidePanelAiListStepFor(e.kind, e.snapshot.busy))
         {
-        case Kind::Reset:
+        case ::Agentmaster::SidePanelAiListStep::AdoptNow:
             _SidePanelAiAdoptSnapshot(e.snapshot); // an empty conversation: no list
             rebuild = true;
             newList = true;
             break;
-        case Kind::Candidates:
-            // A search's rows, before the model picked from them: shown at once (the pick replaces them a second later). Not an
-            // empty one — a blank list while the model tries other words reads as "nothing found" — and never over the final
-            // list of the same request.
-            if (!e.sessionIds.empty() && (e.turn > _sidePanelAiListTurn || (e.turn == _sidePanelAiListTurn && _sidePanelAiPreview)))
+        case ::Agentmaster::SidePanelAiListStep::AdoptIfChanged:
+            // The entries come from the agent's index (_SidePanelAiAdoptSnapshot → EntriesFor): the very rows the show event
+            // carried, so nothing is lost by not keeping that event's copy.
+            if (::Agentmaster::SidePanelAiListDiffers(_sidePanelAiHasShown, _sidePanelAiShownIds, _sidePanelAiReasons, e.snapshot))
             {
-                _sidePanelAiPreview = true;
-                _sidePanelAiListTurn = e.turn;
-                _sidePanelAiShownIds = e.sessionIds;
-                _sidePanelAiReasons.clear(); // the model has read none of them yet: no evidence
-                for (const auto& entry : e.entries)
-                {
-                    _sidePanelAiEntries.insert_or_assign(entry.sessionId, entry);
-                }
-                ++_sidePanelAiListSeq;
-                rebuild = true;
-            }
-            break;
-        case Kind::Shown:
-            _sidePanelAiHasShown = true;
-            _sidePanelAiPreview = false;
-            _sidePanelAiListTurn = e.turn;
-            _sidePanelAiShownIds = e.sessionIds;
-            _sidePanelAiReasons.clear();
-            for (size_t i = 0; i < e.sessionIds.size() && i < e.reasons.size(); ++i)
-            {
-                if (!e.reasons[i].empty())
-                {
-                    _sidePanelAiReasons.insert_or_assign(e.sessionIds[i], e.reasons[i]);
-                }
-            }
-            for (const auto& entry : e.entries)
-            {
-                _sidePanelAiEntries.insert_or_assign(entry.sessionId, entry);
-            }
-            ++_sidePanelAiListSeq;
-            rebuild = true;
-            newList = true;
-            break;
-        case Kind::Answer:
-        case Kind::Failed:
-            if (_sidePanelAiPreview)
-            {
-                // The request ended without a pick (the model answered in words, or it failed): the preview was never the
-                // model's list. Back to the conversation's real one.
                 _SidePanelAiAdoptSnapshot(e.snapshot);
                 rebuild = true;
+                newList = true;
             }
             break;
-        case Kind::StateChanged:
+        case ::Agentmaster::SidePanelAiListStep::Keep:
+        default:
+            break; // the strip and the count line below are all the event changes
+        }
+        // The strip's progress words: how many sessions the running request's NEWEST search returned ("N candidates,
+        // choosing…"). Counted, never drawn. A new request starts at none, and the model's pick (a show), the request's end
+        // or a reset ends the count — after a show the model is writing its answer, not choosing. A Candidates event that
+        // comes when nothing runs (a superseded request's late search) counts nothing.
+        switch (e.kind)
+        {
+        case Kind::Candidates:
+            if (e.snapshot.busy)
+            {
+                _sidePanelAiCandidateCount = e.sessionIds.size();
+            }
+            break;
         case Kind::Asked:
+        case Kind::Shown:
+        case Kind::Answer:
+        case Kind::Failed:
+        case Kind::Reset:
+            _sidePanelAiCandidateCount = 0;
+            break;
+        case Kind::StateChanged:
         case Kind::Searching:
         case Kind::Compacting:
         case Kind::Narration:
         default:
-            break; // the strip below is all they change
+            break; // the count of the newest search stands
         }
         if (rebuild)
         {
@@ -6352,10 +6398,6 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::_SidePanelAiAdoptSnapshot(const ::Agentmaster::SessionSearchSnapshot& snapshot)
     {
         _sidePanelAiHasShown = snapshot.hasShown;
-        _sidePanelAiPreview = false;
-        // The list's request is not in the snapshot; the newest request is the latest it can be (a preview of a later one may
-        // replace it, one of that request may not).
-        _sidePanelAiListTurn = snapshot.hasShown ? snapshot.turns : 0;
         _sidePanelAiShownIds = snapshot.hasShown ? snapshot.shownIds : std::vector<std::wstring>{};
         _sidePanelAiReasons.clear();
         for (size_t i = 0; i < _sidePanelAiShownIds.size() && i < snapshot.shownReasons.size(); ++i)
@@ -6445,7 +6487,8 @@ namespace winrt::TerminalApp::implementation
             _sidePanelAiQuestionText.Visibility(Visibility::Visible);
         }
         // The status line and the dot — the Sessions strip's rules: working (blue; the model's plan above what it does now),
-        // an error (red), the answer (green, plain), starting, or — before any request — how to use it (dim).
+        // an error (red), the answer (green, plain), starting, or — before any request — how to use it (dim). While working,
+        // the loading icon stands in the dot's place (below).
         std::wstring status;
         Color dot = ColorHelper::FromArgb(0xFF, 0x80, 0x80, 0x80);
         Color ink = ColorHelper::FromArgb(0xFF, 0xF2, 0xF2, 0xF2);
@@ -6453,9 +6496,10 @@ namespace winrt::TerminalApp::implementation
         if (snapshot.busy)
         {
             status = !snapshot.activity.empty() ? snapshot.activity : std::wstring{ L"Thinking\x2026" };
-            if (_sidePanelAiPreview)
+            if (_sidePanelAiCandidateCount > 0)
             {
-                status += L" \x2014 " + std::to_wstring(_sidePanelAiShownIds.size()) + (_sidePanelAiShownIds.size() == 1 ? L" candidate, choosing\x2026" : L" candidates, choosing\x2026");
+                // The newest search's size, in words only: its rows are not drawn — the list changes when the request ends.
+                status += L" \x2014 " + std::to_wstring(_sidePanelAiCandidateCount) + (_sidePanelAiCandidateCount == 1 ? L" candidate, choosing\x2026" : L" candidates, choosing\x2026");
             }
             if (!snapshot.narration.empty())
             {
@@ -6494,6 +6538,24 @@ namespace winrt::TerminalApp::implementation
         _sidePanelAiStatusText.Foreground(SolidColorBrush{ ink });
         _sidePanelAiStatusText.Opacity(inkOpacity);
         _sidePanelAiDot.Background(SolidColorBrush{ dot });
+        // The LOADING icon (the user's request of 2026-11-05): spinning in the dot's place while the assistant works — a request
+        // runs, or its process starts (the strip's two blue states) — and only while this view can be seen: AI mode on and the
+        // panel expanded (the status icons' host rule; a collapse and an expand repaint the strip to follow it). Every other
+        // state shows the dot.
+        const bool working = snapshot.busy || snapshot.state == State::Starting;
+        _SidePanelAiShowWorking(working && _sidePanelAiMode && !_sidePanelCollapsed);
+        // The result cards while a request runs are the LAST answer's list (SidePanelAiList.h: the list changes only when the
+        // request ends): dimmed, so they never read as this request's result, and still readable and clickable. A process that
+        // only starts (a prewarm) leaves them as they are: no request, nothing pending. Change-gated: a same-value Opacity write
+        // still invalidates the element.
+        if (_sidePanelAiResultsScroll)
+        {
+            const double listOpacity = snapshot.busy ? kSidePanelAiStaleListOpacity : 1.0;
+            if (std::abs(_sidePanelAiResultsScroll.Opacity() - listOpacity) > 0.001)
+            {
+                _sidePanelAiResultsScroll.Opacity(listOpacity);
+            }
+        }
         // The thinking level the next request runs with — the agent's, so a click in another window shows here too. A level that
         // thinks reads brighter than the context size (it changes how long a request takes); the agent never runs Off, the one
         // level that would read dim, so every level shown reads bright.
@@ -6519,6 +6581,43 @@ namespace winrt::TerminalApp::implementation
         _sidePanelAiUsageText.Text(winrt::hstring{ usage });
     }
 
+    void TerminalPage::_SidePanelAiShowWorking(bool working) noexcept
+    {
+        try
+        {
+            if (_sidePanelAiSpinner)
+            {
+                // IsActive is what starts and stops the ring's animation (its AnimatedVisualPlayer plays only while active), so a
+                // ring that is collapsed is also stopped: a running Composition animation keeps the compositor working on every
+                // frame, seen or not. Each write only when it changes something (a strip repaint comes with every agent event).
+                if (_sidePanelAiSpinner.IsActive() != working)
+                {
+                    _sidePanelAiSpinner.IsActive(working);
+                }
+                const auto ringVisibility = working ? Visibility::Visible : Visibility::Collapsed;
+                if (_sidePanelAiSpinner.Visibility() != ringVisibility)
+                {
+                    _sidePanelAiSpinner.Visibility(ringVisibility);
+                }
+            }
+            if (_sidePanelAiDot)
+            {
+                // The dot's cell is the ring's: one of the two at a time, never both side by side.
+                const auto dotVisibility = working ? Visibility::Collapsed : Visibility::Visible;
+                if (_sidePanelAiDot.Visibility() != dotVisibility)
+                {
+                    _sidePanelAiDot.Visibility(dotVisibility);
+                }
+            }
+        }
+        catch (...)
+        {
+            // The strip keeps whichever of the two it showed; the next repaint (every agent event) writes them again. Recorded
+            // (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelAiShowWorking");
+        }
+    }
+
     void TerminalPage::_SidePanelAiUpdateCountLine(const ::Agentmaster::SessionSearchSnapshot& snapshot)
     {
         if (!_sidePanelAiMode || !_sidePanelCountText)
@@ -6527,17 +6626,15 @@ namespace winrt::TerminalApp::implementation
         }
         std::wstring text;
         const size_t n = _sidePanelAiShownIds.size();
-        if (_sidePanelAiPreview)
+        if (snapshot.busy)
         {
-            text = std::to_wstring(n) + (n == 1 ? L" candidate, choosing\x2026" : L" candidates, choosing\x2026");
+            // A running request outranks whatever is listed: the cards on screen are the last answer's until it ends, so their
+            // count is not this request's result — the line says the search runs instead.
+            text = L"AI search \x2014 searching\x2026";
         }
         else if (_sidePanelAiHasShown)
         {
             text = n == 0 ? std::wstring{ L"no session fits" } : (std::to_wstring(n) + (n == 1 ? L" session found" : L" sessions found"));
-        }
-        else if (snapshot.busy)
-        {
-            text = L"AI search \x2014 searching\x2026";
         }
         else
         {
@@ -6668,14 +6765,12 @@ namespace winrt::TerminalApp::implementation
         {
             m.tagArgb.push_back(SidePanelPackArgb(ResolveTagDisplayColor(tag, tagColors))); // the ONE tag color resolution (Rule #17)
         }
-        // The why: the model's evidence for this session, only on its pick (a preview's rows were read by nobody yet).
+        // The why: the model's evidence for this session. The list on screen is always a pick (a show) — a search's candidates
+        // are never drawn (SidePanelAiList.h) — so every listed session's why, when the model gave one, is shown.
         out.whyText.clear();
-        if (!_sidePanelAiPreview)
+        if (const auto why = _sidePanelAiReasons.find(id); why != _sidePanelAiReasons.end())
         {
-            if (const auto why = _sidePanelAiReasons.find(id); why != _sidePanelAiReasons.end())
-            {
-                out.whyText = why->second;
-            }
+            out.whyText = why->second;
         }
         // The tip: the whole folder, the branch, every tag, the whole why, and what the gestures do for THIS session.
         std::wstring tipText = shownDir.empty() ? std::wstring{ L"(the session's folder is being read)" } : shownDir;
@@ -6935,7 +7030,7 @@ namespace winrt::TerminalApp::implementation
             _sidePanelAiNextRefreshMs = ::GetTickCount64() + kSidePanelAiRefreshMs;
             if (_sidePanelAiShownIds.empty())
             {
-                if (_sidePanelAiHasShown && !_sidePanelAiPreview)
+                if (_sidePanelAiHasShown)
                 {
                     // The model said "nothing fits" (an empty show): say so where the list would be, so an empty area does not
                     // read as "still working".

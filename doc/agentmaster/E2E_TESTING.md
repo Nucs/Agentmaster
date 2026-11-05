@@ -545,8 +545,10 @@ differs from the plan above, and why:
   mirrors with the dock by moving grid columns, never the header's children (appended `launch` · `sum` · `more`), so
   the tree order need not follow the screen: read the line's order from screen positions (the driver's
   `header_buttons`);
-  the side panel's AI search (SIDE_PANEL.md §2h, NOT BUILT): `am.side.ai` (the filter box's AI toggle, named by its "AI"),
-  `am.side.ai.{status,thinking,reset}` (the strip's text, the thinking toggle, ⊘ — named "New conversation"),
+  the side panel's AI search (SIDE_PANEL.md §2h; in dev 0.0.1.42 and production 0.8.0.9): `am.side.ai` (the filter box's
+  AI toggle, named by its "AI"), `am.side.ai.{status,thinking,reset}` (the strip's text, the thinking toggle, ⊘ — named
+  "New conversation"), `am.side.ai.busy` (2026-11-05, NOT BUILT: the strip's loading icon, named "The AI search is
+  working" — in the tree only while it shows, i.e. while a request runs or the process starts),
   `am.side.ai.result.<key>` (a result card's title; its item status is the state word or "closed", the tags, "selected").
   Home keeps its XAML id `ManagerHomeButton` (an x:Name is never overridden).
 - **Item status built:** the tab — the state word, then not started, unread, unsent draft, favorite, cache warm,

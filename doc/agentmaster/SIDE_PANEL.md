@@ -928,7 +928,12 @@ controls (an unknown member planted in the glyph and in `_SidePanelRefreshIndica
 - Collapse the panel while cards ring / glow / pulse, expand it: they move again; no `[exc] status glyph …`,
   `[exc] _SidePanelRefreshIndicators` or `[sidepanel] … out of step` line in hooks.log.
 
-### 2h. The AI search — the filter box's "AI" toggle (2026-10-31, NOT BUILT yet)
+### 2h. The AI search — the filter box's "AI" toggle (2026-10-31; the loading icon and the end-of-request list 2026-11-05)
+
+The view of 2026-10-31 (commit 7bbb63137, and the box keeping its text, 7d8ed1043) is in dev 0.0.1.42 and production
+0.8.0.9. The user's two requests of 2026-11-05 — "a loading icon while the assistant is running" and "the ai assistant
+should update the list only at the end when the result is final" — are NOT BUILT yet (the strip's spinner, *The list
+changes only at a request's end* below).
 
 The user's request: "add a 'Search' area similarly how 'Sum' works … the same search agent we have, same lifecycle but
 custom UI matching a sidemenu". Their answers to the four design questions (design-ask, 2026-10-31):
@@ -964,8 +969,12 @@ shifts the box's own clear button (the template part `DeleteButton`) left by the
 
 **The view** (rows: the strip, then the results):
 
-- **The strip** — the Sessions page's strip for a narrow panel: the state dot (blue working, green answered / ready, red
-  failed, gray idle), "❯ the request" (one line), then the model's plan and what runs now (busy), or its answer, or the
+- **The strip** — the Sessions page's strip for a narrow panel: the state dot (green answered / ready, red failed, gray
+  idle) — and while the assistant works (a request runs, or its process starts) a spinning **loading icon** in the dot's
+  place (`_sidePanelAiSpinner`, `am.side.ai.busy`, 12 DIP in the dot's own footprint so the text never moves; WinUI's
+  `ProgressRing`, the one the tab header and the Sessions page's summary loader use, whose spin is a Composition
+  animation, not a XAML storyboard: no XAML frame loop runs for it, UI_THREAD.md), "❯ the request" (one line), then the
+  model's plan and what runs now (busy; "… — N candidates, choosing…" once a search returned rows), or its answer, or the
   failure, or how to start (selectable, wrapping, scrolling inside 150 DIP), and a footer "thinking <level>  ctx 18K / 200K"
   (the thinking toggle is the Sessions page's own rotation, `_CycleSessionsAiThinking`: low → medium → high → xhigh → max →
   low, no off since 2026-11-01, SESSIONS.md 9.1). ⊘ (`am.side.ai.reset`) throws the
@@ -974,9 +983,23 @@ shifts the box's own clear button (the template part `DeleteButton`) left by the
   (`_SidePanelBuildCardSkeleton`, the same builder as the session cards, so the two can never drift apart) — folder-color
   band with the title and tag ribbons, the status icon and its label, the timing line, the folder / branch line — plus the
   model's **why** under it (a 2 DIP quote bar and one italic line; the tip has it whole). A session with a live tab shows
-  its live state; one without reads **closed** in gray (`kSidePanelAiClosedColor`). A search's candidates show at once (no
-  why lines, "N candidates, choosing…" on the count line), and the model's pick replaces them. An empty pick reads "No
-  session fits this request."
+  its live state; one without reads **closed** in gray (`kSidePanelAiClosedColor`). An empty pick reads "No session fits
+  this request."
+- **The list changes only at a request's end** (the user's rule of 2026-11-05, "the ai assistant should update the list
+  only at the end when the result is final"; `AgentMaster/SidePanelAiList.h`, `SidePanelAiListStepFor` /
+  `SidePanelAiListDiffers`, applied by `_OnSidePanelAiEvent`): a running request's steps never reach the cards — not a
+  search's candidates (only the strip counts them), not a show, which the model may follow with another one and which it
+  still answers after. The event that ENDS the request (its answer, an interrupted request's partial answer, or a failure)
+  puts up the conversation's list as it is then — the pick of its last show, this request's or an earlier one's — when it
+  differs from the list on screen (the flag, a session, the order or a why), and the new list starts at its top; an answer
+  in words leaves the cards and their scroll as they are. A reset (⊘ anywhere) clears them at once. Until the end, the
+  last answer's cards stay on screen **dimmed** (`kSidePanelAiStaleListOpacity`, 0.55; still clickable) and the count line
+  reads "AI search — searching…", so they never read as this request's result. The Sessions page's AI list keeps its own
+  rule (it still previews a search's candidates, SESSIONS.md §9.5). The rule is pinned by `TestSidePanelAiList`
+  (`tests_sidepanel.cpp`).
+- **The loading icon spins only while it can be seen** (`_SidePanelAiShowWorking`, the status icons' host rule of §2g): AI
+  mode on and the panel expanded; AI off and a collapse stop it (a ring left active would keep the compositor animating
+  for nobody), and an expand repaints the strip from the conversation as it is then.
 - **The data of a card**: the registry's record when it has one (an open or a closed session: the managed title, its color,
   its state), else the index entry the agent sent with the list, else — a list restored when the window opens, before any
   search read the index — the entry read from disk off the UI thread (`_SidePanelAiFetchMissingEntries` →
@@ -1013,8 +1036,8 @@ ai-open <sid8> -> jump | resume here | transcript`.
 **While the view shows, the card list rests like a collapsed one** (`_SidePanelCardsHidden`): its updates are owed
 (`_SidePanelScheduleRebuild` / `_SidePanelRebuildCards` only mark it dirty — a forced one too, since it would write the
 count line the AI view owns), its ⌖ reveal stays owed, and its status icons hold still (`SetHostShown`). The summary area
-keeps refreshing. The count line speaks for the AI view ("3 sessions found", "4 candidates, choosing…", "no session fits",
-the idle hint).
+keeps refreshing. The count line speaks for the AI view ("3 sessions found", "no session fits", "AI search — searching…"
+while a request runs, the idle hint).
 
 **Persistence** — the "Sum" contract: per window (`WindowRecord::sidePanelAiMode`, tri-state) and the last change is the
 new-window default (`AppSettings::sidePanelAiMode`), written outside the cog form (both cog-Save preserve blocks restore it).
@@ -1030,8 +1053,12 @@ past a day → 1440, a hand-edited 0, a write of an unclamped value).
   hint. hooks.log: `[nav] sidepanel ai on box=N`, then the agent's process start (`[harness] sessions-search: process up …`).
   AI off with text in the box: the text stays and filters the cards at once (`[nav] sidepanel ai off box=N`). ⊘ with text in
   the box: the conversation resets, the text stays (`ai-reset box=N`).
-- A request: the plan and "Searching …" in blue, candidates at once, then the pick with a why under each card and the answer
-  in the strip; the summary area still follows the focused tab.
+- A request: the loading icon spins where the dot was, the plan and "Searching …" in blue (then "… — N candidates,
+  choosing…"), the count line "AI search — searching…", and the last answer's cards stay as they were, dimmed — no
+  candidate ever shows. At the end the pick replaces them in one step (a why under each card, the list at its top), the
+  answer shows in the strip, the green dot is back and the cards are bright again. A follow-up answered in words leaves the
+  cards as they are. With the panel collapsed during a request, an expand shows the spinner again; the summary area still
+  follows the focused tab. `am.side.ai.busy` is in the UI Automation tree only while the icon shows.
 - Click a result of an open session: the summary peeks it, the Manager lens follows; double-click: its tab comes up. A closed
   one: double-click resumes it as a new tab here; right-click shows the closed-session menu. A session never opened in
   Agentmaster: the click opens its transcript.
@@ -1432,6 +1459,11 @@ below).
   `AgentManagerContent.Settings.cpp` + `AgentManagerContent.h` (the AI SEARCH park field, the preserve),
   `AgentMaster/SessionModels.h` + `Persistence.cpp` (`sidePanelAiMode` both halves, `sessionsAiParkMinutes`,
   `ClampSessionsAiParkMinutes`), `AgentMaster/SessionSearchAgent.{h,cpp}` (`LoadSessionIndexEntryById`),
+  the loading icon and the end-of-request list (2026-11-05): `AgentMaster/SidePanelAiList.h` (the list rule, pure),
+  `TerminalPage.AgentSidePanel.cpp` (`_sidePanelAiSpinner` beside the dot, `_SidePanelAiShowWorking`, the rule in
+  `_OnSidePanelAiEvent`, the dim and the candidate count in `_SidePanelAiUpdateStrip`, the collapse's strip repaint),
+  `TerminalPage.h` (`_sidePanelAiSpinner` + `_sidePanelAiCandidateCount` in place of the preview's two members),
+  `tests/tests_sidepanel.cpp` (`TestSidePanelAiList`),
   `tests/tests_persistence.cpp`.
   The `⋯` menu (§2i): `TerminalPage.AgentSidePanel.cpp` (the button and its lazily filled menu, `_SidePanelFillMoreMenu`,
   `_SidePanelRunMenuCommand`, `_SidePanelSetScope` in place of the scope toggle, `_SidePanelSetSort`, the menu's symbols

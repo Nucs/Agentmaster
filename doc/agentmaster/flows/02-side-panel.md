@@ -296,7 +296,8 @@ rising embers) while the server cache is warm.
 
 ### SP-09 · The AI search in the side panel
 
-> **Since** after 0.8.1 (NOT BUILT) · **P1** · **Needs** F-S2, mock (the AI search's model), keys · **Spec** SIDE_PANEL.md §2h; SESSIONS.md §9.6
+> **Since** 2026-10-31 (in dev 0.0.1.42 and production 0.8.0.9; the loading icon and the end-of-request list 2026-11-05,
+> NOT BUILT) · **P1** · **Needs** F-S2, mock (the AI search's model), keys · **Spec** SIDE_PANEL.md §2h; SESSIONS.md §9.6
 
 **Promise.** The filter box's **AI** toggle turns the box into the AI search's request line and shows the model's answer and
 its list in place of the cards, as side panel cards with the model's evidence under each — the Sessions page's conversation,
@@ -307,10 +308,13 @@ in Settings ▸ Sessions ▸ AI SEARCH (2 hours by default).
 1. **Toggle on.** *Do:* type a filter, then click **AI** inside the box. *Expect:* the text stays (now the request), the caret
    after it; the card area shows the strip over the conversation's last list (or an empty one); the count line reads the AI
    hint. *Check:* [LOG] `[nav] sidepanel ai on box=N`, then `[harness] sessions-search: process up` (the caret's focus).
-2. **Ask.** *Do:* Enter. *Expect:* the box empties; the strip shows "❯ <request>", the plan and "Searching …" in blue; the
-   candidates show at once ("N candidates, choosing…"), then the pick, each card with its why; the answer in the strip
-   (green dot). *Check:* [LOG] `sidepanel ai-ask turn=1 chars=N`; then `[ai-search] side panel (window …): the idle process
-   parks in 120 min (its request was answered)`.
+2. **Ask.** *Do:* Enter. *Expect:* the box empties; the strip shows "❯ <request>", a spinning loading icon where the dot
+   was (`am.side.ai.busy`), the plan and "Searching …" in blue ("… — N candidates, choosing…" once a search returned
+   rows); the count line "AI search — searching…"; the list does NOT change while the request runs (the last answer's
+   cards stay, dimmed; no candidate is drawn). At the end the pick replaces the list in one step, each card with its why;
+   the answer in the strip, the green dot instead of the spinner. NOT BUILT (2026-11-05): a build of 2026-11-04 or older
+   shows the candidates at once and the pick a second later, with no spinner. *Check:* [LOG] `sidepanel ai-ask turn=1
+   chars=N`; then `[ai-search] side panel (window …): the idle process parks in 120 min (its request was answered)`.
 3. **Results.** *Expect:* an open session's card shows its live state; a closed one reads **closed** in gray; the summary area
    below still follows the focused tab.
 4. **Gestures.** *Do:* click an open session's card. *Expect:* the summary peeks it; the Manager lens follows. *Do:*
@@ -333,6 +337,10 @@ in Settings ▸ Sessions ▸ AI SEARCH (2 hours by default).
 - **E5 A restored list of unknown sessions** → their cards read "session <id8> — reading…" and fill in from disk within a
   moment.
 - **E6 No native claude.exe** → AI on shows the "Claude not detected" notice and the toggle stays off.
+- **E7 A follow-up answered in words** (no show) → the cards stay exactly as they were (no rebuild, no scroll to the top);
+  they come back to full brightness at the answer.
+- **E8 The panel collapsed during a request** → no ring spins inside the collapsed panel; an expand shows the spinner
+  again while the request still runs, or the final list when it ended meanwhile.
 
 ---
 

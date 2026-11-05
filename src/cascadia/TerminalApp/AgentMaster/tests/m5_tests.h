@@ -278,6 +278,12 @@ void TestVirtualListWindow();
 // ring blinks whenever shown — an alert that ignores the animation switch and dormancy; plus the exhaustive 128-case
 // sweep against an independent statement of each rule (tests_sidepanel.cpp)
 void TestStatusIconMotion();
+// SidePanelAiList.h (SIDE_PANEL.md §2h): when the side panel's AI view changes its list — the user's "only at the end when
+// the result is final" (2026-11-05): a running request's candidates and shows leave it alone, its end (Answer / Failed)
+// takes the conversation's list when it differs (the flag, the ids, their order, a why), a reset clears it at once; plus
+// whole requests replayed through a model of the view: one change per request, at its end, to the last show
+// (tests_sidepanel.cpp)
+void TestSidePanelAiList();
 // tests_presets.cpp — HARNESSES.md, PRESETS (LaunchPresets.h, the pure core): the list starts EMPTY (no template is added
 // by itself) and an empty list offers "Add presets…" with help text naming the way to the Presets tab (a list of hidden
 // presets does not); one click adds a template as a linked, visible "p-" preset and "Add all tested" adds the five tested
