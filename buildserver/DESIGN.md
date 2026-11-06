@@ -372,7 +372,8 @@ page file, and power plan High performance.
   of that node); fastrund's pod memory limit (1 GiB for everything it starts) raised to a VM's size; ~20 GB of disk
   for `am-e2e` (the base and its layer, ~11 GB) and its overlays (the nodes have 2.3–12 GB free; the thin pool is at
   71.45 %, its alert at 80 %); and RAM: 6.0–7.1 GB available all week, so one e2e VM at 3–4 GB.
-- **dock never takes a build:** a build's minimum is above its free memory.
+- **dock never takes a build:** a build's minimum is above its free memory. §16.16 measured it again on 2026-11-06
+  and lists what would change that.
 
 ### 5.4 Everything else in the WSL VM
 
@@ -945,6 +946,32 @@ app, 117 s): 376 s in all.
 suite's own waits; 2 vCPUs saves CPU (the PC's least scarce resource: 24 usable threads) at a risk of timeouts in the
 UI tests. The guest uses all of its 3 GB (3.13–3.14 GB with QEMU's own), so a smaller guest would page inside Windows
 instead. `amb e2e --ram 8` asks for the old uncapped VM.
+
+### 16.16 dock as a build site (2026-11-06, read-only over SSH)
+
+The owner asked how feasible a build on dock is. Measured on dock and on this PC's site the same morning:
+
+| | dock | A build VM (this site's `build-1`) |
+|---|---|---|
+| CPU | Ryzen 9 6900HX, 8 cores / 16 threads, up to 4.9 GHz; load 0.85–1.35 (55,384 MIPS, §16.7) | 8 vCPUs, `/m:2`, `CL_MPCount` 3 |
+| RAM | 30 GiB, both slots full (2 × 16 GB DDR5-4800; the board takes 64 GB); 24 GiB used, 6 GiB available, swap unused, memory PSI 0. VM 100 holds 16 GiB (its GPU passthrough pins all of it), PBS 4 GiB | at least 8 GB, 16 preferred (10.7 GB granted on 2026-11-04) |
+| Disk | thin pool `pve/data` at 72.74 % of 794 GiB: 216 GiB free, ~58 GiB before `dock-pool-watch`'s 80 % alert | `am-base` 9.1 GB + `am-build` 20.3 GB + the VM's overlay 14.4 GB + its data disk 83.5 GB for three worktrees (~28 GB each): ~72 GB with one worktree |
+| Virtualization | `/dev/kvm` on the host, `kvm_amd` nested = 1, PVE 8.4.21 | KVM |
+
+- **No build fits today.** The free memory is 2 GB short of a build VM's minimum, and one worktree would take the pool
+  past its 80 % alert (to ~82 %).
+- **What would make it fit** (each one the owner's call):
+  - **Memory:** VM 100 stopped for the length of a build (22 GiB available then), or 2 × 32 GB in the two slots.
+  - **Disk:** VM 100's ten snapshots (on 2026-09-23 its seven 2024 ones alone held 114.5 GiB of the pool; the
+    homelab's CLAUDE.md §9 #2), or a second disk.
+  - **A slot driver for dock:** §5.3 plans e2e slots only, through fastrun in CT 113/114 (E3; D3 has fastrun manage
+    dock's slots). A build VM would be simplest as a Proxmox VM made from a copy of `am-base` + `am-build`. Its guest
+    agent would need a LAN path to the coordinator, which today serves this PC (127.0.0.1:2207) and the slots inside
+    the site, and its bootstrap takes the agent from the slot's share (Z:), which dock does not have.
+- **Expected speed, not measured:** dock's CPU gives as much as this PC's 32 threads under their usual load (§16.7),
+  and a Proxmox VM's disk is the NVMe behind one layer of virtualization, not the ~1,100–3,700 IOPS of this site's
+  nested VM (§16.6). So a build there should run at least as fast as in `build-1` (29.5 min for a purged Release build
+  on 2026-11-04). Measure that before relying on it.
 
 ## 17. Evidence
 
