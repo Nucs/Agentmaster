@@ -972,6 +972,10 @@ The owner asked how feasible a build on dock is. Measured on dock and on this PC
   and a Proxmox VM's disk is the NVMe behind one layer of virtualization, not the ~1,100–3,700 IOPS of this site's
   nested VM (§16.6). So a build there should run at least as fast as in `build-1` (29.5 min for a purged Release build
   on 2026-11-04). Measure that before relying on it.
+- **Later the same day:** PBS (VM 105) became an on-demand VM. It now runs only in a weekly window (Wednesdays
+  20:20) and is off the rest of the week (homelab commit 9f95683, `pve/host-backup/install.txt` 3.10). dock's
+  available memory rose from 6 to 9 GiB. By §3.2's rule (MemAvailable − 2 GB) that is 7 GB, still 1 GB short of a
+  build VM's 8 GB minimum, so the memory fix above is still needed.
 
 ## 17. Evidence
 
