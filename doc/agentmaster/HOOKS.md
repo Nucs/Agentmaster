@@ -788,7 +788,8 @@ prompt, a fork, a user interrupt, a dismissed card).
   | a meta row, a compact summary | complete |
 
 - For `interrupted_turn` it appends a meta user row, `Continue from where you left off.`. With
-  `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` (the user's `~/.claude/settings.json`, set 2026-10-09) it sends
+  `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` (the user's `~/.claude/settings.json`, set 2026-10-09; since 2026-11-06,
+  NOT BUILT, also Agentmaster's shipped Global env default for every managed claude, ENV_VARS.md §8 v3) it sends
   it at once.
 - The last message must be younger than `CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS` (5 days on this
   machine). A skipped API-error row has its own bound (that variable, then a server flag, then 6 h).
@@ -843,13 +844,14 @@ continue them by itself.
 | "Restart session" (`_RestartManagedSession`, resume only) | Plans while the old claude still runs. When a rewind is due it opens the holders, swaps the new connection in WITHOUT `Start`, and `_StartAfterApiErrorRewind` waits for the holders off the UI thread (at most `kApiErrorRewindExitWaitMs`, 15 s), appends, then starts the connection on the UI thread — only while it is still `NotConnected` (a closed tab or a second restart has closed it). A timeout or a failure still starts it, un-rewound. A claude in ANOTHER tab running the same conversation (OBSERVER.md §20) skips the hold: this restart cannot end it. |
 | "Deactivate" (`_DeactivateManagedTab`, resume only, state `Error` or `midTurnAtRestore`) | Plans before the swap, then `_RewindApiErrorAfterExit` waits for the parked claude's exit and appends. A tab woken before that has a live claude, and the append refuses rather than race it. |
 | A restored resume (`_LaunchClaudeSession` with a `restored` record: window restore, Sessions-page "Resume here", a reopened closed session) | `_RewindApiErrorBeforeRestore` appends synchronously before the connection is built, only for a record whose state is `Error` or whose `midTurnAtRestore` is set, so a 600-tab window restore reads no transcript for a healthy tab. |
-| A fork answered "Fork uninterrupted" (2026-11-06, NOT BUILT: `ForkTurnChoice::ContinueAfterApiError`, `_TakeBackApiErrorForFork`) | Appends to the SOURCE's transcript right before the fork's launch, a live source claude ALLOWED (`RewindApiErrorTailForForkSource`), launches the fork with `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` and starts it in place one Low-priority tick later (`_StartForkSoonAfterTakeBack`). HOOKS.md *Interrupted turns*, situation B. |
+| A fork answered "Fork uninterrupted" or "Fork interrupted" (2026-11-06, NOT BUILT: `ForkTurnChoice::TakeBackAndContinue` / `TakeBackAndInterrupt`, `_TakeBackStopForFork`) | Appends to the SOURCE's transcript right before the fork's launch, a live source claude ALLOWED (`RewindApiErrorTailForForkSource`), launches the fork with `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` and starts it in place one Low-priority tick later (`_StartForkSoonAfterTakeBack`); "Fork interrupted" also arms the fork stop watch, whose ONE Esc leaves a regular interrupt where the error was. HOOKS.md *Interrupted turns*, situation B. |
 
 Since 2026-11-06 (NOT BUILT) the restart's rewind is ASKED about when the restart is interactive: the restart question
-(situation B, *Interrupted turns*) — "Restart uninterrupted" takes the error back as above and adds
-`CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` to the new claude's environment (a settings file that sets the switch still
-wins), "Restart interrupted" leaves the error and the restarted claude waits at it. A restart nobody asked about
-(Telegram's ▶ Reactivate, a restart with no dialog presenter) still takes it back as the table says.
+(situation B, *Interrupted turns*). BOTH answers take the error back as above and add `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1`
+to the new claude's environment (a settings file that sets the switch still wins); "Restart interrupted" then arms the fork
+stop watch, whose ONE Esc stops the continuation, so the turn waits with Claude Code's own `[Request interrupted by user]` in
+place of the error (the user's rule: "interrupted keeps but replaces error with regular interrupt"). A restart nobody asked
+about (Telegram's ▶ Reactivate, a restart with no dialog presenter) still takes it back as the table says.
 
 **The scanner needs no change.** The marker moves the active leaf off the error branch, so
 `ShouldReleaseErrorOnLeafMove` releases `Error` → `WaitingForInput`; the resumed claude's
@@ -858,8 +860,8 @@ wins), "Restart interrupted" leaves the error and the restarted claude waits at 
 **Left as it is.**
 - A refusal, a DLP denial, a safety-monitor block.
 - A fork of an errored session nobody asked about (a programmatic fork, a fork whose question could not be shown): the
-  fork reads the SOURCE's tail and waits at the error. Since 2026-11-06 an interactive fork asks (situation B) and its
-  "Fork uninterrupted" takes the error back in the source's file (the table's last row).
+  fork reads the SOURCE's tail and waits at the error. Since 2026-11-06 an interactive fork asks (situation B), and both its
+  answers take the error back in the source's file (the table's last row).
 - A turn older than Claude Code's own age bound (5 days here): rewound, but not continued.
 - An error that will repeat (a prompt too long, an invalid model): the resume fails again, as a manual
   retry would.
@@ -934,15 +936,17 @@ the interrupt and the reply. The first other user row is the target; the line is
 
 **The restart question.** `_restartPaneConnection` (the tab menu's "Restart session", the `restartConnection`
 action, a dead pane's Enter) and the Manager's Restart ask first when the pane hosts a managed CLAUDE session whose
-plan is `Rewind` (`_UninterruptQuestionFor`): "Continue the interrupted turn?" — **Continue the turn** /
-**Keep it interrupted** (the default: a habitual Enter must never make an agent run a turn the user stopped) /
-**Cancel** (no restart). The text quotes the prompt that would be resent, and says when
-`CLAUDE_CODE_RESUME_INTERRUPTED_TURN` is not simply on (below).
+plan is `Rewind` (`_UninterruptQuestionFor`): "Restart a session you interrupted?" — **Restart interrupted** (the
+default: a habitual Enter must never make an agent run a turn the user stopped) / **Restart uninterrupted** / **Cancel**
+(no restart). Since 2026-11-06 (NOT BUILT) its words and button places are the other two questions' — interrupted =
+Primary + default, uninterrupted = Secondary (`_UninterruptChoiceFromDialog`, the one mapping of both askers); it read
+"Continue the interrupted turn?" — **Continue the turn** / **Keep it interrupted** before. The text quotes the prompt that
+would be resent, and says when `CLAUDE_CODE_RESUME_INTERRUPTED_TURN` is not simply on (below).
 - Asked WHERE THE USER CLICKED: the tab menu in the hosting window (`_AskUninterruptThenRestart`); the Manager's
   restart of a session another window hosts in the Manager's window (`_AskUninterruptThenFanOut`), which hands the
   ANSWER over — the engine's restart sink now carries a `RestartTurnChoice` (`Engine.h`), so the hosting window
   never asks twice; a Telegram restart in the topic (MESSAGING.md §21.37).
-- "Continue the turn" = `_RestartManagedSession(…, Uninterrupt)`: it plans AGAIN (the file moves while a dialog is
+- "Restart uninterrupted" = `_RestartManagedSession(…, Uninterrupt)`: it plans AGAIN (the file moves while a dialog is
   up), and when the rewind is still due it opens the old claude's `ProcessExitWait`, swaps the new connection in
   WITHOUT `Start`, adds `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` to the new claude's environment, and
   `_StartAfterInterruptRewind` waits for the old claude's exit (its exit re-stamps the interrupt as its leaf — the
@@ -953,7 +957,9 @@ plan is `Rewind` (`_UninterruptQuestionFor`): "Continue the interrupted turn?" �
   settings file decides (`ResolveClaudeAutoContinue`: managed policy > the project's `settings.local.json` >
   `settings.json` > the user's `settings.json` > the launch's env > Agentmaster's env; `AutoContinueAtRestart`).
   Off in a settings file: the interrupt is still taken back, and the user's next message continues the turn (the
-  dialog says so). This machine sets it on in `~/.claude/settings.json`.
+  dialog says so). This machine sets it on in `~/.claude/settings.json`; since 2026-11-06 (NOT BUILT) Agentmaster ships it
+  ON for every install as a Global env default (`CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1`, ENV_VARS.md §8 v3 — seeded once,
+  a deleted line stays deleted), so a managed claude continues a cut-off turn by itself without the user's own settings.
 
 **The fork question.** Every INTERACTIVE fork goes through `_ForkAskingAboutRunningTurn` (the tab menu's "Fork
 session" and its model submenu, Ctrl+Shift+D, the board / tree / side-panel card menus, the Sessions page's row menu
@@ -965,7 +971,8 @@ session's tail changes every second). "Fork a session in the middle of a turn?" 
 default: two sessions running one turn side by side is what a stray Enter must not cause) / **Fork uninterrupted** /
 **Cancel**. The text names a tool call the fork would run again. Telegram asks in its topic. The AI search's fork tool
 (the Sessions page, the side panel and the Telegram Search topic) refuses until the model passes the user's answer (its
-`turn` argument, below).
+`turn` argument, below). Since 2026-11-06 (NOT BUILT) it is also asked when the source's turn was STOPPED — by an API error
+(situation B) or by the user's own Esc (situation C), both below — with the same buttons.
 
 **The restart of a turn that would go on — the third question (2026-11-06, NOT BUILT).** The user's request: "When we
 fork or restart a session, we have (in one of those) a dialog asking if we want interrupted or uninterrupted — 1. make
@@ -1018,13 +1025,21 @@ file: `Rewind` onto the tool result `62d92b21`, 1 half-response row, the take-ba
   question says so). The setting off = no API error is taken back anywhere = nothing offered.
 - **The dialogs** (`ApiErrorTurnQuestionBody`): "Restart a session whose turn stopped on an API error?" / "Fork a session
   whose turn stopped on an API error?", the error quoted, the same buttons and default (interrupted).
+- **The user's rule for the two answers** (2026-11-06, a follow-up: "uninterrupted button is supposed to clear and interrupted
+  keeps but replaces error with regular interrupt. A restart session (and fork session) that picks uninterrupted removes error
+  and interrupt so auto-resume works"): BOTH answers take the error back; "uninterrupted" lets the continuation run,
+  "interrupted" stops it with ONE Esc, so the turn ends in Claude Code's own `[Request interrupted by user]` instead of the
+  error — a later restart then meets the first question, and its "uninterrupted" continues the turn.
 - **Restart uninterrupted** (`LetTurnContinue`): the restart's own API-error rewind (resume: the held Start, the old claude's
   exit, the line) PLUS `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` in the new claude's environment, so it continues by itself; a
   never-messaged fork's RE-FORK takes its source's error back instead (`RewindApiErrorTailForForkSource`). The API-error plan
   now runs BEFORE the connection is built (`_RestartManagedSession`), so the switch can ride its environment.
-- **Restart interrupted** (`StopContinuedTurn`): the rewind is skipped (`NOT rewound — the user chose "Restart
-  interrupted"`), the restarted claude waits at the error, and no stop watch is armed (nothing runs).
-- **Fork uninterrupted** (`ForkTurnChoice::ContinueAfterApiError`, both fork seams): `_TakeBackApiErrorForFork` appends the
+- **Restart interrupted** (`StopContinuedTurn`): the same take-back and switch (an answered question's `answeredTurnQuestion`
+  in `_RestartManagedSession`), then the stop intent and the fork stop watch (seam `restart interrupted`) exactly as for a
+  turn that would go on: the restarted claude starts the continuation, and the watch's ONE Esc stops it. A take-back that was
+  skipped (another tab's claude runs the conversation, `resumeApiErrorTurns` off) leaves the error: nothing runs, and the
+  watch ends at its idle settle.
+- **Fork uninterrupted** (`ForkTurnChoice::TakeBackAndContinue`, both fork seams): `_TakeBackStopForFork` appends the
   line to the SOURCE's transcript right before the launch — the ONE append made beside a live claude: a
   `--fork-session` fork has no file until its first turn and reads its source's once, at its start; Claude Code's
   `--resume-session-at` (which could start it at an earlier row) is honored in print mode only ("Ignored outside print mode",
@@ -1034,11 +1049,37 @@ file: `Rewind` onto the tool result `62d92b21`, 1 half-response row, the take-ba
   so a background fork (the Sessions page, a phone, the AI search) continues now, while the source's file still carries the
   line. ⚠ A dormant fork that starts only after the source's claude exited would read the source's re-stamp and wait at the
   error (the in-place start makes that window ~1 s).
-- **Fork interrupted** = plain `Uninterrupted`: the fork waits at the error; no watch (nothing would run).
+- **Fork interrupted** (`ForkTurnChoice::TakeBackAndInterrupt`): the same take-back, switch and in-place start, PLUS the fork
+  stop watch (the persisted `stopForkedTurn`, the lock, ONE Esc), armed BEFORE the in-place start — so the fork's branch ends
+  in a regular interrupt instead of the error. (`ForkTurnTakesBack` / `ForkTurnArmsStopWatch`, `InterruptedTurns.h`, are the
+  seams' one rule: take back for both take-back values, the watch for `Interrupted` and `TakeBackAndInterrupt`.)
 - After a fork's take-back the source's tail reads as a continuable tail, so the NEXT fork of it gets situation A (Claude
   Code continues by itself) — the stop watch then answers "interrupted".
 - Telegram asks both (MESSAGING.md §21.37); the AI search's fork tool maps its `turn` answer to the take-back (SESSIONS.md
-  §9.14).
+  §9.14). Every pass-through of a decided answer (another window's request, the Telegram launch) goes through
+  `ForkTurnChoiceForLaunch`, so a new answer reaches all of them.
+
+**Situation C — a fork of a turn the USER interrupted (2026-11-06, NOT BUILT).** The same follow-up: "A restart session (and
+fork session) that picks uninterrupted removes error and interrupt so auto-resume works". The restart of such a turn is the
+first question; a fork of it asked nothing and waited at the interrupt (a user interrupt is a FINISHED turn to Claude Code's
+resume, so situation A says no).
+- **When it asks** (`AssessForkContinuation` with `considerUserInterrupt`, after A and B said no; every interactive seam passes
+  true — the PC's `_ForkTurnQuestionFor`, Telegram's `_askForkTurnBeforeLaunch`, the AI search's facts): the source's tail is
+  the user's interrupt and the restart's own planner (`PlanInterruptRewindForSession`) says `Rewind` — whatever the switch says.
+- **The dialog** (`ForkInterruptQuestionBody`): "Fork a session you interrupted?" — the prompt that would be sent again quoted,
+  or "from the last step that finished"; the switch's three states as in B.
+- **Fork uninterrupted** (`TakeBackAndContinue`): `_TakeBackStopForFork` finds no API error, so it takes the interrupt back in
+  the SOURCE's file (`RewindInterruptTailForForkSource` — the interrupt planner's line, appended beside a live source claude like
+  B's), launches with the switch and starts the fork in place: it sends the prompt again or continues from the last finished step.
+- **Fork interrupted** = a plain fork (`Uninterrupted`): the interrupt is a regular one already, so the fork waits at it; no
+  watch (nothing would run).
+- After the take-back the source's tail reads as a continuable tail (the prompt sent again): the next fork gets situation A.
+
+**The switch ships with Agentmaster (2026-11-06, NOT BUILT; the user: "Check if env var for auto resume is coming with
+agentmaster").** It did not: on this machine it worked only through the user's own `~/.claude/settings.json`. Agentmaster now
+seeds `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` once into the Global env (ENV_VARS.md §8 v3), so every managed claude — a restore
+wake, a Reactivate, a Restart, a fork — continues a cut-off turn by itself. The questions still add it to their one start
+(for a user who deleted the line), and a Claude Code settings FILE that sets it off still wins over every environment.
 
 **The classifier** (`ClassifyResumeContinuation`, a mirror of `bfo` from the active leaf): system / progress rows,
 transient API errors and queued task notifications are stepped over; an assistant tool_use at the tail is a call in
@@ -1053,8 +1094,8 @@ Not mirrored: the special tool cards (`vMt`), a max-turns ending, the `n` flag o
 the pure rule `DecideForkTurnStop` in `AgentMaster/InterruptedTurns.h`):
 - The intent is PERSISTED on the fork (`SessionInfo::stopForkedTurn`, `sessions.json`) — or on a session restarted with
   "Restart interrupted" —, and the watch is armed at every seam that gives the session a NEW connection: the fork launch, a
-  restored launch (window restore, Sessions "Resume here"), Restart (a "Continue the turn" or "Restart uninterrupted"
-  answer clears the intent instead), Deactivate.
+  restored launch (window restore, Sessions "Resume here"), Restart (a "Restart uninterrupted" answer to either restart
+  question clears the intent instead), Deactivate.
 - The tab is locked read-only as soon as the watch sees its control (a read-only the user set is never touched);
   the KEYBOARD is blocked, our own write is not.
 - Dormant (a background tab not visited yet): a 1 s timer, unbounded. Started: a 100 ms timer — the claude.exe under
@@ -1082,13 +1123,19 @@ Claude session that does not ask it), `[nav] restart-question <sid8> (the turn r
 source; re-runs <tool>)`, `[nav] restart-answer <sid8> -> stop-continued-turn | let-turn-continue | cancelled`, `[fork-stop]
 <sid8> restart: the user chose "Restart interrupted" — the stop intent is recorded on the session` then `[fork-stop] <sid8>
 armed (restart interrupted)…`, and `… restart: the user chose "Restart uninterrupted" — the stop intent is cleared`.
-Situation B: `[nav] restart-question <sid8> (an API error: server_error)`, `[api-error-rewind] <sid8> restart: NOT rewound —
-the user chose "Restart interrupted": the restarted claude waits at the error …`, `[fork-stop] <sid8> restart: "Restart
-interrupted" kept the API error — nothing will run, no watch`; the fork's `[nav] fork-question <src8> (<origin>; an API error:
-server_error)`, `fork-answer <src8> -> fork uninterrupted (continue-after-api-error) | fork interrupted (the fork waits at the
-API error)`, `[api-error-rewind] <src8> fork: rewound past "…" … (claude pid N still runs the source: it never re-reads its
-file, …)`, `[nav] fork-start <fork8> started in place (the source's API error was taken back: the turn goes on now)`; a
-re-fork restart's `[api-error-rewind] <src8> restart re-fork of <sid8>: …`.
+Situation B: `[nav] restart-question <sid8> (an API error: server_error)`, then for either answer the restart's
+`[api-error-rewind] <sid8> restart: rewound past "…"` line, and for "Restart interrupted" the third question's
+`[fork-stop] <sid8> restart: the user chose "Restart interrupted" — the stop intent is recorded on the session`, `armed
+(restart interrupted)`, `heartbeat: idle -> busy`, `Esc pressed (1/3)`; Telegram's `remote telegram /restartsession <sid8> ->
+restart interrupted | restart uninterrupted (an API error)`. The fork's `[nav] fork-question <src8> (<origin>; an API error:
+server_error | the user's interrupt)`, `fork-answer <src8> -> fork uninterrupted (take-back-and-continue) | fork interrupted
+(take-back-and-interrupt | uninterrupted)`, `[api-error-rewind] <src8> fork: rewound past "…" … (claude pid N still runs the
+source: it never re-reads its file, …)` or, situation C, `[interrupt-rewind] <src8> fork: took back …`, or `[fork-take-back]
+<src8> fork: nothing to take back (no API error, no user interrupt at the source's end)`; `[nav] fork-start <fork8> started in
+place (the source's stop was taken back: the turn goes on now)`; the done line's words (`ForkTurnNavSuffix`): `(fork
+interrupted)`, `(fork uninterrupted, after the take-back of the source's stop)`, `(fork interrupted, after the take-back of the
+source's API error: a regular interrupt replaces it)`; a re-fork restart's `[api-error-rewind] <src8> restart re-fork of
+<sid8>: …`.
 
 **Tests.** `TestInterruptedTurns` (`tests_rewind.cpp`): the planner on the probes' shapes and every refusal, the
 classifier, the switch's precedence on scratch settings files, the session front doors (a scratch
@@ -1100,9 +1147,17 @@ tool's `turn` guard: `TestTabsServer` (`tests_tabtools.cpp`). Situation B: the r
 `None`; neither question without `considerApiError`; both with it, the error quoted, also with the switch off; a re-fork offers
 the source's take-back), the fork's take-back beside a LIVE holder (a heartbeat of the harness's own process with its exact
 `procStart`: a resume's rewind refuses, `RewindApiErrorTailForForkSource` appends one line and names the holder; a second
-one writes nothing; the next fork then reads situation A), `ForkTurnChoice::ContinueAfterApiError`'s value and word,
-`ApiErrorTurnQuestionBody`'s three switch states, and the fork tool's B refusal and mapping (`uninterrupted` →
-`ContinueAfterApiError`, `interrupted` → a plain fork). The live behavior was measured with the
+one writes nothing; the next fork then reads situation A), the take-back values' numbers and words, `ApiErrorTurnQuestionBody`'s
+three switch states (interrupted = take-back + Esc; with the switch off, no Esc), and the fork tool's B refusal and mapping
+(`uninterrupted` → `TakeBackAndContinue`, `interrupted` → `TakeBackAndInterrupt`). Situation C: not asked without
+`considerUserInterrupt`; asked with it (onto the prompt, also with the switch off); `RewindInterruptTailForForkSource` beside a
+live holder appends one line and names it while a resume's rewind refuses; a second one writes nothing; the next fork reads
+situation A; `ForkInterruptQuestionBody`'s three switch states; the fork tool's C refusal and mapping (`uninterrupted` →
+`TakeBackAndContinue`, `interrupted` → a plain fork). The rules `ForkTurnTakesBack`, `ForkTurnArmsStopWatch`,
+`ForkTurnChoiceForLaunch` and `ForkTurnNavSuffix`; the first question's words by its buttons' names. The shipped switch
+(ENV_VARS.md §8 v3): `ApplyEnvDefaults` at every version (`tests_spawn_sched.cpp`), and `ResolveClaudeAutoContinue` reading it
+on through the spawn env. Every new check was proven able to fail by a planted-defect run (the watch rule, the B mapping, the
+v3 entry, C's assessment). The live behavior was measured with the
 probes above (`tools/interrupt-probe/interrupt_probe.py`), and then the COMPILED planner, linked into a probe from
 the harness's objects (`rewind_probe.exe`, `build_rewind_probe.bat` + `cpp_probe.py`), was run on transcripts the
 real claude wrote: an Esc during a reply (planned to the

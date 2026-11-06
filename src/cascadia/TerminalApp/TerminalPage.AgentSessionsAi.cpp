@@ -1412,10 +1412,11 @@ namespace winrt::TerminalApp::implementation
                     // The tab menu's fork for a session the registry knows (Codex-aware, the unsent draft carried); the
                     // Sessions page's fork for one it never knew.
                     // HOOKS.md "Interrupted turns": the fork tool demanded the user's answer when the fork would continue the
-                    // source's turn by itself (its `turn` argument); Interrupted arms the fork stop watch on the new session in
-                    // either seam, ContinueAfterApiError (situation B's "uninterrupted") takes the source's API error back and starts
-                    // the fork, anything else (Ask is never sent) forks as before.
-                    const auto forkTurn = request.forkTurn == ::Agentmaster::ForkTurnChoice::Interrupted || request.forkTurn == ::Agentmaster::ForkTurnChoice::ContinueAfterApiError ? request.forkTurn : ::Agentmaster::ForkTurnChoice::Uninterrupted;
+                    // source's turn by itself, or when the source's turn was stopped by an API error or the user's interrupt (its
+                    // `turn` argument); Interrupted arms the fork stop watch on the new session in either seam, TakeBackAndContinue
+                    // takes the source's stop back and starts the fork, TakeBackAndInterrupt does that and arms the watch, anything
+                    // else (Ask is never sent) forks as before (ForkTurnChoiceForLaunch).
+                    const auto forkTurn = ::Agentmaster::ForkTurnChoiceForLaunch(request.forkTurn);
                     std::wstring forked;
                     if (!_ForkManagedSessionById(request.sessionId, slot, request.model, &forked, forkTurn))
                     {

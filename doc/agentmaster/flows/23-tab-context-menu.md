@@ -261,7 +261,8 @@ session as a branch of its conversation — on the model picked in the submenu.
 
 **Edge cases**
 - **E1 Restart during a running turn** → cut off (CLAUDE.md *Cut-off turns*): Error until the next message — or, from
-  the build after 5bc91d3de (NOT BUILT), the "continue the interrupted turn?" question (INT flows).
+  the build after 5bc91d3de (NOT BUILT), a "Restart interrupted / uninterrupted" question (INT-05 for a turn the user
+  interrupted, INT-08 for one that would go on, INT-09 for an API error).
 - **E2 Restart on a dormant tab** → starts it in place (like Activate).
 - **E3 Restart on a shell tab** → Windows Terminal's restart: a fresh shell in the same pane.
 

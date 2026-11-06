@@ -466,8 +466,9 @@ namespace
 
         // ---- fork: the turn question (HOOKS.md "Interrupted turns", the user's request of 2026-11-06) ----
         // A toolset of its own whose forkTurn callback says the RUNNING kS2 would continue its turn in a fork (re-running a
-        // Bash call), that kS5's last turn stopped on an API error (situation B), and that every other session would not. It
-        // shares `opens` with the main toolset, so counts are relative.
+        // Bash call), that kS5's last turn stopped on an API error (situation B), that the user interrupted kS3's last turn
+        // (situation C, its prompt would be sent again), and that every other session would not. It shares `opens` with the
+        // main toolset, so counts are relative.
         {
             ++generation; // a fresh request: the caps of the blocks above do not count here
             std::vector<std::wstring> asked; // the ids the fake forkTurn was asked about
@@ -486,6 +487,12 @@ namespace
                     facts.wouldContinue = true;
                     facts.apiError = true;
                     facts.errorText = L"API Error: Server error mid-response. The response above may be incomplete.";
+                }
+                else if (sessionId == kS3)
+                {
+                    facts.wouldContinue = true;
+                    facts.userInterrupt = true;
+                    facts.resendsPrompt = true;
                 }
                 else
                 {
@@ -529,14 +536,30 @@ namespace
                 ++generation;
                 t = turnFork->handler(Args(L"{\"id\":\"" + kS5 + L"\",\"window\":\"2\"}"));
                 CHECK(t.isError && t.text.find(L"Not forked yet: The last turn of \"release\" (") == 0 && t.text.find(L"stopped on an API error") != std::wstring::npos &&
-                          t.text.find(L"Server error mid-response") != std::wstring::npos && t.text.find(L"uninterrupted - Agentmaster takes the error back") != std::wstring::npos && opens.size() == before + 3,
-                      "fork turn B: a source whose turn stopped on an API error -> refused with the take-back question (the error quoted), nothing opened");
+                          t.text.find(L"Server error mid-response") != std::wstring::npos && t.text.find(L"Agentmaster takes the error back for the fork either way") != std::wstring::npos &&
+                          t.text.find(L"a regular interrupt in place of the error") != std::wstring::npos && opens.size() == before + 3,
+                      "fork turn B: a source whose turn stopped on an API error -> refused with the take-back question (the error quoted, both answers take it back), nothing opened");
                 t = turnFork->handler(Args(L"{\"id\":\"" + kS5 + L"\",\"window\":\"2\",\"turn\":\"uninterrupted\"}"));
-                CHECK(!t.isError && opens.size() == before + 4 && opens.back().second.forkTurn == ForkTurnChoice::ContinueAfterApiError && t.text.find(L"took the source's API error back") != std::wstring::npos,
-                      "fork turn B: \"uninterrupted\" -> ContinueAfterApiError (the window takes the error back and starts the fork)");
+                CHECK(!t.isError && opens.size() == before + 4 && opens.back().second.forkTurn == ForkTurnChoice::TakeBackAndContinue && t.text.find(L"took the source's API error back") != std::wstring::npos &&
+                          t.text.find(L"carries on with the turn by itself") != std::wstring::npos,
+                      "fork turn B: \"uninterrupted\" -> TakeBackAndContinue (the window takes the error back and starts the fork)");
                 t = turnFork->handler(Args(L"{\"id\":\"" + kS5 + L"\",\"window\":\"2\",\"turn\":\"interrupted\"}"));
-                CHECK(!t.isError && opens.size() == before + 5 && opens.back().second.forkTurn == ForkTurnChoice::Uninterrupted && t.text.find(L"waits at the source's API error") != std::wstring::npos,
-                      "fork turn B: \"interrupted\" -> a plain fork (Uninterrupted: nothing would run, so there is nothing to stop)");
+                CHECK(!t.isError && opens.size() == before + 5 && opens.back().second.forkTurn == ForkTurnChoice::TakeBackAndInterrupt && t.text.find(L"took the source's API error back") != std::wstring::npos &&
+                          t.text.find(L"a regular interrupt in place of the error") != std::wstring::npos,
+                      "fork turn B: \"interrupted\" -> TakeBackAndInterrupt (the user's rule: interrupted keeps but replaces the error with a regular interrupt)");
+                // Situation C: the user interrupted kS3's last turn (a new request: B used 3 more slots of the last one).
+                ++generation;
+                t = turnFork->handler(Args(L"{\"id\":\"" + kS3 + L"\",\"window\":\"1\"}"));
+                CHECK(t.isError && t.text.find(L"Not forked yet: The last turn of \"old work\" (") == 0 && t.text.find(L"was interrupted by the user (Esc)") != std::wstring::npos &&
+                          t.text.find(L"uninterrupted - Agentmaster takes the interrupt back for the fork") != std::wstring::npos && t.text.find(L"(its last prompt is sent again)") != std::wstring::npos &&
+                          t.text.find(L"interrupted - the fork waits at the interrupt for them") != std::wstring::npos && opens.size() == before + 5,
+                      "fork turn C: a source whose turn the user interrupted -> refused with the take-back question, nothing opened");
+                t = turnFork->handler(Args(L"{\"id\":\"" + kS3 + L"\",\"window\":\"1\",\"turn\":\"uninterrupted\"}"));
+                CHECK(!t.isError && opens.size() == before + 6 && opens.back().second.forkTurn == ForkTurnChoice::TakeBackAndContinue && t.text.find(L"took the source's interrupt back") != std::wstring::npos,
+                      "fork turn C: \"uninterrupted\" -> TakeBackAndContinue (the window takes the user's interrupt back and starts the fork)");
+                t = turnFork->handler(Args(L"{\"id\":\"" + kS3 + L"\",\"window\":\"1\",\"turn\":\"interrupted\"}"));
+                CHECK(!t.isError && opens.size() == before + 7 && opens.back().second.forkTurn == ForkTurnChoice::Uninterrupted && t.text.find(L"waits at the source's interrupt") != std::wstring::npos,
+                      "fork turn C: \"interrupted\" -> a plain fork (Uninterrupted: the interrupt is a regular one already, nothing would run to stop)");
             }
             const HarnessTool* turnResume = FindTool(turnServers, L"tabs", L"resume");
             if (turnResume)

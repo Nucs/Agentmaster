@@ -926,7 +926,7 @@ namespace
         LR"("after":{"type":"string","description":"Put the fork right after this tab of that window: its pos (a number) or its session id. Leave it out: right after the source's tab when the source is open in that window, else at the end."},)"
         LR"("model":{"type":"string","description":"Start the fork on this model: an id or an alias such as opus or sonnet. Leave it out for the usual model."},)"
         LR"("focus":{"type":"boolean","description":"true: switch the window to the fork and bring the window to the front. Default false: a background tab."},)"
-        LR"("turn":{"type":"string","enum":["interrupted","uninterrupted"],"description":"Only after the user answered it, when the tool said the source is in the middle of a turn that the fork would continue by itself, or that its last turn stopped on an API error: interrupted - the fork waits for the user (Agentmaster stops a turn it continues with Esc the moment it runs; an API error stays); uninterrupted - the fork carries on with that turn on its own (an API error is taken back first). Leave it out otherwise."})"
+        LR"("turn":{"type":"string","enum":["interrupted","uninterrupted"],"description":"Only after the user answered it, when the tool said the source is in the middle of a turn that the fork would continue by itself, that its last turn stopped on an API error, or that the user interrupted its last turn: interrupted - the fork waits for the user (Agentmaster stops a turn it continues with Esc the moment it runs; an API error is taken back first and becomes a regular interrupt; a user interrupt stays); uninterrupted - the fork carries on with that turn on its own (an API error or a user interrupt is taken back first). Leave it out otherwise."})"
         LR"(},"required":["id"]})";
 
     const wchar_t kTabsDeactivateSchema[] =
@@ -4738,12 +4738,16 @@ namespace Agentmaster
         // assistant forks (the Telegram Search topic's included), so with bypass permissions the guard must be HERE: without
         // `turn` the tool asks the app whether the fork would continue (tabs.forkTurn) and refuses with what to ask the user.
         // An explicit `turn` is the user's answer and is never second-guessed (the source may have finished meanwhile: then
-        // "interrupted" only arms a watch that finds nothing to stop) — but the facts are read for it too, because in
-        // situation B (the source's turn died on an API error) the same answer means another action: "uninterrupted" is the
-        // take-back (ContinueAfterApiError) and "interrupted" a plain fork that waits at the error.
+        // "interrupted" only arms a watch that finds nothing to stop) — but the facts are read for it too, because when the
+        // source's turn was STOPPED the same answer means another action. Situation B (an API error): both answers take the
+        // error back — "uninterrupted" = TakeBackAndContinue, "interrupted" = TakeBackAndInterrupt (the watch's ONE Esc leaves a
+        // regular interrupt where the error was: the user's rule "interrupted keeps but replaces error with regular
+        // interrupt"). Situation C (the user's own interrupt): "uninterrupted" = TakeBackAndContinue, "interrupted" = a plain
+        // fork (the interrupt is a regular one already).
         ForkTurnChoice forkTurn = ForkTurnChoice::Uninterrupted;
         bool turnGiven = false;
         bool turnAboutApiError = false; // the answer was mapped for situation B (the result's sentence says so)
+        bool turnAboutUserInterrupt = false; // the answer was mapped for situation C (the result's sentence says so)
         std::wstring turnQuestion; // non-empty: the fork would continue a turn and no `turn` came — what to ask the user
         if (fork)
         {
@@ -4765,9 +4769,14 @@ namespace Agentmaster
             {
                 turnGiven = true;
                 turnAboutApiError = facts.apiError;
+                turnAboutUserInterrupt = !facts.apiError && facts.userInterrupt;
                 if (facts.apiError)
                 {
-                    forkTurn = turn == L"uninterrupted" ? ForkTurnChoice::ContinueAfterApiError : ForkTurnChoice::Uninterrupted;
+                    forkTurn = turn == L"uninterrupted" ? ForkTurnChoice::TakeBackAndContinue : ForkTurnChoice::TakeBackAndInterrupt;
+                }
+                else if (facts.userInterrupt)
+                {
+                    forkTurn = turn == L"uninterrupted" ? ForkTurnChoice::TakeBackAndContinue : ForkTurnChoice::Uninterrupted;
                 }
                 else
                 {
@@ -4784,9 +4793,18 @@ namespace Agentmaster
                 }
                 if (facts.apiError)
                 {
-                    // Situation B: nothing would run by itself; only the take-back lets the fork go on.
+                    // Situation B: nothing would run by itself; only the take-back lets the fork go on — and both answers take it.
                     turnQuestion = L"The last turn of " + name + L" stopped on an API error" + (facts.errorText.empty() ? std::wstring{} : (L" (\"" + Cut(OneLine(facts.errorText), 160) + L"\")")) +
-                                   L", so a fork would wait at that error. Ask the user which they want: uninterrupted - Agentmaster takes the error back for the fork (one line added to the end of the source's transcript; nothing deleted, the source untouched) and the fork carries on with the turn by itself; or interrupted - the fork waits at the error for them.";
+                                   L", so a fork would wait at that error. Agentmaster takes the error back for the fork either way (one line added to the end of the source's transcript; nothing deleted, the source untouched). Ask the user which they want: uninterrupted - the fork carries on with the turn by itself" +
+                                   (facts.resendsPrompt ? std::wstring{ L" (its last prompt is sent again)" } : std::wstring{}) +
+                                   L"; or interrupted - Agentmaster locks the fork's tab and presses Esc the moment it starts running, so the fork waits for them with a regular interrupt in place of the error.";
+                }
+                else if (facts.userInterrupt)
+                {
+                    // Situation C: the user stopped the source's turn; a fork waits at that interrupt unless it is taken back.
+                    turnQuestion = L"The last turn of " + name + L" was interrupted by the user (Esc), so a fork would wait at that interrupt. Ask the user which they want: uninterrupted - Agentmaster takes the interrupt back for the fork (one line added to the end of the source's transcript; nothing deleted, the source untouched) and the fork carries on with the turn by itself" +
+                                   (facts.resendsPrompt ? std::wstring{ L" (its last prompt is sent again)" } : std::wstring{}) +
+                                   L"; or interrupted - the fork waits at the interrupt for them, as the source does.";
                 }
                 else
                 {
@@ -4846,7 +4864,7 @@ namespace Agentmaster
         if (fork)
         {
             request.model = Trim(arguments.StrAt(L"model"));
-            request.forkTurn = forkTurn; // the user's answer (Interrupted arms the window's fork stop watch), else Uninterrupted
+            request.forkTurn = forkTurn; // the user's answer as mapped above (the window's ForkTurnChoiceForLaunch carries it out), else Uninterrupted
         }
         // `after`: a position in the target window, or the session id of one of its tabs.
         std::wstring afterTitle;
@@ -4927,10 +4945,18 @@ namespace Agentmaster
             text += L" The fork's id is " + handle + L"; the source is untouched.";
             if (turnGiven && turnAboutApiError)
             {
-                // Situation B: say what the take-back did (or that the fork waits at the error), so the reply can tell the user.
-                text += forkTurn == ForkTurnChoice::ContinueAfterApiError ?
+                // Situation B: say what the take-back did, and that "interrupted" stops the continuation with one Esc, so the reply
+                // can tell the user (the tab is read-only for a few seconds then).
+                text += forkTurn == ForkTurnChoice::TakeBackAndContinue ?
                             L" Forked uninterrupted: Agentmaster took the source's API error back for the fork and started it, so it carries on with the turn by itself." :
-                            L" Forked interrupted: the fork waits at the source's API error for the user.";
+                            L" Forked interrupted: Agentmaster took the source's API error back for the fork and started it; its tab stays locked until Agentmaster has stopped the continued turn (one Esc the moment it runs), then the fork waits for the user with a regular interrupt in place of the error.";
+            }
+            else if (turnGiven && turnAboutUserInterrupt)
+            {
+                // Situation C: the take-back of the user's interrupt, or a plain fork that waits at it.
+                text += forkTurn == ForkTurnChoice::TakeBackAndContinue ?
+                            L" Forked uninterrupted: Agentmaster took the source's interrupt back for the fork and started it, so it carries on with the turn by itself." :
+                            L" Forked interrupted: the fork waits at the source's interrupt for the user, as the source does.";
             }
             else if (turnGiven)
             {
@@ -5436,7 +5462,7 @@ namespace Agentmaster
 
         HarnessTool fork;
         fork.name = kTabsForkTool;
-        fork.description = L"Branch a session into a NEW conversation that starts with the source's whole history, as a tab of a window you name, right after a tab you choose (by default right after the source's tab, like the tab menu's Fork session). The source is untouched. Refuses when several windows are open and none is named: then ask the user which window. Refuses when the source is in the middle of a turn that the fork would continue by itself, or its last turn stopped on an API error, until turn carries the user's answer (interrupted or uninterrupted): then ask the user. Use it only when the user asked to fork.";
+        fork.description = L"Branch a session into a NEW conversation that starts with the source's whole history, as a tab of a window you name, right after a tab you choose (by default right after the source's tab, like the tab menu's Fork session). The source is untouched. Refuses when several windows are open and none is named: then ask the user which window. Refuses when the source is in the middle of a turn that the fork would continue by itself, its last turn stopped on an API error, or the user interrupted its last turn, until turn carries the user's answer (interrupted or uninterrupted): then ask the user. Use it only when the user asked to fork.";
         fork.inputSchemaJson = kTabsForkSchema;
         fork.handler = [this](const json::Value& arguments) { return OpenTab(arguments, WindowToolRequest::Kind::Fork); };
         tools.push_back(std::move(fork));

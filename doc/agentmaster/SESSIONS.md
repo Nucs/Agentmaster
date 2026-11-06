@@ -1204,9 +1204,17 @@ call (`SDK_HARNESS.md` §5.1):
   Situation B (2026-11-06, NOT BUILT): a source whose last turn stopped on an API error
   (`ForkTurnFacts::apiError`, with `resumeApiErrorTurns` on) is refused the same way, with the error
   quoted and the take-back explained; the facts are read for an explicit `turn` too, because the answer
-  maps the other way there — `uninterrupted` = `ForkTurnChoice::ContinueAfterApiError` (the window takes the
-  error back in the source's transcript, launches the fork with `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` and
-  starts it at once), `interrupted` = a plain fork that waits at the error.
+  means another action there. Both answers take the error back (the user's rule of the same day:
+  "interrupted keeps but replaces error with regular interrupt") — `uninterrupted` =
+  `ForkTurnChoice::TakeBackAndContinue` (the window takes the error back in the source's transcript,
+  launches the fork with `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` and starts it at once), `interrupted` =
+  `TakeBackAndInterrupt` (the same, plus the fork stop watch: ONE Esc leaves a regular interrupt where the
+  error was).
+  Situation C (2026-11-06, NOT BUILT): a source whose last turn the USER interrupted
+  (`ForkTurnFacts::userInterrupt`) is refused too, the prompt that would be sent again named —
+  `uninterrupted` = `TakeBackAndContinue` (the window takes the interrupt back in the source's file and
+  starts the fork), `interrupted` = a plain fork that waits at the interrupt. The window carries out every
+  decided answer through `ForkTurnChoiceForLaunch` (a stray `Ask` forks as before).
 
 **How a call reaches a window** (`AgentMaster/WindowTabTools.h`; `Engine.h`
 `RegisterWindowAgentToolHandler` / `CollectWindowCensus` / `RunWindowTool` / `RunWindowToolOnHost`;

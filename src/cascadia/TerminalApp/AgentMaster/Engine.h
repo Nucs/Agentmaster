@@ -254,9 +254,10 @@ namespace Agentmaster
         {
             uint64_t token{ 0 };
             std::wstring windowId;
-            // sessionId: the session to restart; turnChoice: the answer to the "continue the interrupted turn?"
-            // or the "restart interrupted or uninterrupted?" question when the caller already has one (the window
-            // the user clicked in, Telegram) — Ask lets the hosting window ask (HOOKS.md "Interrupted turns").
+            // sessionId: the session to restart; turnChoice: the answer to either "restart interrupted or
+            // uninterrupted?" question (a turn the user interrupted; a turn that would go on or stopped on an API
+            // error) when the caller already has one (the window the user clicked in, Telegram) — Ask lets the
+            // hosting window ask (HOOKS.md "Interrupted turns").
             std::function<void(const std::wstring& sessionId, RestartTurnChoice turnChoice)> fn;
         };
         std::mutex restartMutex;

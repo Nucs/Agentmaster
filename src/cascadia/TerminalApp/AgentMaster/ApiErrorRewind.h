@@ -354,6 +354,16 @@ namespace Agentmaster
     // Returns the outcome; never throws.
     InterruptRewindResult RewindInterruptTailForSession(std::wstring_view sessionId) noexcept;
 
+    // The FORK's take-back of the source's USER interrupt (situation C, 2026-11-06: "a restart session (and fork session) that
+    // picks uninterrupted removes error and interrupt so auto-resume works"): the interrupt rewind's line appended to the
+    // fork SOURCE's transcript right before a fork's claude reads it, so the fork continues the turn the user stopped in the
+    // source. ⚠ Like RewindApiErrorTailForForkSource (see there), made beside the source's LIVE claude: it never re-reads its
+    // file, and its exit re-stamps its own leaf — the source stays interrupted; only the fork follows the line.
+    //   sourceId — the conversation forked.
+    // Returns the outcome (NotNeeded with no transcript or nothing to take back; Appended's detail names a live source claude,
+    // "" with none); never throws. ⚠ Blocking file I/O (one small read): an explicit-action path only.
+    InterruptRewindResult RewindInterruptTailForForkSource(std::wstring_view sourceId) noexcept;
+
     // Only the planning half of RewindInterruptTailForSession — no holder check, no write. The Restart seams ask
     // it BEFORE they end the old claude (whether to ask the user; whether to hold the new connection's Start).
     //   sessionId — the conversation to look at.
@@ -363,7 +373,9 @@ namespace Agentmaster
     InterruptRewindPlan PlanInterruptRewindForSession(std::wstring_view sessionId) noexcept;
 
     // One hooks.log line (no "\n") for a result: "[interrupt-rewind] <sid8> <seam>: …". `seam` names the
-    // caller ("restart").
+    // caller ("restart", "fork"). An appended line says who continues next: "the fork" for a seam that starts with
+    // "fork" (the take-back in a fork SOURCE's file, RewindInterruptTailForForkSource), else "the restarted claude";
+    // its detail (a live source claude the fork's take-back was made beside) follows in parentheses.
     //   r         — the result.
     //   sessionId — the conversation (its short id leads the line).
     //   seam      — the caller's name.
@@ -453,10 +465,16 @@ namespace Agentmaster
         std::wstring why; // why not asked (for the log): no transcript, the switch is off, the turn is finished
         // Situation B (2026-11-06; only with considerApiError): the source's turn died on an API error after output began, so
         // a fork waits at the error unless Agentmaster takes it back (RewindApiErrorTailForForkSource) — the question's
-        // "Fork uninterrupted" is ForkTurnChoice::ContinueAfterApiError, its "Fork interrupted" plain Uninterrupted (nothing
-        // to stop: the fork waits at the error). false = situation A (Claude Code continues by itself) or no question.
+        // "Fork uninterrupted" is ForkTurnChoice::TakeBackAndContinue, its "Fork interrupted" TakeBackAndInterrupt (the same
+        // take-back, then the stop watch's ONE Esc: the user's rule "interrupted keeps but replaces error with regular
+        // interrupt"). false = situation A (Claude Code continues by itself), situation C, or no question.
         bool apiError{ false };
         ApiErrorRewindPlan apiErrorPlan; // the source's API-error plan (read only with considerApiError and no situation A)
+        // Situation C (2026-11-06; only with considerUserInterrupt): the source's turn ended in the USER's interrupt, so a fork
+        // waits at it unless Agentmaster takes it back (RewindInterruptTailForForkSource) — "Fork uninterrupted" is then
+        // ForkTurnChoice::TakeBackAndContinue, "Fork interrupted" plain Uninterrupted (the interrupt is a regular one already).
+        bool userInterrupt{ false };
+        InterruptRewindPlan interruptPlan; // the source's interrupt plan (read only with considerUserInterrupt, no A and no B)
     };
 
     // Assess a fork of `sourceId`. Situation A: ask when CLAUDE_CODE_RESUME_INTERRUPTED_TURN is on where the fork runs (a
@@ -471,8 +489,11 @@ namespace Agentmaster
     //   spawnEnv         — the environment the fork's launch adds (ResolveSessionEnv for the dir).
     //   considerApiError — offer situation B (AppSettings::resumeApiErrorTurns: off, Agentmaster never takes an API error
     //                      back, and an API-errored source forks as it always did). false = situation A only.
+    //   considerUserInterrupt — offer situation C, after A and B said no: the source's tail is the USER's interrupt and the
+    //                      interrupt planner (PlanInterruptRewindForSession) can take it back — whatever the switch says.
+    //                      The interactive fork seams pass true; false (the default) keeps a caller that never heard of it.
     // Returns the outlook; never throws (a failure is "do not ask", logged).
-    ForkContinuationOutlook AssessForkContinuation(std::wstring_view sourceId, bool sourceRunning, std::wstring_view cwd, const std::vector<std::pair<std::wstring, std::wstring>>& spawnEnv, bool considerApiError = false) noexcept;
+    ForkContinuationOutlook AssessForkContinuation(std::wstring_view sourceId, bool sourceRunning, std::wstring_view cwd, const std::vector<std::pair<std::wstring, std::wstring>>& spawnEnv, bool considerApiError = false, bool considerUserInterrupt = false) noexcept;
 
     // Does a RESTART of a session need the third question, "restart interrupted or uninterrupted?" (HOOKS.md "Interrupted
     // turns", the user's request of 2026-11-06)? The ONE rule the PC's restart seams and the Telegram bot share — the fork
@@ -491,7 +512,9 @@ namespace Agentmaster
         // Situation B (2026-11-06; only with considerApiError): the turn died on an API error after output began, so the
         // restarted claude waits at the error unless Agentmaster takes it back — the restart's own API-error rewind for a
         // resume, the fork-source take-back for a re-fork. The question's "Restart uninterrupted" (LetTurnContinue) takes it
-        // back and sets the switch for this start; "Restart interrupted" (StopContinuedTurn) leaves the error in place.
+        // back and sets the switch for this start; "Restart interrupted" (StopContinuedTurn) does the same and arms the stop
+        // watch, whose ONE Esc leaves Claude Code's own interrupt where the error was (the user's rule of 2026-11-06:
+        // "interrupted keeps but replaces error with regular interrupt").
         bool apiError{ false };
         ApiErrorRewindPlan apiErrorPlan; // the API-error plan of conversationId (read only with considerApiError and no situation A)
     };

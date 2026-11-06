@@ -14,11 +14,15 @@ session in the middle of a turn the restarted claude would continue by itself as
 uninterrupted" (the same stop watch), in the topic from Telegram too; the AI search's fork tool (the
 Telegram Search topic's assistant) refuses such a fork until the user answered. A turn that died on an API error
 is part of the same choice for Restart and Fork: "uninterrupted" takes the error back and the new Claude
-continues by itself (INT-09).
+continues by itself; "interrupted" takes it back too and stops the continuation with one Esc, so a regular
+interrupt replaces the error (INT-09). The same day: every question reads "interrupted / uninterrupted" (the
+first restart question was "Continue the turn / Keep it interrupted"), a fork of a turn the user interrupted asks
+too (INT-10), and Agentmaster ships `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` as a Global env default (INT-11).
 
 **Test environment rule.** These flows need `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` in the test machine's
 Claude settings (Appendix A of E2E_TESTING.md) unless a flow says otherwise: without it Claude Code only
-PREPARES a continuation and waits.
+PREPARES a continuation and waits. A build after 2026-11-06 (NOT BUILT) seeds it into a fresh profile's Global
+env by itself (INT-11), so the settings line is then needed only by a flow that deletes that default.
 
 ## Lifecycle model
 
@@ -33,8 +37,8 @@ PREPARES a continuation and waits.
                                                 → a Restart of it asks interrupted / uninterrupted (NOT BUILT)
  a Restart of a RUNNING turn                    its own shutdown cuts the turn; the new claude continues it
                                                 → Restart asks interrupted / uninterrupted (NOT BUILT)
- the user pressed Esc during a reply            Claude Code alone: sits at the Esc   → Restart asks (NOT BUILT)
- the user pressed Esc during a tool call        Claude Code alone: sits at the Esc   → Restart asks (NOT BUILT)
+ the user pressed Esc during a reply            Claude Code alone: sits at the Esc   → Restart asks; a Fork asks (NOT BUILT, INT-10)
+ the user pressed Esc during a tool call        Claude Code alone: sits at the Esc   → Restart asks; a Fork asks (NOT BUILT, INT-10)
  the user pressed Esc before any output         Claude Code alone: resends the prompt (Agentmaster cannot tell)
  a fork taken while the source runs             the fork continues the turn by itself → Fork asks (NOT BUILT)
 
@@ -181,23 +185,24 @@ keeps it stopped.
 **Phases**
 1. **Interrupt during a reply.** *Do:* `do x [[mock stream 5 50ms; say "a long answer …"; hold g1; reply "end"]]`,
    press Esc while text streams. *Expect:* `[Request interrupted by user]`; Waiting.
-2. **Restart.** *Do:* tab menu → Restart session. *Expect:* a dialog **Continue the interrupted turn?** quoting
-   the prompt that would be resent, buttons **Continue the turn** / **Keep it interrupted** (default, Enter)
-   / **Cancel**.
-3. **Keep** (Enter). *Expect:* restart without a line; the new claude sits at the Esc; nothing sent.
-4. **Repeat, Continue the turn.** *Expect:* the plan is recomputed; the old claude exits; the line is
+2. **Restart.** *Do:* tab menu → Restart session. *Expect:* a dialog **Restart a session you interrupted?** quoting
+   the prompt that would be resent, buttons **Restart interrupted** (default, Enter) / **Restart uninterrupted**
+   / **Cancel** (since 2026-11-06, NOT BUILT; before: **Continue the interrupted turn?** — **Continue the turn** /
+   **Keep it interrupted**).
+3. **Restart interrupted** (Enter). *Expect:* restart without a line; the new claude sits at the Esc; nothing sent.
+4. **Repeat, Restart uninterrupted.** *Expect:* the plan is recomputed; the old claude exits; the line is
    appended; the new claude starts with `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` in its environment and
    resends the prompt (`interrupted_prompt`). *Check:* [TR] the line; [MOCK] the prompt arrives again.
 5. **Cancel.** *Expect:* no restart at all.
 
 **Edge cases**
-- **E1 Esc during the FIRST tool call** → Continue reruns the whole turn (3 requests in the probe).
+- **E1 Esc during the FIRST tool call** → Restart uninterrupted reruns the whole turn (3 requests in the probe).
 - **E2 Esc during the SECOND tool call** → `Continue from where you left off.` from the first call's result.
 - **E3 Esc before any output** → no dialog (Claude Code resends the prompt by itself; known gap).
 - **E4 Restart from the Manager for a session another window hosts** → the dialog appears in the
   Manager's window; the hosting window restarts with that answer and never asks again.
 - **E5 The switch OFF in a settings file** (project `settings.local.json` sets it 0) → the dialog says so;
-  Continue still takes the interrupt back; the user's next message continues the turn.
+  Restart uninterrupted still takes the interrupt back; the user's next message continues the turn.
 - **E6 WouldNotContinue targets** (a denied tool result, a slash command's meta text, a compaction
   summary) → no dialog.
 - **E7 The same conversation in another tab** → no line (that tab's claude would re-stamp it).
@@ -235,7 +240,7 @@ the fork's copy of the turn by itself, without the user racing to press Esc.
 - **E4 Nothing to stop** → idle with the box on screen for 6 s, or 45 s with no turn → the watch ends.
 - **E5 A dormant fork** (background) → the watch waits (1 s timer) until it starts.
 - **E6 Restart / restore / Deactivate of a "Fork interrupted" fork** → the watch re-arms while the next start
-  would still continue a turn; a "Continue the turn" restart answer clears the intent.
+  would still continue a turn; a "Restart uninterrupted" answer (either restart question) clears the intent.
 - **E7 A fork-carry draft** (DRF-07) → held during the watch, then filled.
 - **E8 The tab torn out to another window** → the watch ends; the intent stays for the next start.
 - **E9 The switch off where the fork runs** → no dialog (a fork only prepares the continuation).
@@ -247,9 +252,9 @@ the fork's copy of the turn by itself, without the user racing to press Esc.
 > **NOT BUILT** (MESSAGING.md §21.37) · **P1 when built** · **Needs** F-TG
 
 **Phases**
-1. `/restartsession` at rest on an interrupted session, or the card's 🔄 Restart → the topic asks Continue
-   the turn / Keep it interrupted / Cancel (tokens `restart-uninterrupt` / `restart-keep`); never a dialog on
-   the PC.
+1. `/restartsession` at rest on an interrupted session, or the card's 🔄 Restart → the topic asks ⏸ Restart
+   interrupted / ▶ Restart uninterrupted / Cancel (tokens `restart-keep` / `restart-uninterrupt`; the words since
+   2026-11-06, NOT BUILT — Continue the turn / Keep it interrupted before); never a dialog on the PC.
 2. ▶ Reactivate, and the confirmed restart of a RUNNING turn → keep it interrupted (no question). Since
    2026-11-06 (NOT BUILT) the confirm of a RUNNING turn appears only with the switch off; with it on,
    `/restartsession` and the card's 🔄 Restart ask the third question instead (INT-08 phase 6).
@@ -313,8 +318,10 @@ would go on.
 > **NOT BUILT** (2026-11-06) · **P0 when built** · **Needs** mock (`say` + `drop`: a server error after output began), F-TG for phase 5 · **Spec** HOOKS.md *Interrupted turns* (situation B), *API-error turns*
 
 **Promise.** A turn that died on an API error after output began ("API Error: Server error mid-response") can be continued
-from a Restart or a Fork by answering "uninterrupted": the error is taken back and the new Claude carries on by itself; an
-"interrupted" answer leaves it waiting at the error.
+from a Restart or a Fork by answering "uninterrupted": the error is taken back and the new Claude carries on by itself. An
+"interrupted" answer takes the error back too and stops the continuation with one Esc, so the new Claude waits with a regular
+`[Request interrupted by user]` in place of the error (the user's rule of 2026-11-06: "interrupted keeps but replaces error
+with regular interrupt").
 
 **Phases**
 1. **The error.** *Do:* `x [[mock think "…"; drop server_error]]` (thinking, then the stream cut). *Expect:* the tab shows
@@ -331,18 +338,92 @@ from a Restart or a Fork by answering "uninterrupted": the error is taken back a
    `[api-error-rewind] <src8> fork: rewound past … (claude pid N still runs the source …)`, `[nav] fork-start <fork8> started
    in place`; [MOCK] the fork's continuation request; the source's tab unchanged.
 5. **From Telegram.** `/restartsession` and `/forksession` in that session's topic → the same questions with the error
-   quoted; the fork's buttons are `fork-keep-api-error` / `fork-continue-after-api-error`. No dialog on the PC.
+   quoted; the fork's buttons are `fork-take-back-and-interrupt` / `fork-take-back-and-continue`. No dialog on the PC.
+6. **Restart interrupted** (repeat phase 1, then Restart → **Restart interrupted**, Enter). *Expect:* the line is appended as
+   in phase 3 and the new claude starts the continuation, locked read-only; ONE Esc stops it; the lock is released; the tab
+   waits. *Check:* [LOG] `[api-error-rewind] <sid8> restart: rewound past …`, `[fork-stop] <sid8> restart: the user chose
+   "Restart interrupted"`, `… armed (restart interrupted)`, `… Esc pressed (1/3)`, `… stopped`; [TR] the active branch ends in
+   `[Request interrupted by user]`, the error on the dead branch; a second Restart then asks INT-05's question.
+7. **Fork interrupted** (repeat phase 1, then Fork → **Fork interrupted**). *Expect:* phase 4's take-back and in-place start,
+   plus the stop watch on the fork: ONE Esc stops its continuation; the fork waits with a regular interrupt. *Check:* [ENG]
+   the fork's `stopForkedTurn`; [LOG] `fork-answer <src8> -> fork interrupted (take-back-and-interrupt)`, `[fork-stop] <fork8>
+   armed (fork)` … `stopped`.
 
 **Edge cases**
-- **E1 Restart interrupted** → `NOT rewound — the user chose "Restart interrupted"`; the restarted claude waits at the error;
-  no stop watch (`kept the API error — nothing will run, no watch`).
-- **E2 Fork interrupted** → a plain fork that waits at the error; no watch.
+- **E1 Restart interrupted with a skipped take-back** (another tab's claude runs the conversation) → the error stays,
+  nothing runs, the watch ends at its idle settle (`nothing to stop`).
+- **E2 Fork interrupted with the switch off in a settings file** → the take-back happens, nothing starts to stop, the fork
+  waits; the dialog said so (no Esc promised).
 - **E3 `resumeApiErrorTurns` off** → no question; the restart keeps the error, as every restart does then.
 - **E4 The switch off in a settings file** → asked; the text says the next message continues it; the line is still appended.
 - **E5 A second fork after a take-back** → situation A (Claude Code continues by itself): the stop watch answers "interrupted".
 - **E6 A dormant fork that starts after the source's claude exited** → it reads the source's re-stamp and waits at the error
   (the in-place start keeps that window ~1 s).
 - **E7 A never-messaged fork restarted** → the re-fork takes its SOURCE's error back (`restart re-fork of <sid8>`).
-- **E8 The AI search's fork** (the Telegram Search topic) → refused until `turn`; `uninterrupted` → the take-back.
+- **E8 The AI search's fork** (the Telegram Search topic) → refused until `turn`; `uninterrupted` → the take-back,
+  `interrupted` → the take-back and the stop watch.
 - **E9 A refusal-class error** (a refusal, a DLP denial) or a target Claude Code would not continue (a meta row, a compaction
   summary) → no question.
+
+---
+
+### INT-10 · Forking a session the user interrupted asks how
+
+> **NOT BUILT** (2026-11-06) · **P1 when built** · **Needs** mock (`hold`), Esc, F-TG for phase 5 · **Spec** HOOKS.md *Interrupted turns* (situation C)
+
+**Promise.** Forking a session whose last turn the user stopped with Esc asks whether the fork carries on with that turn:
+"uninterrupted" takes the interrupt back for the fork (the source stays interrupted), "interrupted" forks it as it is.
+
+**Phases**
+1. **Interrupt.** *Do:* `do x [[mock stream 5 50ms; say "a long answer …"; hold g1; reply "end"]]`, press Esc while text
+   streams. *Expect:* `[Request interrupted by user]`; Waiting.
+2. **Fork.** *Do:* tab menu → Fork session. *Expect:* a dialog **Fork a session you interrupted?** quoting the prompt that
+   would be sent again — **Fork interrupted** (default, Enter) / **Fork uninterrupted** / **Cancel**. *Check:* [LOG] `[nav]
+   fork-question <src8> (<origin>; the user's interrupt)`.
+3. **Fork uninterrupted.** *Expect:* ONE line in the SOURCE's transcript (aimed at the prompt) while its claude still runs;
+   the fork opens, starts at once with `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` and sends the prompt again; the source's tab
+   still shows the interrupt and waits. *Check:* [LOG] `[interrupt-rewind] <src8> fork: took back … (claude pid N still runs
+   the source …)`, `fork-answer <src8> -> fork uninterrupted (take-back-and-continue)`, `[nav] fork-start <fork8> started in
+   place`; [MOCK] the fork's request.
+4. **Fork interrupted** (repeat phases 1–2). *Expect:* a plain fork: no line, no lock; it waits at the interrupt like its
+   source. *Check:* [LOG] `fork-answer <src8> -> fork interrupted (uninterrupted)`.
+5. **From Telegram.** `/forksession` in the source's topic → the same question (⏸ Fork interrupted `fork-keep-interrupt` /
+   ▶ Fork uninterrupted `fork-take-back-and-continue` / Cancel); the 🔎 Search topic's assistant refuses its fork until the
+   user answered. No dialog on the PC.
+
+**Edge cases**
+- **E1 Esc during a tool call** → the take-back lands on the last finished tool result; the fork carries on from it.
+- **E2 The switch off in a settings file** → asked; the text says the next message in the fork continues it; the line is
+  still appended.
+- **E3 A target Claude Code would not continue** (a denied tool result, a slash command's meta text, a compaction summary)
+  → no question; a plain fork.
+- **E4 A second fork after a take-back** → situation A (Claude Code sends the prompt again by itself): the stop watch answers
+  "interrupted".
+- **E5 Esc before any output** → no interrupt row: situation A (the prompt is resent by itself).
+
+---
+
+### INT-11 · A fresh profile ships the auto-continue switch
+
+> **NOT BUILT** (2026-11-06) · **P1 when built** · **Needs** a fresh profile · **Spec** ENV_VARS.md §8 (v3), HOOKS.md *Interrupted turns*
+
+**Promise.** Agentmaster sets `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` for its sessions by itself, so a cut-off turn goes on
+after a restart without the user's own Claude Code settings; a user who removes it keeps it removed.
+
+**Phases**
+1. **Fresh profile.** *Do:* start Agentmaster on an empty profile, with no `CLAUDE_CODE_RESUME_INTERRUPTED_TURN` in any Claude
+   Code settings file. *Expect:* ⚙ → Environment variables ▸ Global lists `CLAUDE_CODE_MAX_RETRIES=50000`,
+   `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` and `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1`. *Check:* [FILE] the profile's
+   `settings.json` has `envDefaultsVersion` 3.
+2. **An updated profile.** *Do:* a profile at `envDefaultsVersion` 2. *Expect:* the v3 line alone is added, on its own line.
+3. **A cut-off turn goes on.** *Do:* `long [[mock bash "echo 1"; hold g1; reply "done"]]`, quit while it runs, reopen.
+   *Expect:* the restore wake starts the tab and the turn continues by itself (INT-04). *Check:* [MOCK] the continuation.
+4. **Removed stays removed.** *Do:* delete the line in the cog, Save, restart. *Expect:* it does not come back; a Restart of a
+   turn that would go on no longer asks (nothing continues by itself), and an "uninterrupted" answer to INT-05 / INT-09 still
+   sets the switch for that one start.
+
+**Edge cases**
+- **E1 A settings file sets it off** (`settings.local.json` → `0`) → the file wins; the questions say so.
+- **E2 A user's own value** (`claude_code_resume_interrupted_turn=0` in the Global env before the seed) → kept, never
+  duplicated.
+- **E3 A folder's env sets it 0** → that folder's sessions do not continue by themselves.

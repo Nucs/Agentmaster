@@ -5635,8 +5635,10 @@ the PC, so the bot asks in the topic and passes the answer on:
 
 - **Restart** — `/restartsession` at rest and the card's 🔄 Restart Session (`_restartFromCard`): when the session's tail is
   a user interrupt a rewind would let Claude Code continue (`PlanInterruptRewindForSession` == Rewind),
-  `_askUninterruptBeforeRestart` posts "⏸ You interrupted <title> …" with ▶ Continue the turn (token
-  `restart-uninterrupt`) · ⏸ Keep it interrupted (`restart-keep`) · Cancel; the card's toast says the question is below.
+  `_askUninterruptBeforeRestart` posts "⏸ You interrupted <title> …" with ⏸ Restart interrupted (token `restart-keep`) ·
+  ▶ Restart uninterrupted (`restart-uninterrupt`) · Cancel — since 2026-11-06 (NOT BUILT) worded and placed like the other
+  questions (it offered ▶ Continue the turn · ⏸ Keep it interrupted before; the tokens kept their names); the card's toast
+  says the question is below.
   The answer goes to the hosting window through `ServiceHooks::restartSession(id, RestartTurnChoice)` → the engine's
   restart sink (`Engine.h`, which now carries the choice), so the window restarts with it and asks nothing. A restart of
   a RUNNING turn (`confirm-restartsession`) and ▶ Reactivate of an errored or exited session pass KeepInterrupted (no turn
@@ -5657,15 +5659,25 @@ the PC, so the bot asks in the topic and passes the answer on:
   request on a session stuck at "API Error: Server error mid-response": "I want restart/fork to also be able to tackle this
   error as part of interrupted/uninterrupted choice. removing this error on a starting tab should auto-continue"). With
   `resumeApiErrorTurns` on: the restart question quotes the error ("🔄 <title> stopped on an API error: <i>…</i>") and keeps
-  its two tokens — the window re-plans and applies the situation it finds: ▶ Restart uninterrupted takes the error back and
-  sets `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` for the restarted claude; ⏸ Restart interrupted leaves the error (it waits).
-  The fork question (/forksession, the card's ⑂, the Search pick's ⑂) quotes it too, with tokens of its own, since the
-  answers map the other way round there: ⏸ Fork interrupted (`fork-keep-api-error`) = a plain fork that waits at the error;
-  ▶ Fork uninterrupted (`fork-continue-after-api-error` → `ForkTurnChoice::ContinueAfterApiError`) = the window appends the
-  take-back line to the SOURCE's transcript, launches the fork with the switch and starts it at once, so the fork carries on
-  with the turn (the source stays where it is). Logs: `remote telegram restart <sid8> -> asked: a turn that stopped on an API
-  error (server_error; <switch source>)`, `remote telegram fork <sid8> -> asked (an API error: server_error)`, `… -> fork
-  interrupted (the fork waits at the API error) | continue-after-api-error`.
+  its two tokens (their payload `api-error` only picks the words of the tap's reply) — the window re-plans and applies the
+  situation it finds. BOTH answers take the error back and set `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` for the restarted
+  claude (the user's follow-up of the same day: "uninterrupted button is supposed to clear and interrupted keeps but replaces
+  error with regular interrupt"): ▶ Restart uninterrupted lets it carry on; ⏸ Restart interrupted arms the PC's stop watch,
+  whose ONE Esc leaves a regular interrupt where the error was. The fork question (/forksession, the card's ⑂, the Search
+  pick's ⑂) quotes it too, with tokens of its own: ⏸ Fork interrupted (`fork-take-back-and-interrupt` →
+  `ForkTurnChoice::TakeBackAndInterrupt`) and ▶ Fork uninterrupted (`fork-take-back-and-continue` → `TakeBackAndContinue`) both
+  make the window append the take-back line to the SOURCE's transcript, launch the fork with the switch and start it at once
+  (the source stays where it is); "interrupted" adds the stop watch. Logs: `remote telegram restart <sid8> -> asked: a turn
+  that stopped on an API error (server_error; <switch source>)`, `… /restartsession <sid8> -> restart interrupted | restart
+  uninterrupted (an API error)`, `remote telegram fork <sid8> -> asked (an API error: server_error)`, `… ->
+  take-back-and-interrupt | take-back-and-continue`.
+- **A fork of a turn the user interrupted** (2026-11-06, NOT BUILT; HOOKS.md "Interrupted turns", situation C — the user's "a
+  restart session (and fork session) that picks uninterrupted removes error and interrupt so auto-resume works"). The fork
+  question is asked for it too ("⑂ <title> was interrupted by you during a tool call | in the middle of a reply …", the prompt
+  that would be sent again quoted): ▶ Fork uninterrupted (`fork-take-back-and-continue`, B's token: the same action — the
+  window takes the interrupt back in the source's file, launches with the switch and starts the fork) · ⏸ Fork interrupted
+  (`fork-keep-interrupt` → a plain fork that waits at the interrupt) · Cancel. Logs: `remote telegram fork <sid8> -> asked
+  (the user's interrupt, prompt | tool result)`, `… -> fork interrupted (the fork waits at the user's interrupt)`.
 - **Fork** — `/forksession`, the card's ⑂ Fork (which runs `/forksession`) and the Search topic's ⑂ pick build their
   `RemoteLaunchRequest` with `forkTurn = Ask`; `_requestLaunch` resolves it before the request leaves the bot:
   `_askForkTurnBeforeLaunch` posts "⑂ <title> is in the middle of a turn …" (naming a tool call the fork would run
@@ -5681,10 +5693,13 @@ the PC, so the bot asks in the topic and passes the answer on:
   source's turn, REFUSES with the question for the user — "interrupted (Agentmaster stops the fork's continued turn) or
   uninterrupted (it runs the turn on its own)" — so the assistant asks in the topic, and the user's answer comes back as the
   tool's `turn` argument (`WindowToolRequest::forkTurn`; the window's fork seams arm the stop watch for Interrupted). A
-  missing window and the turn are asked in ONE refusal. SESSIONS.md §9.14; the PC's AI search (the Sessions page, the side
-  panel) gets the same guard.
+  missing window and the turn are asked in ONE refusal. It refuses the same way for a source stopped by an API error (both
+  answers take it back; "interrupted" adds the Esc) and for one the user interrupted (situation C: "uninterrupted" takes the
+  interrupt back, "interrupted" is a plain fork). SESSIONS.md §9.14; the PC's AI search (the Sessions page, the side panel)
+  gets the same guard.
 - Logs: `[nav] remote telegram restart <sid8> -> asked: the turn the user interrupted (…)`, `… /restartsession <sid8> ->
-  continue the interrupted turn | keep it interrupted`, `remote telegram fork <sid8> -> asked (…) | not asked: <why> |
+  restart uninterrupted (the user's interrupt taken back) | restart interrupted (the user's interrupt kept)` (until
+  2026-11-06: `continue the interrupted turn | keep it interrupted`), `remote telegram fork <sid8> -> asked (…) | not asked: <why> |
   interrupted | uninterrupted`. Since 2026-11-06: `remote telegram restart <sid8> -> asked: the turn would go on (running |
   <tail>; re-forks its source; re-runs <tool>) | not asked about a turn that would go on: <why>`, `… /restartsession <sid8>
   -> restart interrupted | restart uninterrupted`, `remote telegram restart (card) <sid8> -> asked (a turn that would go on)`;

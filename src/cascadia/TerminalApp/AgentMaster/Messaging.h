@@ -2051,8 +2051,9 @@ namespace Agentmaster::Msg
         /// <summary>
         /// HOOKS.md "Interrupted turns" — the restart question, asked IN THE TOPIC (the PC shows no dialog for a restart the
         /// phone asked for). When the session's active branch ends in a turn the USER interrupted and a rewind would let Claude
-        /// Code continue it (PlanInterruptRewindForSession == Rewind), posts "Continue the interrupted turn?" with three
-        /// single-use buttons: ▶ Continue the turn (token restart-uninterrupt), ⏸ Keep it interrupted (restart-keep) and Cancel.
+        /// Code continue it (PlanInterruptRewindForSession == Rewind), posts "⏸ You interrupted …" with three single-use buttons,
+        /// worded like every restart and fork question (2026-11-06): ⏸ Restart interrupted (token restart-keep →
+        /// KeepInterrupted), ▶ Restart uninterrupted (restart-uninterrupt → Uninterrupt) and Cancel.
         /// Their handlers restart with the answer through ServiceHooks::restartSession. /restartsession at rest and the card's 🔄
         /// Restart Session ask here; a restart of a RUNNING turn (confirm-restartsession, or the third question below) and
         /// ▶ Reactivate of an errored or exited session never do (nothing the user interrupted).
@@ -2073,9 +2074,11 @@ namespace Agentmaster::Msg
         /// /restartsession (at rest, and in place of its "the turn is cut off" confirm for a running turn) and the card's 🔄
         /// Restart Session ask here, AFTER _askUninterruptBeforeRestart had nothing to ask; ▶ Reactivate never does (it starts
         /// the session again on purpose, a cut-off turn going on by itself), nor does a Codex session. Situation B (2026-11-06;
-        /// AppSettings::resumeApiErrorTurns): a turn that died on an API error gets the same buttons with the error quoted —
-        /// Restart interrupted leaves the error (the restarted claude waits), Restart uninterrupted takes it back with the switch
-        /// set for the restarted claude (the hosting window re-plans and applies whichever situation it finds).
+        /// AppSettings::resumeApiErrorTurns): a turn that died on an API error gets the same buttons with the error quoted (their
+        /// tokens carry the payload "api-error", for the tap's reply) — both take the error back with the switch set for the
+        /// restarted claude; Restart interrupted then stops the continuation with the stop watch's ONE Esc, so a regular
+        /// interrupt replaces the error (the user's rule of 2026-11-06). The hosting window re-plans and applies whichever
+        /// situation it finds.
         /// </summary>
         /// <param name="sessionId">The session to restart.</param>
         /// <param name="s">Its record (the title, its state, its folder and fork source for the assessment).</param>
@@ -2092,9 +2095,12 @@ namespace Agentmaster::Msg
         /// (fork-uninterrupted) and Cancel. A tap rebuilds the request with the answer (RemoteLaunchRequest::forkTurn) and sends
         /// it through _requestLaunch, so the window forks with the answer (an Interrupted fork arms its stop watch there).
         /// Situation B (2026-11-06; AppSettings::resumeApiErrorTurns): a source whose turn died on an API error gets the same two
-        /// buttons with its own tokens — fork-keep-api-error ("Fork interrupted": a plain fork that waits at the error) and
-        /// fork-continue-after-api-error ("Fork uninterrupted": ForkTurnChoice::ContinueAfterApiError, the window takes the error
-        /// back in the source's transcript and starts the fork at once) — and the error quoted.
+        /// buttons with its own tokens and the error quoted — both take the error back in the source's transcript and start the
+        /// fork at once: fork-take-back-and-continue ("Fork uninterrupted": ForkTurnChoice::TakeBackAndContinue) lets it carry
+        /// on, fork-take-back-and-interrupt ("Fork interrupted": TakeBackAndInterrupt) adds the stop watch, so a regular
+        /// interrupt replaces the error. Situation C (2026-11-06): a source whose turn the USER interrupted gets the pair too —
+        /// fork-take-back-and-continue ("Fork uninterrupted": the interrupt taken back) and fork-keep-interrupt ("Fork
+        /// interrupted": a plain fork that waits at the interrupt).
         /// </summary>
         /// <param name="req">The fork request (dir already resolved).</param>
         /// <param name="threadId">The topic.</param>

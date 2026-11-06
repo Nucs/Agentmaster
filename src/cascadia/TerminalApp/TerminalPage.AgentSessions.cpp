@@ -2848,16 +2848,21 @@ namespace winrt::TerminalApp::implementation
     // else fresh reusing <id> — exactly as the launch path does, and re-point the stdin injector (Claude).
     // Returns false for a plain shell / external tab so the caller falls through to the upstream replay
     // (correct there — a shell has no conversation to resume).
-    // turnChoice (HOOKS.md "Interrupted turns"): Uninterrupt — the user answered "Continue the turn" to the restart question
+    // turnChoice (HOOKS.md "Interrupted turns"): Uninterrupt — the user answered "Restart uninterrupted" to the first restart question
     // — plans the interrupt rewind again HERE (the transcript may have moved since the question), and when it is still due
     // holds the new connection's Start until the old claude has exited, appends the rewind line (_StartAfterInterruptRewind)
     // and gives the new claude CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 so it continues by itself. KeepInterrupted restarts as
     // this seam always did. StopContinuedTurn — the user answered "Restart interrupted" to the third question (the restarted
     // claude would continue a turn by itself) — restarts as KeepInterrupted, then records the stop intent on the session
     // (SessionInfo::stopForkedTurn) and arms the fork stop watch on the new connection (the tab locked, ONE Esc when the
-    // continued turn runs). LetTurnContinue — "Restart uninterrupted" — restarts as KeepInterrupted. A session whose stop
-    // intent is recorded (a fork's "Fork interrupted", an earlier "Restart interrupted" whose watch did not finish) is watched
-    // again on its new connection — unless the answer was Uninterrupt or LetTurnContinue, the user letting it run.
+    // continued turn runs). LetTurnContinue — "Restart uninterrupted" — restarts as KeepInterrupted. Situation B (the turn
+    // died on an API error): BOTH answers take the error back (the held-Start rewind of a resume; the source's take-back of a
+    // never-messaged fork's re-fork) and give the new claude CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1, so it continues the turn;
+    // "Restart interrupted" then stops that continuation with the watch's ONE Esc, which leaves Claude Code's own interrupt
+    // where the error was (the user's rule of 2026-11-06: "interrupted keeps but replaces error with regular interrupt").
+    // A session whose stop intent is recorded (a fork's "Fork interrupted", an earlier "Restart interrupted" whose watch did
+    // not finish) is watched again on its new connection — unless the answer was Uninterrupt or LetTurnContinue, the user
+    // letting it run.
     bool TerminalPage::_RestartManagedSession(const TerminalApp::TerminalPaneContent& paneContent, ::Agentmaster::RestartTurnChoice turnChoice)
     {
         if (!_sessionRegistry || !paneContent)
@@ -2954,10 +2959,6 @@ namespace winrt::TerminalApp::implementation
         // starts it after the old claude (`interruptHolders`) has exited and the line is appended.
         bool holdStartForInterruptRewind = false;
         std::shared_ptr<::Agentmaster::ProcessExitWait> interruptHolders;
-        // Agentmaster (HOOKS.md "Interrupted turns", situation B): set when "Restart interrupted" left an API error in place (the
-        // restart's own, or a re-fork's source's) — the restarted claude then waits at the error and runs nothing, so the stop
-        // watch that "Restart interrupted" arms otherwise is not needed (it would only lock the tab for its idle settle).
-        bool apiErrorLeftInPlace = false;
 
         TerminalConnection::ConptyConnection newConn{ nullptr };
         if (isCodex)
@@ -3009,7 +3010,7 @@ namespace winrt::TerminalApp::implementation
             // Re-host in pwsh (as the launch path does) so the relaunched session keeps the same
             // quit-to-pwsh-prompt behavior rather than dying into a dead pane.
             const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline, spec.authTokenEnv);
-            // Agentmaster (HOOKS.md "Interrupted turns" — the restart question's "Continue the turn"). Planned NOW, while the old
+            // Agentmaster (HOOKS.md "Interrupted turns" — the first restart question's "Restart uninterrupted"). Planned NOW, while the old
             // claude still runs (the user answered a moment ago, but the file may have moved since: a hook's row, the old claude's
             // last lines). Only a RESUME reads the tail — a re-fork / fresh restart has no interrupt of its own to take back. When
             // the rewind is still due, the new claude gets CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 (the switch that makes it SEND the
@@ -3069,29 +3070,22 @@ namespace winrt::TerminalApp::implementation
             // error — and the two never hold one Start together.)
             // HOOKS.md "Interrupted turns", situation B (the user's request of 2026-11-06: "I want restart/fork to also be able to
             // tackle this error as part of interrupted/uninterrupted choice. removing this error on a starting tab should
-            // auto-continue"): the third question's answer steers this rewind. "Restart interrupted" (StopContinuedTurn) leaves
-            // the error where it is — the restarted claude waits at it, and no stop watch is needed (nothing runs). "Restart
-            // uninterrupted" (LetTurnContinue) takes it back as every restart did AND gives the new claude
+            // auto-continue"; and of the same day: "interrupted keeps but replaces error with regular interrupt"): an answered
+            // third question takes the error back as every restart did AND gives the new claude
             // CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1, so it continues by itself even where the user's settings do not set the
-            // switch (a settings file that sets it still wins — the question said so). Planned BEFORE the connection is built,
-            // so the switch can ride its environment. A never-messaged fork RE-FORKS its source: an answered question takes the
-            // SOURCE's error back for it (the fork's take-back, beside a live source claude) — a restart nobody asked about
-            // leaves the source alone, as it always did.
+            // switch (a settings file that sets it still wins — the question said so). For "Restart uninterrupted"
+            // (LetTurnContinue) that continuation is the point; for "Restart interrupted" (StopContinuedTurn) the stop watch armed
+            // below presses ONE Esc the moment it runs, so the turn ends in Claude Code's own "[Request interrupted by user]"
+            // instead of the error. Planned BEFORE the connection is built, so the switch can ride its environment. A
+            // never-messaged fork RE-FORKS its source: an answered question takes the SOURCE's error back for it (the fork's
+            // take-back, beside a live source claude) — a restart nobody asked about leaves the source alone, as it always did.
+            const bool answeredTurnQuestion = turnChoice == ::Agentmaster::RestartTurnChoice::LetTurnContinue || turnChoice == ::Agentmaster::RestartTurnChoice::StopContinuedTurn;
             if (appSettings.resumeApiErrorTurns && !holdStartForInterruptRewind)
             {
                 if (resumed)
                 {
                     const auto plan = ::Agentmaster::PlanApiErrorRewindForSession(managedId);
-                    if (plan.verdict == ::Agentmaster::ApiErrorRewindVerdict::Rewind && turnChoice == ::Agentmaster::RestartTurnChoice::StopContinuedTurn)
-                    {
-                        ::Agentmaster::ApiErrorRewindResult kept;
-                        kept.outcome = ::Agentmaster::ApiErrorRewindOutcome::Skipped;
-                        kept.plan = plan;
-                        kept.detail = L"the user chose \"Restart interrupted\": the restarted claude waits at the error";
-                        ::Agentmaster::AppendStateLog(L"hooks.log", ::Agentmaster::DescribeApiErrorRewind(kept, managedId, L"restart") + L"\n");
-                        apiErrorLeftInPlace = true;
-                    }
-                    else if (plan.verdict == ::Agentmaster::ApiErrorRewindVerdict::Rewind)
+                    if (plan.verdict == ::Agentmaster::ApiErrorRewindVerdict::Rewind)
                     {
                         rewindHolders = std::make_shared<::Agentmaster::ProcessExitWait>(::Agentmaster::ProcessExitWait::ForSession(managedId));
                         // A claude in ANOTHER tab running the same conversation (OBSERVER.md §20) is not ended by this restart:
@@ -3111,7 +3105,7 @@ namespace winrt::TerminalApp::implementation
                         else
                         {
                             holdStartForRewind = true;
-                            if (turnChoice == ::Agentmaster::RestartTurnChoice::LetTurnContinue && ::Agentmaster::ApiErrorTakeBackContinues(plan))
+                            if (answeredTurnQuestion && ::Agentmaster::ApiErrorTakeBackContinues(plan))
                             {
                                 connectionEnv.emplace_back(std::wstring{ ::Agentmaster::kClaudeResumeInterruptedTurnEnv }, L"1");
                             }
@@ -3127,17 +3121,10 @@ namespace winrt::TerminalApp::implementation
                         ::Agentmaster::AppendStateLog(L"hooks.log", ::Agentmaster::DescribeApiErrorRewind(skipped, managedId, L"restart") + L"\n");
                     }
                 }
-                else if (reforked && !info->forkParentId.empty() &&
-                         (turnChoice == ::Agentmaster::RestartTurnChoice::LetTurnContinue || turnChoice == ::Agentmaster::RestartTurnChoice::StopContinuedTurn))
+                else if (reforked && !info->forkParentId.empty() && answeredTurnQuestion)
                 {
                     const auto sourcePlan = ::Agentmaster::PlanApiErrorRewindForSession(info->forkParentId);
-                    if (sourcePlan.verdict == ::Agentmaster::ApiErrorRewindVerdict::Rewind && turnChoice == ::Agentmaster::RestartTurnChoice::StopContinuedTurn)
-                    {
-                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[api-error-rewind] " + ::Agentmaster::ShortId(managedId) + L" restart re-fork: the source " + ::Agentmaster::ShortId(info->forkParentId) +
-                                                                        L"'s error kept \x2014 the user chose \"Restart interrupted\": the re-forked claude waits at it\n");
-                        apiErrorLeftInPlace = true;
-                    }
-                    else if (sourcePlan.verdict == ::Agentmaster::ApiErrorRewindVerdict::Rewind)
+                    if (sourcePlan.verdict == ::Agentmaster::ApiErrorRewindVerdict::Rewind)
                     {
                         // The re-fork starts right after this (no held Start: the old claude of THIS tab is not the source's), and
                         // its loader reads the source's file, line and all.
@@ -3228,7 +3215,7 @@ namespace winrt::TerminalApp::implementation
         control.Connection(newConn);
         if (holdStartForInterruptRewind)
         {
-            // HOOKS.md "Interrupted turns": the same hold for the user's "Continue the turn" — wait for the old claude, take the
+            // HOOKS.md "Interrupted turns": the same hold for the first question's "Restart uninterrupted" — wait for the old claude, take the
             // interrupt back, THEN start.
             _StartAfterInterruptRewind(managedId, newConn, interruptHolders);
         }
@@ -3244,7 +3231,7 @@ namespace winrt::TerminalApp::implementation
         }
         // Agentmaster (HOOKS.md "Interrupted turns"): a fork whose user chose "Fork interrupted" continues its source's turn
         // again on this new claude (a re-fork reads the source again; a resume of an unfinished own tail continues it) — the stop
-        // watch follows it onto the new connection. A "Continue the turn" or "Restart uninterrupted" answer is the user letting
+        // watch follows it onto the new connection. A "Restart uninterrupted" answer (to either question) is the user letting
         // it run: the intent goes.
         // The third question (the user's request of 2026-11-06): "Restart interrupted" asks for the very same stop on THIS
         // restart — the restarted claude would continue a turn by itself (its shutdown just cut a running one, or the tail is
@@ -3252,20 +3239,17 @@ namespace winrt::TerminalApp::implementation
         // tab's next start (a window restore, a Deactivate's wake) watched too, and _EndForkTurnStop clears it once a start
         // would continue nothing (the Esc's own interrupt row is a finished turn to Claude Code's resume). Armed AFTER the swap
         // and the (possibly held) Start above: the watch reads the connection the tab shows now, and waits while it is held.
+        // Situation B's "Restart interrupted" lands here too: the error was taken back above and the switch set, so the
+        // restarted claude continues the turn — and this watch's ONE Esc turns the error into a regular interrupt. (A take-back
+        // that was skipped — another tab's claude runs the conversation, the setting is off — leaves the error, nothing runs,
+        // and the watch ends at its idle settle.)
         if (!isCodex)
         {
-            if (turnChoice == ::Agentmaster::RestartTurnChoice::StopContinuedTurn && !apiErrorLeftInPlace)
+            if (turnChoice == ::Agentmaster::RestartTurnChoice::StopContinuedTurn)
             {
                 _sessionRegistry->Update(managedId, [](::Agentmaster::SessionInfo& s) { s.stopForkedTurn = true; });
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[fork-stop] " + ::Agentmaster::ShortId(managedId) + L" restart: the user chose \"Restart interrupted\" \x2014 the stop intent is recorded on the session\n");
                 _ArmForkTurnStop(managedId, L"restart interrupted");
-            }
-            else if (turnChoice == ::Agentmaster::RestartTurnChoice::StopContinuedTurn)
-            {
-                // Situation B: the API error stays, so the restarted claude continues nothing — no intent, no watch. A fork's own
-                // persisted intent (it continues its source's turn) is left as it is: this restart re-arms nothing for it, and its
-                // next start watches again.
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[fork-stop] " + ::Agentmaster::ShortId(managedId) + L" restart: \"Restart interrupted\" kept the API error \x2014 nothing will run, no watch\n");
             }
             else if (info->stopForkedTurn)
             {
@@ -4750,10 +4734,12 @@ namespace winrt::TerminalApp::implementation
     // NEW session's id — "" when no tab opened (the native-exe gate, a failed launch) — for the AI search's fork tool.
     // forkTurn (HOOKS.md "Interrupted turns"): Interrupted — the user's "Fork interrupted" — records the stop intent on the new
     // Claude fork (SessionInfo::stopForkedTurn, persisted) and arms the fork stop watch: the fork's tab is locked and ONE Esc goes
-    // the moment the fork's claude starts the turn it continues. ContinueAfterApiError — "Fork uninterrupted" of a source whose
-    // turn died on an API error (situation B) — takes the error back in the source's transcript before the launch, launches the
-    // fork with CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 and starts it at once (_TakeBackApiErrorForFork,
-    // _StartForkSoonAfterTakeBack). A Codex fork ignores both (no Claude resume to stop or continue).
+    // the moment the fork's claude starts the turn it continues. TakeBackAndContinue — "Fork uninterrupted" of a source whose
+    // turn was STOPPED (an API error, situation B; the user's own interrupt, situation C) — takes the stop back in the source's
+    // transcript before the launch, launches the fork with CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 and starts it at once
+    // (_TakeBackStopForFork, _StartForkSoonAfterTakeBack). TakeBackAndInterrupt — "Fork interrupted" of an API-errored source —
+    // does all of that AND arms the stop watch, so the fork's continuation is stopped with Claude Code's own interrupt in
+    // place of the error. A Codex fork ignores every choice (no Claude resume to stop or continue).
     bool TerminalPage::_ForkManagedSessionById(const std::wstring& sourceId, uint32_t insertPosition, const std::wstring& modelOverride, std::wstring* forkedIdOut, ::Agentmaster::ForkTurnChoice forkTurn)
     {
         if (forkedIdOut)
@@ -4811,26 +4797,30 @@ namespace winrt::TerminalApp::implementation
         // is keyed on the fork INTENT, not on a transcript: a never-prompted source still forks (fresh), and
         // its draft still comes along.
         auto carry = _CaptureDraftForFork(sourceId);
-        // HOOKS.md "Interrupted turns", situation B: "Fork uninterrupted" of a source whose turn died on an API error — take the
-        // error back in the SOURCE's transcript right before the launch, and give the fork the switch that makes it continue.
-        const bool continueAfterApiError = forkTurn == ::Agentmaster::ForkTurnChoice::ContinueAfterApiError;
-        const auto extraEnv = continueAfterApiError ? _TakeBackApiErrorForFork(forkFrom) : std::vector<std::pair<std::wstring, std::wstring>>{};
+        // HOOKS.md "Interrupted turns", situations B and C: a fork of a source whose turn was STOPPED (an API error, the user's
+        // own interrupt) whose user picked a take-back — append the take-back to the SOURCE's transcript right before the
+        // launch (the fork reads the file once, at its start), and give the fork the switch that makes it continue. A
+        // fresh fork (forkFrom empty: no transcript) has nothing to take back, so the take-back is skipped (no line, no
+        // switch, no in-place start).
+        const bool takesBack = ::Agentmaster::ForkTurnTakesBack(forkTurn) && !forkFrom.empty();
+        const auto extraEnv = takesBack ? _TakeBackStopForFork(forkFrom) : std::vector<std::pair<std::wstring, std::wstring>>{};
         const auto forkedTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition, modelOverride, {}, {}, {}, extraEnv);
         const std::wstring forkedId = forkedTab ? _ClaudeSessionForTab(forkedTab) : std::wstring{};
         _CarryDraftIntoFork(sourceId, forkedId, std::move(carry)); // a no-op for an empty draft / a failed launch
-        // HOOKS.md "Interrupted turns": "Fork interrupted" — persist the intent, then watch the fork (a fresh fork — no source
-        // transcript — continues nothing, and its watch simply ends once the fork idles with its box up).
-        if (forkTurn == ::Agentmaster::ForkTurnChoice::Interrupted && !forkedId.empty())
+        // HOOKS.md "Interrupted turns": "Fork interrupted" (a running source's turn — Interrupted; an API-errored one —
+        // TakeBackAndInterrupt) — persist the intent, then watch the fork (a fresh fork — no source transcript — continues
+        // nothing, and its watch simply ends once the fork idles with its box up). Armed BEFORE the in-place start below, so
+        // the watch's lock is on the tab before the continued turn can produce output.
+        if (::Agentmaster::ForkTurnArmsStopWatch(forkTurn) && !forkedId.empty())
         {
             _sessionRegistry->Update(forkedId, [](::Agentmaster::SessionInfo& s) { s.stopForkedTurn = true; });
             _ArmForkTurnStop(forkedId, L"fork");
         }
-        if (continueAfterApiError)
+        if (takesBack)
         {
             _StartForkSoonAfterTakeBack(forkedId); // the turn goes on now, while the source's file still carries the take-back
         }
-        ::Agentmaster::LogNav(L"fork-managed-done " + (forkedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(forkedId))) + L" from=" + ::Agentmaster::ShortId(sourceId) + (forkFrom.empty() ? std::wstring{ L" (fresh \x2014 no transcript)" } : std::wstring{}) +
-                              (forkTurn == ::Agentmaster::ForkTurnChoice::Interrupted ? std::wstring{ L" (fork interrupted)" } : (continueAfterApiError ? std::wstring{ L" (fork uninterrupted: the source's API error taken back)" } : std::wstring{})));
+        ::Agentmaster::LogNav(L"fork-managed-done " + (forkedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(forkedId))) + L" from=" + ::Agentmaster::ShortId(sourceId) + (forkFrom.empty() ? std::wstring{ L" (fresh \x2014 no transcript)" } : std::wstring{}) + ::Agentmaster::ForkTurnNavSuffix(forkTurn, takesBack));
         if (forkedIdOut)
         {
             *forkedIdOut = forkedId;

@@ -4548,6 +4548,15 @@ send - nothing is submitted until the user presses Enter in that tab.
             // loads their CLAUDE.md too (more context, by design); a user who does not want that deletes the line in
             // the cog, and it stays deleted (the version gate).
             { 2, L"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", L"1" },
+            // v3 (2026-11-06, the user's "Check if env var for auto resume is coming with agentmaster" — it was not: it worked
+            // on the user's PC only through their own ~/.claude/settings.json): Claude Code's resume CONTINUES an unfinished turn
+            // by itself (a turn a shutdown, a crash or a tool call in flight cut — never one the user stopped with Esc) only when
+            // this is truthy; without it the resumed claude only prepares the continuation and waits. Agentmaster's restore wake,
+            // its Restart / Fork "uninterrupted" answers and the take-backs of an API error or a user interrupt all count on it
+            // (HOOKS.md "Interrupted turns"; the questions set it for their one start anyway). Consequence: every managed resume
+            // of a cut-off turn — a window restore's woken tab, a Reactivate, a Restart — continues that turn; a settings file
+            // that sets it off still wins (Claude Code's own precedence), and a user who deletes the line keeps it deleted.
+            { 3, L"CLAUDE_CODE_RESUME_INTERRUPTED_TURN", L"1" },
         };
 
         // Names already present in the editor (case-insensitive — Windows env semantics, the same fold

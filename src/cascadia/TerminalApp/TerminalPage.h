@@ -2743,11 +2743,19 @@ namespace winrt::TerminalApp::implementation
         // Never throws past a logged catch.
         void _RestartPaneWithTurnChoice(const TerminalApp::TerminalPaneContent& paneContent, ::Agentmaster::RestartTurnChoice turnChoice);
         // The restart question's dialog (buttons only — the XAML Islands text-box rule does not apply), dark like every
-        // Agentmaster dialog. Primary = "Continue the turn" (Uninterrupt), Secondary = "Keep it interrupted" (the DEFAULT:
-        // a stray Enter must never make an agent run again), Close = Cancel (no restart).
+        // Agentmaster dialog. Worded like the other two questions (the user's request of 2026-11-06: one pair of words for
+        // every restart and fork): Primary = "Restart interrupted" (KeepInterrupted — the DEFAULT: a stray Enter must never
+        // make an agent run again), Secondary = "Restart uninterrupted" (Uninterrupt), Close = Cancel (no restart).
         //   question — what to show.
         // Returns the dialog. Throws what XAML construction throws (callers are inside a try).
         winrt::Windows::UI::Xaml::Controls::ContentDialog _BuildUninterruptDialog(const UninterruptQuestion& question);
+        // The answer the restart question's dialog came to: Primary → KeepInterrupted, Secondary → Uninterrupt, anything else
+        // (Cancel, Esc, a dialog that could not be shown because another one was up) → nullopt = no restart at all. The ONE
+        // mapping of both askers (_AskUninterruptThenRestart, _AskUninterruptThenFanOut), so the buttons can never mean two
+        // things.
+        //   result — the dialog's result.
+        // Returns the choice, or nullopt. Never throws.
+        static std::optional<::Agentmaster::RestartTurnChoice> _UninterruptChoiceFromDialog(winrt::Windows::UI::Xaml::Controls::ContentDialogResult result) noexcept;
         // Ask, then restart the pane (the local path). The pane is held weakly: a tab closed while the dialog is up restarts
         // nothing. fire_and_forget with a terminate-net (Rule #18).
         //   weakContent — the pane.
@@ -2842,12 +2850,18 @@ namespace winrt::TerminalApp::implementation
             std::wstring tailKind; // what the source's transcript ends in (the log)
             // Situation B (2026-11-06): the source's turn died on an API error after output began — a fork would wait at it
             // unless Agentmaster takes it back (into the SOURCE's transcript). The dialog's "Fork uninterrupted" is then
-            // ForkTurnChoice::ContinueAfterApiError and its "Fork interrupted" plain Uninterrupted (nothing would run).
+            // ForkTurnChoice::TakeBackAndContinue and its "Fork interrupted" TakeBackAndInterrupt (the same take-back, then the
+            // stop watch's Esc: a regular interrupt in place of the error).
             bool apiError{ false };
             std::wstring errorText; // B: the error as Claude Code wrote it (its first line)
             std::wstring errorKind; // B: its `error` field (the log)
-            ::Agentmaster::AutoContinueAtRestart autoContinue{ ::Agentmaster::AutoContinueAtRestart::On }; // B: the switch where the fork runs
-            std::wstring autoContinueSource; // B: where that value came from
+            ::Agentmaster::AutoContinueAtRestart autoContinue{ ::Agentmaster::AutoContinueAtRestart::On }; // B / C: the switch where the fork runs
+            std::wstring autoContinueSource; // B / C: where that value came from
+            // Situation C (2026-11-06): the source's turn ended in the USER's interrupt — "Fork uninterrupted" takes it back
+            // (TakeBackAndContinue), "Fork interrupted" is a plain fork (Uninterrupted: the interrupt is a regular one already).
+            bool userInterrupt{ false };
+            bool duringToolUse{ false }; // C: the Esc came during a tool call
+            std::wstring promptText; // C: the prompt sent again (resendsPrompt), its first line
         };
         // Should a fork of `sourceId` ask? Only for a Claude source with a transcript when CLAUDE_CODE_RESUME_INTERRUPTED_TURN
         // is on where the fork would run (ResolveClaudeAutoContinue) AND the fork would continue a turn by itself — the source's
@@ -2866,23 +2880,26 @@ namespace winrt::TerminalApp::implementation
         // is what a stray Enter must not cause), Secondary = "Fork uninterrupted", Close = Cancel (no fork). Then the fork
         // with the answer. fire_and_forget with a terminate-net.
         winrt::fire_and_forget _AskForkTurnThenFork(ForkLaunchRequest request, ForkTurnQuestion question);
-        // Run `request` with `forkTurn` (Uninterrupted / Interrupted / ContinueAfterApiError): _openClaudeTabInBackground set
-        // around the ONE open the way the call site set it, then the matching fork seam.
+        // Run `request` with `forkTurn` (Uninterrupted / Interrupted / TakeBackAndContinue / TakeBackAndInterrupt):
+        // _openClaudeTabInBackground set around the ONE open the way the call site set it, then the matching fork seam.
         //   request — the fork; forkTurn — the answer.
         // Returns the NEW session's id ("" when no tab opened). Throws what the fork seams throw (callers are inside a try).
         std::wstring _LaunchForkRequest(const ForkLaunchRequest& request, ::Agentmaster::ForkTurnChoice forkTurn);
-        // Situation B's "Fork uninterrupted" (ForkTurnChoice::ContinueAfterApiError), the half BEFORE the launch: take the fork
-        // SOURCE's API error back (ApiErrorRewind.h RewindApiErrorTailForForkSource — the line goes into the source's
-        // transcript, a live source claude allowed, since the fork reads the file once, at its start) and log the outcome.
+        // The take-back of a fork (ForkTurnChoice::TakeBackAndContinue / TakeBackAndInterrupt), the half BEFORE the launch: take
+        // back what stopped the fork SOURCE's turn — its API error (ApiErrorRewind.h RewindApiErrorTailForForkSource), else the
+        // user's interrupt (RewindInterruptTailForForkSource) — in the source's transcript, a live source claude allowed, since
+        // the fork reads the file once, at its start; logs the outcome.
         //   sourceId — the fork source ("" = a source with no transcript: the fork starts fresh, nothing to take back).
         // Returns the environment the fork's launch adds: CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 (a settings file that sets the
-        // switch still wins), so the fork continues the turn by itself; empty for "". Never throws (a failure is logged and
-        // returns the switch anyway: the fork then waits at the error, as a fork without the take-back does).
-        std::vector<std::pair<std::wstring, std::wstring>> _TakeBackApiErrorForFork(const std::wstring& sourceId);
-        // Situation B's "Fork uninterrupted", the half AFTER the launch: start the new fork's claude in place one Low-priority tick
-        // later when its tab is still dormant (a background fork — the Sessions page's row menu, a phone's fork, the AI search's)
-        // — the turn is to go on NOW, and the source's file must still carry the take-back when the fork reads it (the source's
-        // claude re-stamps its own leaf at its exit). The _FinishManagerPageLaunch recipe; a fork already started is left alone.
+        // switch still wins), so the fork continues the turn by itself (and the stop watch has a turn to stop, for
+        // TakeBackAndInterrupt); empty for "". Never throws (a failure is logged and returns the switch anyway: the fork then
+        // waits at the stop, as a fork without the take-back does).
+        std::vector<std::pair<std::wstring, std::wstring>> _TakeBackStopForFork(const std::wstring& sourceId);
+        // The take-back of a fork, the half AFTER the launch: start the new fork's claude in place one Low-priority tick later when
+        // its tab is still dormant (a background fork — the Sessions page's row menu, a phone's fork, the AI search's) — the turn
+        // is to go on (or be stopped by the watch) NOW, and the source's file must still carry the take-back when the fork reads
+        // it (the source's claude re-stamps its own leaf at its exit). The _FinishManagerPageLaunch recipe; a fork already
+        // started is left alone.
         //   forkedId — the new fork ("" = no tab opened: nothing to do).
         // Never throws.
         void _StartForkSoonAfterTakeBack(const std::wstring& forkedId);

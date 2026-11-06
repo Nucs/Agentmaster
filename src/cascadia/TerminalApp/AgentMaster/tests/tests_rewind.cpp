@@ -825,6 +825,14 @@ namespace
         }
         CHECK(!managed.on && managed.source == L"nowhere", "switch: set nowhere = off");
         {
+            // ENV_VARS.md 8, v3 (2026-11-06: "Check if env var for auto resume is coming with agentmaster"): the shipped Global
+            // env default reaches every managed spawn's env, so with no settings file of the user's the switch is on there (a
+            // settings file that sets it still decides: the precedence checks below).
+            const auto seeded = MergeSessionEnv(ApplyEnvDefaults(L"", 0).first, L"");
+            const auto s = ResolveClaudeAutoContinue(project, seeded);
+            CHECK(s.on && s.source == L"spawn env" && !s.fromSettingsFile, "switch: the shipped default (ENV_VARS.md 8, v3) turns it on through the spawn env");
+        }
+        {
             EnvOverride on(L"CLAUDE_CODE_RESUME_INTERRUPTED_TURN", L"1");
             const auto s = ResolveClaudeAutoContinue(project, {});
             CHECK(s.on && s.source == L"process env" && !s.fromSettingsFile, "switch: the process env");
@@ -970,6 +978,57 @@ namespace
                 CHECK(RewindApiErrorTailForForkSource(L"5e551011-0000-4000-8000-0000000000fe").outcome == ApiErrorRewindOutcome::NotNeeded, "fork take-back: a source with no transcript needs nothing");
             }
 
+            // SITUATION C (2026-11-06: "a restart session (and fork session) that picks uninterrupted removes error and interrupt
+            // so auto-resume works"): a fork of a source whose last turn the USER interrupted. A user interrupt is a FINISHED turn
+            // to Claude Code's resume (situation A says no), so only the interactive seams' considerUserInterrupt asks — and the
+            // take-back goes into the SOURCE's file, beside a live source claude, like B's.
+            {
+                const std::wstring userStopped = L"5e551011-0000-4000-8000-0000000000b9";
+                const auto userStoppedPath = root / L"config" / L"projects" / L"K--x" / (userStopped + L".jsonl");
+                WriteBytes(userStoppedPath, EscDuringReply());
+                CHECK(!AssessForkContinuation(userStopped, false, project, {}, true).ask, "user interrupt: without considerUserInterrupt (a caller that never heard of C) the fork is not asked about");
+                const auto c = AssessForkContinuation(userStopped, false, project, {}, true, true);
+                CHECK(c.ask && c.userInterrupt && !c.apiError && c.interruptPlan.verdict == InterruptRewindVerdict::Rewind && c.interruptPlan.targetUuid == L"u0000001" &&
+                          c.interruptPlan.targetKind == L"prompt" && !c.interruptPlan.duringToolUse,
+                      "user interrupt: the fork offers the take-back of the user's interrupt (onto the prompt: it is sent again)");
+                WriteBytes(root / L"config" / L"settings.json", "{\"env\":{\"CLAUDE_CODE_RESUME_INTERRUPTED_TURN\":\"0\"}}");
+                const auto offC = AssessForkContinuation(userStopped, false, project, {}, true, true);
+                CHECK(offC.ask && offC.userInterrupt && !offC.autoContinue.on && offC.autoContinue.fromSettingsFile,
+                      "user interrupt: asked with the switch off too (the question then says the next message continues it)");
+                WriteBytes(root / L"config" / L"settings.json", "{\"env\":{\"CLAUDE_CODE_RESUME_INTERRUPTED_TURN\":\"1\"}}");
+
+                // The take-back beside a LIVE source claude (this process, as above): a resume's rewind refuses, the fork's appends.
+                FILETIME created{}, exited{}, kernel{}, user{};
+                ::GetProcessTimes(::GetCurrentProcess(), &created, &exited, &kernel, &user);
+                const uint64_t procStart = (static_cast<uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+                std::string sidNarrow;
+                for (const wchar_t ch : userStopped)
+                {
+                    sidNarrow += static_cast<char>(ch); // an ASCII GUID
+                }
+                std::filesystem::create_directories(root / L"config" / L"sessions", ec);
+                const auto beat = root / L"config" / L"sessions" / (std::to_wstring(::GetCurrentProcessId()) + L".json");
+                WriteBytes(beat, "{\"pid\":" + std::to_string(::GetCurrentProcessId()) + ",\"sessionId\":\"" + sidNarrow + "\",\"procStart\":\"" + std::to_string(procStart) + "\",\"status\":\"idle\"}");
+                const auto refused = RewindInterruptTailForSession(userStopped);
+                CHECK(refused.outcome == ApiErrorRewindOutcome::Skipped && ReadBytes(userStoppedPath) == EscDuringReply(),
+                      "user interrupt: a RESUME's interrupt rewind refuses beside a live holder (its exit would undo the line): nothing written");
+                const auto taken = RewindInterruptTailForForkSource(userStopped);
+                CHECK(taken.outcome == ApiErrorRewindOutcome::Appended && ReadBytes(userStoppedPath) == EscDuringReply() + taken.plan.markerLine + "\n" &&
+                          taken.plan.targetUuid == L"u0000001" && taken.detail.find(L"still runs the source") != std::wstring::npos,
+                      "fork take-back of a user interrupt: ONE line appended beside the live holder (aimed at the prompt), and the result names the holder");
+                const auto line = DescribeInterruptRewind(taken, userStopped, L"fork");
+                CHECK(line.find(L"[interrupt-rewind] 5e551011 fork: took back") == 0 && line.find(L"still runs the source") != std::wstring::npos &&
+                          line.find(L"the fork sends the prompt again") != std::wstring::npos && line.find(L"restarted claude") == std::wstring::npos,
+                      "fork take-back of a user interrupt: the log line names the live source claude, and says the FORK goes on (not a restarted claude)");
+                std::filesystem::remove(beat, ec);
+                CHECK(RewindInterruptTailForForkSource(userStopped).outcome == ApiErrorRewindOutcome::NotNeeded && ReadBytes(userStoppedPath) == EscDuringReply() + taken.plan.markerLine + "\n",
+                      "fork take-back of a user interrupt: a second one writes nothing (taken back already)");
+                const auto afterC = AssessForkContinuation(userStopped, false, project, {}, true, true);
+                CHECK(afterC.ask && !afterC.userInterrupt && !afterC.apiError && afterC.tail.verdict == ResumeContinuation::ResendsPrompt,
+                      "fork take-back of a user interrupt: once taken back, the next fork's question is situation A (Claude Code sends the prompt again by itself)");
+                CHECK(RewindInterruptTailForForkSource(L"5e551011-0000-4000-8000-0000000000fd").outcome == ApiErrorRewindOutcome::NotNeeded, "fork take-back of a user interrupt: a source with no transcript needs nothing");
+            }
+
             // the restart's front doors: a session interrupted during a reply, planned and rewound through its id
             const std::wstring interrupted = L"5e551011-0000-4000-8000-0000000000b4";
             const auto path = root / L"config" / L"projects" / L"K--x" / (interrupted + L".jsonl");
@@ -1034,17 +1093,41 @@ namespace
                   std::wstring{ RestartTurnChoiceName(RestartTurnChoice::StopContinuedTurn) } == L"stop-continued-turn" && std::wstring{ RestartTurnChoiceName(RestartTurnChoice::LetTurnContinue) } == L"let-turn-continue" &&
                   std::wstring{ RestartTurnChoiceName(static_cast<RestartTurnChoice>(9)) } == L"unknown",
               "choices: the restart's interrupted / uninterrupted answers come after Ask, with their own log words");
-        // Situation B's fork answer (2026-11-06): appended after Ask too.
-        CHECK(static_cast<int32_t>(ForkTurnChoice::ContinueAfterApiError) == 3 && std::wstring{ ForkTurnChoiceName(ForkTurnChoice::ContinueAfterApiError) } == L"continue-after-api-error" &&
+        // The fork's take-back answers (2026-11-06, situations B and C): appended after Ask too.
+        CHECK(static_cast<int32_t>(ForkTurnChoice::TakeBackAndContinue) == 3 && std::wstring{ ForkTurnChoiceName(ForkTurnChoice::TakeBackAndContinue) } == L"take-back-and-continue" &&
+                  static_cast<int32_t>(ForkTurnChoice::TakeBackAndInterrupt) == 4 && std::wstring{ ForkTurnChoiceName(ForkTurnChoice::TakeBackAndInterrupt) } == L"take-back-and-interrupt" &&
                   std::wstring{ ForkTurnChoiceName(static_cast<ForkTurnChoice>(9)) } == L"unknown",
-              "choices: the fork's take-back answer comes after Ask, with its own log word");
+              "choices: the fork's take-back answers come after Ask, with their own log words");
+        // What each fork answer does: the take-back (B and C's "uninterrupted", B's "interrupted") and the stop watch (A's and
+        // B's "interrupted") — the user's rule "interrupted keeps but replaces error with regular interrupt" is the one answer
+        // that does both.
+        CHECK(!ForkTurnTakesBack(ForkTurnChoice::Uninterrupted) && !ForkTurnTakesBack(ForkTurnChoice::Interrupted) && !ForkTurnTakesBack(ForkTurnChoice::Ask) &&
+                  ForkTurnTakesBack(ForkTurnChoice::TakeBackAndContinue) && ForkTurnTakesBack(ForkTurnChoice::TakeBackAndInterrupt),
+              "choices: only the two take-back answers take the source's stop back");
+        CHECK(!ForkTurnArmsStopWatch(ForkTurnChoice::Uninterrupted) && ForkTurnArmsStopWatch(ForkTurnChoice::Interrupted) && !ForkTurnArmsStopWatch(ForkTurnChoice::Ask) &&
+                  !ForkTurnArmsStopWatch(ForkTurnChoice::TakeBackAndContinue) && ForkTurnArmsStopWatch(ForkTurnChoice::TakeBackAndInterrupt),
+              "choices: Interrupted and TakeBackAndInterrupt arm the stop watch, nothing else");
+        // The pass-throughs (another window's request, the Telegram bot's launch) carry every decided answer and fork a stray Ask
+        // or an unknown value as before.
+        CHECK(ForkTurnChoiceForLaunch(ForkTurnChoice::Interrupted) == ForkTurnChoice::Interrupted && ForkTurnChoiceForLaunch(ForkTurnChoice::TakeBackAndContinue) == ForkTurnChoice::TakeBackAndContinue &&
+                  ForkTurnChoiceForLaunch(ForkTurnChoice::TakeBackAndInterrupt) == ForkTurnChoice::TakeBackAndInterrupt && ForkTurnChoiceForLaunch(ForkTurnChoice::Uninterrupted) == ForkTurnChoice::Uninterrupted &&
+                  ForkTurnChoiceForLaunch(ForkTurnChoice::Ask) == ForkTurnChoice::Uninterrupted && ForkTurnChoiceForLaunch(static_cast<ForkTurnChoice>(9)) == ForkTurnChoice::Uninterrupted,
+              "choices: a pass-through carries every decided answer; Ask and unknown values fork as before");
+        // The [nav] done line's words: the old " (fork interrupted)" kept for Interrupted, the take-backs named, a plain fork bare.
+        CHECK(ForkTurnNavSuffix(ForkTurnChoice::Interrupted, false) == L" (fork interrupted)" && ForkTurnNavSuffix(ForkTurnChoice::Uninterrupted, false).empty() &&
+                  ForkTurnNavSuffix(ForkTurnChoice::TakeBackAndContinue, true).find(L"fork uninterrupted, after the take-back") != std::wstring::npos &&
+                  ForkTurnNavSuffix(ForkTurnChoice::TakeBackAndInterrupt, true).find(L"a regular interrupt replaces it") != std::wstring::npos &&
+                  ForkTurnNavSuffix(ForkTurnChoice::TakeBackAndContinue, false).find(L"nothing to take back") != std::wstring::npos,
+              "choices: the fork's [nav] words");
     }
 
     void TestTurnQuestionTexts()
     {
         const auto r = UninterruptQuestionBody(L"Parser work", false, true, L"refactor the parser", AutoContinueAtRestart::On, L"");
         CHECK(r.find(L"\x201CParser work\x201D") != std::wstring::npos && r.find(L"refactor the parser") != std::wstring::npos && r.find(L"sent again") != std::wstring::npos, "texts: the restart question quotes the title and the prompt");
-        CHECK(r.find(L"Keep it interrupted") != std::wstring::npos && r.find(L"Nothing is deleted") != std::wstring::npos, "texts: both answers are explained");
+        CHECK(r.find(L"Restart uninterrupted: before the restart") != std::wstring::npos && r.find(L"Restart interrupted: the restarted session waits for you") != std::wstring::npos &&
+                  r.find(L"Nothing is deleted") != std::wstring::npos && r.find(L"Keep it interrupted") == std::wstring::npos && r.find(L"Continue the turn") == std::wstring::npos,
+              "texts: both answers are explained, by the buttons' names (the words of every restart and fork question since 2026-11-06)");
         const auto t = UninterruptQuestionBody(L"", true, false, L"", AutoContinueAtRestart::TurnedOnForThisRestart, L"");
         CHECK(t.find(L"this session") != std::wstring::npos && t.find(L"during a tool call") != std::wstring::npos && t.find(L"last step that finished") != std::wstring::npos && t.find(L"this one restart sets it") != std::wstring::npos, "texts: a tool-call interrupt, the switch set for the restart");
         const auto o = UninterruptQuestionBody(L"x", false, false, L"", AutoContinueAtRestart::OffInSettings, L"C:\\cfg\\settings.json");
@@ -1070,15 +1153,31 @@ namespace
         // Situation B (2026-11-06): a turn that died on an API error, for the restart and for the fork.
         const auto k = ApiErrorTurnQuestionBody(false, L"open bugs", L"API Error: Server error mid-response.", false, AutoContinueAtRestart::On, L"");
         CHECK(k.find(L"The last turn of \x201Copen bugs\x201D stopped on an API error: \x201C" L"API Error: Server error mid-response.\x201D") == 0 && k.find(L"Restart uninterrupted: Agentmaster takes the error back") != std::wstring::npos &&
-                  k.find(L"continues the turn by itself") != std::wstring::npos && k.find(L"from the last step that finished") != std::wstring::npos && k.find(L"Restart interrupted: the restarted Claude waits at the error") != std::wstring::npos,
-              "texts: the restart's API-error question quotes the error and explains both answers");
+                  k.find(L"continues the turn by itself") != std::wstring::npos && k.find(L"from the last step that finished") != std::wstring::npos &&
+                  k.find(L"Restart interrupted: Agentmaster takes the error back too, then presses Esc") != std::wstring::npos && k.find(L"a regular interrupt in place of the error") != std::wstring::npos &&
+                  k.find(L"waits at the error for you") == std::wstring::npos,
+              "texts: the restart's API-error question quotes the error and explains both answers - interrupted takes the error back too and replaces it with a regular interrupt");
         const auto l = ApiErrorTurnQuestionBody(true, L"", L"", true, AutoContinueAtRestart::TurnedOnForThisRestart, L"");
         CHECK(l.find(L"The last turn of this session stopped on an API error.") == 0 && l.find(L"Fork uninterrupted") != std::wstring::npos && l.find(L"the source stays where it is") != std::wstring::npos &&
-                  l.find(L"your prompt is sent again") != std::wstring::npos && l.find(L"this one fork sets it") != std::wstring::npos && l.find(L"Fork interrupted: the fork waits at the error") != std::wstring::npos,
-              "texts: the fork's API-error question - no title, no error text, the prompt resent, the switch set for this fork");
+                  l.find(L"your prompt is sent again") != std::wstring::npos && l.find(L"this one fork sets it") != std::wstring::npos &&
+                  l.find(L"Fork interrupted: Agentmaster takes the error back for the fork too, then locks the fork's tab and presses Esc") != std::wstring::npos,
+              "texts: the fork's API-error question - no title, no error text, the prompt resent, the switch set for this fork, interrupted = take-back + Esc");
         const auto m = ApiErrorTurnQuestionBody(false, L"x", L"e", false, AutoContinueAtRestart::OffInSettings, L"C:\\cfg\\settings.json");
-        CHECK(m.find(L"is off (in C:\\cfg\\settings.json)") != std::wstring::npos && m.find(L"your next message continues it") != std::wstring::npos && m.find(L"by itself") == std::wstring::npos,
-              "texts: a switch off in settings says what happens instead of promising an automatic continuation");
+        CHECK(m.find(L"is off (in C:\\cfg\\settings.json)") != std::wstring::npos && m.find(L"your next message continues it") != std::wstring::npos && m.find(L"by itself") == std::wstring::npos &&
+                  m.find(L"Restart interrupted: Agentmaster takes the error back too, and the restarted Claude waits for you.") != std::wstring::npos && m.find(L"presses Esc") == std::wstring::npos,
+              "texts: a switch off in settings says what happens instead of promising an automatic continuation (no Esc: nothing starts to stop)");
+        // Situation C (2026-11-06): the fork of a source whose turn the USER interrupted.
+        const auto n = ForkInterruptQuestionBody(L"Parser work", false, true, L"refactor the parser", AutoContinueAtRestart::On, L"");
+        CHECK(n.find(L"You interrupted \x201CParser work\x201D in the middle of a reply.") == 0 && n.find(L"would wait at your interrupt too") != std::wstring::npos &&
+                  n.find(L"Fork uninterrupted: Agentmaster takes the interrupt back for the fork") != std::wstring::npos && n.find(L"the source stays where it is") != std::wstring::npos &&
+                  n.find(L"your prompt \x201Crefactor the parser\x201D is sent again") != std::wstring::npos && n.find(L"Fork interrupted: the fork waits for you, interrupted like its source.") != std::wstring::npos,
+              "texts: the fork's user-interrupt question quotes the title and the prompt and explains both answers");
+        const auto p = ForkInterruptQuestionBody(L"", true, false, L"", AutoContinueAtRestart::TurnedOnForThisRestart, L"");
+        CHECK(p.find(L"You interrupted this session during a tool call.") == 0 && p.find(L"from the last step that finished") != std::wstring::npos && p.find(L"this one fork sets it") != std::wstring::npos,
+              "texts: a tool-call interrupt, the switch set for this fork");
+        const auto q = ForkInterruptQuestionBody(L"x", false, false, L"", AutoContinueAtRestart::OffInSettings, L"C:\\cfg\\settings.json");
+        CHECK(q.find(L"is off (in C:\\cfg\\settings.json)") != std::wstring::npos && q.find(L"your next message there continues it") != std::wstring::npos && q.find(L"by itself") == std::wstring::npos,
+              "texts: the user-interrupt fork question with the switch off in settings promises nothing automatic");
     }
 }
 

@@ -9,7 +9,8 @@
 //
 //   * RESTART — "When restarting a session and user has interrupted the session, ask user if he/she would like to
 //     uninterrupt (we edit the session transcripts on disk before restart)." A restart of a Claude session whose last
-//     turn the user stopped with Esc asks "Continue the interrupted turn?". "Continue the turn" restarts with
+//     turn the user stopped with Esc asks "Restart a session you interrupted?" (2026-11-06: worded like the other questions,
+//     "Restart interrupted" the default). "Restart uninterrupted" restarts with
 //     RestartTurnChoice::Uninterrupt: _RestartManagedSession plans the interrupt rewind again, holds the new connection's
 //     Start, and _StartAfterInterruptRewind (below) appends the one rewind line once the old claude has exited, then
 //     starts the new one with CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 — so it continues the turn by itself. The question is
@@ -205,19 +206,35 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // See TerminalPage.h. The default button is "Keep it interrupted": an Enter pressed by habit must never make an agent run
-    // a turn the user stopped.
+    // See TerminalPage.h. The default button is "Restart interrupted": an Enter pressed by habit must never make an agent run
+    // a turn the user stopped. The words and the button places are the other two questions' (Primary = interrupted, the
+    // default; Secondary = uninterrupted), so every restart and fork reads alike.
     ContentDialog TerminalPage::_BuildUninterruptDialog(const UninterruptQuestion& question)
     {
         ContentDialog dialog;
         dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
-        dialog.Title(winrt::box_value(L"Continue the interrupted turn?"));
+        dialog.Title(winrt::box_value(L"Restart a session you interrupted?"));
         dialog.Content(winrt::box_value(winrt::hstring{ ::Agentmaster::UninterruptQuestionBody(question.title, question.duringToolUse, question.resendsPrompt, question.promptText, question.autoContinue, question.autoContinueSource) }));
-        dialog.PrimaryButtonText(L"Continue the turn");
-        dialog.SecondaryButtonText(L"Keep it interrupted");
+        dialog.PrimaryButtonText(L"Restart interrupted");
+        dialog.SecondaryButtonText(L"Restart uninterrupted");
         dialog.CloseButtonText(L"Cancel");
-        dialog.DefaultButton(ContentDialogButton::Secondary);
+        dialog.DefaultButton(ContentDialogButton::Primary);
         return dialog;
+    }
+
+    // See TerminalPage.h. ShowDialog answers None when another dialog was already up (the presenter shows one at a time), and
+    // that must read as "no restart", like Cancel — never as an answer the user did not give.
+    std::optional<::Agentmaster::RestartTurnChoice> TerminalPage::_UninterruptChoiceFromDialog(const ContentDialogResult result) noexcept
+    {
+        switch (result)
+        {
+        case ContentDialogResult::Primary:
+            return ::Agentmaster::RestartTurnChoice::KeepInterrupted;
+        case ContentDialogResult::Secondary:
+            return ::Agentmaster::RestartTurnChoice::Uninterrupt;
+        default:
+            return std::nullopt;
+        }
     }
 
     // See TerminalPage.h. Terminate-net: a dialog lane — ShowDialog on a tearing-down presenter, the dialog build or the
@@ -246,17 +263,14 @@ namespace winrt::TerminalApp::implementation
             {
                 co_return;
             }
-            ::Agentmaster::RestartTurnChoice choice = ::Agentmaster::RestartTurnChoice::KeepInterrupted;
-            if (result == ContentDialogResult::Primary)
-            {
-                choice = ::Agentmaster::RestartTurnChoice::Uninterrupt;
-            }
-            else if (result != ContentDialogResult::Secondary)
+            const auto answer = _UninterruptChoiceFromDialog(result);
+            if (!answer)
             {
                 // Cancel / Esc — or another dialog was already up (ShowDialog answers None then): no restart at all.
                 ::Agentmaster::LogNav(L"restart-answer " + ::Agentmaster::ShortId(question.sessionId) + L" -> cancelled (nothing restarted)");
                 co_return;
             }
+            ::Agentmaster::RestartTurnChoice choice = *answer;
             const auto content = weakContent.get();
             if (!content)
             {
@@ -301,15 +315,13 @@ namespace winrt::TerminalApp::implementation
                 {
                     co_return;
                 }
-                if (result == ContentDialogResult::Primary)
-                {
-                    choice = ::Agentmaster::RestartTurnChoice::Uninterrupt;
-                }
-                else if (result != ContentDialogResult::Secondary)
+                const auto answer = _UninterruptChoiceFromDialog(result);
+                if (!answer)
                 {
                     ::Agentmaster::LogNav(L"restart-answer " + ::Agentmaster::ShortId(question.sessionId) + L" -> cancelled (nothing restarted)");
                     co_return;
                 }
+                choice = *answer;
             }
             ::Agentmaster::LogNav(L"restart-answer " + ::Agentmaster::ShortId(question.sessionId) + L" -> " + ::Agentmaster::RestartTurnChoiceName(choice) + L" (handed to the hosting window)");
             // The tab may have moved into THIS window while the question was up: local first, like _RestartClaudeSession.
@@ -618,8 +630,9 @@ namespace winrt::TerminalApp::implementation
             const bool sourceRunning = src && src->live && IsTurnRunningState(src->state);
             const std::wstring forkDir = !dir.empty() ? dir : (src ? src->workingDir : std::wstring{});
             // Situation B (the source's turn died on an API error) is considered while Agentmaster may take API errors back
-            // (AppSettings::resumeApiErrorTurns, default on).
-            const auto outlook = ::Agentmaster::AssessForkContinuation(sourceId, sourceRunning, forkDir, ::Agentmaster::ResolveSessionEnv(_appSettings, forkDir), _appSettings.resumeApiErrorTurns);
+            // (AppSettings::resumeApiErrorTurns, default on); situation C (the user's own interrupt) always — the restart of such
+            // a turn asks the first question with no setting either.
+            const auto outlook = ::Agentmaster::AssessForkContinuation(sourceId, sourceRunning, forkDir, ::Agentmaster::ResolveSessionEnv(_appSettings, forkDir), _appSettings.resumeApiErrorTurns, /*considerUserInterrupt*/ true);
             if (!outlook.ask)
             {
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[fork-question] " + ::Agentmaster::ShortId(sourceId) + L" not asked: " + outlook.why + L"\n");
@@ -631,13 +644,21 @@ namespace winrt::TerminalApp::implementation
             question.sourceRunning = sourceRunning;
             question.tailKind = outlook.tail.tailKind;
             question.apiError = outlook.apiError;
+            question.userInterrupt = outlook.userInterrupt;
+            question.autoContinue = ::Agentmaster::ClassifyAutoContinueAtRestart(outlook.autoContinue.on, outlook.autoContinue.fromSettingsFile);
+            question.autoContinueSource = outlook.autoContinue.source;
             if (outlook.apiError)
             {
                 question.resendsPrompt = outlook.apiErrorPlan.targetKind == L"prompt";
                 question.errorText = outlook.apiErrorPlan.errorText;
                 question.errorKind = outlook.apiErrorPlan.errorKind;
-                question.autoContinue = ::Agentmaster::ClassifyAutoContinueAtRestart(outlook.autoContinue.on, outlook.autoContinue.fromSettingsFile);
-                question.autoContinueSource = outlook.autoContinue.source;
+            }
+            else if (outlook.userInterrupt)
+            {
+                // C: what the interrupt take-back lands on (a prompt sent again, or a finished tool result carried on from).
+                question.resendsPrompt = outlook.interruptPlan.targetKind == L"prompt";
+                question.promptText = outlook.interruptPlan.targetText;
+                question.duringToolUse = outlook.interruptPlan.duringToolUse;
             }
             else
             {
@@ -686,17 +707,31 @@ namespace winrt::TerminalApp::implementation
             }
             ContentDialog dialog;
             dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
-            // Situation B quotes the source's API error and says what the take-back does; the buttons keep their places and their
-            // meaning for the user (interrupted = the fork waits; uninterrupted = it carries on with the turn).
-            dialog.Title(winrt::box_value(question.apiError ? L"Fork a session whose turn stopped on an API error?" : L"Fork a session in the middle of a turn?"));
-            dialog.Content(winrt::box_value(winrt::hstring{ question.apiError ? ::Agentmaster::ApiErrorTurnQuestionBody(true, question.title, question.errorText, question.resendsPrompt, question.autoContinue, question.autoContinueSource) :
-                                                                                ::Agentmaster::ForkTurnQuestionBody(question.title, question.resendsPrompt, question.rerunTool, question.sourceRunning) }));
+            // Situation B quotes the source's API error, situation C names the user's interrupt; each says what the take-back does.
+            // The buttons keep their places and their meaning for the user (interrupted = the fork waits; uninterrupted = it
+            // carries on with the turn).
+            if (question.apiError)
+            {
+                dialog.Title(winrt::box_value(L"Fork a session whose turn stopped on an API error?"));
+                dialog.Content(winrt::box_value(winrt::hstring{ ::Agentmaster::ApiErrorTurnQuestionBody(true, question.title, question.errorText, question.resendsPrompt, question.autoContinue, question.autoContinueSource) }));
+            }
+            else if (question.userInterrupt)
+            {
+                dialog.Title(winrt::box_value(L"Fork a session you interrupted?"));
+                dialog.Content(winrt::box_value(winrt::hstring{ ::Agentmaster::ForkInterruptQuestionBody(question.title, question.duringToolUse, question.resendsPrompt, question.promptText, question.autoContinue, question.autoContinueSource) }));
+            }
+            else
+            {
+                dialog.Title(winrt::box_value(L"Fork a session in the middle of a turn?"));
+                dialog.Content(winrt::box_value(winrt::hstring{ ::Agentmaster::ForkTurnQuestionBody(question.title, question.resendsPrompt, question.rerunTool, question.sourceRunning) }));
+            }
             dialog.PrimaryButtonText(L"Fork interrupted");
             dialog.SecondaryButtonText(L"Fork uninterrupted");
             dialog.CloseButtonText(L"Cancel");
             dialog.DefaultButton(ContentDialogButton::Primary); // two sessions running one turn side by side is what a stray Enter must not cause
             ::Agentmaster::LogNav(L"fork-question " + ::Agentmaster::ShortId(request.sourceId) + L" (" + request.origin + L"; " +
-                                  (question.apiError ? (L"an API error: " + (question.errorKind.empty() ? std::wstring{ L"no kind" } : question.errorKind)) : (question.sourceRunning ? std::wstring{ L"running" } : question.tailKind)) +
+                                  (question.apiError ? (L"an API error: " + (question.errorKind.empty() ? std::wstring{ L"no kind" } : question.errorKind)) :
+                                                       (question.userInterrupt ? std::wstring{ L"the user's interrupt" } : (question.sourceRunning ? std::wstring{ L"running" } : question.tailKind))) +
                                   (question.rerunTool.empty() ? std::wstring{} : (L"; re-runs " + question.rerunTool)) + L")");
             const auto weak = get_weak();
             const auto result = co_await presenter.ShowDialog(dialog);
@@ -705,22 +740,32 @@ namespace winrt::TerminalApp::implementation
             {
                 co_return;
             }
-            // The answers in situation A: interrupted = the stop watch (Interrupted), uninterrupted = nothing (Uninterrupted). In
-            // situation B nothing would run by itself, so interrupted = nothing (Uninterrupted: the fork waits at the error) and
-            // uninterrupted = the take-back (ContinueAfterApiError).
-            ::Agentmaster::ForkTurnChoice choice = question.apiError ? ::Agentmaster::ForkTurnChoice::Uninterrupted : ::Agentmaster::ForkTurnChoice::Interrupted;
-            if (result == ContentDialogResult::Secondary)
-            {
-                choice = question.apiError ? ::Agentmaster::ForkTurnChoice::ContinueAfterApiError : ::Agentmaster::ForkTurnChoice::Uninterrupted;
-            }
-            else if (result != ContentDialogResult::Primary)
+            if (result != ContentDialogResult::Primary && result != ContentDialogResult::Secondary)
             {
                 ::Agentmaster::LogNav(L"fork-answer " + ::Agentmaster::ShortId(request.sourceId) + L" -> cancelled (no fork)");
                 co_return;
             }
-            ::Agentmaster::LogNav(L"fork-answer " + ::Agentmaster::ShortId(request.sourceId) + L" -> " +
-                                  (question.apiError ? (result == ContentDialogResult::Secondary ? std::wstring{ L"fork uninterrupted (continue-after-api-error)" } : std::wstring{ L"fork interrupted (the fork waits at the API error)" }) :
-                                                       std::wstring{ ::Agentmaster::ForkTurnChoiceName(choice) }));
+            // The answers (Primary = "Fork interrupted", Secondary = "Fork uninterrupted"), per situation:
+            //   A (the fork would continue by itself): interrupted = the stop watch (Interrupted); uninterrupted = nothing.
+            //   B (an API error): both take the error back in the source's file; interrupted adds the stop watch, so the fork's
+            //     branch ends in a regular interrupt instead of the error (TakeBackAndInterrupt); uninterrupted lets it run.
+            //   C (the user's interrupt): interrupted = a plain fork (the interrupt is regular already); uninterrupted = the
+            //     interrupt taken back (TakeBackAndContinue).
+            const bool interrupted = result == ContentDialogResult::Primary;
+            ::Agentmaster::ForkTurnChoice choice = ::Agentmaster::ForkTurnChoice::Uninterrupted;
+            if (question.apiError)
+            {
+                choice = interrupted ? ::Agentmaster::ForkTurnChoice::TakeBackAndInterrupt : ::Agentmaster::ForkTurnChoice::TakeBackAndContinue;
+            }
+            else if (question.userInterrupt)
+            {
+                choice = interrupted ? ::Agentmaster::ForkTurnChoice::Uninterrupted : ::Agentmaster::ForkTurnChoice::TakeBackAndContinue;
+            }
+            else
+            {
+                choice = interrupted ? ::Agentmaster::ForkTurnChoice::Interrupted : ::Agentmaster::ForkTurnChoice::Uninterrupted;
+            }
+            ::Agentmaster::LogNav(L"fork-answer " + ::Agentmaster::ShortId(request.sourceId) + L" -> " + (interrupted ? L"fork interrupted (" : L"fork uninterrupted (") + ::Agentmaster::ForkTurnChoiceName(choice) + L")");
             _LaunchForkRequest(request, choice);
         }
         catch (...)
@@ -760,24 +805,37 @@ namespace winrt::TerminalApp::implementation
 
     // See TerminalPage.h. Synchronous on purpose, like the restore's take-back (_RewindApiErrorBeforeRestore): the fork's connection
     // is built right after, and its claude reads the source's file when it starts — the line must be there first.
-    std::vector<std::pair<std::wstring, std::wstring>> TerminalPage::_TakeBackApiErrorForFork(const std::wstring& sourceId)
+    std::vector<std::pair<std::wstring, std::wstring>> TerminalPage::_TakeBackStopForFork(const std::wstring& sourceId)
     {
         if (sourceId.empty())
         {
-            return {}; // the source has no transcript: the fork starts fresh, with no error to take back and no turn to continue
+            return {}; // the source has no transcript: the fork starts fresh, with no stop to take back and no turn to continue
         }
         try
         {
+            // The API error first: its line moves the leaf past the error AND the half-response. Only a source with no API error
+            // to take back has its USER interrupt taken back (the two never stop one turn: after an Esc nothing errs).
             const auto taken = ::Agentmaster::RewindApiErrorTailForForkSource(sourceId);
-            // Every outcome is logged: an Appended line names a live source claude it was written beside; NotNeeded means the
-            // error was taken back already (an earlier fork, a restart) or the source went on; Skipped / Failed say why.
-            ::Agentmaster::AppendStateLog(L"hooks.log", ::Agentmaster::DescribeApiErrorRewind(taken, sourceId, L"fork") + L"\n");
+            if (taken.outcome == ::Agentmaster::ApiErrorRewindOutcome::NotNeeded)
+            {
+                const auto untaken = ::Agentmaster::RewindInterruptTailForForkSource(sourceId);
+                // Every outcome is logged except a plain "nothing to take back" for both (an API error taken back already shows in
+                // its own line; a source that went on needs no word): Appended names a live source claude, Skipped / Failed why.
+                ::Agentmaster::AppendStateLog(L"hooks.log", untaken.outcome == ::Agentmaster::ApiErrorRewindOutcome::NotNeeded ?
+                                                                (L"[fork-take-back] " + ::Agentmaster::ShortId(sourceId) + L" fork: nothing to take back (no API error, no user interrupt at the source's end)\n") :
+                                                                (::Agentmaster::DescribeInterruptRewind(untaken, sourceId, L"fork") + L"\n"));
+            }
+            else
+            {
+                // An Appended line names a live source claude it was written beside; Skipped / Failed say why.
+                ::Agentmaster::AppendStateLog(L"hooks.log", ::Agentmaster::DescribeApiErrorRewind(taken, sourceId, L"fork") + L"\n");
+            }
         }
         catch (...)
         {
-            // Rule #18. Only the log line can throw (allocation); the fork goes on either way — without the line it waits at the
-            // error, as a fork without the take-back does.
-            ::Agentmaster::AgentLogCaughtException(L"_TakeBackApiErrorForFork");
+            // Rule #18. Only the log lines can throw (allocation); the fork goes on either way — without the line it waits at the
+            // stop, as a fork without the take-back does.
+            ::Agentmaster::AgentLogCaughtException(L"_TakeBackStopForFork");
         }
         // The switch rides the fork's launch whatever the outcome: with the line it makes the fork continue by itself; without
         // it Claude Code has nothing to continue, and the switch changes nothing (it acts only at the resume).
@@ -804,7 +862,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     // False when the fork started meanwhile (a foreground fork's first layout started it) or its tab is gone.
                     const bool started = self->_ActivateDormantSession(forkedId);
-                    ::Agentmaster::LogNav(L"fork-start " + ::Agentmaster::ShortId(forkedId) + (started ? std::wstring{ L" started in place (the source's API error was taken back: the turn goes on now)" } :
+                    ::Agentmaster::LogNav(L"fork-start " + ::Agentmaster::ShortId(forkedId) + (started ? std::wstring{ L" started in place (the source's stop was taken back: the turn goes on now)" } :
                                                                                                   std::wstring{ L" already starting (or its tab is gone)" }));
                 }
                 catch (...)

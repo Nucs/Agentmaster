@@ -179,7 +179,7 @@ If a future claude ever removes the persisted-flag path, this is the documented 
 
 ## 8. Shipped global defaults (seeded once; user-removable)
 
-Agentmaster ships three **defaults every install gets** — *new installs AND updaters alike* — that the
+Agentmaster ships four **defaults every install gets** — *new installs AND updaters alike* — that the
 user is then free to **edit or delete** (a deleted default never silently returns). All are
 **marker-gated** one-time seeds run at engine init (`Engine.cpp`, right after the dir-colors seed),
 before any window opens the cog or a session spawns.
@@ -188,6 +188,7 @@ before any window opens the cog or a session spawns.
 |---|---|---|---|
 | `CLAUDE_CODE_MAX_RETRIES` (v1) | the **Global env** (`AppSettings.env`) — editable in the cog's *Environment variables ▸ Global* tab | `50000` | Maximize API-retry resilience for unattended Tests Autorunner runs. ⚠️ Claude **clamps the effective value to 15** since CLI **v2.1.186** (`CLAUDE_CODE_RETRY_WATCHDOG` is the newer unattended path); the literal `50000` is intentional + harmless, and the user may change it. |
 | `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` (v2, 2026-11-03) | the **Global env**, like v1 | `1` | Claude Code loads the `CLAUDE.md` of a folder ADDED to a session (`/add-dir`, `--add-dir`, a project's remembered `permissions.additionalDirectories`) only when this is truthy (2.1.310: the host's `claudeMdAdditionalDirectoriesAsked()`, else this variable). Without it, a folder that a new thread's ➕ message adds ([`MESSAGING.md`](MESSAGING.md) §21.25.9) — or any `/add-dir` — is readable, but its `CLAUDE.md` never loads. ⚠️ Every managed session whose project REMEMBERS added folders now loads their `CLAUDE.md` too (more context, by design). Like every variable here, a value in Claude Code's own settings files outranks it (§2). |
+| `CLAUDE_CODE_RESUME_INTERRUPTED_TURN` (v3, 2026-11-06, NOT BUILT) | the **Global env**, like v1 | `1` | Claude Code's resume CONTINUES an unfinished turn by itself — one a shutdown (a Restart, an app close), a crash or a tool call in flight cut; never one the user stopped with Esc — only when this is truthy; without it the resumed claude only prepares the continuation and waits. Agentmaster counts on it: the restore wake, ▶ Reactivate, Restart / Fork "uninterrupted" and the take-backs of an API error or a user interrupt ([`HOOKS.md`](HOOKS.md) *Interrupted turns*). The user's "Check if env var for auto resume is coming with agentmaster" (2026-11-06): it was not — it worked on the user's PC only through their own `~/.claude/settings.json`. ⚠️ Every managed resume of a cut-off turn now continues it; the restart and fork questions ask first where it matters. A Claude Code settings file that sets it off still wins (§2), and a deleted line stays deleted. |
 | `cleanupPeriodDays` | the user's **global `~/.claude/settings.json`** (NOT env, NOT `AppSettings`) — editable in the cog's *Claude history ▸ Keep Claude history (days)* field | `36500` (~100y) | So Claude **never purges global session history** at startup (Resume + the Sessions browser depend on it). The purge is global — any externally-launched `claude` on the default 30 would otherwise delete the whole `~/.claude/projects` store — so we write the **user's own** settings file, not just our `--settings`. |
 
 **Footguns we deliberately avoid** (verified against the official docs + issue tracker):
@@ -205,10 +206,11 @@ one-time seed ran, so the seed is **idempotent** and **respects user removal**:
   `ClaudeSpawn.{h,cpp}`) appends each shipped default whose `introVersion > seededVersion` and whose NAME
   isn't already present (case-insensitive), then returns the new version. `SeedSessionEnvDefaults`
   (`Persistence.cpp`) does Load → apply → Save. A pre-feature `settings.json` reads `0` ⇒ seeds once ⇒
-  bumps to `kEnvDefaultsVersion` (2). Adding a future default = bump the constant + give it the new
-  `introVersion`, and only *it* seeds on the next launch — as v2 did: a profile already at 1 gets
-  `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` alone, and a v1 default its user deleted stays deleted. A default the
-  user deletes never returns (its version is already ≤ the stored marker).
+  bumps to `kEnvDefaultsVersion` (3). Adding a future default = bump the constant + give it the new
+  `introVersion`, and only *it* seeds on the next launch — as v2 and v3 did: a profile already at 1 gets
+  `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` and `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1`, one at 2 gets the v3 line
+  alone, and a default its user deleted stays deleted. A default the user deletes never returns (its version is already ≤
+  the stored marker), and a user's own value for its NAME (even `0`) is kept and never duplicated.
 - **`claudeCleanupDaysSeeded`** (`bool`, default `false`). `SeedClaudeCleanupPeriodDaysIfNeeded` writes
   `cleanupPeriodDays=36500` **only when the user hasn't set it themselves** (`GetClaudeCleanupPeriodDays`
   is empty), then sets the marker — so it's never re-seeded after the user changes or removes it.
@@ -239,8 +241,11 @@ bool                       SetClaudeCleanupPeriodDays(std::optional<int64_t>); /
 ### Tests (`tests/m5_tests.cpp`)
 
 `ApplyEnvDefaults` (seed-from-0, no-re-seed-when-current, no-duplicate-NAME case-insensitive,
-fresh-line append; v2: an updater at v1 gets the new default alone, a deleted v1 default stays deleted, a user's own
-value for the v2 name is kept, and the seeded line reaches the spawn's merged env unless a folder overrides it) and
+fresh-line append; v2: an updater at v1 gets the defaults after it, a deleted v1 default stays deleted, a user's own
+value for the v2 name is kept, and the seeded line reaches the spawn's merged env unless a folder overrides it; v3: an
+updater at v2 gets the v3 line alone, deleted v1 / v2 defaults stay deleted, a user's own `…=0` is kept, a deleted v3 line
+never returns, the line reaches the spawn env and a folder can turn it off — and `TestInterruptedTurns` checks that
+`ResolveClaudeAutoContinue` reads the seeded line as ON through the spawn env) and
 `UpsertJsonNumberKey` (set on empty, preserve other keys + single member on update, `nullopt` removes, refuse to
 clobber an unparseable / non-object file).
 

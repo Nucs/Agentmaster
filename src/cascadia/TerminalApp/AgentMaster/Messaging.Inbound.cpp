@@ -1966,8 +1966,9 @@ namespace Agentmaster::Msg
                 }
                 else
                 {
-                    // HOOKS.md "Interrupted turns": a turn the USER interrupted is asked about here, in the topic — continue it
-                    // after the restart (the transcript gets one rewind line first) or keep it interrupted. The buttons restart.
+                    // HOOKS.md "Interrupted turns": a turn the USER interrupted is asked about here, in the topic — ▶ Restart
+                    // uninterrupted continues it after the restart (the transcript gets one rewind line first), ⏸ Restart
+                    // interrupted keeps it interrupted. The buttons restart.
                     if (_askUninterruptBeforeRestart(sessionId, *s, threadId))
                     {
                         done(L"asked");
@@ -3092,42 +3093,59 @@ namespace Agentmaster::Msg
             }
             else if (k == L"restart-uninterrupt" || k == L"restart-keep")
             {
-                // HOOKS.md "Interrupted turns": the answer to "Continue the interrupted turn?" (_askUninterruptBeforeRestart).
-                // The hosting window plans again on the transcript as it is now (Uninterrupt) and restarts.
+                // HOOKS.md "Interrupted turns": the answer to the first restart question, a turn the USER interrupted
+                // (_askUninterruptBeforeRestart): ▶ Restart uninterrupted (restart-uninterrupt) / ⏸ Restart interrupted
+                // (restart-keep). The tokens keep their names (the words on the buttons changed on 2026-11-06, the answers did
+                // not). The hosting window plans again on the transcript as it is now (Uninterrupt) and restarts.
                 const bool uninterrupt = k == L"restart-uninterrupt";
                 if (_hooks.restartSession)
                 {
                     _hooks.restartSession(tok.sessionId, uninterrupt ? RestartTurnChoice::Uninterrupt : RestartTurnChoice::KeepInterrupted);
                 }
-                _reply(threadId, uninterrupt ? L"\x25B6 Restarting it \x2014 the interrupt is taken back, and the turn goes on." : L"Restarting it \x2014 the turn stays interrupted.", false);
+                _reply(threadId, uninterrupt ? L"\x25B6 Restarting it uninterrupted \x2014 the interrupt is taken back, and the turn goes on." : L"\x23F8 Restarting it interrupted \x2014 the turn stays interrupted.", false);
                 _awaitCardChange(tok.sessionId); // §21.28: until the card shows the restarted session
-                LogNav(L"remote telegram /restartsession " + ShortId(tok.sessionId) + (uninterrupt ? L" -> continue the interrupted turn" : L" -> keep it interrupted"));
+                LogNav(L"remote telegram /restartsession " + ShortId(tok.sessionId) + (uninterrupt ? L" -> restart uninterrupted (the user's interrupt taken back)" : L" -> restart interrupted (the user's interrupt kept)"));
             }
             else if (k == L"restart-interrupted" || k == L"restart-uninterrupted")
             {
                 // HOOKS.md "Interrupted turns": the answer to the third question, "restart interrupted or uninterrupted?"
                 // (_askRestartTurnBeforeRestart). The hosting window restarts with it: StopContinuedTurn records the stop intent and
-                // arms its stop watch (the tab locked, ONE Esc the moment the continued turn runs) — or, for a turn that stopped on
-                // an API error (situation B), leaves the error in place; LetTurnContinue lets the turn run — for situation B by
-                // taking the error back with the switch set for the restarted claude. The re-plan there decides which applies, so
-                // the two buttons serve both situations.
+                // arms its stop watch (the tab locked, ONE Esc the moment the continued turn runs); LetTurnContinue lets the turn
+                // run. For a turn that stopped on an API error (situation B) BOTH take the error back with the switch set for the
+                // restarted claude, and StopContinuedTurn's Esc then leaves a regular interrupt where the error was (the user's rule
+                // of 2026-11-06). The re-plan there decides which situation applies, so the two buttons serve both; the token's
+                // payload ("api-error") only picks the words of this reply.
                 const bool stopTurn = k == L"restart-interrupted";
+                const bool apiError = tok.payload == L"api-error";
                 if (_hooks.restartSession)
                 {
                     _hooks.restartSession(tok.sessionId, stopTurn ? RestartTurnChoice::StopContinuedTurn : RestartTurnChoice::LetTurnContinue);
                 }
-                _reply(threadId, stopTurn ? L"\x23F8 Restarting it \x2014 it waits for you: the turn does not go on by itself." : L"\x25B6 Restarting it \x2014 the turn goes on by itself.", false);
+                if (apiError)
+                {
+                    _reply(threadId, stopTurn ? L"\x23F8 Restarting it interrupted \x2014 the API error is taken back, and Agentmaster stops the turn with Esc the moment it goes on: it waits for you with a regular interrupt." :
+                                                L"\x25B6 Restarting it uninterrupted \x2014 the API error is taken back, and the turn goes on by itself.",
+                           false);
+                }
+                else
+                {
+                    _reply(threadId, stopTurn ? L"\x23F8 Restarting it \x2014 it waits for you: the turn does not go on by itself." : L"\x25B6 Restarting it \x2014 the turn goes on by itself.", false);
+                }
                 _awaitCardChange(tok.sessionId); // §21.28: until the card shows the restarted session
-                LogNav(L"remote telegram /restartsession " + ShortId(tok.sessionId) + (stopTurn ? L" -> restart interrupted" : L" -> restart uninterrupted"));
+                LogNav(L"remote telegram /restartsession " + ShortId(tok.sessionId) + (stopTurn ? L" -> restart interrupted" : L" -> restart uninterrupted") + (apiError ? L" (an API error)" : L""));
             }
-            else if (k == L"fork-interrupted" || k == L"fork-uninterrupted" || k == L"fork-keep-api-error" || k == L"fork-continue-after-api-error")
+            else if (k == L"fork-interrupted" || k == L"fork-uninterrupted" || k == L"fork-take-back-and-interrupt" || k == L"fork-take-back-and-continue" || k == L"fork-keep-interrupt")
             {
-                // HOOKS.md "Interrupted turns": the answer to "Fork a session in the middle of a turn?" (_askForkTurnBeforeLaunch).
-                // The payload carries the request's dir, title and model (U+001F-separated), so the fork goes exactly as asked.
-                // Situation A: fork-interrupted = the stop watch, fork-uninterrupted = a plain fork. Situation B (the source's
-                // turn died on an API error): fork-keep-api-error ("Fork interrupted") = a plain fork that waits at the error,
-                // fork-continue-after-api-error ("Fork uninterrupted") = the take-back (the window appends the line to the
-                // source's transcript, launches the fork with the switch and starts it at once).
+                // HOOKS.md "Interrupted turns": the answer to the fork question (_askForkTurnBeforeLaunch). The payload carries the
+                // request's dir, title and model (U+001F-separated), so the fork goes exactly as asked. Each situation has its own
+                // tokens, because one button means another action in each:
+                //   A (the fork would continue by itself): fork-interrupted = the stop watch, fork-uninterrupted = a plain fork.
+                //   B (the source's turn died on an API error): fork-take-back-and-interrupt ("Fork interrupted") = the take-back
+                //     AND the stop watch (a regular interrupt replaces the error), fork-take-back-and-continue ("Fork
+                //     uninterrupted") = the take-back (the window appends the line to the source's transcript, launches the fork
+                //     with the switch and starts it at once).
+                //   C (the user interrupted the source's turn): fork-keep-interrupt ("Fork interrupted") = a plain fork that waits
+                //     at the interrupt, fork-take-back-and-continue ("Fork uninterrupted") = the take-back of the interrupt.
                 RemoteLaunchRequest req;
                 req.kind = RemoteLaunchRequest::Kind::Fork;
                 req.sessionId = tok.sessionId;
@@ -3137,10 +3155,12 @@ namespace Agentmaster::Msg
                 req.dir = p.substr(0, a);
                 req.title = a == std::wstring::npos ? std::wstring{} : p.substr(a + 1, b == std::wstring::npos ? std::wstring::npos : b - a - 1);
                 req.model = b == std::wstring::npos ? std::wstring{} : p.substr(b + 1);
-                req.forkTurn = k == L"fork-interrupted" ? ForkTurnChoice::Interrupted :
-                                                         (k == L"fork-continue-after-api-error" ? ForkTurnChoice::ContinueAfterApiError : ForkTurnChoice::Uninterrupted);
+                req.forkTurn = k == L"fork-interrupted"             ? ForkTurnChoice::Interrupted :
+                               k == L"fork-take-back-and-interrupt" ? ForkTurnChoice::TakeBackAndInterrupt :
+                               k == L"fork-take-back-and-continue"  ? ForkTurnChoice::TakeBackAndContinue :
+                                                                      ForkTurnChoice::Uninterrupted; // fork-uninterrupted, fork-keep-interrupt
                 LogNav(L"remote telegram fork " + ShortId(tok.sessionId) + L" -> " +
-                       (k == L"fork-keep-api-error" ? std::wstring{ L"fork interrupted (the fork waits at the API error)" } : std::wstring{ ForkTurnChoiceName(req.forkTurn) }));
+                       (k == L"fork-keep-interrupt" ? std::wstring{ L"fork interrupted (the fork waits at the user's interrupt)" } : std::wstring{ ForkTurnChoiceName(req.forkTurn) }));
                 _requestLaunch(req, threadId); // it says how the fork goes
             }
             else if (k == L"confirm-deactivate")
@@ -3829,10 +3849,11 @@ namespace Agentmaster::Msg
         }
         const AutoContinueSetting setting = ResolveClaudeAutoContinue(s.workingDir, ResolveSessionEnv(LoadAppSettings(), s.workingDir));
         const AutoContinueAtRestart mode = ClassifyAutoContinueAtRestart(setting.on, setting.fromSettingsFile);
-        // The topic's words: the PC dialog's, shortened for a phone (UninterruptQuestionBody is the long form).
+        // The topic's words: the PC dialog's, shortened for a phone (UninterruptQuestionBody is the long form) — the answers named
+        // as the buttons are, the words of every restart and fork question (2026-11-06).
         std::wstring html = L"\x23F8 You interrupted <b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&s), s.title, _threadOf(sessionId)) + L"</b> ";
         html += plan.duringToolUse ? L"during a tool call." : L"in the middle of a reply.";
-        html += L"\n\n<b>Continue the turn</b>: before the restart, Agentmaster adds one line to the transcript that takes the interrupt back";
+        html += L"\n\n<b>Restart uninterrupted</b>: before the restart, Agentmaster adds one line to the transcript that takes the interrupt back";
         if (mode == AutoContinueAtRestart::OffInSettings)
         {
             html += L"; CLAUDE_CODE_RESUME_INTERRUPTED_TURN is off in your settings, so your next message continues it.";
@@ -3850,11 +3871,12 @@ namespace Agentmaster::Msg
         {
             html += L", and the restarted Claude carries on from the last step that finished.";
         }
-        html += L" Nothing is deleted.\n<b>Keep it interrupted</b>: the restarted session waits for you.";
+        html += L" Nothing is deleted.\n<b>Restart interrupted</b>: the restarted session waits for you, interrupted as it is now.";
         const std::wstring yes = _tokenFor(L"restart-uninterrupt", sessionId, L"", kTokenTtlMsFor(1));
         const std::wstring keep = _tokenFor(L"restart-keep", sessionId, L"", kTokenTtlMsFor(1));
         const std::wstring no = _tokenFor(L"cancel", sessionId, L"", kTokenTtlMsFor(1));
-        _reply(threadId, html, false, _buttons({ { { L"\x25B6 Continue the turn", yes }, { L"\x23F8 Keep it interrupted", keep } }, { { L"Cancel", no } } }));
+        // The buttons in the other questions' places: ⏸ interrupted first, ▶ uninterrupted second.
+        _reply(threadId, html, false, _buttons({ { { L"\x23F8 Restart interrupted", keep }, { L"\x25B6 Restart uninterrupted", yes } }, { { L"Cancel", no } } }));
         LogNav(L"remote telegram restart " + ShortId(sessionId) + L" -> asked: the turn the user interrupted (" + plan.targetKind + L", " + (setting.on ? L"auto-continue on" : L"auto-continue off") + L")");
         return true;
     }
@@ -3910,7 +3932,10 @@ namespace Agentmaster::Msg
             {
                 html += outlook.apiErrorPlan.targetKind == L"prompt" ? L", and the restarted Claude sends your prompt again by itself." : L", and the restarted Claude carries on with the turn by itself.";
             }
-            html += L"\n<b>Restart interrupted</b>: the restarted Claude waits at the error for you.";
+            // "Interrupted" takes the error back too (the user's rule of 2026-11-06: "interrupted keeps but replaces error with
+            // regular interrupt"); with the switch off in a settings file nothing starts to stop, and the turn simply waits.
+            html += mode == AutoContinueAtRestart::OffInSettings ? L"\n<b>Restart interrupted</b>: Agentmaster takes the error back too, and the restarted Claude waits for you." :
+                                                                   L"\n<b>Restart interrupted</b>: Agentmaster takes the error back too, then presses Esc the moment the restarted Claude starts the turn, so it waits for you with a regular interrupt in place of the error.";
         }
         else
         {
@@ -3929,9 +3954,11 @@ namespace Agentmaster::Msg
                     L"<b>Restart uninterrupted</b>: the restarted Claude carries on with the turn.";
         }
         // Single-use buttons (an hour, like every question's): the answer goes to the hosting window as a RestartTurnChoice, so
-        // the PC restarts with it and asks nothing.
-        const std::wstring stop = _tokenFor(L"restart-interrupted", sessionId, L"", kTokenTtlMsFor(1));
-        const std::wstring go = _tokenFor(L"restart-uninterrupted", sessionId, L"", kTokenTtlMsFor(1));
+        // the PC restarts with it and asks nothing. Situation B's tokens carry "api-error" so the tap's reply can say what the
+        // answer does to the error (the window re-plans either way).
+        const std::wstring situation = outlook.apiError ? std::wstring{ L"api-error" } : std::wstring{};
+        const std::wstring stop = _tokenFor(L"restart-interrupted", sessionId, situation, kTokenTtlMsFor(1));
+        const std::wstring go = _tokenFor(L"restart-uninterrupted", sessionId, situation, kTokenTtlMsFor(1));
         const std::wstring no = _tokenFor(L"cancel", sessionId, L"", kTokenTtlMsFor(1));
         _reply(threadId, html, false, _buttons({ { { L"\x23F8 Restart interrupted", stop }, { L"\x25B6 Restart uninterrupted", go } }, { { L"Cancel", no } } }));
         LogNav(L"remote telegram restart " + ShortId(sessionId) + (outlook.apiError ? (L" -> asked: a turn that stopped on an API error (" + (outlook.apiErrorPlan.errorKind.empty() ? std::wstring{ L"no kind" } : outlook.apiErrorPlan.errorKind) + L"; " + outlook.autoContinue.source + L")") :
@@ -3949,9 +3976,9 @@ namespace Agentmaster::Msg
         }
         const bool sourceRunning = s && s->live && (s->state == SessionState::Running || s->state == SessionState::NeedsApproval);
         // Situation B (the source's turn died on an API error) is considered while Agentmaster may take API errors back
-        // (AppSettings::resumeApiErrorTurns).
+        // (AppSettings::resumeApiErrorTurns); situation C (the user interrupted the source's turn) always — as the PC's dialog does.
         const AppSettings settings = LoadAppSettings();
-        const auto outlook = AssessForkContinuation(req.sessionId, sourceRunning, req.dir, ResolveSessionEnv(settings, req.dir), settings.resumeApiErrorTurns);
+        const auto outlook = AssessForkContinuation(req.sessionId, sourceRunning, req.dir, ResolveSessionEnv(settings, req.dir), settings.resumeApiErrorTurns, /*considerUserInterrupt*/ true);
         if (!outlook.ask)
         {
             LogNav(L"remote telegram fork " + ShortId(req.sessionId) + L" -> not asked: " + outlook.why);
@@ -3963,9 +3990,10 @@ namespace Agentmaster::Msg
         const std::wstring payload = req.dir + L'\x1F' + req.title + L'\x1F' + req.model;
         if (outlook.apiError)
         {
-            // Situation B, the PC dialog's words (ApiErrorTurnQuestionBody) shortened for a phone. Its own tokens: "interrupted"
-            // here is a plain fork (it waits at the error, nothing to stop) and "uninterrupted" the take-back — the A tokens would
-            // map the other way.
+            // Situation B, the PC dialog's words (ApiErrorTurnQuestionBody) shortened for a phone. Its own tokens, because both
+            // answers take the error back: "interrupted" adds the stop watch (fork-take-back-and-interrupt — a regular interrupt
+            // replaces the error), "uninterrupted" lets the fork carry on (fork-take-back-and-continue) — the A tokens would mean
+            // neither.
             const AutoContinueAtRestart mode = ClassifyAutoContinueAtRestart(outlook.autoContinue.on, outlook.autoContinue.fromSettingsFile);
             html += L"stopped on an API error";
             if (!outlook.apiErrorPlan.errorText.empty())
@@ -3981,12 +4009,48 @@ namespace Agentmaster::Msg
             {
                 html += L", and the fork starts at once and carries on with the turn by itself.";
             }
-            html += L"\n<b>Fork interrupted</b>: the fork waits at the error for you.";
-            const std::wstring keep = _tokenFor(L"fork-keep-api-error", req.sessionId, payload, kTokenTtlMsFor(1));
-            const std::wstring go = _tokenFor(L"fork-continue-after-api-error", req.sessionId, payload, kTokenTtlMsFor(1));
+            // The user's rule of 2026-11-06: "interrupted keeps but replaces error with regular interrupt". With the switch off in a
+            // settings file nothing starts to stop: the error is gone and the fork simply waits.
+            html += mode == AutoContinueAtRestart::OffInSettings ? L"\n<b>Fork interrupted</b>: Agentmaster takes the error back for the fork too, and the fork waits for you." :
+                                                                   L"\n<b>Fork interrupted</b>: Agentmaster takes the error back for the fork too, then presses Esc the moment the fork starts the turn, so it waits for you with a regular interrupt in place of the error.";
+            const std::wstring stop = _tokenFor(L"fork-take-back-and-interrupt", req.sessionId, payload, kTokenTtlMsFor(1));
+            const std::wstring go = _tokenFor(L"fork-take-back-and-continue", req.sessionId, payload, kTokenTtlMsFor(1));
+            const std::wstring no = _tokenFor(L"cancel", req.sessionId, L"", kTokenTtlMsFor(1));
+            _reply(threadId, html, false, _buttons({ { { L"\x23F8 Fork interrupted", stop }, { L"\x25B6 Fork uninterrupted", go } }, { { L"Cancel", no } } }));
+            LogNav(L"remote telegram fork " + ShortId(req.sessionId) + L" -> asked (an API error: " + (outlook.apiErrorPlan.errorKind.empty() ? std::wstring{ L"no kind" } : outlook.apiErrorPlan.errorKind) + L")");
+            return true;
+        }
+        if (outlook.userInterrupt)
+        {
+            // Situation C, the PC dialog's words (ForkInterruptQuestionBody) shortened for a phone. Its own tokens: "interrupted"
+            // is a plain fork that waits at the interrupt (fork-keep-interrupt — nothing would run to stop), "uninterrupted" the
+            // take-back of the interrupt (fork-take-back-and-continue, B's token: the same action).
+            const AutoContinueAtRestart mode = ClassifyAutoContinueAtRestart(outlook.autoContinue.on, outlook.autoContinue.fromSettingsFile);
+            html += outlook.interruptPlan.duringToolUse ? L"was interrupted by you during a tool call." : L"was interrupted by you in the middle of a reply.";
+            html += L" A fork starts from the same conversation, so it would wait at your interrupt too.\n\n<b>Fork uninterrupted</b>: Agentmaster takes the interrupt back for the fork (one line added to the source's transcript; the source stays where it is)";
+            if (mode == AutoContinueAtRestart::OffInSettings)
+            {
+                html += L"; CLAUDE_CODE_RESUME_INTERRUPTED_TURN is off in your settings, so your next message in the fork continues the turn.";
+            }
+            else if (outlook.interruptPlan.targetKind == L"prompt")
+            {
+                html += L", and the fork starts at once and sends your prompt";
+                if (!outlook.interruptPlan.targetText.empty())
+                {
+                    html += L" \x201C" + TgEscapeHtml(outlook.interruptPlan.targetText) + L"\x201D";
+                }
+                html += L" again.";
+            }
+            else
+            {
+                html += L", and the fork starts at once and carries on from the last step that finished.";
+            }
+            html += L"\n<b>Fork interrupted</b>: the fork waits for you, interrupted like its source.";
+            const std::wstring keep = _tokenFor(L"fork-keep-interrupt", req.sessionId, payload, kTokenTtlMsFor(1));
+            const std::wstring go = _tokenFor(L"fork-take-back-and-continue", req.sessionId, payload, kTokenTtlMsFor(1));
             const std::wstring no = _tokenFor(L"cancel", req.sessionId, L"", kTokenTtlMsFor(1));
             _reply(threadId, html, false, _buttons({ { { L"\x23F8 Fork interrupted", keep }, { L"\x25B6 Fork uninterrupted", go } }, { { L"Cancel", no } } }));
-            LogNav(L"remote telegram fork " + ShortId(req.sessionId) + L" -> asked (an API error: " + (outlook.apiErrorPlan.errorKind.empty() ? std::wstring{ L"no kind" } : outlook.apiErrorPlan.errorKind) + L")");
+            LogNav(L"remote telegram fork " + ShortId(req.sessionId) + L" -> asked (the user's interrupt, " + outlook.interruptPlan.targetKind + L")");
             return true;
         }
         html += sourceRunning ? L"is in the middle of a turn." : L"stopped in the middle of a turn.";

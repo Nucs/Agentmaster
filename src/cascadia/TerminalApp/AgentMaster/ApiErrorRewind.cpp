@@ -1721,6 +1721,53 @@ namespace Agentmaster
         }
     }
 
+    InterruptRewindResult RewindInterruptTailForForkSource(std::wstring_view sourceId) noexcept
+    {
+        InterruptRewindResult r;
+        try
+        {
+            const std::wstring path = ResolveClaudeTranscriptPath(sourceId);
+            if (path.empty())
+            {
+                return r; // NotNeeded: a source with no transcript forks fresh — there is no interrupt to take back
+            }
+            uint64_t sizeAtRead = 0;
+            bool readOk = true;
+            r.plan = ReadAndPlanWith<InterruptRewindPlan>(
+                path,
+                [sourceId](std::string_view bytes, bool whole) { return PlanInterruptRewind(bytes, whole, sourceId); },
+                [](const InterruptRewindPlan& p) { return p.verdict == InterruptRewindVerdict::NeedMoreHistory; },
+                sizeAtRead,
+                readOk);
+            if (!readOk)
+            {
+                r.outcome = ApiErrorRewindOutcome::Failed;
+                r.detail = L"the source's transcript could not be read (error " + std::to_wstring(::GetLastError()) + L")";
+                return r;
+            }
+            if (r.plan.verdict == InterruptRewindVerdict::NotApplicable)
+            {
+                return r; // NotNeeded: taken back already (an earlier fork, a restart's "uninterrupted") or the source went on
+            }
+            if (r.plan.verdict != InterruptRewindVerdict::Rewind)
+            {
+                r.outcome = ApiErrorRewindOutcome::Skipped;
+                r.detail = r.plan.reason;
+                return r;
+            }
+            // The fork's take-back: the source's live claude does not refuse it (AppendRewindLine's allowLiveHolder — the fork
+            // reads the file once, at its start; RewindApiErrorTailForForkSource's reasoning, header).
+            AppendRewindLine(path, sourceId, sizeAtRead, r.plan.markerLine, L"the interrupt", r.outcome, r.appendedAtByte, r.detail, /*allowLiveHolder*/ true);
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"RewindInterruptTailForForkSource");
+            r.outcome = ApiErrorRewindOutcome::Failed;
+            r.detail = L"an exception was thrown (see the [exc] line above)";
+        }
+        return r;
+    }
+
     InterruptRewindPlan PlanInterruptRewindForSession(std::wstring_view sessionId) noexcept
     {
         try
@@ -1756,6 +1803,9 @@ namespace Agentmaster
         {
             interrupt = std::wstring{ p.duringToolUse ? L"the interrupt during a tool call" : L"the interrupt during a reply" } + L" (" + ShortId(p.interruptUuid) + L", " + p.interruptTimestamp + L")";
         }
+        // Who reads the line next: the fork for a fork's take-back (the line is in the SOURCE's file, and the fork that starts
+        // right after reads it — RewindInterruptTailForForkSource's seam words start with "fork"), else the restarted claude.
+        const std::wstring reader = seam.substr(0, 4) == L"fork" ? L"the fork" : L"the restarted claude";
         switch (r.outcome)
         {
         case ApiErrorRewindOutcome::Appended:
@@ -1763,7 +1813,11 @@ namespace Agentmaster
                  std::to_wstring(p.discardedResults) + L" cut tool result(s), " + std::to_wstring(p.resumePromptRows) + L" earlier continue row(s), " +
                  std::to_wstring(p.errorRows) + L" error row(s), " + std::to_wstring(p.rowsAfterInterrupt) + L" row(s) after it \x2014 to " +
                  ShortId(p.targetUuid) + L" (" + p.targetKind + L"); line at byte " + std::to_wstring(r.appendedAtByte) +
-                 (p.targetKind == L"prompt" ? L"; the restarted claude sends the prompt again" : L"; the restarted claude continues the turn");
+                 (p.targetKind == L"prompt" ? (L"; " + reader + L" sends the prompt again") : (L"; " + reader + L" continues the turn"));
+            if (!r.detail.empty())
+            {
+                s += L" (" + r.detail + L")"; // the fork's take-back beside a live source claude (RewindInterruptTailForForkSource)
+            }
             break;
         case ApiErrorRewindOutcome::NotNeeded:
             s += L"no user interrupt at the end of the conversation any more \x2014 nothing to take back";
@@ -1922,7 +1976,7 @@ namespace Agentmaster
         return result;
     }
 
-    ForkContinuationOutlook AssessForkContinuation(std::wstring_view sourceId, bool sourceRunning, std::wstring_view cwd, const std::vector<std::pair<std::wstring, std::wstring>>& spawnEnv, bool considerApiError) noexcept
+    ForkContinuationOutlook AssessForkContinuation(std::wstring_view sourceId, bool sourceRunning, std::wstring_view cwd, const std::vector<std::pair<std::wstring, std::wstring>>& spawnEnv, bool considerApiError, bool considerUserInterrupt) noexcept
     {
         ForkContinuationOutlook outlook;
         try
@@ -1953,6 +2007,19 @@ namespace Agentmaster
                 if (ApiErrorTakeBackContinues(outlook.apiErrorPlan))
                 {
                     outlook.apiError = true;
+                    outlook.ask = true;
+                    return outlook;
+                }
+            }
+            // Situation C (2026-11-06) — the source's turn ended in the USER's interrupt (Esc), a finished turn to Claude Code's
+            // resume: a fork waits at it unless Agentmaster takes the interrupt back for it (RewindInterruptTailForForkSource,
+            // the restart's first-question planner). Asked whatever the switch says, as B is.
+            if (considerUserInterrupt)
+            {
+                outlook.interruptPlan = PlanInterruptRewindForSession(sourceId);
+                if (outlook.interruptPlan.verdict == InterruptRewindVerdict::Rewind)
+                {
+                    outlook.userInterrupt = true;
                     outlook.ask = true;
                     return outlook;
                 }

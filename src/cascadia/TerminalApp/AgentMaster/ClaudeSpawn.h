@@ -525,7 +525,12 @@ namespace Agentmaster
     //       the session (/add-dir, --add-dir, remembered additionalDirectories; MESSAGING.md §21.25.9's ➕ folders)
     //       only when this is truthy. An install already at v1 gets ONLY this one on its next start (a user who
     //       deleted the v1 default keeps it deleted); deleting it in the cog makes it stay deleted too.
-    inline constexpr uint32_t kEnvDefaultsVersion = 2;
+    //   v3: CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 — Claude Code's resume continues an unfinished turn by itself (a turn
+    //       a shutdown, a crash or a tool call in flight cut; never one the user stopped with Esc) only when this is
+    //       truthy. Agentmaster's restore wake, Restart / Fork "uninterrupted" and the take-backs count on it (HOOKS.md
+    //       "Interrupted turns"). ⚠ Consequence: every managed resume of a cut-off turn continues it — a settings file
+    //       that sets it off still wins, and a deleted line stays deleted.
+    inline constexpr uint32_t kEnvDefaultsVersion = 3;
     std::pair<std::wstring, uint32_t> ApplyEnvDefaults(std::wstring_view envText, uint32_t seededVersion);
 
     // --- OS-touching ---

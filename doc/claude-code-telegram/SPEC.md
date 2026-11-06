@@ -1590,17 +1590,33 @@ answered there.
 ### 12.3 The interrupted-turn questions
 
 A restart or a fork asked from the phone MUST NOT pop a dialog on the PC; the bot asks in the topic and passes the answer on.
+Every question offers the same pair — `[⏸ … interrupted]` · `[▶ … uninterrupted]` · `[Cancel]` — and the PC's dialogs use
+the same words, with "interrupted" as the default.
 
-- **Restart** (`/restartsession` at rest, the card's 🔄): when the session's last turn was interrupted by the user in a way a
-  rewind would let Claude Code continue, the bot posts "⏸ You interrupted <title> …" with `[▶ Continue the turn]` (one
-  `last-prompt` line appended after the old claude exited + `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1`) · `[⏸ Keep it interrupted]`
-  · `[Cancel]`; the toast says the question is below. A restart of a RUNNING turn (confirmed) and a Reactivate of an errored or
-  exited session pass "keep interrupted".
+- **Restart of a turn the user interrupted** (`/restartsession` at rest, the card's 🔄): when the session's last turn was
+  interrupted by the user in a way a rewind would let Claude Code continue, the bot posts "⏸ You interrupted <title> …" with
+  `[⏸ Restart interrupted]` (the turn stays interrupted) · `[▶ Restart uninterrupted]` (one `last-prompt` line appended after
+  the old claude exited + `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1`) · `[Cancel]`; the toast says the question is below. A
+  Reactivate of an errored or exited session passes "keep interrupted".
+- **Restart of a turn that would go on** (the restarted claude would continue it by itself — a running turn the restart's own
+  shutdown cuts, a call in flight, a turn a crash cut — with the variable on): "🔄 <title> is in the middle of a turn …" with
+  `[⏸ Restart interrupted]` (the PC locks the tab and presses ONE Esc the moment the restarted claude runs) ·
+  `[▶ Restart uninterrupted]` · `[Cancel]`. With the variable off, a running turn gets a plain "the turn is cut off" confirm.
+- **A turn that died on an API error after output began** (a finished turn to Claude Code's resume, so a restart or a fork
+  would wait at the error): the restart and fork questions quote the error. BOTH answers take the error back (the
+  `last-prompt` line past the half-response) and set the variable for that start; "interrupted" then stops the continuation
+  with ONE Esc, so a regular interrupt replaces the error. A fork's line goes into the SOURCE's transcript right before the
+  fork starts — allowed beside the source's live claude, which never re-reads its file — and the fork is started at once.
 - **Fork** (`/forksession`, the card's ⑂, a Search pick's ⑂): when a fork would continue the source's turn (the source Running
   or Needs approval, or its tail one a resume continues), "⑂ <title> is in the middle of a turn …" (naming a tool call the fork
   would run again) with `[⏸ Fork interrupted]` (the fork's tab is locked and ONE Esc is pressed the moment it runs) ·
-  `[▶ Fork uninterrupted]` · `[Cancel]`; the tokens carry the request's folder, title and model; a tap sends the request again
-  with the answer. Otherwise it forks at once.
+  `[▶ Fork uninterrupted]` · `[Cancel]`. When the USER interrupted the source's turn, "⑂ <title> was interrupted by you …"
+  with `[⏸ Fork interrupted]` (a plain fork that waits at the interrupt) · `[▶ Fork uninterrupted]` (the interrupt taken back
+  in the source's file, the fork started at once). The tokens carry the request's folder, title and model; a tap sends the
+  request again with the answer. Otherwise it forks at once.
+- The Search topic's assistant forks through a tool that refuses until the user's answer is passed, so it asks in words.
+- The host ships `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` in its sessions' environment, so a cut-off turn goes on after a
+  restart without the user's own settings (a Claude Code settings file that sets it off still wins).
 
 ### 12.4 Plans and permission prompts
 

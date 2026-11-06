@@ -35,16 +35,21 @@ namespace Agentmaster
     /// </remarks>
     struct ForkTurnFacts
     {
-        bool wouldContinue{ false }; // the user must choose first: a fork would continue the source's turn by itself (situation A), or could after a take-back (B)
+        bool wouldContinue{ false }; // the user must choose first: a fork would continue the source's turn by itself (situation A), or could after a take-back (B, C)
         bool sourceRunning{ false }; // the source's turn runs right now (vs. a turn left unfinished on disk)
         bool resendsPrompt{ false }; // the fork would send the source's last prompt again
         std::wstring rerunTool; // a tool call in flight the fork runs again ("" = none known)
         std::wstring why; // wouldContinue false: why not (the log) — the turn is finished, the switch is off, no transcript
         // Situation B (2026-11-06): the source's turn died on an API error after output began — a fork waits at it unless
-        // Agentmaster takes it back. The user's answer then maps the other way round: "uninterrupted" = the take-back
-        // (ForkTurnChoice::ContinueAfterApiError), "interrupted" = a plain fork (Uninterrupted: nothing would run to stop).
+        // Agentmaster takes it back. Both answers take it back: "uninterrupted" = ForkTurnChoice::TakeBackAndContinue (the fork
+        // carries on with the turn), "interrupted" = TakeBackAndInterrupt (the stop watch's ONE Esc then leaves a regular
+        // interrupt where the error was — the user's rule "interrupted keeps but replaces error with regular interrupt").
         bool apiError{ false };
         std::wstring errorText; // B: the error as Claude Code wrote it (its first line)
+        // Situation C (2026-11-06): the source's turn ended in the USER's interrupt (Esc) — a fork waits at it unless Agentmaster
+        // takes it back. "uninterrupted" = TakeBackAndContinue (the interrupt taken back in the source's file, the fork carries
+        // on); "interrupted" = a plain fork (Uninterrupted: the interrupt is a regular one already). Never set with apiError.
+        bool userInterrupt{ false };
     };
 
     /// <summary>
@@ -220,9 +225,10 @@ namespace Agentmaster
         // Fork only (HOOKS.md "Interrupted turns"): the user's answer to "fork interrupted or uninterrupted?", which the fork
         // tool demands (its `turn` argument) when the fork would continue the source's turn by itself. Interrupted makes the
         // window arm its fork stop watch on the new session (the tab locked, ONE Esc the moment the continued turn runs);
-        // Uninterrupted (the default — today's behavior) lets it run; ContinueAfterApiError (situation B's "uninterrupted")
-        // makes the window take the source's API error back, launch the fork with the switch and start it at once. Ask is
-        // never sent: a window that sees it forks Uninterrupted.
+        // Uninterrupted (the default — today's behavior) lets it run; TakeBackAndContinue (the "uninterrupted" of a source
+        // stopped by an API error or the user's interrupt) makes the window take the source's stop back, launch the fork with
+        // the switch and start it at once; TakeBackAndInterrupt (an API-errored source's "interrupted") does that and arms the
+        // watch. Ask is never sent: a window that sees it forks Uninterrupted (ForkTurnChoiceForLaunch).
         ForkTurnChoice forkTurn{ ForkTurnChoice::Uninterrupted };
     };
 

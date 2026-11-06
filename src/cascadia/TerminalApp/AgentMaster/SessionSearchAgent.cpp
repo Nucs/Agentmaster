@@ -1911,18 +1911,23 @@ namespace Agentmaster
             }
             facts.sourceRunning = known && known->live && (known->state == SessionState::Running || known->state == SessionState::NeedsApproval);
             // Situation B (the source's turn died on an API error) is considered while Agentmaster may take API errors back
-            // (AppSettings::resumeApiErrorTurns), as the PC's dialog and the Telegram topic's buttons consider it.
+            // (AppSettings::resumeApiErrorTurns), and situation C (the user's own interrupt) always — as the PC's dialog and the
+            // Telegram topic's buttons consider them.
             const AppSettings settings = LoadAppSettings();
-            const ForkContinuationOutlook outlook = AssessForkContinuation(sessionId, facts.sourceRunning, dir, ResolveSessionEnv(settings, dir), settings.resumeApiErrorTurns);
+            const ForkContinuationOutlook outlook = AssessForkContinuation(sessionId, facts.sourceRunning, dir, ResolveSessionEnv(settings, dir), settings.resumeApiErrorTurns, /*considerUserInterrupt*/ true);
             facts.wouldContinue = outlook.ask;
             facts.apiError = outlook.apiError;
             facts.errorText = outlook.apiError ? outlook.apiErrorPlan.errorText : std::wstring{};
-            facts.resendsPrompt = outlook.apiError ? outlook.apiErrorPlan.targetKind == L"prompt" : outlook.tail.verdict == ResumeContinuation::ResendsPrompt;
-            facts.rerunTool = outlook.apiError ? std::wstring{} : outlook.tail.droppedTool;
+            facts.userInterrupt = outlook.userInterrupt;
+            // What the fork's continuation does first: B and C read their take-back's target (a prompt is sent again), A the tail.
+            facts.resendsPrompt = outlook.apiError ? outlook.apiErrorPlan.targetKind == L"prompt" :
+                                                     (outlook.userInterrupt ? outlook.interruptPlan.targetKind == L"prompt" : outlook.tail.verdict == ResumeContinuation::ResendsPrompt);
+            facts.rerunTool = (outlook.apiError || outlook.userInterrupt) ? std::wstring{} : outlook.tail.droppedTool;
             facts.why = outlook.why;
             LogAgent(L"tool fork " + ShortId(sessionId) +
                      (outlook.ask ? (outlook.apiError ? std::wstring{ L": the source's last turn stopped on an API error - the user's answer is needed" } :
-                                                        (L": the fork would continue a turn (" + (facts.sourceRunning ? std::wstring{ L"running" } : outlook.tail.tailKind) + L") - the user's answer is needed")) :
+                                                        (outlook.userInterrupt ? std::wstring{ L": the user interrupted the source's last turn - the user's answer is needed" } :
+                                                                                 (L": the fork would continue a turn (" + (facts.sourceRunning ? std::wstring{ L"running" } : outlook.tail.tailKind) + L") - the user's answer is needed"))) :
                                     (L": no turn to ask about (" + outlook.why + L")")));
             return facts;
         };
