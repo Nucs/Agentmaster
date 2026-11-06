@@ -5,7 +5,8 @@
 // The Sessions browser's AI search; see SessionSearchAgent.h and SESSIONS.md §9.
 #include "SessionSearchAgent.h"
 
-#include "ClaudeSpawn.h" // AppendStateLog, LogSwallowedException, ResolveClaudeTranscriptPath
+#include "ApiErrorRewind.h" // AssessForkContinuation — the fork tool's "would the fork continue a turn?" (HOOKS.md "Interrupted turns")
+#include "ClaudeSpawn.h" // AppendStateLog, LogSwallowedException, ResolveClaudeTranscriptPath, ResolveSessionEnv
 #include "Engine.h" // SharedEngine — the shared agent's registry
 #include "Persistence.h" // LoadAppSettings — the shared agent's persisted thinking level
 #include "ProfileBootstrap.h" // Profiles::IsDevOrDebugPackage — the conversation log's debug-only gate (SESSIONS.md §9.17)
@@ -1884,6 +1885,38 @@ namespace Agentmaster
             // forget: the tool says it asked, and the next list shows the result.
             ActivateSessionInOtherWindows(sessionId, std::wstring{});
             return true;
+        };
+        // HOOKS.md "Interrupted turns" (the user's request of 2026-11-06: "make sure telegram supports the choosing when
+        // forking"): would a fork of this session continue its turn by itself? The ONE rule the PC's fork dialog and the
+        // Telegram topic's fork buttons use (AssessForkContinuation), read HERE on the tool-call thread (a registry read, the
+        // source's transcript tail and the settings files that may set CLAUDE_CODE_RESUME_INTERRUPTED_TURN — small reads).
+        tools.forkTurn = [](const std::wstring& sessionId) -> ForkTurnFacts {
+            ForkTurnFacts facts;
+            const auto registry = SharedEngine().registry;
+            const std::optional<SessionInfo> known = registry ? registry->GetWithoutQueue(sessionId) : std::nullopt;
+            if (known && known->kind == AgentKind::Codex)
+            {
+                facts.why = L"a Codex fork (`codex fork`) has no Claude resume to stop";
+                return facts;
+            }
+            // Where the fork runs (its project settings may set the switch): the record's folder, else the transcript index's
+            // cwd for a session Agentmaster never ran — the same folder the open callback fills the request with.
+            std::wstring dir = known ? known->workingDir : std::wstring{};
+            if (dir.empty())
+            {
+                if (const auto entry = IndexEntryForSession(sessionId))
+                {
+                    dir = entry->stats.cwd;
+                }
+            }
+            facts.sourceRunning = known && known->live && (known->state == SessionState::Running || known->state == SessionState::NeedsApproval);
+            const ForkContinuationOutlook outlook = AssessForkContinuation(sessionId, facts.sourceRunning, dir, ResolveSessionEnv(LoadAppSettings(), dir));
+            facts.wouldContinue = outlook.ask;
+            facts.resendsPrompt = outlook.tail.verdict == ResumeContinuation::ResendsPrompt;
+            facts.rerunTool = outlook.tail.droppedTool;
+            facts.why = outlook.why;
+            LogAgent(L"tool fork " + ShortId(sessionId) + (outlook.ask ? (L": the fork would continue a turn (" + (facts.sourceRunning ? std::wstring{ L"running" } : outlook.tail.tailKind) + L") - the user's answer is needed") : (L": no turn to ask about (" + outlook.why + L")")));
+            return facts;
         };
         // SESSIONS.md §9.16: the status tool's facts (full) and a search row's status and age (brief). Registry reads on
         // the tool-call thread, never on a UI thread; the session index as it stands, never waited for.

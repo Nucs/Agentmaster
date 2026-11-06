@@ -52,7 +52,9 @@
 // THE CLASSIFIER — would a resume (a fork) continue the turn by itself? (ClassifyResumeContinuation, a mirror of
 // 2.1.291's bfo over the active branch's tail.) The Fork seams ask "fork interrupted or uninterrupted?" only when
 // it says yes (or the source runs right now) and Claude Code's CLAUDE_CODE_RESUME_INTERRUPTED_TURN is on where
-// the fork runs (ResolveClaudeAutoContinue).
+// the fork runs (ResolveClaudeAutoContinue) — AssessForkContinuation. The Restart seams ask the same question for
+// the restart ("restart interrupted or uninterrupted?", 2026-11-06) on the conversation the restart resumes —
+// AssessRestartContinuation.
 
 #pragma once
 
@@ -435,4 +437,38 @@ namespace Agentmaster
     //   spawnEnv      — the environment the fork's launch adds (ResolveSessionEnv for the dir).
     // Returns the outlook; never throws (a failure is "do not ask", logged).
     ForkContinuationOutlook AssessForkContinuation(std::wstring_view sourceId, bool sourceRunning, std::wstring_view cwd, const std::vector<std::pair<std::wstring, std::wstring>>& spawnEnv) noexcept;
+
+    // Does a RESTART of a session need the third question, "restart interrupted or uninterrupted?" (HOOKS.md "Interrupted
+    // turns", the user's request of 2026-11-06)? The ONE rule the PC's restart seams and the Telegram bot share — the fork
+    // question's rule, applied to the conversation the restart actually resumes.
+    struct RestartContinuationOutlook
+    {
+        bool ask{ false }; // the restarted claude would (or may) continue a turn by itself: ask
+        bool turnRunning{ false }; // the caller said the turn runs right now (see AssessRestartContinuation)
+        // The restart RE-FORKS: the session has no transcript of its own (a fork that never got a turn), so the restart
+        // resumes its fork source into the same id (BuildClaudeRestartSpec) — the tail below is the SOURCE's.
+        bool reforks{ false };
+        std::wstring conversationId; // whose transcript the restarted claude reads: the session's, or its source's
+        ResumeContinuationPlan tail; // what that transcript ends in (ClassifyResumeContinuationForSession)
+        AutoContinueSetting autoContinue; // CLAUDE_CODE_RESUME_INTERRUPTED_TURN where the restarted claude runs
+        std::wstring why; // why not asked (for the log): no transcript (fresh), the switch is off, the turn is finished
+    };
+
+    // Assess a restart of `sessionId`, deciding resume / re-fork / fresh exactly as BuildClaudeRestartSpec does (the
+    // session's own transcript; else its fork source's; else a fresh start that continues nothing), then the fork
+    // question's rule on that conversation: ask when CLAUDE_CODE_RESUME_INTERRUPTED_TURN is on where the session runs
+    // (with it off a resumed claude only PREPARES the continuation and waits — nothing to stop) AND either the tail is one
+    // Claude Code continues or the turn runs right now (the restart's own shutdown cuts a running turn, and Claude Code
+    // continues an interruptedByShutdown interrupt; a running session's tail changes every second anyway).
+    // ⚠ A tail that ends in the USER's interrupt reads as a finished turn here (ClassifyResumeContinuation): that restart
+    // is the first question's (PlanInterruptRewindForSession), which a caller asks BEFORE this one.
+    //   sessionId    — the session restarted (a Claude session; a Codex one is never assessed).
+    //   forkParentId — its fork source (SessionInfo::forkParentId; "" for a session that is no fork) — read only when the
+    //                  session has no transcript of its own.
+    //   turnRunning  — the registry says the turn runs right now (Running / Needs approval of a live session); for a
+    //                  never-messaged fork the caller passes its SOURCE's (the re-fork continues the source's turn).
+    //   cwd          — where the session runs (the project settings that may set the switch).
+    //   spawnEnv     — the environment the restart's launch adds (ResolveSessionEnv for the dir).
+    // Returns the outlook; never throws (a failure is "do not ask", logged).
+    RestartContinuationOutlook AssessRestartContinuation(std::wstring_view sessionId, std::wstring_view forkParentId, bool turnRunning, std::wstring_view cwd, const std::vector<std::pair<std::wstring, std::wstring>>& spawnEnv) noexcept;
 }

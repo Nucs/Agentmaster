@@ -5624,13 +5624,14 @@ last ~5 minutes is refreshed about every 2 s; the turn's final message removes t
 If the line must sit ABOVE the card, it can only be an edited message: one topic at a time (the one the user last acted in),
 every 5–10 s.
 
-### 21.37 The interrupted-turn questions, asked in the topic (2026-10-22; in dev since 0.0.1.35, in production since 0.8.0.1)
+### 21.37 The interrupted-turn questions, asked in the topic (2026-10-22; in dev since 0.0.1.35, in production since 0.8.0.1; the third question and the assistant's fork, 2026-11-06, NOT BUILT)
 
 The PC asks two questions since 2026-10-22 (HOOKS.md "Interrupted turns"): a restart of a turn the user interrupted asks
 whether to continue it (one rewind line in the transcript before the new claude starts), and a fork of a session in the
 middle of a turn asks whether the fork may continue that turn by itself or is stopped (its tab locked, ONE Esc the moment
-it runs). A restart or a fork the PHONE asks for must never pop a dialog on the PC, so the bot asks in the topic and passes
-the answer on:
+it runs). Since 2026-11-06 a third: a restart of a session in the middle of a turn asks whether the restarted claude may
+continue that turn by itself or is stopped the same way. A restart or a fork the PHONE asks for must never pop a dialog on
+the PC, so the bot asks in the topic and passes the answer on:
 
 - **Restart** — `/restartsession` at rest and the card's 🔄 Restart Session (`_restartFromCard`): when the session's tail is
   a user interrupt a rewind would let Claude Code continue (`PlanInterruptRewindForSession` == Rewind),
@@ -5640,6 +5641,18 @@ the answer on:
   restart sink (`Engine.h`, which now carries the choice), so the window restarts with it and asks nothing. A restart of
   a RUNNING turn (`confirm-restartsession`) and ▶ Reactivate of an errored or exited session pass KeepInterrupted (no turn
   the user interrupted). A Codex session is never asked.
+- **Restart of a turn that would go on** (2026-11-06, NOT BUILT; HOOKS.md "Interrupted turns", the third question) — the
+  user's request: "make sure its for restart session asks too". `/restartsession` and the card's 🔄 Restart Session: when
+  the restarted claude would continue a turn by itself (`AssessRestartContinuation` — the turn runs now, or the resumed tail
+  continues; `CLAUDE_CODE_RESUME_INTERRUPTED_TURN` on where it runs), `_askRestartTurnBeforeRestart` posts "🔄 <title> is in
+  the middle of a turn …" (naming a tool call that would run again) with ⏸ Restart interrupted (token `restart-interrupted`
+  → `RestartTurnChoice::StopContinuedTurn`: the PC's stop watch locks the tab and presses ONE Esc when the continued turn
+  runs) · ▶ Restart uninterrupted (`restart-uninterrupted` → `LetTurnContinue`) · Cancel. For a RUNNING turn it replaces
+  the "Restart … while a turn is running? The turn is cut off" confirm, which said the opposite of what happens with the
+  switch on; with the switch off that confirm stays. At rest it is asked after the first question had nothing to ask
+  (Needs approval, a call in flight, a turn a crash cut off). The card's toast: "A turn is running — answer the question
+  below to restart." / "Its turn would go on after the restart — choose below whether it does." ▶ Reactivate never asks
+  (it starts the session again on purpose; a cut-off turn goes on by itself).
 - **Fork** — `/forksession`, the card's ⑂ Fork (which runs `/forksession`) and the Search topic's ⑂ pick build their
   `RemoteLaunchRequest` with `forkTurn = Ask`; `_requestLaunch` resolves it before the request leaves the bot:
   `_askForkTurnBeforeLaunch` posts "⑂ <title> is in the middle of a turn …" (naming a tool call the fork would run
@@ -5648,9 +5661,22 @@ the answer on:
   resume continues; `CLAUDE_CODE_RESUME_INTERRUPTED_TURN` on where it runs). The tokens carry the request's dir, title
   and model (U+001F-separated), and a tap sends the request again with the answer; the window forks with it
   (`_ForkSessionFromDisk(…, forkTurn)`, which arms the fork stop watch for Interrupted). No question: it forks as before.
+- **A fork the 🔎 Search topic's assistant makes** (2026-11-06, NOT BUILT; the user's request: "make sure telegram supports
+  the choosing when forking"). The three paths above were the only ones that asked: a fork typed in words ("fork the
+  release session") went through the AI search's `fork` tool, which forked Uninterrupted without a word. The tool now asks
+  the app first (`TabTools::forkTurn` → `AssessForkContinuation`, the same rule) and, when the fork would continue the
+  source's turn, REFUSES with the question for the user — "interrupted (Agentmaster stops the fork's continued turn) or
+  uninterrupted (it runs the turn on its own)" — so the assistant asks in the topic, and the user's answer comes back as the
+  tool's `turn` argument (`WindowToolRequest::forkTurn`; the window's fork seams arm the stop watch for Interrupted). A
+  missing window and the turn are asked in ONE refusal. SESSIONS.md §9.14; the PC's AI search (the Sessions page, the side
+  panel) gets the same guard.
 - Logs: `[nav] remote telegram restart <sid8> -> asked: the turn the user interrupted (…)`, `… /restartsession <sid8> ->
   continue the interrupted turn | keep it interrupted`, `remote telegram fork <sid8> -> asked (…) | not asked: <why> |
-  interrupted | uninterrupted`.
+  interrupted | uninterrupted`. Since 2026-11-06: `remote telegram restart <sid8> -> asked: the turn would go on (running |
+  <tail>; re-forks its source; re-runs <tool>) | not asked about a turn that would go on: <why>`, `… /restartsession <sid8>
+  -> restart interrupted | restart uninterrupted`, `remote telegram restart (card) <sid8> -> asked (a turn that would go on)`;
+  the assistant's `[ai-search] tool fork <sid8>: the fork would continue a turn (…) - the user's answer is needed | no turn to
+  ask about (<why>)`.
 
 ### 21.38 A pick's menu fits where the session stands: ▶ Activate for a deactivated tab (2026-10-23; in dev since 0.0.1.35, in production since 0.8.0.1)
 

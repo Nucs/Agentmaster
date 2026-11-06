@@ -1164,7 +1164,7 @@ four below on 2026-10-24):
 |---|---|
 | `mcp__tabs__list` | Every window — its number (1..N, creation order), `name` (only when the user named the window: AGENT_MANAGER.md *The window name*), short id, tab count, `last_used`, `asked_from`, `agent_manager_page` — and its tabs: `pos`, `title`, `kind` (claude / codex / shell), the session's short id (the same ids every other tool takes), `state` in the Triage Board's words, `dormant`, `adopted`, `dir`, `works_in` (the inferred folder, when it differs), `branch`, `last_turn` (the newest turn's start), `active` (the newest activity), `selected`. Filters: `window`, `dir` (the folder or works_in), `title`; `limit` per window (default 40, at most 200: the selected tab and the most recently active ones, listed in strip order, with a note when tabs were left out). Read-only. |
 | `mcp__tabs__resume` | Opens a closed session again as a tab: `id`; `window` (required while more than one is open); `after` (a pos or a session id of THAT window; without it, the end of the strip); `focus` (default false: a background tab, nothing changes on the user's view). An open session is never opened a second time: the result says where its tab is, and `focus:true` brings it to the front. |
-| `mcp__tabs__fork` | Opens a FORK (a new conversation that starts with the source's history; the source is untouched) as a tab: the same arguments plus `model`. Without `after` the fork goes right after its source's tab when the source is in that window (the tab menu's Fork session placement), else at the end. |
+| `mcp__tabs__fork` | Opens a FORK (a new conversation that starts with the source's history; the source is untouched) as a tab: the same arguments plus `model` and `turn` (`interrupted` / `uninterrupted`: the user's answer when the fork would continue the source's turn by itself — required then, see the guards below). Without `after` the fork goes right after its source's tab when the source is in that window (the tab menu's Fork session placement), else at the end. |
 | `mcp__tabs__deactivate` | Parks ONE tab (the tab menu's Deactivate ▸ Deactivate Tab): `id`, `cut_off_turn`. |
 
 **Guards in code**, not only in the prompt — with bypass permissions nothing else refuses a tool
@@ -1190,6 +1190,18 @@ call (`SDK_HARNESS.md` §5.1):
   started by hand in a shell), is refused; a dormant tab answers "nothing to do"; a running or
   needs-approval tab only with `cut_off_turn:true`, after the user confirmed — a park cuts the turn
   off (`HOOKS.md` "Cut-off turns").
+- Fork asks about the source's turn (2026-11-06, NOT BUILT; HOOKS.md "Interrupted turns" — the user's
+  request "make sure telegram supports the choosing when forking", since the Telegram Search topic's
+  assistant forks through this tool): a fork that would continue the source's turn by itself
+  (`Callbacks::tabs.forkTurn`, the app's `AssessForkContinuation`: the source Running / Needs approval,
+  or its tail continues, with `CLAUDE_CODE_RESUME_INTERRUPTED_TURN` on where the fork runs) is refused
+  until `turn` carries the user's answer — `interrupted` (the window arms the fork stop watch: the fork's
+  tab locked, ONE Esc the moment it runs) or `uninterrupted` (it runs the turn, beside the original).
+  The refusal names the tab, the tool call the fork would run again, both answers, and how to call
+  again; a missing window and the turn come in ONE refusal; no tab-action slot is spent on it. An
+  explicit `turn` is never second-guessed (the callback is not asked); any other word is refused. The
+  answer rides `WindowToolRequest::forkTurn` to both fork seams. Without the callback (a test) the tool
+  never asks.
 
 **How a call reaches a window** (`AgentMaster/WindowTabTools.h`; `Engine.h`
 `RegisterWindowAgentToolHandler` / `CollectWindowCensus` / `RunWindowTool` / `RunWindowToolOnHost`;

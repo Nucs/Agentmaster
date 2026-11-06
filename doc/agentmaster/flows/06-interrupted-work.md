@@ -9,7 +9,10 @@ Deactivate → wake, a window restore, Sessions "Resume here") — one rewind li
 claude exits; after a restart the restored tabs that were busy start by themselves (the restore wake).
 **After 0.8.0 (NOT BUILT, commit 5bc91d3de):** Restart asks whether to continue a turn the USER
 interrupted; a fork of a session in the middle of a turn asks "Fork interrupted / uninterrupted", and a
-stop watch Esc's the fork's continued turn when asked to.
+stop watch Esc's the fork's continued turn when asked to. **2026-11-06 (NOT BUILT):** a Restart of a
+session in the middle of a turn the restarted claude would continue by itself asks "Restart interrupted /
+uninterrupted" (the same stop watch), in the topic from Telegram too; the AI search's fork tool (the
+Telegram Search topic's assistant) refuses such a fork until the user answered.
 
 **Test environment rule.** These flows need `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` in the test machine's
 Claude settings (Appendix A of E2E_TESTING.md) unless a flow says otherwise: without it Claude Code only
@@ -24,6 +27,9 @@ PREPARES a continuation and waits.
                                                 + rewind line (Agentmaster, after the old claude exits): continues
  API error before any output                    Claude Code alone: continues (nothing to do)
  cut off by a shutdown / crash                  Claude Code alone: continues (interruptedByShutdown)
+                                                → a Restart of it asks interrupted / uninterrupted (NOT BUILT)
+ a Restart of a RUNNING turn                    its own shutdown cuts the turn; the new claude continues it
+                                                → Restart asks interrupted / uninterrupted (NOT BUILT)
  the user pressed Esc during a reply            Claude Code alone: sits at the Esc   → Restart asks (NOT BUILT)
  the user pressed Esc during a tool call        Claude Code alone: sits at the Esc   → Restart asks (NOT BUILT)
  the user pressed Esc before any output         Claude Code alone: resends the prompt (Agentmaster cannot tell)
@@ -216,7 +222,9 @@ the fork's copy of the turn by itself, without the user racing to press Esc.
 - **E1 Every fork entry point asks:** tab menu Fork (+ its model submenu), Ctrl+Shift+D, board / tree /
   side-panel card menus, Sessions row menu / detail pane / Resume-Fork dialog, the launch bar's and the "+"
   card's Fork.
-- **E2 The AI search's fork tool** → no dialog (uninterrupted).
+- **E2 The AI search's fork tool** → no dialog: since 2026-11-06 (NOT BUILT) the tool REFUSES while the fork
+  would continue the source's turn and the model must ask the user; its `turn` argument (`interrupted` /
+  `uninterrupted`) carries the answer to the window (`interrupted` arms this same stop watch).
 - **E3 A fork inside `sleep 40`** → the fork re-runs the call (Claude Code drops a call with no result); the
   Esc stops a long call within ~100 ms of `busy`.
 - **E4 Nothing to stop** → idle with the box on screen for 6 s, or 45 s with no turn → the watch ends.
@@ -237,6 +245,58 @@ the fork's copy of the turn by itself, without the user racing to press Esc.
 1. `/restartsession` at rest on an interrupted session, or the card's 🔄 Restart → the topic asks Continue
    the turn / Keep it interrupted / Cancel (tokens `restart-uninterrupt` / `restart-keep`); never a dialog on
    the PC.
-2. ▶ Reactivate, and the confirmed restart of a RUNNING turn → keep it interrupted (no question).
+2. ▶ Reactivate, and the confirmed restart of a RUNNING turn → keep it interrupted (no question). Since
+   2026-11-06 (NOT BUILT) the confirm of a RUNNING turn appears only with the switch off; with it on,
+   `/restartsession` and the card's 🔄 Restart ask the third question instead (INT-08 phase 6).
 3. `/forksession`, the card's ⑂ Fork, the Search topic's ⑂ → "Fork interrupted / uninterrupted" in the topic
    when the fork would continue a turn.
+4. (2026-11-06, NOT BUILT) In the 🔎 Search topic, type "fork the <title> session" while that session runs.
+   *Expect:* the assistant does not fork at once: it asks interrupted or uninterrupted (its `fork` tool refused
+   with that question); answer "interrupted" → the fork opens and its stop watch stops its continued turn
+   (`[fork-stop] <fork8> armed (fork)` … `stopped`). *Check:* [LOG] `[ai-search] tool fork <sid8>: the fork
+   would continue a turn (running) - the user's answer is needed`, then the open with the answer.
+
+---
+
+### INT-08 · Restarting a session in the middle of a turn asks how
+
+> **NOT BUILT** (2026-11-06) · **P0 when built** · **Needs** mock (`hold`, `bash "sleep 40"`), F-TG for phase 6 · **Spec** HOOKS.md *Interrupted turns* (the third question)
+
+**Promise.** Restarting a session whose turn the restarted Claude would continue by itself asks whether that
+turn may go on; the default stops it without the user racing to press Esc, and nothing is asked when no turn
+would go on.
+
+**Phases**
+1. **Running.** *Do:* `long [[mock bash "echo 1"; hold g1; reply "done"]]` (Running).
+2. **Restart.** *Do:* tab menu → Restart session. *Expect:* a dialog **Restart a session in the middle of a
+   turn?** — **Restart interrupted** (default, Enter) / **Restart uninterrupted** / **Cancel**; the text names
+   a tool call that would run again when there is one. *Check:* [LOG] `[nav] restart-question <sid8> (the turn
+   runs…)`.
+3. **Restart interrupted** (Enter). *Expect:* the tab restarts, locked read-only; when the new claude
+   continues the turn (heartbeat `busy`) ONE Esc is written; the lock is released. *Check:* [ENG]
+   `stopForkedTurn` true until the watch ends, then false; [LOG] `[fork-stop] <sid8> restart: the user chose
+   "Restart interrupted"`, `… armed (restart interrupted)`, `… stopped`; [MOCK] the continuation request
+   starts and is aborted; [TR] the interrupt row under the continuation.
+4. **Restart uninterrupted** (repeat with a running turn). *Expect:* the restarted claude carries on with the
+   turn; no lock, no Esc. *Check:* [LOG] `restart-answer <sid8> -> let-turn-continue`.
+5. **Cancel.** *Expect:* no restart at all; the turn keeps running in the old claude.
+6. **From Telegram.** *Do:* `/restartsession` in the running session's topic (or the card's 🔄 Restart).
+   *Expect:* no dialog on the PC; the topic asks ⏸ Restart interrupted / ▶ Restart uninterrupted / Cancel;
+   a tap restarts with that answer (phase 3 or 4's outcome). *Check:* [LOG] `remote telegram restart <sid8> ->
+   asked: the turn would go on (running…)`, `/restartsession <sid8> -> restart interrupted`.
+
+**Edge cases**
+- **E1 A turn the USER interrupted** (Esc) → INT-05's question, never this one.
+- **E2 A finished turn at rest** → no dialog (`[restart-question] <sid8> not asked: the turn is finished`).
+- **E3 Needs approval / a call in flight / a turn a crash cut off, at rest** → the dialog ("stopped in the
+  middle of a turn").
+- **E4 The switch off** (a project `settings.local.json` sets it 0) → no dialog; from Telegram, a running turn
+  gets the old "the turn is cut off" confirm.
+- **E5 Restart from the Manager for a session another window hosts** → the dialog in the Manager's window; the
+  hosting window restarts with the answer.
+- **E6 A never-messaged fork** (no transcript of its own) → the restart re-forks it; the source's tail and
+  state decide (`re-forks its source` in the log).
+- **E7 A fork carrying a "Fork interrupted" intent** → Restart uninterrupted clears it; Restart interrupted
+  keeps watching.
+- **E8 The pane hosts another session by the answer** (an in-session `/resume`) → restarted without it.
+- **E9 A Codex session, a parked tab** → no dialog.

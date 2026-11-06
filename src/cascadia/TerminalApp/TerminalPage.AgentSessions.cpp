@@ -1623,6 +1623,14 @@ namespace winrt::TerminalApp::implementation
             _AskUninterruptThenFanOut(std::move(*question));
             return;
         }
+        // ...and so is the third question (2026-11-06): a turn the restarted claude would continue by itself — "Restart
+        // interrupted" or "Restart uninterrupted" — asked only when the user interrupted nothing (the first question above).
+        if (auto question = _RestartTurnQuestionFor(id))
+        {
+            ::Agentmaster::LogNav(L"restart-done " + ::Agentmaster::ShortId(id) + L" (asked here: the turn would go on after the restart; the hosting window restarts with the answer)");
+            _AskRestartTurnThenFanOut(std::move(*question));
+            return;
+        }
         // Not hosted here -> hand the restart to the window that owns the tab; that window's own
         // _RestartClaudeSessionLocal does the rebuild. So "fan-out" is the HANDOFF, not the completion —
         // the receiving window's mechanism tags carry the rest.
@@ -1638,8 +1646,10 @@ namespace winrt::TerminalApp::implementation
     // re-point the injector). Acts on the tab's ACTIVE pane, exactly like the tab menu — a managed session
     // is normally single-pane; returns true whenever the tab is found here so a hosted session never fans
     // out to other windows.
-    // turnChoice (HOOKS.md "Interrupted turns"): Ask takes the tab menu's own path (_restartPaneConnection asks about a turn the
-    // user interrupted, in THIS window); an answer another window or the Telegram bot already got restarts with it directly.
+    // turnChoice (HOOKS.md "Interrupted turns"): Ask takes the tab menu's own path (_restartPaneConnection asks, in THIS window,
+    // about a turn the user interrupted or about a turn the restarted claude would continue by itself); an answer another window
+    // or the Telegram bot already got (KeepInterrupted, Uninterrupt, StopContinuedTurn, LetTurnContinue) restarts with it
+    // directly.
     bool TerminalPage::_RestartClaudeSessionLocal(const std::wstring& sessionId, ::Agentmaster::RestartTurnChoice turnChoice)
     {
         const auto it = _claudeTabs.find(sessionId);
@@ -2837,8 +2847,12 @@ namespace winrt::TerminalApp::implementation
     // — plans the interrupt rewind again HERE (the transcript may have moved since the question), and when it is still due
     // holds the new connection's Start until the old claude has exited, appends the rewind line (_StartAfterInterruptRewind)
     // and gives the new claude CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 so it continues by itself. KeepInterrupted restarts as
-    // this seam always did. Either way a fork whose user chose "Fork interrupted" (SessionInfo::stopForkedTurn) is watched
-    // again on its new connection — unless the answer was Uninterrupt, which is the user letting it run.
+    // this seam always did. StopContinuedTurn — the user answered "Restart interrupted" to the third question (the restarted
+    // claude would continue a turn by itself) — restarts as KeepInterrupted, then records the stop intent on the session
+    // (SessionInfo::stopForkedTurn) and arms the fork stop watch on the new connection (the tab locked, ONE Esc when the
+    // continued turn runs). LetTurnContinue — "Restart uninterrupted" — restarts as KeepInterrupted. A session whose stop
+    // intent is recorded (a fork's "Fork interrupted", an earlier "Restart interrupted" whose watch did not finish) is watched
+    // again on its new connection — unless the answer was Uninterrupt or LetTurnContinue, the user letting it run.
     bool TerminalPage::_RestartManagedSession(const TerminalApp::TerminalPaneContent& paneContent, ::Agentmaster::RestartTurnChoice turnChoice)
     {
         if (!_sessionRegistry || !paneContent)
@@ -3173,17 +3187,33 @@ namespace winrt::TerminalApp::implementation
         }
         // Agentmaster (HOOKS.md "Interrupted turns"): a fork whose user chose "Fork interrupted" continues its source's turn
         // again on this new claude (a re-fork reads the source again; a resume of an unfinished own tail continues it) — the stop
-        // watch follows it onto the new connection. A "Continue the turn" answer is the user letting it run: the intent goes.
-        if (!isCodex && info->stopForkedTurn)
+        // watch follows it onto the new connection. A "Continue the turn" or "Restart uninterrupted" answer is the user letting
+        // it run: the intent goes.
+        // The third question (the user's request of 2026-11-06): "Restart interrupted" asks for the very same stop on THIS
+        // restart — the restarted claude would continue a turn by itself (its shutdown just cut a running one, or the tail is
+        // unfinished). The intent is recorded first, PERSISTED like a fork's: an app closed or crashed before the Esc leaves the
+        // tab's next start (a window restore, a Deactivate's wake) watched too, and _EndForkTurnStop clears it once a start
+        // would continue nothing (the Esc's own interrupt row is a finished turn to Claude Code's resume). Armed AFTER the swap
+        // and the (possibly held) Start above: the watch reads the connection the tab shows now, and waits while it is held.
+        if (!isCodex)
         {
-            if (turnChoice == ::Agentmaster::RestartTurnChoice::Uninterrupt)
+            if (turnChoice == ::Agentmaster::RestartTurnChoice::StopContinuedTurn)
             {
-                _sessionRegistry->Update(managedId, [](::Agentmaster::SessionInfo& s) { s.stopForkedTurn = false; });
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[fork-stop] " + ::Agentmaster::ShortId(managedId) + L" restart: the user continued the turn \x2014 the fork's stop intent is cleared\n");
+                _sessionRegistry->Update(managedId, [](::Agentmaster::SessionInfo& s) { s.stopForkedTurn = true; });
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[fork-stop] " + ::Agentmaster::ShortId(managedId) + L" restart: the user chose \"Restart interrupted\" \x2014 the stop intent is recorded on the session\n");
+                _ArmForkTurnStop(managedId, L"restart interrupted");
             }
-            else
+            else if (info->stopForkedTurn)
             {
-                _ArmForkTurnStop(managedId, L"restart");
+                if (turnChoice == ::Agentmaster::RestartTurnChoice::Uninterrupt || turnChoice == ::Agentmaster::RestartTurnChoice::LetTurnContinue)
+                {
+                    _sessionRegistry->Update(managedId, [](::Agentmaster::SessionInfo& s) { s.stopForkedTurn = false; });
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[fork-stop] " + ::Agentmaster::ShortId(managedId) + (turnChoice == ::Agentmaster::RestartTurnChoice::Uninterrupt ? std::wstring{ L" restart: the user continued the turn" } : std::wstring{ L" restart: the user chose \"Restart uninterrupted\"" }) + L" \x2014 the stop intent is cleared\n");
+                }
+                else
+                {
+                    _ArmForkTurnStop(managedId, L"restart");
+                }
             }
         }
 

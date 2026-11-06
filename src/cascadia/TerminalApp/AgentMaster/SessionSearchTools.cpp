@@ -925,7 +925,8 @@ namespace
         LR"("window":{"type":"string","description":"The window to open the fork in: its number, its name (when the user named it) or its id from list. Required when more than one window is open."},)"
         LR"("after":{"type":"string","description":"Put the fork right after this tab of that window: its pos (a number) or its session id. Leave it out: right after the source's tab when the source is open in that window, else at the end."},)"
         LR"("model":{"type":"string","description":"Start the fork on this model: an id or an alias such as opus or sonnet. Leave it out for the usual model."},)"
-        LR"("focus":{"type":"boolean","description":"true: switch the window to the fork and bring the window to the front. Default false: a background tab."})"
+        LR"("focus":{"type":"boolean","description":"true: switch the window to the fork and bring the window to the front. Default false: a background tab."},)"
+        LR"("turn":{"type":"string","enum":["interrupted","uninterrupted"],"description":"Only after the user answered it, when the tool said the source is in the middle of a turn that the fork would continue by itself: interrupted - Agentmaster stops the fork's continued turn (Esc the moment it runs) so the fork waits for the user; uninterrupted - the fork runs that turn on its own. Leave it out otherwise."})"
         LR"(},"required":["id"]})";
 
     const wchar_t kTabsDeactivateSchema[] =
@@ -4730,6 +4731,58 @@ namespace Agentmaster
         const std::optional<TabLocation> where = FindSessionTab(windows, sessionId);
         const bool focus = arguments.BoolAt(L"focus");
 
+        // HOOKS.md "Interrupted turns" (the user's request of 2026-11-06: "make sure telegram supports the choosing when
+        // forking"): a fork that would continue its source's turn by itself needs the user's answer first — interrupted
+        // (Agentmaster stops the fork's continued turn: its tab locked, ONE Esc the moment it runs) or uninterrupted (it runs).
+        // The PC's fork seams ask with a dialog and the Telegram topic's ⑂ buttons with their own; this tool is how the
+        // assistant forks (the Telegram Search topic's included), so with bypass permissions the guard must be HERE: without
+        // `turn` the tool asks the app whether the fork would continue (tabs.forkTurn) and refuses with what to ask the user.
+        // An explicit `turn` is the user's answer and is never second-guessed (the source may have finished meanwhile: then
+        // "interrupted" only arms a watch that finds nothing to stop).
+        ForkTurnChoice forkTurn = ForkTurnChoice::Uninterrupted;
+        bool turnGiven = false;
+        std::wstring turnQuestion; // non-empty: the fork would continue a turn and no `turn` came — what to ask the user
+        if (fork)
+        {
+            std::wstring turn = Trim(arguments.StrAt(L"turn"));
+            for (auto& c : turn)
+            {
+                // ASCII case folding only: the two accepted words are ASCII, and a model may write "Interrupted".
+                if (c >= L'A' && c <= L'Z')
+                {
+                    c = static_cast<wchar_t>(c - L'A' + L'a');
+                }
+            }
+            if (turn == L"interrupted" || turn == L"uninterrupted")
+            {
+                forkTurn = turn == L"interrupted" ? ForkTurnChoice::Interrupted : ForkTurnChoice::Uninterrupted;
+                turnGiven = true;
+            }
+            else if (!turn.empty())
+            {
+                return { L"turn takes \"interrupted\" or \"uninterrupted\" (the user's answer), not \"" + Cut(turn, 40) + L"\". Leave it out unless the user was asked.", true };
+            }
+            else if (_callbacks.tabs.forkTurn)
+            {
+                const ForkTurnFacts facts = _callbacks.tabs.forkTurn(sessionId);
+                if (facts.wouldContinue)
+                {
+                    // Named by its tab's title when it is open (the words the user knows it by), else by the id the model wrote.
+                    std::wstring name = L"session " + Cut(written, 40);
+                    if (where)
+                    {
+                        name = L"\"" + Cut(OneLine(windows[where->window].tabs[where->tab].title), 80) + L"\" (" + Cut(written, 40) + L")";
+                    }
+                    turnQuestion = name + (facts.sourceRunning ? L" is in the middle of a turn" : L" stopped in the middle of a turn") +
+                                   L", and Claude Code continues that turn in the fork by itself as soon as the fork's Claude starts" +
+                                   (!facts.rerunTool.empty() ? (L" - the " + facts.rerunTool + L" call it was running runs again in the fork") :
+                                                               (facts.resendsPrompt ? std::wstring{ L" - its last prompt is sent again" } : std::wstring{})) +
+                                   L". Ask the user which they want: interrupted - Agentmaster locks the fork's tab and presses Esc the moment the fork starts running, so the fork waits for them; or uninterrupted - the fork runs the turn on its own" +
+                                   (facts.sourceRunning ? L", beside the original." : L".");
+                }
+            }
+        }
+
         // A resume of a session that has a tab already: never a second tab of one conversation (two writers of one
         // transcript, OBSERVER.md §20). Say where it is, and bring it forward when asked.
         if (!fork && where)
@@ -4755,7 +4808,17 @@ namespace Agentmaster
                 // The usual answer for a fork, to offer the user: next to its source, as the tab menu's Fork session does.
                 error += L"The source session is open in " + DescribeTabPlace(windows, *where) + L": a fork usually goes right after it.\n";
             }
+            if (!turnQuestion.empty())
+            {
+                // Both answers are the user's: one message to the user covers the window AND the turn, not two round trips.
+                error += L"The fork also needs the user's answer about the turn: " + turnQuestion + L" Then call fork again with window and turn (\"interrupted\" or \"uninterrupted\").";
+            }
             return { error, true };
+        }
+        if (!turnQuestion.empty())
+        {
+            // Refused before a tab-action slot is taken: asking costs the request none of its opens.
+            return { L"Not forked yet: " + turnQuestion + L" Then call fork again with turn:\"interrupted\" or turn:\"uninterrupted\".", true };
         }
         const WindowCensus& target = windows[*windowIndex];
 
@@ -4766,6 +4829,7 @@ namespace Agentmaster
         if (fork)
         {
             request.model = Trim(arguments.StrAt(L"model"));
+            request.forkTurn = forkTurn; // the user's answer (Interrupted arms the window's fork stop watch), else Uninterrupted
         }
         // `after`: a position in the target window, or the session id of one of its tabs.
         std::wstring afterTitle;
@@ -4844,6 +4908,15 @@ namespace Agentmaster
         if (fork)
         {
             text += L" The fork's id is " + handle + L"; the source is untouched.";
+            if (turnGiven)
+            {
+                // Say what the user's answer does, so the reply can tell them (the tab is read-only for a few seconds). Worded for
+                // a source that may have finished while the user answered: the watch then finds nothing to stop, and an
+                // uninterrupted fork has nothing to continue.
+                text += forkTurn == ForkTurnChoice::Interrupted ?
+                            L" Forked interrupted: its tab stays locked until Agentmaster has stopped the turn the fork continues (one Esc the moment it runs), or has seen that nothing runs; then it waits for the user." :
+                            L" Forked uninterrupted: if the source's turn is still unfinished, the fork continues it on its own.";
+            }
         }
         else if (opened != sessionId)
         {
@@ -5339,7 +5412,7 @@ namespace Agentmaster
 
         HarnessTool fork;
         fork.name = kTabsForkTool;
-        fork.description = L"Branch a session into a NEW conversation that starts with the source's whole history, as a tab of a window you name, right after a tab you choose (by default right after the source's tab, like the tab menu's Fork session). The source is untouched. Refuses when several windows are open and none is named: then ask the user which window. Use it only when the user asked to fork.";
+        fork.description = L"Branch a session into a NEW conversation that starts with the source's whole history, as a tab of a window you name, right after a tab you choose (by default right after the source's tab, like the tab menu's Fork session). The source is untouched. Refuses when several windows are open and none is named: then ask the user which window. Refuses when the source is in the middle of a turn that the fork would continue by itself, until turn carries the user's answer (interrupted or uninterrupted): then ask the user. Use it only when the user asked to fork.";
         fork.inputSchemaJson = kTabsForkSchema;
         fork.handler = [this](const json::Value& arguments) { return OpenTab(arguments, WindowToolRequest::Kind::Fork); };
         tools.push_back(std::move(fork));

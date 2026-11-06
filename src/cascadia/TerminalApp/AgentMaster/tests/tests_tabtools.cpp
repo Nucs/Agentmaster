@@ -464,6 +464,70 @@ namespace
         r = deactivate->handler(Args(L"{\"id\":\"" + kS1 + L"\"}"));
         CHECK(!r.isError && parks.size() == 3, "deactivate: a refused park gave its slot back, so the next one of the request runs");
 
+        // ---- fork: the turn question (HOOKS.md "Interrupted turns", the user's request of 2026-11-06) ----
+        // A toolset of its own whose forkTurn callback says the RUNNING kS2 would continue its turn in a fork (re-running a
+        // Bash call), and that every other session would not. It shares `opens` with the main toolset, so counts are relative.
+        {
+            ++generation; // a fresh request: the caps of the blocks above do not count here
+            std::vector<std::wstring> asked; // the ids the fake forkTurn was asked about
+            SessionSearchToolset::Callbacks turnCb = cb;
+            turnCb.tabs.forkTurn = [&asked](const std::wstring& sessionId) {
+                asked.push_back(sessionId);
+                ForkTurnFacts facts;
+                if (sessionId == kS2)
+                {
+                    facts.wouldContinue = true;
+                    facts.sourceRunning = true;
+                    facts.rerunTool = L"Bash";
+                }
+                else
+                {
+                    facts.why = L"the source's turn is finished (reply)";
+                }
+                return facts;
+            };
+            SessionSearchToolset turnToolset{ turnCb };
+            const auto turnServers = turnToolset.Servers();
+            const HarnessTool* turnFork = FindTool(turnServers, L"tabs", L"fork");
+            CHECK(turnFork != nullptr && turnFork->inputSchemaJson.find(L"\"turn\"") != std::wstring::npos && turnFork->description.find(L"interrupted or uninterrupted") != std::wstring::npos,
+                  "fork turn: the schema takes turn, and the description says the tool refuses until the user answered");
+            if (turnFork)
+            {
+                const size_t before = opens.size();
+                HarnessToolResult t = turnFork->handler(Args(L"{\"id\":\"" + kS2 + L"\",\"window\":\"1\"}"));
+                CHECK(t.isError && t.text.find(L"Not forked yet") == 0 && t.text.find(L"\"catalog\" (") != std::wstring::npos && t.text.find(L"is in the middle of a turn") != std::wstring::npos &&
+                          t.text.find(L"the Bash call it was running runs again in the fork") != std::wstring::npos && t.text.find(L"turn:\"interrupted\"") != std::wstring::npos &&
+                          t.text.find(L"beside the original") != std::wstring::npos && opens.size() == before,
+                      "fork turn: a source whose turn the fork would continue -> refused with the question for the user (its tab's title, the re-run call, both answers), nothing opened");
+                t = turnFork->handler(Args(L"{\"id\":\"" + kS2 + L"\"}"));
+                CHECK(t.isError && t.text.find(L"Ask the user which window") != std::wstring::npos && t.text.find(L"The fork also needs the user's answer about the turn") != std::wstring::npos &&
+                          t.text.find(L"window and turn") != std::wstring::npos && opens.size() == before,
+                      "fork turn: no window AND a turn to ask about -> ONE refusal that asks both");
+                t = turnFork->handler(Args(L"{\"id\":\"" + kS2 + L"\",\"window\":\"1\",\"turn\":\"Interrupted\"}"));
+                CHECK(!t.isError && opens.size() == before + 1 && opens.back().second.kind == WindowToolRequest::Kind::Fork && opens.back().second.forkTurn == ForkTurnChoice::Interrupted &&
+                          t.text.find(L"Forked interrupted") != std::wstring::npos,
+                      "fork turn: turn \"Interrupted\" (any case) -> the window gets ForkTurnChoice::Interrupted, and the result says what it does");
+                const size_t askedBefore = asked.size();
+                t = turnFork->handler(Args(L"{\"id\":\"" + kS2 + L"\",\"window\":\"1\",\"turn\":\" uninterrupted \"}"));
+                CHECK(!t.isError && opens.size() == before + 2 && opens.back().second.forkTurn == ForkTurnChoice::Uninterrupted && t.text.find(L"Forked uninterrupted") != std::wstring::npos &&
+                          asked.size() == askedBefore,
+                      "fork turn: turn \"uninterrupted\" (trimmed) -> Uninterrupted, and an explicit answer is never second-guessed (forkTurn not asked)");
+                t = turnFork->handler(Args(L"{\"id\":\"" + kS2 + L"\",\"window\":\"1\",\"turn\":\"later\"}"));
+                CHECK(t.isError && t.text.find(L"turn takes \"interrupted\" or \"uninterrupted\"") == 0 && opens.size() == before + 2, "fork turn: any other turn word is refused before anything opens");
+                t = turnFork->handler(Args(L"{\"id\":\"" + kS1 + L"\",\"window\":\"1\"}"));
+                CHECK(!t.isError && opens.size() == before + 3 && opens.back().second.forkTurn == ForkTurnChoice::Uninterrupted && t.text.find(L"Forked interrupted") == std::wstring::npos &&
+                          t.text.find(L"Forked uninterrupted") == std::wstring::npos,
+                      "fork turn: a source with no turn to continue forks at once, Uninterrupted, and the result adds no turn sentence");
+            }
+            const HarnessTool* turnResume = FindTool(turnServers, L"tabs", L"resume");
+            if (turnResume)
+            {
+                const size_t askedBefore = asked.size();
+                turnResume->handler(Args(L"{\"id\":\"" + kS6 + L"\",\"window\":\"2\"}"));
+                CHECK(asked.size() == askedBefore, "fork turn: resume never asks the fork question");
+            }
+        }
+
         // ---- the database mode keeps the tabs server ----
         SessionSearchToolset::Callbacks db = cb;
         db.catalog = {};

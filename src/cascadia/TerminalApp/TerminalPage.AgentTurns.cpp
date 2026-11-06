@@ -23,6 +23,17 @@
 //     uninterrupted". "Fork interrupted" persists the intent on the fork (SessionInfo::stopForkedTurn) and arms the FORK
 //     STOP WATCH (below): the fork's tab is locked read-only, and ONE Esc is written into its input the moment its own
 //     claude's heartbeat reports the continued turn running; the tab is unlocked once the turn stopped (or nothing ran).
+//   * RESTART OF A TURN THAT WOULD GO ON (the user's request of 2026-11-06: "When we fork or restart a session, we have (in
+//     one of those) a dialog asking if we want interrupted or uninterrupted — make sure its for restart session asks too").
+//     A restart resumes the conversation in a new claude, and Claude Code continues an unfinished turn by itself — a running
+//     turn the restart's own shutdown cuts (interruptedByShutdown), a call in flight, a crash's cut. When the user
+//     interrupted nothing (the first question's case comes first), the restart asks the fork's question for the restart
+//     (_RestartTurnQuestionFor, AssessRestartContinuation): "Restart interrupted" restarts with
+//     RestartTurnChoice::StopContinuedTurn — _RestartManagedSession records the stop intent on the session and arms the
+//     SAME stop watch on its new connection — and "Restart uninterrupted" with LetTurnContinue (the turn carries on). Asked
+//     where the user clicked, like the first question: the tab menu's restart in the hosting window
+//     (_AskRestartTurnThenRestart), the Manager's restart of a session another window hosts (_AskRestartTurnThenFanOut), a
+//     Telegram restart in the topic (Messaging.Inbound.cpp, _askRestartTurnBeforeRestart).
 //
 // Measured on 2.1.291 against the e2e mock (tools/e2e-spike): a fork of a running session went busy ~5 s after launch and
 // sent its first request ~0.4–1.1 s later; one Esc then left Claude Code's "Continue from where you left off." row
@@ -34,7 +45,7 @@
 #include "TerminalPage.h"
 
 #include "AgentCatchLog.h" // AgentLogCaughtException (Rule #18)
-#include "AgentMaster/ApiErrorRewind.h" // PlanInterruptRewindForSession, RewindInterruptTailForSession, AssessForkContinuation, ProcessExitWait
+#include "AgentMaster/ApiErrorRewind.h" // PlanInterruptRewindForSession, RewindInterruptTailForSession, AssessForkContinuation, AssessRestartContinuation, ProcessExitWait
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog, LogNav, ShortId, ResolveSessionEnv, ClaudeConversationExists
 #include "AgentMaster/Engine.h" // RestartSessionInOtherWindows
 #include "AgentMaster/PendingInput.h" // InputBoxState (the fork's input box on screen)
@@ -138,13 +149,20 @@ namespace winrt::TerminalApp::implementation
             {
                 return false;
             }
-            auto question = _UninterruptQuestionFor(sessionId);
-            if (!question)
+            // The first question wins: a tail that ends in the USER's interrupt is a finished turn to Claude Code's resume, so the
+            // restarted claude would continue nothing and the third question has nothing to ask there. Only when the user
+            // interrupted nothing does the restart ask whether the turn it would continue by itself may run.
+            if (auto question = _UninterruptQuestionFor(sessionId))
             {
-                return false;
+                _AskUninterruptThenRestart(winrt::make_weak(paneContent), std::move(*question));
+                return true;
             }
-            _AskUninterruptThenRestart(winrt::make_weak(paneContent), std::move(*question));
-            return true;
+            if (auto question = _RestartTurnQuestionFor(sessionId))
+            {
+                _AskRestartTurnThenRestart(winrt::make_weak(paneContent), std::move(*question));
+                return true;
+            }
+            return false;
         }
         catch (...)
         {
@@ -363,6 +381,201 @@ namespace winrt::TerminalApp::implementation
         catch (...)
         {
             ::Agentmaster::AgentLogCaughtException(L"_StartAfterInterruptRewind");
+        }
+    }
+
+    // ===== the RESTART question for a turn that would go on (the third question) ================================
+
+    // See TerminalPage.h. The lean registry read (no queue) + the rule the Telegram bot shares (AssessRestartContinuation),
+    // which reads the resumed transcript's tail and the settings files that may set CLAUDE_CODE_RESUME_INTERRUPTED_TURN.
+    std::optional<TerminalPage::RestartTurnQuestion> TerminalPage::_RestartTurnQuestionFor(const std::wstring& sessionId)
+    {
+        try
+        {
+            if (!_sessionRegistry || sessionId.empty())
+            {
+                return std::nullopt;
+            }
+            const auto info = _sessionRegistry->GetWithoutQueue(sessionId);
+            if (!info || info->kind != ::Agentmaster::AgentKind::Claude)
+            {
+                return std::nullopt; // a Codex restart resumes a rollout: there is no Claude resume to stop
+            }
+            if (!info->started && !info->external)
+            {
+                // A parked tab (restored and never shown, or deactivated): the hosting window's restart skips a connection
+                // that never started (_restartPaneConnection's guard), so an answer would restart nothing. Its claude starts
+                // when the tab is entered — the restore wake's and Reactivate's business, not a restart's.
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart-question] " + ::Agentmaster::ShortId(sessionId) + L" not asked: the tab's claude never started (a restart has nothing to restart)\n");
+                return std::nullopt;
+            }
+            // "The turn runs right now": the session's own live state; for a never-messaged fork (no transcript of its own,
+            // so the restart RE-FORKS it) also its SOURCE's — the re-fork continues the source's turn. The source is read only
+            // in that case, the one in which AssessRestartContinuation reads the source's tail too.
+            bool turnRunning = info->live && IsTurnRunningState(info->state);
+            if (!turnRunning && !info->forkParentId.empty() && !::Agentmaster::ClaudeConversationExists(sessionId))
+            {
+                const auto source = _sessionRegistry->GetWithoutQueue(info->forkParentId);
+                turnRunning = source && source->live && IsTurnRunningState(source->state);
+            }
+            const auto outlook = ::Agentmaster::AssessRestartContinuation(sessionId, info->forkParentId, turnRunning, info->workingDir, ::Agentmaster::ResolveSessionEnv(_appSettings, info->workingDir));
+            if (!outlook.ask)
+            {
+                // Logged on every restart that does not ask (an explicit, rare action): the trail says why a restart of a busy
+                // session went without the question (the switch off, a finished turn, a fresh start).
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart-question] " + ::Agentmaster::ShortId(sessionId) + L" not asked: " + outlook.why + L"\n");
+                return std::nullopt;
+            }
+            RestartTurnQuestion question;
+            question.sessionId = sessionId;
+            question.title = info->title;
+            question.resendsPrompt = outlook.tail.verdict == ::Agentmaster::ResumeContinuation::ResendsPrompt;
+            question.rerunTool = outlook.tail.droppedTool;
+            question.turnRunning = outlook.turnRunning;
+            question.reforks = outlook.reforks;
+            question.tailKind = outlook.tail.tailKind;
+            return question;
+        }
+        catch (...)
+        {
+            // Rule #18: the trace is kept; no question means the restart goes as it always did (the turn carries on).
+            ::Agentmaster::AgentLogCaughtException(L"_RestartTurnQuestionFor");
+            return std::nullopt;
+        }
+    }
+
+    // See TerminalPage.h. The default button is "Restart interrupted", as in the fork question and as "Keep it interrupted" in
+    // the first one: across all three questions an Enter pressed by habit leaves the agent waiting, never running a turn.
+    ContentDialog TerminalPage::_BuildRestartTurnDialog(const RestartTurnQuestion& question)
+    {
+        ContentDialog dialog;
+        dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
+        dialog.Title(winrt::box_value(L"Restart a session in the middle of a turn?"));
+        dialog.Content(winrt::box_value(winrt::hstring{ ::Agentmaster::RestartTurnQuestionBody(question.title, question.resendsPrompt, question.rerunTool, question.turnRunning) }));
+        dialog.PrimaryButtonText(L"Restart interrupted");
+        dialog.SecondaryButtonText(L"Restart uninterrupted");
+        dialog.CloseButtonText(L"Cancel");
+        dialog.DefaultButton(ContentDialogButton::Primary);
+        return dialog;
+    }
+
+    // See TerminalPage.h. ShowDialog answers None when another dialog was already up (the presenter shows one at a time), and
+    // that must read as "no restart", like Cancel — never as an answer the user did not give.
+    std::optional<::Agentmaster::RestartTurnChoice> TerminalPage::_RestartTurnChoiceFromDialog(const ContentDialogResult result) noexcept
+    {
+        switch (result)
+        {
+        case ContentDialogResult::Primary:
+            return ::Agentmaster::RestartTurnChoice::StopContinuedTurn;
+        case ContentDialogResult::Secondary:
+            return ::Agentmaster::RestartTurnChoice::LetTurnContinue;
+        default:
+            return std::nullopt;
+        }
+    }
+
+    // See TerminalPage.h. Terminate-net: a dialog lane — ShowDialog on a tearing-down presenter, the dialog build or the restart
+    // throwing would std::terminate the app from a fire_and_forget; contained and logged (Rule #18).
+    winrt::fire_and_forget TerminalPage::_AskRestartTurnThenRestart(winrt::weak_ref<TerminalApp::TerminalPaneContent> weakContent, RestartTurnQuestion question)
+    {
+        try
+        {
+            const std::wstring sid8 = ::Agentmaster::ShortId(question.sessionId);
+            const auto presenter{ _dialogPresenter.get() };
+            if (!presenter)
+            {
+                // No presenter to ask with: restart as this seam always did — the turn carries on by itself.
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart-question] " + sid8 + L" no dialog presenter \x2014 restarted as before (the turn continues by itself)\n");
+                if (const auto content = weakContent.get())
+                {
+                    _RestartPaneWithTurnChoice(content, ::Agentmaster::RestartTurnChoice::KeepInterrupted);
+                }
+                co_return;
+            }
+            auto dialog = _BuildRestartTurnDialog(question);
+            ::Agentmaster::LogNav(L"restart-question " + sid8 + L" (" + (question.turnRunning ? std::wstring{ L"the turn runs" } : (L"stopped mid-turn: " + question.tailKind)) +
+                                  (question.reforks ? std::wstring{ L"; re-forks its source" } : std::wstring{}) + (question.rerunTool.empty() ? std::wstring{} : (L"; re-runs " + question.rerunTool)) + L")");
+            const auto weak = get_weak();
+            const auto result = co_await presenter.ShowDialog(dialog);
+            const auto strong = weak.get(); // ShowDialog awaits; re-acquire before touching state
+            if (!strong)
+            {
+                co_return;
+            }
+            const auto answer = _RestartTurnChoiceFromDialog(result);
+            if (!answer)
+            {
+                // Cancel / Esc — or another dialog was already up: no restart at all.
+                ::Agentmaster::LogNav(L"restart-answer " + sid8 + L" -> cancelled (nothing restarted)");
+                co_return;
+            }
+            ::Agentmaster::RestartTurnChoice choice = *answer;
+            const auto content = weakContent.get();
+            if (!content)
+            {
+                ::Agentmaster::LogNav(L"restart-answer " + sid8 + L" -> " + ::Agentmaster::RestartTurnChoiceName(choice) + L" (the tab closed while the question was up \x2014 nothing restarted)");
+                co_return;
+            }
+            // The answer was about ONE conversation: a pane that hosts another one by now (an in-session /resume) was never asked
+            // about — it restarts as before. Both answers are dropped: StopContinuedTurn would record and watch the WRONG
+            // session, and LetTurnContinue would clear a stop intent nobody was asked about.
+            const auto control = content.GetTermControl();
+            const std::wstring now = control ? _ManagedSessionForConnection(control.Connection()) : std::wstring{};
+            if (now != question.sessionId)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart-question] " + sid8 + L" the pane now hosts " + (now.empty() ? std::wstring{ L"no managed session" } : ::Agentmaster::ShortId(now)) + L" \x2014 restarted as before, without the answer\n");
+                choice = ::Agentmaster::RestartTurnChoice::KeepInterrupted;
+            }
+            ::Agentmaster::LogNav(L"restart-answer " + sid8 + L" -> " + ::Agentmaster::RestartTurnChoiceName(choice));
+            _RestartPaneWithTurnChoice(content, choice);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_AskRestartTurnThenRestart");
+        }
+    }
+
+    // See TerminalPage.h. Terminate-net as above.
+    winrt::fire_and_forget TerminalPage::_AskRestartTurnThenFanOut(RestartTurnQuestion question)
+    {
+        try
+        {
+            const std::wstring sid8 = ::Agentmaster::ShortId(question.sessionId);
+            ::Agentmaster::RestartTurnChoice choice = ::Agentmaster::RestartTurnChoice::KeepInterrupted;
+            if (const auto presenter{ _dialogPresenter.get() })
+            {
+                auto dialog = _BuildRestartTurnDialog(question);
+                ::Agentmaster::LogNav(L"restart-question " + sid8 + L" (asked here; another window hosts the tab; " + (question.turnRunning ? std::wstring{ L"the turn runs" } : (L"stopped mid-turn: " + question.tailKind)) + L")");
+                const auto weak = get_weak();
+                const auto result = co_await presenter.ShowDialog(dialog);
+                const auto strong = weak.get();
+                if (!strong)
+                {
+                    co_return;
+                }
+                const auto answer = _RestartTurnChoiceFromDialog(result);
+                if (!answer)
+                {
+                    ::Agentmaster::LogNav(L"restart-answer " + sid8 + L" -> cancelled (nothing restarted)");
+                    co_return;
+                }
+                choice = *answer;
+            }
+            else
+            {
+                // No presenter to ask with: the restart goes as it always did (the turn carries on by itself).
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart-question] " + sid8 + L" no dialog presenter \x2014 handed over as before (the turn continues by itself)\n");
+            }
+            ::Agentmaster::LogNav(L"restart-answer " + sid8 + L" -> " + ::Agentmaster::RestartTurnChoiceName(choice) + L" (handed to the hosting window)");
+            // The tab may have moved into THIS window while the question was up: local first, like _RestartClaudeSession.
+            if (!_RestartClaudeSessionLocal(question.sessionId, choice))
+            {
+                ::Agentmaster::RestartSessionInOtherWindows(question.sessionId, _windowId, choice);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_AskRestartTurnThenFanOut");
         }
     }
 

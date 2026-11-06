@@ -1506,8 +1506,9 @@ namespace winrt::TerminalApp::implementation
             const auto weakThis = get_weak();
             const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
             // HOOKS.md "Interrupted turns": `turnChoice` is the answer the caller already got to "continue the turn you
-            // interrupted?" (the window the user clicked in, or the Telegram topic) — it restarts with it, so the hosting
-            // window never asks a second time. Ask (nobody asked yet) lets this window ask.
+            // interrupted?" or to "restart interrupted or uninterrupted?" (the window the user clicked in, or the Telegram
+            // topic) — it restarts with it, so the hosting window never asks a second time. Ask (nobody asked yet) lets this
+            // window ask.
             _windowRestartToken = ::Agentmaster::RegisterWindowRestartHandler(_windowId, [weakThis, dispatcher](const std::wstring& id, ::Agentmaster::RestartTurnChoice turnChoice) {
                 dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, id, turnChoice]() {
                     if (auto self = weakThis.get())

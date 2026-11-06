@@ -248,8 +248,9 @@ namespace Agentmaster::Msg
         std::function<bool(const RemoteLaunchRequest&, RemoteLaunchReply)> launchAnswered;
         // The existing cross-window seams: restart a session's connection in place; park its tab.
         // HOOKS.md "Interrupted turns": restartSession carries the topic's answer to "continue the turn you interrupted?"
-        // (KeepInterrupted for every restart that asks nothing — a running turn cut off, an errored session reactivated),
-        // so the PC never shows a dialog for a restart the phone asked for.
+        // (Uninterrupt / KeepInterrupted) or to "restart interrupted or uninterrupted?" (StopContinuedTurn / LetTurnContinue),
+        // and KeepInterrupted for every restart that asks nothing (a running turn cut off with the switch off, an errored
+        // session reactivated), so the PC never shows a dialog for a restart the phone asked for.
         std::function<void(const std::wstring& sessionId, RestartTurnChoice turnChoice)> restartSession;
         std::function<void(const std::wstring& sessionId)> deactivateSession;
         // The app's version word for the start note and the run marker (§21.18): "0.6.8.21", "dev 0.0.1.28", "portable
@@ -2053,8 +2054,8 @@ namespace Agentmaster::Msg
         /// Code continue it (PlanInterruptRewindForSession == Rewind), posts "Continue the interrupted turn?" with three
         /// single-use buttons: ▶ Continue the turn (token restart-uninterrupt), ⏸ Keep it interrupted (restart-keep) and Cancel.
         /// Their handlers restart with the answer through ServiceHooks::restartSession. /restartsession at rest and the card's 🔄
-        /// Restart Session ask here; a restart of a RUNNING turn (confirm-restartsession) and ▶ Reactivate of an errored or
-        /// exited session never do (nothing the user interrupted).
+        /// Restart Session ask here; a restart of a RUNNING turn (confirm-restartsession, or the third question below) and
+        /// ▶ Reactivate of an errored or exited session never do (nothing the user interrupted).
         /// </summary>
         /// <param name="sessionId">The session to restart.</param>
         /// <param name="s">Its record (the title for the question).</param>
@@ -2062,6 +2063,24 @@ namespace Agentmaster::Msg
         /// <returns>True when the question was posted (the caller restarts nothing now); false when there is nothing to ask.</returns>
         /// <exception cref="std::bad_alloc">If the question cannot be allocated.</exception>
         bool _askUninterruptBeforeRestart(const std::wstring& sessionId, const SessionInfo& s, int64_t threadId);
+        /// <summary>
+        /// HOOKS.md "Interrupted turns" — the THIRD question (the user's request of 2026-11-06), asked IN THE TOPIC: a restart of
+        /// a session in the middle of a turn that the restarted claude would continue by itself (AssessRestartContinuation —
+        /// the turn runs right now and the restart's shutdown cuts it, or the resumed tail continues; with
+        /// CLAUDE_CODE_RESUME_INTERRUPTED_TURN on where the session runs) posts "🔄 … is in the middle of a turn" with ⏸ Restart
+        /// interrupted (token restart-interrupted → RestartTurnChoice::StopContinuedTurn: the PC's stop watch locks the tab and
+        /// presses ONE Esc when the turn runs), ▶ Restart uninterrupted (restart-uninterrupted → LetTurnContinue) and Cancel.
+        /// /restartsession (at rest, and in place of its "the turn is cut off" confirm for a running turn) and the card's 🔄
+        /// Restart Session ask here, AFTER _askUninterruptBeforeRestart had nothing to ask; ▶ Reactivate never does (it starts
+        /// the session again on purpose, a cut-off turn going on by itself), nor does a Codex session.
+        /// </summary>
+        /// <param name="sessionId">The session to restart.</param>
+        /// <param name="s">Its record (the title, its state, its folder and fork source for the assessment).</param>
+        /// <param name="threadId">The topic.</param>
+        /// <returns>True when the question was posted (the caller restarts nothing now); false when the restart may go on at once
+        /// (nothing would continue, the switch is off, a parked tab, a Codex session).</returns>
+        /// <exception cref="std::bad_alloc">If the question cannot be allocated.</exception>
+        bool _askRestartTurnBeforeRestart(const std::wstring& sessionId, const SessionInfo& s, int64_t threadId);
         /// <summary>
         /// HOOKS.md "Interrupted turns" — the fork question, asked IN THE TOPIC for a fork the phone asked for (/forksession,
         /// the card's ⑂ Fork, the Search topic's ⑂ pick). When a fork of `req.sessionId` would continue the source's turn by

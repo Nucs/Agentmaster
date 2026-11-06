@@ -255,8 +255,8 @@ namespace Agentmaster
             uint64_t token{ 0 };
             std::wstring windowId;
             // sessionId: the session to restart; turnChoice: the answer to the "continue the interrupted turn?"
-            // question when the caller already has one (the window the user clicked in, Telegram) — Ask lets the
-            // hosting window ask (HOOKS.md "Interrupted turns").
+            // or the "restart interrupted or uninterrupted?" question when the caller already has one (the window
+            // the user clicked in, Telegram) — Ask lets the hosting window ask (HOOKS.md "Interrupted turns").
             std::function<void(const std::wstring& sessionId, RestartTurnChoice turnChoice)> fn;
         };
         std::mutex restartMutex;
@@ -734,8 +734,9 @@ namespace Agentmaster
     // session's tab, so at most one sink acts; with no host anywhere (archived / mid-bind) every sink
     // misses and the call is a no-op. Used by the Triage Board / Explorer-tree "Restart session".
     // HOOKS.md "Interrupted turns": `turnChoice` rides along to the hosting window — the answer the caller got to
-    // "continue the turn you interrupted?" (KeepInterrupted / Uninterrupt), or Ask to let that window ask. The
-    // default keeps a restart that never heard of the question exactly as it was.
+    // "continue the turn you interrupted?" (KeepInterrupted / Uninterrupt) or to "restart interrupted or
+    // uninterrupted?" (StopContinuedTurn / LetTurnContinue), or Ask to let that window ask. The default keeps a
+    // restart that never heard of the questions exactly as it was.
     uint64_t RegisterWindowRestartHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId, RestartTurnChoice turnChoice)> handler);
     void UnregisterWindowRestartHandler(uint64_t token);
     void RestartSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId, RestartTurnChoice turnChoice = RestartTurnChoice::KeepInterrupted);

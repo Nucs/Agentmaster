@@ -878,6 +878,32 @@ namespace
             CHECK(!AssessForkContinuation(finished, false, project, {}).ask, "fork outlook: a finished source at rest is not asked about");
             CHECK(AssessForkContinuation(finished, true, project, {}).ask, "fork outlook: a source the registry says runs is asked about (its tail changes every second)");
 
+            // The RESTART outlook (the third question, 2026-11-06): the fork rule on the conversation the restart resumes — the
+            // session's own transcript, else (a never-messaged fork, re-forked) its source's, else a fresh start.
+            {
+                const auto own = AssessRestartContinuation(source, L"", false, project, {});
+                CHECK(own.ask && !own.reforks && own.conversationId == source && own.tail.droppedTool == L"Bash" && own.tail.verdict == ResumeContinuation::ResendsPrompt,
+                      "restart outlook: a session whose tail is a call in flight is asked about (its own transcript, the call named)");
+                CHECK(!AssessRestartContinuation(finished, L"", false, project, {}).ask && AssessRestartContinuation(finished, L"", true, project, {}).ask,
+                      "restart outlook: a finished turn at rest is not asked about; a turn the registry says runs is (the restart's shutdown cuts it)");
+                const std::wstring neverMessaged = L"5e551011-0000-4000-8000-0000000000b5"; // no transcript of its own
+                const auto fresh = AssessRestartContinuation(neverMessaged, L"", true, project, {});
+                CHECK(!fresh.ask && fresh.why.find(L"starts it fresh") != std::wstring::npos, "restart outlook: no transcript and no fork source -> a fresh start, never asked (even 'running')");
+                const auto refork = AssessRestartContinuation(neverMessaged, source, false, project, {});
+                CHECK(refork.ask && refork.reforks && refork.conversationId == source && refork.tail.droppedTool == L"Bash",
+                      "restart outlook: a never-messaged fork re-forks -> its SOURCE's tail decides (a call in flight there: asked)");
+                const auto reforkDone = AssessRestartContinuation(neverMessaged, finished, false, project, {});
+                CHECK(!reforkDone.ask && reforkDone.reforks && reforkDone.why.find(L"fork source's turn is finished") != std::wstring::npos,
+                      "restart outlook: a re-fork of a finished source at rest is not asked about, and says why");
+                CHECK(AssessRestartContinuation(neverMessaged, finished, true, project, {}).ask, "restart outlook: ...unless the source's turn runs right now (the caller passes the source's state)");
+                const auto orphan = AssessRestartContinuation(neverMessaged, L"5e551011-0000-4000-8000-0000000000b6", true, project, {});
+                CHECK(!orphan.ask && orphan.why.find(L"neither the fork nor its source") != std::wstring::npos, "restart outlook: a fork whose source has no transcript either starts fresh - never asked");
+                WriteBytes(root / L"config" / L"settings.json", "{\"env\":{\"CLAUDE_CODE_RESUME_INTERRUPTED_TURN\":\"0\"}}");
+                const auto off = AssessRestartContinuation(source, L"", true, project, {});
+                CHECK(!off.ask && off.why.find(L"does not continue a turn by itself") != std::wstring::npos, "restart outlook: with the switch off the restarted claude waits - never asked, even for a running turn");
+                WriteBytes(root / L"config" / L"settings.json", "{\"env\":{\"CLAUDE_CODE_RESUME_INTERRUPTED_TURN\":\"1\"}}");
+            }
+
             // the restart's front doors: a session interrupted during a reply, planned and rewound through its id
             const std::wstring interrupted = L"5e551011-0000-4000-8000-0000000000b4";
             const auto path = root / L"config" / L"projects" / L"K--x" / (interrupted + L".jsonl");
@@ -937,6 +963,11 @@ namespace
         CHECK(DecideForkTurnStop(f, 1000 + kForkTurnStopStartCapMs) == ForkTurnStopAction::NothingToStop, "stop watch: the start cap ends a watch that never saw a turn");
         CHECK(std::wstring{ ForkTurnStopActionName(ForkTurnStopAction::PressEsc) } == L"press-esc" && std::wstring{ ForkTurnChoiceName(ForkTurnChoice::Interrupted) } == L"interrupted" && std::wstring{ RestartTurnChoiceName(RestartTurnChoice::Uninterrupt) } == L"uninterrupt", "stop watch: the log words");
         CHECK(RestartTurnChoice{} == RestartTurnChoice::KeepInterrupted && ForkTurnChoice{} == ForkTurnChoice::Uninterrupted, "choices: zero is today's behavior");
+        // The third question's two answers (2026-11-06): appended after Ask, so 0 / 1 / 2 keep their meaning, and logged by name.
+        CHECK(static_cast<int32_t>(RestartTurnChoice::StopContinuedTurn) == 3 && static_cast<int32_t>(RestartTurnChoice::LetTurnContinue) == 4 &&
+                  std::wstring{ RestartTurnChoiceName(RestartTurnChoice::StopContinuedTurn) } == L"stop-continued-turn" && std::wstring{ RestartTurnChoiceName(RestartTurnChoice::LetTurnContinue) } == L"let-turn-continue" &&
+                  std::wstring{ RestartTurnChoiceName(static_cast<RestartTurnChoice>(9)) } == L"unknown",
+              "choices: the restart's interrupted / uninterrupted answers come after Ask, with their own log words");
     }
 
     void TestTurnQuestionTexts()
@@ -953,6 +984,19 @@ namespace
         CHECK(f.find(L"Fork interrupted") != std::wstring::npos && f.find(L"presses Esc") != std::wstring::npos && f.find(L"beside the original") != std::wstring::npos, "texts: both fork answers are explained");
         const auto g = ForkTurnQuestionBody(L"", true, L"", false);
         CHECK(g.find(L"This session stopped in the middle of a turn") == 0 && g.find(L"the last prompt is sent again") != std::wstring::npos, "texts: a turn left unfinished on disk");
+        // The third question (2026-11-06): the restart of a turn that would go on, in the fork question's words.
+        const auto h = RestartTurnQuestionBody(L"Build", false, L"Bash", true);
+        CHECK(h.find(L"\x201C" L"Build\x201D is in the middle of a turn") == 0 && h.find(L"resumes the conversation in a new Claude") != std::wstring::npos &&
+                  h.find(L"Bash call it was running runs again") != std::wstring::npos,
+              "texts: the restart question names the session, what a restart does, and the re-run tool");
+        CHECK(h.find(L"Restart interrupted") != std::wstring::npos && h.find(L"presses Esc") != std::wstring::npos && h.find(L"Restart uninterrupted") != std::wstring::npos &&
+                  h.find(L"carries on with the turn") != std::wstring::npos,
+              "texts: both restart answers are explained, by the buttons' names");
+        const auto i = RestartTurnQuestionBody(L"", true, L"", false);
+        CHECK(i.find(L"This session stopped in the middle of a turn") == 0 && i.find(L"the last prompt is sent again") != std::wstring::npos && i.find(L"\x2014 the ") != std::wstring::npos,
+              "texts: a restart of a turn left unfinished on disk that resends its prompt");
+        const auto j = RestartTurnQuestionBody(L"x", false, L"", true);
+        CHECK(j.find(L"\x2014") == std::wstring::npos, "texts: with no tool and no prompt to resend, no dash clause");
     }
 }
 

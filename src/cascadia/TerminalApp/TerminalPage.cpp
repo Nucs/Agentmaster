@@ -5269,9 +5269,10 @@ namespace winrt::TerminalApp::implementation
         //
         // Agentmaster (HOOKS.md "Interrupted turns"): a managed Claude session whose last turn the USER
         // interrupted (Esc) is asked about first — continue that turn after the restart (one rewind line in the
-        // transcript before the new claude starts) or keep it interrupted. The question is async: it returns
-        // true while it is up, and its answer restarts this pane (_RestartPaneWithTurnChoice). Every other
-        // restart goes on below exactly as before.
+        // transcript before the new claude starts) or keep it interrupted. A session in the middle of a turn the
+        // restarted claude would continue by itself (2026-11-06) is asked "Restart interrupted / uninterrupted"
+        // instead. The question is async: it returns true while it is up, and its answer restarts this pane
+        // (_RestartPaneWithTurnChoice). Every other restart goes on below exactly as before.
         if (_AskBeforeRestartIfInterrupted(paneContent))
         {
             return;

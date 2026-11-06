@@ -19,8 +19,29 @@
 #include <string>
 #include <vector>
 
+#include "InterruptedTurns.h" // ForkTurnChoice — a fork request's answer to "fork interrupted or uninterrupted?" (HOOKS.md "Interrupted turns"); pure, so the no-Win32 rule above holds
+
 namespace Agentmaster
 {
+    /// <summary>
+    /// HOOKS.md "Interrupted turns": would a FORK of a session continue the source's turn by itself — the fact the fork tool
+    /// needs before it may fork without asking (the user's request of 2026-11-06: "make sure telegram supports the choosing
+    /// when forking"; the Telegram Search topic's assistant forks through this tool).
+    /// </summary>
+    /// <remarks>
+    /// Filled by the app (SessionSearchAgent's engine tab tools: AssessForkContinuation over the source's transcript, its live
+    /// state and CLAUDE_CODE_RESUME_INTERRUPTED_TURN where the fork runs) on the tool-call thread; a test gives a fake. Plain
+    /// data, so this header stays free of the transcript planner.
+    /// </remarks>
+    struct ForkTurnFacts
+    {
+        bool wouldContinue{ false }; // a fork would (or may) continue the source's turn by itself: the user must choose first
+        bool sourceRunning{ false }; // the source's turn runs right now (vs. a turn left unfinished on disk)
+        bool resendsPrompt{ false }; // the fork would send the source's last prompt again
+        std::wstring rerunTool; // a tool call in flight the fork runs again ("" = none known)
+        std::wstring why; // wouldContinue false: why not (the log) — the turn is finished, the switch is off, no transcript
+    };
+
     /// <summary>
     /// One tab of a window, as the census reports it to the model.
     /// </summary>
@@ -191,6 +212,12 @@ namespace Agentmaster
         // tab and changes nothing on the screen — the right thing for a request from a phone, and for a request
         // from the Sessions page that is still talking to the user.
         bool focus{ false };
+        // Fork only (HOOKS.md "Interrupted turns"): the user's answer to "fork interrupted or uninterrupted?", which the fork
+        // tool demands (its `turn` argument) when the fork would continue the source's turn by itself. Interrupted makes the
+        // window arm its fork stop watch on the new session (the tab locked, ONE Esc the moment the continued turn runs);
+        // Uninterrupted (the default — today's behavior) lets it run. Ask is never sent: a window that sees it forks
+        // Uninterrupted.
+        ForkTurnChoice forkTurn{ ForkTurnChoice::Uninterrupted };
     };
 
     /// <summary>

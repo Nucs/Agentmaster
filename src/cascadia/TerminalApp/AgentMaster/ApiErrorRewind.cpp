@@ -1900,6 +1900,59 @@ namespace Agentmaster
         return outlook;
     }
 
+    RestartContinuationOutlook AssessRestartContinuation(std::wstring_view sessionId, std::wstring_view forkParentId, bool turnRunning, std::wstring_view cwd, const std::vector<std::pair<std::wstring, std::wstring>>& spawnEnv) noexcept
+    {
+        RestartContinuationOutlook outlook;
+        try
+        {
+            outlook.turnRunning = turnRunning;
+            outlook.conversationId = std::wstring{ sessionId };
+            outlook.tail = ClassifyResumeContinuationForSession(sessionId);
+            if (outlook.tail.reason == L"no transcript")
+            {
+                // BuildClaudeRestartSpec's order: the own transcript wins; without one a fork RE-FORKS its source into the same
+                // id (the restarted claude then reads the SOURCE's tail); without either the restart starts a fresh
+                // conversation under the same id, which has no turn to continue.
+                if (forkParentId.empty())
+                {
+                    outlook.why = L"the session has no transcript yet (the restart starts it fresh)";
+                    return outlook;
+                }
+                outlook.reforks = true;
+                outlook.conversationId = std::wstring{ forkParentId };
+                outlook.tail = ClassifyResumeContinuationForSession(forkParentId);
+                if (outlook.tail.reason == L"no transcript")
+                {
+                    outlook.why = L"neither the fork nor its source has a transcript (the restart starts it fresh)";
+                    return outlook;
+                }
+            }
+            // The switch first, as for a fork: with it off the restarted claude waits whatever the turn was doing.
+            outlook.autoContinue = ResolveClaudeAutoContinue(cwd, spawnEnv);
+            if (!outlook.autoContinue.on)
+            {
+                outlook.why = std::wstring{ kClaudeResumeInterruptedTurnEnv } + L" is off (" + outlook.autoContinue.source + L") \x2014 the restarted claude does not continue a turn by itself";
+                return outlook;
+            }
+            const bool tailContinues = outlook.tail.verdict == ResumeContinuation::ContinuesTurn || outlook.tail.verdict == ResumeContinuation::ResendsPrompt;
+            if (!tailContinues && !turnRunning)
+            {
+                outlook.why = std::wstring{ outlook.reforks ? L"the fork source's turn is finished (" : L"the turn is finished (" } + outlook.tail.tailKind +
+                              (outlook.tail.reason.empty() ? std::wstring{} : (L": " + outlook.tail.reason)) + L")";
+                return outlook;
+            }
+            outlook.ask = true;
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: "do not ask" — the restart then goes as it always did (the turn continues by itself).
+            LogSwallowedException(L"AssessRestartContinuation");
+            outlook = RestartContinuationOutlook{};
+            outlook.why = L"the assessment failed (see the [exc] line above)";
+        }
+        return outlook;
+    }
+
     ProcessExitWait::~ProcessExitWait()
     {
         _CloseAll();

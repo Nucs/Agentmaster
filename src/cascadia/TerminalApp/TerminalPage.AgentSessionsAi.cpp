@@ -1411,10 +1411,14 @@ namespace winrt::TerminalApp::implementation
                 {
                     // The tab menu's fork for a session the registry knows (Codex-aware, the unsent draft carried); the
                     // Sessions page's fork for one it never knew.
+                    // HOOKS.md "Interrupted turns": the fork tool demanded the user's answer when the fork would continue the
+                    // source's turn by itself (its `turn` argument); Interrupted arms the fork stop watch on the new session in
+                    // either seam, anything else (Ask is never sent) forks as before.
+                    const auto forkTurn = request.forkTurn == ::Agentmaster::ForkTurnChoice::Interrupted ? ::Agentmaster::ForkTurnChoice::Interrupted : ::Agentmaster::ForkTurnChoice::Uninterrupted;
                     std::wstring forked;
-                    if (!_ForkManagedSessionById(request.sessionId, slot, request.model, &forked))
+                    if (!_ForkManagedSessionById(request.sessionId, slot, request.model, &forked, forkTurn))
                     {
-                        forked = _ForkSessionFromDisk(request.sessionId, request.dir, request.title, request.model, slot);
+                        forked = _ForkSessionFromDisk(request.sessionId, request.dir, request.title, request.model, slot, forkTurn);
                     }
                     opened = std::move(forked);
                 }

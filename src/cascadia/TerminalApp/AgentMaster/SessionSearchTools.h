@@ -54,7 +54,9 @@
 // Guards in code, not only in the prompt (SDK_HARNESS.md §5.1: with bypass permissions nothing
 // else refuses a tool call): with more than one window open, resume and fork REFUSE until the call
 // names one (the model has to ask the user); at most kMaxTabOpensPerRequest opens and ONE
-// deactivate per request; a deactivate of a tab whose turn runs needs cut_off_turn.
+// deactivate per request; a deactivate of a tab whose turn runs needs cut_off_turn; a fork that
+// would continue its source's turn by itself needs turn ("interrupted" / "uninterrupted": the
+// user's answer, HOOKS.md "Interrupted turns" — the PC's and the Telegram topic's fork question).
 //
 // This file needs neither the SDK nor nlohmann/json (it uses AgentHarness.h only for the tool
 // types), so the standalone test harness compiles it and calls the tool handlers directly.
@@ -751,6 +753,13 @@ namespace Agentmaster
                 // the model waiting, maybe by two read-only calls at once: thread-safe, and quick (registry reads; for
                 // full, at most kStatusMaxIds records). A throw reaches the harness, which answers the model with it.
                 std::function<std::vector<SessionLiveFacts>(const std::vector<std::wstring>& sessionIds, bool full)> facts;
+                // HOOKS.md "Interrupted turns": would a fork of this session (a whole id) continue the source's turn by itself?
+                // The fork tool asks it before it forks without the model's `turn` argument, and refuses — telling the model to
+                // ask the user "interrupted or uninterrupted?" — when it would (the app: AssessForkContinuation over the
+                // source's transcript tail, its live state and CLAUDE_CODE_RESUME_INTERRUPTED_TURN where the fork runs; small
+                // file reads). Optional: without it the fork tool never asks (a test, a host with no transcripts). Called on the
+                // tool-call thread with the model waiting; a throw reaches the harness, which answers the model with it.
+                std::function<ForkTurnFacts(const std::wstring& sessionId)> forkTurn;
             } tabs;
         };
 
@@ -992,12 +1001,16 @@ namespace Agentmaster
         /// The `resume` and `fork` tools: resolve the id, refuse past the per-request cap, report an already-open
         /// session instead of opening it twice (resume), resolve the window (refusing, with every window described, when
         /// several are open and none is named), resolve `after` to a tab of that window, then run the request there.
+        /// A fork also needs the user's choice when it would continue the source's turn by itself (HOOKS.md "Interrupted
+        /// turns"): without a `turn` argument ("interrupted" / "uninterrupted") it asks Callbacks::tabs.forkTurn, and when
+        /// the fork would continue it REFUSES with what to ask the user (added to a window refusal, so one question to the
+        /// user covers both); with `turn` it forks with that answer (WindowToolRequest::forkTurn).
         /// </summary>
         /// <param name="arguments">The model's argument object.</param>
         /// <param name="kind">WindowToolRequest::Kind::Resume or ::Fork.</param>
         /// <returns>A one-paragraph result for the model (where the tab opened, a fork's new id), or an error result.</returns>
         /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
-        /// <exception cref="std::exception">Whatever the census / open callbacks throw (the harness answers the model with it).</exception>
+        /// <exception cref="std::exception">Whatever the census / open / forkTurn callbacks throw (the harness answers the model with it).</exception>
         HarnessToolResult OpenTab(const json::Value& arguments, WindowToolRequest::Kind kind);
 
         /// <summary>

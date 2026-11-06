@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster — INTERRUPTED TURNS (HOOKS.md "Interrupted turns"): what the user chooses when a Restart meets a
-// turn they interrupted, or a Fork meets a turn that is still running — and the pure rules that carry the choice
-// out. Header-only and pure (no Windows, no WinRT): the engine (Engine.h, Messaging.h, RemoteLaunch.h), the
+// turn they interrupted, a Fork meets a turn that is still running, or a Restart meets a turn the restarted claude
+// would continue by itself — and the pure rules that carry the choice out. Header-only and pure (no Windows, no WinRT): the engine (Engine.h, Messaging.h, RemoteLaunch.h), the
 // TerminalPage glue and the m5 harness (TestInterruptedTurns) include it.
 //
 // THE TWO QUESTIONS (the user's request of 2026-10-22):
@@ -22,6 +22,17 @@
 //     interrupted" = Agentmaster locks the fork's tab (read-only) and presses ONE Esc the moment the fork's own
 //     heartbeat says its turn runs (DecideForkTurnStop below); "Fork uninterrupted" = the fork runs on.
 //
+// THE THIRD QUESTION (the user's request of 2026-11-06: "When we fork or restart a session, we have (in one of those) a
+// dialog asking if we want interrupted or uninterrupted — make sure its for restart session asks too"):
+//   * RESTART OF A TURN THAT WOULD GO ON — a Restart ends the session's claude and resumes the conversation in a new
+//     one, and Claude Code's resume continues an unfinished turn by itself: a turn the restart's own shutdown cut
+//     (Claude Code writes that interrupt with interruptedByShutdown, which it continues), a tool call in flight, a
+//     turn a crash cut off. So a Restart of a session that is in the middle of a turn (running now, or a tail a
+//     resume continues) asks the fork's question for the restart: "Restart interrupted" = the same FORK STOP WATCH
+//     on the restarted claude (the tab locked, ONE Esc the moment it runs — RestartTurnChoice::StopContinuedTurn);
+//     "Restart uninterrupted" = it runs on (RestartTurnChoice::LetTurnContinue). It is asked only where the user
+//     interrupted nothing: a tail that ends in the USER's interrupt gets the first question instead.
+//
 // Every value-initialized choice (0) is today's behavior: KeepInterrupted (no transcript edit, no question) and
 // Uninterrupted (no Esc). A caller that never heard of this feature therefore behaves exactly as before.
 
@@ -33,22 +44,42 @@
 
 namespace Agentmaster
 {
-    // What a Restart does about a turn the user interrupted (HOOKS.md "Interrupted turns").
+    // What a Restart does about the turn it meets (HOOKS.md "Interrupted turns"): a turn the USER interrupted (the
+    // first question: KeepInterrupted / Uninterrupt) or a turn the restarted claude would continue by itself (the
+    // third question: StopContinuedTurn / LetTurnContinue). The two pairs never meet in one restart: a tail that ends
+    // in the user's interrupt is a FINISHED turn to Claude Code's resume, so nothing continues it by itself.
     enum class RestartTurnChoice : int32_t
     {
-        // Restart as before: the transcript is not touched, and the restarted claude waits at the interrupt.
-        // Also the answer for every non-interactive restart (a Telegram restart of a running session, the
-        // Reactivate of an errored one) and for a restart with nothing to ask about.
+        // Restart as before: the transcript is not touched, the restarted claude waits at a user's interrupt and
+        // continues an unfinished turn by itself (Claude Code's own resume), and no stop watch is armed — except
+        // the one a fork's persisted "Fork interrupted" intent re-arms (SessionInfo::stopForkedTurn). Also the
+        // answer for every non-interactive restart (a Telegram restart with nothing to ask, the ▶ Reactivate of
+        // an errored or exited session, a restart whose question could not be shown) and for "Keep it interrupted".
         KeepInterrupted = 0,
         // Take the interrupt back before the restarted claude starts (the user said so): the restart plans the
         // rewind line, holds the new connection's Start until the old claude has exited (it would re-stamp its
         // leaf at exit — ApiErrorRewind.h, TIMING), appends the line, and starts the claude with
-        // CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 in its environment so it continues by itself.
+        // CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 in its environment so it continues by itself. Clears a fork's
+        // persisted stop intent (the user lets the turn run).
         Uninterrupt = 1,
-        // Interactive: plan first, and when the active branch ends in a user interrupt that Claude Code would
-        // continue after a rewind, ASK (the PC's dialog in the window the user clicked in; Telegram asks with
-        // its own buttons and passes one of the two answers). Nothing to ask about == KeepInterrupted.
+        // Interactive: plan first and ASK what the restart meets (the PC's dialog in the window the user clicked
+        // in; Telegram asks with its own buttons and passes one of the answers) — the first question when the
+        // active branch ends in a user interrupt that Claude Code would continue after a rewind, else the third
+        // when the restarted claude would continue a turn by itself. Nothing to ask about == KeepInterrupted.
         Ask = 2,
+        // "Restart interrupted" (the third question): the restarted claude would continue a turn by itself (its
+        // shutdown cut it, a tool call was in flight, a crash cut it), and the user wants it to WAIT. The restart
+        // goes as KeepInterrupted, then records the stop intent on the session (SessionInfo::stopForkedTurn, the
+        // fork's persisted flag — it means "stop the turn the next start continues", whatever made the session)
+        // and arms the FORK STOP WATCH on its tab: the tab is locked read-only and ONE Esc is pressed the moment
+        // the restarted claude's heartbeat reports the continued turn running (DecideForkTurnStop below).
+        // ⚠ Appended after Ask on purpose: the values are compared and passed across windows, never persisted,
+        // but a 0 / 1 / 2 a caller already uses must keep meaning what it meant.
+        StopContinuedTurn = 3,
+        // "Restart uninterrupted" (the third question): the restarted claude continues the turn on its own, as a
+        // restart always let it. Mechanically KeepInterrupted, except that a fork's persisted stop intent is
+        // CLEARED instead of re-armed — the user just chose to let the turn run.
+        LetTurnContinue = 4,
     };
 
     // What a Fork does about the source's turn it would continue by itself (HOOKS.md "Interrupted turns").
@@ -68,9 +99,10 @@ namespace Agentmaster
         Ask = 2,
     };
 
-    // The log word of a restart choice ("keep-interrupted" / "uninterrupt" / "ask"). Pure; never throws.
+    // The log word of a restart choice ("keep-interrupted" / "uninterrupt" / "ask" / "stop-continued-turn" /
+    // "let-turn-continue"). Pure; never throws.
     //   c — the choice.
-    // Returns a static string.
+    // Returns a static string ("unknown" for a value outside the enum — a choice cast from a stray integer).
     inline const wchar_t* RestartTurnChoiceName(RestartTurnChoice c) noexcept
     {
         switch (c)
@@ -81,6 +113,10 @@ namespace Agentmaster
             return L"uninterrupt";
         case RestartTurnChoice::Ask:
             return L"ask";
+        case RestartTurnChoice::StopContinuedTurn:
+            return L"stop-continued-turn";
+        case RestartTurnChoice::LetTurnContinue:
+            return L"let-turn-continue";
         }
         return L"unknown";
     }
@@ -135,7 +171,9 @@ namespace Agentmaster
 
     // ===== the FORK STOP WATCH — the pure decision (TerminalPage::_ForkTurnStopTick runs it) =================
     // A fork whose user chose "Fork interrupted" is watched from its launch until its continued turn is stopped,
-    // or until it is clear that nothing will run. The tab is read-only (locked) meanwhile. The signal is the
+    // or until it is clear that nothing will run. The tab is read-only (locked) meanwhile. A restarted session whose
+    // user chose "Restart interrupted" (RestartTurnChoice::StopContinuedTurn) gets the very same watch: everything
+    // below speaks of "the fork", and holds word for word for the restarted claude of that tab. The signal is the
     // fork's OWN heartbeat (~/.claude/sessions/<pid>.json of the claude.exe under the fork's ConPTY): Claude Code
     // rewrites it at every status change, and its "busy" was the first sign of the auto-continue in every probe
     // (~5 s after launch; the request followed ~0.4–1.1 s later). A turn that re-runs a TOOL starts executing
@@ -394,6 +432,38 @@ namespace Agentmaster
         s += L".\n\nFork interrupted: Agentmaster locks the fork's tab and presses Esc the moment the fork starts running, so the fork waits for you.";
         s += L"\n\nFork uninterrupted: the fork runs the turn on its own";
         s += sourceRunning ? L", beside the original." : L".";
+        return s;
+    }
+
+    // The body of the third question, the RESTART of a turn that would go on ("Restart a session in the middle of a
+    // turn?" — the fork question's words for a restart). Pure.
+    //   title         — the session's title ("" = say "this session").
+    //   resendsPrompt — the restarted claude would send the last prompt again (the turn had produced no step yet), else
+    //                   it continues from the last finished step.
+    //   rerunTool     — a tool call in flight at the tail (its name), which the restarted claude runs again ("" = none
+    //                   known). Claude Code's loader drops a call with no result and goes on from the row before it.
+    //   turnRunning   — the turn runs right now (Running / Needs approval: the restart's own shutdown cuts it), vs. a
+    //                   turn left unfinished on disk (a crash, an exit, an error before any output).
+    // Returns the text (paragraphs separated by a blank line); the two answers are named as the dialog's buttons are
+    // ("Restart interrupted" / "Restart uninterrupted").
+    // Throws std::bad_alloc only.
+    inline std::wstring RestartTurnQuestionBody(std::wstring_view title, bool resendsPrompt, std::wstring_view rerunTool, bool turnRunning)
+    {
+        std::wstring s = title.empty() ? std::wstring{ L"This session" } : (L"\x201C" + std::wstring{ title } + L"\x201D");
+        s += turnRunning ? L" is in the middle of a turn." : L" stopped in the middle of a turn.";
+        // The restart's mechanism in one clause: the old claude ends, the conversation resumes in a new one, and Claude
+        // Code's resume — not Agentmaster — is what continues the turn (so the user knows what "uninterrupted" leaves to it).
+        s += L" A restart resumes the conversation in a new Claude, and Claude Code continues that turn by itself as soon as it starts";
+        if (!rerunTool.empty())
+        {
+            s += L" \x2014 the " + std::wstring{ rerunTool } + L" call it was running runs again";
+        }
+        else if (resendsPrompt)
+        {
+            s += L" \x2014 the last prompt is sent again";
+        }
+        s += L".\n\nRestart interrupted: Agentmaster locks the tab and presses Esc the moment the restarted Claude starts running, so it waits for you.";
+        s += L"\n\nRestart uninterrupted: the restarted Claude carries on with the turn on its own.";
         return s;
     }
 }
