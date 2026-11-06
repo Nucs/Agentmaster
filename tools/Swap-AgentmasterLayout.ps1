@@ -449,7 +449,11 @@ $missingImages = @(foreach ($ref in $imageRefs) {
         if (-not ($exact -or $variant)) { $ref }
     })
 if ($missingImages.Count -gt 0) {
-    throw "Layout '$newDir' lacks the icon files its manifest names ($($missingImages -join ', ')), so Agentmaster would get a BLANK taskbar and Start icon. Rebuild it with the current CascadiaPackage.wapproj (its CopyAgentmasterImagesToLayout target fills Images\), or copy res\terminal\images-Dev\* into '$(Join-Path $newDir 'Images')'."
+    # Each identity has its own icon set (CascadiaPackage.wapproj's WindowsTerminalAssetSuffix): the dev
+    # identity's orange DEV pill, the release identity's green one. Name the one this package wears, or a
+    # hand-made fix would give the dev install the release icon (or the reverse).
+    $imageSet = if ($PackageName -eq 'AgentmasterDev') { 'images-AgentmasterDev' } else { 'images-Dev' }
+    throw "Layout '$newDir' lacks the icon files its manifest names ($($missingImages -join ', ')), so Agentmaster would get a BLANK taskbar and Start icon. Rebuild it with the current CascadiaPackage.wapproj (its CopyAgentmasterImagesToLayout target fills Images\), or copy res\terminal\$imageSet\* into '$(Join-Path $newDir 'Images')'."
 }
 
 # The session database's import (SESSIONS_DB.md §4.2). A layout with agentmaster-sessiondb.exe but no duckdb.dll

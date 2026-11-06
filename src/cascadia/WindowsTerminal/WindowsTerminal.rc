@@ -65,6 +65,13 @@ IDI_APPICON_HC_WHITE    ICON                    "..\\..\\..\\res\\terminal\\imag
 IDI_APPICON             ICON                    "..\\..\\..\\res\\terminal\\images-Can\\terminal.ico"
 IDI_APPICON_HC_BLACK    ICON                    "..\\..\\..\\res\\terminal\\images-Can\\terminal_contrast-black.ico"
 IDI_APPICON_HC_WHITE    ICON                    "..\\..\\..\\res\\terminal\\images-Can\\terminal_contrast-white.ico"
+#elif defined(AGENTMASTER_DEV_IDENTITY)
+// Agentmaster: the dev identity (AgentmasterDev) wears the orange DEV pill, the release identity the green
+// one below. AGENTMASTER_DEV_IDENTITY comes from build\rules\Branding.targets (the Dev branding built with
+// AgentmasterPackageIdentity != Release); the package's own images follow the same property.
+IDI_APPICON             ICON                    "..\\..\\..\\res\\terminal\\images-AgentmasterDev\\terminal.ico"
+IDI_APPICON_HC_BLACK    ICON                    "..\\..\\..\\res\\terminal\\images-AgentmasterDev\\terminal_contrast-black.ico"
+IDI_APPICON_HC_WHITE    ICON                    "..\\..\\..\\res\\terminal\\images-AgentmasterDev\\terminal_contrast-white.ico"
 #else
 IDI_APPICON             ICON                    "..\\..\\..\\res\\terminal\\images-Dev\\terminal.ico"
 IDI_APPICON_HC_BLACK    ICON                    "..\\..\\..\\res\\terminal\\images-Dev\\terminal_contrast-black.ico"

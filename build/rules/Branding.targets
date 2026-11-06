@@ -16,4 +16,17 @@
       <PreprocessorDefinitions>$(_WTBrandingPreprocessorToken);%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
   </ItemDefinitionGroup>
+
+  <!-- Agentmaster: the Dev branding carries two package identities (CascadiaPackage.wapproj), and the DEV one
+       (AgentmasterPackageIdentity != Release, the default) wears its own icon: the orange DEV pill of
+       res\terminal\images-AgentmasterDev. The .rc files of Agentmaster.exe and of the WindowsTerminal.exe shim pick
+       their icon by this define; the package's images follow the same property (WindowsTerminalAssetSuffix).
+       AgentmasterPackageIdentity is a global property, so the solution build hands it to every project; a build that
+       does not set it is the dev identity, as for the manifest. Resource compiles only: no C++ reads it, so a switch
+       of identity recompiles the .rc files alone (their command line changes) and relinks the two exes. -->
+  <ItemDefinitionGroup Condition="'$(_WTBrandingPreprocessorToken)'=='WT_BRANDING_DEV' and '$(AgentmasterPackageIdentity)'!='Release'">
+    <ResourceCompile>
+      <PreprocessorDefinitions>AGENTMASTER_DEV_IDENTITY;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
+  </ItemDefinitionGroup>
 </Project>

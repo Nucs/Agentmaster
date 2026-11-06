@@ -99,8 +99,19 @@
   </ItemGroup>
 
   <!-- This is picked up by CascadiaResources.build.items. -->
-  <PropertyGroup Condition="'$(WindowsTerminalBranding)'=='' or '$(WindowsTerminalBranding)'=='Dev'">
+  <!-- Agentmaster: the Dev branding's two identities wear two icon sets, so the two installs tell apart on
+       the taskbar, in Start and in Alt+Tab. The RELEASE identity keeps Windows Terminal Dev's
+       (res\terminal\images-Dev: the green DEV pill); the DEV identity (the default) wears
+       res\terminal\images-AgentmasterDev, the same pictures with an ORANGE pill, which
+       tools\dev-icon\dev_icon.py writes from images-Dev (gen; check). The file names are the same in both,
+       so the manifests and resources.pri need nothing else. The exes' own icon (Agentmaster.exe, the
+       WindowsTerminal.exe shim) follows the same property: build\rules\Branding.targets defines
+       AGENTMASTER_DEV_IDENTITY for their .rc files. -->
+  <PropertyGroup Condition="('$(WindowsTerminalBranding)'=='' or '$(WindowsTerminalBranding)'=='Dev') and '$(AgentmasterPackageIdentity)'=='Release'">
     <WindowsTerminalAssetSuffix>-Dev</WindowsTerminalAssetSuffix>
+  </PropertyGroup>
+  <PropertyGroup Condition="('$(WindowsTerminalBranding)'=='' or '$(WindowsTerminalBranding)'=='Dev') and '$(AgentmasterPackageIdentity)'!='Release'">
+    <WindowsTerminalAssetSuffix>-AgentmasterDev</WindowsTerminalAssetSuffix>
   </PropertyGroup>
   <PropertyGroup Condition="'$(WindowsTerminalBranding)'=='Preview'">
     <WindowsTerminalAssetSuffix>-Pre</WindowsTerminalAssetSuffix>
@@ -265,8 +276,8 @@
        count overlay (2026-10-02). tools\Swap-AgentmasterLayout.ps1 now refuses a layout that
        lacks the icon files its manifest names.
 
-       $(WindowsTerminalAssetSuffix) is set above: -Dev for Dev/empty branding (both
-       Agentmaster identities), -Pre/-Can for Preview/Canary. -->
+       $(WindowsTerminalAssetSuffix) is set above: under the Dev/empty branding -Dev for the release
+       identity and -AgentmasterDev for the dev identity, -Pre/-Can for Preview/Canary. -->
   <Target Name="CopyAgentmasterImagesToLayout"
           AfterTargets="Build"
           Condition="Exists('$(OpenConsoleDir)res\terminal\images$(WindowsTerminalAssetSuffix)')">

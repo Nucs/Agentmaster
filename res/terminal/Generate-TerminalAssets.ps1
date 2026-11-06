@@ -6,6 +6,9 @@
 #   .\Generate-TerminalAssets.ps1 -Path .\Terminal_Pre.svg -HighContrastPath .\Terminal_Pre_HC.svg -Destination .\images-Pre
 #   .\Generate-TerminalAssets.ps1 -Path .\Terminal_Dev.svg -HighContrastPath .\Terminal_Dev_HC.svg -Destination .\images-Dev
 #
+# Agentmaster: images-AgentmasterDev (the dev identity's set: the orange DEV pill) is not drawn by this
+# script. tools\dev-icon\dev_icon.py gen recolours it from images-Dev: run it again after regenerating images-Dev.
+#
 # Some icons benefit from manual hints.  The most efficient way to do that is to run the script twice:
 #
 #   1. Run .\Generate-TerminalAssets.ps1 ...args... -Destination .\images -KeepIntermediates
