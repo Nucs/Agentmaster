@@ -12,7 +12,9 @@ interrupted; a fork of a session in the middle of a turn asks "Fork interrupted 
 stop watch Esc's the fork's continued turn when asked to. **2026-11-06 (NOT BUILT):** a Restart of a
 session in the middle of a turn the restarted claude would continue by itself asks "Restart interrupted /
 uninterrupted" (the same stop watch), in the topic from Telegram too; the AI search's fork tool (the
-Telegram Search topic's assistant) refuses such a fork until the user answered.
+Telegram Search topic's assistant) refuses such a fork until the user answered. A turn that died on an API error
+is part of the same choice for Restart and Fork: "uninterrupted" takes the error back and the new Claude
+continues by itself (INT-09).
 
 **Test environment rule.** These flows need `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` in the test machine's
 Claude settings (Appendix A of E2E_TESTING.md) unless a flow says otherwise: without it Claude Code only
@@ -25,6 +27,7 @@ PREPARES a continuation and waits.
  ─────────────────────────────────────────────  ──────────────────────────────────────────────────────────
  API error after output ("Connection lost")     Claude Code alone: sits at the error
                                                 + rewind line (Agentmaster, after the old claude exits): continues
+                                                → Restart / Fork ask interrupted / uninterrupted (NOT BUILT, INT-09)
  API error before any output                    Claude Code alone: continues (nothing to do)
  cut off by a shutdown / crash                  Claude Code alone: continues (interruptedByShutdown)
                                                 → a Restart of it asks interrupted / uninterrupted (NOT BUILT)
@@ -52,7 +55,9 @@ the turn by itself — nothing is deleted from the transcript.
 1. **The failure.** *Do:* F-S; `fix it [[mock bash "echo step1"; say "I will now"; drop]]`. *Expect:* Claude
    retries 3×, then the session reads Error with "API Error: Connection lost mid-response…". *Check:* [TR]
    a partial assistant row + a synthetic `isApiErrorMessage` / `server_error` row; [UI] crimson dot.
-2. **Restart.** *Do:* tab menu → Restart session. *Expect:* the old claude closes; only then is the line
+2. **Restart.** *Do:* tab menu → Restart session (since 2026-11-06, NOT BUILT: it first asks **Restart a session whose
+   turn stopped on an API error?** — answer **Restart uninterrupted** for this flow; INT-09 covers both answers). *Expect:*
+   the old claude closes; only then is the line
    appended (one line at the file's end); the new claude starts and sends a continuation. *Check:* [LOG]
    `[api-error-rewind] <sid8> restart: rewound past "API Error: Connection lost mid-response…" (server_error,
    …) — 1 half-response row(s) … to <target8> (tool result); … waited N ms for 1 claude process(es)`; [TR] the
@@ -300,3 +305,44 @@ would go on.
   keeps watching.
 - **E8 The pane hosts another session by the answer** (an in-session `/resume`) → restarted without it.
 - **E9 A Codex session, a parked tab** → no dialog.
+
+---
+
+### INT-09 · Restart and fork offer to take back an API error
+
+> **NOT BUILT** (2026-11-06) · **P0 when built** · **Needs** mock (`say` + `drop`: a server error after output began), F-TG for phase 5 · **Spec** HOOKS.md *Interrupted turns* (situation B), *API-error turns*
+
+**Promise.** A turn that died on an API error after output began ("API Error: Server error mid-response") can be continued
+from a Restart or a Fork by answering "uninterrupted": the error is taken back and the new Claude carries on by itself; an
+"interrupted" answer leaves it waiting at the error.
+
+**Phases**
+1. **The error.** *Do:* `x [[mock think "…"; drop server_error]]` (thinking, then the stream cut). *Expect:* the tab shows
+   `API Error: Server error mid-response…`; state Error. *Check:* [TR] the error row (`truncatedAfterOutput`).
+2. **Restart.** *Do:* tab menu → Restart session. *Expect:* **Restart a session whose turn stopped on an API error?** quoting
+   the error — **Restart interrupted** (default) / **Restart uninterrupted** / **Cancel**.
+3. **Restart uninterrupted.** *Expect:* the old claude exits, ONE `last-prompt` line is appended (aimed at the tool result /
+   prompt below the half-response), the new claude starts with `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` and continues the turn
+   by itself (`Continue from where you left off.`). *Check:* [LOG] `[api-error-rewind] <sid8> restart: rewound past …`; [MOCK]
+   the continuation request.
+4. **Fork uninterrupted** (repeat phase 1, then tab menu → Fork session). *Expect:* **Fork a session whose turn stopped on an
+   API error?**; "Fork uninterrupted" → the line lands in the SOURCE's transcript while the source's claude still runs, the
+   fork opens and starts at once and carries on with the turn; the source still shows the error and waits. *Check:* [LOG]
+   `[api-error-rewind] <src8> fork: rewound past … (claude pid N still runs the source …)`, `[nav] fork-start <fork8> started
+   in place`; [MOCK] the fork's continuation request; the source's tab unchanged.
+5. **From Telegram.** `/restartsession` and `/forksession` in that session's topic → the same questions with the error
+   quoted; the fork's buttons are `fork-keep-api-error` / `fork-continue-after-api-error`. No dialog on the PC.
+
+**Edge cases**
+- **E1 Restart interrupted** → `NOT rewound — the user chose "Restart interrupted"`; the restarted claude waits at the error;
+  no stop watch (`kept the API error — nothing will run, no watch`).
+- **E2 Fork interrupted** → a plain fork that waits at the error; no watch.
+- **E3 `resumeApiErrorTurns` off** → no question; the restart keeps the error, as every restart does then.
+- **E4 The switch off in a settings file** → asked; the text says the next message continues it; the line is still appended.
+- **E5 A second fork after a take-back** → situation A (Claude Code continues by itself): the stop watch answers "interrupted".
+- **E6 A dormant fork that starts after the source's claude exited** → it reads the source's re-stamp and waits at the error
+  (the in-place start keeps that window ~1 s).
+- **E7 A never-messaged fork restarted** → the re-fork takes its SOURCE's error back (`restart re-fork of <sid8>`).
+- **E8 The AI search's fork** (the Telegram Search topic) → refused until `turn`; `uninterrupted` → the take-back.
+- **E9 A refusal-class error** (a refusal, a DLP denial) or a target Claude Code would not continue (a meta row, a compaction
+  summary) → no question.

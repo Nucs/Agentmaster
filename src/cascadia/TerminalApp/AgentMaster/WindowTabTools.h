@@ -35,11 +35,16 @@ namespace Agentmaster
     /// </remarks>
     struct ForkTurnFacts
     {
-        bool wouldContinue{ false }; // a fork would (or may) continue the source's turn by itself: the user must choose first
+        bool wouldContinue{ false }; // the user must choose first: a fork would continue the source's turn by itself (situation A), or could after a take-back (B)
         bool sourceRunning{ false }; // the source's turn runs right now (vs. a turn left unfinished on disk)
         bool resendsPrompt{ false }; // the fork would send the source's last prompt again
         std::wstring rerunTool; // a tool call in flight the fork runs again ("" = none known)
         std::wstring why; // wouldContinue false: why not (the log) — the turn is finished, the switch is off, no transcript
+        // Situation B (2026-11-06): the source's turn died on an API error after output began — a fork waits at it unless
+        // Agentmaster takes it back. The user's answer then maps the other way round: "uninterrupted" = the take-back
+        // (ForkTurnChoice::ContinueAfterApiError), "interrupted" = a plain fork (Uninterrupted: nothing would run to stop).
+        bool apiError{ false };
+        std::wstring errorText; // B: the error as Claude Code wrote it (its first line)
     };
 
     /// <summary>
@@ -215,8 +220,9 @@ namespace Agentmaster
         // Fork only (HOOKS.md "Interrupted turns"): the user's answer to "fork interrupted or uninterrupted?", which the fork
         // tool demands (its `turn` argument) when the fork would continue the source's turn by itself. Interrupted makes the
         // window arm its fork stop watch on the new session (the tab locked, ONE Esc the moment the continued turn runs);
-        // Uninterrupted (the default — today's behavior) lets it run. Ask is never sent: a window that sees it forks
-        // Uninterrupted.
+        // Uninterrupted (the default — today's behavior) lets it run; ContinueAfterApiError (situation B's "uninterrupted")
+        // makes the window take the source's API error back, launch the fork with the switch and start it at once. Ask is
+        // never sent: a window that sees it forks Uninterrupted.
         ForkTurnChoice forkTurn{ ForkTurnChoice::Uninterrupted };
     };
 

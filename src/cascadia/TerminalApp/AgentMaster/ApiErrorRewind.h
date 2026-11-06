@@ -179,6 +179,32 @@ namespace Agentmaster
     // Returns the plan (NotApplicable when there is no transcript); never throws.
     ApiErrorRewindPlan PlanApiErrorRewindForSession(std::wstring_view sessionId) noexcept;
 
+    // Would a resume continue the turn once this plan's line is appended? True only for a Rewind whose target is a row
+    // Claude Code's resume continues from — a tool result (it carries on) or a prompt (it sends it again); a meta row or a
+    // compaction summary as the target takes the error off the branch, but nothing continues by itself. The rule behind
+    // the "uninterrupted" offer of the restart and fork questions (HOOKS.md "Interrupted turns", situation B). Pure.
+    //   plan — a plan of PlanApiErrorRewind / PlanApiErrorRewindForSession.
+    // Returns true when the take-back would let the turn go on. Never throws.
+    inline bool ApiErrorTakeBackContinues(const ApiErrorRewindPlan& plan) noexcept
+    {
+        return plan.verdict == ApiErrorRewindVerdict::Rewind && (plan.targetKind == L"tool result" || plan.targetKind == L"prompt");
+    }
+
+    // The FORK's take-back (HOOKS.md "Interrupted turns", situation B — the user's request of 2026-11-06: "I want
+    // restart/fork to also be able to tackle this error as part of interrupted/uninterrupted choice. removing this error
+    // on a starting tab should auto-continue"): append the API-error rewind line to the fork SOURCE's transcript right
+    // before a fork's claude reads it, so the fork continues the turn the source's API error cut. A `--fork-session` fork
+    // has no file of its own until its first turn, and Claude Code's `--resume-session-at` (which could start it at an
+    // earlier row) is honored in print mode only — so the source's file is the only place the line can go.
+    // ⚠ The ONE append made while a claude may still run the conversation (RewindApiErrorTail refuses that): the source's
+    // live claude never re-reads its file, and its exit re-stamps its own leaf, which only the SOURCE's own next resume
+    // reads — the source stays exactly where it was; only a loader that reads the file before that exit (the fork) follows
+    // the line. Same planner, size re-check and single FILE_APPEND_DATA write as every rewind.
+    //   sourceId — the conversation forked.
+    // Returns the outcome (NotNeeded with no transcript or no error to take back; Appended's detail names a live source
+    // claude, "" with none); never throws. ⚠ Blocking file I/O (one small read): an explicit-action path only.
+    ApiErrorRewindResult RewindApiErrorTailForForkSource(std::wstring_view sourceId) noexcept;
+
     // One hooks.log line (no "\n") for a result: "[api-error-rewind] <sid8> <seam>: …". `seam` names the
     // caller ("restart", "deactivate", "restore").
     std::wstring DescribeApiErrorRewind(const ApiErrorRewindResult& r, std::wstring_view sessionId, std::wstring_view seam);
@@ -420,23 +446,33 @@ namespace Agentmaster
     // and the Telegram bot share (HOOKS.md "Interrupted turns").
     struct ForkContinuationOutlook
     {
-        bool ask{ false }; // a fork would (or may) continue the source's turn by itself: ask
+        bool ask{ false }; // a fork would (or may) continue the source's turn by itself, or could after a take-back: ask
         bool sourceRunning{ false }; // the caller said the source runs right now (Running / NeedsApproval)
         ResumeContinuationPlan tail; // what the source's transcript ends in (ClassifyResumeContinuationForSession)
         AutoContinueSetting autoContinue; // CLAUDE_CODE_RESUME_INTERRUPTED_TURN where the fork would run
         std::wstring why; // why not asked (for the log): no transcript, the switch is off, the turn is finished
+        // Situation B (2026-11-06; only with considerApiError): the source's turn died on an API error after output began, so
+        // a fork waits at the error unless Agentmaster takes it back (RewindApiErrorTailForForkSource) — the question's
+        // "Fork uninterrupted" is ForkTurnChoice::ContinueAfterApiError, its "Fork interrupted" plain Uninterrupted (nothing
+        // to stop: the fork waits at the error). false = situation A (Claude Code continues by itself) or no question.
+        bool apiError{ false };
+        ApiErrorRewindPlan apiErrorPlan; // the source's API-error plan (read only with considerApiError and no situation A)
     };
 
-    // Assess a fork of `sourceId`: ask when CLAUDE_CODE_RESUME_INTERRUPTED_TURN is on where the fork runs (a fork that
-    // cannot send the continuation by itself needs no stopping) AND either the source's transcript tail is one Claude
-    // Code continues or the source runs right now (a running session's tail changes every second; its state is the
-    // better guide). A source with no transcript forks into a fresh session: never asked.
-    //   sourceId      — the session forked.
-    //   sourceRunning — the registry says Running / NeedsApproval (false for a closed or unknown session).
-    //   cwd           — where the fork runs (the project settings that may set the switch).
-    //   spawnEnv      — the environment the fork's launch adds (ResolveSessionEnv for the dir).
+    // Assess a fork of `sourceId`. Situation A: ask when CLAUDE_CODE_RESUME_INTERRUPTED_TURN is on where the fork runs (a
+    // fork that cannot send the continuation by itself needs no stopping) AND either the source's transcript tail is one
+    // Claude Code continues or the source runs right now (a running session's tail changes every second; its state is the
+    // better guide). Else, with considerApiError, situation B: ask when the source's tail is an API error whose take-back
+    // would let the fork continue (ApiErrorTakeBackContinues) — whatever the switch says. A source with no transcript
+    // forks into a fresh session: never asked.
+    //   sourceId         — the session forked.
+    //   sourceRunning    — the registry says Running / NeedsApproval (false for a closed or unknown session).
+    //   cwd              — where the fork runs (the project settings that may set the switch).
+    //   spawnEnv         — the environment the fork's launch adds (ResolveSessionEnv for the dir).
+    //   considerApiError — offer situation B (AppSettings::resumeApiErrorTurns: off, Agentmaster never takes an API error
+    //                      back, and an API-errored source forks as it always did). false = situation A only.
     // Returns the outlook; never throws (a failure is "do not ask", logged).
-    ForkContinuationOutlook AssessForkContinuation(std::wstring_view sourceId, bool sourceRunning, std::wstring_view cwd, const std::vector<std::pair<std::wstring, std::wstring>>& spawnEnv) noexcept;
+    ForkContinuationOutlook AssessForkContinuation(std::wstring_view sourceId, bool sourceRunning, std::wstring_view cwd, const std::vector<std::pair<std::wstring, std::wstring>>& spawnEnv, bool considerApiError = false) noexcept;
 
     // Does a RESTART of a session need the third question, "restart interrupted or uninterrupted?" (HOOKS.md "Interrupted
     // turns", the user's request of 2026-11-06)? The ONE rule the PC's restart seams and the Telegram bot share — the fork
@@ -452,6 +488,12 @@ namespace Agentmaster
         ResumeContinuationPlan tail; // what that transcript ends in (ClassifyResumeContinuationForSession)
         AutoContinueSetting autoContinue; // CLAUDE_CODE_RESUME_INTERRUPTED_TURN where the restarted claude runs
         std::wstring why; // why not asked (for the log): no transcript (fresh), the switch is off, the turn is finished
+        // Situation B (2026-11-06; only with considerApiError): the turn died on an API error after output began, so the
+        // restarted claude waits at the error unless Agentmaster takes it back — the restart's own API-error rewind for a
+        // resume, the fork-source take-back for a re-fork. The question's "Restart uninterrupted" (LetTurnContinue) takes it
+        // back and sets the switch for this start; "Restart interrupted" (StopContinuedTurn) leaves the error in place.
+        bool apiError{ false };
+        ApiErrorRewindPlan apiErrorPlan; // the API-error plan of conversationId (read only with considerApiError and no situation A)
     };
 
     // Assess a restart of `sessionId`, deciding resume / re-fork / fresh exactly as BuildClaudeRestartSpec does (the
@@ -462,13 +504,16 @@ namespace Agentmaster
     // continues an interruptedByShutdown interrupt; a running session's tail changes every second anyway).
     // ⚠ A tail that ends in the USER's interrupt reads as a finished turn here (ClassifyResumeContinuation): that restart
     // is the first question's (PlanInterruptRewindForSession), which a caller asks BEFORE this one.
-    //   sessionId    — the session restarted (a Claude session; a Codex one is never assessed).
-    //   forkParentId — its fork source (SessionInfo::forkParentId; "" for a session that is no fork) — read only when the
-    //                  session has no transcript of its own.
-    //   turnRunning  — the registry says the turn runs right now (Running / Needs approval of a live session); for a
-    //                  never-messaged fork the caller passes its SOURCE's (the re-fork continues the source's turn).
-    //   cwd          — where the session runs (the project settings that may set the switch).
-    //   spawnEnv     — the environment the restart's launch adds (ResolveSessionEnv for the dir).
+    // Situation B (considerApiError): when A says no, the conversation's tail is an API error whose take-back would let the
+    // restarted claude continue (ApiErrorTakeBackContinues) — asked whatever the switch says.
+    //   sessionId        — the session restarted (a Claude session; a Codex one is never assessed).
+    //   forkParentId     — its fork source (SessionInfo::forkParentId; "" for a session that is no fork) — read only when
+    //                      the session has no transcript of its own.
+    //   turnRunning      — the registry says the turn runs right now (Running / Needs approval of a live session); for a
+    //                      never-messaged fork the caller passes its SOURCE's (the re-fork continues the source's turn).
+    //   cwd              — where the session runs (the project settings that may set the switch).
+    //   spawnEnv         — the environment the restart's launch adds (ResolveSessionEnv for the dir).
+    //   considerApiError — offer situation B (AppSettings::resumeApiErrorTurns: off, no restart takes an API error back).
     // Returns the outlook; never throws (a failure is "do not ask", logged).
-    RestartContinuationOutlook AssessRestartContinuation(std::wstring_view sessionId, std::wstring_view forkParentId, bool turnRunning, std::wstring_view cwd, const std::vector<std::pair<std::wstring, std::wstring>>& spawnEnv) noexcept;
+    RestartContinuationOutlook AssessRestartContinuation(std::wstring_view sessionId, std::wstring_view forkParentId, bool turnRunning, std::wstring_view cwd, const std::vector<std::pair<std::wstring, std::wstring>>& spawnEnv, bool considerApiError = false) noexcept;
 }

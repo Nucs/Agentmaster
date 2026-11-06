@@ -1199,9 +1199,14 @@ call (`SDK_HARNESS.md` §5.1):
   tab locked, ONE Esc the moment it runs) or `uninterrupted` (it runs the turn, beside the original).
   The refusal names the tab, the tool call the fork would run again, both answers, and how to call
   again; a missing window and the turn come in ONE refusal; no tab-action slot is spent on it. An
-  explicit `turn` is never second-guessed (the callback is not asked); any other word is refused. The
-  answer rides `WindowToolRequest::forkTurn` to both fork seams. Without the callback (a test) the tool
-  never asks.
+  explicit `turn` is never second-guessed; any other word is refused. The answer rides
+  `WindowToolRequest::forkTurn` to both fork seams. Without the callback (a test) the tool never asks.
+  Situation B (2026-11-06, NOT BUILT): a source whose last turn stopped on an API error
+  (`ForkTurnFacts::apiError`, with `resumeApiErrorTurns` on) is refused the same way, with the error
+  quoted and the take-back explained; the facts are read for an explicit `turn` too, because the answer
+  maps the other way there — `uninterrupted` = `ForkTurnChoice::ContinueAfterApiError` (the window takes the
+  error back in the source's transcript, launches the fork with `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` and
+  starts it at once), `interrupted` = a plain fork that waits at the error.
 
 **How a call reaches a window** (`AgentMaster/WindowTabTools.h`; `Engine.h`
 `RegisterWindowAgentToolHandler` / `CollectWindowCensus` / `RunWindowTool` / `RunWindowToolOnHost`;

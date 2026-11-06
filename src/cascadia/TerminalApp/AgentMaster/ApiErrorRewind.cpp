@@ -1315,14 +1315,21 @@ namespace Agentmaster
         //   whatExitUndoes — what a live holder's exit would put back ("the error", "the interrupt"), for the detail.
         //   outcome        — receives Appended, Skipped or Failed.
         //   appendedAtByte — receives the line's offset (Appended only).
-        //   detail         — receives why (Skipped / Failed only).
+        //   detail         — receives why (Skipped / Failed only); with allowLiveHolder, an Appended line that a live claude
+        //                    holds names that claude here ("" when none held it).
+        //   allowLiveHolder — the FORK's take-back only (RewindApiErrorTailForForkSource): append although a live claude runs
+        //                    the conversation. The line is meant for a FORK's loader, which reads the file once, at its start;
+        //                    the live claude never re-reads its file, and its exit re-stamps its own leaf, which only that
+        //                    conversation's OWN next resume reads — so nothing it runs is changed. false = refuse (every resume).
         // Throws std::bad_alloc only (the callers wrap it).
-        void AppendRewindLine(const std::wstring& path, std::wstring_view sessionId, uint64_t sizeAtRead, const std::string& markerLine, std::wstring_view whatExitUndoes, ApiErrorRewindOutcome& outcome, uint64_t& appendedAtByte, std::wstring& detail)
+        void AppendRewindLine(const std::wstring& path, std::wstring_view sessionId, uint64_t sizeAtRead, const std::string& markerLine, std::wstring_view whatExitUndoes, ApiErrorRewindOutcome& outcome, uint64_t& appendedAtByte, std::wstring& detail, bool allowLiveHolder = false)
         {
             // Nobody may hold the conversation: a live claude that ran the failed turn re-stamps the error
             // branch as its leaf at exit and would silently undo the line (ApiErrorRewind.h, TIMING). The
-            // seams that end a claude wait for its exit first; this is the belt for every caller.
-            if (const auto holders = LiveClaudeProcessesForSession(sessionId); !holders.empty())
+            // seams that end a claude wait for its exit first; this is the belt for every caller. The fork's
+            // take-back needs the line only until the fork has read the file, so it may append beside a holder.
+            const auto holders = LiveClaudeProcessesForSession(sessionId);
+            if (!holders.empty() && !allowLiveHolder)
             {
                 outcome = ApiErrorRewindOutcome::Skipped;
                 detail = L"claude pid " + JoinPids(holders) + L" still runs this conversation (its exit would put " + std::wstring{ whatExitUndoes } + L" back as the active leaf)";
@@ -1368,6 +1375,12 @@ namespace Agentmaster
             }
             outcome = ApiErrorRewindOutcome::Appended;
             appendedAtByte = sizeAtRead;
+            if (!holders.empty())
+            {
+                // Only reachable with allowLiveHolder: say who still runs the source, and why that is fine for a fork.
+                detail = L"claude pid " + JoinPids(holders) + L" still runs the source: it never re-reads its file, and its exit puts " + std::wstring{ whatExitUndoes } +
+                         L" back for the source's own next resume only";
+            }
         }
 
         // A file read for ResolveClaudeAutoContinue: the whole file when it holds at most `cap` bytes, "" when it
@@ -1531,6 +1544,48 @@ namespace Agentmaster
         }
     }
 
+    ApiErrorRewindResult RewindApiErrorTailForForkSource(std::wstring_view sourceId) noexcept
+    {
+        ApiErrorRewindResult r;
+        try
+        {
+            const std::wstring path = ResolveClaudeTranscriptPath(sourceId);
+            if (path.empty())
+            {
+                return r; // NotNeeded: a source with no transcript forks fresh — there is no error to take back
+            }
+            uint64_t sizeAtRead = 0;
+            bool readOk = true;
+            r.plan = ReadAndPlan(path, sourceId, sizeAtRead, readOk);
+            if (!readOk)
+            {
+                r.outcome = ApiErrorRewindOutcome::Failed;
+                r.detail = L"the source's transcript could not be read (error " + std::to_wstring(::GetLastError()) + L")";
+                return r;
+            }
+            if (r.plan.verdict == ApiErrorRewindVerdict::NotApplicable)
+            {
+                return r; // NotNeeded: the error was taken back already (an earlier fork, a restart) or the source went on
+            }
+            if (r.plan.verdict != ApiErrorRewindVerdict::Rewind)
+            {
+                r.outcome = ApiErrorRewindOutcome::Skipped;
+                r.detail = r.plan.reason;
+                return r;
+            }
+            // The size re-check and the single append of every rewind — but a live claude of the SOURCE does not refuse it
+            // (AppendRewindLine's allowLiveHolder: the fork reads the file once, at its start; see the header).
+            AppendRewindLine(path, sourceId, sizeAtRead, r.plan.markerLine, L"the error", r.outcome, r.appendedAtByte, r.detail, /*allowLiveHolder*/ true);
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"RewindApiErrorTailForForkSource");
+            r.outcome = ApiErrorRewindOutcome::Failed;
+            r.detail = L"an exception was thrown (see the [exc] line above)";
+        }
+        return r;
+    }
+
     ApiErrorRewindPlan PlanApiErrorRewindForSession(std::wstring_view sessionId) noexcept
     {
         try
@@ -1568,6 +1623,10 @@ namespace Agentmaster
                  std::to_wstring(p.resumePromptRows) + L" earlier continue row(s), " + std::to_wstring(p.rowsAfterError) +
                  L" row(s) after it \x2014 to " + ShortId(p.targetUuid) + L" (" + p.targetKind + L"); line at byte " + std::to_wstring(r.appendedAtByte) +
                  ((p.targetKind == L"tool result" || p.targetKind == L"prompt") ? L"; the resumed claude continues the turn" : L"; Claude Code will NOT continue a turn that stops at this row \x2014 type to go on");
+            if (!r.detail.empty())
+            {
+                s += L" (" + r.detail + L")"; // the fork's take-back beside a live source claude (RewindApiErrorTailForForkSource)
+            }
             break;
         case ApiErrorRewindOutcome::NotNeeded:
             s += L"no API error at the end of the conversation";
@@ -1863,7 +1922,7 @@ namespace Agentmaster
         return result;
     }
 
-    ForkContinuationOutlook AssessForkContinuation(std::wstring_view sourceId, bool sourceRunning, std::wstring_view cwd, const std::vector<std::pair<std::wstring, std::wstring>>& spawnEnv) noexcept
+    ForkContinuationOutlook AssessForkContinuation(std::wstring_view sourceId, bool sourceRunning, std::wstring_view cwd, const std::vector<std::pair<std::wstring, std::wstring>>& spawnEnv, bool considerApiError) noexcept
     {
         ForkContinuationOutlook outlook;
         try
@@ -1875,21 +1934,35 @@ namespace Agentmaster
                 outlook.why = L"the source has no transcript (the fork starts fresh)";
                 return outlook;
             }
-            // The switch first: with it off, Claude Code only PREPARES the continuation, and a fork waits whatever its
-            // source was doing — there is nothing to stop and nothing to ask.
+            // Situation A — Claude Code continues the turn in the fork by itself. The switch first: with it off, Claude Code
+            // only PREPARES the continuation, and a fork waits whatever its source was doing — there is nothing to stop.
             outlook.autoContinue = ResolveClaudeAutoContinue(cwd, spawnEnv);
+            const bool tailContinues = outlook.tail.verdict == ResumeContinuation::ContinuesTurn || outlook.tail.verdict == ResumeContinuation::ResendsPrompt;
+            if (outlook.autoContinue.on && (tailContinues || sourceRunning))
+            {
+                outlook.ask = true;
+                return outlook;
+            }
+            // Situation B (2026-11-06) — the source's turn died on an API error after output began: its half-response reads
+            // as a finished turn (so A said no), and only Agentmaster's take-back would let a fork continue it. Offered only
+            // when the take-back lands on a row Claude Code continues from (a tool result, a prompt); asked whatever the switch
+            // says, because "Fork uninterrupted" sets it for the fork's start when no settings file decides.
+            if (considerApiError)
+            {
+                outlook.apiErrorPlan = PlanApiErrorRewindForSession(sourceId);
+                if (ApiErrorTakeBackContinues(outlook.apiErrorPlan))
+                {
+                    outlook.apiError = true;
+                    outlook.ask = true;
+                    return outlook;
+                }
+            }
             if (!outlook.autoContinue.on)
             {
                 outlook.why = std::wstring{ kClaudeResumeInterruptedTurnEnv } + L" is off (" + outlook.autoContinue.source + L") \x2014 a fork does not continue a turn by itself";
                 return outlook;
             }
-            const bool tailContinues = outlook.tail.verdict == ResumeContinuation::ContinuesTurn || outlook.tail.verdict == ResumeContinuation::ResendsPrompt;
-            if (!tailContinues && !sourceRunning)
-            {
-                outlook.why = L"the source's turn is finished (" + outlook.tail.tailKind + (outlook.tail.reason.empty() ? std::wstring{} : (L": " + outlook.tail.reason)) + L")";
-                return outlook;
-            }
-            outlook.ask = true;
+            outlook.why = L"the source's turn is finished (" + outlook.tail.tailKind + (outlook.tail.reason.empty() ? std::wstring{} : (L": " + outlook.tail.reason)) + L")";
         }
         catch (...)
         {
@@ -1900,7 +1973,7 @@ namespace Agentmaster
         return outlook;
     }
 
-    RestartContinuationOutlook AssessRestartContinuation(std::wstring_view sessionId, std::wstring_view forkParentId, bool turnRunning, std::wstring_view cwd, const std::vector<std::pair<std::wstring, std::wstring>>& spawnEnv) noexcept
+    RestartContinuationOutlook AssessRestartContinuation(std::wstring_view sessionId, std::wstring_view forkParentId, bool turnRunning, std::wstring_view cwd, const std::vector<std::pair<std::wstring, std::wstring>>& spawnEnv, bool considerApiError) noexcept
     {
         RestartContinuationOutlook outlook;
         try
@@ -1927,21 +2000,37 @@ namespace Agentmaster
                     return outlook;
                 }
             }
-            // The switch first, as for a fork: with it off the restarted claude waits whatever the turn was doing.
+            // Situation A — the restarted claude continues the turn by itself. The switch first, as for a fork: with it off the
+            // restarted claude waits whatever the turn was doing.
             outlook.autoContinue = ResolveClaudeAutoContinue(cwd, spawnEnv);
+            const bool tailContinues = outlook.tail.verdict == ResumeContinuation::ContinuesTurn || outlook.tail.verdict == ResumeContinuation::ResendsPrompt;
+            if (outlook.autoContinue.on && (tailContinues || turnRunning))
+            {
+                outlook.ask = true;
+                return outlook;
+            }
+            // Situation B (2026-11-06) — the turn died on an API error after output began (its half-response reads as a finished
+            // turn, so A said no) and Agentmaster's take-back would let the restarted claude continue it: the restart's own
+            // API-error rewind for a resume, the fork-source take-back for a re-fork. Offered only when the take-back lands on a
+            // row Claude Code continues from, whatever the switch says ("Restart uninterrupted" sets it for this start when no
+            // settings file decides).
+            if (considerApiError)
+            {
+                outlook.apiErrorPlan = PlanApiErrorRewindForSession(outlook.conversationId);
+                if (ApiErrorTakeBackContinues(outlook.apiErrorPlan))
+                {
+                    outlook.apiError = true;
+                    outlook.ask = true;
+                    return outlook;
+                }
+            }
             if (!outlook.autoContinue.on)
             {
                 outlook.why = std::wstring{ kClaudeResumeInterruptedTurnEnv } + L" is off (" + outlook.autoContinue.source + L") \x2014 the restarted claude does not continue a turn by itself";
                 return outlook;
             }
-            const bool tailContinues = outlook.tail.verdict == ResumeContinuation::ContinuesTurn || outlook.tail.verdict == ResumeContinuation::ResendsPrompt;
-            if (!tailContinues && !turnRunning)
-            {
-                outlook.why = std::wstring{ outlook.reforks ? L"the fork source's turn is finished (" : L"the turn is finished (" } + outlook.tail.tailKind +
-                              (outlook.tail.reason.empty() ? std::wstring{} : (L": " + outlook.tail.reason)) + L")";
-                return outlook;
-            }
-            outlook.ask = true;
+            outlook.why = std::wstring{ outlook.reforks ? L"the fork source's turn is finished (" : L"the turn is finished (" } + outlook.tail.tailKind +
+                          (outlook.tail.reason.empty() ? std::wstring{} : (L": " + outlook.tail.reason)) + L")";
         }
         catch (...)
         {

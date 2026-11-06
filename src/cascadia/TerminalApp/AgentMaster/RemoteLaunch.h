@@ -48,8 +48,10 @@ namespace Agentmaster
         std::wstring afterSessionId;
         // HOOKS.md "Interrupted turns" (Fork only): what the fork does about the source's unfinished turn, which Claude Code's
         // resume would continue in the fork by itself. Interrupted arms the window's fork stop watch (the fork's tab locked, ONE
-        // Esc the moment it runs); Uninterrupted lets it run. Ask makes the BOT ask in the topic first (its _requestLaunch
-        // resolves it before the request reaches a window; a window that still sees Ask forks Uninterrupted).
+        // Esc the moment it runs); Uninterrupted lets it run. ContinueAfterApiError (a source whose turn died on an API error:
+        // situation B's "Fork uninterrupted") makes the window take the error back in the source's transcript, launch the fork
+        // with CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 and start it at once. Ask makes the BOT ask in the topic first (its
+        // _requestLaunch resolves it before the request reaches a window; a window that still sees Ask forks Uninterrupted).
         ForkTurnChoice forkTurn{ ForkTurnChoice::Uninterrupted };
     };
 

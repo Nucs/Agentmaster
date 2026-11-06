@@ -1413,8 +1413,9 @@ namespace winrt::TerminalApp::implementation
                     // Sessions page's fork for one it never knew.
                     // HOOKS.md "Interrupted turns": the fork tool demanded the user's answer when the fork would continue the
                     // source's turn by itself (its `turn` argument); Interrupted arms the fork stop watch on the new session in
-                    // either seam, anything else (Ask is never sent) forks as before.
-                    const auto forkTurn = request.forkTurn == ::Agentmaster::ForkTurnChoice::Interrupted ? ::Agentmaster::ForkTurnChoice::Interrupted : ::Agentmaster::ForkTurnChoice::Uninterrupted;
+                    // either seam, ContinueAfterApiError (situation B's "uninterrupted") takes the source's API error back and starts
+                    // the fork, anything else (Ask is never sent) forks as before.
+                    const auto forkTurn = request.forkTurn == ::Agentmaster::ForkTurnChoice::Interrupted || request.forkTurn == ::Agentmaster::ForkTurnChoice::ContinueAfterApiError ? request.forkTurn : ::Agentmaster::ForkTurnChoice::Uninterrupted;
                     std::wstring forked;
                     if (!_ForkManagedSessionById(request.sessionId, slot, request.model, &forked, forkTurn))
                     {

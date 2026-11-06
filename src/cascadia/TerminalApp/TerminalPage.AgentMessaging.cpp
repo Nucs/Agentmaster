@@ -550,9 +550,11 @@ namespace winrt::TerminalApp::implementation
                 // before the call, since the fork's new id is always new and cannot tell it).
                 fresh = !::Agentmaster::ClaudeConversationExists(request.sessionId);
                 // HOOKS.md "Interrupted turns": the topic asked "Fork interrupted or uninterrupted?" and this is the answer (the
-                // bot resolves Ask before the request leaves it; a stray Ask forks as before).
+                // bot resolves Ask before the request leaves it; a stray Ask forks as before). ContinueAfterApiError is situation B's
+                // "Fork uninterrupted": the seam takes the source's API error back, launches with the switch and starts the fork.
                 openedId = _ForkSessionFromDisk(request.sessionId, request.dir, request.title, request.model, static_cast<uint32_t>(-1),
-                                                request.forkTurn == ::Agentmaster::ForkTurnChoice::Interrupted ? ::Agentmaster::ForkTurnChoice::Interrupted : ::Agentmaster::ForkTurnChoice::Uninterrupted);
+                                                request.forkTurn == ::Agentmaster::ForkTurnChoice::Interrupted || request.forkTurn == ::Agentmaster::ForkTurnChoice::ContinueAfterApiError ? request.forkTurn :
+                                                                                                                                                                                              ::Agentmaster::ForkTurnChoice::Uninterrupted);
                 break;
             }
             if (!openedId.empty())

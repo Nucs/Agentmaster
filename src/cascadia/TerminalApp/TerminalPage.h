@@ -1618,7 +1618,7 @@ namespace winrt::TerminalApp::implementation
         bool _LeaveManagerPageOntoSelectedTab(const TerminalApp::Tab& tab);
         void _InitAgentmasterEngine(); // Agentmaster: start the SessionRegistry + hooks bridge
         std::wstring _SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition = -1, winrt::hstring model = {}, const std::wstring& presetSessionId = {}); // Agentmaster (insertPosition: -1 == end/NewTabPosition default; a tab-context-menu spawn passes clickedIndex+1 so the new tab lands next to the clicked tab. model: the launch-model picker's per-LAUNCH `--model <id>` pick from an "Open New Session Here" submenu; "" = Default, the settings model. presetSessionId: MESSAGING.md §21.17 — the id the new session takes, minted by the caller (the Telegram bot's new-thread picker binds the user's thread to it before the tab exists); "" = mint one. Returns the new session's id, or "" when no tab opened — the claude.exe gate, a refused preset, a failed pane — which _RemoteLaunch turns into its answer, MESSAGING.md §21.23; every other caller ignores it)
-        TerminalApp::Tab _LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId = {}, uint32_t insertPosition = -1, const std::wstring& modelOverride = {}, const std::wstring& initialPrompt = {}, const std::wstring& inheritLaunchFromId = {}, const std::wstring& presetSessionId = {}); // Agentmaster (MESSAGING.md §21.17): presetSessionId = the id a FRESH launch takes (no `restored`, no fork) instead of a minted one — ignored by a resume, a restore and a fork. // Agentmaster (PRESETS): modelOverride is now a LAUNCH TARGET — "" (inherit / Default), a model id, or "@<presetId>" — resolved by _ResolveLaunchForSpawn; an empty target reuses the snapshot of the resumed session, else the fork source, else inheritLaunchFromId (the /handover origin), and the result is stored under the new session id (launchArgs) so every later relaunch keeps it // Agentmaster (returns the created tab; forkFromId set => fork that conversation into a new id; insertPosition threads tab placement, default -1 == end; modelOverride: launch-model picker — non-empty adds ` --model <id>` to THIS launch's commandline; initialPrompt: COMMANDS.md — non-empty rides the commandline as the positional prompt claude submits as the session's FIRST turn, the /handover successor's kickoff)
+        TerminalApp::Tab _LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId = {}, uint32_t insertPosition = -1, const std::wstring& modelOverride = {}, const std::wstring& initialPrompt = {}, const std::wstring& inheritLaunchFromId = {}, const std::wstring& presetSessionId = {}, const std::vector<std::pair<std::wstring, std::wstring>>& extraEnv = {}); // Agentmaster (MESSAGING.md §21.17): presetSessionId = the id a FRESH launch takes (no `restored`, no fork) instead of a minted one — ignored by a resume, a restore and a fork. // Agentmaster (HOOKS.md "Interrupted turns", situation B): extraEnv = variables added to THIS launch's claude environment after the spec's own (the last value of a name wins) — a fork whose source's API error was taken back gets CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 so it continues by itself; {} for every other launch. // Agentmaster (PRESETS): modelOverride is now a LAUNCH TARGET — "" (inherit / Default), a model id, or "@<presetId>" — resolved by _ResolveLaunchForSpawn; an empty target reuses the snapshot of the resumed session, else the fork source, else inheritLaunchFromId (the /handover origin), and the result is stored under the new session id (launchArgs) so every later relaunch keeps it // Agentmaster (returns the created tab; forkFromId set => fork that conversation into a new id; insertPosition threads tab placement, default -1 == end; modelOverride: launch-model picker — non-empty adds ` --model <id>` to THIS launch's commandline; initialPrompt: COMMANDS.md — non-empty rides the commandline as the positional prompt claude submits as the session's FIRST turn, the /handover successor's kickoff)
         void _HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPayload, const std::wstring& commandArgs = {}, bool inPlace = false, bool standby = false); // Agentmaster (COMMANDS.md): a /handover-family await resolved — if THIS window hosts the origin session's tab, FAN OUT one successor PER collected markdown (mdPayload = the '|'-joined path set, SplitWatchPaths): each HANDOVER-*.md starts its OWN "<title> (handover N)" successor whose first user message is THAT file's content, via the per-file delivery tiers (commandline under the escaped budget; full-document bracketed-paste injection above it; NEVER truncated), tabs in write order right of the origin. commandArgs = the typed command's <command-args> verbatim — its LEADING words may name a §6b per-message successor-model hint ("/handover [fable] do x…", PickModelFromArgsHint), overriding the per-command Successor-model combo for THIS handover only. inPlace=false (/handover) spawns every successor as a new tab; inPlace=true (/handover-here) puts the FIRST file's successor INTO the origin tab via _RestartTabIntoFreshSession (additional files beside it), degrading to the new-tab spawn if the in-place swap is unavailable. standby=true (/handover-standby, §5b — mutually exclusive with inPlace) spawns new tabs like /handover but delivers NOTHING at launch: every file (content AND pointer alike) rides the pump's STANDBY lane, which TYPES it into the successor's input box without submitting (BuildPromptFill — one Enter away; the commandline tier is structurally excluded because a positional prompt auto-submits)
         std::wstring _RestartTabIntoFreshSession(const TerminalApp::Tab& originTab, const ::Agentmaster::SessionInfo& origin, const std::wstring& dir, const std::wstring& title, const std::wstring& initialPrompt, const std::wstring& modelOverride = {}); // Agentmaster (COMMANDS.md — /handover-here): REPLACE the origin session's live pane in place with a brand-new FRESH conversation — "Open New Session Here -> Default" spawn semantics (new minted id, the settings model unless the §6b per-command successor modelOverride is set, same dir) delivered through the Restart-session swap (_RestartManagedSession's recipe: HardResetWithoutErase + Connection swap + Start, scrollback kept); _BindClaudeSessionToTab's re-home block then archives the origin (live=false, injector cleared, resumable from Sessions) and re-keys the tab onto the successor. Returns the successor's session id ("" == refused/failed — the caller falls back to the new-tab spawn so the handover is never lost). UI thread only
         // Agentmaster (COMMANDS.md §5 — the over-budget /handover delivery): a successor spawned with a
@@ -2775,6 +2775,13 @@ namespace winrt::TerminalApp::implementation
             bool turnRunning{ false }; // the turn runs right now (the restart's shutdown cuts it), vs. a turn left unfinished on disk
             bool reforks{ false }; // the restart re-forks a never-messaged fork from its source (the log)
             std::wstring tailKind; // what the resumed transcript ends in (the log)
+            // Situation B (2026-11-06): the turn died on an API error after output began — the restarted claude would wait at
+            // it unless Agentmaster takes it back. The dialog quotes the error and says what "uninterrupted" does with the switch.
+            bool apiError{ false };
+            std::wstring errorText; // B: the error as Claude Code wrote it (its first line)
+            std::wstring errorKind; // B: its `error` field ("server_error", "overloaded", … — the log)
+            ::Agentmaster::AutoContinueAtRestart autoContinue{ ::Agentmaster::AutoContinueAtRestart::On }; // B: the switch for the restarted claude
+            std::wstring autoContinueSource; // B: where that value came from (the dialog names a settings file that turns it off)
         };
         // Should a restart of `sessionId` ask the third question? Only for a managed CLAUDE session whose restart would
         // continue a turn by itself (AssessRestartContinuation: CLAUDE_CODE_RESUME_INTERRUPTED_TURN on where it runs, and the
@@ -2833,6 +2840,14 @@ namespace winrt::TerminalApp::implementation
             std::wstring rerunTool; // a tool call in flight the fork re-runs ("" = none)
             bool sourceRunning{ false }; // the source runs right now (vs. a turn left unfinished on disk)
             std::wstring tailKind; // what the source's transcript ends in (the log)
+            // Situation B (2026-11-06): the source's turn died on an API error after output began — a fork would wait at it
+            // unless Agentmaster takes it back (into the SOURCE's transcript). The dialog's "Fork uninterrupted" is then
+            // ForkTurnChoice::ContinueAfterApiError and its "Fork interrupted" plain Uninterrupted (nothing would run).
+            bool apiError{ false };
+            std::wstring errorText; // B: the error as Claude Code wrote it (its first line)
+            std::wstring errorKind; // B: its `error` field (the log)
+            ::Agentmaster::AutoContinueAtRestart autoContinue{ ::Agentmaster::AutoContinueAtRestart::On }; // B: the switch where the fork runs
+            std::wstring autoContinueSource; // B: where that value came from
         };
         // Should a fork of `sourceId` ask? Only for a Claude source with a transcript when CLAUDE_CODE_RESUME_INTERRUPTED_TURN
         // is on where the fork would run (ResolveClaudeAutoContinue) AND the fork would continue a turn by itself — the source's
@@ -2851,11 +2866,26 @@ namespace winrt::TerminalApp::implementation
         // is what a stray Enter must not cause), Secondary = "Fork uninterrupted", Close = Cancel (no fork). Then the fork
         // with the answer. fire_and_forget with a terminate-net.
         winrt::fire_and_forget _AskForkTurnThenFork(ForkLaunchRequest request, ForkTurnQuestion question);
-        // Run `request` with `forkTurn` (Uninterrupted / Interrupted): _openClaudeTabInBackground set around the ONE open the
-        // way the call site set it, then the matching fork seam.
+        // Run `request` with `forkTurn` (Uninterrupted / Interrupted / ContinueAfterApiError): _openClaudeTabInBackground set
+        // around the ONE open the way the call site set it, then the matching fork seam.
         //   request — the fork; forkTurn — the answer.
         // Returns the NEW session's id ("" when no tab opened). Throws what the fork seams throw (callers are inside a try).
         std::wstring _LaunchForkRequest(const ForkLaunchRequest& request, ::Agentmaster::ForkTurnChoice forkTurn);
+        // Situation B's "Fork uninterrupted" (ForkTurnChoice::ContinueAfterApiError), the half BEFORE the launch: take the fork
+        // SOURCE's API error back (ApiErrorRewind.h RewindApiErrorTailForForkSource — the line goes into the source's
+        // transcript, a live source claude allowed, since the fork reads the file once, at its start) and log the outcome.
+        //   sourceId — the fork source ("" = a source with no transcript: the fork starts fresh, nothing to take back).
+        // Returns the environment the fork's launch adds: CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 (a settings file that sets the
+        // switch still wins), so the fork continues the turn by itself; empty for "". Never throws (a failure is logged and
+        // returns the switch anyway: the fork then waits at the error, as a fork without the take-back does).
+        std::vector<std::pair<std::wstring, std::wstring>> _TakeBackApiErrorForFork(const std::wstring& sourceId);
+        // Situation B's "Fork uninterrupted", the half AFTER the launch: start the new fork's claude in place one Low-priority tick
+        // later when its tab is still dormant (a background fork — the Sessions page's row menu, a phone's fork, the AI search's)
+        // — the turn is to go on NOW, and the source's file must still carry the take-back when the fork reads it (the source's
+        // claude re-stamps its own leaf at its exit). The _FinishManagerPageLaunch recipe; a fork already started is left alone.
+        //   forkedId — the new fork ("" = no tab opened: nothing to do).
+        // Never throws.
+        void _StartForkSoonAfterTakeBack(const std::wstring& forkedId);
 
         // ---- the FORK STOP WATCH (InterruptedTurns.h DecideForkTurnStop) ----
         // One watched fork — or one session restarted with "Restart interrupted" (the same watch, the same persisted intent:

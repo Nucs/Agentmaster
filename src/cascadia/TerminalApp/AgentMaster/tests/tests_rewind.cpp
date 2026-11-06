@@ -904,6 +904,72 @@ namespace
                 WriteBytes(root / L"config" / L"settings.json", "{\"env\":{\"CLAUDE_CODE_RESUME_INTERRUPTED_TURN\":\"1\"}}");
             }
 
+            // SITUATION B (2026-11-06, the session stuck at "API Error: Server error mid-response. The response above may be
+            // incomplete."): a turn that died on an API error after output began. The real shape: a tool result, a THINKING-ONLY
+            // half-response, the error (server_error, truncatedAfterOutput) and its turn_duration row.
+            {
+                const std::wstring errored = L"5e551011-0000-4000-8000-0000000000b7";
+                const auto erroredPath = root / L"config" / L"projects" / L"K--x" / (errored + L".jsonl");
+                const std::string erroredTail = Join({
+                    UserPrompt("u0000001", "", "Finish this"),
+                    ToolUse("a0000001", "u0000001", "msg_1", "toolu_1"),
+                    ToolResult("r0000001", "a0000001", "toolu_1"),
+                    Partial("p0000001", "r0000001", "msg_2", true),
+                    ApiError("e0000001", "p0000001", "API Error: Server error mid-response. The response above may be incomplete.", true),
+                    TurnDuration("t0000001", "e0000001"),
+                });
+                WriteBytes(erroredPath, erroredTail);
+                const auto tail = ClassifyResumeContinuationForSession(errored);
+                CHECK(tail.verdict == ResumeContinuation::None && tail.tailKind == L"reply", "api error: the thinking-only half-response reads as a finished turn to the classifier (situation A says no)");
+                CHECK(!AssessRestartContinuation(errored, L"", false, project, {}).ask && !AssessForkContinuation(errored, false, project, {}).ask,
+                      "api error: without considerApiError (resumeApiErrorTurns off) neither question is asked");
+                const auto r = AssessRestartContinuation(errored, L"", false, project, {}, true);
+                CHECK(r.ask && r.apiError && !r.reforks && r.apiErrorPlan.verdict == ApiErrorRewindVerdict::Rewind && r.apiErrorPlan.targetKind == L"tool result" &&
+                          r.apiErrorPlan.errorText.find(L"API Error: Server error mid-response") == 0 && r.apiErrorPlan.errorKind == L"server_error",
+                      "api error: the restart offers the take-back (onto the tool result: it carries on), with the error quoted");
+                const auto f = AssessForkContinuation(errored, false, project, {}, true);
+                CHECK(f.ask && f.apiError && ApiErrorTakeBackContinues(f.apiErrorPlan), "api error: the fork offers the take-back too");
+                WriteBytes(root / L"config" / L"settings.json", "{\"env\":{\"CLAUDE_CODE_RESUME_INTERRUPTED_TURN\":\"0\"}}");
+                const auto offB = AssessRestartContinuation(errored, L"", false, project, {}, true);
+                CHECK(offB.ask && offB.apiError && !offB.autoContinue.on && offB.autoContinue.fromSettingsFile && AssessForkContinuation(errored, false, project, {}, true).ask,
+                      "api error: asked with the switch off too (the question then says the next message continues it)");
+                WriteBytes(root / L"config" / L"settings.json", "{\"env\":{\"CLAUDE_CODE_RESUME_INTERRUPTED_TURN\":\"1\"}}");
+                const auto refork = AssessRestartContinuation(L"5e551011-0000-4000-8000-0000000000b8", errored, false, project, {}, true);
+                CHECK(refork.ask && refork.apiError && refork.reforks && refork.conversationId == errored, "api error: a never-messaged fork's re-fork offers its SOURCE's take-back");
+                CHECK(!ApiErrorTakeBackContinues(ApiErrorRewindPlan{}), "api error: a plan that is not Rewind offers nothing");
+
+                // The fork's take-back beside a LIVE holder: a heartbeat of THIS process (the harness) naming the conversation with
+                // its exact creation stamp, so the holder check opens the pid and matches procStart as it does for a real claude.
+                FILETIME created{}, exited{}, kernel{}, user{};
+                ::GetProcessTimes(::GetCurrentProcess(), &created, &exited, &kernel, &user);
+                const uint64_t procStart = (static_cast<uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+                std::string erroredNarrow;
+                for (const wchar_t c : errored)
+                {
+                    erroredNarrow += static_cast<char>(c); // an ASCII GUID
+                }
+                std::filesystem::create_directories(root / L"config" / L"sessions", ec);
+                const auto beat = root / L"config" / L"sessions" / (std::to_wstring(::GetCurrentProcessId()) + L".json");
+                WriteBytes(beat, "{\"pid\":" + std::to_string(::GetCurrentProcessId()) + ",\"sessionId\":\"" + erroredNarrow + "\",\"procStart\":\"" + std::to_string(procStart) + "\",\"status\":\"idle\"}");
+                CHECK(LiveClaudeProcessesForSession(errored).size() == 1, "fork take-back: the heartbeat makes this process a live holder of the source");
+                const auto refused = RewindApiErrorTailForSession(errored);
+                CHECK(refused.outcome == ApiErrorRewindOutcome::Skipped && refused.detail.find(L"still runs this conversation") != std::wstring::npos && ReadBytes(erroredPath) == erroredTail,
+                      "a RESUME's rewind refuses beside a live holder (its exit would undo the line): nothing written");
+                const auto taken = RewindApiErrorTailForForkSource(errored);
+                CHECK(taken.outcome == ApiErrorRewindOutcome::Appended && ReadBytes(erroredPath) == erroredTail + taken.plan.markerLine + "\n" && taken.detail.find(L"still runs the source") != std::wstring::npos &&
+                          taken.plan.targetUuid == L"r0000001",
+                      "fork take-back: ONE line appended beside the live holder (aimed at the tool result), and the result names the holder");
+                const auto line = DescribeApiErrorRewind(taken, errored, L"fork");
+                CHECK(line.find(L"[api-error-rewind] 5e551011 fork: rewound past") == 0 && line.find(L"still runs the source") != std::wstring::npos, "fork take-back: the log line names the live source claude");
+                std::filesystem::remove(beat, ec);
+                CHECK(RewindApiErrorTailForForkSource(errored).outcome == ApiErrorRewindOutcome::NotNeeded && ReadBytes(erroredPath) == erroredTail + taken.plan.markerLine + "\n",
+                      "fork take-back: a second one writes nothing (the error is taken back already)");
+                const auto afterA = AssessForkContinuation(errored, false, project, {}, true);
+                CHECK(afterA.ask && !afterA.apiError && afterA.tail.verdict == ResumeContinuation::ContinuesTurn,
+                      "fork take-back: once taken back, the next fork's question is situation A (Claude Code continues the turn by itself)");
+                CHECK(RewindApiErrorTailForForkSource(L"5e551011-0000-4000-8000-0000000000fe").outcome == ApiErrorRewindOutcome::NotNeeded, "fork take-back: a source with no transcript needs nothing");
+            }
+
             // the restart's front doors: a session interrupted during a reply, planned and rewound through its id
             const std::wstring interrupted = L"5e551011-0000-4000-8000-0000000000b4";
             const auto path = root / L"config" / L"projects" / L"K--x" / (interrupted + L".jsonl");
@@ -968,6 +1034,10 @@ namespace
                   std::wstring{ RestartTurnChoiceName(RestartTurnChoice::StopContinuedTurn) } == L"stop-continued-turn" && std::wstring{ RestartTurnChoiceName(RestartTurnChoice::LetTurnContinue) } == L"let-turn-continue" &&
                   std::wstring{ RestartTurnChoiceName(static_cast<RestartTurnChoice>(9)) } == L"unknown",
               "choices: the restart's interrupted / uninterrupted answers come after Ask, with their own log words");
+        // Situation B's fork answer (2026-11-06): appended after Ask too.
+        CHECK(static_cast<int32_t>(ForkTurnChoice::ContinueAfterApiError) == 3 && std::wstring{ ForkTurnChoiceName(ForkTurnChoice::ContinueAfterApiError) } == L"continue-after-api-error" &&
+                  std::wstring{ ForkTurnChoiceName(static_cast<ForkTurnChoice>(9)) } == L"unknown",
+              "choices: the fork's take-back answer comes after Ask, with its own log word");
     }
 
     void TestTurnQuestionTexts()
@@ -997,6 +1067,18 @@ namespace
               "texts: a restart of a turn left unfinished on disk that resends its prompt");
         const auto j = RestartTurnQuestionBody(L"x", false, L"", true);
         CHECK(j.find(L"\x2014") == std::wstring::npos, "texts: with no tool and no prompt to resend, no dash clause");
+        // Situation B (2026-11-06): a turn that died on an API error, for the restart and for the fork.
+        const auto k = ApiErrorTurnQuestionBody(false, L"open bugs", L"API Error: Server error mid-response.", false, AutoContinueAtRestart::On, L"");
+        CHECK(k.find(L"The last turn of \x201Copen bugs\x201D stopped on an API error: \x201C" L"API Error: Server error mid-response.\x201D") == 0 && k.find(L"Restart uninterrupted: Agentmaster takes the error back") != std::wstring::npos &&
+                  k.find(L"continues the turn by itself") != std::wstring::npos && k.find(L"from the last step that finished") != std::wstring::npos && k.find(L"Restart interrupted: the restarted Claude waits at the error") != std::wstring::npos,
+              "texts: the restart's API-error question quotes the error and explains both answers");
+        const auto l = ApiErrorTurnQuestionBody(true, L"", L"", true, AutoContinueAtRestart::TurnedOnForThisRestart, L"");
+        CHECK(l.find(L"The last turn of this session stopped on an API error.") == 0 && l.find(L"Fork uninterrupted") != std::wstring::npos && l.find(L"the source stays where it is") != std::wstring::npos &&
+                  l.find(L"your prompt is sent again") != std::wstring::npos && l.find(L"this one fork sets it") != std::wstring::npos && l.find(L"Fork interrupted: the fork waits at the error") != std::wstring::npos,
+              "texts: the fork's API-error question - no title, no error text, the prompt resent, the switch set for this fork");
+        const auto m = ApiErrorTurnQuestionBody(false, L"x", L"e", false, AutoContinueAtRestart::OffInSettings, L"C:\\cfg\\settings.json");
+        CHECK(m.find(L"is off (in C:\\cfg\\settings.json)") != std::wstring::npos && m.find(L"your next message continues it") != std::wstring::npos && m.find(L"by itself") == std::wstring::npos,
+              "texts: a switch off in settings says what happens instead of promising an automatic continuation");
     }
 }
 

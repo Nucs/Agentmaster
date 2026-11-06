@@ -843,6 +843,13 @@ continue them by itself.
 | "Restart session" (`_RestartManagedSession`, resume only) | Plans while the old claude still runs. When a rewind is due it opens the holders, swaps the new connection in WITHOUT `Start`, and `_StartAfterApiErrorRewind` waits for the holders off the UI thread (at most `kApiErrorRewindExitWaitMs`, 15 s), appends, then starts the connection on the UI thread — only while it is still `NotConnected` (a closed tab or a second restart has closed it). A timeout or a failure still starts it, un-rewound. A claude in ANOTHER tab running the same conversation (OBSERVER.md §20) skips the hold: this restart cannot end it. |
 | "Deactivate" (`_DeactivateManagedTab`, resume only, state `Error` or `midTurnAtRestore`) | Plans before the swap, then `_RewindApiErrorAfterExit` waits for the parked claude's exit and appends. A tab woken before that has a live claude, and the append refuses rather than race it. |
 | A restored resume (`_LaunchClaudeSession` with a `restored` record: window restore, Sessions-page "Resume here", a reopened closed session) | `_RewindApiErrorBeforeRestore` appends synchronously before the connection is built, only for a record whose state is `Error` or whose `midTurnAtRestore` is set, so a 600-tab window restore reads no transcript for a healthy tab. |
+| A fork answered "Fork uninterrupted" (2026-11-06, NOT BUILT: `ForkTurnChoice::ContinueAfterApiError`, `_TakeBackApiErrorForFork`) | Appends to the SOURCE's transcript right before the fork's launch, a live source claude ALLOWED (`RewindApiErrorTailForForkSource`), launches the fork with `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` and starts it in place one Low-priority tick later (`_StartForkSoonAfterTakeBack`). HOOKS.md *Interrupted turns*, situation B. |
+
+Since 2026-11-06 (NOT BUILT) the restart's rewind is ASKED about when the restart is interactive: the restart question
+(situation B, *Interrupted turns*) — "Restart uninterrupted" takes the error back as above and adds
+`CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` to the new claude's environment (a settings file that sets the switch still
+wins), "Restart interrupted" leaves the error and the restarted claude waits at it. A restart nobody asked about
+(Telegram's ▶ Reactivate, a restart with no dialog presenter) still takes it back as the table says.
 
 **The scanner needs no change.** The marker moves the active leaf off the error branch, so
 `ShouldReleaseErrorOnLeafMove` releases `Error` → `WaitingForInput`; the resumed claude's
@@ -850,8 +857,9 @@ continue them by itself.
 
 **Left as it is.**
 - A refusal, a DLP denial, a safety-monitor block.
-- A fork of an errored session: the fork reads the SOURCE's tail, which is not this session's to change.
-  Restart the source instead.
+- A fork of an errored session nobody asked about (a programmatic fork, a fork whose question could not be shown): the
+  fork reads the SOURCE's tail and waits at the error. Since 2026-11-06 an interactive fork asks (situation B) and its
+  "Fork uninterrupted" takes the error back in the source's file (the table's last row).
 - A turn older than Claude Code's own age bound (5 days here): rewound, but not continued.
 - An error that will repeat (a prompt too long, an invalid model): the resume fails again, as a manual
   retry would.
@@ -992,10 +1000,45 @@ turn a crash cut off. Before this, such a restart asked nothing and the turn sim
 - **Not asked:** a Codex session, a parked tab (a restart has nothing to restart there), the switch off (the restarted
   claude only prepares the continuation and waits), a finished turn, a session with no transcript (fresh). ▶ Reactivate of
   an errored or exited session (Telegram) restarts with `KeepInterrupted` and never asks: it starts the session again on
-  purpose. The API-error rewind is untouched: a half-response under an API error reads as a finished turn to the
-  classifier, so the restart that rewinds it asks nothing (HOOKS.md *API-error turns*); if the question was asked for a
-  running turn and the rewind is also due, "Restart interrupted" lets the rewind happen and the stop watch stops whatever
-  then runs.
+  purpose.
+
+**Situation B — a turn that died on an API error (2026-11-06, NOT BUILT).** The user's request, on session `cd34ab6c`
+stuck at "API Error: Server error mid-response. The response above may be incomplete.": "I want restart/fork to also be
+able to tackle this error as part of interrupted/uninterrupted choice. removing this error on a starting tab should
+auto-continue". That transcript's tail (2.1.310): a tool result, a THINKING-ONLY half-response, the error row (`error:
+"server_error"`, `truncatedAfterOutput`, `streamCutCause`) and its `turn_duration`. The classifier steps over the error and
+stops at the half-response: a FINISHED turn (`None`, "reply") — so situation A asks nothing, a fork waits at the error, and
+only the API-error take-back (*API-error turns*) lets anything continue. The compiled planner, run read-only on the real
+file: `Rewind` onto the tool result `62d92b21`, 1 half-response row, the take-back continues.
+- **When it asks** (`AssessRestartContinuation` / `AssessForkContinuation` with `considerApiError` =
+  `AppSettings::resumeApiErrorTurns`, after situation A said no): the conversation the restart resumes (own / re-forked
+  source) or the fork's source ends in an API error whose take-back lands on a row Claude Code continues from
+  (`ApiErrorTakeBackContinues`: a tool result, a prompt) — whatever the switch says, because "uninterrupted" sets it for that
+  one start (a settings file that turns it OFF still wins: the take-back happens and the next message continues; the
+  question says so). The setting off = no API error is taken back anywhere = nothing offered.
+- **The dialogs** (`ApiErrorTurnQuestionBody`): "Restart a session whose turn stopped on an API error?" / "Fork a session
+  whose turn stopped on an API error?", the error quoted, the same buttons and default (interrupted).
+- **Restart uninterrupted** (`LetTurnContinue`): the restart's own API-error rewind (resume: the held Start, the old claude's
+  exit, the line) PLUS `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` in the new claude's environment, so it continues by itself; a
+  never-messaged fork's RE-FORK takes its source's error back instead (`RewindApiErrorTailForForkSource`). The API-error plan
+  now runs BEFORE the connection is built (`_RestartManagedSession`), so the switch can ride its environment.
+- **Restart interrupted** (`StopContinuedTurn`): the rewind is skipped (`NOT rewound — the user chose "Restart
+  interrupted"`), the restarted claude waits at the error, and no stop watch is armed (nothing runs).
+- **Fork uninterrupted** (`ForkTurnChoice::ContinueAfterApiError`, both fork seams): `_TakeBackApiErrorForFork` appends the
+  line to the SOURCE's transcript right before the launch — the ONE append made beside a live claude: a
+  `--fork-session` fork has no file until its first turn and reads its source's once, at its start; Claude Code's
+  `--resume-session-at` (which could start it at an earlier row) is honored in print mode only ("Ignored outside print mode",
+  2.1.310); the source's live claude never re-reads its file, and its exit re-stamps its OWN leaf, which only the source's own
+  next resume reads — so the source stays exactly where it was. The fork launches with the switch
+  (`_LaunchClaudeSession`'s `extraEnv`) and is started in place one Low-priority tick later (`_StartForkSoonAfterTakeBack`),
+  so a background fork (the Sessions page, a phone, the AI search) continues now, while the source's file still carries the
+  line. ⚠ A dormant fork that starts only after the source's claude exited would read the source's re-stamp and wait at the
+  error (the in-place start makes that window ~1 s).
+- **Fork interrupted** = plain `Uninterrupted`: the fork waits at the error; no watch (nothing would run).
+- After a fork's take-back the source's tail reads as a continuable tail, so the NEXT fork of it gets situation A (Claude
+  Code continues by itself) — the stop watch then answers "interrupted".
+- Telegram asks both (MESSAGING.md §21.37); the AI search's fork tool maps its `turn` answer to the take-back (SESSIONS.md
+  §9.14).
 
 **The classifier** (`ClassifyResumeContinuation`, a mirror of `bfo` from the active leaf): system / progress rows,
 transient API errors and queued task notifications are stepped over; an assistant tool_use at the tail is a call in
@@ -1039,6 +1082,13 @@ Claude session that does not ask it), `[nav] restart-question <sid8> (the turn r
 source; re-runs <tool>)`, `[nav] restart-answer <sid8> -> stop-continued-turn | let-turn-continue | cancelled`, `[fork-stop]
 <sid8> restart: the user chose "Restart interrupted" — the stop intent is recorded on the session` then `[fork-stop] <sid8>
 armed (restart interrupted)…`, and `… restart: the user chose "Restart uninterrupted" — the stop intent is cleared`.
+Situation B: `[nav] restart-question <sid8> (an API error: server_error)`, `[api-error-rewind] <sid8> restart: NOT rewound —
+the user chose "Restart interrupted": the restarted claude waits at the error …`, `[fork-stop] <sid8> restart: "Restart
+interrupted" kept the API error — nothing will run, no watch`; the fork's `[nav] fork-question <src8> (<origin>; an API error:
+server_error)`, `fork-answer <src8> -> fork uninterrupted (continue-after-api-error) | fork interrupted (the fork waits at the
+API error)`, `[api-error-rewind] <src8> fork: rewound past "…" … (claude pid N still runs the source: it never re-reads its
+file, …)`, `[nav] fork-start <fork8> started in place (the source's API error was taken back: the turn goes on now)`; a
+re-fork restart's `[api-error-rewind] <src8> restart re-fork of <sid8>: …`.
 
 **Tests.** `TestInterruptedTurns` (`tests_rewind.cpp`): the planner on the probes' shapes and every refusal, the
 classifier, the switch's precedence on scratch settings files, the session front doors (a scratch
@@ -1046,7 +1096,13 @@ classifier, the switch's precedence on scratch settings files, the session front
 `AssessRestartContinuation` on the same scratch config dir (a call in flight asked; a finished turn only while it runs; no
 transcript and no source = fresh; a never-messaged fork's re-fork decided by its source's tail and state; a source with no
 transcript; the switch off), the two new choices' values and log words, and `RestartTurnQuestionBody`'s words. The fork
-tool's `turn` guard: `TestTabsServer` (`tests_tabtools.cpp`). The live behavior was measured with the
+tool's `turn` guard: `TestTabsServer` (`tests_tabtools.cpp`). Situation B: the real thinking-only shape (the classifier's
+`None`; neither question without `considerApiError`; both with it, the error quoted, also with the switch off; a re-fork offers
+the source's take-back), the fork's take-back beside a LIVE holder (a heartbeat of the harness's own process with its exact
+`procStart`: a resume's rewind refuses, `RewindApiErrorTailForForkSource` appends one line and names the holder; a second
+one writes nothing; the next fork then reads situation A), `ForkTurnChoice::ContinueAfterApiError`'s value and word,
+`ApiErrorTurnQuestionBody`'s three switch states, and the fork tool's B refusal and mapping (`uninterrupted` →
+`ContinueAfterApiError`, `interrupted` → a plain fork). The live behavior was measured with the
 probes above (`tools/interrupt-probe/interrupt_probe.py`), and then the COMPILED planner, linked into a probe from
 the harness's objects (`rewind_probe.exe`, `build_rewind_probe.bat` + `cpp_probe.py`), was run on transcripts the
 real claude wrote: an Esc during a reply (planned to the

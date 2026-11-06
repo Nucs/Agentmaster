@@ -1910,12 +1910,20 @@ namespace Agentmaster
                 }
             }
             facts.sourceRunning = known && known->live && (known->state == SessionState::Running || known->state == SessionState::NeedsApproval);
-            const ForkContinuationOutlook outlook = AssessForkContinuation(sessionId, facts.sourceRunning, dir, ResolveSessionEnv(LoadAppSettings(), dir));
+            // Situation B (the source's turn died on an API error) is considered while Agentmaster may take API errors back
+            // (AppSettings::resumeApiErrorTurns), as the PC's dialog and the Telegram topic's buttons consider it.
+            const AppSettings settings = LoadAppSettings();
+            const ForkContinuationOutlook outlook = AssessForkContinuation(sessionId, facts.sourceRunning, dir, ResolveSessionEnv(settings, dir), settings.resumeApiErrorTurns);
             facts.wouldContinue = outlook.ask;
-            facts.resendsPrompt = outlook.tail.verdict == ResumeContinuation::ResendsPrompt;
-            facts.rerunTool = outlook.tail.droppedTool;
+            facts.apiError = outlook.apiError;
+            facts.errorText = outlook.apiError ? outlook.apiErrorPlan.errorText : std::wstring{};
+            facts.resendsPrompt = outlook.apiError ? outlook.apiErrorPlan.targetKind == L"prompt" : outlook.tail.verdict == ResumeContinuation::ResendsPrompt;
+            facts.rerunTool = outlook.apiError ? std::wstring{} : outlook.tail.droppedTool;
             facts.why = outlook.why;
-            LogAgent(L"tool fork " + ShortId(sessionId) + (outlook.ask ? (L": the fork would continue a turn (" + (facts.sourceRunning ? std::wstring{ L"running" } : outlook.tail.tailKind) + L") - the user's answer is needed") : (L": no turn to ask about (" + outlook.why + L")")));
+            LogAgent(L"tool fork " + ShortId(sessionId) +
+                     (outlook.ask ? (outlook.apiError ? std::wstring{ L": the source's last turn stopped on an API error - the user's answer is needed" } :
+                                                        (L": the fork would continue a turn (" + (facts.sourceRunning ? std::wstring{ L"running" } : outlook.tail.tailKind) + L") - the user's answer is needed")) :
+                                    (L": no turn to ask about (" + outlook.why + L")")));
             return facts;
         };
         // SESSIONS.md §9.16: the status tool's facts (full) and a search row's status and age (brief). Registry reads on

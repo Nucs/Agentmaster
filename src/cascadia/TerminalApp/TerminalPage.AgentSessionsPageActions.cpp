@@ -165,7 +165,9 @@ namespace winrt::TerminalApp::implementation
     // insertPosition (SESSIONS.md §9.14): the 0-based strip slot for the fork; -1 = the end (Terminal's newTabPosition).
     // Returns the NEW session's id, or "" when no tab opened (a gate, a failed launch, missing arguments).
     // forkTurn (HOOKS.md "Interrupted turns"): Interrupted — the user's "Fork interrupted" — records the stop intent on the new
-    // fork (SessionInfo::stopForkedTurn, persisted) and arms the fork stop watch (TerminalPage.AgentTurns.cpp).
+    // fork (SessionInfo::stopForkedTurn, persisted) and arms the fork stop watch (TerminalPage.AgentTurns.cpp). ContinueAfterApiError
+    // — "Fork uninterrupted" of a source whose turn died on an API error (situation B) — takes the error back in the source's
+    // transcript before the launch, launches with CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 and starts the fork at once.
     std::wstring TerminalPage::_ForkSessionFromDisk(const std::wstring& parentId, const std::wstring& dir, const std::wstring& title, const std::wstring& modelOverride, uint32_t insertPosition, ::Agentmaster::ForkTurnChoice forkTurn)
     {
         if (!_sessionRegistry || parentId.empty() || dir.empty())
@@ -202,7 +204,11 @@ namespace winrt::TerminalApp::implementation
         // another window or a closed one with a persisted memory (the remembered draft answers), or one the
         // registry never knew (nothing to carry — _CaptureDraftForFork returns empty).
         auto carry = _CaptureDraftForFork(forkParentId);
-        const auto forkedTab = _LaunchClaudeSession(winrt::hstring{ forkDir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition, modelOverride);
+        // HOOKS.md "Interrupted turns", situation B: "Fork uninterrupted" of a source whose turn died on an API error — take the
+        // error back in the SOURCE's transcript right before the launch, and give the fork the switch that makes it continue.
+        const bool continueAfterApiError = forkTurn == ::Agentmaster::ForkTurnChoice::ContinueAfterApiError;
+        const auto extraEnv = continueAfterApiError ? _TakeBackApiErrorForFork(forkFrom) : std::vector<std::pair<std::wstring, std::wstring>>{};
+        const auto forkedTab = _LaunchClaudeSession(winrt::hstring{ forkDir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition, modelOverride, {}, {}, {}, extraEnv);
         _CarryDraftIntoFork(forkParentId, forkedTab ? _ClaudeSessionForTab(forkedTab) : std::wstring{}, std::move(carry));
         // Nav audit END (pairs with the fork-click BEGIN above): the NEW forked id — exactly "the id of the
         // new forked session" the user asked to be able to trace, alongside the source it forked from. A
@@ -216,7 +222,12 @@ namespace winrt::TerminalApp::implementation
             _sessionRegistry->Update(forkedId, [](::Agentmaster::SessionInfo& s) { s.stopForkedTurn = true; });
             _ArmForkTurnStop(forkedId, L"fork");
         }
-        ::Agentmaster::LogNav(L"sessions fork-done " + (forkedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(forkedId))) + L" from=" + ::Agentmaster::ShortId(forkParentId) + (forkFrom.empty() ? std::wstring{ L" (fresh \x2014 no parent transcript)" } : std::wstring{}) + (forkTurn == ::Agentmaster::ForkTurnChoice::Interrupted ? std::wstring{ L" (fork interrupted)" } : std::wstring{}));
+        if (continueAfterApiError)
+        {
+            _StartForkSoonAfterTakeBack(forkedId); // the turn goes on now, while the source's file still carries the take-back
+        }
+        ::Agentmaster::LogNav(L"sessions fork-done " + (forkedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(forkedId))) + L" from=" + ::Agentmaster::ShortId(forkParentId) + (forkFrom.empty() ? std::wstring{ L" (fresh \x2014 no parent transcript)" } : std::wstring{}) +
+                              (forkTurn == ::Agentmaster::ForkTurnChoice::Interrupted ? std::wstring{ L" (fork interrupted)" } : (continueAfterApiError ? std::wstring{ L" (fork uninterrupted: the source's API error taken back)" } : std::wstring{})));
         if (!_openClaudeTabInBackground)
         {
             _HideSessionsPage(); // foreground: land on the fork. Background bulk-open keeps the list open.

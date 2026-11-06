@@ -5653,6 +5653,19 @@ the PC, so the bot asks in the topic and passes the answer on:
   (Needs approval, a call in flight, a turn a crash cut off). The card's toast: "A turn is running — answer the question
   below to restart." / "Its turn would go on after the restart — choose below whether it does." ▶ Reactivate never asks
   (it starts the session again on purpose; a cut-off turn goes on by itself).
+- **A turn that stopped on an API error** (2026-11-06, NOT BUILT; HOOKS.md "Interrupted turns", situation B — the user's
+  request on a session stuck at "API Error: Server error mid-response": "I want restart/fork to also be able to tackle this
+  error as part of interrupted/uninterrupted choice. removing this error on a starting tab should auto-continue"). With
+  `resumeApiErrorTurns` on: the restart question quotes the error ("🔄 <title> stopped on an API error: <i>…</i>") and keeps
+  its two tokens — the window re-plans and applies the situation it finds: ▶ Restart uninterrupted takes the error back and
+  sets `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` for the restarted claude; ⏸ Restart interrupted leaves the error (it waits).
+  The fork question (/forksession, the card's ⑂, the Search pick's ⑂) quotes it too, with tokens of its own, since the
+  answers map the other way round there: ⏸ Fork interrupted (`fork-keep-api-error`) = a plain fork that waits at the error;
+  ▶ Fork uninterrupted (`fork-continue-after-api-error` → `ForkTurnChoice::ContinueAfterApiError`) = the window appends the
+  take-back line to the SOURCE's transcript, launches the fork with the switch and starts it at once, so the fork carries on
+  with the turn (the source stays where it is). Logs: `remote telegram restart <sid8> -> asked: a turn that stopped on an API
+  error (server_error; <switch source>)`, `remote telegram fork <sid8> -> asked (an API error: server_error)`, `… -> fork
+  interrupted (the fork waits at the API error) | continue-after-api-error`.
 - **Fork** — `/forksession`, the card's ⑂ Fork (which runs `/forksession`) and the Search topic's ⑂ pick build their
   `RemoteLaunchRequest` with `forkTurn = Ask`; `_requestLaunch` resolves it before the request leaves the bot:
   `_askForkTurnBeforeLaunch` posts "⑂ <title> is in the middle of a turn …" (naming a tool call the fork would run

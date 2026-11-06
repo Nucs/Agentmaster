@@ -1718,6 +1718,10 @@ namespace Agentmaster
         // longer continue anything on its next start (ClassifyResumeContinuation over the fork's own transcript,
         // else its source's), and by a Restart whose user chose to continue the turn after all. Omitted from
         // sessions.json when false, so a fleet with no stopped fork is byte-unchanged.
+        // Since 2026-11-06 it also carries a RESTART's "Restart interrupted" answer (RestartTurnChoice::StopContinuedTurn,
+        // the third question): a restarted session whose claude would continue a turn by itself gets the same intent and
+        // the same watch, whatever made the session — the name says "fork" because forks came first, and the persisted key
+        // stays "stopForkedTurn" so older sessions.json files keep their meaning.
         bool stopForkedTurn{ false };
         // Agentmaster (PERSISTED — the summary's conversation chain): the session THIS one continues, when
         // Agentmaster SAW it continue in a way no transcript records, and how:

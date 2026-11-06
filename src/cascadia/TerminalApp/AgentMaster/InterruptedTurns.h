@@ -32,6 +32,16 @@
 //     on the restarted claude (the tab locked, ONE Esc the moment it runs — RestartTurnChoice::StopContinuedTurn);
 //     "Restart uninterrupted" = it runs on (RestartTurnChoice::LetTurnContinue). It is asked only where the user
 //     interrupted nothing: a tail that ends in the USER's interrupt gets the first question instead.
+//   * SITUATION B — A TURN THAT DIED ON AN API ERROR (the user's request of 2026-11-06, on a session stuck at "API Error:
+//     Server error mid-response. The response above may be incomplete.": "I want restart/fork to also be able to tackle
+//     this error as part of interrupted/uninterrupted choice. removing this error on a starting tab should auto-continue").
+//     A half-response above the error reads as a FINISHED turn to Claude Code's resume, so a restarted claude and a fork
+//     wait at the error; only Agentmaster's take-back (the API-error rewind line, ApiErrorRewind.h) lets them continue.
+//     The restart's third question and the fork question are asked for it too, with the error quoted
+//     (ApiErrorTurnQuestionBody): "uninterrupted" = take the error back AND set CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 for
+//     that one start, so it continues by itself (RestartTurnChoice::LetTurnContinue, ForkTurnChoice::ContinueAfterApiError);
+//     "interrupted" = leave the error, the new claude waits (StopContinuedTurn skips the restart's rewind; a fork does
+//     nothing — plain Uninterrupted). A fork's take-back goes into the SOURCE's transcript, beside a live source claude.
 //
 // Every value-initialized choice (0) is today's behavior: KeepInterrupted (no transcript edit, no question) and
 // Uninterrupted (no Esc). A caller that never heard of this feature therefore behaves exactly as before.
@@ -75,10 +85,17 @@ namespace Agentmaster
         // the restarted claude's heartbeat reports the continued turn running (DecideForkTurnStop below).
         // ⚠ Appended after Ask on purpose: the values are compared and passed across windows, never persisted,
         // but a 0 / 1 / 2 a caller already uses must keep meaning what it meant.
+        // Situation B (2026-11-06: the turn died on an API error after output began — "removing this error on a
+        // starting tab should auto-continue"): "Restart interrupted" means NO take-back — the restart's API-error
+        // rewind (which KeepInterrupted makes) is skipped, the restarted claude waits at the error, and no watch is
+        // armed (nothing would run).
         StopContinuedTurn = 3,
         // "Restart uninterrupted" (the third question): the restarted claude continues the turn on its own, as a
         // restart always let it. Mechanically KeepInterrupted, except that a fork's persisted stop intent is
-        // CLEARED instead of re-armed — the user just chose to let the turn run.
+        // CLEARED instead of re-armed — the user just chose to let the turn run. Situation B: the API-error take-back
+        // (the restart's own rewind for a resume; the fork-source take-back for a never-messaged fork's re-fork) plus
+        // CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 for this one start (a settings file that sets the switch still wins),
+        // so the restarted claude continues the turn by itself.
         LetTurnContinue = 4,
     };
 
@@ -97,6 +114,15 @@ namespace Agentmaster
         // + CLAUDE_CODE_RESUME_INTERRUPTED_TURN + the source's live state) and, when it would, ASK. Nothing to
         // ask about == Uninterrupted.
         Ask = 2,
+        // "Fork uninterrupted" when the source's turn died on an API error after output began (situation B, the
+        // user's request of 2026-11-06: "removing this error on a starting tab should auto-continue"). A fork of such
+        // a source waits at the error; this answer takes the error back for the fork — the API-error rewind line is
+        // appended to the SOURCE's transcript right before the launch (ApiErrorRewind.h RewindApiErrorTailForForkSource:
+        // the fork reads the file once, at its start, and a live source claude is allowed) — gives the fork's launch
+        // CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 (a settings file that sets the switch still wins), and starts the fork
+        // at once, so it continues the turn by itself. Situation B's "Fork interrupted" is plain Uninterrupted (the
+        // fork waits at the error, as every fork did; nothing runs, so there is nothing to stop).
+        ContinueAfterApiError = 3,
     };
 
     // The log word of a restart choice ("keep-interrupted" / "uninterrupt" / "ask" / "stop-continued-turn" /
@@ -121,9 +147,10 @@ namespace Agentmaster
         return L"unknown";
     }
 
-    // The log word of a fork choice ("uninterrupted" / "interrupted" / "ask"). Pure; never throws.
+    // The log word of a fork choice ("uninterrupted" / "interrupted" / "ask" / "continue-after-api-error"). Pure; never
+    // throws.
     //   c — the choice.
-    // Returns a static string.
+    // Returns a static string ("unknown" for a value outside the enum).
     inline const wchar_t* ForkTurnChoiceName(ForkTurnChoice c) noexcept
     {
         switch (c)
@@ -134,6 +161,8 @@ namespace Agentmaster
             return L"interrupted";
         case ForkTurnChoice::Ask:
             return L"ask";
+        case ForkTurnChoice::ContinueAfterApiError:
+            return L"continue-after-api-error";
         }
         return L"unknown";
     }
@@ -464,6 +493,57 @@ namespace Agentmaster
         }
         s += L".\n\nRestart interrupted: Agentmaster locks the tab and presses Esc the moment the restarted Claude starts running, so it waits for you.";
         s += L"\n\nRestart uninterrupted: the restarted Claude carries on with the turn on its own.";
+        return s;
+    }
+
+    // The body of the restart AND fork questions in SITUATION B — a turn that died on an API error after output began, which
+    // a restarted claude (or a fork) would wait at unless Agentmaster takes the error back (the user's request of
+    // 2026-11-06: "I want restart/fork to also be able to tackle this error as part of interrupted/uninterrupted choice.
+    // removing this error on a starting tab should auto-continue"). Pure.
+    //   fork          — the fork question's words (the take-back goes into the SOURCE's transcript), else the restart's.
+    //   title         — the session's (a fork: the source's) title ("" = say "this session").
+    //   errorText     — the error's text as Claude Code wrote it (its first line, capped by the planner; "" = not quoted).
+    //   resendsPrompt — the take-back lands on the user's prompt (Claude Code sends it again), else on a finished tool
+    //                   result (it carries on from there).
+    //   autoContinue  — how CLAUDE_CODE_RESUME_INTERRUPTED_TURN stands for the claude that starts: On, set for this one start
+    //                   (TurnedOnForThisRestart), or off in a settings file (OffInSettings: the take-back still happens, and
+    //                   the user's next message continues the turn — the text says so instead of promising it).
+    //   offSource     — OffInSettings: the settings file that turns it off ("" = not named).
+    // Returns the text (paragraphs separated by a blank line); the answers are named as the dialogs' buttons are.
+    // Throws std::bad_alloc only.
+    inline std::wstring ApiErrorTurnQuestionBody(bool fork, std::wstring_view title, std::wstring_view errorText, bool resendsPrompt, AutoContinueAtRestart autoContinue, std::wstring_view offSource)
+    {
+        std::wstring s = L"The last turn of ";
+        s += title.empty() ? std::wstring{ L"this session" } : (L"\x201C" + std::wstring{ title } + L"\x201D");
+        s += L" stopped on an API error";
+        if (!errorText.empty())
+        {
+            s += L": \x201C" + std::wstring{ errorText } + L"\x201D";
+        }
+        s += fork ? L". A fork starts from the same conversation, so it would wait at that error too." : L". A restarted Claude would wait at that error.";
+        s += fork ? L"\n\nFork uninterrupted: Agentmaster takes the error back for the fork (one line added to the end of the source's transcript; nothing is deleted, and the source stays where it is), " :
+                    L"\n\nRestart uninterrupted: Agentmaster takes the error back (one line added to the end of the transcript; nothing is deleted), ";
+        if (autoContinue == AutoContinueAtRestart::OffInSettings)
+        {
+            // A settings file outranks the environment the start could set: say what happens instead of promising it.
+            s += L"but Claude Code's CLAUDE_CODE_RESUME_INTERRUPTED_TURN is off";
+            if (!offSource.empty())
+            {
+                s += L" (in " + std::wstring{ offSource } + L")";
+            }
+            s += fork ? L", so the fork waits with the turn unfinished, and your next message there continues it." : L", so the restarted Claude waits with the turn unfinished, and your next message continues it.";
+        }
+        else
+        {
+            s += fork ? L"and the fork continues the turn by itself as soon as it starts \x2014 " : L"and the restarted Claude continues the turn by itself \x2014 ";
+            s += resendsPrompt ? L"your prompt is sent again." : L"from the last step that finished.";
+            if (autoContinue == AutoContinueAtRestart::TurnedOnForThisRestart)
+            {
+                s += fork ? L" (Claude Code's CLAUDE_CODE_RESUME_INTERRUPTED_TURN is not set here; this one fork sets it.)" :
+                            L" (Claude Code's CLAUDE_CODE_RESUME_INTERRUPTED_TURN is not set here; this one restart sets it.)";
+            }
+        }
+        s += fork ? L"\n\nFork interrupted: the fork waits at the error for you." : L"\n\nRestart interrupted: the restarted Claude waits at the error for you.";
         return s;
     }
 }
