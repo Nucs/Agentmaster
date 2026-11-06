@@ -447,6 +447,10 @@ session handled only from the phone. (Merely viewing a topic cannot be seen: bot
   results ("Revive 📌"); **Pin (never idle)** / **Unpin** in the tab's right-click menu and the board
   card's menu, beside Move to Waiting-for-you; a small 📌 beside the tab's status dot (D32).
 - **Unpinning** lets the normal decay resume from that moment.
+- **Not the side panel's Pin to Top** (SIDE_PANEL.md §2j, 2026-11-06): that one only orders the side panel's cards and
+  draws a pushpin on them (`SessionInfo::sidePanelPinnedAtUnixMs`, its own key) — the user chose it SEPARATE from this
+  pin. Neither sets, reads or shows the other: `/pin` neither moves nor marks a card, and a card pin never holds a session
+  in Waiting for you.
 
 ### 5.4 🔎 Search: find, wake, revive (D24)
 

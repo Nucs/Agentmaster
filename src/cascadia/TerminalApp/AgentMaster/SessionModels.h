@@ -1799,6 +1799,20 @@ namespace Agentmaster
         // "📌" buttons and (later) the tab menu; cleared by /unpin, which lets the normal decay resume
         // from that moment.
         bool pinned{ false };
+        // Agentmaster (SIDE_PANEL.md §2j — the side panel's PIN TO TOP; PERSISTED, omitted from sessions.json while 0): when the
+        // user last pinned this session's side panel card to the top of the list — the card menu's "Pin to Top", system-clock
+        // ms; 0 = not pinned (SidePanelPins.h IsSidePanelPinStamp: only a positive value is a pin). Every side panel lists the
+        // pinned cards first, the NEWEST pin on top, then the rest in the board's order, and a "Pin to Top" of a pinned card
+        // stamps it again, so it goes back to the top (NextSidePanelPinStamp keeps every new stamp past the newest one).
+        // ⚠ NOT `pinned` above: that is Telegram's "never idle" pin, which holds the session in Waiting-for-you. This one
+        // orders the cards and draws a pushpin in the card's title band — nothing else (the user's pick of 2026-11-06): it
+        // never touches the state, and neither pin sets, reads or shows the other.
+        // Kept while the session is closed (a resumed session comes back pinned), cleared only by the menu's "Unpin", and
+        // carried to the successor when one tab switches conversation (a /clear, a /resume, a /handover-here — the re-home in
+        // TerminalPage::_BindClaudeSessionToTab, SidePanelPinAfterRehome), because the user pins the tab's card, not an id.
+        // Written only through SessionRegistry::Update (TerminalPage::_SidePanelSetPinned and that re-home), so every window's
+        // panel hears the change and sessions.json saves it.
+        int64_t sidePanelPinnedAtUnixMs{ 0 };
         // Transient (NOT persisted): turn accounting for the ordered state machine — see
         // TurnAccounting above / NextSessionStateOrdered (HookEvents.h). Reset on
         // SessionStart / SessionEnd (a resume must not inherit stale turn identity) — EXCEPT a

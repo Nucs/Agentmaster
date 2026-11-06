@@ -147,6 +147,9 @@ namespace winrt::TerminalApp::implementation
     inline constexpr std::wstring_view kAgentStatusUnread = L"unread"; // the tab's red flash ring (left Running for a needs-you state, not visited since)
     inline constexpr std::wstring_view kAgentStatusDraft = L"unsent draft"; // the "3 dots": text typed into claude's input box and not sent
     inline constexpr std::wstring_view kAgentStatusFavorite = L"favorite"; // the crown / star marker
+    // SIDE_PANEL.md §2j: a side panel card pinned to the top (its band's pushpin). Not a plain "pinned": that word names
+    // Telegram's "never idle" pin in the AI search's tab words (SessionSearchTools), a different feature.
+    inline constexpr std::wstring_view kAgentStatusPinnedToTop = L"pinned to the top";
     inline constexpr std::wstring_view kAgentStatusCacheWarm = L"cache warm"; // the spark crown / the board's ⚡: Claude's prompt cache is still warm
     inline constexpr std::wstring_view kAgentStatusCodex = L"codex"; // a managed Codex session (the teal pill)
     inline constexpr std::wstring_view kAgentStatusExternal = L"external"; // observed, not managed (the External column / scope)

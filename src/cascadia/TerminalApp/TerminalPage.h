@@ -167,6 +167,7 @@ namespace winrt::TerminalApp::implementation
         std::wstring dirLine; // "<leaf>[ / <branch>]"
         std::vector<std::wstring> tags; // the bookmark tags, in the order they were added
         std::vector<uint32_t> tagArgb; // each tag's resolved display color (ResolveTagDisplayColor), 0xAARRGGBB, parallel to `tags`
+        bool pinned{ false }; // SIDE_PANEL.md §2j: the card is pinned to the top (SessionInfo::sidePanelPinnedAtUnixMs > 0) — the band's pushpin, in the title's ink, right of the tag strip. The ORDER of the pins is the row order's business (_SidePanelRebuildCards), not the card's
         std::wstring tipTitle; // the card tooltip's title (the raw session title)
         std::wstring tipText; // the card tooltip's text (full dir, branch, every tag, the gestures)
     };
@@ -190,8 +191,9 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Grid bandArea{ nullptr }; // the title row: [band][title | bandGrid] in one cell, no corner radius
         winrt::Windows::UI::Xaml::Controls::Border band{ nullptr }; // CHILDLESS: the colored title band (rounded top corners), drawn behind the title
         winrt::Windows::UI::Xaml::Controls::TextBlock title{ nullptr }; // the title (bandArea's second child while untagged — the band padding as its margin — or bandGrid's column 0 while tagged)
-        winrt::Windows::UI::Xaml::Controls::Grid bandGrid{ nullptr }; // [ title * ][ tag strip Auto ] while the session is tagged (bandArea's second child, the band padding as its margin); null untagged
-        winrt::Windows::UI::Xaml::Controls::StackPanel tagStrip{ nullptr }; // the ribbons in the band's top-right corner; null untagged
+        winrt::Windows::UI::Xaml::Controls::Grid bandGrid{ nullptr }; // [ title * ][ tag strip Auto ][ pushpin Auto ] while the session is tagged OR pinned (bandArea's second child, the band padding as its margin); null while neither — the band is then the title alone
+        winrt::Windows::UI::Xaml::Controls::StackPanel tagStrip{ nullptr }; // the ribbons in the band's top-right corner (bandGrid's column 1); null untagged
+        winrt::Windows::UI::Xaml::Controls::FontIcon pinIcon{ nullptr }; // SIDE_PANEL.md §2j: the PIN TO TOP pushpin at the band's right end (bandGrid's column 2, right of the ribbons), in the title's ink; not hit-testable (a press selects the card, the card's tip covers it); null unpinned
         // The state line: a 2-column Grid, [ stateRow Auto ][ timing * ]. The timing sits in the STAR column, not in the
         // row's StackPanel, because a horizontal StackPanel offers its children unlimited width: there the "created 4d1h,
         // active 2m4s ago" line (twice the length of the old "-7h5m/7h6m/2m4s") was cut off mid-letter at the card's edge on
@@ -780,6 +782,11 @@ namespace winrt::TerminalApp::implementation
         // with no card, and by turning the toggle off — a stale one would yank the list somewhere you've left.
         std::wstring _sidePanelRevealPendingId;
         bool _sidePanelRevealQueued{ false }; // a coalesced reveal tick is queued (_SidePanelQueueReveal) — rapid Ctrl+Tab cycling folds into ONE scroll, to the LAST tab
+        // SIDE_PANEL.md §2j: the owed reveal is a PIN's (_SidePanelSetPinned: the card just moved to the top of the list, and the
+        // list scrolls to it so the user sees where it went), not a tab selection's — so it is paid whatever the ⌖ setting says.
+        // Set together with _sidePanelRevealPendingId; cleared whenever that debt is consumed or replaced (a tab selection's own
+        // reveal, or its drop, replaces a pin's: the user moved on).
+        bool _sidePanelRevealForced{ false };
         uint64_t _sidePanelLastRebuildMs{ 0 }; // GetTickCount64 of the last card rebuild (the min-gap throttle anchor)
         uint64_t _sidePanelNextTimingMs{ 0 }; // next GetTickCount64 at/after which the in-place timing-text refresh runs (~30s cadence)
         // --- The header's "+" LAUNCHER (SIDE_PANEL.md §2e) ---
@@ -3457,7 +3464,53 @@ namespace winrt::TerminalApp::implementation
         //   throws - winrt::hresult_error when XAML refuses a registration; the list update's catch resets the list.
         void _SidePanelWireCardHandlers(AgentSidePanelCardView& v, const std::wstring& id);
         void _SidePanelApplyCardModel(AgentSidePanelCardView& view, AgentSidePanelCardModel model, const std::wstring& id, bool fresh); // write `model` into the card: with fresh==false only the values that differ from view.model (a text, a brush, a part added or dropped); fresh==true writes everything (a new card). Then view.model = model
-        void _SidePanelApplyCardTags(AgentSidePanelCardView& view, const AgentSidePanelCardModel& model, const std::wstring& id); // give the band the layout `model.tags` needs: untagged = the band is exactly the title; tagged = [ title * ][ a NEW tag strip ] (a changed tag list, tag color or ink replaces the strip; the title element is re-parented, never rebuilt); `id` = the card's session (the strip's ribbons suspend its rich tooltip in the "Sum" off mode)
+        void _SidePanelApplyCardTags(AgentSidePanelCardView& view, const AgentSidePanelCardModel& model, const std::wstring& id); // give the band the layout `model.tags` needs: untagged = no strip (and the band is exactly the title unless the card is pinned, SIDE_PANEL.md §2j); tagged = [ title * ][ a NEW tag strip ][ pin ] (a changed tag list, tag color or ink replaces the strip; the title element is re-parented, never rebuilt); `id` = the card's session (the strip's ribbons suspend its rich tooltip in the "Sum" off mode)
+        // Agentmaster (SIDE_PANEL.md §2j — PIN TO TOP): give the band the pushpin `model.pinned` asks for, at its right end (the band
+        // grid's column 2, right of the tag strip), in the title's ink (`model.darkInk`). A pinned card's band becomes the grid if it
+        // was the title alone; an unpinned card loses the pushpin, and its band goes back to the title alone when no tag strip is
+        // left (_SidePanelReleaseBandGridIfBare). The pushpin is never hit-testable, so a press on it selects the card and the
+        // card's tooltip (which names the pin) covers it.
+        //   view  - the card (a session card or an AI result card: both share the skeleton).
+        //   model - the values it must show: pinned, darkInk.
+        //   throws - winrt::hresult_error when XAML refuses an edit; the list update's catch resets the list (and the AI view's
+        //            catch keeps the cards it had).
+        void _SidePanelApplyCardPin(AgentSidePanelCardView& view, const AgentSidePanelCardModel& model);
+        // Agentmaster (SIDE_PANEL.md §2j): make the band the [ title * ][ tag strip Auto ][ pushpin Auto ] grid if it is still the
+        // title alone — the title is re-parented (never rebuilt) and the band padding moves from it to the grid; a no-op when the
+        // grid exists. The band itself stays CHILDLESS (the grid sits beside it in the band area): a rounded element with
+        // children would get its own composition node (UI_THREAD.md §10h).
+        //   view   - the card.
+        //   throws - winrt::hresult_error when XAML refuses an edit (the callers' catches handle it).
+        void _SidePanelEnsureBandGrid(AgentSidePanelCardView& view);
+        // Agentmaster (SIDE_PANEL.md §2j): back to the plain band — the title alone over the band, the padding on it again —
+        // once the grid holds neither a tag strip nor a pushpin; a no-op while either remains, or without a grid.
+        //   view   - the card.
+        //   throws - winrt::hresult_error when XAML refuses an edit (the callers' catches handle it).
+        void _SidePanelReleaseBandGridIfBare(AgentSidePanelCardView& view);
+        // Agentmaster (SIDE_PANEL.md §2j): the card menu's own items under "Jump to Tab" (AgentManagerContent::SessionMenuHostItems)
+        // — "Pin to Top", and "Unpin" when the session is pinned — read from the session as it is when the menu opens. Each item
+        // runs _SidePanelSetPinned one tick after its click (the menu is still closing inside the click and hands focus back as it
+        // closes). Nothing is added for a session the registry does not know or that has no live tab (a closed session has no
+        // card in the list a pin would order).
+        //   menu       - the session menu being filled; the items are appended to it.
+        //   id         - the menu's session.
+        //   fromAiView - the menu belongs to an AI search result card: the cards list is hidden behind the AI view, so the pin
+        //                owes no reveal, and the result cards are refreshed at once to show the pushpin.
+        //   throws     - winrt::hresult_error / std::bad_alloc while building the items; the menu's filler contains it.
+        void _SidePanelAppendPinItems(winrt::Windows::UI::Xaml::Controls::MenuFlyout& menu, const std::wstring& id, bool fromAiView);
+        // Agentmaster (SIDE_PANEL.md §2j): pin a session's card to the top of the list, pin it again (back to the top), or unpin it.
+        // A pin stamps SessionInfo::sidePanelPinnedAtUnixMs with NextSidePanelPinStamp — the clock, past the newest pin of every
+        // live session — through SessionRegistry::Update, so every window's panel re-sorts from its registry drain and
+        // sessions.json saves it; an unpin writes 0. This window's list is then brought up to date at once (the drain's 500 ms
+        // throttle would make the card wait), and a pin owes the list a FORCED reveal of the card at its new place
+        // (_sidePanelRevealForced: paid whatever the ⌖ setting says), unless `revealAfter` is false. Logged as one [nav] line.
+        //   id          - the session; unknown or closed => nothing changes.
+        //   pin         - true = Pin to Top (also a pin again), false = Unpin.
+        //   revealAfter - scroll the cards list to the pinned card once it is listed at the top (false for a pin made from an AI
+        //                 search result: the list is behind the AI view, and a scroll owed until the view closes would surprise).
+        //   returns     - nothing.
+        //   throws      - nothing: a failure is logged (Rule #18) and the list is marked dirty for the periodic tick to catch up.
+        void _SidePanelSetPinned(const std::wstring& id, bool pin, bool revealAfter) noexcept;
         winrt::Windows::UI::Xaml::Controls::StackPanel _SidePanelMakeTagStrip(const std::vector<std::wstring>& tags,
                                                                               const std::vector<winrt::Windows::UI::Color>& colors,
                                                                               bool darkInk,

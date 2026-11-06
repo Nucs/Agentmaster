@@ -20,7 +20,7 @@
 //   tests_taskbar.cpp         - NOTIFICATIONS.md sections 8 + 9: the taskbar unread badge (TaskbarBadge.h's label / size / disc + digit composition / GDI icon, drawn like the shell draws it) + the engine's process-wide unread census + the unread frame on a window's taskbar preview (TaskbarThumbnail.h)
 //   tests_turns.cpp           - the Copy > Transcript levels: TranscriptTurns (the C++ port of the am-agentmaster-cli skill's transcript_turns.py v11) vs the reference's own goldens in turns\expected, byte for byte; + the summary's whole-conversation chain (CollectConversationUpstream / BuildSummaryConversation)
 //   tests_markdown.cpp        - the transcript overlay's Markdown flattener (MarkdownBlocks — cmark -> flat render blocks); compiled only when the vcpkg cmark of a full build is present (AM_HAVE_CMARK), else it reports a skip
-//   tests_sidepanel.cpp       - SIDE_PANEL.md §2c: the side panel's in-place card list — the order planner (KeyedListDiff.h): reaches the target, indexes in range, minimal; + the cards' and rows' timing line (SessionTimingText.h)
+//   tests_sidepanel.cpp       - SIDE_PANEL.md §2c: the side panel's in-place card list — the order planner (KeyedListDiff.h): reaches the target, indexes in range, minimal; + the cards' and rows' timing line (SessionTimingText.h); + §2j the cards' Pin to Top (SidePanelPins.h)
 //   tests_harness.cpp         - SDK_HARNESS.md + SESSIONS.md section 9: the agent harness's model-free half (AgentHarnessCore — the record, the digest, the --settings text, the child's environment, the readers of Claude Code's lines) and the Sessions page's AI search tools (SessionSearchTools — arguments, one search, the result text, the two tool handlers, the stepwise catalog gather)
 //   tests_presets.cpp         - HARNESSES.md: PRESETS (LaunchPresets.h, pure) — the empty initial list + "Add presets…", the one-click template adds, the 0.6.8.18 cleanup, launch-presets.json, the value tiers, the session snapshot (launchArgs), every OpenRouter template's compile vs its launcher profile (MiMo, Kimi, Qwen, GLM), effort, top_k / require_parameters, refusals, the menus, the /handover hint's preset rule
 //   tests_tabtools.cpp        - SESSIONS.md 9.14: the AI search's window and tab tools (the window choice, list / resume / fork / deactivate on fake windows, the per-request caps, the engine's answered fan-out) and the system prompts' structure
@@ -284,6 +284,12 @@ void TestStatusIconMotion();
 // whole requests replayed through a model of the view: one change per request, at its end, to the last show
 // (tests_sidepanel.cpp)
 void TestSidePanelAiList();
+// SidePanelPins.h (SIDE_PANEL.md §2j): the cards' PIN TO TOP — the user's "pinning puts on top and repinning will bring a tab
+// to the top again" (2026-11-06): pinned cards first, the newest pin on top, the board's order for the rest; a pin again
+// brings a card back to the top whatever the clock says; the comparator is a strict weak ordering (seeded sweep); the
+// stamp's edges (never below 1, no overflow); the pin a tab keeps when it switches conversation; the sessions.json key,
+// apart from Telegram's never-idle "pinned"; the registry's lean copies carry it and it holds no state (tests_sidepanel.cpp)
+void TestSidePanelPins();
 // tests_presets.cpp — HARNESSES.md, PRESETS (LaunchPresets.h, the pure core): the list starts EMPTY (no template is added
 // by itself) and an empty list offers "Add presets…" with help text naming the way to the Presets tab (a list of hidden
 // presets does not); one click adds a template as a linked, visible "p-" preset and "Add all tested" adds the five tested

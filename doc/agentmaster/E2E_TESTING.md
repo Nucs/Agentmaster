@@ -537,6 +537,8 @@ differs from the plan above, and why:
   `am.mgr.queue.row.<promptKey>`, `am.tab.<key>` (the `TabViewItem`; cleared when the tab stops hosting a session),
   `am.badge.<key>.{mode,up,down,folder,mail,copy,pencil}`,
   `am.side.{launch,filter,sum,scope,sort,scrollToTab,dock,collapse,expand}`, `am.side.card.<key>` (the card's title);
+  a card's session menu adds `am.side.pin` ("Pin to Top", right under Jump to Tab) and `am.side.unpin` ("Unpin", on a
+  pinned card only) — SIDE_PANEL.md §2j, 2026-11-06, NOT BUILT; a menu item exists only while its menu is open;
   the side panel's `⋯` menu (SIDE_PANEL.md §2i; in dev 0.0.1.42 and production 0.8.0.9): `am.side.more` (the header's
   `⋯` button, named "More options"), and `scope` / `sort` / `scrollToTab` / `dock` / `collapse` move from header buttons
   to that menu's items (the same ids; their texts carry the state: "Card scope: LOCAL", "Dock on the right"), plus the
@@ -558,8 +560,8 @@ differs from the plan above, and why:
   selected (an External card: external, codex, selected); a tree row — the same plus "in another window" (a folder row:
   expanded / collapsed, scoped); a queue row — pending / sent / held / skipped / failed, auto / typed for a sent row,
   selected; the runner toggle — its mode without the "Prompt Queue Runner: " prefix; a side panel card (on its title) —
-  state, codex, unread, unsent draft, cache warm, tags, selected, kept current by the model apply and the selection
-  restyle. The words are `AgentStateWord`'s, the tree row's and the side card's visible labels.
+  state, codex, unread, unsent draft, cache warm, "pinned to the top" (SIDE_PANEL.md §2j, NOT BUILT; an AI search result
+  card says it too), tags, selected, kept current by the model apply and the selection restyle. The words are `AgentStateWord`'s, the tree row's and the side card's visible labels.
 - **Not done yet:** the launch bar (`am.mgr.launch.*`: its agent toggle is still nameless — the file was under another
   session's edit), the board columns' ids, the Tags panel's buttons (+, swatches, rows, ✕ — the same), the Sessions
   page, the settings overlay and the transcript overlay.

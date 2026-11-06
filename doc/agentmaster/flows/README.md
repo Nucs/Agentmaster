@@ -221,7 +221,9 @@ mirrored with the dock (⋯ · Sum · + docked left, ⋯ always at the window's 
 and holding ⌖, the card scope, the card order, then the dock and the collapse (SP-10; SIDE_PANEL.md §2i) · Telegram's
 `/enter` presses ONE Enter on the prompt waiting in the box, never into a menu, a dialog or an empty box (TGC-07;
 MESSAGING.md §21.47) · a new thread's ➕ message adds more folders to the session, each sent as `/add-dir` with its answer
-chosen before the session starts, and before its first prompt (TGS-06; MESSAGING.md §21.25.9).
+chosen before the session starts, and before its first prompt (TGS-06; MESSAGING.md §21.25.9) · a side-panel card's menu
+pins it to the top of the list, right under Jump to Tab, with a pushpin on its band; a pin again brings it back to the top
+(SP-11; SIDE_PANEL.md §2j).
 
 **The regression base** — older behaviors the recent releases build on, covered because every new feature leans on
 them: the /handover family (HND-01, HND-03, HND-04, HND-05, HND-07, HND-08), the Sessions browser (SES-01, SES-02,
@@ -386,6 +388,7 @@ stalled the app's UI thread) — reruns `pqr6`–`pqr8`.
 | SP-05 | phases 1, 3, 4, 5, E2, E3 (phase 5: `needs_fix`, a build with SP-K1's fix) | `…::test_plus_launcher_card`, `…::test_plus_card_launch_takes_one_click_with_its_menu_open` |
 | SP-06 | phases 3–5 (through the ⋯ menu on a build that has it, the 0.8.x buttons otherwise) | `…::test_collapse_and_dock`, `…::test_panel_state_survives_a_restart` |
 | SP-10 | phases 1–7, E4 (`needs_fix`: a build with the ⋯ menu's 2026-11-04 shape — the mirrored line, the menu on ⋯'s outer edge, the dock below the separator — SP-F1; a 2026-11-03 build fails phases 1, 2 and 6) | `…::test_more_menu_holds_the_header_controls` |
+| SP-11 | phases 1–5 (`needs_fix`: a build with Pin to Top — SP-F2; written 2026-11-06, never run) | `…::test_pin_to_top` |
 | TCM-01 | phases 1–3, E1 | `test_tab_menu.py::test_menu_fits_the_tab`, `…::test_triage_item_follows_the_state` |
 | TCM-02 | phases 1–3 | `…::test_position_decides_what_is_enabled` |
 | TCM-03 | phases 1–2, E2, E3; TCM-K1 | `…::test_rename_renames_the_session_everywhere`, `…::test_restart_restores_the_renamed_tab_dormant`, `…::test_known_defect_blank_rename_shows_claudes_own_title` |

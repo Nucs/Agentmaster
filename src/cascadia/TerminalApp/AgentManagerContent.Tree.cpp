@@ -1478,7 +1478,9 @@ namespace winrt::TerminalApp::implementation
     // any caller that wants one up front; _MakeLazySessionMenu returns an EMPTY menu whose Opening
     // handler runs this, so a card/row pays for its menus only when one is actually opened — and the
     // "read at flyout-creation time" note below then means "read at OPEN time", which is fresher still.
-    void AgentManagerContent::_PopulateSessionMenu(MenuFlyout& menu, const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor)
+    // `afterJumpToTab` (SIDE_PANEL.md §2j): the host's own items, appended right under "Jump to Tab" (SessionMenuHostItems,
+    // AgentManagerContent.h) — the side panel's Pin to Top / Unpin; empty for every Agent Manager surface.
+    void AgentManagerContent::_PopulateSessionMenu(MenuFlyout& menu, const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor, const SessionMenuHostItems& afterJumpToTab)
     {
         auto disp = _dispatcher;
         auto weak = get_weak();
@@ -1574,6 +1576,22 @@ namespace winrt::TerminalApp::implementation
             }
         });
         menu.Items().Append(jump);
+
+        // Agentmaster (SIDE_PANEL.md §2j): the HOST's own items right under Jump to Tab — the side panel's "Pin to Top" and
+        // "Unpin", the user's place for them ("put pin below Jump to tab"). No Agent Manager surface passes any. Contained:
+        // a host item that fails to build costs only the host's items — logged with the throw site (Rule #18) — and the rest
+        // of the menu below is still built, so a right-click never opens a menu cut off after Jump to Tab.
+        if (afterJumpToTab)
+        {
+            try
+            {
+                afterJumpToTab(menu);
+            }
+            catch (...)
+            {
+                AgentLogCaughtException(L"session menu: the host's items under Jump to Tab");
+            }
+        }
 
         // Move to Idle/Done — Waiting-for-you AND Error triage. For a Waiting card it is the immediate,
         // user-driven twin of the timed WaitingForInput -> Idle decay (SessionScanner::_maybeDecayWaiting):
@@ -2248,7 +2266,9 @@ namespace winrt::TerminalApp::implementation
     // open (Items().Clear() first) so a menu can never show a stale "Move to Idle/Done" for a session
     // that has since moved on. The anchor (Tags-panel placement) is held weakly: a rebuilt card's old
     // menu is garbage by then, and a live one resolves its live anchor.
-    MenuFlyout AgentManagerContent::_MakeLazySessionMenu(const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor)
+    // `afterJumpToTab` (SIDE_PANEL.md §2j): the host's own items under Jump to Tab, kept by the Opening handler and handed to
+    // every fill; the host holds itself weakly inside it (SessionMenuHostItems), so the menu keeps no page alive.
+    MenuFlyout AgentManagerContent::_MakeLazySessionMenu(const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor, SessionMenuHostItems afterJumpToTab)
     {
         MenuFlyout menu;
         auto weak = get_weak();
@@ -2257,7 +2277,7 @@ namespace winrt::TerminalApp::implementation
         {
             anchorWeak = winrt::make_weak(anchor);
         }
-        menu.Opening([weak, id, cwd, anchorWeak](const IInspectable& sender, const IInspectable&) {
+        menu.Opening([weak, id, cwd, anchorWeak, afterJumpToTab = std::move(afterJumpToTab)](const IInspectable& sender, const IInspectable&) {
             const auto self = weak.get();
             auto m = sender.try_as<MenuFlyout>();
             if (!self || !m)
@@ -2268,7 +2288,7 @@ namespace winrt::TerminalApp::implementation
             {
                 m.Items().Clear();
                 const winrt::Windows::UI::Xaml::FrameworkElement anchorNow = anchorWeak ? anchorWeak.get() : nullptr;
-                self->_PopulateSessionMenu(m, id, cwd, anchorNow);
+                self->_PopulateSessionMenu(m, id, cwd, anchorNow, afterJumpToTab);
             }
             catch (...)
             {

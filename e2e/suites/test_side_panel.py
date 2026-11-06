@@ -450,6 +450,91 @@ def test_more_menu_holds_the_header_controls(am, s2):
     panel.expand()
 
 
+@pytest.mark.p1
+@pytest.mark.flow("SP-11")
+@pytest.mark.needs_fix("SP-F2")
+def test_pin_to_top(am, s2):
+    """SP-11 phases 1-5 (SP-F2, the user's request of 2026-11-06 - a build with Pin to Top; SIDE_PANEL.md section 2j): a
+    card's right-click menu has Pin to Top right under Jump to Tab, and Unpin only on a pinned card; a pin moves the card
+    to the top, its item status says "pinned to the top", sessions.json keeps its stamp, and its state stays as it was;
+    the newest pin is on top; Pin to Top on the lower pinned card brings it back to the top; Unpin drops it back into the
+    order and clears its stamp. (Phases 6-7 and the edge cases - the pushpin's look, a restart, other windows, /clear,
+    the AI view - are not covered here.)
+
+    Args:
+        am: The app.
+        s2: F-S2 (t1 and t2 in one window, both Waiting for you).
+    """
+    panel = am.window.side_panel
+    wait_until(lambda: sorted(panel.titles()) == ["t1", "t2"], 10, what="both cards", describe=panel.titles)
+    ids = {"t1": s2[0].id, "t2": s2[1].id}
+
+    def card_menu(title):
+        """Open a card's right-click menu.
+
+        Args:
+            title: The card's title.
+        Returns:
+            The menu.
+        """
+        before = Menu.open_hwnds(am)
+        panel.card(title).right_click()
+        return Menu.wait_new(am, before)
+
+    def says_pinned(title):
+        """Whether a card's item status carries the pin's words.
+
+        Args:
+            title: The card's title.
+        Returns:
+            True when "pinned to the top" is one of its facets.
+        """
+        return "pinned to the top" in panel.card(title).status.split("; ")
+
+    def stamp(title):
+        """The card's pin stamp as sessions.json saved it.
+
+        Args:
+            title: The card's title.
+        Returns:
+            The stamp, 0 when the key is absent (not pinned) or the record is not saved yet.
+        """
+        rec = am.profile.session(ids[title])
+        return int(rec.raw.get("sidePanelPinnedAtUnixMs", 0)) if rec else 0
+
+    # 1. The items: Pin to Top right under Jump to Tab; no Unpin on a card that is not pinned.
+    upper, lower = panel.titles()[0], panel.titles()[1]
+    state_before = panel.card(lower).state
+    menu = card_menu(lower)
+    names = menu.names()
+    assert "Pin to Top" in names and names.index("Pin to Top") == names.index("Jump to Tab") + 1, names
+    assert "Unpin" not in names, names
+    # 2. Pin the lower card: it goes to the top and says so, sessions.json keeps its stamp, and its state is unchanged
+    #    (a card pin is not Telegram's never-idle pin).
+    menu.choose("Pin to Top")
+    wait_until(lambda: panel.titles()[0] == lower, 5, what=f"{lower} at the top", describe=panel.titles)
+    wait_until(lambda: says_pinned(lower), 5, what=f"{lower}'s item status names the pin", describe=lambda: panel.card(lower).status)
+    wait_until(lambda: stamp(lower) > 0, 5, what=f"{lower}'s stamp in sessions.json")
+    assert panel.card(lower).state == state_before, (panel.card(lower).state, state_before)
+    assert not says_pinned(upper), panel.card(upper).status
+    # 3. Pin the other card: the newest pin is on top, with the newer stamp.
+    card_menu(upper).choose("Pin to Top")
+    wait_until(lambda: panel.titles() == [upper, lower], 5, what="the newest pin on top", describe=panel.titles)
+    wait_until(lambda: stamp(upper) > stamp(lower) > 0, 5, what="a newer stamp for the newer pin")
+    # 4. Pin again: the lower pinned card offers Pin to Top and Unpin under it; Pin to Top brings it back to the top.
+    menu = card_menu(lower)
+    names = menu.names()
+    assert "Unpin" in names and names.index("Unpin") == names.index("Pin to Top") + 1, names
+    menu.choose("Pin to Top")
+    wait_until(lambda: panel.titles() == [lower, upper], 5, what="a pin again back on top", describe=panel.titles)
+    # 5. Unpin the top card: it drops below the remaining pin and loses its words and its stamp; the other keeps its pin.
+    card_menu(lower).choose("Unpin")
+    wait_until(lambda: panel.titles() == [upper, lower], 5, what="the unpinned card below the pin", describe=panel.titles)
+    wait_until(lambda: not says_pinned(lower), 5, what=f"{lower}'s item status without the pin")
+    wait_until(lambda: stamp(lower) == 0, 5, what=f"{lower}'s stamp gone from sessions.json")
+    assert says_pinned(upper), panel.card(upper).status
+
+
 # ---- batch 2: restart, the hover card -----------------------------------------------------------------------
 
 

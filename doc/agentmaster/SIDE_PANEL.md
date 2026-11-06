@@ -111,11 +111,19 @@ model's answer and its list of sessions instead of the session cards; the summar
   replaced waited 3 s too), and the collapsed strip's expand chevron. Each tip is a paragraph, and at
   ~133 ms it opened over the panel whenever the pointer reached a button on its way to a click. Any
   move restarts the 3 s. A new button in the panel, or a new `⋯` menu item, must pass the constant to its
-  `AgentSetTip` / `AgentSetTitledTip`. Not changed on purpose: the filter box (not a button), the cards (4 s), the
+  `AgentSetTip` / `AgentSetTitledTip`. Not changed on purpose: the cards (4 s), the
   separators (7 s), the summary area's own buttons (the per-tab summary panel's, shared with every
   tab) and the `+` launcher card (the Agent Manager's own launch bar, §2e). Check after the build:
   the pointer still on each of the three header buttons and on each menu item opens its tip after ~3 s,
   a move restarts the wait, and a click before then shows no tip.
+- **The filter box's tooltip waits 3 s too** (2026-11-06, NOT BUILT yet — the user's request: "the tooltip on the filter
+  sessions text box must appear after 3s, it appears almost instantly"). It was the one header control left at the
+  ~133 ms default, as "a text box, not a button"; it spans the panel's whole width under the buttons, so the pointer
+  crosses it on its way to the cards, and its paragraph popped up over them. Both of its texts pass
+  `kSidePanelButtonTipDelay`: the filter's ("Filter the cards"), set when the box is built, and the AI search's request
+  line's ("AI search", §2h), swapped in by `_SidePanelSetAiMode` (the element keeps the delay it was given, so the
+  second call is a belt). Check after the build: the pointer at rest on the box opens its tip after ~3 s, with AI off and
+  on; a move inside the box restarts the wait.
 
 ## 2. TOP — the session cards (the Triage-Board integration, vertical)
 
@@ -145,7 +153,10 @@ model's answer and its list of sessions instead of the session cards; the summar
   `MatchesQueryText`/`MatchesPathQuery` over title / effective dir / branch / id;
   whitespace-split AND terms, "quoted phrase" exact, a bare whole GUID matches the session +
   its forks by IDENTITY. The **AI** toggle inside the box, at its right end (§2h; its tip waits the buttons' 3 s), turns
-  it into the AI search's request line, and the card area then shows the model's list instead of these cards.
+  it into the AI search's request line, and the card area then shows the model's list instead of these cards. The box's
+  own tip waits 3 s as well (§1, 2026-11-06).
+- **Pinned cards come first** (§2j, 2026-11-06, NOT BUILT yet): a card pinned with its menu's **Pin to Top** sits above
+  every unpinned one, the newest pin on top; the order below applies to the rest (and to pins of one stamp).
 - **Order** (`⋯` ▸ **Card order**, §2i): the SHARED `AppSettings::boardSort`, set by name through
   `AgentManagerContent::SetBoardSort` (the board's own `_CycleBoardSort` tail: persist through the settings sink,
   broadcast, re-sort the board) and applied with the board's own `MakeSortKey`/`SortKeyLess` — one sort
@@ -174,7 +185,7 @@ model's answer and its list of sessions instead of the session cards; the summar
   restore/resume is NOT stamped: it keeps its persisted anchor, and its transcript orders it.
 - **A card**: title on a band painted the session's `ResolveSessionColorHex` color
   (WCAG-contrast text), the session's **bookmark-tag ribbons in the band's top-right corner**
-  (§2b), the **tab strip's status icon** (§2g — the state dot with the tab's unsent-draft 3 dots,
+  (§2b), a **pushpin** at the band's right end while the card is pinned to the top (§2j), the **tab strip's status icon** (§2g — the state dot with the tab's unsent-draft 3 dots,
   red flash ring and cache-warm spark crown) + `StateLabel` in the shared `AgentStatusColors` palette, a
   teal `codex` pill, the timing line, and a dim
   `leaf / branch` line.
@@ -200,7 +211,9 @@ model's answer and its list of sessions instead of the session cards; the summar
   `AgentManagerContent::BuildSessionMenuFor` (a public wrapper over `_MakeLazySessionMenu`), the
   exact lazily-filled flyout the board card shows, **anchored on the card** (its optional `anchor`
   argument, held weakly) so the menu's **Tags** item opens the tag panel right under the card,
-  as on the board (without an anchor it opened at the window's top-left). The menu ends with
+  as on the board (without an anchor it opened at the window's top-left). Right under its **Jump to Tab**, the card's
+  own two items (§2j, 2026-11-06, NOT BUILT yet): **Pin to Top**, and **Unpin** on a pinned card — the board card and
+  the tree row do not have them. The menu ends with
   **Deactivate ▸** over **Close ▸**, the WT tab menu's two submenus with its items in its order
   (2026-10-23, NOT BUILT yet; CLAUDE.md *C1 UI*, `AgentManagerContent::_MakeSessionScopeSubmenu`):
   Deactivate Tab / Close Tab · Tabs to the Left · Tabs to the Right · Other Tabs · Of Same Folder ·
@@ -1203,6 +1216,119 @@ Docked RIGHT (the mirror; the menu hangs from `⋯`'s right edge):
 - Esc closes the menu (and its submenu) without a change; no keystroke reaches the terminal; no
   `[exc] side panel more menu` line in hooks.log.
 
+### 2j. Pin to Top — a card's right-click pins it at the top of the list (2026-11-06, NOT BUILT yet)
+
+The user's request: "Add to side menu cards, a pin option where top-right of their title colored bar gets a pinned icon
+when you pin and they appear. pinning puts on top and repinning will bring a tab to the top again. pinning can only
+happen through right click. put pin below Jump to tab". Their answers the same day to the two design questions (asked
+with mockups of the card):
+
+| Question | Answer |
+|---|---|
+| How it relates to Telegram's `/pin` (MESSAGING.md §5.3: a pinned session is held in Waiting-for-you and never goes Idle) | **Separate: order only.** It moves the card and draws the pushpin; the session's state is untouched. Neither pin sets, reads or shows the other. |
+| The icon | **The outline pushpin**: Segoe Fluent Icons' Pin glyph (U+E718), in the title's own ink |
+
+```
+┌──────────────────────────────────────────┐
+│ Release notes for 0.8.2                 ⚲│  ← a pinned card: the pushpin at the band's right end
+│ ● Running  created 2h, active 4s ago     │
+├──────────────────────────────────────────┤
+│ Fix the flaky login…           ▮▮▮▮+2   ⚲│  ← tagged and pinned: [ title * ][ ribbons ][ pushpin ]
+│ ● Waiting  created 4d1h, active 2m4s ago │
+├──────────────────────────────────────────┤
+│ kvnode compaction bench                  │  ← the unpinned cards follow, in the chosen order
+└──────────────────────────────────────────┘
+   (⚲ stands for the icon font's pushpin; the cards' margins are left out)
+```
+
+- **The menu, and only the menu.** Right under **Jump to Tab**: **Pin to Top** on every live card — on a pinned card it
+  is the user's "repinning will bring a tab to the top again" — and **Unpin** under it on a pinned card only. Nothing
+  else pins or unpins: the pushpin is not a button (`IsHitTestVisible(false)`; a press on it selects the card like any
+  press on the band). The items are the side panel's own, appended by the shared session menu's new host hook
+  (`AgentManagerContent::BuildSessionMenuFor`'s `afterJumpToTab`, a `SessionMenuHostItems`; the board card, the tree row
+  and the card's `⋯` button pass none) and filled at every open from the session as it is then
+  (`_SidePanelAppendPinItems`, one lean `GetWithoutQueue`); a session closed since its card was drawn gets neither. Each
+  runs one tick after its click (`_SidePanelRunMenuCommand`: the menu is still closing inside the Click). Their icons are
+  the band's glyphs (Pin, and Unpin U+E77A); their tips use the menu's default delay, like Jump to Tab's.
+- **The order** (`_SidePanelRebuildCards`): the pinned cards first, the NEWEST pin on top, then every other card in the
+  board's shared order (§2) — `CompareSidePanelPins` before `SortKeyLess` in the one `std::stable_sort`, a lexicographic
+  pairing that keeps the comparator a strict weak ordering; pins of one stamp keep the board's order. The scope and the
+  filter apply first: a pinned card the filter hides stays hidden, and a LOCAL list shows this window's pins only. The
+  Triage Board, the tree and the AI search's result list keep their own orders.
+- **The stamp** — `SessionInfo::sidePanelPinnedAtUnixMs`, system-clock ms, 0 = not pinned (only a positive value is a pin,
+  `IsSidePanelPinStamp`). A pin (or a pin again) takes `NextSidePanelPinStamp(now, the newest pin of every live
+  session)`: the clock, but always past the newest pin, so the card is the top one at once in every window's GLOBAL list
+  too, even after the clock stepped back or for two pins in one millisecond. Written through `SessionRegistry::Update`
+  (`_SidePanelSetPinned`), so every window's panel re-sorts from its registry drain and sessions.json saves it; this
+  window's list updates at once, past the drain's 500 ms throttle (the tag edit's way, `_SidePanelNoteTagsChanged`).
+  An unpin writes 0. One `[nav] sidepanel pin-to-top <sid8>` / `[nav] sidepanel unpin <sid8>` line.
+- **The list shows where the card went.** A pin from the session cards owes the list a reveal of the card at its new
+  place, the top — the ⌖ reveal of §2a, with a FORCED debt (`_sidePanelRevealForced`) that is paid whatever the ⌖
+  setting says, because it answers the user's own pin. The tick runs after the update, realizes the top rows when they
+  had no cards (§2f) and jumps without the scroll animation. A tab selection's own reveal or a card click replaces or
+  drops it; ⌖ turning off (here or by a broadcast) keeps it. An unpin owes no scroll: the card drops back into the order
+  while the user looks at the pins.
+- **The band** (`_SidePanelApplyCardPin`, beside `_SidePanelApplyCardTags`): `[ title * ][ tag strip Auto ][ pushpin
+  Auto ]`. The grid exists while the card is tagged OR pinned (`_SidePanelEnsureBandGrid`); when neither is left the band
+  is the title alone again (`_SidePanelReleaseBandGridIfBare`) — an untagged pinned card keeps the grid for its pushpin,
+  and an unpinned tagged one keeps it for its ribbons. The pushpin is a 10 DIP `FontIcon` ("Segoe Fluent Icons, Segoe
+  MDL2 Assets": the MDL2 font has the same code points, for a Windows 10 without the Fluent font), vertically centered
+  on the title's line, 5 DIP from the ribbons or the title's ellipsis, in the title's WCAG-picked ink (like the `+N`), so
+  it reads on every folder color — where a colored emoji melts into a band of its own color. It never makes the band
+  taller (the stride stays, §2f), and the band stays CHILDLESS (the grid sits beside it in the band area).
+- **Words**: the card's tooltip adds `pinned to the top of this list (right-click ▸ Unpin)`; the title's item status
+  adds `pinned to the top` (`kAgentStatusPinnedToTop`, AgentAutomation.h — not a bare "pinned", which the AI search's tab
+  facts use for the never-idle pin).
+- **The AI search's results** (§2h): a result card of an OPEN pinned session wears the pushpin too (the same skeleton and
+  band code; a closed session keeps its stamp but has no card in the list a pin orders, so its card shows none), and its
+  menu has the same two items. A pin made there owes no scroll — the cards list is behind the AI view — and the result
+  cards are refreshed at once to show the pushpin; the hidden list catches up when the view closes.
+- **Lifetime.** In sessions.json (`"sidePanelPinnedAtUnixMs"`, omitted while 0, so an untouched file is byte-unchanged; a
+  zero, negative, string or null value reads as not pinned). Not on the older-writer repair's volatile list (PERSISTENCE.md
+  §17): only the user's Unpin clears it. Kept while the session is closed — a resumed session comes back pinned. A
+  restore, a resume and a restore-fresh keep it (the launch seams copy the saved record whole), and a Restart and a
+  Deactivate keep it (they edit the record in place). When ONE tab
+  switches conversation — a `/clear`, a `/resume`, a `/handover-here` successor, all through the re-home in
+  `_BindClaudeSessionToTab` — the successor takes the pin (the newer of its own and the replaced one's,
+  `SidePanelPinAfterRehome`; `[rehome] <id> keeps the side panel pin of <old>` in hooks.log) and the archived conversation
+  gives it up, so resuming it later brings back no second pinned card: the user pinned the tab's card, not a conversation
+  id. A fork, a `/handover` successor in a new tab and a new session start unpinned.
+- **Cost:** one comparison of two integers per sort step, one lean read per menu open, one lean snapshot per pin click;
+  the pushpin is built on its card's first pinned apply and dropped on unpin, nothing else is added to a card.
+- **Tested** (no build): `TestSidePanelPins` (`tests_sidepanel.cpp`, 38 checks) — which stamps are pins, the comparison,
+  a list sorted like the panel's with a pin again of the bottom pin on a stepped-back clock and an unpin, the
+  comparator's strict weak ordering over seeded random rows, the stamp's edges (a burst of 1,000 pins in one millisecond,
+  never below 1, no overflow), the re-home carry, the sessions.json key apart from the never-idle `pinned` (hand-edited
+  values included), and the registry's lean copies; the whole m5 harness passes but for the 3 known taskbar-badge
+  checks. `cl /Zs` (syntax and types, no objects) with the recorded lines of the 2026-11-06 Release worktree build
+  (Q:\tmp\am-release-wt at f93329856: its PCH and generated projection; K:'s sources): all 17 agentmaster-cli units pass
+  at their `/W4 /WX`; of the 121 TerminalAppLib units 114 pass, and 7 fail on that setup alone — a relative include of an
+  upstream header (`../../inc/til/string.h`, `../inc/cppwinrt_utils.h`) reaches K:'s copy while the PCH holds the
+  worktree's, so `#pragma once` sees two files (C2011 / C2084 / C2995 redefinitions). Five of them reach no changed header
+  (the three palette units' whole include closure is byte-identical to f93329856, which built them); the two that do,
+  `TabManagement.cpp` and `TerminalPage.cpp`, pass from an overlay copy of K:'s headers whose `../` includes point at
+  the worktree's copies. Negative controls: an unknown name planted in `_SidePanelSetPinned` and one in
+  `_SidePanelApplyCardPin` failed at exactly those lines, and one planted in the overlay's `TerminalPage.h` failed
+  `TabManagement.cpp` at exactly that line. The e2e test `test_side_panel.py::test_pin_to_top` (flows/02 SP-11 phases 1–5, `needs_fix("SP-F2")`)
+  is written and collects, never run (it needs a build).
+- **Check after the build** (a PURGED build: `SessionModels.h`, `TerminalPage.h` and `AgentManagerContent.h` changed):
+  - Right-click a card: **Pin to Top** sits right under Jump to Tab; Pin it: it moves to the top of the list, a pushpin
+    at its band's right end (right of any ribbons), in dark ink on a light band and light ink on a dark one; the band is
+    no taller. With the list scrolled down, the list jumps to the top to show it, ⌖ on or off.
+  - Pin a second card: it goes above the first. Right-click the lower pinned card: **Pin to Top** and **Unpin**; Pin to
+    Top brings it back above the other one; Unpin drops it back into the order and takes the pushpin away, without a
+    scroll. Untag / tag a pinned card: the pushpin stays at the band's end.
+  - The board card, the tree row and the board card's `⋯` menu have no pin items; a click on the pushpin selects the
+    card; the card's tooltip says it is pinned.
+  - Another window with its list on GLOBAL re-sorts within ~2.5 s (its registry drain, or the periodic tick when the
+    drain's 500 ms throttle folded it there); settings.json is untouched, sessions.json has the
+    stamp; after a restart the pinned cards are still on top. `/clear` in a pinned tab: its card stays pinned at the same
+    place. A Telegram `/pin` neither moves nor marks the card, and a card pin never holds a session in Waiting-for-you.
+  - The AI view: a pinned open session's result card wears the pushpin; Pin to Top from a result card shows the pushpin
+    at once, and AI off shows the card at the top of the list.
+  - No `[exc] _SidePanelSetPinned`, `[exc] session menu: the host's items under Jump to Tab` or `[sidepanel] … out of
+    step` line in hooks.log.
+
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 
 The bottom area hosts a REAL `AgentTabOverlay` whose summary panel is switched into the new
@@ -1334,6 +1460,7 @@ below).
 | card scope (LOCAL/GLOBAL) | `WindowRecord::sidePanelGlobal` (absent = LOCAL; written only when GLOBAL) | — **none by design**: every new window starts LOCAL |
 | `⌖` scroll to the selected tab (§2a) | — | `AppSettings::sidePanelScrollToSelectedTab` (true = **ON, the default**; absent key = ON) — a GLOBAL preference, broadcast live to every open window |
 | the filter box's **AI** toggle (§2h) | `WindowRecord::sidePanelAiMode` (-1 = unset; written only when set; a non-bool value reads unset) | `AppSettings::sidePanelAiMode` (false = **the session cards, the default**) |
+| a card's **Pin to Top** (§2j) | — | — **per SESSION instead**: sessions.json's `SessionInfo::sidePanelPinnedAtUnixMs` (absent / 0 = not pinned), so the pin follows the session into every window's list and through a restart |
 
 - **The card scope is the one field with NO last-one-wins export**: `_SidePanelSetScope`
   persists it through the window-record autosave alone — never `_SidePanelPersistDefaults`, and
@@ -1405,6 +1532,9 @@ below).
   down (detached) before its card leaves the list or the list resets, its floating tips are silenced
   meanwhile (`AgentSuppressTip`), its arm-build reads no transcript, and every handler it wires holds
   the page and the host weakly.
+- Pin to Top (§2j): one integer comparison per sort step, one lean read per menu open, one lean snapshot per pin click;
+  the pushpin exists only on a pinned card (built at its first pinned apply, dropped at unpin), is not hit-testable and
+  adds no handler, and the band's rounded shape stays childless.
 - The AI search (§2h): its view is built on the first AI-on; while it shows, the card list rests like a collapsed one
   (updates owed, reveal owed, icons still); its result cards are the model's handful, rebuilt per list and refreshed at
   most once per periodic tick; its disk reads run on a pool thread that holds the page weakly; its claude.exe starts only
@@ -1494,3 +1624,15 @@ below).
   `_SidePanelApplyDock`; the dock item moved in `_SidePanelFillMoreMenu`), `TerminalPage.h` (`_sidePanelHeader`, the
   declaration), `e2e/amdriver/ui/sidepanel.py` (`header_buttons`, `HEADER_ORDER`, `MORE_ITEM_ORDER`),
   `e2e/suites/test_side_panel.py` (the line in both docks, the menu's outer edge).
+  Pin to Top (§2j): `AgentMaster/SidePanelPins.h` (the order, the stamp and the re-home carry, pure; new),
+  `AgentMaster/SessionModels.h` (`SessionInfo::sidePanelPinnedAtUnixMs`) + `Persistence.cpp` (the sessions.json key),
+  `AgentManagerContent.{h,Tree.cpp}` (`SessionMenuHostItems`, the `afterJumpToTab` hook of `BuildSessionMenuFor` /
+  `_MakeLazySessionMenu` / `_PopulateSessionMenu`), `TerminalPage.AgentSidePanel.cpp` (`_SidePanelAppendPinItems`,
+  `_SidePanelSetPinned`, the pinned-first sort, `_SidePanelApplyCardPin` + `_SidePanelEnsureBandGrid` +
+  `_SidePanelReleaseBandGridIfBare` beside `_SidePanelApplyCardTags`, the forced reveal, the AI result cards' pushpin and
+  items, the `kSidePanelPin*` constants), `TerminalPage.h` (the model's `pinned`, the view's `pinIcon`,
+  `_sidePanelRevealForced`, the declarations), `TerminalPage.AgentObserver.cpp` (the re-home carry in
+  `_BindClaudeSessionToTab`), `AgentAutomation.h` (`kAgentStatusPinnedToTop`), `TerminalAppLib.vcxproj` (the header),
+  `tests/tests_sidepanel.cpp` (`TestSidePanelPins`), `tests/m5_tests.{h,cpp}`. The filter box's 3 s tip (§1, the same
+  day): `TerminalPage.AgentSidePanel.cpp` (the box's build and `_SidePanelSetAiMode`; `kSidePanelButtonTipDelay`'s
+  comment).

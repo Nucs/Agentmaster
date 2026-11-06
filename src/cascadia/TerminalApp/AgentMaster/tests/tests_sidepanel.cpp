@@ -43,6 +43,11 @@
 // ids, their order, each why); and whole requests replayed through a small model of the view - a request that searches,
 // shows, shows again and answers changes the list ONCE, at its end, to the last show; one that answers in words changes
 // nothing; a request that ends in a failure after a show still lands its pick; a reset clears at once.
+//
+// TestSidePanelPins pins the cards' PIN TO TOP (AgentMaster/SidePanelPins.h, SIDE_PANEL.md section 2j): the pins first, the
+// newest on top, the board's order for the rest; a pin again bringing a card back to the top on any clock; the comparator's
+// strict weak ordering; the stamp's edges; the pin a tab keeps when it switches conversation; the sessions.json key (apart
+// from Telegram's never-idle pin) and the registry's lean copies.
 
 #include "m5_tests.h"
 
@@ -50,6 +55,7 @@
 #include "../PointerCardPlacement.h" // the "+" launcher card's tooltip-like placement (TestPointerCardPlacement)
 #include "../SessionTimingText.h" // the cards' and rows' "created 4d1h, active 2m4s ago" (TestSessionTimingText)
 #include "../SidePanelAiList.h" // the AI view's list rule: only a request's end or a reset changes it (TestSidePanelAiList)
+#include "../SidePanelPins.h" // Pin to Top: pinned cards first, the newest pin on top, the pin stamp, the re-home carry (TestSidePanelPins)
 #include "../StatusIconMotion.h" // the status icon's motion rule, shared by the tab header and the card icon (TestStatusIconMotion)
 #include "../VirtualListWindow.h" // the virtualized card list's realized rows (TestVirtualListWindow)
 
@@ -1201,5 +1207,231 @@ void TestSidePanelAiList()
         view.Apply(Kind::Asked, AiConversation(true, true, {}, {}));
         view.Apply(Kind::Reset, AiConversation(false, false, {}, {}));
         CHECK(view.replacements == 4 && !view.hasShown && view.ids.empty(), "ai request: a reset clears the list at once");
+    }
+}
+
+namespace
+{
+    // One row of the side panel's card list as _SidePanelRebuildCards orders it: the card's pin stamp, and its rank in the
+    // board's shared order (MakeSortKey / SortKeyLess, stood in for by a number: lower = earlier).
+    struct PinRow
+    {
+        std::wstring id;
+        int64_t pin;
+        int boardRank;
+    };
+
+    // The list's comparator, written exactly as _SidePanelRebuildCards writes it: the pins first, the board's order for what
+    // they leave equal.
+    //   a, b    - two rows.
+    //   returns - true when a goes before b.
+    //   throws  - nothing.
+    bool PinRowLess(const PinRow& a, const PinRow& b) noexcept
+    {
+        const int pin = CompareSidePanelPins(a.pin, b.pin);
+        return pin < 0 || (pin == 0 && a.boardRank < b.boardRank);
+    }
+
+    // The rows' ids in order, as one string ("bfdg..."), so a CHECK names the whole order at once.
+    //   rows    - the rows.
+    //   returns - their ids concatenated.
+    //   throws  - std::bad_alloc only.
+    std::wstring PinRowOrder(const std::vector<PinRow>& rows)
+    {
+        std::wstring order;
+        for (const auto& r : rows)
+        {
+            order += r.id;
+        }
+        return order;
+    }
+}
+
+// TestSidePanelPins pins the side panel's PIN TO TOP (AgentMaster/SidePanelPins.h, SIDE_PANEL.md section 2j; the user's request
+// of 2026-11-06, "pinning puts on top and repinning will bring a tab to the top again", and their pick of a pin SEPARATE from
+// Telegram's never-idle /pin): which stamps are pins; the pinned-first comparison; a list sorted the way the panel sorts it
+// (the pins first, the newest on top, then the board's order) with a pin again bringing the bottom pin to the top; that
+// comparator's strict weak ordering over seeded random rows (std::stable_sort needs one); the stamp a pin gets (the clock, past
+// the newest pin, never below 1, no overflow at the type's end; a frozen clock still orders a burst of pins); the pin a tab
+// keeps when it switches conversation; the sessions.json round trip (written only for a pin, independent of the never-idle
+// key, absent / zero / negative / non-number read as not pinned); and the registry: Update reaches the lean copies the cards
+// read, and the card pin never holds a session out of Idle (that is the never-idle pin's hold, ApplyPinHold).
+void TestSidePanelPins()
+{
+    std::wprintf(L"Side panel pins (SidePanelPins.h, SIDE_PANEL.md section 2j):\n");
+    constexpr auto npos = std::wstring::npos;
+    constexpr int64_t kMax = (std::numeric_limits<int64_t>::max)();
+
+    // Which stamps are pins.
+    CHECK(!IsSidePanelPinStamp(0), "pins: 0 is not a pin");
+    CHECK(!IsSidePanelPinStamp(-5), "pins: a negative stamp (a hand edit) is not a pin");
+    CHECK(IsSidePanelPinStamp(1) && IsSidePanelPinStamp(1'762'400'000'000) && IsSidePanelPinStamp(kMax), "pins: every positive stamp is a pin");
+
+    // The pinned-first comparison.
+    CHECK(CompareSidePanelPins(0, 0) == 0, "pins: two unpinned rows - the board's order decides");
+    CHECK(CompareSidePanelPins(-3, 0) == 0 && CompareSidePanelPins(0, -3) == 0 && CompareSidePanelPins(-3, -9) == 0, "pins: a negative stamp ranks like an unpinned row");
+    CHECK(CompareSidePanelPins(100, 0) < 0 && CompareSidePanelPins(0, 100) > 0, "pins: a pinned row goes before an unpinned one, from either side");
+    CHECK(CompareSidePanelPins(100, -1) < 0 && CompareSidePanelPins(-1, 100) > 0, "pins: a pinned row goes before a negative-stamped one");
+    CHECK(CompareSidePanelPins(200, 100) < 0 && CompareSidePanelPins(100, 200) > 0, "pins: the newer pin goes first - the last card pinned is the top card");
+    CHECK(CompareSidePanelPins(100, 100) == 0, "pins: one stamp - the board's order decides");
+
+    // A list sorted the way the side panel sorts it, then a pin again of its bottom pin, then an unpin.
+    {
+        std::vector<PinRow> rows = {
+            { L"a", 0, 0 }, { L"b", 300, 4 }, { L"c", 0, 1 }, { L"d", 100, 2 }, { L"e", 0, 3 }, { L"f", 200, 5 }, { L"g", 100, 6 },
+        };
+        std::stable_sort(rows.begin(), rows.end(), PinRowLess);
+        CHECK(PinRowOrder(rows) == L"bfdgace", "pins order: the pins first, newest on top (b 300, f 200; d and g share 100 and keep the board's order), then the rest in the board's order");
+        // Pin again: g, the bottom pin, gets a stamp past the newest pin (b's 300) on a clock that reads 150 (stepped back).
+        int64_t newest = 0;
+        for (const auto& r : rows)
+        {
+            newest = (std::max)(newest, r.pin);
+        }
+        for (auto& r : rows)
+        {
+            if (r.id == L"g")
+            {
+                r.pin = NextSidePanelPinStamp(150, newest);
+            }
+        }
+        std::stable_sort(rows.begin(), rows.end(), PinRowLess);
+        CHECK(PinRowOrder(rows) == L"gbfdace", "pins order: a pin again brings the bottom pin back to the top, whatever the clock says");
+        // Unpin b: it drops back into the board's order (rank 4: after a, c, e), the other pins keep theirs.
+        for (auto& r : rows)
+        {
+            if (r.id == L"b")
+            {
+                r.pin = 0;
+            }
+        }
+        std::stable_sort(rows.begin(), rows.end(), PinRowLess);
+        CHECK(PinRowOrder(rows) == L"gfdaceb", "pins order: an unpinned card goes back to its place in the board's order");
+        // Nothing pinned: exactly the board's order.
+        for (auto& r : rows)
+        {
+            r.pin = 0;
+        }
+        std::stable_sort(rows.begin(), rows.end(), PinRowLess);
+        CHECK(PinRowOrder(rows) == L"acdebfg", "pins order: with no pin the list is the board's order, untouched");
+    }
+
+    // The comparator is a strict weak ordering (irreflexive, asymmetric, transitive, and its "neither goes first" is transitive
+    // too), over seeded random rows with few distinct pins and ranks, so ties of every kind meet.
+    {
+        bool irreflexive = true;
+        bool asymmetric = true;
+        bool transitive = true;
+        bool equivTransitive = true;
+        uint32_t seed = 0x5EED2026u;
+        const auto next = [&seed]() {
+            seed = seed * 1664525u + 1013904223u; // a fixed LCG: the same rows on every run
+            return seed >> 8;
+        };
+        const int64_t pinChoices[] = { 0, -1, 5, 7, 9, 0 };
+        for (int trial = 0; trial < 4; ++trial)
+        {
+            std::vector<PinRow> rows;
+            for (int i = 0; i < 24; ++i)
+            {
+                rows.push_back(PinRow{ std::to_wstring(i), pinChoices[next() % 6], static_cast<int>(next() % 4) });
+            }
+            for (const auto& x : rows)
+            {
+                irreflexive = irreflexive && !PinRowLess(x, x);
+                for (const auto& y : rows)
+                {
+                    asymmetric = asymmetric && !(PinRowLess(x, y) && PinRowLess(y, x));
+                    for (const auto& z : rows)
+                    {
+                        if (PinRowLess(x, y) && PinRowLess(y, z))
+                        {
+                            transitive = transitive && PinRowLess(x, z);
+                        }
+                        const bool xyEquiv = !PinRowLess(x, y) && !PinRowLess(y, x);
+                        const bool yzEquiv = !PinRowLess(y, z) && !PinRowLess(z, y);
+                        if (xyEquiv && yzEquiv)
+                        {
+                            equivTransitive = equivTransitive && !PinRowLess(x, z) && !PinRowLess(z, x);
+                        }
+                    }
+                }
+            }
+        }
+        CHECK(irreflexive && asymmetric, "pins order: the comparator is irreflexive and asymmetric");
+        CHECK(transitive && equivTransitive, "pins order: the comparator and its equivalence are transitive - a strict weak ordering std::stable_sort accepts");
+    }
+
+    // The stamp a pin gets.
+    CHECK(NextSidePanelPinStamp(1000, 0) == 1000, "pin stamp: nothing pinned - the clock");
+    CHECK(NextSidePanelPinStamp(1000, 999) == 1000, "pin stamp: the clock past the newest pin - the clock");
+    CHECK(NextSidePanelPinStamp(1000, 1000) == 1001, "pin stamp: two pins in one millisecond - one past the newest");
+    CHECK(NextSidePanelPinStamp(500, 1000) == 1001, "pin stamp: a clock stepped back - one past the newest, so the card is still the top one");
+    CHECK(NextSidePanelPinStamp(0, 0) == 1 && NextSidePanelPinStamp(-7, 0) == 1, "pin stamp: never below 1 (a pin is a positive stamp)");
+    CHECK(NextSidePanelPinStamp(5, -9) == 5, "pin stamp: a negative newest stamp counts as none");
+    CHECK(NextSidePanelPinStamp(5, kMax) == kMax && NextSidePanelPinStamp(kMax, kMax) == kMax, "pin stamp: a newest stamp at the type's end returns that end - no wrap to negative");
+    {
+        // A burst of pins on a frozen clock (each pin again of the card that was on top a moment ago): every stamp is newer.
+        int64_t newest = 0;
+        bool increasing = true;
+        for (int i = 0; i < 1000; ++i)
+        {
+            const int64_t stamp = NextSidePanelPinStamp(1'762'400'000'000, newest);
+            increasing = increasing && stamp > newest && IsSidePanelPinStamp(stamp);
+            newest = stamp;
+        }
+        CHECK(increasing && newest == 1'762'400'000'999, "pin stamp: 1000 pins in one millisecond each land on top (strictly newer stamps)");
+    }
+
+    // The pin a tab keeps when it switches conversation (a /clear, a /resume, a /handover-here).
+    CHECK(SidePanelPinAfterRehome(0, 0) == 0, "pin carry: neither pinned - the successor is not pinned");
+    CHECK(SidePanelPinAfterRehome(0, 500) == 500, "pin carry: the successor takes the replaced card's pin, at its place among the pins");
+    CHECK(SidePanelPinAfterRehome(700, 500) == 700 && SidePanelPinAfterRehome(300, 500) == 500, "pin carry: the newer of the two stamps");
+    CHECK(SidePanelPinAfterRehome(-1, 500) == 500 && SidePanelPinAfterRehome(500, -1) == 500 && SidePanelPinAfterRehome(-1, -1) == 0, "pin carry: a negative stamp counts as none");
+
+    // sessions.json: the stamp round-trips, apart from Telegram's never-idle key.
+    {
+        SessionInfo p = MakeSession(L"spin-1");
+        p.sidePanelPinnedAtUnixMs = 1'762'400'000'123;
+        const auto text = SerializeSessions({ p });
+        CHECK(text.find(L"\"sidePanelPinnedAtUnixMs\":1762400000123") != npos, "pins persist: a pinned card's stamp is written");
+        CHECK(text.find(L"\"pinned\"") == npos, "pins persist: a card pin writes no never-idle key");
+        const auto back = DeserializeSessions(text);
+        CHECK(back.size() == 1 && back[0].sidePanelPinnedAtUnixMs == 1'762'400'000'123 && !back[0].pinned, "pins persist: the stamp reads back, and the session is not never-idle pinned");
+        CHECK(SerializeSessions({ MakeSession(L"spin-2") }).find(L"sidePanelPinnedAtUnixMs") == npos, "pins persist: nothing written while unpinned (an untouched sessions.json is byte-unchanged)");
+        SessionInfo tg = MakeSession(L"spin-3");
+        tg.pinned = true;
+        const auto tgBack = DeserializeSessions(SerializeSessions({ tg }));
+        CHECK(tgBack.size() == 1 && tgBack[0].pinned && tgBack[0].sidePanelPinnedAtUnixMs == 0, "pins persist: Telegram's never-idle pin does not pin the card");
+        // Hand edits of the stamp: zero, negative and a non-number read as not pinned; a real stamp stands.
+        const std::wstring key = L"\"sidePanelPinnedAtUnixMs\":1762400000123";
+        const auto edited = [&](const std::wstring& value) {
+            std::wstring t = text;
+            const size_t at = t.find(key);
+            if (at != npos)
+            {
+                t.replace(at, key.size(), L"\"sidePanelPinnedAtUnixMs\":" + value);
+            }
+            const auto rows = DeserializeSessions(t);
+            return rows.size() == 1 ? rows[0].sidePanelPinnedAtUnixMs : int64_t{ -42 };
+        };
+        CHECK(edited(L"0") == 0 && edited(L"-1762400000123") == 0 && edited(L"\"soon\"") == 0 && edited(L"null") == 0, "pins persist: a zero, negative, string or null stamp reads as not pinned");
+        CHECK(edited(L"77") == 77, "pins persist: a small positive stamp is a pin");
+    }
+
+    // The registry: an Update reaches the lean copies the cards read, and the card pin holds no state.
+    {
+        SessionRegistry reg;
+        SessionInfo r = MakeSession(L"spin-reg");
+        r.live = true;
+        reg.Upsert(r);
+        CHECK(reg.Update(L"spin-reg", [](SessionInfo& s) { s.sidePanelPinnedAtUnixMs = 4242; }), "pins registry: Update knows the session");
+        const auto lean = reg.GetWithoutQueue(L"spin-reg");
+        const auto cards = reg.SnapshotLiveForCards();
+        CHECK(lean && lean->sidePanelPinnedAtUnixMs == 4242, "pins registry: the one-session lean read carries the stamp (the menu reads it)");
+        CHECK(cards.size() == 1 && cards[0].sidePanelPinnedAtUnixMs == 4242, "pins registry: the cards' lean snapshot carries the stamp (the list sorts by it)");
+        reg.Update(L"spin-reg", [](SessionInfo& s) { s.state = SessionState::Idle; });
+        const auto idle = reg.Get(L"spin-reg");
+        CHECK(idle && idle->state == SessionState::Idle && !idle->pinned, "pins registry: a card pin never holds a session out of Idle (the never-idle hold is Telegram's pin)");
     }
 }

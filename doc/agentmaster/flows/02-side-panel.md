@@ -15,6 +15,8 @@ draft's three dots under it, the red unread ring, the cache-warm spark crown (SP
 card scope, the card order and the collapse that were buttons on it (SP-10). 2026-11-04 (NOT BUILT): the line mirrors
 with the dock — **⋯** · **Sum** · **+** from the window's left edge docked left, ⋯ always at the window's edge — the
 menu hangs from ⋯'s outer edge, and the dock item sits below the separator, just above the collapse (SP-10).
+2026-11-06 (NOT BUILT): a card's menu pins it to the top of the list, right under Jump to Tab (SP-11); the filter box's
+tip waits 3 s like the buttons'.
 
 ## Lifecycle model
 
@@ -383,6 +385,47 @@ of its text and the current state in its text or its check; each item does exact
   of the terminal, SP-02 phase 8).
 - **E4 Docked right** → the menu still opens inside the panel (right edges aligned with ⋯; docked left the left edges).
 - **E5 Another window moves the dock** (a settings broadcast) → this window's panel moves and its line mirrors with it.
+
+---
+
+### SP-11 · Pin to Top
+
+> **Since** 2026-11-06 (NOT BUILT) · **P1** · **Needs** F-S2 (+ F-W2 for E3) · **Spec** SIDE_PANEL.md §2j
+
+**Promise.** A card's right-click menu pins it, right under Jump to Tab — the only way in or out. A pinned card goes to
+the top of the list, the newest pin on top, and wears a pushpin at its title band's right end (right of any tag
+ribbons); **Pin to Top** on a pinned card brings it back to the top; **Unpin** lets it drop back into the chosen order.
+Nothing else about the session changes: it is not Telegram's never-idle `/pin`.
+
+**Phases**
+1. **The items.** *Do:* right-click B's card. *Expect:* `Pin to Top` (`am.side.pin`) right under `Jump to Tab`, no
+   `Unpin`; the Triage Board card's and the tree row's menus have neither.
+2. **Pin.** *Do:* Pin to Top on the card that is LOWER in the list. *Expect:* it moves to the top; its band shows the
+   pushpin; its title's item status reads `… pinned to the top …`; sessions.json has its `sidePanelPinnedAtUnixMs`; its
+   state is unchanged (Waiting stays Waiting, and an Idle card stays Idle).
+3. **The newest on top.** *Do:* pin the other card. *Expect:* it is above the first; the first keeps its pushpin.
+4. **Pin again.** *Do:* right-click the lower pinned card. *Expect:* `Pin to Top` and `Unpin` (`am.side.unpin`). *Do:* Pin
+   to Top. *Expect:* it is the top card again.
+5. **Unpin.** *Do:* Unpin the top card. *Expect:* its pushpin is gone and it is back in the order below the other pin;
+   the list did not scroll; sessions.json has no stamp for it.
+6. **The pushpin is no button.** *Do:* click a pinned card's pushpin. *Expect:* the card is selected (a peek), nothing is
+   pinned or unpinned; the card's tooltip names the pin.
+7. **Restart.** *Do:* close and reopen the window (or the app). *Expect:* the pinned card is still on top, with its
+   pushpin.
+
+**Edge cases**
+- **E1 A long list scrolled down** → Pin to Top on a far card scrolls the list to the top, where the card now is — with ⌖
+  on and with ⌖ off.
+- **E2 A pinned card with tags** → the ribbons stay in the top-right corner, the pushpin right of them; untagging keeps
+  the pushpin, unpinning keeps the ribbons; the band is no taller than an unpinned card's.
+- **E3 Another window's GLOBAL list** → it re-sorts within ~2.5 s (its registry drain, or the periodic tick); its card
+  shows the pushpin.
+- **E4 `/clear` in a pinned tab** → the new conversation's card is pinned at the same place; the old conversation,
+  resumed later from the Sessions page, is not.
+- **E5 Telegram `/pin`** (MESSAGING.md §5.3) → the card neither moves nor shows a pushpin; a card pin never holds a
+  session in Waiting for you.
+- **E6 The AI view** → a result card of a pinned open session shows the pushpin; Pin to Top from a result card shows it at
+  once, and AI off shows the card at the top of the list.
 
 ---
 

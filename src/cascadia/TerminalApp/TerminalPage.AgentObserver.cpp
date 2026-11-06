@@ -56,6 +56,7 @@
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/SessionScanner.h" // PresenceIsWorking + the toast HOLD gates (ShouldHoldCompletionToast / DecideHeldToast / ShouldSuppressDuplicateToast) — System notifications
 #include "AgentMaster/SessionStore.h" // IsSessionFavorite (the FAVORITE crown on a managed tab's status dot)
+#include "AgentMaster/SidePanelPins.h" // SidePanelPinAfterRehome / IsSidePanelPinStamp — a pinned side panel card stays pinned when its tab switches conversation (SIDE_PANEL.md §2j)
 #include "AgentMaster/TabDragMath.h" // DecideTabStripRevealOffset — the tab-strip reveal decision (_AdjustStripToRevealItem)
 #include "AgentMaster/TaskbarThumbnail.h" // FrameColor — the taskbar preview frame's alpha floor (NOTIFICATIONS.md section 9)
 #include "AgentMaster/TranscriptStore.h" // Agentmaster (tab color modes): LoadOrRefreshSessionIndex + InferWorkingDirectory (the inferred-workdir scan)
@@ -8474,6 +8475,9 @@ namespace winrt::TerminalApp::implementation
         // the tab was actually on.
         bool supersededWasManaged = false;
         bool supersededStarted = false;
+        // Agentmaster (SIDE_PANEL.md §2j): the superseded conversation's side panel PIN TO TOP stamp (0 = not pinned), read before
+        // its archive below takes it away — the pin belongs to the TAB's card, so the successor carries it (the carry block).
+        int64_t supersededSidePanelPin = 0;
         std::wstring supersededForLog;
         for (const auto& [oldId, weakOld] : _claudeTabs)
         {
@@ -8503,6 +8507,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     supersededWasManaged = !oldRec->external; // read BEFORE the archive below (which leaves the flag untouched anyway)
                     supersededStarted = oldRec->started;
+                    supersededSidePanelPin = oldRec->sidePanelPinnedAtUnixMs; // BEFORE the archive below clears it
                 }
                 supersededForLog = superseded;
                 _sessionRegistry->SetInjector(superseded, nullptr);
@@ -8510,6 +8515,9 @@ namespace winrt::TerminalApp::implementation
                 _sessionRegistry->SetEnterPresser(superseded, nullptr); // DELIVERY_PLAN.md R8
                 _sessionRegistry->Update(superseded, [](::Agentmaster::SessionInfo& s) {
                     s.live = false;
+                    // SIDE_PANEL.md §2j: its side panel pin moves to the successor (the carry below) — the archived conversation
+                    // gives it up, so resuming it later from the Sessions page brings back no second pinned card.
+                    s.sidePanelPinnedAtUnixMs = 0;
                 });
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[rehome] " + superseded + L" -> " + id + L" (same tab, new conversation id)\n");
                 // Nav audit: a TAB SWAPPED its bound session id (claude switched conversation in place
@@ -8550,6 +8558,19 @@ namespace winrt::TerminalApp::implementation
             {
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[rehome] " + id + L" inherits MANAGED provenance from " + supersededForLog + L" (same ConPTY \x2014 not an adopted shell)\n");
             }
+        }
+
+        // Agentmaster (SIDE_PANEL.md §2j — the side panel's PIN TO TOP carry): the user pinned the TAB's card, so when the tab
+        // switches conversation (a /clear, a /resume, a /handover-here's in-place successor — all land here) the successor keeps
+        // the card's pin, at the same place among the pins: the newer of its own stamp (a /resume back to a conversation that
+        // was pinned when it closed) and the superseded one's (SidePanelPinAfterRehome). Managed or adopted alike — the card is
+        // the same either way. Without it a pinned tab's card fell out of the pinned group at every /clear.
+        if (reHomedFromOtherId && ::Agentmaster::IsSidePanelPinStamp(supersededSidePanelPin))
+        {
+            _sessionRegistry->Update(id, [supersededSidePanelPin](::Agentmaster::SessionInfo& s) {
+                s.sidePanelPinnedAtUnixMs = ::Agentmaster::SidePanelPinAfterRehome(s.sidePanelPinnedAtUnixMs, supersededSidePanelPin);
+            });
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[rehome] " + id + L" keeps the side panel pin of " + supersededForLog + L" (same tab)\n");
         }
 
         // Give the card a readable title from its working dir if it has none.

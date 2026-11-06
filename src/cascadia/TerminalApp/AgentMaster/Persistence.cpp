@@ -7,6 +7,7 @@
 #include "ClaudeSpawn.h" // AgentmasterStateDir, NewSessionId
 #include "LaunchPresets.h" // PERSISTENCE.md §17: launch-presets.json's round trip (LaunchPresetsConfigFromJson / ...ToJson; pure, Json.h only)
 #include "ProcessInspect.h" // ReadGitBranchForDir — the configured DeriveSessionTitle's Branch* techniques
+#include "SidePanelPins.h" // SIDE_PANEL.md §2j: IsSidePanelPinStamp — which side panel pin stamps sessions.json writes and reads back
 #include "StateBackups.h" // PERSISTENCE.md §17: the writer identity, the shadow paths, the repair's state snapshot
 #include "StateCompat.h" // PERSISTENCE.md §17: the residue (unknown fields kept) and the older-writer repair
 
@@ -708,6 +709,14 @@ namespace Agentmaster
         {
             o.Set(L"pinned", json::Value::MkBool(true));
         }
+        // Agentmaster (SIDE_PANEL.md §2j): the side panel's PIN TO TOP stamp (SessionInfo::sidePanelPinnedAtUnixMs) — a separate
+        // key from the "never idle" pin above, which it never implies. Omitted while the card is not pinned (every session
+        // until the user pins one), so an untouched sessions.json is byte-unchanged. Not on the repair's volatile list: only
+        // the user's Unpin clears it, so a key absent on every record of an older writer's file proves that writer dropped it.
+        if (IsSidePanelPinStamp(s.sidePanelPinnedAtUnixMs))
+        {
+            o.Set(L"sidePanelPinnedAtUnixMs", json::Value::MkNum(static_cast<double>(s.sidePanelPinnedAtUnixMs)));
+        }
         // Agentmaster (crash/restore fidelity — Rule #16): persist the question-guard flag so a crash
         // while the agent was WaitingForInput on a clarifying question can't drop the guard on reopen
         // (else a queued prompt would auto-ANSWER the question). Omitted when false (the common case), so
@@ -795,6 +804,12 @@ namespace Agentmaster
         s.turnEndUnixMs = v.I64At(L"turnEndUnixMs"); // ditto — the assistant's last turn END
         s.external = v.BoolAt(L"external", false);
         s.pinned = v.BoolAt(L"pinned", false); // PERSISTED (MESSAGING.md §5.3): absent => not pinned
+        {
+            // PERSISTED (SIDE_PANEL.md §2j): the side panel's PIN TO TOP stamp; absent => 0 (not pinned). A zero or negative value
+            // (a hand edit) reads as not pinned, so no card can sort as pinned without a real stamp.
+            const int64_t pinnedAt = v.I64At(L"sidePanelPinnedAtUnixMs");
+            s.sidePanelPinnedAtUnixMs = IsSidePanelPinStamp(pinnedAt) ? pinnedAt : 0;
+        }
         s.lastMessageWasQuestion = v.BoolAt(L"lastMessageWasQuestion", false); // PERSISTED (Rule #16): absent => false (back-compat + the common case)
         s.kind = (v.StrAt(L"kind", L"Claude") == L"Codex") ? AgentKind::Codex : AgentKind::Claude; // absent => Claude (back-compat)
         s.codexSessionId = v.StrAt(L"codexSessionId");

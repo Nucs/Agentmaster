@@ -99,6 +99,7 @@
 #include "AgentMaster/SessionSearch.h" // ParseSessionQuery / MatchesQueryText / MatchesPathQuery — the Sessions grammar, reused
 #include "AgentMaster/SessionSearchAgent.h" // SharedSessionSearchAgent / SessionSearchEvent / LoadSessionIndexEntryById — the side panel's AI search, a view of the process's one search conversation (SIDE_PANEL.md §2h)
 #include "AgentMaster/SidePanelAiList.h" // SidePanelAiListStepFor / SidePanelAiListDiffers — the AI view's list changes only when a request ends (SIDE_PANEL.md §2h)
+#include "AgentMaster/SidePanelPins.h" // CompareSidePanelPins / NextSidePanelPinStamp / IsSidePanelPinStamp — Pin to Top: pinned cards first, the newest pin on top (SIDE_PANEL.md §2j)
 #include "AgentMaster/SessionStore.h" // GetSessionTags / LoadAllTagColors / SessionTagsEpoch — the cards' bookmark-tag strip (cached per card until a tag changes)
 
 #include <algorithm>
@@ -258,11 +259,16 @@ namespace
     // on the button to read it. Any move restarts the wait (AgentTipHelpers' rest rule), and the delay is recorded on
     // the element, so the tip keeps it for the element's life.
     // ⚠ A NEW button in the panel, or a new ⋯ menu item, must pass this constant to its AgentSetTip /
-    // AgentSetTitledTip, or its tip opens after ~133 ms. Not covered on purpose: the filter box (a text box, not a button), the cards (kCardTipDelay,
-    // 4 s), the two drag separators (kSidePanelSplitterTipDelay, 7 s), the summary area's own buttons (the per-tab
-    // summary panel's, AgentTabOverlay — shared with every tab) and the "+" launcher card (the Agent Manager's own
-    // launch bar, AgentLaunchBar — SIDE_PANEL.md §2e keeps the two surfaces identical).
-    // Tradeoff: a first-time user waits 3 s for a button's explanation.
+    // AgentSetTitledTip, or its tip opens after ~133 ms.
+    // The FILTER BOX waits the same 3 s (2026-11-06, the user's request: "the tooltip on the filter sessions text box must
+    // appear after 3s, it appears almost instantly"): it spans the panel's whole width under the buttons, so the pointer
+    // crosses it on its way to almost anything, and its paragraph opened over the cards each time. Both of its texts (the
+    // filter's and the AI search's request line's, _SidePanelSetAiMode) pass the constant. It was left out before, as "a
+    // text box, not a button".
+    // Not covered on purpose: the cards (kCardTipDelay, 4 s), the two drag separators (kSidePanelSplitterTipDelay, 7 s), the
+    // summary area's own buttons (the per-tab summary panel's, AgentTabOverlay — shared with every tab) and the "+" launcher
+    // card (the Agent Manager's own launch bar, AgentLaunchBar — SIDE_PANEL.md §2e keeps the two surfaces identical).
+    // Tradeoff: a first-time user waits 3 s for a button's explanation, or the filter box's grammar.
     constexpr std::chrono::milliseconds kSidePanelButtonTipDelay{ 3000 };
 
     // The two separators' tooltip texts, named once: each is set when its bar is built and set again when a
@@ -451,6 +457,7 @@ namespace
         impl::AgentItemStatus status;
         status.Add(view.open ? impl::AgentStateWord(view.base.model.state) : std::wstring_view{ L"closed" })
             .Add(impl::kAgentStatusCodex, view.base.model.codex)
+            .Add(impl::kAgentStatusPinnedToTop, view.base.model.pinned) // SIDE_PANEL.md §2j: the band's pushpin, in words
             .Add(tags)
             .Add(impl::kAgentStatusSelected, selected);
         impl::AgentSetItemStatus(view.base.title, status.Text());
@@ -587,6 +594,7 @@ namespace
             .Add(impl::kAgentStatusUnread, model.flashRing)
             .Add(impl::kAgentStatusDraft, model.pending)
             .Add(impl::kAgentStatusCacheWarm, model.cacheWarm)
+            .Add(impl::kAgentStatusPinnedToTop, model.pinned) // SIDE_PANEL.md §2j: the band's pushpin, in words
             .Add(tags)
             .Add(impl::kAgentStatusSelected, selected);
         impl::AgentSetItemStatus(view.title, status.Text());
@@ -631,6 +639,23 @@ namespace
         ribbon.VerticalAlignment(VerticalAlignment::Top);
         return ribbon;
     }
+
+    // --- The cards' PIN TO TOP pushpin (the title band's right end — SIDE_PANEL.md §2j) -------------------------
+    // The user's pick of 2026-11-06 from three looks (an outline pushpin, a filled one, the 📌 emoji): the icon font's OUTLINE
+    // pushpin, Pin (U+E718 in Segoe Fluent Icons, and the same code point in Segoe MDL2 Assets — the fallback named after it,
+    // for a Windows 10 without the Fluent font), drawn in the title's own ink so it reads on every folder color; a colored
+    // emoji melts into a band of its own color.
+    constexpr const wchar_t* kSidePanelPinGlyph = L"\xE718";
+    // The menu's Unpin item: the icon font's Unpin (U+E77A, the pushpin struck through), the twin of Pin's glyph.
+    constexpr const wchar_t* kSidePanelUnpinGlyph = L"\xE77A";
+    // The family list both glyphs are drawn from: Segoe Fluent Icons first (Windows 11), Segoe MDL2 Assets when it is missing.
+    // Named explicitly: XAML falls back to the text font for a family it cannot find, and that has no glyph at these points.
+    constexpr const wchar_t* kSidePanelPinFont = L"Segoe Fluent Icons, Segoe MDL2 Assets";
+    // 10 DIPs: about the tag ribbons' 9.3 DIP height beside it, and well inside the band's 12 px title line, so a pin never
+    // makes the band (and with it every card's stride, SIDE_PANEL.md §2f) taller.
+    constexpr double kSidePanelPinIconSize = 10.0;
+    // The air between the pushpin and what is left of it: the last ribbon or "+N", else the title's ellipsis.
+    constexpr double kSidePanelPinIconGapPx = 5.0;
 
     // --- The in-place card list (SIDE_PANEL.md §2c) ----------------------------------------------
 
@@ -788,8 +813,12 @@ namespace
                 tagsLine += (i ? L" \x00B7 " : L"") + tags[i];
             }
         }
+        // PIN TO TOP (SIDE_PANEL.md §2j): the band's pushpin. The pushpin itself takes no pointer (a press selects the card), so the
+        // card's tooltip is where it reads as words, with the way back: the same right-click menu that pinned it.
+        m.pinned = ::Agentmaster::IsSidePanelPinStamp(s.sidePanelPinnedAtUnixMs);
+        const wchar_t* const pinLine = m.pinned ? L"\npinned to the top of this list (right-click \x25B8 Unpin)" : L"";
         m.tipTitle = s.title;
-        m.tipText = dir + (s.branch.empty() ? L"" : (L"\nbranch: " + s.branch)) + tagsLine + L"\n\nClick to select \x00B7 double-click to jump to its tab \x00B7 right-click for actions.";
+        m.tipText = dir + (s.branch.empty() ? L"" : (L"\nbranch: " + s.branch)) + tagsLine + pinLine + L"\n\nClick to select \x00B7 double-click to jump to its tab \x00B7 right-click for actions.";
         return m;
     }
 
@@ -1164,7 +1193,9 @@ namespace winrt::TerminalApp::implementation
         _sidePanelSearchBox.MinHeight(0.0);
         _sidePanelSearchBox.PlaceholderText(kSidePanelFilterPlaceholder); // the AI mode swaps it for its own (_SidePanelSetAiMode)
         _sidePanelSearchBox.VerticalAlignment(VerticalAlignment::Center);
-        AgentSetTitledTip(_sidePanelSearchBox, winrt::hstring{ kSidePanelFilterTipTitle }, winrt::hstring{ kSidePanelFilterTip });
+        // Opens after 3 s of rest (kSidePanelButtonTipDelay, the user's 2026-11-06 request): the box spans the panel, so the
+        // pointer crosses it on its way to the cards, and at ~133 ms its paragraph popped up over them each time.
+        AgentSetTitledTip(_sidePanelSearchBox, winrt::hstring{ kSidePanelFilterTipTitle }, winrt::hstring{ kSidePanelFilterTip }, kSidePanelButtonTipDelay);
         _sidePanelSearchBox.TextChanged([weakThis](const IInspectable& sender, const TextChangedEventArgs&) {
             const auto self = weakThis.get();
             if (!self)
@@ -2419,7 +2450,10 @@ namespace winrt::TerminalApp::implementation
         }
         if (!next)
         {
-            _sidePanelRevealPendingId.clear();
+            if (!_sidePanelRevealForced)
+            {
+                _sidePanelRevealPendingId.clear(); // a PIN's reveal stays (SIDE_PANEL.md §2j): the setting governs tab selections only
+            }
             return;
         }
         if (const auto tab = _GetFocusedTab()) // null on the Agent Manager page — no tab, nothing to reveal
@@ -2636,6 +2670,9 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        // A tab selection's debt is never a pin's forced one (SIDE_PANEL.md §2j): whichever way this goes, it replaces or drops a
+        // pin's unpaid scroll — the user moved to a tab, and the list follows that (or nothing) now.
+        _sidePanelRevealForced = false;
         if (id.empty() || !_appSettings.sidePanelScrollToSelectedTab)
         {
             _sidePanelRevealPendingId.clear();
@@ -2701,11 +2738,13 @@ namespace winrt::TerminalApp::implementation
         {
             return; // collapsed / covered by the AI view: the expand path or the view's close re-queues; nothing owed: a stale tick
         }
-        if (!_appSettings.sidePanelScrollToSelectedTab)
+        if (!_appSettings.sidePanelScrollToSelectedTab && !_sidePanelRevealForced)
         {
             _sidePanelRevealPendingId.clear(); // switched off (here or by a broadcast) after the request was made
             return;
         }
+        // (A PIN's reveal — _sidePanelRevealForced, SIDE_PANEL.md §2j — is paid with ⌖ off too: it is the answer to the user's
+        // own "Pin to Top", which moved the card to the top of the list, not a selection the setting governs.)
         const auto row = std::find(_sidePanelRowIds.begin(), _sidePanelRowIds.end(), _sidePanelRevealPendingId);
         if (row == _sidePanelRowIds.end())
         {
@@ -2724,6 +2763,7 @@ namespace winrt::TerminalApp::implementation
         }
         const auto card = it->second.card; // a strong ref: layout below can't release it under us
         _sidePanelRevealPendingId.clear();
+        _sidePanelRevealForced = false; // the debt is paid, a pin's included
         try
         {
             if (_sidePanelCards)
@@ -3174,6 +3214,8 @@ namespace winrt::TerminalApp::implementation
                 SortKey key;
                 const ::Agentmaster::SessionInfo* session;
             };
+            // ⚠ The comparator below reads each row's PIN through `session` (SessionInfo::sidePanelPinnedAtUnixMs, SIDE_PANEL.md
+            // §2j): `snap` owns the sessions and outlives the sort, so the pointer is valid for every comparison.
             std::vector<CardRow> rows;
             rows.reserve(snap.size());
             size_t liveTotal = 0; // the IN-SCOPE total (what "N of M" counts against — never another window's sessions under LOCAL)
@@ -3193,8 +3235,15 @@ namespace winrt::TerminalApp::implementation
                     rows.push_back(CardRow{ MakeSortKey(s), &s });
                 }
             }
+            // PINNED FIRST (SIDE_PANEL.md §2j, the user's "pinning puts on top and repinning will bring a tab to the top again"):
+            // every card pinned to the top comes before the rest, the newest pin first — a pin again restamps a card, so it goes
+            // back to the top — and the board's SHARED order ranks everything the pins leave equal (the unpinned rows, and pins
+            // of one stamp). The pins first, then the board's order: that pairing is a lexicographic order on (pin class, board
+            // key), so the comparator stays the strict weak ordering std::stable_sort needs (CompareSidePanelPins). Only the
+            // cards are ordered so: the Triage Board and the tree keep their own order.
             std::stable_sort(rows.begin(), rows.end(), [this](const CardRow& a, const CardRow& b) {
-                return SortKeyLess(_appSettings.boardSort, a.key, b.key);
+                const int pin = ::Agentmaster::CompareSidePanelPins(a.session->sidePanelPinnedAtUnixMs, b.session->sidePanelPinnedAtUnixMs);
+                return pin < 0 || (pin == 0 && SortKeyLess(_appSettings.boardSort, a.key, b.key));
             });
 
             // Bookmark tags, from the per-card cache. The epoch is loaded BEFORE any read (the SessionStore.h
@@ -3883,7 +3932,15 @@ namespace winrt::TerminalApp::implementation
                         // Anchored on THIS card (the sender — the handler never captures the card
                         // itself): the menu's "Tags" item then opens the tag panel right under the card
                         // instead of at the window's top-left default. The menu holds it weakly.
-                        auto menu = mgr->BuildSessionMenuFor(id, cwd, sender.try_as<FrameworkElement>());
+                        // Under Jump to Tab, the card's own items (SIDE_PANEL.md §2j): Pin to Top, and Unpin for a
+                        // pinned card — filled at every open from the session as it is then. The page is held weakly:
+                        // the menu keeps the function for its life.
+                        auto menu = mgr->BuildSessionMenuFor(id, cwd, sender.try_as<FrameworkElement>(), [weakThis, id](MenuFlyout& m) {
+                            if (const auto page = weakThis.get())
+                            {
+                                page->_SidePanelAppendPinItems(m, id, /*fromAiView*/ false);
+                            }
+                        });
                         if (const auto fe = sender.try_as<UIElement>())
                         {
                             menu.ShowAt(fe, e.GetPosition(fe));
@@ -3896,6 +3953,142 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::AgentLogCaughtException(L"sidepanel card context menu");
             }
         });
+    }
+
+    // The card menu's PIN TO TOP items (SIDE_PANEL.md §2j; see the declaration in TerminalPage.h). The user's words: "pinning
+    // can only happen through right click. put pin below Jump to tab" — so these two items are the only way in and out, and the
+    // band's pushpin is no button. Labels: "Pin to Top" on every live card — on a pinned one it is the user's "repinning will
+    // bring a tab to the top again" — and "Unpin" under it on a pinned card only.
+    void TerminalPage::_SidePanelAppendPinItems(MenuFlyout& menu, const std::wstring& id, bool fromAiView)
+    {
+        if (!_sessionRegistry)
+        {
+            return;
+        }
+        // The session as it is NOW (the menu is being filled at its open): a lean read — the queue, which no item needs, is the
+        // costliest part of a record copy.
+        const auto lean = _sessionRegistry->GetWithoutQueue(id);
+        if (!lean || !lean->live)
+        {
+            return; // unknown, or closed since its card was drawn: no list card for a pin to order
+        }
+        const bool pinned = ::Agentmaster::IsSidePanelPinStamp(lean->sidePanelPinnedAtUnixMs);
+        const bool revealAfter = !fromAiView; // behind the AI view the cards list is hidden: no scroll owed until it closes
+        // An item's icon: the band's own pushpin glyphs, from the same font list as the band (a FontIcon per item — a menu
+        // element cannot be shared between two items).
+        const auto pinIcon = [](const wchar_t* glyph) {
+            FontIcon icon{};
+            icon.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ kSidePanelPinFont });
+            icon.Glyph(glyph);
+            return icon;
+        };
+        // Every click runs one tick later through the ⋯ menu's command helper (_SidePanelRunMenuCommand): inside the Click the
+        // menu is still closing and hands focus back as it closes — the session menu defers every item for the same reason.
+        // The handlers capture the page weakly (inside the helper) and the item never: no element -> handler -> element cycle.
+        const auto weakThis = get_weak();
+
+        MenuFlyoutItem pinItem;
+        pinItem.Text(L"Pin to Top");
+        pinItem.Icon(pinIcon(kSidePanelPinGlyph));
+        AgentSetTip(pinItem, winrt::hstring{ pinned ? L"Bring this pinned card back to the top of the side panel's list, above every other pinned card." :
+                                                      L"Keep this card at the top of the side panel's list: pinned cards come first, the last one pinned on top, then the rest in the chosen order. A pushpin marks it; Pin to Top again brings it back to the top, Unpin lets it go.\nThe pin is this session's in every window, and it is kept after a restart. Nothing else changes: the session runs and idles as before." });
+        AgentSetAutomationId(pinItem, L"am.side.pin");
+        pinItem.Click([weakThis, id, revealAfter](const IInspectable&, const RoutedEventArgs&) {
+            if (const auto self = weakThis.get())
+            {
+                self->_SidePanelRunMenuCommand(L"card menu: Pin to Top", [id, revealAfter](TerminalPage& page) { page._SidePanelSetPinned(id, /*pin*/ true, revealAfter); });
+            }
+        });
+        menu.Items().Append(pinItem);
+
+        if (pinned)
+        {
+            MenuFlyoutItem unpinItem;
+            unpinItem.Text(L"Unpin");
+            unpinItem.Icon(pinIcon(kSidePanelUnpinGlyph));
+            AgentSetTip(unpinItem, L"Let this card go back to its place in the chosen order, and take its pushpin away.");
+            AgentSetAutomationId(unpinItem, L"am.side.unpin");
+            unpinItem.Click([weakThis, id](const IInspectable&, const RoutedEventArgs&) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelRunMenuCommand(L"card menu: Unpin", [id](TerminalPage& page) { page._SidePanelSetPinned(id, /*pin*/ false, /*revealAfter*/ false); });
+                }
+            });
+            menu.Items().Append(unpinItem);
+        }
+    }
+
+    // Pin, pin again or unpin a session's card (SIDE_PANEL.md §2j; see the declaration in TerminalPage.h).
+    void TerminalPage::_SidePanelSetPinned(const std::wstring& id, bool pin, bool revealAfter) noexcept
+    {
+        try
+        {
+            if (!_sidePanelBuilt || !_sessionRegistry || id.empty())
+            {
+                return;
+            }
+            // The stamp: the clock, but past the newest pin of EVERY live session — not only this list's: a GLOBAL list in any
+            // window orders its pins by these same stamps, and the card must be the top one there too (NextSidePanelPinStamp).
+            // One lean snapshot per click (no queues): a user action, never a per-update cost.
+            int64_t stamp = 0;
+            if (pin)
+            {
+                int64_t newest = 0;
+                for (const auto& s : _sessionRegistry->SnapshotLiveForCards())
+                {
+                    newest = (std::max)(newest, s.sidePanelPinnedAtUnixMs);
+                }
+                stamp = ::Agentmaster::NextSidePanelPinStamp(NowMs(), newest);
+            }
+            // Through Update, so every observer hears it: each window's panel re-sorts from its registry drain, and the
+            // persistence observer saves sessions.json. A session closed since the menu opened is left as it is (its card is
+            // gone; a pin would only resurface when it is resumed).
+            bool live = false;
+            const bool known = _sessionRegistry->Update(id, [pin, stamp, &live](::Agentmaster::SessionInfo& s) {
+                live = s.live;
+                if (live)
+                {
+                    s.sidePanelPinnedAtUnixMs = pin ? stamp : 0;
+                }
+            });
+            if (!known || !live)
+            {
+                return;
+            }
+            ::Agentmaster::LogNav(std::wstring{ pin ? L"sidepanel pin-to-top " : L"sidepanel unpin " } + ::Agentmaster::ShortId(id));
+            // A pin owes the list a scroll to the card's new place, the top: paid by the reveal tick once the card is listed
+            // there, whatever the ⌖ setting says (_sidePanelRevealForced) — the user asked for the card to move and should
+            // see where it went. Recorded BEFORE the update below, whose end queues the owed reveal (_SidePanelQueueReveal).
+            // An unpin owes none: the card drops back into the order, and the user is looking at the pins.
+            if (pin && revealAfter)
+            {
+                _sidePanelRevealPendingId = id;
+                _sidePanelRevealForced = true;
+            }
+            // This window's list at once — the drain would come back through _SidePanelScheduleRebuild's 500 ms throttle, and
+            // the card should move while the user watches — the way a tag edit does (_SidePanelNoteTagsChanged): a collapsed
+            // list only owes its update (the expand pays it), and behind the AI view the hidden list owes its update while the
+            // result cards, which can show this session, take the pushpin now.
+            if (_sidePanelCollapsed)
+            {
+                _sidePanelDirty = true;
+            }
+            else if (_sidePanelAiMode)
+            {
+                _sidePanelDirty = true;
+                _SidePanelAiRefreshResults();
+            }
+            else
+            {
+                _SidePanelRebuildCards();
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the list catches up on the periodic tick (the registry write, when it landed, stands).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelSetPinned");
+            _sidePanelDirty = true;
+        }
     }
 
     // Write `model` into a card IN PLACE: every value that differs from the one the card shows now (its
@@ -3932,6 +4125,13 @@ namespace winrt::TerminalApp::implementation
         if (fresh || model.tags != shown.tags || model.tagArgb != shown.tagArgb || (!model.tags.empty() && model.darkInk != shown.darkInk))
         {
             _SidePanelApplyCardTags(view, model, id);
+        }
+        // The PIN TO TOP pushpin (SIDE_PANEL.md §2j), at the band's right end in the title's ink. After the tags on purpose: an
+        // untagging that leaves a pinned card keeps its band grid (the pushpin still needs it), and an unpinning that leaves no
+        // strip gives the band back its plain layout — each half releases the grid only when the other has nothing there.
+        if (fresh || model.pinned != shown.pinned || (model.pinned && model.darkInk != shown.darkInk))
+        {
+            _SidePanelApplyCardPin(view, model);
         }
         if (fresh || model.state != shown.state)
         {
@@ -4036,35 +4236,34 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Give a card's band the layout its tags need. The band area holds the CHILDLESS band (its first child, drawn
-    // behind) and ONE content element over it, which carries the band padding as its margin. Untagged: the content
-    // is the title alone. Tagged: [ title * ][ tag strip Auto ] — the strip takes the width its (capped) ribbons
-    // need and the title takes the rest, trimming with its ellipsis, so the ribbons stay in the band's top-right
-    // corner and a long title can never push them off the card. A changed tag list, tag color or title ink REPLACES
-    // the strip (a few ribbons — simpler than editing them); the title element is only re-parented between the band
-    // area and the grid, never rebuilt, and the band never gets a child (a rounded element with children gets its
-    // own composition node — see _SidePanelCreateCardView).
+    // behind) and ONE content element over it, which carries the band padding as its margin. Untagged and unpinned: the
+    // content is the title alone. Tagged: [ title * ][ tag strip Auto ][ pushpin Auto ] — the strip takes the width its
+    // (capped) ribbons need and the title takes the rest, trimming with its ellipsis, so the ribbons stay in the band's
+    // top-right corner and a long title can never push them off the card; the last column is the PIN TO TOP pushpin's
+    // (SIDE_PANEL.md §2j, _SidePanelApplyCardPin), empty and 0 wide on an unpinned card. A changed tag list, tag color or
+    // title ink REPLACES the strip (a few ribbons — simpler than editing them); the title element is only re-parented
+    // between the band area and the grid, never rebuilt (_SidePanelEnsureBandGrid / _SidePanelReleaseBandGridIfBare), and
+    // the band never gets a child (a rounded element with children gets its own composition node — see
+    // _SidePanelCreateCardView).
     // `view`: the card. `model`: the values it must show (tags, their colors, the ink). `id`: the card's session —
     // handed to the strip so, with "Sum" off, its ribbons can suspend THIS card's rich tooltip while hovered.
     // Throws winrt::hresult_error if XAML refuses an edit — _SidePanelRebuildCards resets the list on a throw
     // (the "Sum" mode switch calls it inside _SidePanelApplyCardTipMode's catch).
     void TerminalPage::_SidePanelApplyCardTags(AgentSidePanelCardView& view, const AgentSidePanelCardModel& model, const std::wstring& id)
     {
-        const auto bandPadding = ThicknessHelper::FromLengths(kSidePanelBandPadX, kSidePanelBandPadY, kSidePanelBandPadX, kSidePanelBandPadY);
         if (model.tags.empty())
         {
-            if (view.bandGrid)
+            if (view.tagStrip)
             {
-                // Back to the plain band: the title alone over the band, the padding back on it. The title leaves the
-                // grid FIRST: a XAML element has one parent, and handing it to the band area while the grid still
-                // holds it would throw.
-                SidePanelRemoveChild(view.bandGrid, view.title);
-                SidePanelRemoveChild(view.bandArea, view.bandGrid);
-                Grid::SetColumn(view.title, 0);
-                view.title.Margin(bandPadding);
-                view.bandArea.Children().Append(view.title); // after the band: drawn over it
-                view.bandGrid = nullptr;
+                // The strip leaves the grid; the grid itself goes only when no pushpin is left in it either — a pinned card
+                // keeps [ title * ][ ][ pushpin ] (SIDE_PANEL.md §2j). Then the band is the title alone again.
+                if (view.bandGrid)
+                {
+                    SidePanelRemoveChild(view.bandGrid, view.tagStrip);
+                }
                 view.tagStrip = nullptr;
             }
+            _SidePanelReleaseBandGridIfBare(view);
             return;
         }
         std::vector<Color> colors;
@@ -4078,34 +4277,95 @@ namespace winrt::TerminalApp::implementation
         // than badges floating mid-bar. The same constant the margin is made of, so a later padding change can't
         // silently detach them from the edge.
         auto strip = _SidePanelMakeTagStrip(model.tags, colors, model.darkInk, kSidePanelBandPadY, view.card, id);
-        Grid::SetColumn(strip, 1);
-        if (!view.bandGrid)
+        Grid::SetColumn(strip, 1); // the middle column: left of the pushpin's, so the pin stays at the band's very end
+        // The title alone becomes [ title * ][ strip ][ pushpin ] (a no-op when the grid exists — a card pinned before it was
+        // tagged already has it). Built BEFORE the strip goes in, so the strip only ever lands in a grid that is in the band.
+        _SidePanelEnsureBandGrid(view);
+        if (view.tagStrip)
         {
-            Grid bandGrid{};
-            ColumnDefinition titleCol{};
-            titleCol.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
-            ColumnDefinition tagCol{};
-            tagCol.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-            bandGrid.ColumnDefinitions().Append(titleCol);
-            bandGrid.ColumnDefinitions().Append(tagCol);
-            bandGrid.Margin(bandPadding); // the band padding moves from the title to the grid that now holds it
-            SidePanelRemoveChild(view.bandArea, view.title); // release the title from the band area before the grid takes it (one parent)
-            view.title.Margin(ThicknessHelper::FromUniformLength(0));
-            Grid::SetColumn(view.title, 0);
-            bandGrid.Children().Append(view.title);
-            bandGrid.Children().Append(strip);
-            view.bandArea.Children().Append(bandGrid); // after the band: drawn over it
-            view.bandGrid = bandGrid;
+            SidePanelRemoveChild(view.bandGrid, view.tagStrip); // the strip is replaced, never edited
         }
-        else
-        {
-            if (view.tagStrip)
-            {
-                SidePanelRemoveChild(view.bandGrid, view.tagStrip);
-            }
-            view.bandGrid.Children().Append(strip);
-        }
+        view.bandGrid.Children().Append(strip);
         view.tagStrip = strip;
+    }
+
+    void TerminalPage::_SidePanelEnsureBandGrid(AgentSidePanelCardView& view)
+    {
+        if (view.bandGrid)
+        {
+            return;
+        }
+        Grid bandGrid{};
+        ColumnDefinition titleCol{};
+        titleCol.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+        ColumnDefinition tagCol{};
+        tagCol.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+        // SIDE_PANEL.md §2j: the PIN TO TOP pushpin's column, the band's right end. Auto, so it is 0 wide on an unpinned card —
+        // a tagged card that is not pinned lays out exactly as before the pin existed.
+        ColumnDefinition pinCol{};
+        pinCol.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+        bandGrid.ColumnDefinitions().Append(titleCol);
+        bandGrid.ColumnDefinitions().Append(tagCol);
+        bandGrid.ColumnDefinitions().Append(pinCol);
+        bandGrid.Margin(ThicknessHelper::FromLengths(kSidePanelBandPadX, kSidePanelBandPadY, kSidePanelBandPadX, kSidePanelBandPadY)); // the band padding moves from the title to the grid that now holds it
+        SidePanelRemoveChild(view.bandArea, view.title); // release the title from the band area before the grid takes it (one parent)
+        view.title.Margin(ThicknessHelper::FromUniformLength(0));
+        Grid::SetColumn(view.title, 0);
+        bandGrid.Children().Append(view.title);
+        view.bandArea.Children().Append(bandGrid); // after the band: drawn over it
+        view.bandGrid = bandGrid;
+    }
+
+    void TerminalPage::_SidePanelReleaseBandGridIfBare(AgentSidePanelCardView& view)
+    {
+        if (!view.bandGrid || view.tagStrip || view.pinIcon)
+        {
+            return; // the band is already the title alone, or the grid still holds a tag strip or the pushpin
+        }
+        // Back to the plain band: the title alone over the band, the padding back on it. The title leaves the grid FIRST: a
+        // XAML element has one parent, and handing it to the band area while the grid still holds it would throw.
+        SidePanelRemoveChild(view.bandGrid, view.title);
+        SidePanelRemoveChild(view.bandArea, view.bandGrid);
+        Grid::SetColumn(view.title, 0);
+        view.title.Margin(ThicknessHelper::FromLengths(kSidePanelBandPadX, kSidePanelBandPadY, kSidePanelBandPadX, kSidePanelBandPadY));
+        view.bandArea.Children().Append(view.title); // after the band: drawn over it
+        view.bandGrid = nullptr;
+    }
+
+    void TerminalPage::_SidePanelApplyCardPin(AgentSidePanelCardView& view, const AgentSidePanelCardModel& model)
+    {
+        if (!model.pinned)
+        {
+            if (view.pinIcon)
+            {
+                if (view.bandGrid)
+                {
+                    SidePanelRemoveChild(view.bandGrid, view.pinIcon);
+                }
+                view.pinIcon = nullptr;
+            }
+            _SidePanelReleaseBandGridIfBare(view); // the title alone again, unless a tag strip is left
+            return;
+        }
+        if (!view.pinIcon)
+        {
+            FontIcon pin{};
+            pin.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ kSidePanelPinFont });
+            pin.Glyph(kSidePanelPinGlyph);
+            pin.FontSize(kSidePanelPinIconSize);
+            pin.VerticalAlignment(VerticalAlignment::Center); // on the title's line, not hung from the top edge like the ribbons
+            pin.Margin(ThicknessHelper::FromLengths(kSidePanelPinIconGapPx, 0, 0, 0));
+            // Not hit-testable: a press on the pushpin falls through to the band, so it selects the card like any other press
+            // on it, and the card's own tooltip — which names the pin and its way back — covers it. That also keeps the user's
+            // rule that a card is pinned (and unpinned) only through its right-click menu: the pushpin is no button.
+            pin.IsHitTestVisible(false);
+            Grid::SetColumn(pin, 2); // the band's right end, right of the tag strip
+            _SidePanelEnsureBandGrid(view);
+            view.bandGrid.Children().Append(pin);
+            view.pinIcon = pin;
+        }
+        // The title's own ink (WCAG-picked against the band, like the "+N" count), so the pushpin reads on any folder color.
+        view.pinIcon.Foreground(model.darkInk ? Fill(0xFF, 0x10, 0x10, 0x10) : Fill(0xFF, 0xF0, 0xF0, 0xF0));
     }
 
     // Build a card's bookmark-TAG strip: the ribbons in the title band's TOP-RIGHT corner. It is the
@@ -4608,8 +4868,10 @@ namespace winrt::TerminalApp::implementation
         }
         if (driveManagerLens)
         {
-            // BEFORE the same-id early-out: re-clicking the already-selected card is just as explicit.
+            // BEFORE the same-id early-out: re-clicking the already-selected card is just as explicit. It outranks a PIN's
+            // owed scroll too (SIDE_PANEL.md §2j): the user has picked where to look.
             _sidePanelRevealPendingId.clear();
+            _sidePanelRevealForced = false;
         }
         if (_sidePanelSelectedId == id)
         {
@@ -4850,8 +5112,9 @@ namespace winrt::TerminalApp::implementation
         }
         _SidePanelApplyDock(); // no-op when the dock side didn't change (idempotent assignments)
         // ⌖ scroll-to-tab is GLOBAL (another window's ⋯ menu may have broadcast it here): if it just turned OFF,
-        // drop a reveal still owed so nothing scrolls after the user asked it not to.
-        if (!_appSettings.sidePanelScrollToSelectedTab)
+        // drop a reveal still owed so nothing scrolls after the user asked it not to — except a PIN's (SIDE_PANEL.md §2j),
+        // which answers this window's own "Pin to Top" and is no tab selection the setting governs.
+        if (!_appSettings.sidePanelScrollToSelectedTab && !_sidePanelRevealForced)
         {
             _sidePanelRevealPendingId.clear();
         }
@@ -5866,7 +6129,9 @@ namespace winrt::TerminalApp::implementation
             if (_sidePanelSearchBox)
             {
                 _sidePanelSearchBox.PlaceholderText(on ? kSidePanelAiPlaceholder : kSidePanelFilterPlaceholder);
-                AgentSetTitledTip(_sidePanelSearchBox, winrt::hstring{ on ? kSidePanelAiBoxTipTitle : kSidePanelFilterTipTitle }, winrt::hstring{ on ? kSidePanelAiBoxTip : kSidePanelFilterTip });
+                // The 3 s rest delay again (kSidePanelButtonTipDelay): the element keeps the delay it was given at the build, so
+                // this is a belt — the request line's tip must never open at ~133 ms if the build's call ever changes.
+                AgentSetTitledTip(_sidePanelSearchBox, winrt::hstring{ on ? kSidePanelAiBoxTipTitle : kSidePanelFilterTipTitle }, winrt::hstring{ on ? kSidePanelAiBoxTip : kSidePanelFilterTip }, kSidePanelButtonTipDelay);
             }
             // The two views share the cards area's one cell: exactly one is visible.
             if (_sidePanelCardsScroll)
@@ -6823,6 +7088,10 @@ namespace winrt::TerminalApp::implementation
         {
             m.tagArgb.push_back(SidePanelPackArgb(ResolveTagDisplayColor(tag, tagColors))); // the ONE tag color resolution (Rule #17)
         }
+        // PIN TO TOP (SIDE_PANEL.md §2j): a result card is the session's card, so it wears the same pushpin — for an OPEN session
+        // only. A closed session keeps its stamp (it comes back pinned when resumed), but it has no card in the list a pin
+        // orders, so a pushpin on its "closed" card would promise nothing.
+        m.pinned = out.open && lean && ::Agentmaster::IsSidePanelPinStamp(lean->sidePanelPinnedAtUnixMs);
         // The why: the model's evidence for this session. The list on screen is always a pick (a show) — a search's candidates
         // are never drawn (SidePanelAiList.h) — so every listed session's why, when the model gave one, is shown.
         out.whyText.clear();
@@ -6843,6 +7112,10 @@ namespace winrt::TerminalApp::implementation
             {
                 tipText += (i ? L" \x00B7 " : L"") + tags[i];
             }
+        }
+        if (m.pinned)
+        {
+            tipText += L"\npinned to the top of the session cards (right-click \x25B8 Unpin)"; // the session card's own line (SidePanelCardModelFor)
         }
         if (!out.whyText.empty())
         {
@@ -6947,7 +7220,16 @@ namespace winrt::TerminalApp::implementation
                                     cwd = ::Agentmaster::EffectiveWorkingDir(self->_appSettings.tabColorMode, *cur);
                                 }
                             }
-                            auto menu = mgr->BuildSessionMenuFor(id, cwd, anchor);
+                            // The session card's own Pin to Top / Unpin under Jump to Tab too (SIDE_PANEL.md §2j): a result
+                            // card is the same card. From here the pin owes no scroll — the cards list is behind the AI view —
+                            // and the result cards show the pushpin at once. The page is held weakly (the menu keeps the
+                            // function for its life).
+                            auto menu = mgr->BuildSessionMenuFor(id, cwd, anchor, [weakThis, id](MenuFlyout& m) {
+                                if (const auto page = weakThis.get())
+                                {
+                                    page->_SidePanelAppendPinItems(m, id, /*fromAiView*/ true);
+                                }
+                            });
                             menu.ShowAt(anchor, e.GetPosition(anchor));
                         }
                     }
@@ -6988,6 +7270,12 @@ namespace winrt::TerminalApp::implementation
         if (fresh || model.tags != shown.tags || model.tagArgb != shown.tagArgb || (!model.tags.empty() && model.darkInk != shown.darkInk))
         {
             _SidePanelApplyCardTags(b, model, id); // the session card's own band layout and tag strip (the shared hover panel)
+        }
+        // The session card's PIN TO TOP pushpin too (SIDE_PANEL.md §2j), after the tags for the same reason as there: each half
+        // gives the band its plain layout back only when the other has nothing left in the grid.
+        if (fresh || model.pinned != shown.pinned || (model.pinned && model.darkInk != shown.darkInk))
+        {
+            _SidePanelApplyCardPin(b, model);
         }
         // The state line: the live state for a session with a tab; "closed" in gray for one without — a result is often a
         // session nobody runs now, and a gray "idle" would read as an open tab at rest.

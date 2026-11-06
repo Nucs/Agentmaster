@@ -294,6 +294,9 @@
     <!-- Agentmaster (SIDE_PANEL.md section 2h): when the side panel's AI view changes its list - only when a request ends or the
          conversation is reset, never for a running request's candidates or shows (pure, header-only; TestSidePanelAiList). -->
     <ClInclude Include="AgentMaster\SidePanelAiList.h" />
+    <!-- Agentmaster (SIDE_PANEL.md section 2j): the side panel's PIN TO TOP - pinned cards first, the newest pin on top, the
+         stamp a pin gets, the pin a tab keeps when it switches conversation (pure, header-only; TestSidePanelPins). -->
+    <ClInclude Include="AgentMaster\SidePanelPins.h" />
     <ClInclude Include="SnippetsPaneContent.h">
       <DependentUpon>SnippetsPaneContent.xaml</DependentUpon>
     </ClInclude>
