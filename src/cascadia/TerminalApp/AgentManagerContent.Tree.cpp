@@ -1478,9 +1478,10 @@ namespace winrt::TerminalApp::implementation
     // any caller that wants one up front; _MakeLazySessionMenu returns an EMPTY menu whose Opening
     // handler runs this, so a card/row pays for its menus only when one is actually opened — and the
     // "read at flyout-creation time" note below then means "read at OPEN time", which is fresher still.
-    // `afterJumpToTab` (SIDE_PANEL.md §2j): the host's own items, appended right under "Jump to Tab" (SessionMenuHostItems,
-    // AgentManagerContent.h) — the side panel's Pin to Top / Unpin; empty for every Agent Manager surface.
-    void AgentManagerContent::_PopulateSessionMenu(MenuFlyout& menu, const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor, const SessionMenuHostItems& afterJumpToTab)
+    // `host` (SIDE_PANEL.md §2j / §2k; SessionMenuHost, AgentManagerContent.h): the side panel's own items right under "Jump
+    // to Tab" (Pin to Top / Unpin) and its own "Open New Session Here" / "Fork session" (the new tab next to the card's tab,
+    // in that tab's window); empty for every Agent Manager surface, which keeps the content's handlers.
+    void AgentManagerContent::_PopulateSessionMenu(MenuFlyout& menu, const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor, const SessionMenuHost& host)
     {
         auto disp = _dispatcher;
         auto weak = get_weak();
@@ -1581,11 +1582,11 @@ namespace winrt::TerminalApp::implementation
         // "Unpin", the user's place for them ("put pin below Jump to tab"). No Agent Manager surface passes any. Contained:
         // a host item that fails to build costs only the host's items — logged with the throw site (Rule #18) — and the rest
         // of the menu below is still built, so a right-click never opens a menu cut off after Jump to Tab.
-        if (afterJumpToTab)
+        if (host.afterJumpToTab)
         {
             try
             {
-                afterJumpToTab(menu);
+                host.afterJumpToTab(menu);
             }
             catch (...)
             {
@@ -1910,11 +1911,18 @@ namespace winrt::TerminalApp::implementation
             openHere.Text(L"Open New Codex Session Here");
             openHere.Icon(glyphIcon(L"\xE710")); // Add (matches the WT tab menu's "New Session Here")
             AgentSetTip(openHere, L"Launch a managed Codex session in this directory (a new, independent conversation)");
-            openHere.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
-                auto act = [weak, cwd]() {
+            openHere.Click([weak, disp, cwd, hostOpenHere = host.openNewSessionHere](const IInspectable&, const RoutedEventArgs&) {
+                auto act = [weak, cwd, hostOpenHere]() {
                     auto self = weak.get();
                     if (!self)
                     {
+                        return;
+                    }
+                    // SIDE_PANEL.md §2k: a host that places the new tab itself (the side panel: next to the card's tab, in
+                    // its window) gets the pick instead — "" for Codex, which takes no model.
+                    if (hostOpenHere)
+                    {
+                        hostOpenHere(winrt::hstring{});
                         return;
                     }
                     // Codex spawn (adopt=false, fork ignored) — no native-exe gate (Codex isn't exe-only;
@@ -1934,19 +1942,26 @@ namespace winrt::TerminalApp::implementation
             openHere.Text(L"Open New Session Here");
             openHere.Icon(glyphIcon(L"\xE710")); // Add (matches the WT tab menu's "New Session Here")
             AgentSetTip(openHere, winrt::hstring{ L"Launch a managed Claude session in this directory (a new, independent conversation) \x2014 pick the model it starts on, or Default. " } + AgentModelEditHint());
-            AgentFillModelPickItems(openHere.Items(), ::Agentmaster::LaunchMenuEntries(_appSettings.launchModels), [weak, disp, cwd](winrt::hstring model) {
-                auto act = [weak, cwd, model]() {
+            AgentFillModelPickItems(openHere.Items(), ::Agentmaster::LaunchMenuEntries(_appSettings.launchModels), [weak, disp, cwd, hostOpenHere = host.openNewSessionHere](winrt::hstring model) {
+                auto act = [weak, cwd, model, hostOpenHere]() {
                     auto self = weak.get();
-                    if (!self || !self->_spawnHandler)
+                    // A host override needs no spawn handler of the content's (SIDE_PANEL.md §2k): only the content must be alive.
+                    if (!self || (!hostOpenHere && !self->_spawnHandler))
                     {
                         return;
                     }
                     // Native-exe-only policy: spawning a managed Claude session needs a native claude.exe —
                     // gate (re-resolve-then-prompt) so it surfaces the install modal instead of silently
-                    // no-op'ing at the engine backstop when Claude isn't installed.
+                    // no-op'ing at the engine backstop when Claude isn't installed. The host's spawn passes it too.
                     if (!::Agentmaster::EnsureClaudeAvailable())
                     {
                         self->_ShowClaudeMissing();
+                        return;
+                    }
+                    if (hostOpenHere)
+                    {
+                        // SIDE_PANEL.md §2k: the side panel places the new tab itself — next to the card's tab, in its window.
+                        hostOpenHere(model);
                         return;
                     }
                     self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{}, model);
@@ -1991,17 +2006,31 @@ namespace winrt::TerminalApp::implementation
             fork.Text(L"Fork session");
             fork.Icon(glyphIcon(L"\xF5ED")); // Duplicate (matches the WT tab menu's "Fork session")
             AgentSetTip(fork, L"Fork this session \x2014 branch its conversation into a new, independent session (named \x201C\x2026 (fork)\x201D); the original is untouched.");
-            fork.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
-                if (disp)
-                {
-                    disp.TryEnqueue([weak, id]() { if (auto self = weak.get()) { if (self->_forkManagedSessionHandler) { self->_forkManagedSessionHandler(winrt::hstring{ id }, winrt::hstring{}); } } });
-                }
-                else if (auto self = weak.get())
-                {
-                    if (self->_forkManagedSessionHandler)
+            fork.Click([weak, disp, id, hostFork = host.forkSession](const IInspectable&, const RoutedEventArgs&) {
+                // SIDE_PANEL.md §2k: a host that places the fork itself (the side panel: next to the card's tab, in its window)
+                // gets the click instead of the content's fork handler — "" for Codex, which takes no model.
+                auto act = [weak, id, hostFork]() {
+                    auto self = weak.get();
+                    if (!self)
+                    {
+                        return;
+                    }
+                    if (hostFork)
+                    {
+                        hostFork(winrt::hstring{});
+                    }
+                    else if (self->_forkManagedSessionHandler)
                     {
                         self->_forkManagedSessionHandler(winrt::hstring{ id }, winrt::hstring{});
                     }
+                };
+                if (disp)
+                {
+                    disp.TryEnqueue(act);
+                }
+                else
+                {
+                    act();
                 }
             });
             menu.Items().Append(fork);
@@ -2012,11 +2041,16 @@ namespace winrt::TerminalApp::implementation
             fork.Text(L"Fork session");
             fork.Icon(glyphIcon(L"\xF5ED")); // Duplicate (matches the WT tab menu's "Fork session")
             AgentSetTip(fork, winrt::hstring{ L"Fork this session \x2014 branch its conversation into a new, independent session (named \x201C\x2026 (fork)\x201D); the original is untouched. Pick the model the fork starts on, or Default. " } + AgentModelEditHint());
-            AgentFillModelPickItems(fork.Items(), ::Agentmaster::LaunchMenuEntries(_appSettings.launchModels), [weak, disp, id](winrt::hstring model) {
-                auto act = [weak, id, model]() {
+            AgentFillModelPickItems(fork.Items(), ::Agentmaster::LaunchMenuEntries(_appSettings.launchModels), [weak, disp, id, hostFork = host.forkSession](winrt::hstring model) {
+                auto act = [weak, id, model, hostFork]() {
                     if (auto self = weak.get())
                     {
-                        if (self->_forkManagedSessionHandler)
+                        if (hostFork)
+                        {
+                            // SIDE_PANEL.md §2k: the side panel places the fork itself — next to the card's tab, in its window.
+                            hostFork(model);
+                        }
+                        else if (self->_forkManagedSessionHandler)
                         {
                             self->_forkManagedSessionHandler(winrt::hstring{ id }, model);
                         }
@@ -2266,9 +2300,9 @@ namespace winrt::TerminalApp::implementation
     // open (Items().Clear() first) so a menu can never show a stale "Move to Idle/Done" for a session
     // that has since moved on. The anchor (Tags-panel placement) is held weakly: a rebuilt card's old
     // menu is garbage by then, and a live one resolves its live anchor.
-    // `afterJumpToTab` (SIDE_PANEL.md §2j): the host's own items under Jump to Tab, kept by the Opening handler and handed to
-    // every fill; the host holds itself weakly inside it (SessionMenuHostItems), so the menu keeps no page alive.
-    MenuFlyout AgentManagerContent::_MakeLazySessionMenu(const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor, SessionMenuHostItems afterJumpToTab)
+    // `host` (SIDE_PANEL.md §2j / §2k): the host's additions and overrides (SessionMenuHost), kept by the Opening handler and
+    // handed to every fill; the host holds itself weakly inside each function, so the menu keeps no page alive.
+    MenuFlyout AgentManagerContent::_MakeLazySessionMenu(const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor, SessionMenuHost host)
     {
         MenuFlyout menu;
         auto weak = get_weak();
@@ -2277,7 +2311,7 @@ namespace winrt::TerminalApp::implementation
         {
             anchorWeak = winrt::make_weak(anchor);
         }
-        menu.Opening([weak, id, cwd, anchorWeak, afterJumpToTab = std::move(afterJumpToTab)](const IInspectable& sender, const IInspectable&) {
+        menu.Opening([weak, id, cwd, anchorWeak, host = std::move(host)](const IInspectable& sender, const IInspectable&) {
             const auto self = weak.get();
             auto m = sender.try_as<MenuFlyout>();
             if (!self || !m)
@@ -2288,7 +2322,7 @@ namespace winrt::TerminalApp::implementation
             {
                 m.Items().Clear();
                 const winrt::Windows::UI::Xaml::FrameworkElement anchorNow = anchorWeak ? anchorWeak.get() : nullptr;
-                self->_PopulateSessionMenu(m, id, cwd, anchorNow, afterJumpToTab);
+                self->_PopulateSessionMenu(m, id, cwd, anchorNow, host);
             }
             catch (...)
             {

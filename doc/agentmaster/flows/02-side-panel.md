@@ -16,7 +16,8 @@ card scope, the card order and the collapse that were buttons on it (SP-10). 202
 with the dock — **⋯** · **Sum** · **+** from the window's left edge docked left, ⋯ always at the window's edge — the
 menu hangs from ⋯'s outer edge, and the dock item sits below the separator, just above the collapse (SP-10).
 2026-11-06 (NOT BUILT): a card's menu pins it to the top of the list, right under Jump to Tab (SP-11); the filter box's
-tip waits 3 s like the buttons'.
+tip waits 3 s like the buttons'. 2026-11-07 (NOT BUILT): a card's Open New Session Here and Fork session open the new tab
+right after the card's tab, in that tab's window (SP-12).
 
 ## Lifecycle model
 
@@ -430,6 +431,32 @@ Nothing else about the session changes: it is not Telegram's never-idle `/pin`.
   session in Waiting for you.
 - **E6 The AI view** → a result card of a pinned open session shows the pushpin; Pin to Top from a result card shows it at
   once, and AI off shows the card at the top of the list.
+
+---
+
+### SP-12 · A card's Open New Session Here and Fork session open next to its tab
+
+> **Since** 2026-11-07 (NOT BUILT) · **P1** · **Needs** F-S2 (+ F-W2 for E1) · **Spec** SIDE_PANEL.md §2k
+
+**Promise.** A card menu's **Open New Session Here ▸** and **Fork session ▸** open the new tab right AFTER the card's own tab,
+in the window that hosts that tab — the WT tab menu's "Here" placement — never at the end of the strip, and never in another
+window. What opens is what the items always opened (the card's folder, the picked model, a Codex card's codex, a fork's
+question when its source is mid-turn).
+
+**Phases**
+1. **Open New Session Here.** *Do:* with t1's tab left of t2's, right-click t1's card ▸ Open New Session Here ▸ Default.
+   *Expect:* a new session's tab right after t1's and before t2's, selected; t2 keeps its place.
+2. **Fork session.** *Do:* right-click t1's card ▸ Fork session ▸ Default (answer the question if one is asked). *Expect:*
+   `t1 (fork)` right after t1's tab — before the tab phase 1 opened.
+3. **On the Agent Manager page.** *Do:* Home, then a card's Fork session ▸ Default. *Expect:* the page stays; the fork is
+   selected on it; its tab sits right after the card's tab.
+
+**Edge cases**
+- **E1 Another window's session** (the card list on GLOBAL in window A, the card's tab in window B) → window B comes to the
+  front with the new tab right after the card's tab; window A's strip is unchanged.
+- **E2 A Codex card** → Open New Codex Session Here and Fork session open next to its tab too.
+- **E3 The board card and the tree row** → their Open New Session Here / Fork session still open at the end of the strip of
+  the window they were used in.
 
 ---
 

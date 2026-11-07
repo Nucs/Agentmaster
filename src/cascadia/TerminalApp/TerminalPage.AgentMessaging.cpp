@@ -284,6 +284,15 @@ namespace winrt::TerminalApp::implementation
                     ::Agentmaster::AppendStateLog(L"hooks.log", L"[session-menu] " + ::Agentmaster::ShortId(sessionId) + L" " + action + L" refused - the scope argument \"" + arg + L"\" is not a number (nothing done)\n");
                 }
             }
+            else if (action == kSidePanelNewSessionNextAction || action == kSidePanelForkNextAction)
+            {
+                // Agentmaster (SIDE_PANEL.md §2k — not the bot): another window's side panel card asked for "Open New Session Here"
+                // or "Fork session" of a session whose tab lives HERE, and the new tab belongs right after that tab, in this window
+                // (TerminalPage::_SidePanelLaunchNextToTab). The argument is the launch-model pick ("" = Default), passed through
+                // untouched: the spawn and fork seams validate it as they do for every other caller. This window comes to the
+                // front first (the Here half).
+                _SidePanelLaunchNextToTabHere(sessionId, action == kSidePanelForkNextAction, arg, /*fromOtherWindow*/ true);
+            }
             else
             {
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[msg] unknown remote session action: " + action + L"\n");

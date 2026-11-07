@@ -355,6 +355,27 @@ namespace winrt::TerminalApp::implementation
         // ⚠ The lazy menu keeps the function for its whole life: capture the host WEAKLY (a strong capture of the page
         // would let a menu keep a closed window's page alive).
         using SessionMenuHostItems = std::function<void(winrt::Windows::UI::Xaml::Controls::MenuFlyout&)>;
+        // Agentmaster (SIDE_PANEL.md §2j / §2k): what a HOST of the session menu adds to it or changes in it — the side panel's
+        // cards (its session cards, and its AI search result cards of open sessions). Every member is optional, and an empty
+        // host — what the Triage Board card, its ⋯ button and the Explorer tree row pass — gets the menu exactly as it always
+        // was. The lazy menu keeps the host for its whole life, so ⚠ every function in it must hold the host (the page) WEAKLY.
+        struct SessionMenuHost
+        {
+            // §2j: the host's own items right under "Jump to Tab" (Pin to Top / Unpin) — see SessionMenuHostItems.
+            SessionMenuHostItems afterJumpToTab;
+            // §2k: "Open New Session Here ▸ <model>" (a Claude session) and "Open New Codex Session Here" (a Codex one, which
+            // passes ""). When set, the item calls THIS instead of the content's spawn handlers (_spawnHandler /
+            // _codexLaunchHandler), so the host decides where the new tab opens: the side panel opens it right next to the
+            // card's own tab, in the window that hosts that tab (the user's rule of 2026-11-07). Called on the UI thread one
+            // dispatcher tick after the pick — the menu's own defer — and, for Claude, only after the claude.exe gate passed.
+            //   model - the pick ("" = Default; a model id; a preset's `@<id>` target, which the spawn seams resolve).
+            std::function<void(winrt::hstring model)> openNewSessionHere;
+            // §2k: "Fork session ▸ <model>" (Claude) / "Fork session" (Codex, ""). When set, called instead of
+            // _forkManagedSessionHandler, on the same terms as openNewSessionHere: the side panel opens the fork next to the
+            // card's tab, in that tab's window.
+            //   model - the pick ("" = Default).
+            std::function<void(winrt::hstring model)> forkSession;
+        };
         // Agentmaster (SIDE PANEL): build the full session context menu — the SAME lazily-populated
         // MenuFlyout the Triage-Board card / Explorer-tree row shows (_MakeLazySessionMenu: Jump to
         // Tab / Rename / Restart / Close ▸ / Open New Session Here ▸ model picker / Tags / Copy ▸ /
@@ -371,15 +392,16 @@ namespace winrt::TerminalApp::implementation
         // window's top-left, which is also what an omitted anchor gets). Returns a menu the caller
         // shows via ShowAt; never null. UI thread only. Throws winrt::hresult_error only if the empty
         // flyout itself can't be created (the items are built later, guarded, at Opening).
-        // `afterJumpToTab` (SIDE_PANEL.md §2j): the host's OWN items, appended right under "Jump to Tab" each
-        // time the menu opens — the side panel's "Pin to Top" / "Unpin", which the board card and the tree
-        // row do not offer (they pass none); see SessionMenuHostItems.
+        // `host` (SIDE_PANEL.md §2j / §2k): what the menu's HOST adds or changes — its own items right under "Jump to
+        // Tab" (the side panel's "Pin to Top" / "Unpin") and where "Open New Session Here" / "Fork session" open the new
+        // tab (the side panel: next to the card's tab, in its window). The board card and the tree row pass none and get
+        // the menu as it always was; see SessionMenuHost.
         winrt::Windows::UI::Xaml::Controls::MenuFlyout BuildSessionMenuFor(const std::wstring& id,
                                                                            const std::wstring& cwd,
                                                                            const winrt::Windows::UI::Xaml::FrameworkElement& anchor = nullptr,
-                                                                           SessionMenuHostItems afterJumpToTab = {})
+                                                                           SessionMenuHost host = {})
         {
-            return _MakeLazySessionMenu(id, cwd, anchor, std::move(afterJumpToTab));
+            return _MakeLazySessionMenu(id, cwd, anchor, std::move(host));
         }
         // Agentmaster (SIDE PANEL "+" launcher, SIDE_PANEL.md §2e): the launch box's current text — what the side panel's
         // launcher card shows when it opens, so the two boxes read the same (the user's "keep the last, the same one the
@@ -1075,11 +1097,11 @@ namespace winrt::TerminalApp::implementation
         // Opening handler (the same "fill at flyout-open" idiom the WT tab context menu uses), so a
         // menu costs nothing until it is actually opened — and then reflects the session's state AT
         // OPEN time rather than at rebuild time. The eager builders stay as the fillers.
-        // `afterJumpToTab` (SIDE_PANEL.md §2j): the host's own items under Jump to Tab (SessionMenuHostItems; empty for the
-        // board card, the tree row and the card's ⋯ button) — kept by the lazy menu and handed to every fill.
-        winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeLazySessionMenu(const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor = nullptr, SessionMenuHostItems afterJumpToTab = {});
+        // `host` (SIDE_PANEL.md §2j / §2k): the menu's host's additions and overrides (SessionMenuHost; empty for the board
+        // card, the tree row and the card's ⋯ button) — kept by the lazy menu and handed to every fill.
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeLazySessionMenu(const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor = nullptr, SessionMenuHost host = {});
         winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeLazyExternalMenu(const ::Agentmaster::ExternalClaudeRow& ex);
-        void _PopulateSessionMenu(winrt::Windows::UI::Xaml::Controls::MenuFlyout& menu, const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor, const SessionMenuHostItems& afterJumpToTab = {});
+        void _PopulateSessionMenu(winrt::Windows::UI::Xaml::Controls::MenuFlyout& menu, const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor, const SessionMenuHost& host = {});
         // Agentmaster (session menu "Deactivate ▸" / "Close ▸" — the WT tab menu's two submenus): build ONE of the two
         // for _PopulateSessionMenu. Both list the tab menu's scopes in ONE order, so they line up row for row: this tab ·
         // tabs to the left · tabs to the right · other tabs · of same folder · other of same folder · all tabs (Close ends

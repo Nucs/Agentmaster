@@ -2069,9 +2069,10 @@ namespace winrt::TerminalApp::implementation
 
         const auto weakThis = get_weak();
         // MGR-K1 (2026-10-23): every launch the content asks for — the launch row's Launch, a board / tree / External row's
-        // "Open New Session Here ▸", the side panel card menu's — goes through _LaunchFromManagerPage: with the page on
-        // screen the new tab opens behind it and the page selects the session; with a tab on screen (the side panel's card
-        // menu over a tab) it opens in front, as before.
+        // "Open New Session Here ▸" — goes through _LaunchFromManagerPage: with the page on screen the new tab opens behind it
+        // and the page selects the session; with a tab on screen it opens in front, as before. (Since 2026-11-07 the side panel
+        // card menu's "Open New Session Here" / "Fork session" do not come here: the card's own host opens them next to the
+        // card's tab, in that tab's window — _SidePanelLaunchNextToTab, SIDE_PANEL.md §2k — through the same wrapper.)
         content->SetSpawnHandler([weakThis](winrt::hstring dir, winrt::hstring title, winrt::hstring model) {
             if (auto self = weakThis.get())
             {

@@ -3932,15 +3932,32 @@ namespace winrt::TerminalApp::implementation
                         // Anchored on THIS card (the sender — the handler never captures the card
                         // itself): the menu's "Tags" item then opens the tag panel right under the card
                         // instead of at the window's top-left default. The menu holds it weakly.
-                        // Under Jump to Tab, the card's own items (SIDE_PANEL.md §2j): Pin to Top, and Unpin for a
-                        // pinned card — filled at every open from the session as it is then. The page is held weakly:
-                        // the menu keeps the function for its life.
-                        auto menu = mgr->BuildSessionMenuFor(id, cwd, sender.try_as<FrameworkElement>(), [weakThis, id](MenuFlyout& m) {
+                        // The card's part of the shared menu (AgentManagerContent::SessionMenuHost). The page is held weakly
+                        // in every function: the menu keeps them for its life.
+                        implementation::AgentManagerContent::SessionMenuHost host;
+                        // Under Jump to Tab, the card's own items (SIDE_PANEL.md §2j): Pin to Top, and Unpin for a pinned
+                        // card — filled at every open from the session as it is then.
+                        host.afterJumpToTab = [weakThis, id](MenuFlyout& m) {
                             if (const auto page = weakThis.get())
                             {
                                 page->_SidePanelAppendPinItems(m, id, /*fromAiView*/ false);
                             }
-                        });
+                        };
+                        // SIDE_PANEL.md §2k: "Open New Session Here" and "Fork session" open the new tab right next to THIS
+                        // card's tab, in the window that hosts it — not at the end of this window's strip.
+                        host.openNewSessionHere = [weakThis, id](winrt::hstring model) {
+                            if (const auto page = weakThis.get())
+                            {
+                                page->_SidePanelLaunchNextToTab(id, /*fork*/ false, std::wstring{ model });
+                            }
+                        };
+                        host.forkSession = [weakThis, id](winrt::hstring model) {
+                            if (const auto page = weakThis.get())
+                            {
+                                page->_SidePanelLaunchNextToTab(id, /*fork*/ true, std::wstring{ model });
+                            }
+                        };
+                        auto menu = mgr->BuildSessionMenuFor(id, cwd, sender.try_as<FrameworkElement>(), std::move(host));
                         if (const auto fe = sender.try_as<UIElement>())
                         {
                             menu.ShowAt(fe, e.GetPosition(fe));
@@ -4089,6 +4106,137 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::AgentLogCaughtException(L"_SidePanelSetPinned");
             _sidePanelDirty = true;
         }
+    }
+
+    // "Open New Session Here" / "Fork session" next to the card's tab, in that tab's window (SIDE_PANEL.md §2k; see the
+    // declaration in TerminalPage.h).
+    void TerminalPage::_SidePanelLaunchNextToTab(const std::wstring& sessionId, const bool fork, const std::wstring& model) noexcept
+    {
+        try
+        {
+            if (sessionId.empty())
+            {
+                return;
+            }
+            const std::wstring what = std::wstring{ fork ? L"fork" : L"new-session" } + L" next to " + ::Agentmaster::ShortId(sessionId) + (model.empty() ? std::wstring{} : (L" model=" + model));
+            ::Agentmaster::LogNav(L"sidepanel " + what);
+            if (_SidePanelLaunchNextToTabHere(sessionId, fork, model, /*fromOtherWindow*/ false))
+            {
+                return; // this window hosts the card's tab: the new tab opened right after it, here
+            }
+            // Not hosted here. Does ANY window host a tab of it? A live MANAGED session always has one: a launch makes it, a Close
+            // archives the record (live = false), and a closing window archives its sessions — so it is another window's. A live
+            // ADOPTED session (external) has a tab only once a window bound it to that window's own ConPTY, which gave it a stdin
+            // injector; one that no window bound (a claude running outside Agentmaster) has none, and no window would answer.
+            const auto info = _sessionRegistry ? _sessionRegistry->GetWithoutQueue(sessionId) : std::nullopt;
+            const bool tabSomewhere = info && info->live && (!info->external || _sessionRegistry->HasInjector(sessionId));
+            if (tabSomewhere)
+            {
+                // Hand it to the window that hosts the tab: every window gets it on its own UI thread and only the host acts
+                // (_RemoteSessionAction -> _SidePanelLaunchNextToTabHere). Fire-and-forget, like the session menu's Deactivate ▸ /
+                // Close ▸: a tab that left every window meanwhile (closed, or in the middle of a tear-out) opens nothing.
+                ::Agentmaster::LogNav(L"sidepanel " + what + L" -> handed to the window that hosts its tab");
+                ::Agentmaster::RequestSessionActionInWindows(sessionId, fork ? kSidePanelForkNextAction : kSidePanelNewSessionNextAction, model, {});
+                return;
+            }
+            // No tab anywhere to sit next to: the menu's old behavior — THIS window, at the end of the strip.
+            ::Agentmaster::LogNav(L"sidepanel " + what + L" -> no window hosts a tab of it: opened in this window, at the end of the strip");
+            _SidePanelOpenNewOrFork(sessionId, fork, model, static_cast<uint32_t>(-1));
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: nothing opened (or what opened before the throw stays); the user can pick the item again.
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelLaunchNextToTab");
+        }
+    }
+
+    bool TerminalPage::_SidePanelLaunchNextToTabHere(const std::wstring& sessionId, const bool fork, const std::wstring& model, const bool fromOtherWindow)
+    {
+        const auto it = _claudeTabs.find(sessionId);
+        const auto tab = (it != _claudeTabs.end()) ? it->second.get() : nullptr;
+        if (!tab)
+        {
+            return false; // not hosted here (another window's tab, or no tab anywhere): the caller hands it on, a sink just misses
+        }
+        const std::wstring what = std::wstring{ fork ? L"fork" : L"new-session" } + L" next to " + ::Agentmaster::ShortId(sessionId);
+        // The slot is read NOW, from the strip as it is (it may have changed since the menu opened): right after the tab.
+        uint32_t index = 0;
+        if (!_tabs.IndexOf(tab, index))
+        {
+            // Mapped, but not in this window's strip this very moment (being torn out or moved): there is no "next to it" here,
+            // and the window it is moving to does not know it yet.
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[sidepanel] " + what + L": its tab is not in this window's strip right now (nothing opened)\n");
+            return true;
+        }
+        if (fromOtherWindow)
+        {
+            ::Agentmaster::LogNav(L"sidepanel-remote " + what + L" (asked from another window's side panel card)");
+            // The new tab — and a fork's interrupted-turn question, when one is asked — shows in THIS window, which can sit behind
+            // the one the user clicked in: bring it to the front first, with the restore / foreground / SwitchToThisWindow recipe
+            // of the session menu's cross-window Close (_RunSessionMenuScopeHere). The process owns the foreground (the click
+            // happened in its other window), so SetForegroundWindow may hand it over.
+            if (_hostingHwnd)
+            {
+                const HWND hwnd = *_hostingHwnd;
+                if (::IsIconic(hwnd))
+                {
+                    ::ShowWindow(hwnd, SW_RESTORE);
+                }
+                ::SetForegroundWindow(hwnd);
+                if (::GetForegroundWindow() != hwnd)
+                {
+                    ::SwitchToThisWindow(hwnd, TRUE); // belt-and-braces when the shell denies the hand-off
+                }
+            }
+        }
+        _SidePanelOpenNewOrFork(sessionId, fork, model, index + 1);
+        return true;
+    }
+
+    void TerminalPage::_SidePanelOpenNewOrFork(const std::wstring& sessionId, const bool fork, const std::wstring& model, const uint32_t insertPosition)
+    {
+        if (fork)
+        {
+            // The content's own fork (its _forkManagedSessionHandler: kind-aware, Claude --fork-session / `codex fork`), with the
+            // slot: the interrupted-turn question first when the source is in the middle of a turn (HOOKS.md "Interrupted
+            // turns"), then the fork through _LaunchFromManagerPage (fromManagerPage — decided when the fork RUNS, after the
+            // question: behind the page while it is on screen, in front over a tab). The slot is the one read now, as the WT tab
+            // menu's own fork does.
+            ForkLaunchRequest request;
+            request.sourceId = sessionId;
+            request.managed = true;
+            request.model = model;
+            request.insertPosition = insertPosition;
+            request.origin = L"side-panel";
+            request.fromManagerPage = true;
+            _ForkAskingAboutRunningTurn(std::move(request));
+            return;
+        }
+        // "Open New Session Here": the card session's EFFECTIVE working directory — the folder the menu's "Here" names (the
+        // content's _WorkDirOf) — and its kind, read now. An empty directory goes through as it did (the launch seam falls back to
+        // its default folder), so a record without one behaves as before.
+        std::wstring dir;
+        bool codex = false;
+        if (_sessionRegistry)
+        {
+            if (const auto s = _sessionRegistry->GetWithoutQueue(sessionId))
+            {
+                dir = ::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, *s);
+                codex = (s->kind == ::Agentmaster::AgentKind::Codex);
+            }
+        }
+        if (codex)
+        {
+            // A Codex card spawns codex, which takes no --model (the Codex item sends ""), as the content's Codex launch does.
+            _LaunchFromManagerPage(L"side panel new codex session", [&]() {
+                _SpawnCodexSession(winrt::hstring{ dir }, winrt::hstring{}, insertPosition);
+                return std::wstring{}; // the seam returns no id: the launch records it (_NoteLaunchedSessionTab)
+            });
+            return;
+        }
+        _LaunchFromManagerPage(L"side panel new session", [&]() {
+            return _SpawnClaudeSession(winrt::hstring{ dir }, winrt::hstring{}, insertPosition, winrt::hstring{ model });
+        });
     }
 
     // Write `model` into a card IN PLACE: every value that differs from the one the card shows now (its
@@ -7220,16 +7368,31 @@ namespace winrt::TerminalApp::implementation
                                     cwd = ::Agentmaster::EffectiveWorkingDir(self->_appSettings.tabColorMode, *cur);
                                 }
                             }
-                            // The session card's own Pin to Top / Unpin under Jump to Tab too (SIDE_PANEL.md §2j): a result
-                            // card is the same card. From here the pin owes no scroll — the cards list is behind the AI view —
-                            // and the result cards show the pushpin at once. The page is held weakly (the menu keeps the
-                            // function for its life).
-                            auto menu = mgr->BuildSessionMenuFor(id, cwd, anchor, [weakThis, id](MenuFlyout& m) {
+                            // A result card is the session's card, so its menu takes the session card's part too
+                            // (AgentManagerContent::SessionMenuHost; the page held weakly — the menu keeps the functions for
+                            // its life): Pin to Top / Unpin under Jump to Tab (SIDE_PANEL.md §2j — from here the pin owes no
+                            // scroll, the cards list being behind the AI view, and the result cards show the pushpin at once),
+                            // and "Open New Session Here" / "Fork session" right next to the session's tab, in its window (§2k).
+                            implementation::AgentManagerContent::SessionMenuHost host;
+                            host.afterJumpToTab = [weakThis, id](MenuFlyout& m) {
                                 if (const auto page = weakThis.get())
                                 {
                                     page->_SidePanelAppendPinItems(m, id, /*fromAiView*/ true);
                                 }
-                            });
+                            };
+                            host.openNewSessionHere = [weakThis, id](winrt::hstring model) {
+                                if (const auto page = weakThis.get())
+                                {
+                                    page->_SidePanelLaunchNextToTab(id, /*fork*/ false, std::wstring{ model });
+                                }
+                            };
+                            host.forkSession = [weakThis, id](winrt::hstring model) {
+                                if (const auto page = weakThis.get())
+                                {
+                                    page->_SidePanelLaunchNextToTab(id, /*fork*/ true, std::wstring{ model });
+                                }
+                            };
+                            auto menu = mgr->BuildSessionMenuFor(id, cwd, anchor, std::move(host));
                             menu.ShowAt(anchor, e.GetPosition(anchor));
                         }
                     }

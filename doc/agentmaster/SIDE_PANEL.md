@@ -213,7 +213,8 @@ model's answer and its list of sessions instead of the session cards; the summar
   argument, held weakly) so the menu's **Tags** item opens the tag panel right under the card,
   as on the board (without an anchor it opened at the window's top-left). Right under its **Jump to Tab**, the card's
   own two items (§2j, 2026-11-06, NOT BUILT yet): **Pin to Top**, and **Unpin** on a pinned card — the board card and
-  the tree row do not have them. The menu ends with
+  the tree row do not have them. Its **Open New Session Here ▸** and **Fork session ▸** open the new tab right after the
+  card's tab, in the window that hosts that tab (§2k, 2026-11-07, NOT BUILT yet). The menu ends with
   **Deactivate ▸** over **Close ▸**, the WT tab menu's two submenus with its items in its order
   (2026-10-23, NOT BUILT yet; CLAUDE.md *C1 UI*, `AgentManagerContent::_MakeSessionScopeSubmenu`):
   Deactivate Tab / Close Tab · Tabs to the Left · Tabs to the Right · Other Tabs · Of Same Folder ·
@@ -1371,6 +1372,67 @@ with mockups of the card):
   - No `[exc] _SidePanelSetPinned`, `[exc] session menu: the host's items under Jump to Tab` or `[sidepanel] … out of
     step` line in hooks.log.
 
+### 2k. Open New Session Here and Fork session open next to the card's tab (2026-11-07, NOT BUILT yet)
+
+The user's rule: "When user right-click a sidemenu card and fork or open new, then the new tab must be created next to the
+card's tab we right-clicked (and that tab's window obviously)". Before, a card menu's **Open New Session Here ▸** and
+**Fork session ▸** went through the Agent Manager content's own handlers, which open the new tab at the END of the strip of
+the window the user clicked in — for a GLOBAL list's card of another window's session, in the wrong window too. The WT tab
+menu's own two items always placed the new tab right after the clicked tab (`TabViewIndex() + 1`); the card now does the
+same, in the window that hosts the card's tab.
+
+```
+ window B's strip, before:   [ t1 ][ t2 (the card's session) ][ t3 ]
+ a card menu's Fork session  [ t1 ][ t2 ][ t2 (fork) ][ t3 ]          ← right after t2, in window B, whichever window's
+ or Open New Session Here    [ t1 ][ t2 ][ <folder>  ][ t3 ]            side panel the card was right-clicked in
+```
+
+- **Where the new tab opens** (`_SidePanelLaunchNextToTab`): this window hosts the card's tab → right after it here
+  (`_SidePanelLaunchNextToTabHere`, the slot read from the strip at the click, `_tabs.IndexOf(tab) + 1`). Another window
+  hosts it → the request goes there through the session-action fan-out (`RequestSessionActionInWindows`, the words
+  `sidepanel-new-session-next` / `sidepanel-fork-next`, the model as the argument; `_RemoteSessionAction`), and that window
+  comes to the FRONT (the session menu's cross-window Close recipe: restore, foreground, `SwitchToThisWindow`) and opens it
+  right after the tab — the new tab, and a fork's interrupted-turn question when one is asked, show there. No window hosts a
+  tab of it — a live session adopted from a claude that no window has bound to its own ConPTY (no stdin injector), or one
+  closed since the menu opened — → the old behavior: this window, at the end of the strip. A live MANAGED session always has
+  a tab somewhere (a Close archives the record, a closing window archives its sessions), so the fan-out is used only when
+  some window can answer; a tab that leaves every window during that hop (closed, mid tear-out) opens nothing.
+- **What opens is unchanged** (`_SidePanelOpenNewOrFork`): a new session in the card session's EFFECTIVE working directory
+  (the folder the menu's "Here" names), on the picked model or preset (Default, Specify…, the configured list); a Codex
+  card's **Open New Codex Session Here** spawns codex; a fork is the kind-aware fork with the picked model, asking the
+  interrupted-turn question first when the source is in the middle of a turn (HOOKS.md *Interrupted turns*,
+  `_ForkAskingAboutRunningTurn` with the slot in its `ForkLaunchRequest`, origin `side-panel`). With the Agent Manager page on
+  screen in the window that opens it, the new tab still opens behind the page and the page selects it
+  (`_LaunchFromManagerPage`, MGR-K1); over a tab it opens in front.
+- **How the card takes them over:** the shared session menu's host (`AgentManagerContent::SessionMenuHost`, §2j's hook
+  grown into a struct) has two more optional members, `openNewSessionHere` and `forkSession`; when set, the menu's items
+  call them instead of the content's `_spawnHandler` / `_codexLaunchHandler` / `_forkManagedSessionHandler` — after the
+  menu's one-tick defer and, for Claude, its claude.exe gate. The session cards and the AI search's result cards of OPEN
+  sessions set both (a closed result's own menu, Fork here ▸ / Open New Session Here ▸, has no tab to sit next to and is
+  unchanged). The Triage Board card, its ⋯ button and the Explorer tree row pass no host: their items behave as before.
+- **Log:** `[nav] sidepanel new-session|fork next to <sid8>[ model=…]`, then `… -> handed to the window that hosts its tab`
+  or `… -> no window hosts a tab of it: opened in this window, at the end of the strip`; in the hosting window
+  `[nav] sidepanel-remote … (asked from another window's side panel card)`; then the spawn / fork seams' own lines. A tab
+  mapped but not in the strip at that moment: `[sidepanel] … its tab is not in this window's strip right now (nothing
+  opened)`.
+- **Tested** (no build): `cl /Zs` against the 2026-11-06 Release worktree build (§2j's recipe) of the six units that
+  changed or call the menu (`TerminalPage.AgentSidePanel.cpp`, `.AgentMessaging.cpp`, `.AgentEngine.cpp`,
+  `AgentManagerContent.Tree.cpp`, `.Board.cpp`, `AgentManagerContent.cpp`): all pass; six undeclared names planted in the new
+  branches (the fork, the Here half, the no-tab fallback, both overrides' calls, the hosting window's dispatch) failed at
+  exactly their lines. The e2e test `test_side_panel.py::test_card_menu_opens_next_to_its_tab`
+  (flows/02 SP-12 phases 1–2, `needs_fix("SP-F3")`) is written, never run (it needs a build).
+- **Check after the build** (a PURGED build: `TerminalPage.h` and `AgentManagerContent.h` changed):
+  - Three tabs in one window, right-click the MIDDLE tab's card: **Open New Session Here ▸ Default** opens the new tab
+    right after it (not at the strip's end), in front; **Fork session ▸ Default** the same, its fork question first for a
+    session in the middle of a turn.
+  - The card list on GLOBAL in window A, right-click a card of window B's session: window B comes to the front with the
+    new tab (or the fork) right after that session's tab; window A's strip is unchanged.
+  - On the Agent Manager page: the new tab opens behind the page right after the card's tab, and the page selects it.
+  - A Codex card's **Open New Codex Session Here** and **Fork session** open next to its tab too.
+  - The Triage Board card's and the tree row's **Open New Session Here** / **Fork session** still open at the end of the
+    strip of the window they were used in.
+  - No `[exc] _SidePanelLaunchNextToTab` line in hooks.log.
+
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 
 The bottom area hosts a REAL `AgentTabOverlay` whose summary panel is switched into the new
@@ -1678,3 +1740,9 @@ below).
   `tests/tests_sidepanel.cpp` (`TestSidePanelPins`), `tests/m5_tests.{h,cpp}`. The filter box's 3 s tip (§1, the same
   day): `TerminalPage.AgentSidePanel.cpp` (the box's build and `_SidePanelSetAiMode`; `kSidePanelButtonTipDelay`'s
   comment).
+  Open New Session Here / Fork session next to the card's tab (§2k): `AgentManagerContent.{h,Tree.cpp}` (`SessionMenuHost`
+  with `openNewSessionHere` / `forkSession`, used by the Open New … Here and Fork session items of `_PopulateSessionMenu`),
+  `TerminalPage.AgentSidePanel.cpp` (`_SidePanelLaunchNextToTab`, `_SidePanelLaunchNextToTabHere`,
+  `_SidePanelOpenNewOrFork`; both card menus' hosts), `TerminalPage.AgentMessaging.cpp` (`_RemoteSessionAction`'s two
+  words), `TerminalPage.h` (the declarations, `kSidePanelNewSessionNextAction` / `kSidePanelForkNextAction`),
+  `TerminalPage.AgentEngine.cpp` (the spawn handler's comment), `e2e/suites/test_side_panel.py` (SP-12).

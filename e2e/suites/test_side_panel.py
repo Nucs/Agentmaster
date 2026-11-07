@@ -535,6 +535,69 @@ def test_pin_to_top(am, s2):
     assert says_pinned(upper), panel.card(upper).status
 
 
+@pytest.mark.p1
+@pytest.mark.flow("SP-12")
+@pytest.mark.needs_fix("SP-F3")
+def test_card_menu_opens_next_to_its_tab(am, s2, mock):
+    """SP-12 phases 1-2 (SP-F3, the user's rule of 2026-11-07 - a build with it; SIDE_PANEL.md section 2k): a card menu's
+    Open New Session Here > Default opens the new session's tab right AFTER the card's own tab - between t1's tab and
+    t2's, not at the end of the strip - and Fork session > Default opens "t1 (fork)" right after t1's tab too, before the
+    tab the first step opened. Tabs are found by their session ids: a new session in t1's folder can derive t1's own title.
+    (Phase 3, on the Agent Manager page, and the edge cases - another window's session, a Codex card, the board and the
+    tree keeping the end of the strip - are not covered here.)
+
+    Args:
+        am: The app.
+        s2: F-S2 (t1 launched before t2, so t1's tab is left of t2's).
+        mock: The scripted model.
+    """
+    w = am.window
+    panel = w.side_panel
+    t1, t2 = s2
+    wait_until(lambda: sorted(panel.titles()) == ["t1", "t2"], 10, what="both cards", describe=panel.titles)
+
+    def index_of(session):
+        """A session's tab position in this window's strip.
+
+        Args:
+            session: The Session.
+        Returns:
+            Its index (0 = left-most), -1 when no tab of this window hosts it.
+        """
+        tab = w.tabs.by_session(session.id)
+        return tab.index if tab else -1
+
+    def card_menu(title):
+        """Open a card's right-click menu.
+
+        Args:
+            title: The card's title.
+        Returns:
+            The menu.
+        """
+        before = Menu.open_hwnds(am)
+        panel.card(title).right_click()
+        return Menu.wait_new(am, before)
+
+    assert 0 <= index_of(t1) < index_of(t2), w.tabs.titles()
+    # 1. Open New Session Here > Default on t1's card: the new tab sits right after t1's and right before t2's, and it went
+    #    the card's own way (not the content's spawn, which opened at the end of the strip).
+    mark = am.profile.hooks.mark()
+    card_menu("t1").choose_path("Open New Session Here", "Default")
+    new = wait_new_session(am, mark, pattern=r"\[nav\] open-new claude done new=([0-9a-f]{8})", mock=mock)
+    wait_until(lambda: index_of(new) == index_of(t1) + 1, 10, what="the new session's tab right after t1's", describe=w.tabs.titles)
+    assert index_of(t2) == index_of(new) + 1, w.tabs.titles()
+    assert am.profile.hooks.find(r"\[nav\] sidepanel new-session next to " + t1.short, since=mark), "the card's own route was not taken"
+    # 2. Fork session > Default on t1's card (t1 is at rest: no interrupted-turn question): "t1 (fork)" right after t1's tab,
+    #    before the tab step 1 opened.
+    mark = am.profile.hooks.mark()
+    card_menu("t1").choose_path("Fork session", "Default")
+    fork = wait_new_session(am, mark, pattern=r"\[nav\] fork-managed-done new=([0-9a-f]{8})", mock=mock)
+    wait_until(lambda: index_of(fork) == index_of(t1) + 1, 10, what="the fork's tab right after t1's", describe=w.tabs.titles)
+    assert index_of(new) == index_of(fork) + 1, w.tabs.titles()
+    assert fork.record().title == "t1 (fork)"
+
+
 # ---- batch 2: restart, the hover card -----------------------------------------------------------------------
 
 

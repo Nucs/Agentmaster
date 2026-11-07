@@ -2469,7 +2469,9 @@ namespace winrt::TerminalApp::implementation
         // pressed, at once otherwise). Also two non-bot words from other windows: the session
         // menu's (kSessionMenuDeactivateAction / kSessionMenuCloseAction, -> _RunSessionMenuScopeHere) and the two state
         // scopes' (kDeactivateIdleSessionAction / kDeactivateWaitingSessionAction: "Deactivate All Idle Tabs" / "Deactivate
-        // All Waiting-for-you" answered "All windows", -> _DeactivateStateSessionLocal).
+        // All Waiting-for-you" answered "All windows", -> _DeactivateStateSessionLocal); and the side panel card menu's
+        // "Open New Session Here" / "Fork session" next to the card's tab (kSidePanelNewSessionNextAction /
+        // kSidePanelForkNextAction, the model as the argument, -> _SidePanelLaunchNextToTabHere; SIDE_PANEL.md §2k).
         // Returns false, calling nothing, when this window does not host the session (the fan-out's other windows). UI
         // thread; never throws (Rule #18 inside).
         bool _RemoteSessionAction(const std::wstring& sessionId, const std::wstring& action, const std::wstring& arg, const std::function<void(std::wstring)>& reply);
@@ -3511,6 +3513,51 @@ namespace winrt::TerminalApp::implementation
         //   returns     - nothing.
         //   throws      - nothing: a failure is logged (Rule #18) and the list is marked dirty for the periodic tick to catch up.
         void _SidePanelSetPinned(const std::wstring& id, bool pin, bool revealAfter) noexcept;
+        // Agentmaster (SIDE_PANEL.md §2k — "next to the card's tab", the user's rule of 2026-11-07: "When user right-click a
+        // sidemenu card and fork or open new, then the new tab must be created next to the card's tab we right-clicked (and that
+        // tab's window obviously)"): a side panel card menu's "Open New Session Here ▸ <model>" / "Open New Codex Session Here"
+        // (fork = false) or "Fork session ▸ <model>" (fork = true), carried to the window that hosts the card's session tab and
+        // opened RIGHT AFTER that tab — the WT tab menu's own "Here" placement (its index + 1). Local first
+        // (_SidePanelLaunchNextToTabHere); a tab another window hosts gets the request through the session-action fan-out (Engine.h
+        // RequestSessionActionInWindows, kSidePanelNewSessionNextAction / kSidePanelForkNextAction, the model as the argument), and
+        // that window comes to the front and runs the same Here half. A session NO window hosts a tab for — a live adopted session
+        // no window has bound (no injector), or one closed since the menu opened — keeps the menu's old behavior: this window, at
+        // the end of the strip. Everything else is the content's own path, unchanged: the new session opens in the card session's
+        // effective working directory, a Codex card spawns codex, a fork asks the interrupted-turn question first when it must, and
+        // a launch made while the Agent Manager page is on screen stays behind the page (_SidePanelOpenNewOrFork).
+        //   sessionId - the card's session; empty is a no-op.
+        //   fork      - false: a new session in the card's folder; true: a fork of the card's session.
+        //   model     - the launch-model pick ("" = Default; a preset's `@<id>`; ignored for Codex).
+        //   returns   - nothing: the outcome is in hooks.log ([nav] sidepanel …, then the spawn / fork seams' own lines).
+        //   throws    - nothing: a failure is logged (Rule #18) and nothing opens.
+        void _SidePanelLaunchNextToTab(const std::wstring& sessionId, bool fork, const std::wstring& model) noexcept;
+        // Agentmaster (SIDE_PANEL.md §2k): the hosting window's half of _SidePanelLaunchNextToTab — open the new session or the fork
+        // right after `sessionId`'s tab IN THIS WINDOW. A request from another window brings this window to the front first: the
+        // new tab, and a fork's question when one is asked, show here, and this window can sit behind the one the user clicked in.
+        //   sessionId       - the card's session.
+        //   fork, model     - see _SidePanelLaunchNextToTab.
+        //   fromOtherWindow - true when the session-action sink delivered it: logged as such, and the foreground rule.
+        //   returns         - false, touching nothing, when this window does not host the session's tab; true otherwise (also
+        //                     when the tab is mapped but not in the strip this very moment — torn out or moving: nothing opens).
+        //   throws          - what the spawn / fork seams throw on a torn-down tree (winrt::hresult_error) and std::bad_alloc; both
+        //                     callers contain it. UI thread only.
+        bool _SidePanelLaunchNextToTabHere(const std::wstring& sessionId, bool fork, const std::wstring& model, bool fromOtherWindow);
+        // Agentmaster (SIDE_PANEL.md §2k): the one launch both halves end in — "Open New Session Here" or "Fork session" of
+        // `sessionId` at `insertPosition`, each through the path the session menu's content handler takes for it: a new session
+        // opens in the session's EFFECTIVE working directory (the folder the menu's "Here" names) through _SpawnClaudeSession, or
+        // _SpawnCodexSession for a Codex card, inside _LaunchFromManagerPage (MGR-K1: behind the Agent Manager page while it is on
+        // screen); a fork is a ForkLaunchRequest through _ForkAskingAboutRunningTurn (HOOKS.md "Interrupted turns").
+        //   sessionId      - the session whose folder the new session opens in, or which is forked.
+        //   fork, model    - see _SidePanelLaunchNextToTab.
+        //   insertPosition - the strip slot: the card's tab index + 1, or -1 for the end.
+        //   returns        - nothing.
+        //   throws         - what the seams throw (see _SidePanelLaunchNextToTabHere). UI thread only.
+        void _SidePanelOpenNewOrFork(const std::wstring& sessionId, bool fork, const std::wstring& model, uint32_t insertPosition);
+        // Agentmaster (SIDE_PANEL.md §2k): the session-action words that carry a side panel card's "Open New Session Here" / "Fork
+        // session" to the window hosting the card's tab (_RemoteSessionAction reads them); the argument is the model pick. Distinct
+        // from every Telegram action word and the session menu's own, so nothing else can send one by accident.
+        static constexpr const wchar_t* kSidePanelNewSessionNextAction{ L"sidepanel-new-session-next" };
+        static constexpr const wchar_t* kSidePanelForkNextAction{ L"sidepanel-fork-next" };
         winrt::Windows::UI::Xaml::Controls::StackPanel _SidePanelMakeTagStrip(const std::vector<std::wstring>& tags,
                                                                               const std::vector<winrt::Windows::UI::Color>& colors,
                                                                               bool darkInk,
