@@ -80,8 +80,64 @@ namespace
     constexpr size_t kMinBlocksPerSlice = 16;
 
     // Elements per chunk panel. Appending to a panel re-measures it; a two-level stack (chunks of 200)
-    // keeps each append from walking ten thousand siblings.
+    // keeps each append from walking ten thousand siblings. Each chunk is also one UI Automation node
+    // (AgentTranscriptChunkPanel), which bounds every UIA child list to one chunk's elements.
     constexpr size_t kChunkSize = 200;
+
+    // A chunk panel (of a level, or of an open fold) that UI Automation sees as ONE node of its own: its peer is
+    // a plain FrameworkElementAutomationPeer, kept out of the Control and Content views (AccessibilityView Raw,
+    // set by MakeChunkPanel), so a screen reader reads exactly what it read before - the chunk's elements, in
+    // order - while the Raw tree gains a level of hierarchy.
+    //
+    // Why it must exist: XAML builds an element's UIA children by walking its visual subtree down to the first
+    // descendants that HAVE a peer (FrameworkElementAutomationPeer::GetAutomationPeerChildren), and a plain panel
+    // has none - so every block of a level was ONE flat child list of the scroll view (22,231 blocks at Compact
+    // for session 489217be). UIA moves to a next sibling by asking the parent for that whole list again
+    // (AutomationPeer::NavigateCoreImpl: GetParent, GetChildren, IndexOf), so another process's UIA Find over the
+    // window rebuilt it once per block: quadratic, on the UI thread, inside an incoming COM call that nothing can
+    // cancel. Production 0.8.0.10 sat there 10+ minutes on 2026-11-07, every window Not Responding, after a
+    // 1.27 M-character Compact level opened (stack: RemoteUiaNodeStub::Incoming_Find -> UiaNodeTraverser::
+    // GetNextSibling -> CUIAWrapper::Navigate -> FrameworkElementAutomationPeer::GetChildrenCore). With a peer per
+    // chunk, a child list holds at most one chunk's elements (kChunkSize) or the level's chunks
+    // (kMaxBlocks / kChunkSize = 125), so the same Find is linear in the blocks.
+    //
+    // Code-only (no IDL, never named in markup): winrt::make returns it as a StackPanel, so the overlay's
+    // fields, the reading-position anchor walk and the fold code keep treating chunks as panels.
+    struct AgentTranscriptChunkPanel : StackPanelT<AgentTranscriptChunkPanel>
+    {
+        // XAML asks for the element's peer the first time UIA (or anything else) needs it, then caches it on the
+        // element; the peer's default children are the elements of this chunk that have peers.
+        // Returns: the peer, or null when it cannot be made - the chunk is then a plain panel again (its
+        // elements fall back into the parent's list, the pre-fix tree), which is slow for UIA but correct.
+        // Throws nothing: a failure is logged ([exc], throttled) and answered with null, because an exception
+        // here would come back to XAML as a failed HRESULT inside a UIA call and fail that call for the client.
+        winrt::Windows::UI::Xaml::Automation::Peers::AutomationPeer OnCreateAutomationPeer()
+        {
+            try
+            {
+                return winrt::Windows::UI::Xaml::Automation::Peers::FrameworkElementAutomationPeer{ *this };
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay chunk automation peer");
+                return nullptr;
+            }
+        }
+    };
+
+    // One chunk panel for _AppendElement / _AppendToFold: an AgentTranscriptChunkPanel, Raw in the accessibility
+    // views (see the struct for why both matter).
+    // Returns: the new, empty chunk, as the StackPanel the level views store.
+    // Throws: winrt::hresult_error when XAML cannot create the panel or set its property (out of memory, a XAML
+    // core shutting down) - the same failures a plain StackPanel{} would raise there; the build's dispatcher
+    // item contains it like any other build failure.
+    StackPanel MakeChunkPanel()
+    {
+        StackPanel chunk = winrt::make<AgentTranscriptChunkPanel>();
+        winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetAccessibilityView(
+            chunk, winrt::Windows::UI::Xaml::Automation::Peers::AccessibilityView::Raw);
+        return chunk;
+    }
 
     // Typography (DIPs).
     constexpr double kBodyFontSize = 14.0;
@@ -1698,7 +1754,9 @@ namespace winrt::TerminalApp::implementation
     {
         if (!view.chunk || view.chunkFill >= kChunkSize)
         {
-            view.chunk = StackPanel{};
+            // A chunk with its own automation peer: without it a UIA client's walk is quadratic in the blocks
+            // (AgentTranscriptChunkPanel).
+            view.chunk = MakeChunkPanel();
             view.content.Children().Append(view.chunk);
             view.chunkFill = 0;
         }
@@ -1710,7 +1768,8 @@ namespace winrt::TerminalApp::implementation
     {
         if (!view.areaChunk || view.areaChunkFill >= kChunkSize)
         {
-            view.areaChunk = StackPanel{};
+            // An open fold's elements are UIA children too: its chunks get their own peers like the level's.
+            view.areaChunk = MakeChunkPanel();
             view.areaPanel.Children().Append(view.areaChunk);
             view.areaChunkFill = 0;
         }

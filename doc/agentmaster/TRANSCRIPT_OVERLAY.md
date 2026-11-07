@@ -439,6 +439,11 @@ The tenth ask (2026-10-31), about a comparison table in one of Claude's replies 
    ~12 ms each (at least 16 blocks), then yield. The top of a long transcript shows at once; the window
    keeps answering while the rest lays out. Only the CURRENT level builds; a level left mid-build resumes
    where it stopped. Elements go into chunk panels of 200 so an append never re-measures 10,000 siblings.
+   Each chunk (the level's and an open fold's) is also ONE UI Automation node (`AgentTranscriptChunkPanel`: a
+   code-only `StackPanel` subclass with a plain peer, `AccessibilityView::Raw`): a plain panel has no peer, so
+   without it every block was one flat UIA child list, and another process's UIA search over the window walked
+   it once per block — quadratic, on the UI thread, uncancellable; it froze every window for 40+ minutes on a
+   22,231-block Compact level (UI_THREAD.md §16). Raw keeps what a screen reader reads unchanged.
 3. **Caps** (a pathological session degrades to "the view stops here", never a stall): 8 M characters
    parsed, 25,000 blocks built, 150,000 characters per block (a huge written file). A closing note says
    when the view was cut; **Copy always copies the whole level**.
@@ -553,6 +558,8 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
 - No find-in-transcript yet.
 - A Codex rollout is plain conversation text parsed as Markdown (Codex has no turns view) — it has no
   speaker headers, so nothing folds.
+- A Markdown table's cells are still one flat UI Automation list under their chunk (UI_THREAD.md §16d): a table
+  of thousands of cells costs that many steps per sibling move inside it.
 - Not virtualized: a level is fully built (time-sliced) — fine at the measured sizes, capped beyond. A
   folded list's elements are built too (only their layout is skipped); building them lazily on first open
   would make a big Max level faster still, at the cost of an "Expand all" that builds hundreds of blocks

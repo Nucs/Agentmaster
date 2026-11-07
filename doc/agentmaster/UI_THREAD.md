@@ -1444,3 +1444,73 @@ export STACKSNAP_SYMSRV='Q:\buildserver\out\b20261101-1\syms;srv*Q:\tmp\symcache
 ./stacksnap.exe sample <pid> 270 3 <uiTid>          # then grep the .folded file for AgentManagerContent::_Refresh
 rg "slow rebuild|manager-page show" <profile>/hooks.log
 ```
+
+## 16. A UI Automation client froze every window: the transcript overlay's flat UIA tree (2026-11-07)
+
+The report (production 0.8.0.10, the 11-06 local artifact of f93329856's era, pid 30268; 4 windows): "agentmaster
+froze up, its stack and UI is not responding but i can see text moving. I opened a transcript UI and tried to copy
+the transcript". Every window read Not Responding from 08:58:48 for 40+ minutes; the terminals kept drawing (their
+render threads are their own), so text still moved.
+
+### 16a. The evidence
+
+- hooks.log: `[nav] transcript-show 489217be (from tab menu)` at 08:58:25, `transcript-level … compact` at 08:58:27,
+  `[transcript] 489217be show compact: chars=1269711 blocks=22231 rendered in 10717ms` at 08:58:38, then from 08:59:11
+  `[ui-stall] … UI thread has NOT pumped` and `rescue #N … pump=DEAD (probe timed out — a blocked UI thread)`.
+- `stacksnap sample` of the UI thread (nothing suspended; Microsoft's public symbols): 100% ON-CPU, every sample under
+  the message loop's dispatch of an INCOMING COM call — `RemoteUiaNodeStub::Incoming_Find` → `UiaNode_Find` →
+  `UiaNodeTraverser::Traverse` → `UiaNodeTraverser::GetNextSibling` → `CUIAWrapper::Navigate` →
+  `AutomationPeer::NavigateCoreImpl` → `AutomationPeer::GetChildren` → `FrameworkElementAutomationPeer::GetChildrenCore`
+  → `GetAutomationPeerChildren` (recursing) → `VisualTreeHelper::GetChildrenCount`. Another process (a UI Automation
+  client: a clipboard tool, an assistant that reads apps, a screen reader) had asked the window to search its tree.
+- The client was not identified: BetterClipboard's app code makes no tree search of other windows; sampling every
+  thread of each candidate means a symbol download per module, too slow to finish. It does not matter for the fix.
+
+### 16b. Why one search never ends
+
+From the WinUI source (`dxaml/xcp/dxaml/lib/AutomationPeer_Partial.cpp`, `FrameworkElementAutomationPeer_partial.cpp`;
+the OS XAML matches the stack above):
+
+- An element's UIA children are its visual descendants down to the first ones that HAVE a peer
+  (`GetAutomationPeerChildren` appends a child with a peer and recurses into one without). A `StackPanel`, `Grid` or
+  `Border` has no peer, so the overlay's chunk panels (§4 of TRANSCRIPT_OVERLAY.md: chunks of 200 for layout) were
+  transparent: all 22,231 blocks' text elements were ONE child list of the level's scroll view.
+- `NavigateCoreImpl(NextSibling)` = `GetParent` → `parent->GetChildren()` (that whole list rebuilt, the visual subtree
+  walked again) → `IndexOf(this)`. A search visits the siblings one by one, so it costs (blocks) × (the scroll view's
+  whole visual subtree): about 22 k × 100 k node visits, on the UI thread, inside an RPC call nothing cancels, on a PC
+  whose UI thread got only 63-73% of a core.
+
+### 16c. The fix (`AgentTranscriptOverlay.cpp`, `AgentTranscriptChunkPanel` + `MakeChunkPanel`)
+
+- Every chunk panel — the level's and an open fold's — is a code-only `StackPanelT<>` subclass whose
+  `OnCreateAutomationPeer` returns a plain `FrameworkElementAutomationPeer` (the pattern of upstream's
+  `TerminalPage::OnCreateAutomationPeer`), marked `AccessibilityView::Raw`. The Raw tree gains one level: the scroll
+  view's list holds the level's chunks (at most kMaxBlocks / kChunkSize = 125) and each chunk's list its own elements
+  (at most 200), so the same search is linear in the blocks. Raw keeps the Control and Content views — what a screen
+  reader reads — exactly as before: the chunk is skipped and its elements read in order.
+- `winrt::make` returns it as a `StackPanel`, so the level views, the reading-position anchor walk and the fold code
+  are unchanged. A failed peer is logged (`[exc] AgentTranscriptOverlay chunk automation peer`) and answered with
+  null: that chunk is then a plain panel again.
+- Checked without a build: `cl /Zs` of the unit against the clean worktree's PCH, PASS; two planted defects FAIL where
+  planted (C2440 in the peer's construction; C2664 in C++/WinRT's `detach_from<AutomationPeer>` when the override
+  returns the wrong type — the proof that `make` wires the override into XAML's `IUIElementOverrides`).
+- Not done: a live measurement of a UIA search over a big level after a build.
+
+### 16d. What is left
+
+- An element with many peer-children of its own is still one flat list under its chunk: a Markdown table of R × C
+  cells (each cell a text block) costs R × C per sibling step inside that table.
+- Any long list of peer-bearing elements in plain panels has the same trap; the Agent Manager board's columns (cards
+  of Borders and Grids holding text blocks) are the likeliest, measured nowhere yet. The side panel's cards are
+  virtualized (§14) and the tab strip is a virtualizing list.
+- A UIA client's call always runs on the UI thread; the fix bounds its cost, it cannot move it.
+
+### 16e. How it was measured
+
+```bash
+# Which instance: IsHungAppWindow / SendMessageTimeout(WM_NULL) per Agentmaster.exe; the trail before the stall:
+rg -n "transcript-show|transcript-level|\[transcript\]|ui-stall" <profile>/hooks.log
+cd <scratch> && cp tools/stacksnap.exe "<SDK>/Debuggers/x64/dbghelp.dll" "<SDK>/Debuggers/x64/symsrv.dll" . && touch symsrv.yes
+export STACKSNAP_SYMSRV='srv*Q:\symcache*https://msdl.microsoft.com/download/symbols'   # the layout ships our PDBs
+./stacksnap.exe sample <pid> 6 300 <uiTid>          # the first run downloads symbols (~2 min); the .folded file holds the stack
+```

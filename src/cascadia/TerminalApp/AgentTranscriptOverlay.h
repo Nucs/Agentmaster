@@ -240,7 +240,9 @@ namespace winrt::TerminalApp::implementation
             winrt::Windows::UI::Xaml::Controls::ScrollViewer scroll{ nullptr };
             // The scroll content: a vertical stack of CHUNK panels (see _AppendElement).
             winrt::Windows::UI::Xaml::Controls::StackPanel content{ nullptr };
-            // The chunk currently being filled, and how many elements it holds.
+            // The chunk currently being filled, and how many elements it holds. Every chunk comes from
+            // MakeChunkPanel: a StackPanel that is also one UI Automation node, so no UIA child list ever holds
+            // more than one chunk's elements (a flat list made a UIA client's search quadratic - UI_THREAD.md §16).
             winrt::Windows::UI::Xaml::Controls::StackPanel chunk{ nullptr };
             size_t chunkFill = 0;
             // The placeholder TextBlock showing `message` while Loading / Empty (removed when content
@@ -262,7 +264,8 @@ namespace winrt::TerminalApp::implementation
             size_t areaEnd = 0;
             // the chunk of that fold panel being filled, and how many elements it holds — a fold is
             // chunked like the level itself (one real turn held 243 calls, 1,000+ elements at Max), so an
-            // append to an OPEN fold never re-measures a thousand siblings (_AppendToFold).
+            // append to an OPEN fold never re-measures a thousand siblings (_AppendToFold); made by
+            // MakeChunkPanel like the level's chunks, so an open fold is a bounded UIA list too.
             winrt::Windows::UI::Xaml::Controls::StackPanel areaChunk{ nullptr };
             size_t areaChunkFill = 0;
             // "Expand all" is on for this level: every fold flips open, and folds built from now on start
