@@ -293,6 +293,10 @@ rising embers) while the server cache is warm.
 - **E5 Cards scrolled out of view and back** (the virtualized list) → a card shows the current indicators within a
   tick; no ring left on a session whose tab was visited meanwhile.
 - **E6 A Codex session** → no draft dots and no crown (both are Claude-only, as on its tab); its ring follows its tab's.
+- **E7 The ring's spot** (2026-11-07, NOT BUILT) → at 100%, a card shows 2 px of red left of and above its dot and 1 px
+  right of and below it; its tab's ring is unchanged (1 px left and above, 2 px right and below). Only the card's ring
+  moved, by the user's call. Expected elsewhere (a replica of XAML's layout math, SIDE_PANEL.md §2g *The ring's spot*):
+  at 125% the card's ring matches its tab's (2 px and 1 px), and at 200% both are centered (3 px all round).
 
 ---
 

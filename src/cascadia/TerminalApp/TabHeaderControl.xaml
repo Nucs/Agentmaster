@@ -158,7 +158,10 @@
               pending-dots band with the same sizes, order and opacities, and runs the same composition animations
               (the glow's breath is the shared AgentMakeCacheWarmGlow; the motion gates are AgentMaster/StatusIconMotion.h,
               the rule TabHeaderControl's _Update*Animation methods apply). It leaves out the favorite star / crown and the
-              dormant half-dot. A change to an element below (a size, the order, a static Opacity) is a change there too.  -->
+              dormant half-dot. A change to an element below (a size, the order, a static Opacity) is a change there too.
+              ONE deliberate difference: the card's flash ring is nudged a hair off center, so at 100% it draws 1 px left
+              of and above this one (the user's correction for the side panel only, AgentStatusGlyph.cpp kRingNudge);
+              this ring stays centered, and a sync must not carry either spot to the other.  -->
         <Grid x:Name="HeaderAgentStatusDotWrap"
               Width="18"
               Margin="0,1,0,-1"

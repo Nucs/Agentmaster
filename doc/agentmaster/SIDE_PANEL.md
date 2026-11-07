@@ -849,7 +849,7 @@ flight (inertia, a thumb drag) is never disturbed.
     UI thread's frame walk (`stacksnap sample` + `uiclass.py`) far below ~250 ms/s.
   - No `[sidepanel] … out of step` line in hooks.log.
 
-### 2g. The status icon is the tab's — the 3 dots, the red flash ring, the spark crown (2026-10-23, NOT BUILT yet)
+### 2g. The status icon is the tab's — the 3 dots, the red flash ring, the spark crown (2026-10-23, in production 0.8.0.9 and dev 0.0.1.42; the ring's spot 2026-11-07, NOT BUILT)
 
 The user's request: "The status icon in sidemenu should be supporting what tab supports: 3 dots when text present in
 text editor of the claude code of the tab, red circle when tab is unread flashing, fire when tab is cached. All these
@@ -862,7 +862,7 @@ black stroke in an 18 DIP cell, over a 4 DIP band — with the tab's three indic
 | Indicator | Shape (the XAML twin) | Shown when | Motion |
 |---|---|---|---|
 | **3 dots** | three 2.5 DIP dots, 1.5 apart, in the band under the dot (`HeaderPendingDots`) | the session has an unsent draft | the staggered opacity wave (`AgentDotsPulse`) — only once the session's tab has STARTED (a dormant tab's remembered draft stands still) and with Windows' animation effects on |
-| **red flash ring** | a 13 DIP ellipse behind the dot, ~1.5 DIP of it showing around the black stroke (`HeaderAgentStatusFlashRing`), in the cog's "status flashing color" | the session is UNREAD: its tab's ring flashes (the automatic "left Running while you weren't looking" flash, or a Mark Unread) | the 600 ms on / 600 ms off blink on the UI thread's ONE shared clock (`AgentLockstepBlink`) — so a card's ring blinks in lockstep with its tab's ring, in every window; an ALERT: it ignores the animation switch and dormancy |
+| **red flash ring** | a 13 DIP ellipse behind the dot, ~1.5 DIP of it showing around the black stroke (`HeaderAgentStatusFlashRing`), in the cog's "status flashing color"; the card's sits 1 px left of and above the tab's (*The ring's spot*, below) | the session is UNREAD: its tab's ring flashes (the automatic "left Running while you weren't looking" flash, or a Mark Unread) | the 600 ms on / 600 ms off blink on the UI thread's ONE shared clock (`AgentLockstepBlink`) — so a card's ring blinks in lockstep with its tab's ring, in every window; an ALERT: it ignores the animation switch and dormancy |
 | **fire** (spark crown) | a two-disc amber glow behind the dot (16 DIP at 0.5, 12.5 DIP at 0.55, the grid at 0.45 — `HeaderCacheWarmGlow`) and three embers rising off it (the 18 DIP `HeaderCacheWarmSparks` canvas) | `ServerCacheStillWarm` holds: the session is at rest and its last real API turn is younger than the server cache's lifetime (`serverCacheMinutes`, 0 → 5) | the glow's breath (`AgentMakeCacheWarmGlow` — the SAME recipe the tab header now builds its own from) and the rising embers (`AgentEmberSparks`), with Windows' animation effects on; off, the steady glow alone |
 
 Before: an 8 DIP dot with no stroke, no ring, no crown, and the draft dots a separate `BuildPendingDots` cluster
@@ -895,6 +895,45 @@ top gap went from 3 to 1 DIP (the icon's cell holds 4 DIPs of air above the dot 
 use), so the dot stays ~5 DIPs under the title band and every card grows by ~6.7 DIPs (the band is FIXED, so a draft
 appearing never moves anything — the tab's rule). The default stride before the first measurement went from 60 to 66
 DIPs. The icon is not hit-testable: a press on it lands on the card's background and selects the card.
+
+**The ring's spot (2026-11-07, NOT BUILT).** The user's correction, for the side panel only: "The flashing unread red
+background for the status indicator in the sidemenu (sidemenu only) needs to be moved -1 left and -1 top, as its not
+really centered to the circle so 1px left and 1px up."
+- **Why it looked off.** Centered in the 18 DIP cell, the 13 DIP ring sits at 2.5 DIP, and XAML's layout rounding takes
+  a half pixel UP (`CFrameworkElement::ArrangeCore` rounds each offset with `XcpRound`, which is `floor(x + 0.5)`). At
+  100% the ring therefore draws at 3 px and the dot at 4 px: 1 px of red left of and above the dot, 2 px right of and
+  below it. The tab's ring has the same geometry and draws the same way.
+- **What the card does now.** Its ring stays centered and gets a 0.01 DIP margin to the left and top, with the same
+  amount on the far sides, so the margins sum to zero (`kRingNudge` in `AgentStatusGlyph.cpp`). Its offset becomes
+  2.49 DIP, which rounds DOWN to 2 px: at 100% it draws 1 px left of and above the tab's ring, with 2 px of red left of
+  and above the dot and 1 px right of and below it. A 13 DIP ring can never sit centered on a 10 DIP dot in whole
+  pixels at 100% (the 3 px difference is odd), so the move puts the extra pixel on the other side.
+- **Where the nudge acts.** Only where the centered offset lands on an exact half pixel: a whole-pixel offset (a ring
+  that is already centered) rounds back to itself, and the result is always a whole physical pixel (no blurred edge).
+  A float32 replica of XAML's layout math (WinUI 3's `LayoutRoundHelper`, `MeasureCore`, `ArrangeCore` and
+  `ComputeAlignmentOffset`, every display scale from 100% to 500%) gives, at the standard scales:
+
+  | Scale | 100% | 125% | 150% | 175% | 200% | 225% | 250% | 300% | 350% | 400% | 450% | 500% |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | Tab, red left / right (px) | 1 / 2 | 2 / 1 | 2 / 3 | 2 / 3 | 3 / 3 | 3 / 3 | 4 / 4 | 4 / 5 | 6 / 5 | 6 / 6 | 7 / 7 | 7 / 8 |
+  | Card, red left / right (px) | 2 / 1 | 2 / 1 | 3 / 2 | 3 / 2 | 3 / 3 | 3 / 3 | 4 / 4 | 5 / 4 | 6 / 5 | 6 / 6 | 7 / 7 | 8 / 7 |
+
+  Top / bottom read the same as left / right. The card's ring is centered wherever whole pixels allow it, and has its
+  extra pixel left of and above the dot everywhere else, never right of and below it (the look the user asked to fix).
+  At 125% the tab's ring already draws that way: float error makes its centered offset 2.7999997 DIP, which rounds
+  down. Only the 100% row is exact arithmetic; the others hold as far as Windows' own XAML rounds like WinUI 3's.
+- **Why a hair, not the 1 DIP the user named.** A −1 DIP margin is the same 1 px at 100%, but at 125% it draws the
+  ring at 2 px, leaving no red at all right of the dot, and from 150% up it moves the ring 2 px or more. A −1 DIP
+  RenderTransform moves the ring off the pixel grid (1.25 px at 125%, a blurred edge). A fixed spot (Left / Top with a
+  2 DIP margin) moves it at every scale, so at 200% to 250% it is 1 px off center where the centered ring is exact.
+  The nudge must stay far below half a physical pixel at the largest scale (0.01 DIP = 0.05 px at 500%) and far above
+  float error (~1e-6 DIP).
+- **The tab is unchanged** (the user's "sidemenu only"). The nudge is the one place the icon differs from its XAML
+  twin, and both sides say so: a sync must carry neither spot to the other.
+- **If an exact center is wanted later:** take the ring off the pixel grid (`UseLayoutRounding` off for the ring
+  alone): 1.5 px of red all round at 100%, centered at every standard scale in the replica, with a softer outer edge.
+  A 12 DIP ring (1 px of red all round at 100% and 125%) is half a pixel off at 150%, 175%, 250%, 350% and 450%. A
+  14 DIP ring (2 px all round at 100%) is half a pixel off at 125%, 175% and 225%.
 
 **Motions, and what they cost.** All composition (UI_THREAD.md §10a #1, §10i): no XAML frame and no UI-thread work per
 blink or breath. When a motion may run is ONE rule, `AgentMaster/StatusIconMotion.h` (`DecideStatusIconMotion`), the one
@@ -938,6 +977,9 @@ controls (an unknown member planted in the glyph and in `_SidePanelRefreshIndica
 - After a turn ends the card's crown glows with rising embers, and goes out on the same tick as its tab's crown
   (`serverCacheMinutes`, 5 by default). Windows "Animation effects" off: still dots, a steady glow, the ring still blinks.
 - Change the "status flashing color" in the cog: the cards' rings take it at once.
+- The ring's spot: on a 100% screen a ringing card shows 2 px of red left of and above its dot and 1 px right of and
+  below it, and its tab's ring is unchanged (1 px left and above, 2 px right and below). On a 125% screen the card's
+  ring and its tab's look alike (2 px, then 1 px), as the replica predicts.
 - Collapse the panel while cards ring / glow / pulse, expand it: they move again; no `[exc] status glyph …`,
   `[exc] _SidePanelRefreshIndicators` or `[sidepanel] … out of step` line in hooks.log.
 
