@@ -15,7 +15,7 @@
 
 | Install | Identity | Version | Runs from | Commit |
 |---|---|---|---|---|
-| production | `Agentmaster` | 0.8.0.10 | the loose layout `Q:\agentmaster-layouts\Release-B` (a local Release build of a clean worktree, installed with the build server's `install-build.ps1`) | `f93329856` |
+| production | `Agentmaster` | 0.8.0.11 | the loose layout `Q:\agentmaster-layouts\Release` (a local purged Release build of the clean worktree `Q:\tmp\am-release-wt`, registered with `Add-AppxPackage -Register -ForceApplicationShutdown`) | `e7a8c3aa2` |
 | dev | `AgentmasterDev` | 0.0.1.42 | the loose layout `Q:\agentmaster-layouts\Debug` (build server build `b20261103-2`, installed by `amb install`) | `8f23157ba` |
 
 - Whether a commit is in a build: `git merge-base --is-ancestor <commit> <build commit>`.
@@ -592,6 +592,7 @@ Nothing stops before step 3, so a refusal in step 1 costs nothing.
 - **`-WhatIf` noise:** it prints a `What if: Performing the operation "Set Alias"` line for each alias; filter them out.
 - **The new instance can stop on the "Reopen your N previous Agentmaster windows?" dialog.** The measured downtime ends when the new GUI starts, not when someone answers; someone must click it — unless the instance's profile remembers a choice (`settings.reopenWindowsAtStart` is `reopen` or `oneWindow`: PERSISTENCE.md §18), and then it asks nothing.
 - **After a swap, the instance runs from the OTHER slot.** The next build targets the slot that it left.
+- **A HUNG GUI can outlive its stop:** the stopped process stays mid-termination (WMI lists it, `Get-Process` cannot open it, its handles stay open), so its ConPTY hosts never drain, the register fails on `0x80073D02` and the rollback's relaunch starts NOTHING — the instance is down while the transcript says "rollback: relaunching". Check for a GUI under the old folder after a failed swap; `Add-AppxPackage -Register <new layout>\AppxManifest.xml -ForceUpdateFromAnyVersion -ForceApplicationShutdown` (under the mutex) ends the stuck process and its hosts with every client, then launch `shell:appsFolder\<PFN>!App` (UI_THREAD.md §16e).
 
 #### The build half, and both instances in one deploy
 

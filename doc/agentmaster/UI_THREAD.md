@@ -1494,7 +1494,7 @@ the OS XAML matches the stack above):
 - Checked without a build: `cl /Zs` of the unit against the clean worktree's PCH, PASS; two planted defects FAIL where
   planted (C2440 in the peer's construction; C2664 in C++/WinRT's `detach_from<AutomationPeer>` when the override
   returns the wrong type — the proof that `make` wires the override into XAML's `IUIElementOverrides`).
-- Not done: a live measurement of a UIA search over a big level after a build.
+- Not done: a live measurement of a UIA search over a big level after a build (it is in production 0.8.0.11, §16e).
 
 ### 16d. What is left
 
@@ -1505,7 +1505,28 @@ the OS XAML matches the stack above):
   virtualized (§14) and the tab strip is a virtualizing list.
 - A UIA client's call always runs on the UI thread; the fix bounds its cost, it cannot move it.
 
-### 16e. How it was measured
+### 16e. Recovering the frozen instance: the swap could not stop it
+
+The fix went out the same morning (production 0.8.0.11, `e7a8c3aa2`: a purged local Release build of the clean worktree
+`Q:\tmp\am-release-wt` into the free slot `Release`, 6 min), and the swap onto it FAILED in a way worth knowing:
+
+- `Swap-AgentmasterLayout.ps1` stopped the frozen GUI (`Stop-Process` at 09:56:17, logged "stopped") but the process
+  never finished exiting: 22 minutes later it still had ONE thread (Ready, wait reason 31, no CPU time), 3,918 handles
+  and 2.9 GB private bytes, exit code -1 already set, no debugger. `Get-Process` could no longer open it while WMI still
+  listed it. Its rundown had not started, so none of its handles closed.
+- So its 48 ConPTY hosts never saw a broken pipe ("drained … in 120.2s (48 still alive)" - all their threads in
+  ordinary waits), the register failed 12 times on `0x80073D02` ("the following apps need to be closed
+  Agentmaster_0.8.0.10"), and the rollback's relaunch started NO process (production's hooks.log has no start line):
+  the instance was down with every window gone while the transcript said "rollback: relaunching".
+- `Add-AppxPackage -Register <the new layout's AppxManifest.xml> -ForceUpdateFromAnyVersion -ForceApplicationShutdown`
+  (under the build-launch mutex) registered the new version in 12 s and ended the stuck process and the 48 hosts with
+  their clients (the package's whole process tree: no orphan left for the reaper); `shell:appsFolder\…!App` then
+  started 0.8.0.11, which reopened its 4 windows and answered at once.
+- Why the last thread never ran is not known (no kernel tools without admin; the package's PLM state reads Unknown, as
+  for any full-trust app). The swap script could check the stopped GUI is GONE before draining, and treat a relaunch
+  that starts no process as a failed rollback; neither is done.
+
+### 16f. How it was measured
 
 ```bash
 # Which instance: IsHungAppWindow / SendMessageTimeout(WM_NULL) per Agentmaster.exe; the trail before the stall:
