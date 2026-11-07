@@ -849,7 +849,7 @@ flight (inertia, a thumb drag) is never disturbed.
     UI thread's frame walk (`stacksnap sample` + `uiclass.py`) far below ~250 ms/s.
   - No `[sidepanel] … out of step` line in hooks.log.
 
-### 2g. The status icon is the tab's — the 3 dots, the red flash ring, the spark crown (2026-10-23, in production 0.8.0.9 and dev 0.0.1.42; the ring's spot 2026-11-07, NOT BUILT)
+### 2g. The status icon is the tab's — the 3 dots, the red flash ring, the spark crown (2026-10-23, in production 0.8.0.10 and dev 0.0.1.42; the ring's spot 2026-11-07, NOT BUILT)
 
 The user's request: "The status icon in sidemenu should be supporting what tab supports: 3 dots when text present in
 text editor of the claude code of the tab, red circle when tab is unread flashing, fire when tab is cached. All these
