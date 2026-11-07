@@ -1204,6 +1204,171 @@ namespace
     }
 }
 
+namespace
+{
+    // ===== §21.48: a new session from anywhere ================================================================================
+
+    // A Telegram message from a JSON text (the tests' own literals: a parse failure is a test bug, read as an empty object).
+    json::Value NaMsg(const wchar_t* text)
+    {
+        auto v = json::Parse(text);
+        return v ? *v : json::Value::MkObj();
+    }
+
+    /// <summary>
+    /// §21.48's pure halves: the opener follow (Telegram for Android 13.0.x sends the message that opened a thread from "All"
+    /// without the thread's id — seen in the owner's chat 2026-11-07), which messages take part in it, the name of a thread the
+    /// service opens for main-view words, /newsession's arguments, the main view's own commands, and the line that names an opened
+    /// thread. The service's routing, sends and wizard need Telegram: the live check is the dev bot (MESSAGING.md §21.48).
+    /// </summary>
+    void TestMessagingNewThreadAnywhere()
+    {
+        wprintf(L"== TestMessagingNewThreadAnywhere (MESSAGING.md 21.48: the opener follow, /newsession anywhere, the main view's commands) ==\n");
+
+        // --- the follow: a thread-less opener within the window is the new thread's ---
+        {
+            NewThreadOpenerFollow f;
+            CHECK(f.Route(0, 1000, 500, false) == 0, "no follow: a thread-less message is the main view's");
+            f.OnThreadCreated(100, 1000);
+            CHECK(f.Route(0, 1000, 501, false) == 100, "a thread-less message stamped in the creation's second is the new thread's opener");
+            CHECK(f.MovedThreadOf(501) == 100, "...and is remembered as moved into it");
+            CHECK(f.Route(0, 1003, 502, false) == 100, "a second chunk 3 s after the first is adopted too (a long opener the client splits)");
+            CHECK(f.Route(0, 1008, 503, false) == 100, "the window runs from the LAST adopted message: 5 s after the chunk before is still in");
+            CHECK(f.Route(0, 1014, 504, false) == 0 && f.threadId == 0, "6 s after the last adopted message: the main view's, and the follow ends");
+            CHECK(f.Route(0, 1014, 505, false) == 0, "...a later thread-less message stays in the main view");
+            CHECK(f.MovedThreadOf(504) == 0 && f.MovedThreadOf(505) == 0, "main-view messages are never remembered as moved");
+        }
+        {
+            NewThreadOpenerFollow f;
+            f.OnThreadCreated(7, 2000);
+            CHECK(f.Route(0, 2005, 1, false) == 7, "exactly kNewThreadOpenerFollowSec after the creation: adopted");
+            f.OnThreadCreated(8, 3000);
+            CHECK(f.Route(0, 3006, 2, false) == 0, "one second past the window: the main view's");
+            f.OnThreadCreated(9, 4000);
+            CHECK(f.Route(0, 3999, 3, false) == 0 && f.threadId == 0, "a message stamped BEFORE the creation is no opener, and ends the follow");
+            f.OnThreadCreated(10, 5000);
+            CHECK(f.Route(0, 0, 4, false) == 0 && f.threadId == 0, "an unstamped message is never adopted by guess");
+            f.OnThreadCreated(11, 0);
+            CHECK(f.threadId == 0 && f.Route(0, 6000, 5, false) == 0, "a creation without a stamp starts no follow");
+            f.OnThreadCreated(0, 6000);
+            CHECK(f.threadId == 0, "thread 0 starts no follow");
+        }
+        {
+            NewThreadOpenerFollow f;
+            f.OnThreadCreated(200, 4000);
+            CHECK(f.Route(300, 4000, 601, false) == 300, "a stamped message belongs to its own thread");
+            CHECK(f.threadId == 0 && f.Route(0, 4001, 602, false) == 0, "...and ends the follow: a thread-less message after it is the main view's");
+            f.OnThreadCreated(200, 4100);
+            CHECK(f.Route(200, 4100, 603, false) == 200 && f.Route(0, 4101, 604, false) == 0,
+                  "a Desktop client STAMPS the opener with the new thread: the follow ends with it, nothing is adopted");
+            f.OnThreadCreated(10, 5000);
+            f.OnThreadCreated(11, 5001);
+            CHECK(f.Route(0, 5001, 701, false) == 11, "a second creation replaces the follow (the user wrote in All again)");
+        }
+        // --- edits: only a moved message's edit goes back to its thread; an edit never adopts and never ends the follow ---
+        {
+            NewThreadOpenerFollow f;
+            f.OnThreadCreated(100, 1000);
+            CHECK(f.Route(0, 1000, 501, false) == 100, "the opener is adopted");
+            CHECK(f.Route(0, 1000, 501, true) == 100, "its edit (also thread-less) goes to the same thread");
+            CHECK(f.Route(0, 1000, 999, true) == 0, "an edit of a message that was never moved stays in the main view");
+            f.OnThreadCreated(14, 8000);
+            CHECK(f.Route(0, 8000, 801, true) == 0, "an edit right after a creation is NOT adopted by time (an old lobby message edited)");
+            CHECK(f.Route(55, 8000, 802, true) == 55, "an edit with a thread id belongs to that thread");
+            CHECK(f.threadId == 14 && f.Route(0, 8001, 803, false) == 14, "...and neither edit ended the follow: the opener after them is adopted");
+        }
+        // --- the memory of moved messages ---
+        {
+            NewThreadOpenerFollow f;
+            f.Remember(900, 21);
+            CHECK(f.MovedThreadOf(900) == 21, "a remembered message names its thread");
+            f.Remember(900, 22);
+            CHECK(f.MovedThreadOf(900) == 22 && f.moved.size() == 1, "remembering it again updates its thread (no second entry)");
+            f.Remember(0, 5);
+            f.Remember(5, 0);
+            CHECK(f.moved.size() == 1 && f.MovedThreadOf(0) == 0, "message 0 and thread 0 are never remembered");
+            for (int64_t i = 1; i <= static_cast<int64_t>(kNewThreadMovedMemory) + 5; ++i)
+            {
+                f.Remember(10000 + i, 30);
+            }
+            CHECK(f.moved.size() == kNewThreadMovedMemory, "the memory holds at most kNewThreadMovedMemory messages");
+            CHECK(f.MovedThreadOf(900) == 0 && f.MovedThreadOf(10001) == 0 && f.MovedThreadOf(10006) == 30 &&
+                      f.MovedThreadOf(10000 + static_cast<int64_t>(kNewThreadMovedMemory) + 5) == 30,
+                  "...the oldest are forgotten first, the newest kept");
+            f.OnThreadCreated(3, 10);
+            f.Reset();
+            CHECK(f.threadId == 0 && f.lastDateSec == 0 && f.moved.empty(), "Reset forgets the follow and every moved message (a new bot's chat)");
+        }
+        // --- which messages take part: content only ---
+        {
+            CHECK(NewThreadMessageCarriesContent(NaMsg(L"{\"message_id\":1,\"text\":\"/newsession\"}")), "a text takes part");
+            CHECK(NewThreadMessageCarriesContent(NaMsg(L"{\"message_id\":1,\"caption\":\"see this\",\"photo\":[]}")), "a captioned photo takes part");
+            CHECK(NewThreadMessageCarriesContent(NaMsg(L"{\"message_id\":1,\"voice\":{\"file_id\":\"x\",\"duration\":50}}")), "a voice note takes part (the \"Media\" thread)");
+            CHECK(NewThreadMessageCarriesContent(NaMsg(L"{\"message_id\":1,\"video_note\":{\"file_id\":\"x\"}}")), "a round video note takes part");
+            CHECK(!NewThreadMessageCarriesContent(NaMsg(L"{\"message_id\":1,\"message_thread_id\":5,\"forum_topic_created\":{\"name\":\"x\",\"is_name_implicit\":true}}")),
+                  "the thread's creation (a service message) does not");
+            CHECK(!NewThreadMessageCarriesContent(NaMsg(L"{\"message_id\":1,\"pinned_message\":{\"message_id\":2}}")), "a pin's service message does not");
+            CHECK(!NewThreadMessageCarriesContent(NaMsg(L"{\"message_id\":1,\"text\":\"\"}")), "an empty text does not");
+            CHECK(!NewThreadMessageCarriesContent(json::Value::MkStr(L"x")), "a non-object does not");
+        }
+        // --- the name of a thread the service opens for main-view words ---
+        {
+            CHECK(NewThreadNameForMessage(L"Look at pr") == L"Look at pr", "a short message names its thread as it is");
+            CHECK(NewThreadNameForMessage(L"\n  \nfirst line\nsecond line") == L"first line", "the first non-empty line, trimmed");
+            CHECK(NewThreadNameForMessage(L"") == kNewSessionThreadName && NewThreadNameForMessage(L" \n ") == kNewSessionThreadName,
+                  "a blank message gets the service's name");
+            const std::wstring longLine(100, L'a');
+            const std::wstring cut = NewThreadNameForMessage(longLine);
+            CHECK(cut.size() == kNewThreadNameMaxChars && cut.back() == L'\x2026', "a long line is cut to kNewThreadNameMaxChars with an ellipsis");
+            std::wstring pairAtCut(kNewThreadNameMaxChars - 2, L'b');
+            pairAtCut += L"\U0001F600 tail that makes it long enough";
+            const std::wstring safe = NewThreadNameForMessage(pairAtCut);
+            CHECK(safe.size() <= kNewThreadNameMaxChars && safe.back() == L'\x2026' && !(safe[safe.size() - 2] >= 0xD800 && safe[safe.size() - 2] <= 0xDBFF),
+                  "a cut never splits a surrogate pair (a lone surrogate is invalid UTF-16, which Telegram refuses)");
+            CHECK(!kNewSessionThreadName.empty() && kNewSessionThreadName.size() <= 128, "the service's name fits a topic name (1-128)");
+        }
+        // --- /newsession's arguments ---
+        {
+            NewSessionArgs a = ParseNewSessionArgs(L"");
+            CHECK(a.folder.empty() && a.model.empty(), "no arguments: the wizard asks for everything");
+            a = ParseNewSessionArgs(L"K:\\src\\app");
+            CHECK(a.folder == L"K:\\src\\app" && a.model.empty(), "a folder alone");
+            a = ParseNewSessionArgs(L"  K:\\src\\app   claude-opus-5-5[1m]  ");
+            CHECK(a.folder == L"K:\\src\\app" && a.model == L"claude-opus-5-5[1m]", "a folder and a model, trimmed");
+            a = ParseNewSessionArgs(L"\"K:\\my folder\\x\" sonnet");
+            CHECK(a.folder == L"K:\\my folder\\x" && a.model == L"sonnet", "a QUOTED folder keeps its spaces; the model follows it");
+            a = ParseNewSessionArgs(L"\"K:\\my folder");
+            CHECK(a.folder == L"K:\\my folder" && a.model.empty(), "an unclosed quote takes the rest as the folder");
+            a = ParseNewSessionArgs(L"\"\" opus");
+            CHECK(a.folder.empty() && a.model == L"opus", "an empty quoted folder is no folder (the wizard asks for it)");
+        }
+        // --- the main view's own commands ---
+        {
+            for (const wchar_t* t : { L"/help", L"/start", L"/status", L"/idle", L"/board", L"/pauseall", L"/resumeall", L"/verbose on", L"/recreate", L"/help@SomeBot" })
+            {
+                CHECK(IsMainViewFleetCommand(ParseRemoteCommand(t)), "a main-view command");
+            }
+            for (const wchar_t* t : { L"/newsession", L"/newsession K:\\x", L"/search words", L"/search_tab", L"/queue", L"/rename x", L"/compact", L"hello", L"" })
+            {
+                CHECK(!IsMainViewFleetCommand(ParseRemoteCommand(t)), "not a main-view command (/newsession and /search have their own paths; a session's command; a Claude Code command; words)");
+            }
+        }
+        // --- the line that names the thread the service opened ---
+        {
+            const std::wstring linked = BuildNewSessionThreadOpenedHtml(L"@MyBot", 42, L"\U0001F195 New session", false);
+            CHECK(linked.find(L"https://t.me/MyBot/42?topic=42") != std::wstring::npos && linked.find(L"open it") != std::wstring::npos,
+                  "with the bot's username: a link that opens the thread");
+            CHECK(linked.find(L"folder, model and window") != std::wstring::npos && linked.find(L"first prompt") == std::wstring::npos,
+                  "/newsession's line says what the thread asks, and holds no prompt");
+            const std::wstring words = BuildNewSessionThreadOpenedHtml(L"", 42, L"fix <the> bug", true);
+            CHECK(words.find(L"first prompt") != std::wstring::npos && words.find(L"first in the thread list") != std::wstring::npos &&
+                      words.find(L"href") == std::wstring::npos,
+                  "words: the line says they wait as the first prompt; with no username yet, where the thread is instead of a link");
+            CHECK(words.find(L"fix &lt;the&gt; bug") != std::wstring::npos && words.find(L"<the>") == std::wstring::npos, "the thread's name is escaped");
+        }
+    }
+}
+
 void TestMessagingNewThread()
 {
     wprintf(L"== TestMessagingNewThread (MESSAGING.md 21.17: title links, the You lines' title row, the turn chain fields, the new-thread picker) ==\n");
@@ -1632,4 +1797,5 @@ void TestMessagingNewThread()
               "...its failure is not kept as an answer: the next ask probes again");
     }
     TestMessagingNewThreadWizard(); // §21.25: the new-thread wizard (its own header line)
+    TestMessagingNewThreadAnywhere(); // §21.48: the opener follow, /newsession anywhere, the main view's commands (its own header line)
 }

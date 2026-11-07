@@ -2993,7 +2993,8 @@ updated 5 minutes ago
   the bot answered "Topics are made from Agentmaster's tabs"), then the user's message.
   - A thread the user NAMED (`is_name_implicit` false): the name becomes the session's title, and the picker goes up at once.
   - A thread Telegram named after the first message (`is_name_implicit` true): the picker goes up with that message — one post,
-    not a post and an edit.
+    not a post and an edit. (§21.48: Telegram for Android 13.0.x sends that message WITHOUT the thread's id; the opener follow
+    takes a thread-less message stamped within 5 s of the creation as the thread's.)
   - A message in any thread no session owns (one the user opened, one made before §21.17, one whose session closed while the
     thread stayed) is HELD (👀 reaction), and the thread gets a picker if it has none; a recreation's old topic, about to be
     deleted, is told so instead.
@@ -3879,6 +3880,8 @@ with `/add-dir`'s own three answers chosen here.
 | ✖ Cancel at any step | the thread is DELETED (`deleteForumTopic`, its queued items dropped first); what it held is copied into the main view in a silent line with an expandable quote (`BuildNewThreadAbortHtml`) — the messages go with the thread |
 | Nothing chosen for a day (`kNewThreadPickerIdleMs`, every message or tap counts) | the same, from the tick (`_newThreadsTick`): "🗑 “X” was deleted — nothing was chosen in it for 24 hours." |
 | A new thread whose only message is `/search` / `/search_tab` | deleted once the command left it for the Search topic (`_abortUntouchedNewThread`) — the creation never started |
+| A new thread whose only message is a main-view command (`/help`, `/status`, `/idle`, …; §21.48) | answered in the main view, and the thread deleted the same way |
+| `/newsession` in a new thread (§21.48) | the wizard shows itself (never held); a thread Telegram named after the command is renamed "🆕 New session" |
 | The window REFUSES the launch (§21.23) | not an abort: the thread goes back into its wizard at the step that can fix it (`NewThreadStepAfterRefusal`: a refused preset → the model step, its choices read again; a failed tab or a closed window → the window step; the model step when the window step had been skipped), with its held messages and the reason |
 | No window takes the launch (the chosen one closed, or none is open) | back to the window step ("That window is not open any more — pick another one"), or the model step when none was named |
 | The session does not come up within 3 min | back into the wizard the same way, the picker posted again below the line |
@@ -3963,7 +3966,8 @@ build-install skill's §5.8).
 7. Rename the thread at the folder step: the folder step shows the new title, and the session takes it.
 
 **Not changed, still open.** The topic's `/newsession` / `/forksession` and Search's `/newsession <folder>` keep their own
-paths (no wizard, the model unchecked, §21.21); a held command still replays as a topic command at the bind; a never-prompted
+paths (no wizard, the model unchecked, §21.21); a held command still replays as a topic command at the bind (since §21.48 never
+`/newsession`, which a new thread's wizard takes itself); a never-prompted
 session restores under a NEW id (restore-fresh), so a launch restored from the state file can time out and send its thread back
 into the wizard; the window step counts a Codex tab like any tab; a thread the user deletes is noticed only at the next edit
 or post.
@@ -7244,6 +7248,178 @@ logs only its `[nav]` line (`usage`, `refused:backlog`, `refused:closed`, `not-r
    dialog still open at the PC; on a parked tab → "/activate starts a parked tab".
 4. `/handover-standby`, then `/enter` in the successor's topic → the briefing goes.
 5. `/enter fix it` → the usage line; the chat's "/" menu lists `enter`.
+
+### 21.48 A new session from ANYWHERE: the opener Telegram Android leaves in "All", and `/newsession` in every thread (2026-11-07; NOT BUILT — the next build must purge: `MessagingService` gained a data member)
+
+> The user's request (2026-11-07, a voice note in the topic of session 6dc478dc, the session this work came from): "every time I
+> used /new session, it told me that I am in search or something. I would like you to even pull up the Telegram yourself, and
+> find those attempts … my expectation was for it to work anywhere I use it. So if I were to go to "all" in the topics and do
+> /new session … that opens up a new topic with a temporary name that, as soon as we finish setting up … we need to pick a
+> folder and then pick the model. And then voila, it's ready. But instead there's this workaround: I have to send a message
+> that creates a topic in the name of my message, and then in there I need to send a message and then start all the process.
+> … and essentially the titles here are also not being synced. They are sort of stuck with the name that I gave them."
+
+#### 21.48.1 What went wrong (production 0.8.0.11, the owner's chat, 2026-11-07 18:32–18:56)
+
+Read from production's `hooks.log`, `messaging\telegram\state.json` and the chat itself (Telegram Web A, in the owner's Chrome):
+
+- **Five threads the user opened from "All" never got their first message.** `/newsession` ×3 (threads 43319 at 18:32, 43322
+  at 18:33, 43352 at 18:48), `/help` (43349, 18:48) and a voice note (43341 "Media", 18:47): each `forum_topic_created` came
+  and was logged ("opened by the user (an implicit name): its folder picker goes up with the first message"), but Telegram
+  itself shows each thread as "No messages", and their wizard records sit in `state.json` untouched (no picker, nothing held)
+  until the 24-hour abort.
+- **The messages came WITHOUT `message_thread_id`** and were read as the main view's (the main view logs nothing):
+  `/newsession`, "Look at pr" and "Hey" got "This is Agentmaster's bot. Each working session has its own topic; the 🔎 Search
+  topic finds old ones …"; `/help` got the 🔎 Search topic's help ("🔎 Search — Write what you look for in plain words …") —
+  the user's "it told me that I am in search"; the voice note got `voice thread=0 -> refused:no-session` ("Voice notes are read
+  in a session's topic, in the 🔎 Search topic (as a search), or in a new thread, which starts a new session").
+- **The workaround:** a SECOND message written inside the empty thread came stamped, was held, and started the wizard — "Hey"
+  in "Look at pr" (43346) a minute later, which became 7f64d66b "localization"; "He y" in "Hey" (43375) 8 s later, which became
+  6dc478dc.
+- **The client changed, not Agentmaster.** Every implicit thread before (36 since 2026-10-17, the last two on 2026-11-04: 40773
+  and 40785) got its first message WITH its id, 0.1–1 s after the creation; no code that reads `message_thread_id` changed
+  since. Telegram for Android 13.0.x (DrKLO/Telegram#2179, open) creates the thread and then sends its opener topic-less; Desktop
+  still stamps it. Other bots met it the same week — NousResearch/hermes-agent#141751, whose time rule §21.48.2 follows. MTProto's
+  own rule for bot forums (core.telegram.org/api/forum): "graphical clients should prevent users from sending topic-less
+  messages …: before sending/forwarding the message(s), a new topic must first be created …, and the messages should be sent to
+  the newly created topic, instead."
+- **`/newsession` had no meaning outside a session's topic.** The main view ran `/help` and `/status` only; the 🔎 Search
+  topic's bare `/newsession` answered "Usage: /newsession <folder> [model]"; and in a thread no session owned, `/newsession` was
+  HELD like words and replayed at the bind as the new topic's own `/newsession` — a second session in the same folder.
+- **"stuck with the name that I gave them":** threads named after a command ("/newsession", "/help", "Media") never got a
+  session, so nothing ever renamed them; the bind renames only the thread of a session.
+
+#### 21.48.2 The opener follow
+
+`NewThreadOpenerFollow` (`MessagingNewThread.h`, pure; `MessagingService::_openerFollow`, under `_mtx`):
+
+- **Started** by every `forum_topic_created` from the owner (`_onUserThreadCreated`), with Telegram's `date` of the creation —
+  never by a thread the bot creates (its service message comes back with the bot as the sender, which `_handleMessage` skips).
+- **A thread-less message** (`message_thread_id` absent) that Telegram stamped at most `kNewThreadOpenerFollowSec` (5 s) after
+  the creation — or after the message the follow adopted before it, so a long opener the client splits into several messages
+  goes whole — is the thread's OPENER. Both stamps are Telegram's `date` (the moment of SENDING, whole seconds), so the rule holds
+  in a backlog read after a restart; message-id adjacency was hermes-agent's first rule and misrouted (the ids are one sequence
+  over every private chat of the bot).
+- **A message with a thread id ends the follow** (Desktop stamps the opener: nothing is adopted), and so does a thread-less one
+  past the window, one stamped before the creation, or one with no stamp.
+- **An EDIT never adopts by time** (an old main-view message edited right after a creation stays there): only a message the
+  follow adopted (or the service moved, §21.48.4) is routed again — its edit carries no thread id either.
+- **Only messages with content** take part (`NewThreadMessageCarriesContent`: text, a caption, a voice note, any media); a
+  service message (a pin) neither adopts nor ends the follow.
+- **Routed by a copy.** `_handleMessage` gives an adopted message a COPY that names the thread (`message_thread_id`, set by
+  `WithMember`: `json::Value::Set` only appends, and `Find` returns the first) and carries `kNewThreadMovedKey`
+  (`"am_moved_to_thread"`), and reads the copy again — so the voice path, the `/search` pair, the wizard and the hand-over all
+  read it in its thread, and the mark keeps it from being routed twice. A message the voice lane hands back was routed when it
+  came.
+- **The moved messages** (adopted, or taken by a thread the bot opened) are remembered — at most `kNewThreadMovedMemory` (64),
+  the oldest forgotten first. `_start` resets the follow and refills the memory from the held messages that carry the mark (the
+  wizards and binds are persisted, §21.25); a new bot (the token changed) forgets both.
+
+#### 21.48.3 Never quoted from inside its thread
+
+A moved message stays in "All" (only the client could move it). A reply inside the thread that quotes it is a reply to another
+topic's message: the Bot API sends such a quote as an external reply, which `allow_sending_without_reply` does not cover ("Always
+False for replies in another chat or forum topic") — refused once the message is deleted, and possibly placed by the quoted
+message. So the send loop, right after an item's `beforeSend` sets its quote, drops the item's `reply_parameters` when they name
+a remembered moved message and the item targets a thread (`_dropQuoteOfMovedMessage`); a reply in the main view, where the
+message is, keeps its quote. Its reactions are untouched (👀 while held, the turn's ✍ / ✅ status): a reaction names a message,
+not a topic. So the session's first answer lands in its thread without a quote, and the prompt it answers sits in "All" with
+its status.
+
+#### 21.48.4 `/newsession` everywhere, and the main view's own commands
+
+| Where | `/newsession` |
+|---|---|
+| **The main view** ("All" on a client that posts there, thread 0) | the bot opens a thread named "🆕 New session" (`kNewSessionThreadName`; `createForumTopic` through the outbox at the answer's priority, `_openNewSessionThread`) and starts its wizard there on a worker (`_startOpenedNewThread`: the picker's lists probe folders, and the send loop must not wait); a silent line in the main view names the thread with an "open it" link (`BuildNewSessionThreadOpenedHtml`), or "(first in the thread list)" before the bot's username is known. A refusal is answered there |
+| **A thread no session owns** — the thread Telegram opened for the command (Android via the follow, Desktop stamped), or any wizard's thread | the wizard itself, never held (`_holdForNewThread` → `_newSessionInThread`): an untouched thread Telegram named after the command is renamed "🆕 New session" (`_renameNewThread`, the temporary name the session's title replaces at the bind; its "topic renamed" notice is deleted like the bot's own) and gets its picker; a thread with a picker gets it posted again below the command |
+| **A thread whose launch runs** | "A new session is already starting in this thread — it is up in a moment. Then /newsession here opens another one in its folder." Nothing held |
+| **The 🔎 Search topic** | bare: a thread the bot opens, as in the main view (it answered a usage line); `/newsession <folder> [model]` still opens the session at once (§21.7) |
+| **A session's topic** | unchanged: a new session in that session's folder, like the card's 🆕 New Session |
+
+- **Arguments** (`ParseNewSessionArgs`, the Search topic's split: a "quoted folder" or the first word, then the model): in a
+  thread the bot opens, or Telegram opened, a folder is pre-picked as a TYPED folder at any step (checked case-insensitively; a
+  missing one is only offered for creation, §21.25.2), and a model after it is taken once the folder step went through, as
+  "/model <id>" typed at the model step (the id checked, §21.25.3). A word that is no absolute path is answered ("… is not a
+  folder's full path") and the picker shown.
+- **The main view runs** (`kMainViewFleetCommands`, `_runMainViewCommand`): `/help` and `/start` → the main view's OWN help
+  (`_sendMainHelp`: writing here opens a new thread for a new session, `/newsession`, the fleet commands, the `/search` pair; it
+  sent the Search topic's help before); `/status`, `/idle`, `/board`, `/pauseall`, `/resumeall`, `/verbose`, `/recreate` → run as
+  the Search topic runs them (only `/help` and `/status` worked here before). A session's command → "… works in a session's
+  topic. Here: /newsession …"; a Claude Code command → the main view's line, which now names `/newsession`; an EDIT → nothing (it
+  got the main view's answer again before).
+- **Words in the main view** (a client that posted them there, or a follow that missed) open a thread the bot names after them
+  (`NewThreadNameForMessage`: the first non-empty line, at most 64 UTF-16 units, never cut inside a surrogate pair), which holds
+  them as the session's first prompt — remembered as moved (§21.48.2), so their edits reach the thread. They were answered and
+  lost before.
+- **A thread opened only for a main-view command** — its only message `/help`, `/status`, `/idle`, … (`_newThreadUntouched`: no
+  picker, nothing held, a name Telegram gave it) — is answered in the MAIN VIEW, where the user wrote it, without a quote (the
+  message may go with the thread), and the empty thread is deleted (`_abortUntouchedNewThread`), as §21.25 does for one opened
+  only for `/search`. A thread the user named, or whose wizard has begun, keeps such a message for its session as before.
+- **Texts**: the chat's "/" menu lists `newsession` as "a new session: a new thread asks its folder, model and window (in a
+  session's topic: in its folder)"; the Search topic's help, its first message and its fallback line name `/newsession [folder]`.
+
+#### 21.48.5 What stays
+
+- The user's message stays in "All": the thread shows the picker, then the conversation; the prompt and its reactions are in
+  "All" (only Telegram's client can move a message; hermes-agent's fix has the same limit).
+- The five threads left from 2026-11-07 hold untouched wizard records: the 24-hour abort deletes them from 18:32 on 2026-11-08
+  while Agentmaster runs (or the user deletes them).
+- A follow does not survive a restart that falls between a creation and its opener (one getUpdates answer carries both; the
+  opener then reads as main-view words, which open a thread of their own, and the empty thread is aborted after a day).
+- A voice note posted in the main view by a client that does not open a thread is still refused there (§21.43's route); from
+  Android it reaches its "Media" thread through the follow.
+
+#### 21.48.6 The code, the tests, what was checked
+
+- **Code.** `MessagingNewThread.h`: `kNewSessionThreadName`, `kNewThreadNameMaxChars`, `kNewThreadOpenerFollowSec`,
+  `kNewThreadMovedMemory`, `kNewThreadMovedKey`, `kMainViewFleetCommands`, `NewThreadOpenerFollow`, `NewThreadMessageCarriesContent`,
+  `NewThreadNameForMessage`, `BuildNewSessionThreadOpenedHtml`, `NewSessionArgs` / `ParseNewSessionArgs`, `IsMainViewFleetCommand`.
+  `Messaging.h`: `_openerFollow`; `_openNewSessionThread`, `_startOpenedNewThread`, `_newSessionInThread`, `_newThreadUntouched`,
+  `_runMainViewCommand`, `_sendMainHelp`, `_renameNewThread`, `_dropQuoteOfMovedMessage`. `Messaging.Inbound.cpp`: the follow in
+  `_handleMessage`, the main view, the command-only thread, `_onUserThreadCreated`'s follow, `/newsession` in `_holdForNewThread`,
+  the Search topic's bare `/newsession`, `WithMember` / `WithoutMember`, the new functions, the help texts. `Messaging.cpp`: the
+  send loop's quote rule, `_start`'s reset and refill, the bot change's reset, the "/" menu, the Search topic's first message.
+- **Tests** (`TestMessagingNewThreadAnywhere`, `tests_messaging_newthread.cpp`): the follow — an opener in the creation's second,
+  split chunks (the window from the last adopted one, its inclusive edge), the end of the window, a message stamped before the
+  creation, an unstamped one, an unstamped creation, thread 0, a stamped message ending the follow (Desktop's opener), a second
+  creation replacing it; edits (a moved message's edit routed, another one not, no adoption by time, the follow untouched); the
+  moved memory (update, no zero ids, the cap, oldest first), `Reset`; which messages take part (text, caption, voice, video note;
+  not the creation, a pin, an empty text, a non-object); the thread's name (as is, the first line, blank, the cap, a surrogate
+  pair at the cut, the service's name within 1–128); the arguments (none, a folder, a folder and a model trimmed, a quoted folder,
+  an unclosed quote, an empty quote); the main view's commands (each of its nine, a `@bot` suffix; not `/newsession`, `/search`,
+  `/search_tab`, a session's command, a Claude Code command, words); the opened line (the link, the words' form, no username,
+  the name escaped).
+- **Checked** (2026-11-07, HEAD b67576483 + this change, an isolated copy on Q: with its own profile): the m5 suite 12,153 checks,
+  only the 3 known `TestTaskbarBadge` failures; a negative control (`kNewThreadOpenerFollowSec` planted at 4 in the copy) fails
+  exactly the new group's two edge-of-window checks (5 failures), and the copy matched the tree byte for byte afterwards. `cl /Zs` with TerminalAppLib's flags (`/W3 /WX` + the `/we` list, `/sdl`,
+  `/permissive-`) on the eight engine units that include the changed headers (`Messaging.Inbound.cpp`, `Messaging.cpp`,
+  `Messaging.Voice.cpp`, `.Files`, `.Menus`, `.Questions`, `.Status`, `Engine.cpp`) and the test unit: all pass; a probe naming a
+  member the follow lacks fails with exactly C2039. The three PCH units that include `Messaging.h`
+  (`AgentManagerContent.Settings.cpp`, `TerminalPage.AgentEngine.cpp`, `MessagingSearchBridge.cpp`) were not compiled (no local
+  build tree; 4 GB of RAM free): they include the header only. NOT BUILT; nothing tried live.
+
+**Check after the build** (the dev bot; Android 13.0.x for 1, 2, 5 and Desktop for 2):
+1. In "All", write "fix the header" → the thread "fix the header" shows the picker at once, no second message needed;
+   `hooks.log`: `[msg] new thread N: its opener (message M) came without the thread's id (Telegram Android's "All" view); taken
+   as the thread's`. Pick the folder, the model, the window → the session starts with "fix the header" as its first prompt, the
+   thread is renamed to the session's title, its first answer lands in the thread without a quote, and the message in "All" wears
+   👀, then the turn's status.
+2. `/newsession` in "All" (Android, then Desktop) → the thread Telegram opened is renamed "🆕 New session" and shows the picker;
+   nothing is held.
+3. `/newsession K:\source\Agentmaster` there → the model step at once; `/newsession K:\source\Agentmaster sonnet` → the window
+   step (with one window open, the launch).
+4. `/help` in "All" → the main view's help in "All", the "/help" thread gone; `/status` and `/idle` the same.
+5. A voice note in "All" (Android) → its "Media" thread holds it with the picker; the session transcribes it as its first prompt.
+6. `/newsession` in 🔎 Search → "🆕 New thread “🆕 New session” …" with a link that opens a thread with the picker.
+7. Edit the opener in "All" before picking → the picker's held message changes (the hand-over sends the edited words).
+
+**Logs:** `[msg] new thread N: its opener (message M) came without the thread's id …` / `… an edit of its opener …`, `[nav]
+remote telegram new-thread N opener msg=M` / `opener-edit`; `[msg] new thread N opened by the bot for /newsession in the main
+view: “🆕 New session”` (or `for words written in …`), `[nav] remote telegram new-thread open (the main view) /newsession`,
+`[nav] remote telegram new-thread N opened (the main view)`; `[nav] remote telegram new-thread N /newsession`, `[msg] new thread
+N was opened with /newsession: renamed “🆕 New session” until the session's title replaces it`; `[nav] … /newsession ->
+already launching`; `[msg] new thread N aborted (its only message was /help, answered in the main view): the thread is deleted`;
+`[nav] remote telegram /help (main view) -> help`.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

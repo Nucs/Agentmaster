@@ -32,6 +32,10 @@
 // probe is injected), no Win32, no WinRT: the m5 suite pins every rule (tests_messaging.cpp, TestMessagingNewThread).
 // §21.25.9: the ➕ message's buttons ("nt:a…", MessagingNewThreadWizard.h's extra folders) are this header's kinds too, and its add
 // picker draws the folder step's two lists through the same builders (detail::AppendNewThreadFolderSections, BuildNewThreadFolderRows).
+// §21.48 (2026-11-07): a new session from ANYWHERE — the opener follow (NewThreadOpenerFollow: Telegram for Android 13.0.x sends the
+// message that opened a thread from "All" without the thread's id, so it is taken into the thread it opened), the name of a thread
+// the service opens for a main-view message (NewThreadNameForMessage), /newsession's arguments (ParseNewSessionArgs), and the
+// commands the chat's main view runs itself (kMainViewFleetCommands).
 
 #pragma once
 
@@ -924,5 +928,311 @@ namespace Agentmaster::Msg
         // nothing about one message, and the topic's own handling reads them.
         return description.find(L"message") != std::wstring_view::npos && description.find(L"not found") != std::wstring_view::npos &&
                description.find(L"thread") == std::wstring_view::npos && description.find(L"chat not found") == std::wstring_view::npos;
+    }
+
+    // ===== a new session from anywhere (§21.48) ======================================================================
+
+    // The name of a thread the SERVICE opens for a new session (/newsession in the main view or in the 🔎 Search topic), and the
+    // temporary name a thread Telegram named after a "/newsession" message gets instead of the command: either way the thread is
+    // renamed to the session's title at the bind, like every topic. U+1F195 is the "NEW" button emoji.
+    inline constexpr std::wstring_view kNewSessionThreadName = L"\U0001F195 New session";
+    // The most UTF-16 units of the first line of a main-view message that names the thread the service opens for it (Telegram's
+    // own implicit names come from the message the same way; a topic name may hold 128).
+    inline constexpr size_t kNewThreadNameMaxChars = 64;
+    // A thread-less message Telegram stamped at most this many seconds after a thread's creation — or after the message the follow
+    // adopted before it — is that thread's OPENER (NewThreadOpenerFollow). Both stamps are Telegram's own `date`, whole seconds of
+    // the moment it was SENT, so the window holds in a backlog too (a creation and its opener read after a restart).
+    inline constexpr int64_t kNewThreadOpenerFollowSec = 5;
+    // How many MOVED messages the follow remembers: an edit of one comes without the thread's id as well, and the outbox drops a
+    // reply's quote of one inside its thread (the message is not there). Old ones fall out first.
+    inline constexpr size_t kNewThreadMovedMemory = 64;
+    // The member a moved message's copy carries (a json::Value Bool): the service took this message into a thread it was not sent
+    // in — the opener Telegram Android leaves in "All", or a main-view message a thread the service opened took. It travels with
+    // the copy into the wizard's held messages, which are persisted, so a restart still knows the message is not in its thread.
+    inline constexpr std::wstring_view kNewThreadMovedKey = L"am_moved_to_thread";
+    // The Agentmaster commands the chat's MAIN VIEW runs (MessagingService::_runMainViewCommand): the help, and the fleet commands
+    // the 🔎 Search topic runs that act on the whole fleet. /newsession and the /search pair have their own handling; every other
+    // Agentmaster command belongs in a session's topic.
+    inline constexpr std::wstring_view kMainViewFleetCommands[] = {
+        L"start", L"help", L"status", L"idle", L"board", L"pauseall", L"resumeall", L"verbose", L"recreate"
+    };
+
+    /// <summary>
+    /// §21.48: the FOLLOW of a thread the user opens from the chat's "All" view, and the memory of every message the service MOVED
+    /// into a thread. Telegram for Android 13.0.x (DrKLO/Telegram#2179, seen in the owner's chat 2026-11-07) creates the thread —
+    /// forum_topic_created arrives with the thread's id — and then sends the message that named it WITHOUT message_thread_id: the
+    /// message stays in "All" (the General topic), the new thread stays empty ("No messages" in Telegram itself), and a bot reads
+    /// it as a message of the main view. Desktop clients stamp it. The follow takes a thread-less message as the new thread's when
+    /// Telegram stamped it at most kNewThreadOpenerFollowSec after the creation, or after the message it adopted before (a long
+    /// opener the client splits into several messages) — the time rule NousResearch/hermes-agent#141751 settled on after an
+    /// id-adjacency rule misrouted (the message ids are one sequence across every private chat of the bot). A message with a
+    /// thread id ends the follow, and so does a thread-less one past the window. An EDIT never adopts by time: only a message the
+    /// follow adopted (or the service moved, Remember) is routed again — its edit carries no thread id either.
+    /// </summary>
+    /// <remarks>
+    /// Not thread-safe: the service keeps one under its `_mtx`. In memory only: a restart forgets a follow in progress (the
+    /// creation and its opener come in one getUpdates answer, so the gap is a stop between two updates of one batch) and refills
+    /// the moved messages from the wizards' persisted held messages (their kNewThreadMovedKey). A follow is never started for a
+    /// thread the bot itself created: its forum_topic_created comes back with the bot as the sender, which the service skips.
+    /// </remarks>
+    struct NewThreadOpenerFollow
+    {
+        int64_t threadId{ 0 }; // the thread a thread-less message is adopted into now (0 = no follow)
+        int64_t lastDateSec{ 0 }; // Telegram's stamp of the creation, then of the newest adopted message (Unix seconds)
+        std::vector<std::pair<int64_t, int64_t>> moved; // (message id, thread id) of the moved messages, oldest first, at most kNewThreadMovedMemory
+
+        /// <summary>Forgets the follow and every moved message — a new bot (the token changed) owns another chat.</summary>
+        void Reset() noexcept
+        {
+            threadId = 0;
+            lastDateSec = 0;
+            moved.clear();
+        }
+
+        /// <summary>
+        /// The owner created a thread (forum_topic_created): thread-less messages stamped within the window are its opener from now
+        /// on. A creation replaces a follow still running — the user wrote in "All" again, and Telegram opened another thread.
+        /// </summary>
+        /// <param name="thread">The new thread's id (0 ends any follow).</param>
+        /// <param name="dateSec">The creation's `date` (Unix seconds); 0 when Telegram sent none, which starts no follow: without
+        /// a stamp the window cannot be measured, and adopting by guess could move an unrelated main-view message.</param>
+        void OnThreadCreated(int64_t thread, int64_t dateSec) noexcept
+        {
+            if (thread <= 0 || dateSec <= 0)
+            {
+                threadId = 0;
+                lastDateSec = 0;
+                return;
+            }
+            threadId = thread;
+            lastDateSec = dateSec;
+        }
+
+        /// <summary>
+        /// Remembers that `messageId` was moved into `thread` (the follow's own adoptions, and a main-view message the thread the
+        /// service opened took), so its edits find the thread and the outbox never quotes it from inside the thread. Remembering a
+        /// message again updates its thread and makes it the newest; past kNewThreadMovedMemory the oldest is forgotten.
+        /// </summary>
+        /// <param name="messageId">The moved message (0 is ignored: nothing can name it).</param>
+        /// <param name="thread">The thread it was moved into (0 is ignored).</param>
+        /// <exception cref="std::bad_alloc">If the memory cannot grow; the follow's state is unchanged then.</exception>
+        void Remember(int64_t messageId, int64_t thread)
+        {
+            if (messageId == 0 || thread <= 0)
+            {
+                return;
+            }
+            const auto same = std::find_if(moved.begin(), moved.end(), [messageId](const auto& m) { return m.first == messageId; });
+            if (same != moved.end())
+            {
+                moved.erase(same); // re-added below as the newest, with the thread it has now
+            }
+            if (moved.size() >= kNewThreadMovedMemory)
+            {
+                moved.erase(moved.begin());
+            }
+            moved.emplace_back(messageId, thread);
+        }
+
+        /// <summary>The thread a remembered message was moved into.</summary>
+        /// <param name="messageId">The message.</param>
+        /// <returns>The thread; 0 when the message was never moved (or has been forgotten).</returns>
+        int64_t MovedThreadOf(int64_t messageId) const noexcept
+        {
+            if (messageId == 0)
+            {
+                return 0;
+            }
+            for (auto it = moved.rbegin(); it != moved.rend(); ++it)
+            {
+                if (it->first == messageId)
+                {
+                    return it->second;
+                }
+            }
+            return 0;
+        }
+
+        /// <summary>
+        /// Where a message from the owner belongs, as the follow reads it — and the follow's next state. A message with a thread
+        /// id belongs to that thread and ENDS the follow (it was sent from inside a thread, so the opener has been read or never
+        /// came thread-less). A thread-less message stamped within the window of the creation (or of the message adopted before
+        /// it) is ADOPTED: it belongs to the followed thread, is remembered as moved, and the window runs on from its stamp. A
+        /// thread-less message past the window ends the follow and stays in the main view. An edit only ever goes back to the
+        /// thread a moved message went to, and touches neither the follow nor the memory.
+        /// </summary>
+        /// <param name="thread">The message's message_thread_id (0 = none: the main view, or a thread-less opener).</param>
+        /// <param name="dateSec">The message's `date` (Unix seconds; for an edit, of the original message).</param>
+        /// <param name="messageId">The message's id.</param>
+        /// <param name="edited">True for an edited_message update.</param>
+        /// <returns>The thread the message belongs to: `thread` itself for a stamped message; the followed thread for an adopted
+        /// one; the moved thread for an edit of a moved message; 0 for a main-view message.</returns>
+        /// <exception cref="std::bad_alloc">If an adopted message cannot be remembered; the message is still adopted then (the
+        /// follow moved on before the memory grew), and only its later edit or quote is not caught.</exception>
+        int64_t Route(int64_t thread, int64_t dateSec, int64_t messageId, bool edited)
+        {
+            if (edited)
+            {
+                return thread != 0 ? thread : MovedThreadOf(messageId);
+            }
+            if (thread != 0)
+            {
+                threadId = 0;
+                lastDateSec = 0;
+                return thread;
+            }
+            if (threadId == 0)
+            {
+                return 0;
+            }
+            const int64_t gap = dateSec - lastDateSec;
+            if (dateSec <= 0 || gap < 0 || gap > kNewThreadOpenerFollowSec)
+            {
+                // Too late (or unstamped, or stamped before the creation, which no opener can be): the follow is over, and the
+                // message is the main view's.
+                threadId = 0;
+                lastDateSec = 0;
+                return 0;
+            }
+            const int64_t adopted = threadId;
+            lastDateSec = dateSec; // the next chunk of a split opener is measured from this one
+            Remember(messageId, adopted);
+            return adopted;
+        }
+    };
+
+    /// <summary>
+    /// Whether a Telegram message carries something the user SENT — text, a caption, or media — as opposed to a service message
+    /// (a topic created, renamed or pinned). Only such messages take part in the opener follow: a service message in the main view
+    /// right after a creation (a pin the user made) must neither be adopted nor end the follow.
+    /// </summary>
+    /// <param name="msg">The Telegram Message object.</param>
+    /// <returns>True for text, a caption, or any of the media kinds a user sends.</returns>
+    inline bool NewThreadMessageCarriesContent(const json::Value& msg)
+    {
+        if (msg.type != json::Value::Type::Obj)
+        {
+            return false;
+        }
+        if (!msg.StrAt(L"text").empty() || !msg.StrAt(L"caption").empty())
+        {
+            return true;
+        }
+        static constexpr std::wstring_view kMediaKinds[] = { L"voice", L"audio",    L"video_note", L"video",   L"photo", L"document", L"animation",
+                                                             L"sticker", L"location", L"venue",      L"contact", L"poll",  L"dice",     L"story" };
+        return std::any_of(std::begin(kMediaKinds), std::end(kMediaKinds), [&msg](std::wstring_view kind) { return msg.Find(kind) != nullptr; });
+    }
+
+    /// <summary>
+    /// The name of the thread the service opens for a message written in the main view (§21.48): the message's first non-empty
+    /// line, cut to kNewThreadNameMaxChars UTF-16 units with an ellipsis (never inside a surrogate pair: a lone surrogate is
+    /// invalid UTF-16, which Telegram refuses) — the way Telegram itself names a thread opened from "All". A message with no
+    /// line (a blank text) gets kNewSessionThreadName.
+    /// </summary>
+    /// <param name="text">The message's text.</param>
+    /// <returns>The thread's name, never empty.</returns>
+    /// <exception cref="std::bad_alloc">If the name cannot be allocated.</exception>
+    inline std::wstring NewThreadNameForMessage(std::wstring_view text)
+    {
+        const std::wstring line = TgFirstLine(text, 0);
+        if (line.empty())
+        {
+            return std::wstring{ kNewSessionThreadName };
+        }
+        if (line.size() <= kNewThreadNameMaxChars)
+        {
+            return line;
+        }
+        return std::wstring{ detail::TgPrefixUnits(line, kNewThreadNameMaxChars - 1) } + L"\x2026";
+    }
+
+    /// <summary>
+    /// The silent line the service posts where a new session was asked for — the main view or the 🔎 Search topic — once the
+    /// thread it opened for it exists (§21.48): what the thread is for, its name, and a link that opens it ("open it"; Telegram
+    /// Desktop opens the thread, Android lands in "All", §21.16.3) — or, before the bot's username is known, where to find it
+    /// (a new thread is first in the thread list).
+    /// </summary>
+    /// <param name="botUsername">The bot's username (with or without '@'; "" = not known yet: no link).</param>
+    /// <param name="threadId">The thread the service opened.</param>
+    /// <param name="name">The thread's name as the service gave it.</param>
+    /// <param name="heldWords">True: the user's WORDS opened it, and wait there as the session's first prompt; false: /newsession.</param>
+    /// <returns>The line, HTML (the name escaped).</returns>
+    /// <exception cref="std::bad_alloc">If the line cannot be allocated.</exception>
+    inline std::wstring BuildNewSessionThreadOpenedHtml(std::wstring_view botUsername, int64_t threadId, std::wstring_view name, bool heldWords)
+    {
+        std::wstring html = heldWords ? L"\U0001F195 Your message opened a new thread, \x201C" + TgEscapeHtml(name) +
+                                            L"\x201D: it waits there as the new session's first prompt while the thread asks for the folder, the model and the window" :
+                                        L"\U0001F195 New thread \x201C" + TgEscapeHtml(name) + L"\x201D: it asks for the new session's folder, model and window";
+        const std::wstring url = TgTopicUrl(botUsername, threadId);
+        if (url.empty())
+        {
+            html += L" (first in the thread list).";
+        }
+        else
+        {
+            html += L" \x2014 <a href=\"" + detail::TgEscapeHtmlAttribute(url) + L"\">open it</a>.";
+        }
+        return html;
+    }
+
+    /// <summary>/newsession's arguments as a new thread's wizard takes them (§21.48).</summary>
+    struct NewSessionArgs
+    {
+        std::wstring folder; // the folder to pre-pick ("" = the folder step asks)
+        std::wstring model; // the model id to pre-pick after it ("" = the model step asks; the wizard checks the id)
+    };
+
+    /// <summary>
+    /// Splits /newsession's arguments the way the 🔎 Search topic's /newsession &lt;folder&gt; [model] always has: a "quoted
+    /// folder" (it may hold spaces) or the first word is the folder, and whatever follows is the model. Nothing is checked here:
+    /// the wizard resolves the folder (a missing one is only offered for creation, never made without the user's tap) and
+    /// refuses a model id it cannot pass to claude.
+    /// </summary>
+    /// <param name="args">The text after "/newsession" (RemoteCommand::args).</param>
+    /// <returns>The folder and the model, each trimmed ("" when absent). An unclosed quote takes the rest as the folder.</returns>
+    /// <exception cref="std::bad_alloc">If the strings cannot be allocated.</exception>
+    inline NewSessionArgs ParseNewSessionArgs(std::wstring_view args)
+    {
+        const auto trim = [](std::wstring_view v) {
+            const size_t a = v.find_first_not_of(L" \t\r\n");
+            if (a == std::wstring_view::npos)
+            {
+                return std::wstring_view{};
+            }
+            return v.substr(a, v.find_last_not_of(L" \t\r\n") - a + 1);
+        };
+        NewSessionArgs out;
+        const std::wstring_view all = trim(args);
+        if (all.empty())
+        {
+            return out;
+        }
+        if (all.front() == L'"')
+        {
+            const size_t close = all.find(L'"', 1);
+            if (close == std::wstring_view::npos)
+            {
+                out.folder = std::wstring{ trim(all.substr(1)) };
+                return out;
+            }
+            out.folder = std::wstring{ trim(all.substr(1, close - 1)) };
+            out.model = std::wstring{ trim(all.substr(close + 1)) };
+            return out;
+        }
+        const size_t ws = all.find_first_of(L" \t\r\n");
+        out.folder = std::wstring{ all.substr(0, ws) };
+        if (ws != std::wstring_view::npos)
+        {
+            out.model = std::wstring{ trim(all.substr(ws)) };
+        }
+        return out;
+    }
+
+    /// <summary>Whether a parsed command is one the chat's main view runs itself (kMainViewFleetCommands).</summary>
+    /// <param name="cmd">The command (ParseRemoteCommand).</param>
+    /// <returns>True for an Agentmaster command of that list; false for every other command and for plain text.</returns>
+    inline bool IsMainViewFleetCommand(const RemoteCommand& cmd) noexcept
+    {
+        return cmd.kind == RemoteKind::AgentmasterCommand && detail::InList(cmd.name, std::begin(kMainViewFleetCommands), std::end(kMainViewFleetCommands));
     }
 }

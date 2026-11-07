@@ -1179,6 +1179,39 @@ namespace Agentmaster::Msg
                     nt.pickerStale = false; // no post is in flight at a start
                     nt.wizard.windowsSerial = 0; // no census is in flight either: _newThreadsTick asks again
                 }
+                // §21.48: no thread is being followed at a start, and the messages moved into a thread are known again from the
+                // held messages that carry the mark (persisted with the wizards and the binds): their edits still find the thread,
+                // and no reply inside it quotes them.
+                _openerFollow.Reset();
+                try
+                {
+                    for (const auto& [threadId, nt] : _newThreads)
+                    {
+                        for (const auto& h : nt.held)
+                        {
+                            if (h.BoolAt(kNewThreadMovedKey))
+                            {
+                                _openerFollow.Remember(h.I64At(L"message_id", 0), threadId);
+                            }
+                        }
+                    }
+                    for (const auto& b : _threadBinds)
+                    {
+                        for (const auto& h : b.held)
+                        {
+                            if (h.BoolAt(kNewThreadMovedKey))
+                            {
+                                _openerFollow.Remember(h.I64At(L"message_id", 0), b.threadId);
+                            }
+                        }
+                    }
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: the moved messages remembered so far stay; an edit of a forgotten one is ignored in the
+                    // main view, and a reply quoting one goes with its quote (as before §21.48).
+                    LogSwallowedException(L"MessagingService::_start (remember the moved messages)");
+                }
                 _newThreadsResumePending = !_newThreads.empty();
                 if (!_newThreads.empty() || !_threadBinds.empty())
                 {
@@ -2027,6 +2060,9 @@ namespace Agentmaster::Msg
                         LogSwallowedException(L"MessagingService::_sendLoop (beforeSend)"); // the item goes as it is
                     }
                 }
+                // §21.48: AFTER beforeSend (which may just have set the quote): a reply inside a thread never quotes a message the
+                // service moved into that thread — the message sits in "All", not in the thread.
+                _dropQuoteOfMovedMessage(item.params);
                 // One call with the client the item names: a send as the user through the SECRETARY bot (§21.11) uses its
                 // client, which exists for the whole run when it was made (it is reset only after this thread is joined).
                 const auto call = [this, &item]() {
@@ -2300,6 +2336,7 @@ namespace Agentmaster::Msg
                                     // §21.25: the new-thread wizards and their launches name threads of the OLD bot's chat.
                                     _newThreads.clear();
                                     _threadBinds.clear();
+                                    _openerFollow.Reset(); // §21.48: and so do the follow and the moved messages
                                     // §21.28: and so do the holds of the taps that started those launches (letting them go here
                                     // only queues their taps for the send loop: OnTapHoldsGone takes the leaf `_tapMtx`).
                                     _bindTapHolds.clear();
@@ -3077,6 +3114,41 @@ namespace Agentmaster::Msg
         return _linkBotName;
     }
 
+    void MessagingService::_dropQuoteOfMovedMessage(json::Value& params) noexcept
+    {
+        try
+        {
+            if (params.type != json::Value::Type::Obj || params.I64At(L"message_thread_id", 0) <= 0)
+            {
+                return; // the main view: a moved message sits there, and a reply there may quote it
+            }
+            const json::Value* rp = params.Find(L"reply_parameters");
+            if (!rp || rp->type != json::Value::Type::Obj || rp->Find(L"chat_id"))
+            {
+                return; // no quote, or a quote of another chat's message (never one of ours)
+            }
+            const int64_t quoted = rp->I64At(L"message_id", 0);
+            int64_t movedTo = 0;
+            {
+                std::lock_guard lk{ _mtx }; // the send loop holds no lock here
+                movedTo = _openerFollow.MovedThreadOf(quoted);
+            }
+            if (movedTo == 0)
+            {
+                return;
+            }
+            // The quote goes, the reply stays: without it the message lands in its thread for sure. With it, Telegram may refuse
+            // the call (allow_sending_without_reply does not hold across topics) or place the reply where the quoted message is.
+            params.members.erase(std::remove_if(params.members.begin(), params.members.end(), [](const auto& m) { return m.first == L"reply_parameters"; }),
+                                 params.members.end());
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the call goes with its quote, as before §21.48 (Telegram may refuse it or place it by the quote).
+            LogSwallowedException(L"MessagingService::_dropQuoteOfMovedMessage");
+        }
+    }
+
     int64_t MessagingService::_threadOf(const std::wstring& sessionId) const
     {
         std::lock_guard lk{ _mtx };
@@ -3791,7 +3863,7 @@ namespace Agentmaster::Msg
             _sendText(thread,
                       L"<b>\U0001F50E Search</b> \x2014 ask for a session in plain words (\x201Cthe session where I fixed the tab drag crash\x201D) and the Sessions page's search agent finds it. Tap a result's number to pick it: Resume a closed one into a tab, Activate a deactivated tab where it is, Wake an idle one, or Fork it.\n\n"
                       L"This is one conversation for the whole app: it carries on after a restart, and /clear (or \x2298 Clear under an answer) starts it over.\n\n"
-                      L"Fleet commands: /idle (idle tabs), /board (counts), /newsession &lt;folder&gt;, /pauseall, /resumeall, /status, /help.\n\n"
+                      L"Fleet commands: /idle (idle tabs), /board (counts), /newsession [folder] (a new session), /pauseall, /resumeall, /status, /help.\n\n" // §21.48
                       L"Pin this topic at the top of the list (Telegram has no way for a bot to do it).",
                       true,
                       SendPriority::Final,
@@ -3840,7 +3912,7 @@ namespace Agentmaster::Msg
                     { L"activate", L"start a parked tab's claude" },
                     { L"reactivate", L"resume a parked tab or a cut-off / failed session" },
                     { L"forksession", L"fork into a new tab" },
-                    { L"newsession", L"a new session in this folder (or <folder> in Search)" },
+                    { L"newsession", L"a new session: a new thread asks its folder, model and window (in a session's topic: in its folder)" }, // §21.48
                     { L"interrupt", L"stop the running turn (asks first)" },
                     { L"idle", L"Search: the idle tabs" },
                     { L"board", L"Search: counts per state" },

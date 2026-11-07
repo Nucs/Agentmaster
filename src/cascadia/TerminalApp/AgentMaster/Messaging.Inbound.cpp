@@ -66,6 +66,44 @@ namespace Agentmaster::Msg
             return std::wstring{ s.substr(a, b - a + 1) };
         }
 
+        /// <summary>
+        /// §21.48: a copy of a Telegram object with one member SET — any member of that name removed first, then the new value
+        /// appended. json::Value::Set only appends, and Find returns the FIRST match, so setting a member an object already has
+        /// would leave the old value in force: a moved message's copy must name its new thread whatever the original carried.
+        /// </summary>
+        /// <param name="v">The object (a copy; a non-object is returned as it is).</param>
+        /// <param name="key">The member's name.</param>
+        /// <param name="value">The member's new value.</param>
+        /// <returns>The object with `key` = `value`.</returns>
+        /// <exception cref="std::bad_alloc">If the member cannot be added.</exception>
+        json::Value WithMember(json::Value v, std::wstring_view key, json::Value value)
+        {
+            if (v.type != json::Value::Type::Obj)
+            {
+                return v;
+            }
+            v.members.erase(std::remove_if(v.members.begin(), v.members.end(), [key](const auto& m) { return m.first == key; }), v.members.end());
+            v.members.emplace_back(std::wstring{ key }, std::move(value));
+            return v;
+        }
+
+        /// <summary>
+        /// §21.48: a copy of a Telegram object WITHOUT one member — a command answered in the main view after its thread is deleted
+        /// loses its message_id, so no answer quotes a message that went with the thread (a reply to a message of another topic
+        /// ignores allow_sending_without_reply, and would be refused once the message is gone).
+        /// </summary>
+        /// <param name="v">The object (a copy; a non-object is returned as it is).</param>
+        /// <param name="key">The member to drop (every occurrence).</param>
+        /// <returns>The object without `key`.</returns>
+        json::Value WithoutMember(json::Value v, std::wstring_view key)
+        {
+            if (v.type == json::Value::Type::Obj)
+            {
+                v.members.erase(std::remove_if(v.members.begin(), v.members.end(), [key](const auto& m) { return m.first == key; }), v.members.end());
+            }
+            return v;
+        }
+
         // The first word and the rest of an argument string.
         std::pair<std::wstring, std::wstring> SplitFirst(const std::wstring& args)
         {
@@ -742,6 +780,36 @@ namespace Agentmaster::Msg
             return;
         }
         const int64_t threadId = msg.I64At(L"message_thread_id", 0);
+        // §21.48: the OPENER of a thread the user opened from "All". Telegram for Android 13.0.x creates the thread and then sends
+        // the message that named it WITHOUT message_thread_id, so it read as a main-view message here — the bot answered "This is
+        // Agentmaster's bot …" (to /help: the Search topic's help), the new thread stayed empty, and the user had to write in it
+        // again to start the wizard (seen in the owner's chat 2026-11-07: five such threads in 16 minutes). The follow
+        // (NewThreadOpenerFollow, started by _onUserThreadCreated) takes a thread-less message Telegram stamped within seconds of
+        // the creation as that thread's: a COPY that names the thread and carries kNewThreadMovedKey goes through this function
+        // again, so every reader below — the voice path, the /search pair, the wizard, the hand-over — reads the message where the
+        // user meant it. An edit of a moved message is routed the same way. The mark keeps the copy from being routed twice; a
+        // message the voice lane hands back was routed when it first came; a service message (no content) never takes part.
+        if (!fromVoiceLane && !msg.BoolAt(kNewThreadMovedKey) && NewThreadMessageCarriesContent(msg))
+        {
+            const int64_t messageId = msg.I64At(L"message_id", 0);
+            int64_t routed = 0;
+            {
+                std::lock_guard lk{ _mtx };
+                routed = _openerFollow.Route(threadId, msg.I64At(L"date", 0), messageId, edited);
+            }
+            if (threadId == 0 && routed != 0)
+            {
+                const json::Value moved = WithMember(WithMember(msg, L"message_thread_id", json::Value::MkNum(static_cast<double>(routed))),
+                                                     kNewThreadMovedKey,
+                                                     json::Value::MkBool(true));
+                _log(L"[msg] new thread " + std::to_wstring(routed) + L": " +
+                     (edited ? L"an edit of its opener (message " + std::to_wstring(messageId) + L") came without the thread's id; it goes to the thread" :
+                               L"its opener (message " + std::to_wstring(messageId) + L") came without the thread's id (Telegram Android's \x201C" L"All\x201D view); taken as the thread's"));
+                LogNav(L"remote telegram new-thread " + std::to_wstring(routed) + (edited ? L" opener-edit" : L" opener") + L" msg=" + std::to_wstring(messageId));
+                _handleMessage(moved, edited, fromVoiceLane);
+                return;
+            }
+        }
         int64_t searchThread = 0;
         std::wstring sessionId;
         // §21.17: the thread is a session's topic AND still has its new-thread bind — the tick is binding it right now and hands
@@ -941,20 +1009,47 @@ namespace Agentmaster::Msg
         // The chat's main view, or a topic the map does not know (deleted on our side, or made by the user).
         if (threadId == 0)
         {
+            if (edited)
+            {
+                // §21.48: an edit asks for nothing new — an edit of a message moved into a thread was routed there above. Before
+                // §21.48 an edited main-view message got the main view's answer once more.
+                return;
+            }
             const RemoteCommand cmd = ParseRemoteCommand(text);
-            if (cmd.kind == RemoteKind::AgentmasterCommand && (cmd.name == L"start" || cmd.name == L"help"))
+            if (cmd.kind == RemoteKind::AgentmasterCommand && cmd.name == L"newsession")
             {
-                _sendHelp(0, true);
+                // §21.48: /newsession works here too (the user's "my expectation was for it to work anywhere I use it"): the bot
+                // opens a thread for the new session and its wizard asks there — the folder, the model, the window. Before, it
+                // got the line below. (Telegram's own "All" view on Android and Desktop opens a thread for the command itself; that
+                // command reaches the thread's wizard through the follow above or with its thread id, never here.)
+                _openNewSessionThread(cmd.args, msg, 0, false);
                 return;
             }
-            if (cmd.kind == RemoteKind::AgentmasterCommand && cmd.name == L"status")
+            if (IsMainViewFleetCommand(cmd))
             {
-                // §21.40: the fleet's /status works here as in the 🔎 Search topic: the bot's line, then Claude Code's account and
-                // plan usage (before §21.40 the main view answered every command but /help with the line below).
-                _runSearchCommand(cmd, msg, 0);
+                // §21.48: the main view's OWN help (before, /help here sent the 🔎 Search topic's, which read as "you are in the
+                // Search topic"), and the fleet commands the Search topic runs — §21.40 brought /status here first; /idle, /board,
+                // /pauseall, /resumeall, /verbose and /recreate got the line below until §21.48.
+                _runMainViewCommand(cmd, msg);
                 return;
             }
-            _reply(0, L"This is Agentmaster's bot. Each working session has its own topic; the \U0001F50E Search topic finds old ones (/search &lt;words&gt; asks it from anywhere, /search_tab puts it first in the list); a new thread starts a new session (you pick its folder). Send /help for the commands.", false); // §21.17: the new thread; §21.19: /search, /search_tab
+            if (cmd.kind == RemoteKind::Text)
+            {
+                // §21.48: WORDS written in the main view open a new session, as Telegram's own "All" view does where it opens a thread
+                // for them (Android's and Desktop's; those words reach the thread's wizard through the follow above or with their
+                // thread id). A client that posts them here instead — or a follow that missed — gets a thread the bot opens, named
+                // after them, which holds them as the session's first prompt. Before, they got the line below and were lost.
+                _openNewSessionThread(L"", msg, 0, true);
+                return;
+            }
+            if (cmd.kind == RemoteKind::AgentmasterCommand)
+            {
+                // §21.48: a session's own command (/queue, /rename, /steer, …) has no session here.
+                _reply(0, L"<code>/" + TgEscapeHtml(cmd.name) + L"</code> works in a session's topic. Here: /newsession (a new session), /help, /status, /idle, /board, /pauseall, /resumeall, /search &lt;words&gt;.", false);
+                return;
+            }
+            // §21.17: the new thread; §21.19: /search, /search_tab; §21.48: /newsession, and Claude Code's commands need a session.
+            _reply(0, L"This is Agentmaster's bot. Claude Code's commands go in a session's topic \x2014 /newsession opens a new session (its thread asks for the folder, the model and the window), and the \U0001F50E Search topic finds old ones (/search &lt;words&gt; asks it from anywhere). Send /help for the commands.", false);
             return;
         }
         // §21.17: a thread no session owns — one the user opened, or one whose session closed while the thread stayed — starts a
@@ -969,6 +1064,23 @@ namespace Agentmaster::Msg
         {
             _reply(threadId, L"This topic is being made again and goes away in a moment; write in its new topic.", false);
             return;
+        }
+        // §21.48: a thread whose ONLY message is a command of the main view (/help, /status, /idle, …) was opened by Telegram for
+        // that command — writing in "All" opens a thread for every message — not by a user who wants a session there. The command
+        // is answered in the MAIN VIEW, where the user wrote it, and the empty thread is deleted, as a thread opened only for
+        // /search is (§21.25). Before §21.48 such a thread stayed, named after the command, holding the command as the first
+        // prompt of a session nobody asked for (or, from Android, empty: the command itself came thread-less). The answer quotes
+        // nothing: the message may go with the thread (WithoutMember). A thread the user named, or whose wizard has begun, keeps
+        // the message for its session as before.
+        if (!edited)
+        {
+            const RemoteCommand cmd = ParseRemoteCommand(text);
+            if (IsMainViewFleetCommand(cmd) && _newThreadUntouched(threadId))
+            {
+                _runMainViewCommand(cmd, WithoutMember(msg, L"message_id"));
+                _abortUntouchedNewThread(threadId, L"its only message was /" + cmd.name + L", answered in the main view");
+                return;
+            }
         }
         _holdForNewThread(threadId, msg, edited);
     }
@@ -2287,7 +2399,10 @@ namespace Agentmaster::Msg
             }
             if (folder.empty())
             {
-                _reply(threadId, L"Usage: /newsession &lt;folder&gt; [model]", false);
+                // §21.48: a bare /newsession opens a THREAD for the new session, whose wizard asks for the folder, the model and the
+                // window, as everywhere else (before, it answered "Usage: /newsession <folder> [model]"). With a folder it still
+                // opens the session at once, below.
+                _openNewSessionThread(L"", msg, threadId, false);
                 return;
             }
             // §21.17.4: the folder check is BOUNDED (FolderProbe.h), like a new thread's pick — this runs on the poll thread, the
@@ -2315,7 +2430,7 @@ namespace Agentmaster::Msg
             _reply(threadId, L"/cc works in a session's topic.", false);
             return;
         }
-        _reply(threadId, L"Here: a search in plain words, or /clear, /idle, /board, /newsession &lt;folder&gt;, /pauseall, /resumeall, /verbose, /recreate, /status, /help.", false);
+        _reply(threadId, L"Here: a search in plain words, or /clear, /idle, /board, /newsession [folder], /pauseall, /resumeall, /verbose, /recreate, /status, /help.", false); // §21.48: a bare /newsession works here
     }
 
     bool MessagingService::_ensureSearchBridge(int64_t threadId)
@@ -5029,6 +5144,11 @@ namespace Agentmaster::Msg
             nt.topicName = implicit ? std::wstring{} : name;
             nt.lastUseMs = WallMs();
             _stateDirty = true; // §21.25: the wizards are persisted
+            // §21.48: Telegram for Android sends the message that opened this thread from "All" WITHOUT the thread's id, right after
+            // this service message: the follow takes a thread-less message it stamped within kNewThreadOpenerFollowSec of this
+            // creation as the thread's (_handleMessage). A named thread follows too — harmless, as nothing else comes thread-less
+            // within seconds of a creation.
+            _openerFollow.OnThreadCreated(threadId, msg.I64At(L"date", 0));
         }
         // A thread Telegram named (is_name_implicit) was made from the user's first message, which comes right after this service
         // message: the picker goes up with it (_holdForNewThread), one post instead of a post and an edit that counts the message.
@@ -5132,6 +5252,10 @@ namespace Agentmaster::Msg
             }
             return;
         }
+        // §21.48: /newsession in a thread no session owns is the WIZARD itself, never words for the session — held, it was replayed
+        // at the bind as the new topic's own /newsession and opened a SECOND session in the same folder.
+        const RemoteCommand command = ParseRemoteCommand(text);
+        const bool newSessionCommand = command.kind == RemoteKind::AgentmasterCommand && command.name == L"newsession";
         // A thread whose pick is launching, or whose bind is handing its messages over: the message waits for that session too.
         {
             bool bound = false;
@@ -5149,7 +5273,7 @@ namespace Agentmaster::Msg
                     {
                         bound = true;
                         full = b.held.size() >= kNewThreadHeldMax;
-                        if (!full)
+                        if (!full && !newSessionCommand) // §21.48: /newsession is answered below, never handed to the session
                         {
                             b.held.push_back(msg);
                             _stateDirty = true; // §21.25: the binds are persisted
@@ -5171,7 +5295,14 @@ namespace Agentmaster::Msg
             }
             if (bound)
             {
-                if (full)
+                if (newSessionCommand)
+                {
+                    // §21.48: the session this thread was opened for is coming up; once it is, /newsession here is that topic's own
+                    // (a new session in the same folder).
+                    _reply(threadId, L"A new session is already starting in this thread \x2014 it is up in a moment. Then /newsession here opens another one in its folder.", false, json::Value{}, msgId);
+                    LogNav(L"remote telegram new-thread " + std::to_wstring(threadId) + L" /newsession -> already launching");
+                }
+                else if (full)
                 {
                     _reply(threadId, L"The new session is starting; send this again once it is up.", false, json::Value{}, msgId);
                 }
@@ -5195,6 +5326,20 @@ namespace Agentmaster::Msg
                 }
                 return;
             }
+        }
+        if (newSessionCommand)
+        {
+            // §21.48: the wizard shows itself here (a folder and a model in the command are pre-picked) — the thread was opened by
+            // the command (Telegram named it "/newsession": it gets the temporary name kNewSessionThreadName), or the user asks for
+            // the steps again. A thread the bot never saw gets its record here, at the folder step, as below.
+            {
+                std::lock_guard lk{ _mtx };
+                _newThreads[threadId].lastUseMs = now;
+                _stateDirty = true;
+            }
+            LogNav(L"remote telegram new-thread " + std::to_wstring(threadId) + L" /newsession");
+            _newSessionInThread(threadId, command.args, msgId, true);
+            return;
         }
         // §21.25: the thread's WIZARD reads the message first (ApplyNewThreadText) — a lone folder path at every step, a model id
         // at the model steps, a window number at the window step; anything else is the user's own words, held for the session.
@@ -6386,6 +6531,250 @@ namespace Agentmaster::Msg
         }
     }
 
+    // ===== §21.48: a new session from anywhere ==================================================================================
+
+    bool MessagingService::_newThreadUntouched(int64_t threadId)
+    {
+        std::lock_guard lk{ _mtx };
+        const auto it = _newThreads.find(threadId);
+        if (it == _newThreads.end())
+        {
+            return false; // no wizard: a thread made before §21.17, or one whose session closed — the wizard takes its message
+        }
+        // The three facts _abortUntouchedNewThread reads before it deletes a thread: nothing held, no picker yet, no name the user
+        // gave the thread.
+        const auto& nt = it->second;
+        return nt.held.empty() && nt.pickerMessageId == 0 && nt.topicName.empty();
+    }
+
+    void MessagingService::_runMainViewCommand(const RemoteCommand& cmd, const json::Value& msg)
+    {
+        if (cmd.name == L"start" || cmd.name == L"help")
+        {
+            _sendMainHelp(0);
+            LogNav(L"remote telegram /" + cmd.name + L" (main view) -> help");
+            return;
+        }
+        // /status (§21.40: the bot's line, then Claude Code's account and plan usage), /idle, /board, /pauseall, /resumeall, /verbose
+        // and /recreate: the 🔎 Search topic runs them, answered here.
+        _runSearchCommand(cmd, msg, 0);
+    }
+
+    void MessagingService::_sendMainHelp(int64_t threadId)
+    {
+        // The main view's own help: before §21.48 /help here sent the Search topic's, which read as "you are in the Search topic".
+        const std::wstring html =
+            L"<b>All \x2014 the chat's main view</b>\n"
+            L"Every session has its own topic. Writing here opens a NEW THREAD for a NEW SESSION: the thread asks for the folder, then the model and the window, and what you wrote becomes the session's first prompt.\n"
+            L"/newsession \x2014 the same without a prompt (/newsession &lt;folder&gt; [model] picks them ahead)\n"
+            L"/idle \x2014 the idle tabs \x00B7 /board \x2014 counts per state\n"
+            L"/status \x2014 the bot, then Claude Code's account and plan usage\n"
+            L"/pauseall \x00B7 /resumeall \x2014 every Prompt Queue Runner\n"
+            L"/verbose on|off \x2014 the default for all topics: the work too, or the conversation only\n"
+            L"/search &lt;words&gt; \x2014 ask the \U0001F50E Search agent (its answer comes in the Search topic) \x00B7 /search_tab \x2014 put the Search topic first in the thread list\n"
+            L"In a session's topic, /help lists what you can do there.";
+        _reply(threadId, html, false);
+    }
+
+    void MessagingService::_renameNewThread(int64_t threadId, const std::wstring& name)
+    {
+        OutItem item;
+        item.prio = SendPriority::New; // a name, not an answer: after the answers queued now, before the cards' edits
+        item.method = L"editForumTopic";
+        item.params = json::Value::MkObj();
+        item.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+        item.params.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(threadId)));
+        item.params.Set(L"name", json::Value::MkStr(name));
+        auto self = weak_from_this();
+        item.onDone = [self, threadId, name](const TgResult& r) {
+            auto me = self.lock();
+            if (!me || r.ok || r.TopicNotModified())
+            {
+                return; // renamed (its "topic renamed" notice comes back from the bot and is deleted by _handleMessage)
+            }
+            // Cosmetic: the thread keeps the name Telegram gave it, and the bind renames it to the session's title all the same.
+            me->_log(L"[msg] new thread " + std::to_wstring(threadId) + L": its temporary name \x201C" + name + L"\x201D was refused (" + r.description +
+                     L"); it keeps Telegram's until the session's title replaces it");
+        };
+        _enqueue(std::move(item));
+        _log(L"[msg] new thread " + std::to_wstring(threadId) + L" was opened with /newsession: renamed \x201C" + name + L"\x201D until the session's title replaces it");
+    }
+
+    void MessagingService::_newSessionInThread(int64_t threadId, const std::wstring& args, int64_t replyTo, bool renameImplicit)
+    {
+        const NewSessionArgs a = ParseNewSessionArgs(args);
+        bool known = false;
+        bool untouched = false;
+        bool implicitName = false;
+        {
+            std::lock_guard lk{ _mtx };
+            if (const auto it = _newThreads.find(threadId); it != _newThreads.end())
+            {
+                known = true;
+                // Read BEFORE anything is shown: "untouched" decides whether this command opened the thread (it gets the temporary
+                // name, and its picker is posted rather than moved below the command).
+                untouched = it->second.held.empty() && it->second.pickerMessageId == 0;
+                implicitName = it->second.topicName.empty();
+                it->second.lastUseMs = WallMs();
+                _stateDirty = true; // §21.25: the wizards are persisted (the idle clock counts this use)
+            }
+        }
+        if (!known)
+        {
+            return; // launched or cancelled meanwhile (the caller made the record): nothing is left to show
+        }
+        if (renameImplicit && untouched && implicitName)
+        {
+            // The thread Telegram named after the command ("/newsession"): the temporary name until the session's title replaces
+            // it at the bind (the user's "a new topic with a temporary name").
+            _renameNewThread(threadId, std::wstring{ kNewSessionThreadName });
+        }
+        // A picker that stands already is posted again BELOW the command (the user looks at the bottom of the thread); a thread
+        // without one gets it posted.
+        const bool repost = replyTo != 0 && !untouched;
+        if (a.folder.empty())
+        {
+            _showNewThreadPicker(threadId, repost);
+            return;
+        }
+        const std::optional<std::wstring> folder = NewThreadTypedFolder(a.folder);
+        if (!folder)
+        {
+            // Not an absolute folder path (a relative name, a word): said, and the wizard shown where it stands. Nothing is checked
+            // or created for it.
+            _reply(threadId, L"<code>" + TgEscapeHtml(a.folder) + L"</code> is not a folder's full path \x2014 send one (like <code>K:\\src\\app</code>), or pick a folder below.", false, json::Value{}, replyTo);
+            _showNewThreadPicker(threadId, repost);
+            return;
+        }
+        NewThreadOutcome out;
+        {
+            std::lock_guard lk{ _mtx };
+            const auto it = _newThreads.find(threadId);
+            if (it == _newThreads.end())
+            {
+                return;
+            }
+            // A TYPED folder: a folder choice at any step — checked case-insensitively, and only OFFERED for creation when missing
+            // (ApplyNewThreadText → CheckFolder; the user's tap on 📁 Create makes it).
+            out = ApplyNewThreadText(it->second, *folder);
+            _stateDirty = true;
+        }
+        _applyNewThreadOutcome(threadId, out, replyTo);
+        if (a.model.empty())
+        {
+            return;
+        }
+        // The model after the folder: taken only once the folder step went through — the wizard stands at the model step now —,
+        // as "/model <id>" typed there (the id checked before it can reach a launch: ParseNewThreadModelId). A folder that must be
+        // created first leaves the model to the model step.
+        NewThreadOutcome model;
+        bool atModel = false;
+        {
+            std::lock_guard lk{ _mtx };
+            if (const auto it = _newThreads.find(threadId); it != _newThreads.end() && it->second.wizard.step == NewThreadStep::Model)
+            {
+                atModel = true;
+                model = ApplyNewThreadText(it->second, L"/model " + a.model);
+                _stateDirty = true;
+            }
+        }
+        if (atModel)
+        {
+            _applyNewThreadOutcome(threadId, model, replyTo);
+        }
+        else
+        {
+            _log(L"[msg] new thread " + std::to_wstring(threadId) + L": /newsession named the model " + a.model +
+                 L", but the folder step did not go through (the model step asks for it once it does)");
+        }
+    }
+
+    void MessagingService::_openNewSessionThread(const std::wstring& args, const json::Value& msg, int64_t fromThread, bool holdMessage)
+    {
+        const int64_t msgId = msg.I64At(L"message_id", 0);
+        const std::wstring name = holdMessage ? NewThreadNameForMessage(msg.StrAt(L"text")) : std::wstring{ kNewSessionThreadName };
+        const std::wstring where = fromThread == 0 ? std::wstring{ L"the main view" } : std::wstring{ L"the Search topic" };
+        OutItem item;
+        item.prio = SendPriority::Final; // the answer to the user's command (or words): their thread comes first
+        item.method = L"createForumTopic";
+        item.params = json::Value::MkObj();
+        item.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+        item.params.Set(L"name", json::Value::MkStr(name));
+        auto self = weak_from_this();
+        // The words the thread takes (holdMessage): the copy that names the thread is made once Telegram has answered with its id.
+        const json::Value held = holdMessage ? msg : json::Value{};
+        item.onDone = [self, args, held, fromThread, msgId, name, where, holdMessage](const TgResult& r) {
+            auto me = self.lock();
+            if (!me)
+            {
+                return;
+            }
+            const int64_t thread = r.ok ? r.result.I64At(L"message_thread_id", 0) : 0;
+            if (thread <= 0)
+            {
+                const std::wstring why = r.description.empty() ? std::wstring{ L"no answer from Telegram" } : r.description;
+                me->_log(L"[msg] a new thread for " + std::wstring{ holdMessage ? L"words written in " : L"/newsession in " } + where + L" was refused (" + why + L")");
+                LogNav(L"remote telegram new-thread open (" + where + L") -> refused");
+                me->_reply(fromThread, L"A new thread for the session could not be opened (" + TgEscapeHtml(why) + L"). Try again, or open a thread yourself.", false, json::Value{}, msgId);
+                return;
+            }
+            {
+                std::lock_guard lk{ me->_mtx };
+                auto& nt = me->_newThreads[thread];
+                nt.topicName.clear(); // an implicit name, as a thread Telegram names: the session's title comes from its folder
+                nt.lastUseMs = WallMs();
+                me->_stateDirty = true; // §21.25: the wizards are persisted
+                if (held.type == json::Value::Type::Obj)
+                {
+                    // The words stay in the main view, where they were written: their edits are routed to this thread, and no reply
+                    // inside the thread quotes them (_dropQuoteOfMovedMessage).
+                    me->_openerFollow.Remember(held.I64At(L"message_id", 0), thread);
+                }
+            }
+            me->_log(L"[msg] new thread " + std::to_wstring(thread) + L" opened by the bot for " + std::wstring{ holdMessage ? L"words written in " : L"/newsession in " } + where +
+                     L": \x201C" + name + L"\x201D");
+            LogNav(L"remote telegram new-thread " + std::to_wstring(thread) + L" opened (" + where + L")");
+            // What the thread starts with runs on a worker of its own, holding the service weakly (as the window census does): the
+            // picker's lists probe every listed folder (up to kNewThreadListProbeBudgetMs) and a folder argument is walked (up to
+            // kNewThreadPickProbeWaitMs), and this is the send loop's thread, which every other message waits for.
+            std::thread([self, thread, args, held]() noexcept {
+                try
+                {
+                    if (const auto service = self.lock())
+                    {
+                        service->_startOpenedNewThread(thread, args, held);
+                    }
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: the thread has its wizard record but no picker yet — the user's next message there posts it
+                    // (_holdForNewThread), and a thread nobody uses is deleted after kNewThreadPickerIdleMs (_newThreadsTick).
+                    LogSwallowedException(L"MessagingService (start a new session's thread)");
+                }
+            }).detach();
+            me->_reply(fromThread, BuildNewSessionThreadOpenedHtml(me->_linkBot(), thread, name, holdMessage), false, json::Value{}, msgId);
+        };
+        _enqueue(std::move(item));
+        LogNav(L"remote telegram new-thread open (" + where + L")" + (holdMessage ? L" words" : L" /newsession"));
+    }
+
+    void MessagingService::_startOpenedNewThread(int64_t threadId, const std::wstring& args, const json::Value& held)
+    {
+        if (held.type == json::Value::Type::Obj)
+        {
+            // The words written in the main view: held by the thread's wizard as if they had been written there — the 👀, the picker
+            // counting them, the first prompt of the session it starts (a lone folder path is a folder choice, as there). The copy
+            // names the thread and carries the moved mark (persisted with the held messages).
+            _holdForNewThread(threadId,
+                              WithMember(WithMember(held, L"message_thread_id", json::Value::MkNum(static_cast<double>(threadId))), kNewThreadMovedKey, json::Value::MkBool(true)),
+                              false);
+            return;
+        }
+        // /newsession: the wizard, with what the command named pre-picked (a bare one: the folder step). The thread already has the
+        // name the service gave it.
+        _newSessionInThread(threadId, args, 0, false);
+    }
+
     void MessagingService::_queueNewThreadExtraFolders(const std::wstring& sessionId, int64_t threadId, const std::vector<NewThreadExtraFolder>& folders) noexcept
     {
         if (folders.empty())
@@ -6585,7 +6974,8 @@ namespace Agentmaster::Msg
             // a search too (its transcript, echoed under it, is the request).
             html = L"<b>\U0001F50E Search</b>\nWrite what you look for in plain words, or say it in a voice note; the agent reads the sessions it finds and answers with one numbered card each, quoting the evidence it saw. Tap a number to pick one: its menu fits where the session stands \x2014 \x25B6 Resume a closed one, \x25B6 Activate a deactivated tab, \x23F0 Wake an idle one, \U0001F4AC Go to topic \x2014 or \x2442 Fork it. A follow-up refines the last answer.\n"
                    L"It is one conversation for the whole app: it carries on after a restart, and /clear (or \x2298 Clear under an answer) starts it over.\n"
-                   L"/idle \x2014 the idle tabs\n/board \x2014 counts per state\n/newsession &lt;folder&gt; [model] \x2014 or open a new thread and pick its folder\n/pauseall \x00B7 /resumeall\n/status \x2014 the bot, then Claude Code's account and plan usage\n/clear \x2014 forget the search conversation\n/verbose on|off \x2014 the default for all topics: the work too, or the conversation only\n/recreate \x2014 make the session topics again in MOST RECENT order, with their history, verbose or not (asks first)\n"
+                   // §21.48: a bare /newsession opens a thread whose wizard asks (it answered a usage line before).
+                   L"/idle \x2014 the idle tabs\n/board \x2014 counts per state\n/newsession \x2014 a new thread for a new session: it asks for the folder, the model and the window (/newsession &lt;folder&gt; [model] opens the session at once)\n/pauseall \x00B7 /resumeall\n/status \x2014 the bot, then Claude Code's account and plan usage\n/clear \x2014 forget the search conversation\n/verbose on|off \x2014 the default for all topics: the work too, or the conversation only\n/recreate \x2014 make the session topics again in MOST RECENT order, with their history, verbose or not (asks first)\n"
                    // §21.19: the hyphenated spelling only inside <code>: a client makes a command LINK of "/search-tab" only up
                    // to the hyphen, so the word would show half linked, and its tap would send a bare "/search" (the jump too,
                    // but not what the line says). The menu's "/search_tab" is a link as a whole.

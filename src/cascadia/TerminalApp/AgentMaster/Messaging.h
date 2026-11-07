@@ -2382,6 +2382,103 @@ namespace Agentmaster::Msg
         /// <param name="name">The new name as Telegram reports it.</param>
         /// <returns>True when the thread was a wizard's or a launch's (handled); false otherwise.</returns>
         bool _onNewThreadRenamed(int64_t threadId, const std::wstring& name);
+
+        // ----- §21.48: a new session from anywhere — the opener Telegram Android leaves in "All", /newsession in every thread ------
+        /// <summary>
+        /// §21.48: opens a THREAD for a new session at the user's word in the chat's main view or the 🔎 Search topic — /newsession,
+        /// or (the main view) words written there that Telegram did not put in a thread of their own — and starts its wizard
+        /// there, as a thread the user opens does (§21.17 / §21.25). The thread is created through the outbox
+        /// (createForumTopic, the answer's priority), so this returns at once; when Telegram answers, the thread gets its wizard
+        /// record (an implicit name: the session's title comes from its folder), what it starts with is done on a worker
+        /// (_startOpenedNewThread: the picker's lists probe folders, a folder argument is walked — the send loop must not wait for
+        /// either), and a silent line where it was asked names the thread, with a link to it. A refusal is answered there.
+        /// </summary>
+        /// <param name="args">/newsession's arguments ("" for none, and for words that open a thread): a folder (quoted when it has
+        /// spaces) and a model to pre-pick (ParseNewSessionArgs).</param>
+        /// <param name="msg">The user's message (its id is quoted by the line where it was asked; with `holdMessage`, its copy is
+        /// what the thread holds).</param>
+        /// <param name="fromThread">Where it was asked: 0 = the main view, else the Search topic's thread.</param>
+        /// <param name="holdMessage">True: the message's WORDS open the thread — it is named after them (NewThreadNameForMessage),
+        /// and holds them as the session's first prompt, remembered as moved (their edits go there, and no reply inside the thread
+        /// quotes them). False: /newsession — the thread is named kNewSessionThreadName and holds nothing.</param>
+        /// <exception cref="std::bad_alloc">If the outbox item cannot be allocated.</exception>
+        void _openNewSessionThread(const std::wstring& args, const json::Value& msg, int64_t fromThread, bool holdMessage);
+        /// <summary>
+        /// §21.48, a worker started by _openNewSessionThread's answer: what a thread the service just opened starts with — the
+        /// message it holds (_holdForNewThread on a copy that names the thread and carries kNewThreadMovedKey: the 👀, the picker
+        /// counting it), or /newsession's arguments (_newSessionInThread: a folder and a model pre-picked), or the plain picker.
+        /// </summary>
+        /// <param name="threadId">The thread Telegram made.</param>
+        /// <param name="args">/newsession's arguments ("" = none).</param>
+        /// <param name="held">The main-view message the thread takes (a Null value = none).</param>
+        /// <exception cref="std::bad_alloc">If a copy or a send cannot be allocated (the worker logs it, Rule #18).</exception>
+        void _startOpenedNewThread(int64_t threadId, const std::wstring& args, const json::Value& held);
+        /// <summary>
+        /// §21.48: /newsession in a thread no session owns — the WIZARD itself, never a message held for the session (before, it was
+        /// held like words and replayed at the bind as the new topic's own /newsession, which opened a SECOND session). A bare one
+        /// shows the wizard where it stands: posted when the thread has no picker yet, else posted again below the command (where
+        /// the user looks). A folder argument is taken as a typed folder at any step (ApplyNewThreadText: checked case-insensitively,
+        /// a missing one offered for creation), and a model after it is taken once the folder step went through (the model step
+        /// checks the id as when it is typed there). A thread Telegram named after the command ("/newsession") is renamed
+        /// kNewSessionThreadName first — the temporary name the session's title replaces at the bind. A thread with no record gets
+        /// one (the caller made it). Poll thread, or _startOpenedNewThread's worker.
+        /// </summary>
+        /// <param name="threadId">The thread.</param>
+        /// <param name="args">The command's arguments (ParseNewSessionArgs).</param>
+        /// <param name="replyTo">The command's message (0 = none): a reply about a bad folder quotes it, and a choice re-posts the
+        /// picker below it. The outbox drops the quote of a message that is not in the thread (_dropQuoteOfMovedMessage).</param>
+        /// <param name="renameImplicit">True: rename an untouched thread Telegram named after the command (the user opened it with
+        /// /newsession); false for a thread the service named itself.</param>
+        /// <exception cref="std::bad_alloc">If a reply or an outbox item cannot be allocated.</exception>
+        void _newSessionInThread(int64_t threadId, const std::wstring& args, int64_t replyTo, bool renameImplicit);
+        /// <summary>
+        /// §21.48: whether a thread no session owns holds NOTHING the user made — a wizard record with no held message, no picker yet
+        /// (an implicit-named thread gets its picker with its first held message) and no name the user gave it: the thread Telegram
+        /// opened for the one message being read now. The test _abortUntouchedNewThread applies before it deletes such a thread.
+        /// </summary>
+        /// <param name="threadId">The thread.</param>
+        /// <returns>True for such a thread; false for a thread with no record, or one the user has begun to use.</returns>
+        bool _newThreadUntouched(int64_t threadId);
+        /// <summary>
+        /// §21.48: runs a command of the chat's MAIN VIEW (kMainViewFleetCommands) and answers in the main view: /help and /start get
+        /// the main view's own help (_sendMainHelp; before §21.48 they got the 🔎 Search topic's, which read as "this is the Search
+        /// topic" in "All"), the others run as the Search topic runs them (_runSearchCommand with thread 0). Also used for such a
+        /// command that came in a thread Telegram opened for it (the caller deletes that thread after).
+        /// </summary>
+        /// <param name="cmd">The command (IsMainViewFleetCommand is true for it).</param>
+        /// <param name="msg">The message (its id is quoted by /status's account report; the caller strips the id when the message
+        /// goes with its thread).</param>
+        /// <exception cref="std::bad_alloc">If an answer cannot be allocated.</exception>
+        void _runMainViewCommand(const RemoteCommand& cmd, const json::Value& msg);
+        /// <summary>
+        /// §21.48: the MAIN VIEW's help — what writing in "All" does (a new thread for a new session, the words its first prompt),
+        /// /newsession, the fleet commands it runs, and the /search pair. A session's topic and the Search topic keep their own
+        /// (_sendHelp).
+        /// </summary>
+        /// <param name="threadId">Where it goes (0 = the main view).</param>
+        /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+        void _sendMainHelp(int64_t threadId);
+        /// <summary>
+        /// §21.48: gives a new thread a temporary NAME (editForumTopic through the outbox) — kNewSessionThreadName for a thread
+        /// Telegram named after a "/newsession" message. The bind renames the thread to the session's title like every topic; the
+        /// "topic renamed" notice this leaves is deleted with the bot's own (_handleMessage). A refusal only logs: the thread keeps
+        /// Telegram's name until the bind.
+        /// </summary>
+        /// <param name="threadId">The thread.</param>
+        /// <param name="name">The name.</param>
+        /// <exception cref="std::bad_alloc">If the outbox item cannot be allocated.</exception>
+        void _renameNewThread(int64_t threadId, const std::wstring& name);
+        /// <summary>
+        /// §21.48, the send loop, right before each call: a reply INSIDE a thread never quotes a message the service MOVED into that
+        /// thread (the opener Telegram Android leaves in "All", a main-view message a thread the service opened took) — the message
+        /// is not in the thread, and a reply to a message of another topic is one Telegram may refuse outright (its
+        /// allow_sending_without_reply does not apply across topics) or place by the quoted message instead. So the call's
+        /// reply_parameters are dropped when they name a remembered moved message (NewThreadOpenerFollow::MovedThreadOf) and the
+        /// call targets a thread; a reply in the main view, where such a message sits, keeps its quote. Contains every failure
+        /// (Rule #18): the call then goes as it was.
+        /// </summary>
+        /// <param name="params">The call's parameters (changed in place).</param>
+        void _dropQuoteOfMovedMessage(json::Value& params) noexcept;
         /// <summary>
         /// Binds each picked thread to its session once the session is LIVE (§21.17, tick thread, before the sync's plan so the
         /// plan never makes the session a topic of its own): the thread becomes the session's topic (a TopicRecord with the
@@ -3110,6 +3207,14 @@ namespace Agentmaster::Msg
         /// </summary>
         using ThreadBind = NewThreadBind;
         std::vector<ThreadBind> _threadBinds;
+        /// <summary>
+        /// §21.48, under `_mtx`: the FOLLOW of the thread the user opened last (Telegram for Android sends the message that opened a
+        /// thread from "All" without the thread's id: _handleMessage takes a thread-less message stamped within seconds of the
+        /// creation as that thread's), and the memory of every message moved into a thread (edits routed there, quotes of it
+        /// dropped inside the thread: _dropQuoteOfMovedMessage). Started by _onUserThreadCreated; reset at _start (its moved
+        /// messages refilled from the wizards' persisted held messages) and when the bot changes.
+        /// </summary>
+        NewThreadOpenerFollow _openerFollow;
         /// <summary>§21.25, under `_mtx`: the last census serial handed out (NewThreadWizard::windowsSerial; 0 is never one).</summary>
         uint64_t _censusSerial{ 0 };
         /// <summary>
