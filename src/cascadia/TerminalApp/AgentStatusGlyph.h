@@ -9,18 +9,18 @@
 // under the cell, and around the dot the tab's three indicators —
 //   - the UNSENT-DRAFT "3 dots" in the band (2.5 DIP dots, 1.5 apart), pulsing in the staggered wave while the
 //     session's tab has started, standing still on a dormant tab's remembered draft;
-//   - the UNREAD FLASH RING, a 13 DIP ellipse behind the dot (so ~1.5 DIP of it shows around the dot's black stroke)
-//     in the user's "status flashing color", blinking 600 ms on / 600 ms off in LOCKSTEP with every other ring of
-//     the UI thread — the tab's own ring included (one shared composition clock, AgentLockstepBlink). At 100% it sits
-//     1 px left of and above the tab's centered ring (2 px of red left of and above the dot, 1 px right of and below
-//     it): the user's correction for the side panel only, a hair's nudge off center that makes layout rounding take
-//     the ring's half-pixel offset down instead of up (AgentStatusGlyph.cpp, kRingNudge);
+//   - the UNREAD FLASH RING, an ellipse behind the dot in the user's "status flashing color", blinking 600 ms on /
+//     600 ms off in LOCKSTEP with every other ring of the UI thread — the tab's own ring included (one shared
+//     composition clock, AgentLockstepBlink). It is a hair under 14 DIP where the tab's is 13: at 100% 14 px,
+//     centered on the dot with 2 px of red on every side, where the tab's 13 px ring shows 1 px left and above and
+//     2 px right and below. The user's correction for the side panel only; the hair keeps the ring centered at every
+//     standard display scale (AgentStatusGlyph.cpp, kRingDiameter);
 //   - the CACHE-WARM SPARK CROWN, a two-disc glow behind the dot that breathes (the shared AgentMakeCacheWarmGlow)
 //     and three embers rising off it (AgentEmberSparks), in the fire color picked for the background.
 // The same elements, sizes, z-order, static opacities and composition animations as the XAML, and the same motion
 // rule (AgentMaster/StatusIconMotion.h — what TabHeaderControl's _Update*Animation methods apply). The two must be
 // kept in step BY HAND: each constant in AgentStatusGlyph.cpp names its XAML twin, and the XAML points back here.
-// ONE deliberate difference, kept on purpose: the flash ring's spot (above) — a sync must leave it alone.
+// ONE deliberate difference, kept on purpose: the flash ring's size (above) — a sync must leave it alone.
 //
 // WHY IN CODE: the side panel's cards are built imperatively (TerminalPage.AgentSidePanel.cpp), like the board's; a
 // XAML UserControl would be a new XAML type of the package, and the tab header itself is a whole tab title, not an
@@ -156,7 +156,7 @@ namespace winrt::TerminalApp::implementation
         // --- The elements (TabHeaderControl.xaml twins in brackets) ---
         winrt::Windows::UI::Xaml::Controls::Grid _root{ nullptr }; // [HeaderAgentStatusDotWrap] 18 x (18 + 4): the glyph cell over the pending band
         winrt::Windows::UI::Xaml::Controls::Grid _glow{ nullptr }; // [HeaderCacheWarmGlow] the two-disc glow, drawn first (behind everything)
-        winrt::Windows::UI::Xaml::Shapes::Ellipse _ring{ nullptr }; // [HeaderAgentStatusFlashRing] the 13 DIP unread ring; nudged (kRingNudge)
+        winrt::Windows::UI::Xaml::Shapes::Ellipse _ring{ nullptr }; // [HeaderAgentStatusFlashRing] the unread ring, 13.95 DIP (kRingDiameter)
         winrt::Windows::UI::Xaml::Shapes::Ellipse _dot{ nullptr }; // [HeaderAgentStatusDot] the 10 DIP state dot, black 1 DIP stroke
         winrt::Windows::UI::Xaml::Controls::Canvas _sparks{ nullptr }; // [HeaderCacheWarmSparks] the embers' 18 x 18 host, drawn last in the cell
         winrt::Windows::UI::Xaml::Controls::StackPanel _pending{ nullptr }; // [HeaderPendingDots] the 3 dots, in the band

@@ -4,8 +4,9 @@
 // Agentmaster — the tab strip's status icon, built in code (see AgentStatusGlyph.h for what it is, what it leaves out,
 // and its ownership rules). Every size, order and static opacity below is the XAML's (TabHeaderControl.xaml,
 // HeaderAgentStatusDotWrap); each constant names its twin, so a change on either side can be carried to the other.
-// The one deliberate difference is where the flash ring sits (kRingNudge): 1 px left of and above the tab's centered
-// ring at 100%, the user's correction for the side panel only — never "re-sync" it to the XAML.
+// The one deliberate difference is the flash ring's size (kRingDiameter: a hair under 14 DIP, the tab's is 13): at
+// 100% it is 14 px, centered on the dot with 2 px of red on every side — the user's correction for the side panel
+// only. Never "re-sync" it to the XAML.
 
 #include "pch.h"
 #include "AgentStatusGlyph.h"
@@ -29,35 +30,32 @@ namespace
     // [HeaderAgentStatusDot Width/Height="10" StrokeThickness="1" Stroke="Black"]
     constexpr double kDotDiameter = 10.0;
     constexpr double kDotStroke = 1.0;
-    // [HeaderAgentStatusFlashRing Width/Height="13"] — 1.5 DIP of ring around the 10 DIP dot on average; whole
-    // pixels split it 1 + 2 (see kRingNudge).
-    constexpr double kRingDiameter = 13.0;
-    // [no twin: the tab's ring has no nudge] How far THIS ring is pulled left and up off center, DIPs — a hair, so
-    // layout rounding takes the ring's half-pixel offset DOWN instead of up. The user's call of 2026-11-07, for the
-    // side panel only: "The flashing unread red background for the status indicator in the sidemenu (sidemenu only)
-    // needs to be moved -1 left and -1 top, as its not really centered to the circle so 1px left and 1px up."
-    //   Why it looked off: centered in the 18 DIP cell, the 13 DIP ring sits at (18 - 13) / 2 = 2.5 DIP, a half
-    //   pixel at 100%, and layout rounding takes a half pixel UP (XAML's XcpRound is floor(x + 0.5), applied to
-    //   every element's offset by CFrameworkElement::ArrangeCore). So the tab's ring draws at 3 px while the dot,
-    //   at (18 - 10) / 2 = 4 DIP, needs no rounding: 1 px of red left of and above the dot, 2 px right of and below.
-    //   What the nudge gives: 2.5 - 0.01 = 2.49 DIP rounds DOWN, to 2 px — 1 px left of and above the tab's ring,
-    //   the move asked for: 2 px of red left of and above the dot, 1 px right of and below it. No whole-pixel spot
-    //   centers a 13 DIP ring on a 10 DIP dot at 100% (the 3 px difference is odd), so the move puts the extra
-    //   pixel on the other side.
-    //   Where it acts: only where the centered offset lands on an exact half pixel; a whole-pixel offset (the ring
-    //   already centered) is rounded back to itself. A float32 replica of XAML's layout math (WinUI 3's source,
-    //   2026-11-07) gives, at the standard display scales: centered at 200%, 225%, 250%, 400% and 450%; the extra
-    //   pixel left of and above the dot at 100% to 175%, 300%, 350% and 500% — never right of and below it, the
-    //   look the user asked to fix. By the same replica the tab's own ring at 125% already draws that way (float
-    //   error makes its centered offset 2.7999997 DIP, which rounds down), so the nudge changes nothing there.
-    //   Why not the 1 DIP the user named: a -1 DIP margin is the same 1 px at 100%, but at 125% it would draw the
-    //   ring at 2 px, leaving no red at all right of the dot, and from 150% up it moves the ring 2 px or more; a
-    //   -1 DIP TranslateTransform would move it off the pixel grid (1.25 px at 125%, a blurred edge); a fixed spot
-    //   (Left / Top + a 2 DIP margin) would move it at every scale, 1 px off center at 200% to 250%, where the
-    //   centered ring is exact.
-    // ⚠ Keep it far below half a physical pixel at the largest scale (0.01 DIP = 0.05 px at 500%), or it starts
-    //   moving rings that need no move, and far above float error (~1e-6 DIP), or it stops tipping the half pixel.
-    constexpr double kRingNudge = 0.01;
+    // [HeaderAgentStatusFlashRing Width/Height="13"] — NOT the tab's 13: THIS ring is a hair under 14 DIP, the one
+    // deliberate difference from the XAML twin (a sync must leave it alone). The user's calls, for the side panel
+    // only: 2026-11-07 "The flashing unread red background for the status indicator in the sidemenu (sidemenu only)
+    // needs to be moved -1 left and -1 top, as its not really centered to the circle so 1px left and 1px up", then
+    // 2026-11-08, after seeing that build: "its still offset, add 1px width and 1px height".
+    //   Why the tab's 13 DIP ring is off center: centered in the 18 DIP cell it sits at (18 - 13) / 2 = 2.5 DIP, and
+    //   layout rounding takes that half pixel UP (XAML's XcpRound is floor(x + 0.5); CFrameworkElement::ArrangeCore
+    //   rounds every offset, MeasureCore and GetMinMax every size). At 100% it draws 13 px at 3 px around the 10 px
+    //   dot at 4 px: 1 px of red left of and above the dot, 2 px right of and below it. A ring and a dot whose pixel
+    //   sizes differ by an ODD number can never share a center on whole pixels, wherever the ring is placed.
+    //   What this size gives: 14 px at 100%, centered at (18 - 14) / 2 = 2 px, with 2 px of red on every side of the
+    //   dot — the move to 2 px and the 1 px more width and height the user asked for. The hair under 14 keeps the two
+    //   sizes' difference EVEN at every standard display scale: where 14 DIP lands on a half pixel (125%: 17.5 px;
+    //   175%, 225%), the dot's 10 DIP does too (12.5 px) and rounds UP (13 px), so the ring must round DOWN (17 px).
+    //   A full 14 rounds up as well (18 px: 5 more than the dot, odd). A float32 replica of XAML's layout math
+    //   (WinUI 3's source, 2026-11-08) draws this ring centered at all 12 standard scales from 100% to 500%: 14, 17,
+    //   21, 24, 28, 31, 35, 42, 49, 56, 63 and 70 px, with 2, 2, 3, 3, 4, 4, 5, 6, 7, 8, 9 and 10 px of red. A full 14
+    //   is centered at 9 of them (not 125%, 175%, 225%), the tab's 13 at 5.
+    //   It replaces the 2026-11-07 position nudge (a 0.01 DIP margin that made the 13 DIP ring's half-pixel offset
+    //   round down: 2 px of red left and above, 1 px right and below — "still offset"). With the sizes' parity right,
+    //   the centered offset is a whole pixel at every standard scale, so the nudge would do nothing there and would
+    //   break centering at custom scales (the replica, 100% to 500% in 1% steps: 160 centered with it, 191 without).
+    // ⚠ Keep the hair between ~0.01 and ~0.09 DIP: the replica centers 13.91 to 13.99 at every standard scale up to
+    //   500%; at 13.90 float error rounds the ring to 69 px at 500%, and a hair of 0.1 DIP or more stops a whole-pixel
+    //   14 DIP size (100%, 150%, 200% ...) from rounding back to itself. 13.95 is the middle of that window.
+    constexpr double kRingDiameter = 13.95;
     // [HeaderCacheWarmGlow's two Ellipses] — the outer disc 16 DIP at 0.5, the inner 12.5 DIP at 0.55: two flat discs
     // fake a falloff (no RadialGradientBrush anywhere in this codebase), and the grid's own Opacity breathes both.
     constexpr double kGlowOuterDiameter = 16.0;
@@ -135,19 +133,17 @@ namespace winrt::TerminalApp::implementation
         root.Children().Append(glow);
 
         // 2. The FLASH RING, behind the dot: only its outer edge shows, outside the dot's black stroke (read
-        //    outside-in: ring, black stroke, state fill) — at 100%, 2 px of it left of and above the dot, 1 px right
-        //    of and below. No Fill until the first SetFlashRing hands the window's shared brush, and deliberately NO
-        //    Opacity write anywhere (the blink is an expression on it — see SetFlashRing's warning).
+        //    outside-in: ring, black stroke, state fill) — 2 px of it on every side of the dot at 100%. No Fill until
+        //    the first SetFlashRing hands the window's shared brush, and deliberately NO Opacity write anywhere (the
+        //    blink is an expression on it — see SetFlashRing's warning).
         Shapes::Ellipse ring{};
         ring.Width(kRingDiameter);
         ring.Height(kRingDiameter);
-        // Centered like the tab's, then pulled a hair left and up (kRingNudge: the user's 1 px left and up at 100%).
-        // The far sides get the same amount back, so the two margins sum to exactly 0: the ring's slot, its desired
-        // size and the icon's layout are the centered ring's, and only the direction its half-pixel offset rounds
-        // changes. The rounded offset is a whole physical pixel, so the ring stays on the pixel grid (no soft edge).
+        // Centered like the tab's, with no offset of its own: kRingDiameter's size alone puts it on the dot's center
+        // (see there). XAML rounds the 13.95 DIP Width to whole pixels (14 px at 100%) and GetMinMax rounds the max to
+        // match, so the ellipse is drawn at its rounded size with no layout clip; it fits the 18 DIP cell.
         ring.HorizontalAlignment(HorizontalAlignment::Center);
         ring.VerticalAlignment(VerticalAlignment::Center);
-        ring.Margin(ThicknessHelper::FromLengths(-kRingNudge, -kRingNudge, kRingNudge, kRingNudge));
         ring.IsHitTestVisible(false);
         ring.Visibility(Visibility::Collapsed);
         root.Children().Append(ring);
