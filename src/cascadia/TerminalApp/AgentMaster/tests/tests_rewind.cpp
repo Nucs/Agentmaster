@@ -23,6 +23,7 @@
 #include "m5_tests.h"
 
 #include "../ApiErrorRewind.h"
+#include "../ConnectionLostRestart.h" // TestConnectionLostRestart — the automatic restart after a lost connection
 
 #include <algorithm>
 #include <fstream>
@@ -1188,4 +1189,339 @@ void TestInterruptedTurns()
     TestAutoContinueSetting();
     TestForkTurnStopDecision();
     TestTurnQuestionTexts();
+}
+
+// ===== the AUTOMATIC RESTART after a lost connection (ConnectionLostRestart.h; HOOKS.md "Connection lost mid-response — the
+// automatic restart"; the user's request of 2026-11-08) =====
+namespace
+{
+    // A system row Claude Code writes after a turn (its away_summary minutes later, …), parented like its other bookkeeping.
+    std::string SystemRow(const std::string& uuid, const std::string& parent, const std::string& subtype)
+    {
+        return "{\"parentUuid\":" + Parent(parent) + ",\"isSidechain\":false,\"type\":\"system\",\"subtype\":" + Q(subtype) + ",\"isMeta\":false" + Common(uuid, "2026-11-08T09:12:02.775Z") + "}";
+    }
+
+    // The 2.1.310 shape of the user's session d42f0aea (2026-11-08, the session that prompted the feature; dummy text): a tool
+    // result, the NON-explicit last-prompt claude wrote before the reply, the cut half-response (thinking + text, one message
+    // id), the error row with its streamCutCause, the turn_duration and the away_summary written minutes later.
+    std::string ConnectionLostTail310()
+    {
+        return Join({
+            UserPrompt("u0000001", "", "dedupe the eateries"),
+            ToolUse("a0000001", "u0000001", "msg_1", "toolu_1"),
+            ToolResult("r0000001", "a0000001", "toolu_1"),
+            LastPrompt("r0000001", "dedupe the eateries"),
+            Partial("p0000001", "r0000001", "msg_2", true),
+            Partial("p0000002", "p0000001", "msg_2", false),
+            ApiError("e0000001", "p0000002", "API Error: Connection lost mid-response. The response above may be incomplete.", true, "stop_sequence", ",\"streamCutCause\":\"stale_connection\""),
+            TurnDuration("t0000001", "e0000001"),
+            SystemRow("s0000001", "t0000001", "away_summary"),
+        });
+    }
+
+    // The facts of a session the registry gate restarts: every other case below changes ONE of them.
+    ConnectionLostRestartFacts GoFacts()
+    {
+        ConnectionLostRestartFacts f;
+        f.settingOn = true;
+        f.takeBackOn = true;
+        f.isClaude = true;
+        f.live = true;
+        f.hostedHere = true;
+        f.started = true;
+        f.external = false;
+        f.state = SessionState::Error;
+        f.errorDismissed = false;
+        f.errorMessage = L"API Error: Connection lost mid-response. The response above may be incomplete."; // a literal: the view never dangles
+        return f;
+    }
+
+    void TestConnectionLostText()
+    {
+        CHECK(IsConnectionLostMidResponseError(L"API Error: Connection lost mid-response. The response above may be incomplete."), "conn-lost text: Claude Code's own row text matches");
+        CHECK(IsConnectionLostMidResponseError(L"api error: CONNECTION LOST MID-RESPONSE."), "conn-lost text: the match ignores ASCII case");
+        CHECK(IsConnectionLostMidResponseError(L"\x05E9\x05DC Connection lost mid-response"), "conn-lost text: a non-ASCII prefix does not hide the words");
+        CHECK(IsConnectionLostMidResponseError(L"Connection lost mid-response"), "conn-lost text: the words alone match (at the very start and end of the text)");
+        CHECK(!IsConnectionLostMidResponseError(L"API Error: Server error mid-response. The response above may be incomplete."), "conn-lost text: a server error mid-response is another error");
+        CHECK(!IsConnectionLostMidResponseError(L"API Error: Connection lost before a response was produced. Try again."), "conn-lost text: the before-any-output variant is not matched (any resume continues it)");
+        CHECK(!IsConnectionLostMidResponseError(L"API Error: The response stopped arriving. The response above may be incomplete."), "conn-lost text: a stalled stream is another error");
+        CHECK(!IsConnectionLostMidResponseError(L""), "conn-lost text: an empty message never matches");
+        CHECK(!IsConnectionLostMidResponseError(L"Connection lost mid-respons"), "conn-lost text: a text shorter than the words never matches");
+    }
+
+    void TestConnectionLostRegistryGate()
+    {
+        using G = ConnectionLostRestartGate;
+        const auto go = DecideConnectionLostRestart(GoFacts());
+        CHECK(go.gate == G::Go && go.reason.empty(), "gate: a started Claude session hosted here, in an unacknowledged lost-connection Error, restarts");
+        // Ignore: not this feature's business (nothing is logged for these).
+        {
+            auto f = GoFacts();
+            f.isClaude = false;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate: a Codex session is ignored");
+        }
+        {
+            auto f = GoFacts();
+            f.live = false;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate: an archived session is ignored");
+        }
+        {
+            auto f = GoFacts();
+            f.hostedHere = false;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate: a session another window hosts is that window's to restart");
+        }
+        {
+            auto f = GoFacts();
+            f.state = SessionState::Running;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate: a session that runs again (a retry) is ignored");
+            f.state = SessionState::WaitingForInput;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate: a session out of Error (a rewind) is ignored");
+        }
+        {
+            auto f = GoFacts();
+            f.errorDismissed = true;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate: an error the user acknowledged (Move to Idle/Done) is ignored");
+        }
+        {
+            auto f = GoFacts();
+            f.errorMessage = L"API Error: Server error mid-response. The response above may be incomplete.";
+            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate: another API error is ignored");
+            f.errorMessage = L"The last turn stopped before it finished.";
+            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate: a cut-off turn's Error is ignored");
+        }
+        {
+            auto f = GoFacts();
+            f.started = false;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate: a dormant tab is ignored (its own start takes the error back)");
+        }
+        // Decline: a lost connection this window will not restart (logged once per episode).
+        {
+            auto f = GoFacts();
+            f.settingOn = false;
+            const auto r = DecideConnectionLostRestart(f);
+            CHECK(r.gate == G::Decline && r.reason.find(L"Settings") != std::wstring_view::npos, "gate: the switch off declines, naming the setting");
+        }
+        {
+            auto f = GoFacts();
+            f.external = true;
+            const auto r = DecideConnectionLostRestart(f);
+            CHECK(r.gate == G::Decline && r.reason.find(L"adopted") != std::wstring_view::npos, "gate: an adopted session declines (its ConPTY is the user's shell)");
+        }
+        {
+            auto f = GoFacts();
+            f.takeBackOn = false;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Decline, "gate: without the API-error take-back a restart heals nothing - declined");
+        }
+        {
+            auto f = GoFacts();
+            f.stopIntent = true;
+            const auto r = DecideConnectionLostRestart(f);
+            CHECK(r.gate == G::Decline && r.reason.find(L"interrupted") != std::wstring_view::npos,
+                  "gate: a recorded stop intent (Fork / Restart interrupted) declines - \"uninterrupted\" is the answer the user did not give");
+            f.draftInBox = true;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Decline, "gate order: a stop intent stays a decline whatever holds");
+        }
+        // Hold: restarted once the reason passes.
+        {
+            auto f = GoFacts();
+            f.draftInBox = true;
+            const auto r = DecideConnectionLostRestart(f);
+            CHECK(r.gate == G::Hold && r.reason.find(L"draft") != std::wstring_view::npos, "gate: an unsent draft holds the restart (it would wipe the draft)");
+        }
+        {
+            auto f = GoFacts();
+            f.boxBusy = true;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Hold, "gate: a delivery / draft fill / stop watch owning the box holds the restart");
+        }
+        {
+            auto f = GoFacts();
+            f.backgroundWork = true;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Hold, "gate: background work (a shell, an agent) holds the restart");
+        }
+        // The order: Ignore before Decline before Hold.
+        {
+            auto f = GoFacts();
+            f.settingOn = false;
+            f.draftInBox = true;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Decline, "gate order: a declined restart stays declined whatever holds");
+        }
+        {
+            auto f = GoFacts();
+            f.state = SessionState::Idle;
+            f.settingOn = false;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate order: a session out of Error is ignored, never declined");
+        }
+        {
+            auto f = GoFacts();
+            f.started = false;
+            f.external = true;
+            f.settingOn = false;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate order: a dormant tab is ignored before any decline");
+        }
+        {
+            auto f = GoFacts();
+            f.errorMessage = L"API Error: Overloaded";
+            f.draftInBox = true;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate order: another error never holds");
+        }
+    }
+
+    void TestConnectionLostTranscriptGate()
+    {
+        const std::wstring sid = L"5e551011-0000-4000-8000-000000000001";
+        const auto plan = PlanApiErrorRewind(ConnectionLostTail310(), true, sid);
+        CHECK(plan.verdict == ApiErrorRewindVerdict::Rewind && plan.targetUuid == L"r0000001" && plan.targetKind == L"tool result" && plan.partialRows == 2 && plan.errorUuid == L"e0000001",
+              "transcript gate: the 2.1.310 shape (streamCutCause, a non-explicit marker before the reply, an away_summary) plans the take-back onto the tool result");
+        const auto go = DecideConnectionLostRestartFromPlan(plan, L"", 0);
+        CHECK(go.verdict == ConnectionLostPlanVerdict::Restart && go.reason.empty(), "transcript gate: a new error row with budget left restarts");
+        CHECK(DecideConnectionLostRestartFromPlan(plan, L"e0000001", 1).verdict == ConnectionLostPlanVerdict::AlreadyRestarted,
+              "transcript gate: the error row a restart was already made for is never restarted again (that restart did not take it back)");
+        CHECK(DecideConnectionLostRestartFromPlan(plan, L"e0000000", kConnectionLostRestartBudget - 1).verdict == ConnectionLostPlanVerdict::Restart,
+              "transcript gate: another error row restarts while under the budget");
+        const auto over = DecideConnectionLostRestartFromPlan(plan, L"e0000000", kConnectionLostRestartBudget);
+        CHECK(over.verdict == ConnectionLostPlanVerdict::OverBudget && over.reason.find(L"30 minutes") != std::wstring::npos, "transcript gate: the budget caps the restarts and says over which time");
+        // Already taken back (the line is in the file): nothing left to heal.
+        const auto rewound = PlanApiErrorRewind(ConnectionLostTail310() + plan.markerLine + "\n", true, sid);
+        CHECK(DecideConnectionLostRestartFromPlan(rewound, L"", 0).verdict == ConnectionLostPlanVerdict::NothingToTakeBack, "transcript gate: a transcript already taken back has nothing to heal");
+        // Another error at the active leaf.
+        {
+            const auto bytes = Join({
+                UserPrompt("u1", "", "go"),
+                ToolUse("a1", "u1", "msg_1", "toolu_1"),
+                ToolResult("r1", "a1", "toolu_1"),
+                Partial("p1", "r1", "msg_2", false),
+                ApiError("e1", "p1", "API Error: Server error mid-response. The response above may be incomplete.", true, "stop_sequence", ",\"streamCutCause\":\"server_error\""),
+                TurnDuration("t1", "e1"),
+            });
+            const auto r = DecideConnectionLostRestartFromPlan(PlanApiErrorRewind(bytes, true, sid), L"", 0);
+            CHECK(r.verdict == ConnectionLostPlanVerdict::NotThisError && r.reason.find(L"Server error") != std::wstring::npos, "transcript gate: the transcript's error is another one - not restarted, and the log quotes it");
+        }
+        // The planner leaves the error alone: a refusal, a torn last line, two responses above the error.
+        {
+            const auto refusal = Join({ UserPrompt("u1", "", "x"), Partial("p1", "u1", "msg_1", false), ApiError("e1", "p1", "API Error: Connection lost mid-response.", true, "refusal"), TurnDuration("t1", "e1") });
+            CHECK(DecideConnectionLostRestartFromPlan(PlanApiErrorRewind(refusal, true, sid), L"", 0).verdict == ConnectionLostPlanVerdict::NotTakenBack, "transcript gate: a refused response is never taken back, so never restarted");
+            auto torn = ConnectionLostTail310();
+            torn.pop_back();
+            CHECK(DecideConnectionLostRestartFromPlan(PlanApiErrorRewind(torn, true, sid), L"", 0).verdict == ConnectionLostPlanVerdict::NotTakenBack, "transcript gate: a torn last line is not restarted");
+            const auto two = Join({
+                UserPrompt("u1", "", "x"),
+                Reply("a1", "u1", "msg_A", "complete answer"),
+                Partial("p1", "a1", "msg_B", false),
+                ApiError("e1", "p1", "API Error: Connection lost mid-response.", true),
+                TurnDuration("t1", "e1"),
+            });
+            const auto r = DecideConnectionLostRestartFromPlan(PlanApiErrorRewind(two, true, sid), L"", 0);
+            CHECK(r.verdict == ConnectionLostPlanVerdict::NotTakenBack && !r.reason.empty(), "transcript gate: an unknown shape is not restarted, and the planner's reason is logged");
+        }
+        // The take-back lands on a row Claude Code would not continue by itself (a slash command's skill text).
+        {
+            const auto bytes = Join({
+                UserPrompt("u1", "", "<command-name>/np-function</command-name>"),
+                MetaUser("m1", "u1", "When user requests /np-function, follow these instructions"),
+                Partial("p1", "m1", "msg_1", false),
+                ApiError("e1", "p1", "API Error: Connection lost mid-response. The response above may be incomplete.", true),
+                TurnDuration("t1", "e1"),
+            });
+            const auto r = DecideConnectionLostRestartFromPlan(PlanApiErrorRewind(bytes, true, sid), L"", 0);
+            CHECK(r.verdict == ConnectionLostPlanVerdict::WouldNotContinue && r.reason.find(L"meta") != std::wstring::npos, "transcript gate: a meta target would not continue - not restarted");
+        }
+        // A healthy transcript (the race where the user retried meanwhile).
+        {
+            const auto healthy = Join({ UserPrompt("u1", "", "x"), Reply("a1", "u1", "m", "ok"), TurnDuration("t1", "a1") });
+            CHECK(DecideConnectionLostRestartFromPlan(PlanApiErrorRewind(healthy, true, sid), L"", 0).verdict == ConnectionLostPlanVerdict::NothingToTakeBack, "transcript gate: no error at the leaf - nothing to heal");
+        }
+        CHECK(std::wstring{ ConnectionLostPlanVerdictName(ConnectionLostPlanVerdict::Restart) } == L"restart" &&
+                  std::wstring{ ConnectionLostPlanVerdictName(ConnectionLostPlanVerdict::OverBudget) } == L"over-budget" &&
+                  std::wstring{ ConnectionLostPlanVerdictName(static_cast<ConnectionLostPlanVerdict>(99)) } == L"unknown",
+              "transcript gate: the verdicts' log words (a stray value reads unknown)");
+    }
+
+    void TestConnectionLostOutcome()
+    {
+        using O = ConnectionLostRestartOutcome;
+        CHECK(DecideConnectionLostRestartOutcome(false, SessionState::Running, true, 0) == O::Gone, "outcome: a closed session is gone, whatever its state");
+        CHECK(DecideConnectionLostRestartOutcome(true, SessionState::Running, false, 4000) == O::Healed, "outcome: the turn runs again - healed");
+        CHECK(DecideConnectionLostRestartOutcome(true, SessionState::NeedsApproval, false, 9000) == O::Healed, "outcome: the continuation asks for a permission - healed too");
+        CHECK(DecideConnectionLostRestartOutcome(true, SessionState::Error, false, 5000) == O::Waiting,
+              "outcome: Error again during the held start (the error stays the leaf until the take-back line is written) is not a failure");
+        CHECK(DecideConnectionLostRestartOutcome(true, SessionState::Idle, false, kConnectionLostRestartConfirmMs - 1) == O::Waiting, "outcome: still waiting a millisecond before the confirm window ends");
+        CHECK(DecideConnectionLostRestartOutcome(true, SessionState::Idle, false, kConnectionLostRestartConfirmMs) == O::NotHealed, "outcome: the confirm window passed without the turn going on - not healed");
+        CHECK(DecideConnectionLostRestartOutcome(true, SessionState::Error, false, kConnectionLostRestartConfirmMs) == O::NotHealed, "outcome: still in Error after the window - not healed");
+        CHECK(DecideConnectionLostRestartOutcome(true, SessionState::WaitingForInput, false, 3 * kConnectionLostRestartConfirmMs) == O::NotHealed,
+              "outcome: the error taken back but nothing continued (a settings file turned the switch off) - not healed, the user is told");
+        CHECK(DecideConnectionLostRestartOutcome(true, SessionState::Done, false, -5) == O::Waiting, "outcome: a negative clock reads as no time passed");
+        // A turn the new claude ENDED after the restart (a real Stop / a terminal reply line).
+        CHECK(DecideConnectionLostRestartOutcome(true, SessionState::WaitingForInput, true, 3000) == O::Healed,
+              "outcome: a continuation answered so fast that no scan saw it run still counts as healed (the e2e mock's case, flows/06 INT-01)");
+        CHECK(DecideConnectionLostRestartOutcome(true, SessionState::Idle, true, 3000) == O::Healed, "outcome: ...in Idle too");
+        CHECK(DecideConnectionLostRestartOutcome(true, SessionState::Error, true, 3000) == O::NotHealed,
+              "outcome: a turn that ended with the session in Error again - the continuation failed, not healed (and decided at once, not after the window)");
+        CHECK(DecideConnectionLostRestartOutcome(true, SessionState::Running, true, 3000) == O::Healed, "outcome: running again outranks an older turn end");
+    }
+
+    void TestConnectionLostRunnerGiveBack()
+    {
+        AutorunnerState a;
+        a.mode = AutorunnerMode::Off;
+        a.stopOnErrorPausedMode = AutorunnerMode::Full;
+        a.stopOnErrorPausedEpisodeMs = 1000;
+        CHECK(ShouldGiveRunnerBackAfterRestart(a, 1000), "give-back: the mode the stop-on-error pause took goes back once that episode is healed");
+        CHECK(!ShouldGiveRunnerBackAfterRestart(a, 2000), "give-back: a pause of another Error episode is not given back");
+        {
+            auto b = a;
+            b.mode = AutorunnerMode::Full;
+            CHECK(!ShouldGiveRunnerBackAfterRestart(b, 1000), "give-back: a runner that runs already is left as it is");
+        }
+        {
+            auto b = a;
+            b.stopOnErrorPausedMode = AutorunnerMode::Off;
+            CHECK(!ShouldGiveRunnerBackAfterRestart(b, 1000), "give-back: a pause that took nothing gives nothing back");
+        }
+        {
+            auto b = a;
+            b.stopOnErrorPausedEpisodeMs = 0;
+            CHECK(!ShouldGiveRunnerBackAfterRestart(b, 0), "give-back: an unstamped pause never matches, not even an episode of 0");
+        }
+        {
+            auto b = a;
+            ClearInterruptHold(b);
+            CHECK(!ShouldGiveRunnerBackAfterRestart(b, 1000) && b.stopOnErrorPausedMode == AutorunnerMode::Off && b.stopOnErrorPausedEpisodeMs == 0 && b.mode == AutorunnerMode::Off,
+                  "give-back: every mode decision (ClearInterruptHold) forgets the pause and leaves the mode alone");
+        }
+    }
+
+    void TestConnectionLostLedger()
+    {
+        constexpr int64_t kMin = 60 * 1000;
+        ConnectionLostRestartLedger ledger;
+        auto e = ledger.Look(L"s1", 0);
+        CHECK(e.lastErrorUuid.empty() && e.restartsInWindow == 0, "ledger: a session never restarted has no history");
+        ledger.Note(L"s1", L"e1", 1000);
+        e = ledger.Look(L"s1", 2000);
+        CHECK(e.lastErrorUuid == L"e1" && e.restartsInWindow == 1, "ledger: a restart is remembered with its error row");
+        CHECK(ledger.Look(L"s2", 2000).restartsInWindow == 0 && ledger.Look(L"s2", 2000).lastErrorUuid.empty(), "ledger: sessions are counted apart");
+        ledger.Note(L"s1", L"e2", 10 * kMin);
+        ledger.Note(L"s1", L"e3", 20 * kMin);
+        e = ledger.Look(L"s1", 25 * kMin);
+        CHECK(e.restartsInWindow == 3 && e.lastErrorUuid == L"e3", "ledger: three restarts in the window, the newest error row last");
+        CHECK(ledger.Look(L"s1", 1000 + kConnectionLostRestartWindowMs - 1).restartsInWindow == 3, "ledger: a restart still counts a millisecond before its window ends");
+        CHECK(ledger.Look(L"s1", 1000 + kConnectionLostRestartWindowMs).restartsInWindow == 2, "ledger: ...and leaves the count when it does");
+        ledger.Note(L"s1", L"e4", 60 * kMin);
+        e = ledger.Look(L"s1", 60 * kMin);
+        CHECK(e.restartsInWindow == 1 && e.lastErrorUuid == L"e4", "ledger: an old stretch of restarts no longer counts against a new one");
+        ConnectionLostRestartLedger back;
+        back.Note(L"s", L"e", 10 * kMin);
+        CHECK(back.Look(L"s", 5 * kMin).restartsInWindow == 1, "ledger: a restart stamped after the asked time (a clock that went back) still counts - the budget only gets stricter");
+        CHECK(&SharedConnectionLostRestartLedger() == &SharedConnectionLostRestartLedger(), "ledger: one shared ledger per process");
+    }
+}
+
+void TestConnectionLostRestart()
+{
+    TestConnectionLostText();
+    TestConnectionLostRegistryGate();
+    TestConnectionLostTranscriptGate();
+    TestConnectionLostOutcome();
+    TestConnectionLostRunnerGiveBack();
+    TestConnectionLostLedger();
 }

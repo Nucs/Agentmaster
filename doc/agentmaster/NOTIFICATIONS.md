@@ -249,6 +249,16 @@ the track leak-proof:
   `[notify-dedupe]`) additionally caps a W→R→W flap at one SHOWN toast per window, immediate and
   deferred paths alike. The flash ring still fires on the transient edge (deliberate — it self-clears
   on the re-promotion; a toast doesn't).
+- **A lost connection the app restarts by itself waits for the outcome (2026-11-08, NOT BUILT).** The one Error that does
+  hold: a Running → Error toast whose session the hosting window is restarting automatically ("API Error: Connection lost
+  mid-response" — HOOKS.md *Connection lost mid-response — the automatic restart*). `_EvaluateAgentNotification` hands it
+  to the restart's track (`_HoldToastForConnectionLostRestart`, `[notify-hold] … a lost connection that this window
+  restarts by itself`) instead of firing it; it is **dropped** when the restart heals the session (the turn runs again,
+  `[auto-restart] … healed … its held Error toast is dropped`) and **shown with the session's state at that moment** through
+  `_FireAgentCompletionToast` — the cog switches, focused-skip and duplicate guard apply — when the restart is declined,
+  held after its transcript read, refused, or does not heal within 2 minutes (`[notify-release] <sid8> the held running ->
+  error toast is shown as <state> after N s: <why>`). A session the restart holds from the start (an unsent draft, a
+  delivery, background work) toasts at once, as before.
 - **Click after the app exits = a normal start, then a best-effort jump.** The manifests' ExeServer
   brings Agentmaster back (workspace restore and all) and the SCM's pending activation jumps to the
   session once the engine registers the class object — *if* it beats the SCM's activation timeout on a

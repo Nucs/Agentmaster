@@ -77,6 +77,12 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
   §11).
 - `resumeApiErrorTurns` (true): append the one-line rewind so a resumed session continues a turn that an
   API error ended (HOOKS.md *API-error turns*).
+- `autoRestartOnConnectionLost` (true): a session whose turn dies on "API Error: Connection lost mid-response" is
+  restarted by the window that hosts its tab as "Restart uninterrupted", with no question and no tab switch — not while
+  its box holds an unsent draft, a delivery owns the box or claude still runs background work; never twice for one
+  error row; at most 3 times per session in 30 minutes; the Error toast waits for the outcome; a healed session's Prompt
+  Queue Runner gets back the mode stop-on-error took. Needs `resumeApiErrorTurns`. Read live from each window's settings
+  copy (HOOKS.md *Connection lost mid-response — the automatic restart*).
 - **Hidden sessions:** Reset hidden sessions clears `hiddenSessionIds` (the Sessions page's Hide from
   list).
 

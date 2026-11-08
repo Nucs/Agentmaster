@@ -1948,6 +1948,10 @@ namespace winrt::TerminalApp::implementation
                                 // shows the half-hollow dot. An external (observe-only) session has no
                                 // control of ours, so it is never "dormant".
                                 const bool dormant = cur->live && !cur->started && !cur->external;
+                                // Agentmaster (HOOKS.md "Connection lost mid-response — the automatic restart"): BEFORE the dot,
+                                // because the dot runs the completion toast — a restart that starts judging here holds this same
+                                // pass's Running -> Error toast. A map lookup and a state test for every other session.
+                                self->_EvaluateConnectionLostRestart(*cur);
                                 self->_UpdateTabAgentDot(id, cur->state, cur->live, dormant);
                             }
                             else
@@ -1997,6 +2001,7 @@ namespace winrt::TerminalApp::implementation
                     self->_SweepHandoverDeletes(); // COMMANDS.md §6b: delete a handed-over md once its successor actually STARTED (opt-in; keeps the file if the successor never comes up)
                     self->_PumpDraftRestores(); // PENDING_INPUT.md §10: type a reopened session's remembered unsent draft back into its input box once its claude starts (fill, never submit)
                     self->_SweepAgentPendingToasts(); // System notifications: fire/drop the HELD completion toasts (spurious-toast suppression — SessionScanner's DecideHeldToast)
+                    self->_SweepConnectionLostRestarts(); // HOOKS.md "Connection lost mid-response — the automatic restart": re-judge held restarts, time a restarted session's heal, settle a lost read (a no-op with no tracks)
                     self->_ScanInferredTabColors(); // tab color modes: re-infer each Claude tab's ACTUAL workdir + recolor (every session under InferredWorkingDirectory; ONLY home-dir launches — forced inference, SessionInfersWorkingDir — in the other modes; throttled + mtime-gated inside)
                     self->_SidePanelPeriodicTick(); // SIDE PANEL: deferred-rebuild catch-up + the summary's mtime-gated re-check + the ~30s in-place timing refresh (self-marshals)
                 }

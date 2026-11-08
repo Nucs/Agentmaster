@@ -808,6 +808,7 @@ void TestAppSettings()
         in.restoreDraftOnResume = false; // non-default (default true = the restore RE-FILL is on) — PENDING_INPUT.md §10
         in.carryDraftOnFork = false; // non-default (default true = the FORK CARRY is on) — PENDING_INPUT.md §11
         in.resumeApiErrorTurns = false; // non-default (default true = the API-ERROR REWIND before a resume) — HOOKS.md "API-error turns"
+        in.autoRestartOnConnectionLost = false; // non-default (default true = the automatic restart after a lost connection) — HOOKS.md "Connection lost mid-response — the automatic restart"
         in.confirmBeforeKill = false;
         in.reapOrphanedSessions = false; // non-default (default true = the §13a orphan reaper is armed) — OBSERVER.md
         in.uiStallAutoRestart = false; // non-default (default true = the ui-stall RESTART tier is armed) — Engine.h escalation
@@ -891,6 +892,8 @@ void TestAppSettings()
         CHECK(DeserializeAppSettings(L"{\"version\":1,\"settings\":{}}").carryDraftOnFork == true, "settings carryDraftOnFork: an absent key (a pre-§11 settings.json) reads ON");
         CHECK(out.resumeApiErrorTurns == false, "settings resumeApiErrorTurns round-trip (the API-error rewind OFF)");
         CHECK(DeserializeAppSettings(L"{\"version\":1,\"settings\":{}}").resumeApiErrorTurns == true, "settings resumeApiErrorTurns: an absent key (every settings.json before the rewind) reads ON");
+        CHECK(out.autoRestartOnConnectionLost == false, "settings autoRestartOnConnectionLost round-trip (the automatic restart after a lost connection OFF)");
+        CHECK(DeserializeAppSettings(L"{\"version\":1,\"settings\":{}}").autoRestartOnConnectionLost == true, "settings autoRestartOnConnectionLost: an absent key (every settings.json before the automatic restart) reads ON");
         CHECK(out.confirmBeforeKill == false, "settings confirmBeforeKill round-trip");
         CHECK(out.reapOrphanedSessions == false, "settings reapOrphanedSessions round-trip (orphan reaper OFF)");
         CHECK(out.uiStallAutoRestart == false, "settings uiStallAutoRestart round-trip (restart tier OFF)");

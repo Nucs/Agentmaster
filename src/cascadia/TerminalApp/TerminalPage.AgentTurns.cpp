@@ -35,6 +35,14 @@
 //     where the user clicked, like the first question: the tab menu's restart in the hosting window
 //     (_AskRestartTurnThenRestart), the Manager's restart of a session another window hosts (_AskRestartTurnThenFanOut), a
 //     Telegram restart in the topic (Messaging.Inbound.cpp, _askRestartTurnBeforeRestart).
+//   * THE AUTOMATIC RESTART AFTER A LOST CONNECTION (the user's request of 2026-11-08: "Lets add self healing for error "●
+//     API Error: Connection lost mid-response. The response above may be incomplete." by restarting session as uninterrupted
+//     automatically. As soon as this error state is detected, we shall restart the tab automatically (without switching to it
+//     and without opening a prompt asking for interrupted or uninterrupted restart)"). The window hosting the tab answers the
+//     third question itself — "Restart uninterrupted", RestartTurnChoice::LetTurnContinue — the moment its session enters
+//     Error on that error: a registry gate (no I/O, every registry change), a transcript gate (one tail read per Error
+//     episode, off the UI thread), the restart of the session's OWN pane, then a watch for the turn to run again. Its pure
+//     rules are AgentMaster/ConnectionLostRestart.h; HOOKS.md "Connection lost mid-response — the automatic restart".
 //
 // Measured on 2.1.291 against the e2e mock (tools/e2e-spike): a fork of a running session went busy ~5 s after launch and
 // sent its first request ~0.4–1.1 s later; one Esc then left Claude Code's "Continue from where you left off." row
@@ -45,12 +53,17 @@
 #include "pch.h"
 #include "TerminalPage.h"
 
+#include "../../types/inc/utils.hpp" // GuidToPlainString — the automatic restart finds the session's own pane by its WT_SESSION
+
+#include "AgentAutomation.h" // AgentStateWord — the automatic restart's log words for a session state
 #include "AgentCatchLog.h" // AgentLogCaughtException (Rule #18)
-#include "AgentMaster/ApiErrorRewind.h" // PlanInterruptRewindForSession, RewindInterruptTailForSession, AssessForkContinuation, AssessRestartContinuation, ProcessExitWait
-#include "AgentMaster/ClaudeSpawn.h" // AppendStateLog, LogNav, ShortId, ResolveSessionEnv, ClaudeConversationExists
+#include "AgentMaster/ApiErrorRewind.h" // PlanInterruptRewindForSession, RewindInterruptTailForSession, AssessForkContinuation, AssessRestartContinuation, ProcessExitWait, PlanApiErrorRewindForSession
+#include "AgentMaster/ClaudeSpawn.h" // AppendStateLog, LogNav, ShortId, ResolveSessionEnv, ClaudeConversationExists, ClaudeProjectsDir
+#include "AgentMaster/ConnectionLostRestart.h" // the automatic restart after a lost connection: its two gates, its outcome, the runner give-back, the ledger
+#include "AgentMaster/SessionScanner.h" // PresenceIsWorking, kScanSubagentFreshMs — the automatic restart's background-work hold
 #include "AgentMaster/Engine.h" // RestartSessionInOtherWindows
 #include "AgentMaster/PendingInput.h" // InputBoxState (the fork's input box on screen)
-#include "AgentMaster/ProcessInspect.h" // SnapshotProcesses, FindDescendantByImage, ProcessStartUnixMs
+#include "AgentMaster/ProcessInspect.h" // SnapshotProcesses, FindDescendantByImage, ProcessStartUnixMs, SubagentActivityUnixMs, EncodeCwdToProjectDir
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/TranscriptStore.h" // ReadSessionPresenceForPid, PresenceRowMatchesProcess
 
@@ -76,6 +89,35 @@ namespace
     bool IsTurnRunningState(::Agentmaster::SessionState state) noexcept
     {
         return state == ::Agentmaster::SessionState::Running || state == ::Agentmaster::SessionState::NeedsApproval;
+    }
+
+    // HOOKS.md "Connection lost mid-response — the automatic restart": how long the transcript read of the automatic restart
+    // may stay out before the liveness sweep settles its track as "not restarted" and shows the Error toast it held. The read
+    // itself is one bounded tail read (normally the last 1 MiB; more only while the planner walks a long half-response); this
+    // only catches a finish that never reached the UI thread (a dispatcher torn down, an exception logged in the coroutine), so
+    // a track can never hold its toast — or block a later restart of the same episode — forever.
+    constexpr int64_t kConnectionLostJudgeTimeoutMs = 120 * 1000;
+
+    // A record's text as ONE hooks.log line: line breaks become spaces (a title can carry a lone CR, and hooks.log is one event
+    // per line) and the text is cut at `maxChars` with an ellipsis.
+    //   text     — the text (a title, an error message).
+    //   maxChars — the most characters kept before the ellipsis.
+    // Returns the line. Throws std::bad_alloc only (the callers' catch logs it, Rule #18).
+    std::wstring OneLogLine(std::wstring_view text, size_t maxChars)
+    {
+        std::wstring out{ text.substr(0, maxChars) };
+        for (auto& c : out)
+        {
+            if (c == L'\r' || c == L'\n')
+            {
+                c = L' ';
+            }
+        }
+        if (text.size() > maxChars)
+        {
+            out += L"\x2026";
+        }
+        return out;
     }
 }
 
@@ -1215,6 +1257,588 @@ namespace winrt::TerminalApp::implementation
         if (outcome == ::Agentmaster::ForkTurnStopAction::GaveUp)
         {
             ::Agentmaster::LogNav(L"fork-stop " + ::Agentmaster::ShortId(forkId) + L" gave up: " + detail);
+        }
+    }
+
+    // ===== the AUTOMATIC RESTART after a lost connection ========================================================
+    // HOOKS.md "Connection lost mid-response — the automatic restart"; the pure rules are AgentMaster/ConnectionLostRestart.h.
+    // A session whose turn dies on "API Error: Connection lost mid-response. The response above may be incomplete." is restarted
+    // by the window hosting its tab as "Restart uninterrupted" — no question, no tab switch — in four steps, all on this
+    // window's UI thread except the transcript read:
+    //   1. the REGISTRY gate on every change of the session (_EvaluateConnectionLostRestart, from the tab-dot drain and the
+    //      liveness sweep): is it this error, on a tab this window can restart safely, with nothing a restart would destroy?
+    //   2. the TRANSCRIPT gate (_JudgeConnectionLostRestart → _FinishConnectionLostJudge): one tail read per Error episode, off
+    //      the UI thread — does the take-back continue the turn, is this error row new, is budget left?
+    //   3. the RESTART of the session's own pane (_RestartAfterConnectionLost → _RestartManagedSession with LetTurnContinue);
+    //   4. the WATCH (_CheckConnectionLostRestartOutcome): the turn runs again → healed (the held Error toast dropped, the
+    //      Prompt Queue Runner given back the mode the stop-on-error pause took); 2 minutes without that → not healed (the held
+    //      toast shown, the session left to the user).
+
+    // See TerminalPage.h.
+    ::Agentmaster::ConnectionLostRestartFacts TerminalPage::_ConnectionLostRestartFactsFor(const ::Agentmaster::SessionInfo& info, bool probeSideFiles)
+    {
+        ::Agentmaster::ConnectionLostRestartFacts f;
+        f.settingOn = _appSettings.autoRestartOnConnectionLost;
+        f.takeBackOn = _appSettings.resumeApiErrorTurns;
+        f.isClaude = info.kind == ::Agentmaster::AgentKind::Claude;
+        f.live = info.live;
+        const auto tabIt = _claudeTabs.find(info.id);
+        f.hostedHere = tabIt != _claudeTabs.end() && tabIt->second.get() != nullptr;
+        f.started = info.started;
+        f.external = info.external;
+        f.stopIntent = info.stopForkedTurn;
+        f.state = info.state;
+        f.errorDismissed = info.errorDismissed;
+        f.errorMessage = info.errorMessage;
+        if (!f.hostedHere || f.state != ::Agentmaster::SessionState::Error || !f.started || !::Agentmaster::IsConnectionLostMidResponseError(f.errorMessage))
+        {
+            // The gate answers Ignore before it reads anything below, so the fleet's other sessions (every window's drain sees
+            // every session's change) — and sessions in another error, or dormant — cost no registry lock and no map lookups.
+            return f;
+        }
+        f.draftInBox = !info.pendingInput.empty();
+        // Every owner of the input box a restart would pull the box from under: a delivery or the mail button's clear (the
+        // delivery gate), the draft swap, a remembered draft being typed back after a resume (its pump would type into the new
+        // claude's box in the middle of the continuation), the fork stop watch (it presses Esc into this very tab).
+        f.boxBusy = (_sessionRegistry && _sessionRegistry->DeliveryGateHeld(info.id)) || _draftSwapsInFlight.count(info.id) != 0 ||
+                    _pendingDraftRestores.count(info.id) != 0 || _forkTurnStopWatches.count(info.id) != 0;
+        // Claude's own heartbeat: "busy" / "shell" == a background shell or agent still works in that process, and a restart
+        // ends the process with everything it runs.
+        f.backgroundWork = ::Agentmaster::PresenceIsWorking(info.presenceStatus);
+        if (probeSideFiles && !f.backgroundWork && !info.workingDir.empty())
+        {
+            // A background agent writes its own transcript beside the session's (subagents\, tool-results\) while the
+            // heartbeat may already read idle — the scanner's recon-subagent and the completion toast's hold read the same
+            // signal (AgentExternalWorkSignal, TerminalPage.AgentObserver.cpp). Two directory enumerations: only for a session
+            // the gate would restart now.
+            const std::wstring transcript = ::Agentmaster::ClaudeProjectsDir() + L"\\" + ::Agentmaster::EncodeCwdToProjectDir(info.workingDir) + L"\\" + info.id + L".jsonl";
+            const int64_t sideMs = ::Agentmaster::SubagentActivityUnixMs(transcript);
+            f.backgroundWork = sideMs > 0 && TurnsUnixMs() - sideMs <= ::Agentmaster::kScanSubagentFreshMs;
+        }
+        return f;
+    }
+
+    // See TerminalPage.h.
+    void TerminalPage::_EvaluateConnectionLostRestart(const ::Agentmaster::SessionInfo& info)
+    {
+        try
+        {
+            using ::Agentmaster::ConnectionLostRestartGate;
+            using ::Agentmaster::SessionState;
+            const std::wstring& id = info.id;
+            auto it = _connectionLostRestarts.find(id);
+            if (it == _connectionLostRestarts.end() && info.state != SessionState::Error)
+            {
+                return; // nearly every call of every drain: no track, and the session is not in Error
+            }
+            if (it != _connectionLostRestarts.end())
+            {
+                if (it->second.phase == ConnectionLostRestartPhase::Restarted)
+                {
+                    // After its restart the session passes through Idle (the restart's normalization), maybe Error again (the
+                    // error stays the active leaf until the take-back line is written, so the scanner asserts it anew), Waiting
+                    // (the line moved the leaf) and Running (the continuation): only the outcome rule reads that, never the gate.
+                    _CheckConnectionLostRestartOutcome(id, info);
+                    return;
+                }
+                if (info.state != SessionState::Error || info.stateChangedAtUnixMs != it->second.errorEpisodeMs)
+                {
+                    // The Error episode this track was about ended: a retry, a rewind, the user's "Move to Idle/Done", a close, or
+                    // a NEW Error episode. A read still out then finds no track and does nothing; a held toast is dropped, since
+                    // the session moved on without the restart.
+                    const auto& old = it->second;
+                    if (old.phase == ConnectionLostRestartPhase::Held || old.phase == ConnectionLostRestartPhase::Judging || old.toastOwed)
+                    {
+                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[auto-restart] " + ::Agentmaster::ShortId(id) + L" let go: the Error episode ended without the automatic restart (now " +
+                                                                        std::wstring{ AgentStateWord(info.state) } + L")" + (old.toastOwed ? L"; its held Error toast is dropped" : L"") + L"\n");
+                    }
+                    _connectionLostRestarts.erase(it);
+                    it = _connectionLostRestarts.end();
+                    if (info.state != SessionState::Error)
+                    {
+                        return;
+                    }
+                }
+                else if (it->second.phase == ConnectionLostRestartPhase::Judging || it->second.phase == ConnectionLostRestartPhase::Settled)
+                {
+                    return; // the read is out (its finish re-runs the gate on a fresh record), or this episode is settled
+                }
+            }
+
+            // 1. THE REGISTRY GATE. The side-file probe (disk) only for a session the gate would restart now.
+            auto facts = _ConnectionLostRestartFactsFor(info, false);
+            auto ruling = ::Agentmaster::DecideConnectionLostRestart(facts);
+            if (ruling.gate == ConnectionLostRestartGate::Go)
+            {
+                facts = _ConnectionLostRestartFactsFor(info, true);
+                ruling = ::Agentmaster::DecideConnectionLostRestart(facts);
+            }
+            if (ruling.gate == ConnectionLostRestartGate::Ignore)
+            {
+                if (it != _connectionLostRestarts.end())
+                {
+                    _connectionLostRestarts.erase(it); // e.g. the tab left this window or was parked: no longer this window's to restart
+                }
+                return;
+            }
+            if (it == _connectionLostRestarts.end())
+            {
+                ConnectionLostRestartTrack fresh;
+                fresh.errorEpisodeMs = info.stateChangedAtUnixMs;
+                it = _connectionLostRestarts.emplace(id, std::move(fresh)).first;
+            }
+            auto& track = it->second;
+            if (ruling.gate == ConnectionLostRestartGate::Decline || ruling.gate == ConnectionLostRestartGate::Hold)
+            {
+                const bool decline = ruling.gate == ConnectionLostRestartGate::Decline;
+                track.phase = decline ? ConnectionLostRestartPhase::Declined : ConnectionLostRestartPhase::Held;
+                if (track.loggedReason != ruling.reason)
+                {
+                    // Once per reason, not per notify: a held session is judged again on every registry change and every tick.
+                    track.loggedReason.assign(ruling.reason);
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[auto-restart] " + ::Agentmaster::ShortId(id) + (decline ? L" not restarted: " : L" waiting before the restart: ") + track.loggedReason +
+                                                                    L" (\"" + OneLogLine(info.title, 80) + L"\" stopped on \"" + OneLogLine(info.errorMessage, 120) + L"\")\n");
+                }
+                return;
+            }
+
+            // 2. GO: the transcript gate decides, on one tail read off the UI thread. Until its finish the track is Judging — which
+            // also makes this same pass's Running -> Error toast wait (_HoldToastForConnectionLostRestart: the drain calls this
+            // function BEFORE the tab dot and its toast).
+            if (!track.loggedReason.empty())
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[auto-restart] " + ::Agentmaster::ShortId(id) + L" no longer waiting (" + track.loggedReason + L")\n");
+                track.loggedReason.clear();
+            }
+            track.phase = ConnectionLostRestartPhase::Judging;
+            track.judgingSinceTickMs = TurnsTickMs();
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[auto-restart] " + ::Agentmaster::ShortId(id) + L" a lost connection: \"" + OneLogLine(info.title, 80) + L"\" stopped on \"" +
+                                                            OneLogLine(info.errorMessage, 120) + L"\" \x2014 reading its transcript to restart it uninterrupted\n");
+            _JudgeConnectionLostRestart(id, track.errorEpisodeMs);
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the track stays as it was; the next registry change or liveness tick judges the session again.
+            ::Agentmaster::AgentLogCaughtException(L"_EvaluateConnectionLostRestart");
+        }
+    }
+
+    // See TerminalPage.h. Terminate-net: an exception escaping a fire_and_forget is std::terminate (Rule #18).
+    winrt::fire_and_forget TerminalPage::_JudgeConnectionLostRestart(std::wstring sessionId, int64_t errorEpisodeMs)
+    {
+        // Both taken BEFORE the first suspension: after it `this` may be gone (the window closed while the file was read), so
+        // the finish reaches the page only through the weak reference.
+        const auto weak = get_weak();
+        const auto dispatcher{ Dispatcher() };
+        try
+        {
+            co_await winrt::resume_background();
+            // A tail read (the last 1 MiB, more only while the planner walks a long half-response). PlanApiErrorRewindForSession
+            // is noexcept: a failed read degrades to NotApplicable with its reason, which the finish reports.
+            const ::Agentmaster::ApiErrorRewindPlan plan = ::Agentmaster::PlanApiErrorRewindForSession(sessionId);
+            co_await wil::resume_foreground(dispatcher);
+            if (const auto self = weak.get())
+            {
+                self->_FinishConnectionLostJudge(sessionId, errorEpisodeMs, plan);
+            }
+        }
+        catch (...)
+        {
+            // Recovery: the track stays Judging; the liveness sweep settles it after kConnectionLostJudgeTimeoutMs and shows the
+            // Error toast it held.
+            ::Agentmaster::AgentLogCaughtException(L"_JudgeConnectionLostRestart");
+        }
+    }
+
+    // See TerminalPage.h.
+    void TerminalPage::_FinishConnectionLostJudge(const std::wstring& sessionId, int64_t errorEpisodeMs, const ::Agentmaster::ApiErrorRewindPlan& plan)
+    {
+        using ::Agentmaster::ConnectionLostRestartGate;
+        using ::Agentmaster::SessionState;
+        try
+        {
+            const auto sid8 = ::Agentmaster::ShortId(sessionId);
+            const auto it = _connectionLostRestarts.find(sessionId);
+            if (it == _connectionLostRestarts.end() || it->second.phase != ConnectionLostRestartPhase::Judging || it->second.errorEpisodeMs != errorEpisodeMs)
+            {
+                return; // the track moved on while the file was read (the episode ended, the window let it go): nothing to do
+            }
+            auto& track = it->second;
+            const auto info = _sessionRegistry ? _sessionRegistry->GetWithoutQueue(sessionId) : std::nullopt;
+            if (!info || info->state != SessionState::Error || info->stateChangedAtUnixMs != errorEpisodeMs)
+            {
+                // The episode ended while the file was read (the user typed, rewound, closed the tab). The next registry change
+                // opens a new track if a new Error comes. A held toast goes with it: the session moved on by itself.
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[auto-restart] " + sid8 + L" let go: the Error episode ended while its transcript was read" +
+                                                                (track.toastOwed ? L"; its held Error toast is dropped" : L"") + L"\n");
+                _connectionLostRestarts.erase(it);
+                return;
+            }
+            // The registry gate AGAIN, on the fresh record: a draft typed, a delivery started, a setting turned off while the file
+            // was read all count, and the side files are probed again.
+            const auto facts = _ConnectionLostRestartFactsFor(*info, true);
+            const auto ruling = ::Agentmaster::DecideConnectionLostRestart(facts);
+            if (ruling.gate != ConnectionLostRestartGate::Go)
+            {
+                const std::wstring reason{ ruling.reason };
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[auto-restart] " + sid8 + L" not restarted now: " + reason + L"\n");
+                // The error is the user's again until the gate says otherwise: the held toast shows now (a restart made later, once
+                // a hold passes, heals without a second toast).
+                _ReleaseConnectionLostRestartToast(sessionId, track, info->state, reason);
+                if (ruling.gate == ConnectionLostRestartGate::Ignore)
+                {
+                    _connectionLostRestarts.erase(it);
+                }
+                else
+                {
+                    track.phase = ruling.gate == ConnectionLostRestartGate::Decline ? ConnectionLostRestartPhase::Declined : ConnectionLostRestartPhase::Held;
+                    track.loggedReason = reason;
+                }
+                return;
+            }
+            // 2. THE TRANSCRIPT GATE: the take-back must continue the turn, the error row must be new, the budget must allow it.
+            const auto look = ::Agentmaster::SharedConnectionLostRestartLedger().Look(sessionId, TurnsTickMs());
+            const auto verdict = ::Agentmaster::DecideConnectionLostRestartFromPlan(plan, look.lastErrorUuid, look.restartsInWindow);
+            if (verdict.verdict != ::Agentmaster::ConnectionLostPlanVerdict::Restart)
+            {
+                track.phase = ConnectionLostRestartPhase::Settled;
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[auto-restart] " + sid8 + L" not restarted (" + ::Agentmaster::ConnectionLostPlanVerdictName(verdict.verdict) + L"): " + verdict.reason +
+                                                                L" \x2014 the session waits at the error for you\n");
+                _ReleaseConnectionLostRestartToast(sessionId, track, info->state, L"not restarted: " + verdict.reason);
+                return;
+            }
+            // 3. THE RESTART. The track is marked Restarted FIRST, so a registry change the restart raises — which normalizes the
+            // session out of Error — can only ever meet the watch, never the "episode ended" branch.
+            track.phase = ConnectionLostRestartPhase::Restarted;
+            track.restartedTickMs = TurnsTickMs();
+            track.restartedUnixMs = TurnsUnixMs();
+            track.errorUuid = plan.errorUuid;
+            std::wstring why;
+            if (!_RestartAfterConnectionLost(sessionId, *info, plan, why))
+            {
+                // Re-found: nothing in the refused restart touches the map, but it ran registry code, and a stale reference must
+                // never be written through.
+                if (const auto again = _connectionLostRestarts.find(sessionId); again != _connectionLostRestarts.end())
+                {
+                    again->second.phase = ConnectionLostRestartPhase::Settled;
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[auto-restart] " + sid8 + L" not restarted: " + why + L" \x2014 the session waits at the error for you\n");
+                    _ReleaseConnectionLostRestartToast(sessionId, again->second, info->state, L"not restarted: " + why);
+                }
+                return;
+            }
+            // 4. THE WATCH runs from the drain and the sweep (_CheckConnectionLostRestartOutcome).
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_FinishConnectionLostJudge");
+            // Recovery: settle the episode (a failure must not run again on every notify) and give the user the toast it held.
+            try
+            {
+                if (const auto it = _connectionLostRestarts.find(sessionId); it != _connectionLostRestarts.end() && it->second.phase == ConnectionLostRestartPhase::Judging)
+                {
+                    it->second.phase = ConnectionLostRestartPhase::Settled;
+                    _ReleaseConnectionLostRestartToast(sessionId, it->second, SessionState::Error, L"the automatic restart failed (exception logged)");
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"_FinishConnectionLostJudge settle");
+            }
+        }
+    }
+
+    // See TerminalPage.h.
+    bool TerminalPage::_RestartAfterConnectionLost(const std::wstring& sessionId, const ::Agentmaster::SessionInfo& info, const ::Agentmaster::ApiErrorRewindPlan& plan, std::wstring& why)
+    {
+        why.clear();
+        const auto tabIt = _claudeTabs.find(sessionId);
+        const auto tab = tabIt != _claudeTabs.end() ? tabIt->second.get() : nullptr;
+        const auto tabImpl = tab ? _GetTabImpl(tab) : nullptr;
+        const auto rootPane = tabImpl ? tabImpl->GetRootPane() : nullptr;
+        if (!rootPane)
+        {
+            why = L"its tab is no longer in this window";
+            return false;
+        }
+        // The session's OWN pane: the one whose connection's WT_SESSION is the record's tabToken (the Deactivate and
+        // /handover-here discipline). Without a match only a tab with ONE terminal pane is unambiguous — in a split the active
+        // or the first pane can be the user's shell, and restarting it would end their shell to resume a conversation there.
+        TerminalApp::TerminalPaneContent own{ nullptr };
+        TerminalApp::TerminalPaneContent lastTerminal{ nullptr };
+        size_t terminals = 0;
+        rootPane->WalkTree([&](auto&& pane) {
+            if (const auto content = pane->GetContent())
+            {
+                if (const auto term = content.try_as<TerminalApp::TerminalPaneContent>())
+                {
+                    ++terminals;
+                    lastTerminal = term;
+                    if (!info.tabToken.empty())
+                    {
+                        if (const auto ctrl = term.GetTermControl())
+                        {
+                            if (const auto conn = ctrl.Connection(); conn && ::Agentmaster::TabTokenEq(info.tabToken, ::Microsoft::Console::Utils::GuidToPlainString(conn.SessionId())))
+                            {
+                                own = term;
+                                return true; // the session's own pane — stop walking
+                            }
+                        }
+                    }
+                }
+            }
+            return false;
+        });
+        if (!own)
+        {
+            if (terminals != 1)
+            {
+                why = terminals == 0 ? std::wstring{ L"its tab holds no terminal pane" } :
+                                       L"its tab is split and no pane carries the session's WT_SESSION (" + (info.tabToken.empty() ? std::wstring{ L"none recorded" } : info.tabToken) +
+                                           L"), so the restart cannot tell which pane is Claude's";
+                return false;
+            }
+            own = lastTerminal;
+        }
+        const auto control = own.GetTermControl();
+        if (!control || control.ConnectionState() == ConnectionState::NotConnected)
+        {
+            // _restartPaneConnection's guard: restarting a never-initialized control AVs inside the control DLL.
+            why = L"its pane's connection never started (a dormant tab takes the error back at its own start)";
+            return false;
+        }
+        const auto oldConnection = control.Connection();
+        // _RestartManagedSession picks the conversation it restarts from the connection: it must be this one.
+        if (const auto owner = _ManagedSessionForConnection(oldConnection); owner != sessionId)
+        {
+            why = L"its pane resolves to " + (owner.empty() ? std::wstring{ L"no managed session" } : ::Agentmaster::ShortId(owner)) + L", not to this session";
+            return false;
+        }
+        auto& ledger = ::Agentmaster::SharedConnectionLostRestartLedger();
+        const int64_t now = TurnsTickMs();
+        const size_t before = ledger.Look(sessionId, now).restartsInWindow;
+        // Noted BEFORE the restart: nothing that runs inside it can start a second one for this error row.
+        ledger.Note(sessionId, plan.errorUuid, now);
+        ::Agentmaster::LogNav(L"auto-restart-begin " + ::Agentmaster::ShortId(sessionId) + L" (a lost connection: error row " + ::Agentmaster::ShortId(plan.errorUuid) + L", taken back to the " +
+                              plan.targetKind + L" " + ::Agentmaster::ShortId(plan.targetUuid) + L"; automatic restart " + std::to_wstring(before + 1) + L" of at most " +
+                              std::to_wstring(::Agentmaster::kConnectionLostRestartBudget) + L" in " + std::to_wstring(::Agentmaster::kConnectionLostRestartWindowMs / 60000) + L" min)");
+        bool handled = false;
+        {
+            // No dialog on this path (the user's "without opening a prompt"): _PromptPresetLaunchError records a preset refusal
+            // instead of showing it while the flag is up. Set around this ONE synchronous call, restored on every way out.
+            const bool previousInFlight = _connectionLostRestartInFlight;
+            _connectionLostRestartInFlight = true;
+            _connectionLostRestartRefusal.clear();
+            auto restore = wil::scope_exit([this, previousInFlight] {
+                _connectionLostRestartInFlight = previousInFlight;
+            });
+            // "Restart uninterrupted": the take-back is planned again inside (the file may have moved), its line waits for the old
+            // claude's exit (_StartAfterApiErrorRewind), the new claude gets CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1, and the
+            // injector is re-pointed. Nothing on this path selects the tab or asks anything.
+            handled = _RestartManagedSession(own, ::Agentmaster::RestartTurnChoice::LetTurnContinue);
+        }
+        // "Handled" also covers a restart the seam REFUSED (no claude.exe, a preset that no longer compiles): those return before
+        // the swap, so the pane still holds the old connection. Only a new connection proves the restart ran.
+        const bool swapped = handled && own.GetTermControl() && own.GetTermControl().Connection() != oldConnection;
+        if (!swapped)
+        {
+            why = !_connectionLostRestartRefusal.empty() ? L"the restart was refused: " + _connectionLostRestartRefusal :
+                                                           (handled ? std::wstring{ L"the restart seam refused it (see its [restart-blocked] line)" } :
+                                                                      std::wstring{ L"the restart seam found no managed session on the pane" });
+        }
+        _connectionLostRestartRefusal.clear(); // a refusal belongs to this restart, never to the next one
+        ::Agentmaster::LogNav(L"auto-restart-done " + ::Agentmaster::ShortId(sessionId) +
+                              (swapped ? std::wstring{ L" (restarted in place, uninterrupted; the take-back is written once the old claude has exited)" } : L" (NOT restarted: " + why + L")"));
+        return swapped;
+    }
+
+    // See TerminalPage.h.
+    void TerminalPage::_CheckConnectionLostRestartOutcome(const std::wstring& sessionId, const ::Agentmaster::SessionInfo& info)
+    {
+        try
+        {
+            const auto it = _connectionLostRestarts.find(sessionId);
+            if (it == _connectionLostRestarts.end() || it->second.phase != ConnectionLostRestartPhase::Restarted)
+            {
+                return;
+            }
+            auto& track = it->second;
+            const auto sid8 = ::Agentmaster::ShortId(sessionId);
+            const int64_t since = TurnsTickMs() - track.restartedTickMs;
+            // A turn the NEW claude ended (a real Stop, or a terminal reply line in the transcript): the continuation ran,
+            // even when no scan caught it running.
+            const bool turnEnded = track.restartedUnixMs != 0 && info.turnEndUnixMs > track.restartedUnixMs;
+            switch (::Agentmaster::DecideConnectionLostRestartOutcome(info.live, info.state, turnEnded, since))
+            {
+            case ::Agentmaster::ConnectionLostRestartOutcome::Waiting:
+                return;
+            case ::Agentmaster::ConnectionLostRestartOutcome::Gone:
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[auto-restart] " + sid8 + L" closed " + std::to_wstring(since / 1000) + L" s after its automatic restart" +
+                                                                (track.toastOwed ? L"; its held Error toast is dropped" : L"") + L"\n");
+                _connectionLostRestarts.erase(it);
+                return;
+            case ::Agentmaster::ConnectionLostRestartOutcome::Healed:
+            {
+                const int64_t episode = track.errorEpisodeMs;
+                const bool running = info.state == ::Agentmaster::SessionState::Running || info.state == ::Agentmaster::SessionState::NeedsApproval;
+                std::wstring line = L"[auto-restart] " + sid8 + (running ? L" healed: the turn runs again (" : L" healed: the continued turn already ended (") + std::wstring{ AgentStateWord(info.state) } +
+                                    L") " + std::to_wstring(since / 1000) + L" s after the automatic restart";
+                if (track.toastOwed)
+                {
+                    line += L"; its held Error toast is dropped (held " + std::to_wstring((TurnsTickMs() - track.toastHeldTickMs) / 1000) + L" s)";
+                }
+                // Erased BEFORE the give-back: the runner's registry update notifies, and the drain it queues must find no track.
+                _connectionLostRestarts.erase(it);
+                // The stop-on-error backstop paused this session's runner when the lost connection put it in Error. The turn runs
+                // again, so the queue gets its mode back — decided again inside the registry update, so a mode the user set
+                // meanwhile wins (ClearInterruptHold forgets the pause at every such decision).
+                ::Agentmaster::AutorunnerMode givenBack = ::Agentmaster::AutorunnerMode::Off;
+                if (_sessionRegistry && ::Agentmaster::ShouldGiveRunnerBackAfterRestart(info.autorunner, episode))
+                {
+                    _sessionRegistry->Update(sessionId, [&givenBack, episode](::Agentmaster::SessionInfo& s) {
+                        if (::Agentmaster::ShouldGiveRunnerBackAfterRestart(s.autorunner, episode))
+                        {
+                            givenBack = s.autorunner.stopOnErrorPausedMode;
+                            s.autorunner.mode = givenBack;
+                            s.autorunner.stopOnErrorPausedMode = ::Agentmaster::AutorunnerMode::Off;
+                            s.autorunner.stopOnErrorPausedEpisodeMs = 0;
+                        }
+                    });
+                }
+                if (givenBack != ::Agentmaster::AutorunnerMode::Off)
+                {
+                    line += std::wstring{ L"; the Prompt Queue Runner is back to " } + ::Agentmaster::AutorunnerModeLabel(givenBack) + L" (stop-on-error had paused it for the lost connection)";
+                    ::Agentmaster::AppendStateLog(L"autorunner.log", L"[auto-restart] " + sessionId + L" runner back to " + ::Agentmaster::AutorunnerModeLabel(givenBack) +
+                                                                         L" (the lost connection's stop-on-error pause is given back: the turn runs again after the automatic restart)\n");
+                }
+                ::Agentmaster::AppendStateLog(L"hooks.log", line + L"\n");
+                return;
+            }
+            case ::Agentmaster::ConnectionLostRestartOutcome::NotHealed:
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[auto-restart] " + sid8 + L" NOT healed: " +
+                                                                (turnEnded ? L"the continued turn ended in Error again " + std::to_wstring(since / 1000) + L" s after the automatic restart" :
+                                                                             L"still " + std::wstring{ AgentStateWord(info.state) } + L" " + std::to_wstring(since / 1000) + L" s after the automatic restart") +
+                                                                L" \x2014 the session waits for you\n");
+                _ReleaseConnectionLostRestartToast(sessionId, track, info.state, L"the automatic restart did not heal it");
+                _connectionLostRestarts.erase(it);
+                return;
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the track stays; the next change or tick decides again (the confirm window still bounds it).
+            ::Agentmaster::AgentLogCaughtException(L"_CheckConnectionLostRestartOutcome");
+        }
+    }
+
+    // See TerminalPage.h.
+    bool TerminalPage::_HoldToastForConnectionLostRestart(const std::wstring& sessionId, int64_t runningSinceMs)
+    {
+        try
+        {
+            const auto it = _connectionLostRestarts.find(sessionId);
+            if (it == _connectionLostRestarts.end() || it->second.phase != ConnectionLostRestartPhase::Judging)
+            {
+                return false;
+            }
+            it->second.toastOwed = true;
+            it->second.toastRunningSinceMs = runningSinceMs;
+            it->second.toastHeldTickMs = TurnsTickMs();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_HoldToastForConnectionLostRestart");
+            return false; // the toast shows, as it always did
+        }
+        // Logged once the hold is in place: a failed log line must not turn a held toast into an immediate second one.
+        try
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[notify-hold] " + ::Agentmaster::ShortId(sessionId) +
+                                                            L" running -> error (a lost connection that this window restarts by itself: the toast shows only if the restart does not heal it)\n");
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_HoldToastForConnectionLostRestart log");
+        }
+        return true;
+    }
+
+    // See TerminalPage.h.
+    void TerminalPage::_ReleaseConnectionLostRestartToast(const std::wstring& sessionId, ConnectionLostRestartTrack& track, ::Agentmaster::SessionState state, std::wstring_view why)
+    {
+        if (!track.toastOwed)
+        {
+            return;
+        }
+        track.toastOwed = false; // cleared FIRST: a throw below must never let a later step show it a second time
+        try
+        {
+            const int64_t heldFor = TurnsTickMs() - track.toastHeldTickMs;
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[notify-release] " + ::Agentmaster::ShortId(sessionId) + L" the held running -> error toast is shown as " + std::wstring{ AgentStateWord(state) } +
+                                                            L" after " + std::to_wstring(heldFor / 1000) + L" s: " + std::wstring{ why } + L"\n");
+            const auto tabIt = _claudeTabs.find(sessionId);
+            if (const auto tab = tabIt != _claudeTabs.end() ? tabIt->second.get() : nullptr)
+            {
+                // The cog's per-state switches, the focused-tab skip and the duplicate guard all apply at this late fire too.
+                _FireAgentCompletionToast(sessionId, tab, state, track.toastRunningSinceMs, heldFor);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ReleaseConnectionLostRestartToast");
+        }
+    }
+
+    // See TerminalPage.h. Terminate-net + the self-marshal of every liveness-tick pass (_PumpDraftRestores, _SweepAgentPendingToasts).
+    winrt::fire_and_forget TerminalPage::_SweepConnectionLostRestarts()
+    {
+        auto strongThis{ get_strong() };
+        try
+        {
+            co_await wil::resume_foreground(Dispatcher());
+            if (_connectionLostRestarts.empty() || !_sessionRegistry)
+            {
+                co_return; // the common case: nothing to watch
+            }
+            std::vector<std::wstring> ids;
+            ids.reserve(_connectionLostRestarts.size());
+            for (const auto& entry : _connectionLostRestarts)
+            {
+                ids.push_back(entry.first); // copied first: _EvaluateConnectionLostRestart below erases tracks
+            }
+            const int64_t now = TurnsTickMs();
+            for (const auto& id : ids)
+            {
+                const auto it = _connectionLostRestarts.find(id);
+                if (it == _connectionLostRestarts.end())
+                {
+                    continue; // an earlier step of this pass let it go
+                }
+                const auto info = _sessionRegistry->GetWithoutQueue(id);
+                if (it->second.phase == ConnectionLostRestartPhase::Judging)
+                {
+                    if (now - it->second.judgingSinceTickMs >= kConnectionLostJudgeTimeoutMs)
+                    {
+                        it->second.phase = ConnectionLostRestartPhase::Settled;
+                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[auto-restart] " + ::Agentmaster::ShortId(id) + L" not restarted: its transcript read did not come back within " +
+                                                                        std::to_wstring(kConnectionLostJudgeTimeoutMs / 1000) + L" s \x2014 the session waits at the error for you\n");
+                        _ReleaseConnectionLostRestartToast(id, it->second, info ? info->state : ::Agentmaster::SessionState::Error, L"its transcript read did not come back");
+                    }
+                    continue; // otherwise its finish judges on a fresh record
+                }
+                if (!info)
+                {
+                    // Gone from the registry (a resume-fresh drop, a delete): nothing left to restart or to toast about.
+                    _connectionLostRestarts.erase(it);
+                    continue;
+                }
+                // Every other phase is the registry change's own path on a fresh read: a hold re-judged (fresh side files age out
+                // without a registry change), a restarted session's confirm window timed, an ended episode let go.
+                _EvaluateConnectionLostRestart(*info);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SweepConnectionLostRestarts");
         }
     }
 }

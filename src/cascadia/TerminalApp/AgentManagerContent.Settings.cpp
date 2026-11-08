@@ -1167,6 +1167,14 @@ namespace winrt::TerminalApp::implementation
         _setResumeApiErrorTurns.Header(winrt::box_value(L"Continue a turn that ended in an API error when its session is resumed"));
         AgentSetTip(_setResumeApiErrorTurns, L"A turn can die on an API error \x2014 \x201C" L"Connection lost mid-response\x201D, an overloaded or rate-limited API, a server error. Resuming such a session (Restart session, entering a Deactivated or restored tab, Resume here on the Sessions page) normally leaves Claude sitting at the error.\n\nWith this on, Agentmaster first adds ONE line to the session's transcript \x2014 the same line Claude Code writes when you rewind with Esc Esc \x2014 that steps the conversation back to just before the failed response. The resumed Claude then sees an interrupted turn and continues it by itself (Claude Code's CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1, which Agentmaster puts in the Global environment variables; a Restart or a Fork asks first: interrupted or uninterrupted). Nothing is deleted: the error and the half-written reply stay in the file on an abandoned branch.\n\nA refusal or a safety block is never retried. Restart waits (up to 15 s) for the old Claude to exit before it writes the line, because that Claude would otherwise put the error back on exit. Off: a resumed errored session waits at the error for you to type.");
         panel.Children().Append(_setResumeApiErrorTurns);
+        // HOOKS.md "Connection lost mid-response — the automatic restart" (AppSettings::autoRestartOnConnectionLost; the user's
+        // request of 2026-11-08). Sits under the take-back switch because it NEEDS it: the restart heals only by taking the
+        // error back. Each window reads it from its own settings copy, which this Save and the broadcast keep current, so it
+        // applies to the next lost connection with no restart of the app.
+        _setAutoRestartConnectionLost = ToggleSwitch{};
+        _setAutoRestartConnectionLost.Header(winrt::box_value(L"Restart a session by itself when its connection is lost mid-response"));
+        AgentSetTip(_setAutoRestartConnectionLost, L"When a turn dies on \x201C" L"API Error: Connection lost mid-response. The response above may be incomplete.\x201D, Agentmaster restarts that session by itself as \x201CRestart uninterrupted\x201D: the error is taken back (the switch above) and the restarted Claude continues the turn. No question is asked and the tab is not brought to the front; the restart happens in the window that holds the tab.\n\nIt waits while you have an unsent message in that session's input box (a restart would wipe it), while a prompt is being delivered, and while Claude still runs background work (a shell or an agent) that a restart would end \x2014 then it restarts. It never restarts twice for the same error, and at most 3 times per session in 30 minutes, so a connection that keeps dropping leaves the session in Error for you. A session you chose to keep stopped (\x201C" L"Fork interrupted\x201D / \x201CRestart interrupted\x201D) is never restarted by it.\n\nThe Error notification waits for the outcome: none when the turn runs again, the usual one if it does not within 2 minutes. A Prompt Queue Runner that the error paused (stop on error) is set back to Auto once the turn runs again.\n\nNeeds \x201C" L"Continue a turn that ended in an API error\x201D: without it a restart cannot continue the turn. Off: the session waits at the error for you, as before.");
+        panel.Children().Append(_setAutoRestartConnectionLost);
         // SESSIONS.md §9.6 / SIDE_PANEL.md §2h: the AI search's PARK delay — how long its idle claude.exe lives after the
         // last use, on both surfaces (the Sessions page's AI toggle and the side panel's). One number: a park ends only the
         // process, so the trade-off is memory (~400 MB of commit while it lives) against the model's full context (a
@@ -3271,6 +3279,10 @@ namespace winrt::TerminalApp::implementation
         {
             _setResumeApiErrorTurns.IsOn(_appSettings.resumeApiErrorTurns); // HOOKS.md "API-error turns"
         }
+        if (_setAutoRestartConnectionLost)
+        {
+            _setAutoRestartConnectionLost.IsOn(_appSettings.autoRestartOnConnectionLost); // HOOKS.md "Connection lost mid-response — the automatic restart"
+        }
         if (_setSessionsAiPark)
         {
             // Shown clamped, the way every surface that arms the park reads it (a hand-edited 0 shows the 120 it means).
@@ -4222,6 +4234,10 @@ namespace winrt::TerminalApp::implementation
         if (_setResumeApiErrorTurns)
         {
             _appSettings.resumeApiErrorTurns = _setResumeApiErrorTurns.IsOn(); // HOOKS.md "API-error turns"
+        }
+        if (_setAutoRestartConnectionLost)
+        {
+            _appSettings.autoRestartOnConnectionLost = _setAutoRestartConnectionLost.IsOn(); // HOOKS.md "Connection lost mid-response — the automatic restart"
         }
         if (_setSessionsAiPark)
         {

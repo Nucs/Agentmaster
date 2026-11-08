@@ -35,6 +35,7 @@
 #include <cctype> // std::isalnum - TestDialogEchoCoverage's source scanner
 #include <set> // the forbidden direct dialog calls (TestDialogEchoCoverage)
 #include "../DialogEcho.h" // the dialog echo + caller sink + hand-off reply (TestDialogEcho, TestDialogEchoCoverage; CLI.md §2b)
+#include "../ConnectionLostRestart.h" // ShouldGiveRunnerBackAfterRestart — the stop-on-error pause's record (TestInterruptHold; HOOKS.md "Connection lost mid-response — the automatic restart")
 
 // The updater tests odr-use RunStartupUpdateCheck (the fresh-launch latch-clear check), which pulls
 // ShowUpdatePrompt -> TaskDialogIndirect — imported from comctl32 BY ORDINAL (345), which only
@@ -6273,6 +6274,46 @@ void TestInterruptHold()
         }
         s = reg->Get(L"h5");
         CHECK(s && s->autorunner.mode == AutorunnerMode::Off, "stop-on-error: ...so the next message does NOT resume past the error pause");
+        CHECK(s && s->autorunner.stopOnErrorPausedMode == AutorunnerMode::Off && s->autorunner.stopOnErrorPausedEpisodeMs == 0,
+              "stop-on-error while held: the pause took only an interrupt hold's Off, so nothing is recorded for the automatic restart to give back");
+    }
+    {
+        // HOOKS.md "Connection lost mid-response — the automatic restart": the stop-on-error pause RECORDS the mode it took and
+        // the Error episode it paused in, so the automatic restart can give the mode back once the healed turn runs again —
+        // and every later mode decision (ClearInterruptHold) forgets that record.
+        auto reg = std::make_shared<SessionRegistry>();
+        Scheduler sched{ reg };
+        {
+            auto s = MakeSession(L"h5r", SessionState::Running);
+            s.live = true;
+            s.autorunner.mode = AutorunnerMode::Full;
+            s.autorunner.stopOnError = true;
+            reg->Upsert(s);
+        }
+        reg->Update(L"h5r", [](SessionInfo& ss) { ss.state = SessionState::Error; });
+        const auto errored = reg->Get(L"h5r");
+        CHECK(errored && errored->stateChangedAtUnixMs != 0, "stop-on-error record: the Error episode is stamped by the registry");
+        sched.OnObserved(*errored);
+        auto s = reg->Get(L"h5r");
+        CHECK(s && s->autorunner.mode == AutorunnerMode::Off && s->autorunner.stopOnErrorPausedMode == AutorunnerMode::Full &&
+                  s->autorunner.stopOnErrorPausedEpisodeMs == errored->stateChangedAtUnixMs,
+              "stop-on-error record: the pause records the mode it took (Full) and the Error episode it paused in");
+        CHECK(s && ShouldGiveRunnerBackAfterRestart(s->autorunner, errored->stateChangedAtUnixMs) && !ShouldGiveRunnerBackAfterRestart(s->autorunner, errored->stateChangedAtUnixMs + 1),
+              "stop-on-error record: ...which the automatic restart may give back for that episode only");
+        sched.OnObserved(*reg->Get(L"h5r"));
+        s = reg->Get(L"h5r");
+        CHECK(s && s->autorunner.stopOnErrorPausedMode == AutorunnerMode::Full && s->autorunner.stopOnErrorPausedEpisodeMs == errored->stateChangedAtUnixMs,
+              "stop-on-error record: a repeated observation of the same Error pauses nothing more and keeps the record");
+        // The toggle's exact write (the user picks Paused while the session sits in Error): the record is forgotten, so a heal
+        // can never undo the user's pick.
+        reg->Update(L"h5r", [](SessionInfo& ss) {
+            ss.autorunner.mode = AutorunnerMode::Off;
+            ClearInterruptHold(ss.autorunner);
+        });
+        s = reg->Get(L"h5r");
+        CHECK(s && s->autorunner.stopOnErrorPausedMode == AutorunnerMode::Off && s->autorunner.stopOnErrorPausedEpisodeMs == 0 &&
+                  !ShouldGiveRunnerBackAfterRestart(s->autorunner, errored->stateChangedAtUnixMs),
+              "stop-on-error record: the user's mode pick forgets the pause - nothing is given back after it");
     }
     {
         // The MERGE verdict (push): the merged message is itself a user message, but the pause wins.

@@ -230,6 +230,27 @@ namespace winrt::TerminalApp::implementation
         {
             co_return;
         }
+        // HOOKS.md "Connection lost mid-response — the automatic restart": a restart this window made by itself (a session
+        // whose connection was lost) shows no dialog either — nobody asked for it, and the user may not be at the PC. The
+        // refusal is recorded for _RestartAfterConnectionLost, which logs it and leaves the session in Error for the user.
+        // Read before the first co_await, so it runs inside the synchronous restart that set the flag.
+        if (_connectionLostRestartInFlight)
+        {
+            try
+            {
+                if (_connectionLostRestartRefusal.empty())
+                {
+                    _connectionLostRestartRefusal = message;
+                }
+            }
+            catch (...)
+            {
+                // Rule #18 (and the fire_and_forget terminate-net). Recovery: the dialog stays suppressed; the automatic restart
+                // still sees that nothing was swapped in (its connection check) and logs the refusal without these words.
+                ::Agentmaster::AgentLogCaughtException(L"_PromptPresetLaunchError (automatic restart)");
+            }
+            co_return;
+        }
         if (_presetLaunchErrorShowing)
         {
             co_return; // one notice at a time: a window restore of N keyless preset sessions shows ONE

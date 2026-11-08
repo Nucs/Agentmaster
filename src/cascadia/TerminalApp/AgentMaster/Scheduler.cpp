@@ -625,8 +625,20 @@ namespace Agentmaster
             (s.autorunner.mode != AutorunnerMode::Off || InterruptHoldActive(s.autorunner)))
         {
             _registry->Update(s.id, [](SessionInfo& ss) {
+                const AutorunnerMode pausedFrom = ss.autorunner.mode;
                 ss.autorunner.mode = AutorunnerMode::Off;
                 ClearInterruptHold(ss.autorunner);
+                // Agentmaster (HOOKS.md "Connection lost mid-response — the automatic restart"): remember what this pause
+                // took away, and in which Error episode, so the automatic restart after a lost connection can give the mode
+                // back once the healed turn runs again (ShouldGiveRunnerBackAfterRestart). Written AFTER ClearInterruptHold,
+                // which forgets it: every later mode decision goes through that function and cancels the give-back. An
+                // interrupt hold's Off took nothing away, so nothing is recorded (Off / 0) — a hold is never given back by a
+                // restart.
+                if (pausedFrom != AutorunnerMode::Off)
+                {
+                    ss.autorunner.stopOnErrorPausedMode = pausedFrom;
+                    ss.autorunner.stopOnErrorPausedEpisodeMs = ss.stateChangedAtUnixMs;
+                }
             });
             AppendStateLog(L"autorunner.log", L"[stop-on-error] paused " + s.id + L"\n");
             return;

@@ -1403,6 +1403,18 @@ namespace Agentmaster
         // both were transient, and a reopened session re-stamped the cog's default mode.)
         AutorunnerMode interruptHeldMode{ AutorunnerMode::Off };
         int64_t interruptHeldUnixMs{ 0 };
+        // Agentmaster (HOOKS.md "Connection lost mid-response — the automatic restart"): the mode the STOP-ON-ERROR
+        // backstop (Scheduler::OnObserved) took away when it paused this runner, and the Error episode it paused in (that
+        // episode's SessionInfo::stateChangedAtUnixMs). Read ONLY by the automatic restart after a lost connection, which
+        // gives the mode back once the restarted session runs the turn again (ShouldGiveRunnerBackAfterRestart,
+        // ConnectionLostRestart.h): a healed turn must not leave its queue paused for good, which nobody would notice until
+        // the queue was found stalled hours later. Off / 0 == nothing to give back. Every explicit mode decision forgets it
+        // (ClearInterruptHold — the user's pick on the badge, the Manager or Telegram, and every other engine pause), so
+        // the give-back can never undo a choice made after the pause, and the episode stamp keeps an older pause from being
+        // given back by the restart of a later, unrelated error. TRANSIENT: never persisted (Persistence.cpp writes the
+        // runner's fields one by one, and a pause outliving the run has no restart left to give it back).
+        AutorunnerMode stopOnErrorPausedMode{ AutorunnerMode::Off };
+        int64_t stopOnErrorPausedEpisodeMs{ 0 };
     };
 
     // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): the PURE rules over AutorunnerState, shared by
@@ -1453,10 +1465,19 @@ namespace Agentmaster
     }
 
     // Cancel a pending resume (the user set the mode / a backstop paused). The mode itself is untouched.
+    // Agentmaster (HOOKS.md "Connection lost mid-response — the automatic restart"): it also forgets the stop-on-error
+    // pause the automatic restart would give back (AutorunnerState::stopOnErrorPausedMode / …EpisodeMs). Both are
+    // automations that would re-arm the runner LATER on their own, and every caller of this function is a mode decision
+    // that outranks them — the user's pick, an engine backstop pausing for its own reason, an interrupt hold resumed by the
+    // user's message — so one call ends both. ⚠ The stop-on-error backstop records its pause AFTER calling this.
+    //   a — the session's runner state (edited in place; the mode itself is untouched).
+    // Never throws.
     inline void ClearInterruptHold(AutorunnerState& a) noexcept
     {
         a.interruptHeldMode = AutorunnerMode::Off;
         a.interruptHeldUnixMs = 0;
+        a.stopOnErrorPausedMode = AutorunnerMode::Off;
+        a.stopOnErrorPausedEpisodeMs = 0;
     }
 
     // PARK: an interrupt on a non-Off (Auto) autorunner -> Off, the mode remembered, the marker stamp kept as
@@ -2739,6 +2760,17 @@ namespace Agentmaster
         // GLOBAL; cog SESSIONS tab; read fresh at each seam (LoadAppSettings). OFF: a resumed errored session
         // sits idle at the error, as before — Claude Code still continues an error that hit BEFORE any output.
         bool resumeApiErrorTurns{ true };
+        // Agentmaster (HOOKS.md "Connection lost mid-response — the automatic restart"; the user's request of 2026-11-08:
+        // "self healing for error "API Error: Connection lost mid-response …" by restarting session as uninterrupted
+        // automatically … without switching to it and without opening a prompt"): when a session whose claude runs in a
+        // tab of this app enters Error on that error, the hosting window restarts it by itself as "Restart uninterrupted"
+        // (RestartTurnChoice::LetTurnContinue: the take-back above plus CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1), so the
+        // turn simply goes on. Never while the input box holds an unsent draft, a delivery owns the box or claude still
+        // runs background work (it waits for those to end); never twice for one error row; at most 3 times per session in
+        // 30 minutes (ConnectionLostRestart.h). Needs resumeApiErrorTurns: without the take-back a restart heals nothing.
+        // GLOBAL; cog SESSIONS tab; read live from the page's settings copy. OFF: the session waits at the error for the
+        // user, as before.
+        bool autoRestartOnConnectionLost{ true };
 
         // --- Behavior sugar ---
         bool confirmBeforeKill{ true }; // confirm before killing a session from the Manager

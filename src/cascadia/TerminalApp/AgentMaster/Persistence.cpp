@@ -890,6 +890,7 @@ namespace Agentmaster
         o.Set(L"restoreDraftOnResume", json::Value::MkBool(s.restoreDraftOnResume));
         o.Set(L"carryDraftOnFork", json::Value::MkBool(s.carryDraftOnFork)); // PENDING_INPUT.md §11 — the fork carry
         o.Set(L"resumeApiErrorTurns", json::Value::MkBool(s.resumeApiErrorTurns)); // HOOKS.md "API-error turns" — the rewind before a resume
+        o.Set(L"autoRestartOnConnectionLost", json::Value::MkBool(s.autoRestartOnConnectionLost)); // HOOKS.md "Connection lost mid-response — the automatic restart"
         o.Set(L"confirmBeforeKill", json::Value::MkBool(s.confirmBeforeKill));
         o.Set(L"reapOrphanedSessions", json::Value::MkBool(s.reapOrphanedSessions));
         o.Set(L"uiStallAutoRestart", json::Value::MkBool(s.uiStallAutoRestart));
@@ -1112,6 +1113,7 @@ namespace Agentmaster
         s.restoreDraftOnResume = v.BoolAt(L"restoreDraftOnResume", true);
         s.carryDraftOnFork = v.BoolAt(L"carryDraftOnFork", true); // absent (a pre-§11 settings.json) => ON, the default
         s.resumeApiErrorTurns = v.BoolAt(L"resumeApiErrorTurns", true); // absent (every settings.json before the rewind existed) => ON, the default
+        s.autoRestartOnConnectionLost = v.BoolAt(L"autoRestartOnConnectionLost", true); // absent (every settings.json before the automatic restart existed) => ON, the default
         s.confirmBeforeKill = v.BoolAt(L"confirmBeforeKill", true);
         s.reapOrphanedSessions = v.BoolAt(L"reapOrphanedSessions", true);
         s.uiStallAutoRestart = v.BoolAt(L"uiStallAutoRestart", true);

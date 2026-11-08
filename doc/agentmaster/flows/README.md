@@ -205,7 +205,9 @@ uninterrupted", on the PC and in Telegram, and the AI search's fork tool asks th
 INT-07 phase 4; 2026-11-06) · a turn that died on an API error is part of the same Restart / Fork choice, "uninterrupted"
 taking the error back and "interrupted" taking it back too, then one Esc, so a regular interrupt replaces it (INT-09;
 2026-11-06) · every restart and fork question reads "interrupted / uninterrupted", a fork of a turn the user interrupted
-asks too (INT-10), and a fresh profile ships `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` (INT-11; 2026-11-06) · a Search
+asks too (INT-10), and a fresh profile ships `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` (INT-11; 2026-11-06) · a turn that
+dies on "Connection lost mid-response" is restarted by its window as "Restart uninterrupted", no question, no tab switch
+(INT-12; 2026-11-08) · a Search
 pick's menu by the session's state: Activate,
 Wake, Go to topic (TGS-05; 380e86d64) · `agentmaster <verb>` answered by an unpackaged install's own exe, and the
 release CLI on the right profile (CLI-02 phase 3, CLI-K2; 4950ece21) · the installer's edge cases (INS-01 E3–E6;

@@ -845,6 +845,7 @@ continue them by itself.
 | "Deactivate" (`_DeactivateManagedTab`, resume only, state `Error` or `midTurnAtRestore`) | Plans before the swap, then `_RewindApiErrorAfterExit` waits for the parked claude's exit and appends. A tab woken before that has a live claude, and the append refuses rather than race it. |
 | A restored resume (`_LaunchClaudeSession` with a `restored` record: window restore, Sessions-page "Resume here", a reopened closed session) | `_RewindApiErrorBeforeRestore` appends synchronously before the connection is built, only for a record whose state is `Error` or whose `midTurnAtRestore` is set, so a 600-tab window restore reads no transcript for a healthy tab. |
 | A fork answered "Fork uninterrupted" or "Fork interrupted" (2026-11-06, NOT BUILT: `ForkTurnChoice::TakeBackAndContinue` / `TakeBackAndInterrupt`, `_TakeBackStopForFork`) | Appends to the SOURCE's transcript right before the fork's launch, a live source claude ALLOWED (`RewindApiErrorTailForForkSource`), launches the fork with `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` and starts it in place one Low-priority tick later (`_StartForkSoonAfterTakeBack`); "Fork interrupted" also arms the fork stop watch, whose ONE Esc leaves a regular interrupt where the error was. HOOKS.md *Interrupted turns*, situation B. |
+| The automatic restart after a lost connection (2026-11-08, NOT BUILT: `_RestartAfterConnectionLost`) | A session whose turn died on "Connection lost mid-response" is restarted by its hosting window as "Restart uninterrupted" — the Restart row above with `LetTurnContinue` — with no question and no tab switch, once the transcript gate agrees. *Connection lost mid-response — the automatic restart*, below. |
 
 Since 2026-11-06 (NOT BUILT) the restart's rewind is ASKED about when the restart is interactive: the restart question
 (situation B, *Interrupted turns*). BOTH answers take the error back as above and add `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1`
@@ -1165,6 +1166,117 @@ prompt, appended; the resume sent it again) and an Esc during the second tool ca
 one cut result; the resume wrote `Continue from where you left off.` and finished the turn); the classifier read a
 live source inside `sleep 40` as `ContinuesTurn`, dropped `Bash`. The app's dialogs, the fan-out and the stop watch are
 not yet run live.
+
+### Connection lost mid-response — the automatic restart (2026-11-08, NOT BUILT)
+
+**The request** (the user, 2026-11-08): "Lets add self healing for error "● API Error: Connection lost mid-response. The
+response above may be incomplete." by restarting session as uninterrupted automatically. As soon as this error state is
+detected, we shall restart the tab automatically (without switching to it and without opening a prompt asking for interrupted
+or uninterrupted restart)". The session that prompted it, `d42f0aea` ("foodie duplicates", production window 0, tab 603),
+had sat 52 minutes at the error.
+
+**What Claude Code writes** (2.1.310, read from its bundle and from 11 such rows on this PC). When the stream dies after
+output began, Claude Code finalizes the half-streamed reply and appends the synthetic row
+`{"type":"assistant", … "text":"API Error: Connection lost mid-response. The response above may be incomplete.", …
+"error":"server_error", "truncatedAfterOutput":true, "isApiErrorMessage":true, "streamCutCause":"stale_connection"}`. The
+text is the same for the cut causes `stale_connection`, `network_down`, `stream_truncated` and a `stream_suspended` that was
+not a sleep; 2.1.282 / 2.1.291 wrote it without `streamCutCause`, and `truncatedAfterOutput` is absent when the cut reply held a
+tool call. Its siblings — "Server error mid-response", "The response stopped arriving", "Part of the response never arrived",
+"Your computer went to sleep mid-response" — are other errors and are NOT matched; nor is "Connection lost before a response
+was produced", which any resume continues by itself (*API-error turns*). The match is a case-insensitive search for
+`Connection lost mid-response` (`IsConnectionLostMidResponseError`).
+
+**What happens now.** The window that hosts the session's tab answers the restart question itself — "Restart uninterrupted",
+`RestartTurnChoice::LetTurnContinue` (situation B of *Interrupted turns*: the take-back line once the old claude exited, plus
+`CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` for the new claude) — so the turn simply goes on. No dialog, no tab selection, no
+window brought forward. The pure rules are `AgentMaster/ConnectionLostRestart.h`; the glue is `TerminalPage.AgentTurns.cpp`
+("the AUTOMATIC RESTART after a lost connection"). Four steps:
+
+1. **The registry gate** (`DecideConnectionLostRestart`, no I/O) on every registry change of a session the window hosts —
+   the tab-dot drain calls `_EvaluateConnectionLostRestart` BEFORE the dot and its toast — and on every liveness tick
+   (`_SweepConnectionLostRestarts`):
+
+   | Verdict | When | What happens |
+   |---|---|---|
+   | Ignore | not a live Claude session hosted here; not in an unacknowledged Error; another error; a DORMANT tab (its own start takes the error back: the restore and Deactivate seams do, and the shipped switch continues it) | nothing, nothing logged |
+   | Decline | the switch is off (`autoRestartOnConnectionLost`); an ADOPTED session (its ConPTY is the user's shell: a restart would replay the shell); `resumeApiErrorTurns` off (a restart could not take the error back); a recorded stop intent (`SessionInfo::stopForkedTurn` — "Fork interrupted" / "Restart interrupted": "uninterrupted" is the answer the user did not give) | logged once per Error episode; the session waits for the user, as before |
+   | Hold | an unsent draft in the box (a restart wipes it — the restart seam's one eager clear); the box owned by a delivery, the draft swap, a draft type-back or the fork stop watch; background work (claude's heartbeat `busy` / `shell`, or its subagent / tool-result side files written within 15 s) that a restart would end | logged once per reason; restarted once the reason passes |
+   | Go | anything else | the transcript gate |
+
+   The checks run in that order: a decline stays a decline whatever holds, and a session out of Error is never logged.
+   An Error EPISODE is identified by `SessionInfo::stateChangedAtUnixMs` (the registry's stamp of the Error entry), so the
+   window reads the transcript at most once per episode.
+2. **The transcript gate** (`DecideConnectionLostRestartFromPlan`), on one tail read off the UI thread
+   (`_JudgeConnectionLostRestart`: `PlanApiErrorRewindForSession`, then back on the UI thread the registry gate AGAIN on a
+   fresh record):
+
+   | Verdict | When |
+   |---|---|
+   | `restart` | the planner says `Rewind`, the active error is this one, the take-back lands on a tool result or a prompt (`ApiErrorTakeBackContinues`), the error row is new, budget is left |
+   | `nothing-to-take-back` | the active branch no longer ends in an API error (a retry, a rewind, a take-back already written) |
+   | `not-taken-back` | the planner leaves the error alone: a refusal, an unknown shape, a torn last line |
+   | `not-this-error` | the transcript's active error is another one |
+   | `would-not-continue` | the take-back lands on a meta row or a compaction summary |
+   | `already-restarted` | the previous automatic restart of this session was made for this very error row — it did not take it back (another tab's claude runs the conversation, the old claude outlived the 15 s wait), so a second one would fail alike |
+   | `over-budget` | 3 automatic restarts of this session within 30 minutes (`kConnectionLostRestartBudget`, `kConnectionLostRestartWindowMs`): a connection that keeps dropping leaves the session in Error |
+
+   The memory of restarts is one process-wide ledger (`SharedConnectionLostRestartLedger`: per session, the last error row
+   and the restart times; in memory only), noted BEFORE each restart runs.
+3. **The restart** (`_RestartAfterConnectionLost`): the session's OWN pane — the one whose connection's `WT_SESSION` is the
+   record's `tabToken`; without a match only a tab with a single terminal pane — then `_RestartManagedSession(pane,
+   LetTurnContinue)`. ⚠ Never `_RestartClaudeSessionLocal`: it restarts the tab's ACTIVE pane and falls through to the upstream
+   shell restart for an unmanaged one, so in a split tab whose focused pane is the user's shell it would restart that shell.
+   The pane must also resolve to this session (`_ManagedSessionForConnection`), and a never-started control is refused (the
+   `_restartPaneConnection` guard). While it runs, `_connectionLostRestartInFlight` makes `_PromptPresetLaunchError` record a
+   preset's refusal instead of showing "This preset can't start", and only a NEW connection on the pane counts as restarted
+   (`[restart-blocked]` and a refused preset return "handled" without a swap).
+4. **The watch** (`_CheckConnectionLostRestartOutcome`, `DecideConnectionLostRestartOutcome`): after the restart the session
+   passes through Idle (the restart's normalization), maybe Error again (the error stays the active leaf until the take-back
+   line is written, and the scanner asserts it anew — expected, never a failure), Waiting (`[recon-error-release]`) and Running
+   (the continuation). **Healed** = Running / NeedsApproval, or a turn ended after the restart out of Error
+   (`SessionInfo::turnEndUnixMs` newer than the restart: only a real Stop or a terminal reply line stamps it, and the old
+   claude's hooks are dropped once retired — a continuation answered faster than a scan, measured with the e2e mock in
+   flows/06 INT-01). **Not healed** = 2 minutes (`kConnectionLostRestartConfirmMs`) without either, or a turn that ended with
+   the session in Error again (the continuation failed; a new lost connection then starts a new track).
+
+**The Error toast waits for the outcome.** The Running → Error completion toast of a session whose track is judging is HELD
+on the track (`_HoldToastForConnectionLostRestart`, called by `_EvaluateAgentNotification` right before it would fire):
+dropped when the restart heals the session, shown — with the session's state at that moment, through
+`_FireAgentCompletionToast` and its cog switches, focused-tab skip and duplicate guard — when the gate declines or holds after
+the read, when the transcript gate says no, when the restart is refused, or when the watch says not healed. A session held
+from the start (a draft) toasts at once, as before.
+
+**The queue is given back.** The scheduler's stop-on-error backstop paused an Auto runner when the lost connection put the
+session in Error. It now records what it took and in which Error episode (`AutorunnerState::stopOnErrorPausedMode` /
+`stopOnErrorPausedEpisodeMs`, transient), and a HEALED restart gives that mode back (`ShouldGiveRunnerBackAfterRestart`: the
+same episode, the runner still Off, a real mode taken). `ClearInterruptHold` — called by every mode decision: the user's pick
+on the badge, the Manager or Telegram, every other engine pause, an interrupt hold's resume — forgets the record, so the
+give-back never undoes a choice made after the pause. An interrupt hold's Off is never recorded.
+
+**The setting.** `AppSettings::autoRestartOnConnectionLost` (default ON; the cog's Sessions tab, under "Continue a turn that
+ended in an API error"), read live from each window's settings copy. Off: the session waits at the error, as before.
+
+**Logs** (hooks.log): `[auto-restart] <sid8> a lost connection: "<title>" stopped on "API Error: Connection lost mid-response…"
+— reading its transcript to restart it uninterrupted`; `[notify-hold] <sid8> running -> error (a lost connection that this window
+restarts by itself …)`; `[nav] auto-restart-begin <sid8> (a lost connection: error row <uuid8>, taken back to the tool result
+<target8>; automatic restart 1 of at most 3 in 30 min)`, the restart's own `[restart] claude <id> (resume)` and
+`[api-error-rewind] <sid8> restart: rewound past …`, `[nav] auto-restart-done <sid8> (restarted in place, uninterrupted …)`;
+`[auto-restart] <sid8> healed: the turn runs again (running) N s after the automatic restart; its held Error toast is dropped
+(held N s); the Prompt Queue Runner is back to Full …` (and autorunner.log's `[auto-restart] <sid> runner back to Full`).
+Refusals: `[auto-restart] <sid8> not restarted: <why>`, `waiting before the restart: <why>`, `no longer waiting (<why>)`, `not
+restarted (<verdict>): <reason> — the session waits at the error for you`, `NOT healed: …`, `let go: the Error episode ended …`,
+and `[notify-release] <sid8> the held running -> error toast is shown as <state> after N s: <why>`.
+
+**Tests.** `TestConnectionLostRestart` (`tests_rewind.cpp`): the text match; every Ignore / Decline / Hold / Go case of the
+registry gate and their order; the transcript gate on the 2.1.310 shape of `d42f0aea` (dummy text) and on every refusal; the
+outcome rule (the held start's Error, the fast continuation, a continuation that failed, the confirm window); the give-back rule
+with `ClearInterruptHold`; the ledger's window to the millisecond. `TestInterruptHold` (`tests_spawn_sched.cpp`): the scheduler's
+record, a repeated observation, the user's pick forgetting it, the interrupt hold recording nothing. `tests_persistence.cpp`: the
+setting's round trip and its absent-key default. Every new check was proven able to fail by two planted-defect runs (the budget,
+a decline turned into a hold, the outcome rule, the record, the forgetting, the stop intent, the failed continuation). The real
+transcript of `d42f0aea`, read by the compiled planner (a probe linked from the harness objects; nothing written): `Rewind`
+onto the tool result `3df489fc` past a 2-row half-response, `restart`, then `already-restarted` for a second attempt. The app's
+seams (the drain, the restart, the toast, the watch) are not run live yet: flows/06 INT-12 lists the checks.
 
 ### Transcript watcher — the scanner's change feed (ReadDirectoryChangesW)
 
