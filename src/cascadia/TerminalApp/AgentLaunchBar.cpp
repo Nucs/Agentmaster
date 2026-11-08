@@ -25,11 +25,13 @@
 #include "AgentMaster/ProcessInspect.h" // ReadGitBranchForDir / ListGitWorktrees (the drop-down) + ExternalClaudeRow (Internal.h's MakeSortKey overload)
 #include "AgentMaster/ProfileBootstrap.h" // (the AgentManagerContent.Internal.h include convention — keeps the include set board-identical)
 #include "AgentMaster/SessionRegistry.h" // SessionRegistry::Get / Snapshot — a session id's dir + title, the live folders in RECENT
+#include "AgentMaster/SessionFolderFilter.h" // IsAbsoluteFolderPath — what folder-pick mode accepts as a folder (SIDE_PANEL.md §2l)
 #include "AgentMaster/TranscriptStore.h" // ReadTranscriptQuickFacts — resolve a launch-box session id's cwd
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cwctype> // towlower — folder-pick mode's text match over the host's folder section (FolderMatchForm)
 #include <filesystem> // create_directories — the "Create & Launch" affordance for a not-yet-existing dir
 #include <optional>
 #include <system_error> // std::error_code — non-throwing create_directories
@@ -81,6 +83,27 @@ namespace winrt::TerminalApp::implementation
         // (_pathPickerReanchorRounds). The first round normally settles the anchor; a second one covers a layout pass
         // that belonged to another window on this UI thread; the cap keeps a list from chasing a box forever.
         constexpr uint8_t kPathPickerReanchorMaxRounds = 3;
+
+        // FOLDER-PICK MODE (SIDE_PANEL.md §2l): the most rows the host's folder section lists at one re-list. The section is
+        // rebuilt at every keystroke (each row a Button with three text elements), and a GLOBAL side panel over a big fleet
+        // can name dozens of folders: the most used come first, and a line under the last row says how many more typing
+        // would narrow down.
+        constexpr size_t kFolderChoiceMaxRows = 20;
+
+        // The case-folded, '\'-separated form of a path for the folder section's text match (folder-pick mode): a bare word
+        // must be CONTAINED in a choice's path, a rooted path must be its PREFIX. Not NormDirKey: the box holds a half-typed
+        // path, and a prefix compare must see it as typed (a trailing separator is trimmed by the caller).
+        //   s       - the text.
+        //   returns - the folded copy.
+        //   throws  - std::bad_alloc.
+        std::wstring FolderMatchForm(std::wstring s)
+        {
+            for (auto& c : s)
+            {
+                c = (c == L'/') ? L'\\' : static_cast<wchar_t>(::towlower(c));
+            }
+            return s;
+        }
 
         // How long a press that closed the Launch hover menu stays ARMED for its release, in ms (_NoteLaunchMenuClosing,
         // _OnLaunchButtonReleased). A click's release follows its press within a few hundred ms, and a slow, deliberate
@@ -231,7 +254,15 @@ namespace winrt::TerminalApp::implementation
             _agentChip.Padding(Thickness{ 8, 1, 8, 1 });
             _agentChip.VerticalAlignment(VerticalAlignment::Center);
             _agentChip.Background(Fill(0x01, 0xFF, 0xFF, 0xFF));
-            AgentSetTitledTip(_agentChip, L"Agent to launch", L"This launcher starts Claude Code sessions. Codex launches from the side panel are planned \x2014 the Agent Manager's launch bar can start a Codex session now.");
+            if (_PickMode())
+            {
+                // FOLDER-PICK MODE (SIDE_PANEL.md §2l): the chip names what the box takes — a folder — not an agent.
+                AgentSetTitledTip(_agentChip, L"Folder", L"Pick the folder to filter by: type its path, or choose it in the list under the box.");
+            }
+            else
+            {
+                AgentSetTitledTip(_agentChip, L"Agent to launch", L"This launcher starts Claude Code sessions. Codex launches from the side panel are planned \x2014 the Agent Manager's launch bar can start a Codex session now.");
+            }
         }
         _UpdateLaunchAgentButton();
 
@@ -245,11 +276,19 @@ namespace winrt::TerminalApp::implementation
         _cwdBox.MinWidth(504);
         _cwdBox.MaxWidth(504); // seed; the host (re)computes Min/Max on first layout
         _cwdBox.HorizontalAlignment(HorizontalAlignment::Left);
-        _cwdBox.PlaceholderText(L"working directory (the M axis)");
-        // Agentmaster: the box accepts EITHER a working dir (new session) OR a session id (Resume / Fork).
-        // The underline + the Launch button's label track what you type — the tip names all three states.
-        AgentSetTitledTip(_cwdBox, L"Where to launch", L"A working directory for a new session, or a Claude session id to resume or fork. Start typing to pick from recent and matching folders.\n\nThe underline reads back what you typed: green = a session id found on disk (Launch becomes Resume, with a Fork twin) \x00B7 amber = a folder that doesn't exist yet (Launch creates it) \x00B7 red = an id with no conversation on disk, or a path that can't be created (Launch is disabled).");
+        if (_PickMode())
         {
+            // FOLDER-PICK MODE (SIDE_PANEL.md §2l): the box takes a folder only, and starts EMPTY (no %USERPROFILE% seed
+            // below): a filter on the home folder is no sensible default, and the host empties the box at every open anyway.
+            _cwdBox.PlaceholderText(L"a folder to filter by");
+            AgentSetTitledTip(_cwdBox, L"Folder to filter by", L"Type the folder's path, or pick one in the list under the box: the folders your sessions work in, your recent folders, a repository's worktrees, the subfolders of what you typed, or Browse\x2026. A row fills the box; Filter (or Enter) applies it.\n\nThe underline reads back what you typed: amber = a folder that is not on disk (sessions may still have worked there) \x00B7 red = not a folder path (Filter is disabled).");
+        }
+        else
+        {
+            _cwdBox.PlaceholderText(L"working directory (the M axis)");
+            // Agentmaster: the box accepts EITHER a working dir (new session) OR a session id (Resume / Fork).
+            // The underline + the Launch button's label track what you type — the tip names all three states.
+            AgentSetTitledTip(_cwdBox, L"Where to launch", L"A working directory for a new session, or a Claude session id to resume or fork. Start typing to pick from recent and matching folders.\n\nThe underline reads back what you typed: green = a session id found on disk (Launch becomes Resume, with a Fork twin) \x00B7 amber = a folder that doesn't exist yet (Launch creates it) \x00B7 red = an id with no conversation on disk, or a path that can't be created (Launch is disabled).");
             wchar_t up[MAX_PATH];
             const DWORD n = ::GetEnvironmentVariableW(L"USERPROFILE", up, MAX_PATH);
             if (n > 0 && n < MAX_PATH)
@@ -435,8 +474,18 @@ namespace winrt::TerminalApp::implementation
         _cwdCol.Children().Append(_cwdUnderline);
 
         _launchBtn = Button{};
-        _launchBtn.Content(winrt::box_value(L"Launch Claude"));
-        AgentSetTip(_launchBtn, L"Start the selected agent in the working directory above \x2014 or resume the conversation when a session id is entered. Hover to pick a model or a preset for the new session.");
+        if (_PickMode())
+        {
+            // FOLDER-PICK MODE (SIDE_PANEL.md §2l): the button hands the box's folder to the host (_OnPickFolder); it has no
+            // hover menu (the PointerEntered below stands aside), so its words and tip are the host's.
+            _launchBtn.Content(winrt::box_value(winrt::hstring{ _host.pickLabel.empty() ? std::wstring{ L"Pick" } : _host.pickLabel }));
+            AgentSetTip(_launchBtn, winrt::hstring{ _host.pickTip.empty() ? std::wstring{ L"Use the folder in the box." } : _host.pickTip });
+        }
+        else
+        {
+            _launchBtn.Content(winrt::box_value(L"Launch Claude"));
+            AgentSetTip(_launchBtn, L"Start the selected agent in the working directory above \x2014 or resume the conversation when a session id is entered. Hover to pick a model or a preset for the new session.");
+        }
         _launchBtn.Click([weak](const IInspectable&, const RoutedEventArgs&) {
             if (const auto self = weak.lock())
             {
@@ -492,6 +541,10 @@ namespace winrt::TerminalApp::implementation
             // FIRST, menu or not: where the pointer is on Launch, for the release watch (SP-K1). The menu opened below takes
             // the pointer's later moves (its light dismiss), so this sample is the one a click on Launch is judged by.
             self->_NoteLaunchPointerOnButton(e); // noexcept
+            if (self->_PickMode())
+            {
+                return; // FOLDER-PICK MODE (SIDE_PANEL.md §2l): no models to offer, so no hover menu and no hold timer either
+            }
             if (self->_launchMenu)
             {
                 return; // its menu is still up (the pointer came back from it): nothing to stack
@@ -941,6 +994,24 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        if (_PickMode() && _agentChip)
+        {
+            // FOLDER-PICK MODE (SIDE_PANEL.md §2l): the chip reads "[folder icon] Folder" — the Browse… row's folder glyph
+            // (Segoe Fluent Icons, as a TextBlock so its line matches the label's), in the toggle's own text color.
+            auto pickRow = StackPanel{};
+            pickRow.Orientation(Orientation::Horizontal);
+            pickRow.Spacing(6);
+            auto folderGlyph = Text(L"\xE8B7", 11, false, 0.9); // Segoe Fluent Icons: Folder
+            folderGlyph.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+            folderGlyph.Foreground(Fill(0xFF, 0xE6, 0xE6, 0xE6));
+            pickRow.Children().Append(folderGlyph);
+            auto folderLabel = Text(L"Folder", 11, false, 0.95);
+            folderLabel.Foreground(Fill(0xFF, 0xE6, 0xE6, 0xE6));
+            pickRow.Children().Append(folderLabel);
+            _agentChip.Child(pickRow);
+            _NotifyLayoutChanged(); // the chip's width is new: the host re-fits its row
+            return;
+        }
         const bool codex = _launchCodex;
         auto row = StackPanel{};
         row.Orientation(Orientation::Horizontal);
@@ -971,7 +1042,9 @@ namespace winrt::TerminalApp::implementation
         // in the box means "Resume" (that session keeps its own snapshot), and a disabled button (a red box)
         // must not be bypassed through its menu. Never after Shutdown: the hover opens this straight from
         // PointerEntered now, and an element can still be under the pointer while its host goes away.
-        if (_shutDown || !_launchBtn || !_cwdBox || _launchMenu || _launchCodex || !_launchBtn.IsEnabled())
+        // FOLDER-PICK MODE (SIDE_PANEL.md §2l) has no models to offer: its button only picks (a belt — its PointerEntered
+        // never asks for the menu).
+        if (_shutDown || _PickMode() || !_launchBtn || !_cwdBox || _launchMenu || _launchCodex || !_launchBtn.IsEnabled())
         {
             return;
         }
@@ -1357,6 +1430,13 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        if (_PickMode())
+        {
+            // FOLDER-PICK MODE (SIDE_PANEL.md §2l): the button picks the folder; nothing below (resume, Create & Launch, the
+            // recent push, a spawn) may run for a filter. `target` is always "" here (no hover menu offers one).
+            _OnPickFolder();
+            return;
+        }
         _NormalizeCwdBox(); // launch with — and remember — a normalized path (a session id is unaffected)
         std::wstring text{ _cwdBox.Text() };
         { // trim surrounding whitespace so the launch target matches exactly what _ValidateLaunchBox judged
@@ -1484,9 +1564,9 @@ namespace winrt::TerminalApp::implementation
     // into a NEW one in the same dir (the page's _ForkSessionFromDisk: claude --resume --fork-session).
     void AgentLaunchBar::_OnForkFromBox()
     {
-        if (!_cwdBox)
+        if (!_cwdBox || _PickMode())
         {
-            return;
+            return; // FOLDER-PICK MODE (SIDE_PANEL.md §2l) never forks: Fork stays hidden there, and a key-up must not reach one
         }
         // Native-exe-only policy: a fork is a claude launch -> requires a native claude.exe.
         if (!::Agentmaster::EnsureClaudeAvailable())
@@ -1527,6 +1607,13 @@ namespace winrt::TerminalApp::implementation
         // change below (Launch Claude / Create & Launch Claude / Resume session / +Fork / the Codex twins),
         // which changes the launch-buttons group width — let the host re-fit its row on EVERY exit path.
         auto reflowOnExit = wil::scope_exit([this]() noexcept { _NotifyLayoutChanged(); });
+        if (_PickMode())
+        {
+            // FOLDER-PICK MODE (SIDE_PANEL.md §2l): folders only — no session id, no "Create & Launch" (the reflow above still
+            // runs on the way out).
+            _ValidatePickBox();
+            return;
+        }
         std::wstring trimmed{ _cwdBox.Text() };
         const auto isws = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n'; };
         while (!trimmed.empty() && isws(trimmed.front()))
@@ -1613,6 +1700,208 @@ namespace winrt::TerminalApp::implementation
         _launchBtn.IsEnabled(exists || creatable);
         _launchBtn.Content(winrt::box_value(creatable ? L"Create & Launch Claude" : L"Launch Claude"));
         showFork(false);
+    }
+
+    // ---- FOLDER-PICK MODE (SIDE_PANEL.md §2l — the side panel's By Folder filter card) --------------------------------
+
+    void AgentLaunchBar::_ValidatePickBox()
+    {
+        if (!_cwdBox || !_launchBtn)
+        {
+            return;
+        }
+        std::wstring trimmed{ _cwdBox.Text() };
+        const auto isws = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n'; };
+        while (!trimmed.empty() && isws(trimmed.front()))
+        {
+            trimmed.erase(trimmed.begin());
+        }
+        while (!trimmed.empty() && isws(trimmed.back()))
+        {
+            trimmed.pop_back();
+        }
+        // The launch underline's palette (_ValidateLaunchBox), so both modes speak one color language: transparent = nothing to
+        // say, red = the button is disabled for this text, amber = allowed, but there is no such folder on disk.
+        const auto paint = [this](int state) { // 0 neutral, 2 red, 3 amber
+            if (!_cwdUnderline)
+            {
+                return;
+            }
+            const SolidColorBrush b = state == 2 ? Fill(0xFF, 0xE5, 0x39, 0x35) :
+                                      state == 3 ? Fill(0xFF, 0xDA, 0xA5, 0x20) :
+                                                   Fill(0x00, 0x00, 0x00, 0x00);
+            _cwdUnderline.Background(b);
+        };
+        if (_forkBtn)
+        {
+            _forkBtn.Visibility(Visibility::Collapsed); // a filter forks nothing
+        }
+        if (trimmed.empty())
+        {
+            // Nothing typed yet: no color (the box is not wrong, only empty), but nothing to pick either.
+            paint(0);
+            _launchBtn.IsEnabled(false);
+            return;
+        }
+        // An absolute folder path is a pick (IsAbsoluteFolderPath: a drive path or a UNC share — what a session's folder can
+        // be); anything else — a bare word, a relative path, a session id — is no folder. A missing folder is allowed (a
+        // session may still have worked in a folder deleted since), and the amber says so.
+        const std::wstring norm = NormPath(trimmed);
+        if (!::Agentmaster::IsAbsoluteFolderPath(norm))
+        {
+            paint(2);
+            _launchBtn.IsEnabled(false);
+            return;
+        }
+        paint(IsDir(norm) ? 0 : 3);
+        _launchBtn.IsEnabled(true);
+    }
+
+    void AgentLaunchBar::_OnPickFolder()
+    {
+        if (!_cwdBox || !_host.pickFolder)
+        {
+            return;
+        }
+        _NormalizeCwdBox(); // the box shows the folder exactly as it is handed over (the drill's trailing '\' trimmed)
+        std::wstring text{ _cwdBox.Text() };
+        const auto isws = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n'; };
+        while (!text.empty() && isws(text.front()))
+        {
+            text.erase(text.begin());
+        }
+        while (!text.empty() && isws(text.back()))
+        {
+            text.pop_back();
+        }
+        const std::wstring norm = NormPath(text);
+        if (norm.empty() || !::Agentmaster::IsAbsoluteFolderPath(norm))
+        {
+            // The button is disabled for such a text, but Enter (the host's key-up) reaches here too: repaint, pick nothing.
+            _ValidatePickBox();
+            return;
+        }
+        _ClosePathPicker(); // the list must not stay up over a card its host is about to close
+        _host.pickFolder(norm);
+    }
+
+    void AgentLaunchBar::_AppendFolderChoices(const std::wstring& current, bool queryMode)
+    {
+        if (!_host.folderChoices || !_pathListHost)
+        {
+            return;
+        }
+        std::vector<AgentLaunchFolderChoice> choices;
+        try
+        {
+            choices = _host.folderChoices();
+        }
+        catch (...)
+        {
+            // The section is left out (RECENT and the rest still list); the next re-list asks again. Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: the host's folder choices");
+            return;
+        }
+        // Narrow by the box's text: a bare word must appear in the path; a typed path must be the start of the folder's (its
+        // trailing separators trimmed, so a folder drilled into — "K:\src\" — still lists itself and what is under it).
+        std::wstring needle = FolderMatchForm(current);
+        if (!queryMode)
+        {
+            while (needle.size() > 3 && needle.back() == L'\\')
+            {
+                needle.pop_back();
+            }
+        }
+        std::vector<const AgentLaunchFolderChoice*> shown;
+        size_t more = 0;
+        for (const auto& choice : choices)
+        {
+            if (choice.dir.empty())
+            {
+                continue;
+            }
+            if (!needle.empty())
+            {
+                const std::wstring hay = FolderMatchForm(choice.dir);
+                const bool hit = queryMode ? (hay.find(needle) != std::wstring::npos) : (hay.compare(0, needle.size(), needle) == 0);
+                if (!hit)
+                {
+                    continue;
+                }
+            }
+            if (shown.size() < kFolderChoiceMaxRows)
+            {
+                shown.push_back(&choice);
+            }
+            else
+            {
+                ++more; // counted, not built: the line under the section says how many typing would bring in
+            }
+        }
+        if (shown.empty())
+        {
+            return; // nothing of the host's matches: no header over an empty section
+        }
+        auto header = Text(winrt::hstring{ _host.folderChoicesLabel.empty() ? std::wstring{ L"SESSION FOLDERS" } : _host.folderChoicesLabel }, 11, true, 0.5);
+        header.Margin(Thickness{ 6, 8, 6, 2 }); // the section labels' own margin (_RebuildPathPicker's sectionLabel)
+        _pathListHost.Children().Append(header);
+        for (const auto* choice : shown)
+        {
+            _pathListHost.Children().Append(_MakeFolderChoiceRow(*choice));
+        }
+        if (more > 0)
+        {
+            auto tail = Text(winrt::hstring{ std::to_wstring(more) + (more == 1 ? L" more folder \x2014 type part of its path to find it" : L" more folders \x2014 type part of a path to narrow the list") }, 12, false, 0.5);
+            tail.Margin(Thickness{ 10, 2, 6, 2 });
+            _pathListHost.Children().Append(tail);
+        }
+    }
+
+    Button AgentLaunchBar::_MakeFolderChoiceRow(const AgentLaunchFolderChoice& choice)
+    {
+        auto row = StackPanel{};
+        row.Orientation(Orientation::Horizontal);
+        row.Spacing(8);
+        row.VerticalAlignment(VerticalAlignment::Center);
+        // The dot in the folder's tab color (the cards' bands wear it), so a row reads as "those cards" at a glance; a folder
+        // without a color (Remove colors) gets the RECENT rows' dim glyph instead of a dot of no color.
+        if (choice.colorArgb != 0)
+        {
+            auto dot = Text(L"\x25CF", 13, false, 1.0); // ●
+            dot.Foreground(SolidColorBrush{ Color{ static_cast<uint8_t>(choice.colorArgb >> 24), static_cast<uint8_t>(choice.colorArgb >> 16), static_cast<uint8_t>(choice.colorArgb >> 8), static_cast<uint8_t>(choice.colorArgb) } });
+            row.Children().Append(dot);
+        }
+        else
+        {
+            row.Children().Append(Text(L"\x25CB", 13, false, 0.7)); // ○
+        }
+        row.Children().Append(Text(winrt::hstring{ choice.dir }, 13, false, 1.0));
+        if (choice.sessions > 0)
+        {
+            row.Children().Append(Text(L"\x2014", 13, false, 0.35)); // the RECENT rows' "— <branch>" separator
+            row.Children().Append(Text(winrt::hstring{ std::to_wstring(choice.sessions) + (choice.sessions == 1 ? L" session" : L" sessions") }, 13, false, 0.6));
+        }
+
+        auto btn = Button{};
+        btn.Content(row);
+        btn.HorizontalAlignment(HorizontalAlignment::Stretch);
+        btn.HorizontalContentAlignment(HorizontalAlignment::Left);
+        btn.Background(SolidColorBrush{ Colors::Transparent() });
+        btn.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        btn.Padding(Thickness{ 8, 5, 8, 5 });
+        // Focus-neutral like every drop-down row (_MakePathRow): a row that took focus would let the box's LostFocus tear the
+        // drop-down down before this click lands.
+        btn.IsTabStop(false);
+        btn.AllowFocusOnInteraction(false);
+        AgentSetTip(btn, winrt::hstring{ L"Use this folder \x2014 " + choice.dir + (choice.sessions > 0 ? (L" (" + std::to_wstring(choice.sessions) + (choice.sessions == 1 ? L" session works here)" : L" sessions work here)")) : std::wstring{}) });
+        const std::wstring captured = choice.dir;
+        btn.Click([weak = weak_from_this(), captured](const IInspectable&, const RoutedEventArgs&) {
+            if (const auto self = weak.lock())
+            {
+                self->_PickPath(captured); // fills the box (drilling into the folder, as a RECENT row does); Filter applies it
+            }
+        });
+        return btn;
     }
 
     // Agentmaster: resolve a session id to its (working dir, title) for resume / fork. The registry
@@ -1855,7 +2144,12 @@ namespace winrt::TerminalApp::implementation
                 return;
             }
             const std::wstring dir = NormPath(*picked);
-            self->_PushRecentDir(dir); // a Browse pick joins the recents right away (shared MRU with launches)
+            // A Browse pick joins the recents right away (shared MRU with launches) — but not a FOLDER-PICK bar's (SIDE_PANEL.md
+            // §2l): a folder picked to filter by was launched nowhere, and RECENT stays the list of launch folders.
+            if (!self->_PickMode())
+            {
+                self->_PushRecentDir(dir);
+            }
             // Set the launch target (fires TextChanged -> _ValidateLaunchBox) as a PROGRAMMATIC write: its TextChanged
             // re-lists an open list but does not reopen a closed one — "leave a closed one closed", below.
             self->_WriteBoxTextProgrammatically(dir);
@@ -2011,6 +2305,14 @@ namespace winrt::TerminalApp::implementation
             return false;
         };
         const bool queryMode = !current.empty() && !looksRooted(current) && !LooksLikeSessionId(current).has_value();
+
+        // FOLDER-PICK MODE (SIDE_PANEL.md §2l): the host's own section first, right under Browse… — the folders its sessions
+        // work in, most used first, narrowed by what is typed. For a filter these are the folders that can list something,
+        // so they come before RECENT (where you LAUNCHED last).
+        if (_PickMode())
+        {
+            _AppendFolderChoices(current, queryMode);
+        }
 
         // RECENT (up to AppSettings::recentDirsLimit, current excluded). In query mode the section
         // is filtered + ranked by closeness to the typed token; otherwise it's plain MRU order.

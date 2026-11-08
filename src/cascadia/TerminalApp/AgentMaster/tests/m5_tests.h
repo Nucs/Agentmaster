@@ -290,6 +290,13 @@ void TestSidePanelAiList();
 // stamp's edges (never below 1, no overflow); the pin a tab keeps when it switches conversation; the sessions.json key,
 // apart from Telegram's never-idle "pinned"; the registry's lean copies carry it and it holds no state (tests_sidepanel.cpp)
 void TestSidePanelPins();
+// SidePanelFilters.h (SIDE_PANEL.md §2l): the funnel's FILTERS — the user's request of 2026-11-08 (By Folder through the "+"
+// picker, By State, By Tag, the four flags, Active within; a row of chips only while a filter is on): the facet bits and the
+// panel counts' "every facet but one"; the states' bits; the "active within" boundary; the edits (a folder trimmed, deduped by
+// key, re-choosing its subfolders; a state; a tag in any case; a window); the matcher (no filter lists all; a folder with or
+// without its subfolders at a segment boundary and through the inferred folder; OR inside a facet, AND across; the flags;
+// Untagged); the chips and their x; the record's JSON (round trip, tolerance) and its window-record key (tests_sidepanel.cpp)
+void TestSidePanelFilters();
 // tests_presets.cpp — HARNESSES.md, PRESETS (LaunchPresets.h, the pure core): the list starts EMPTY (no template is added
 // by itself) and an empty list offers "Add presets…" with help text naming the way to the Presets tab (a list of hidden
 // presets does not); one click adds a template as a linked, visible "p-" preset and "Add all tested" adds the five tested

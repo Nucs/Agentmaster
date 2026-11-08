@@ -551,7 +551,15 @@ differs from the plan above, and why:
   AI toggle, named by its "AI"), `am.side.ai.{status,thinking,reset}` (the strip's text, the thinking toggle, ⊘ — named
   "New conversation"), `am.side.ai.busy` (2026-11-05, NOT BUILT: the strip's loading icon, named "The AI search is
   working" — in the tree only while it shows, i.e. while a request runs or the process starts),
-  `am.side.ai.result.<key>` (a result card's title; its item status is the state word or "closed", the tags, "selected").
+  `am.side.ai.result.<key>` (a result card's title; its item status is the state word or "closed", the tags, "selected");
+  the side panel's FILTERS (SIDE_PANEL.md §2l, 2026-11-08, NOT BUILT): `am.side.funnel` (the header's fourth button, the
+  innermost — named "Filter the cards"; ItemStatus "N filters on" while lit), its panel's rows (an in-window popup, open
+  only after a click) `am.side.filter.{byFolder, section.<state|tag|active>, state.<token>, tag.<folded name>, untagged,
+  active.<any|15|60|1440|10080>, flag.<draft|unread|pinned|favorite>, clear}` (a pick row's ItemStatus "checked"), the
+  folder card's `am.side.folderCard.{box,subfolders,filter}`, and the chips row's `am.side.filterRow.{count,clear}` with per
+  chip `am.side.chip.<folder.N|state|tag|draft|unread|pinned|favorite|active|text>` (its words) + `<that id>.remove` (its ✕)
+  — the containers (a Border, a Grid) have no automation peer and no id. From that build the card mode shows NO count line: its words
+  ("2 sessions in this window", "1 of 3 sessions across all windows") are the filter box's (`am.side.filter`) ItemStatus.
   Home keeps its XAML id `ManagerHomeButton` (an x:Name is never overridden).
 - **Item status built:** the tab — the state word, then not started, unread, unsent draft, favorite, cache warm,
   "selected on the Agent Manager page" (the Linked-Lenses pill, MGR-05 phase 2) and "tags: …", composed by `Tab` from

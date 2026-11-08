@@ -36,6 +36,20 @@ columns only, never the header's children, so read the line's order from the but
 not from the tree; cards_view's "the ScrollViewer after +" walk holds in either dock, since the three buttons precede
 the cards whatever their order. The 2026-11-03 build kept '+ Sum ⋯' right-aligned in both docks and listed the dock
 item first, above Scroll to the selected tab.
+
+The FILTERS (SIDE_PANEL.md §2l; a build of 2026-11-08 or later — NOT BUILT on that day): a fourth header button, the
+funnel (ToggleButton "Filter the cards", am.side.funnel), the innermost of the line: '⋯' · 'Sum' · '+' · funnel docked
+left, funnel · '+' · 'Sum' · '⋯' docked right (HEADER_ORDER), appended LAST to the header's children. Its click opens an
+in-window Popup that looks like a menu and stays open while you pick (no id of its own — a Border has no automation
+peer —; its rows am.side.filter.byFolder, .section.<state|tag|active>, .state.<token>, .tag.<folded name>, .untagged,
+.active.<any|15|60|1440|10080>, .flag.<draft|unread|pinned|favorite>, .clear; a pick row's ItemStatus is "checked"). By
+Folder… opens the + card in folder-pick mode (its box am.side.folderCard.box, am.side.folderCard.subfolders, the button
+'Filter' am.side.folderCard.filter). The COUNT LINE is gone from the screen in card mode: its words ('2 sessions in this
+window', '1 of 3 sessions across all windows') are the filter box's ItemStatus instead, and count_line reads them
+there first. While a filter (or typed text) narrows the list, a row of chips shows under the box (found by its
+am.side.filterRow.count 'N of M'; a chip's words am.side.chip.<folder.N | state | tag | draft | unread | pinned |
+favorite | active | text>, its ✕ <chip id>.remove, am.side.filterRow.clear). In AI mode the count line still shows the
+AI view's words.
 """
 from __future__ import annotations
 
@@ -67,10 +81,15 @@ MORE_ITEM_IDS = {"dock": "am.side.dock", "scroll": "am.side.scrollToTab", "scope
 MORE_ITEM_ORDER = ["scroll", "scope", "order", "dock", "collapse"]
 """The ⋯ menu's items top to bottom (the user's order of 2026-11-04: the dock moved below the separator, before the
 collapse; the separator after the card order is not reported). The 2026-11-03 build listed the dock first."""
-HEADER_ORDER = {"right": ["am.side.launch", "am.side.sum", MORE_ID],
-                "left": [MORE_ID, "am.side.sum", "am.side.launch"]}
+FUNNEL_ID = "am.side.funnel"
+"""The header's filter button (the funnel, SIDE_PANEL.md §2l; a build of 2026-11-08 or later) by AutomationId."""
+FILTER_BOX_ID = "am.side.filter"
+"""The filter box by AutomationId: since the filters (SIDE_PANEL.md §2l) its ItemStatus holds the old count line's words."""
+HEADER_ORDER = {"right": [FUNNEL_ID, "am.side.launch", "am.side.sum", MORE_ID],
+                "left": [MORE_ID, "am.side.sum", "am.side.launch", FUNNEL_ID]}
 """The header line's buttons LEFT TO RIGHT on screen, per dock side -> their AutomationIds: the line mirrors with the dock,
-⋯ always at the window's edge (the user's layout of 2026-11-04; header_buttons reads it)."""
+⋯ always at the window's edge (the user's layout of 2026-11-04; header_buttons reads it), the funnel always the innermost
+(SIDE_PANEL.md §2l, 2026-11-08). A build before the filters shows the three-button line without FUNNEL_ID."""
 ORDER_TOKENS = {"MOST ACTIVE": "active", "MOST RECENT": "recent", "NEWEST": "newest", "OLDEST": "oldest", "A–Z": "alpha"}
 """The Card order submenu's words, top to bottom -> the settings.json `boardSort` token (its entry is am.side.sort.<token>)."""
 
@@ -371,10 +390,11 @@ class SidePanel:
         word = next((k.name for k in controls if k.role == "button" and k.name in ("LOCAL", "GLOBAL")), "")
         if word:
             return word
-        for k in controls:
-            m = COUNT_RE.match(k.name) if k.role == "text" else None
-            if m:
-                return "LOCAL" if m.group(3) == "in this window" else "GLOBAL"
+        # The count words: the filter box's ItemStatus on a build with the filters (SIDE_PANEL.md §2l), the count line's
+        # text before them (count_line reads both).
+        m = COUNT_RE.match(self.count_line())
+        if m:
+            return "LOCAL" if m.group(3) == "in this window" else "GLOBAL"
         return ""
 
     def set_scope(self, scope: str) -> None:
@@ -450,12 +470,37 @@ class SidePanel:
             wait_until(lambda: self.sum_on() == on, 5.0, what=f"Sum {'on' if on else 'off'}")
 
     def count_line(self) -> str:
-        """The count line ('2 sessions in this window', '1 of 3 sessions …').
+        """The count line's words ('2 sessions in this window', '1 of 3 sessions …').
+
+        A build with the filters (SIDE_PANEL.md §2l, 2026-11-08) shows no count line in card mode (the user's "replaced by
+        a row only shown when filter is on"): the same words are the filter box's ItemStatus, read first. An older build
+        shows them as the count line's text, read second.
 
         Returns:
-            The text ("" when absent).
+            The words ("" when absent: a collapsed panel, or the AI view, whose count line says something else).
         """
-        return next((k.name for k in self.controls() if k.role == "text" and COUNT_RE.match(k.name)), "")
+        controls = self.controls()
+        box = next((k for k in controls if k.automation_id == FILTER_BOX_ID), None)
+        if box is not None and COUNT_RE.match(box.item_status):
+            return box.item_status
+        return next((k.name for k in controls if k.role == "text" and COUNT_RE.match(k.name)), "")
+
+    def funnel(self) -> Optional[uia.Element]:
+        """The header's filter button (the funnel, SIDE_PANEL.md §2l).
+
+        Returns:
+            The button, or None on a build before the filters and while the panel is collapsed.
+        """
+        return next((k for k in self.controls() if k.automation_id == FUNNEL_ID), None)
+
+    def filter_chips(self) -> list[str]:
+        """The chips row's words, left to right (SIDE_PANEL.md §2l): one per filter, e.g. ['Agentmaster', 'Running'].
+
+        Returns:
+            The chips' words ([] while no filter narrows the list, and on a build before the filters).
+        """
+        chips = [k for k in self.controls() if k.automation_id.startswith("am.side.chip.") and not k.automation_id.endswith(".remove")]
+        return [k.name for k in sorted(chips, key=lambda k: (k.rect[1], k.rect[0]))]
 
     def filter_box(self) -> uia.Element:
         """The filter box.

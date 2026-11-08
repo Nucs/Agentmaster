@@ -8,17 +8,17 @@ per-tab overlay's components, so it carries their business logic verbatim instea
 ## 1. Layout
 
 Shown in the DEFAULT dock (LEFT); the header's `⋯` ▸ **Dock on the right** flips it to the mirror image (dock
-RIGHT), which also flips the header's button line (`⋯ Sum +` from the left edge here, `+ Sum ⋯` against the right edge
-docked right — `⋯` always at the window's edge, §2i) and the collapse symbols (the menu's `«` here and the collapsed
-strip's `»` — the collapse always points toward the docked edge).
+RIGHT), which also flips the header's button line (`⋯ Sum + ⏷` from the left edge here, `⏷ + Sum ⋯` against the right
+edge docked right — `⋯` always at the window's edge, §2i; `⏷` is the funnel, the filters' button, §2l) and the collapse
+symbols (the menu's `«` here and the collapsed strip's `»` — the collapse always points toward the docked edge).
 
 ```
 ┌ tab row ────────────────────────────────────────────────────────────┐
 ├───────────────────────────────┬──┬──────────────────────────────────┤
-│ [⋯][Sum][+]                   │ ▌│                                  │  ← header line 1 (at the window's edge, mirrored with the dock):
-│                               │ ▌│                                  │    ⋯ menu (§2i: ⌖, scope, order, dock, collapse) / summary area (§2d) / + launcher (§2e)
+│ [⋯][Sum][+][⏷]                │ ▌│                                  │  ← header line 1 (at the window's edge, mirrored with the dock):
+│                               │ ▌│                                  │    ⋯ menu (§2i: ⌖, scope, order, dock, collapse) / summary area (§2d) / + launcher (§2e) / ⏷ filters (§2l)
 │ [filter sessions…]            │ ▌│                                  │  ← header line 2: the filter box, full width
-│ N of M (this window)          │ ▌│        terminal content          │  ← count line (names the scope)
+│ 3 of 12 [📁 x ✕][● Running ✕]  │ ▌│        terminal content          │  ← the chips row: ONLY while a filter narrows the list (§2l)
 │ ┌───────────────────────────┐ │ ▌│          (TabContent)            │
 │ │ session CARDS             │ │ ▌│                                  │  ← TOP area (own scroll)
 │ └───────────────────────────┘ │ ▌│                                  │
@@ -38,9 +38,9 @@ the panel:
 ```
 ┌ tab row ────────────────────────────────────────────────────────────┐
 ├───────────────────────────────┬──┬──────────────────────────────────┤
-│ [⋯][Sum][+]                   │ ▌│                                  │  ← "Sum" OFF (unchecked)
+│ [⋯][Sum][+][⏷]                │ ▌│                                  │  ← "Sum" OFF (unchecked)
 │ [filter sessions…]            │ ▌│                                  │
-│ N of M (this window)          │ ▌│                                  │
+│ (the chips row, when filtered)│ ▌│                                  │
 │ ┌───────────────────────────┐ │ ▌│ ┌──────────────────────────────┐ │  ← hover a card: the session's RICH card
 │ │ card                      │ │ ▌│ │ ● title         folder/branch│ │    opens beside the panel (left of it
 │ │ card  (hovered)           │ │ ▌│ │ state · ago · why            │ │    when the panel is docked RIGHT),
@@ -58,7 +58,7 @@ model's answer and its list of sessions instead of the session cards; the summar
 ```
 ┌ tab row ────────────────────────────────────────────────────────────┐
 ├───────────────────────────────┬──┬──────────────────────────────────┤
-│ [⋯][Sum][+]                   │ ▌│                                  │
+│ [⋯][Sum][+][⏷]                │ ▌│                                  │
 │ [describe a session, Enter[AI]]│ ▌│                                  │  ← the filter box is the REQUEST line (AI checked)
 │ 3 sessions found              │ ▌│                                  │  ← the count line speaks for the AI view
 │ ╭───────────────────────────╮ │ ▌│                                  │
@@ -79,17 +79,17 @@ model's answer and its list of sessions instead of the session cards; the summar
   rotation — LEFT = `[panel][splitter][TabContent *]`, RIGHT = its mirror. Both extra columns are
   0 until `_InitAgentSidePanel` runs, so a build without the panel renders the pre-feature layout.
 - The whole panel forces the Agentmaster DARK theme (explicit fills, `RequestedTheme(Dark)`).
-- The header's line of buttons is **+** (the launcher, §2e), **Sum** (the summary-area toggle, §2d)
-  and **⋯** (§2i), a menu holding **Scroll to the selected tab** (`⌖`, §2a), **Card scope ▸** (LOCAL /
+- The header's line of buttons is the **funnel** (the filters, §2l), **+** (the launcher, §2e), **Sum** (the
+  summary-area toggle, §2d) and **⋯** (§2i), a menu holding **Scroll to the selected tab** (`⌖`, §2a), **Card scope ▸** (LOCAL /
   GLOBAL, §2), **Card order ▸** (§2), then below a separator **Dock on the right / left** (`⇄`) and
   **Collapse the side panel**, which shrinks the panel to a 20px expander strip (the strip's chevron
   brings it back).
 - The header is **two lines** (one 2-row grid): the buttons, at the panel's OUTER end (the window's
-  edge) and in a line that mirrors with the dock — `⋯ Sum +` left-aligned docked left, `+ Sum ⋯`
-  right-aligned docked right, so `⋯` is always outermost (§2i) — over the filter box, which spans every
-  column. Sharing one line with the buttons, the box was squeezed toward its minimum on a narrow panel
+  edge) and in a line that mirrors with the dock — `⋯ Sum + ⏷` left-aligned docked left, `⏷ + Sum ⋯`
+  right-aligned docked right, so `⋯` is always outermost (§2i) and the funnel innermost (§2l) — over the filter box,
+  which spans every column. Sharing one line with the buttons, the box was squeezed toward its minimum on a narrow panel
   while the buttons kept their natural widths.
-- **Two font sizes.** The worded button (Sum) is 11 px; the ICON buttons (`+`, `⋯`, and the
+- **Two font sizes.** The worded button (Sum) is 11 px; the ICON buttons (`+`, `⋯`, the funnel and the
   collapsed strip's chevron) are 12 px
   (`kSidePanelIconFontSize`, 2026-10-05 — they were 11 px, and a symbol reads smaller than a word at
   the same size).
@@ -144,8 +144,11 @@ model's answer and its list of sessions instead of the session cards; the summar
   `_claudeTabs` with NO registry notify (the moved session stays live + unchanged), so the drain
   trigger alone would leave a LOCAL list stale. After ~30 s with no update, the periodic tick runs
   the same in-place update for the "ago" texts: only the timing texts whose value moved are written
-  — never a rebuild for a clock tick. The count line names the scope (`N of M sessions in this
-  window` / `… across all windows`), so a short list reads as "this window", not "the fleet shrank".
+  — never a rebuild for a clock tick. The count words name the scope (`N of M sessions in this
+  window` / `… across all windows`), so a short list reads as "this window", not "the fleet shrank" — since §2l
+  (2026-11-08, NOT BUILT yet) as the filter box's UI Automation ItemStatus and the chips row's "N of M" tooltip, no longer
+  as a line on the screen (the user's "replaced by a row only shown when filter is on"). The funnel's filters (§2l) narrow
+  the list after the scope and the typed text.
 - **Search** (the header's second line, full width — slim: FontSize 11 over a ~22px floor, the
   TextBox template's stock 32px lifted for this box alone by overriding `TextControlThemeMinHeight`
   in its own `Resources`, since a `MinHeight` on the control can't lower a template part's floor):
@@ -1436,6 +1439,169 @@ same, in the window that hosts the card's tab.
     strip of the window they were used in.
   - No `[exc] _SidePanelLaunchNextToTab` line in hooks.log.
 
+### 2l. The filters — the funnel, its panel, By Folder and the chips row (2026-11-08, NOT BUILT yet)
+
+The user's request: "In sidemenu, we need to introduce ability to filter, Filter by folder and even have like the +, but a
+button for FILTER and in it have menu appear on click and then By Folder -> <the picker of +>. The row below the filter with
+N sessions across all window, shall be replaced by a row only shown when filter is on and in that row we show what we filter
+based on. Add other filterables." Their answers the same day to the four design questions (asked with mockups):
+
+| Question | Answer |
+|---|---|
+| How By Folder reaches "the picker of +" | **By Folder… opens the + card** — the launcher's own box and drop-down, with Filter in Launch's place and a section of the folders the sessions work in |
+| Which sessions a folder keeps | **The folder and its subfolders** — "And have some way to get Exactly that folder if user choses": the card's **Include subfolders** check box, checked at every open |
+| The other filters | **By State** ("Multiselect enabled, menu shouldnt close on clicking"), **By Tag**, **the four flags** (the same words), **Active within** — not By Kind, not By Branch |
+| The row under the filter box | **The count + a chip per filter + Clear**, kept per window |
+
+Docked left (docked right the line mirrors: `⏷ + Sum ⋯`, the funnel still the innermost):
+
+```
+ [⋯][Sum][+][⏷]                       ⏷ = the funnel: lit (the accent) while a filter is on
+ [filter sessions…                [AI]]
+ 3 of 12 [📁 Agentmaster ✕] [● Running or Waiting for you ✕] [“login” ✕]  Clear     ← the chips row: only while
+ ┌─ card ─────────────────────┐                                                     something narrows the list
+ …
+      ┌──────────────────────────────┐   ← the funnel's PANEL, at the click (it stays open while you pick)
+      │    📁 By Folder…           1 │   ← gives way to the FOLDER CARD below
+      │ ⌄  ● By State          2 on  │   ← a section header: a click expands / folds it (in place of a submenu)
+      │      ✓  ● Running          2 │
+      │      ✓  ● Waiting for you  3 │
+      │         ● Needs approval   1 │   (and Error · Idle · Done)
+      │ ›  🏷 By Tag                  │
+      │ ›  ⏱ Active within      1 h  │
+      │ ──────────────────────────── │
+      │ ✓  ••• Unsent draft        3 │   ← the four flags: each one narrows
+      │    ○   Unread              4 │
+      │    📌  Pinned to top       1 │
+      │    ★   Favorite            2 │
+      │ ──────────────────────────── │
+      │    ✕  Clear all filters      │
+      └──────────────────────────────┘
+      [📁 Folder] [ K:\source\Agentmaster\    ] [☑ Include subfolders] [Filter]     ← the FOLDER CARD (the + card's row)
+                  Browse…
+                  FOLDERS YOUR SESSIONS WORK IN   ● K:\source\Agentmaster — 2 sessions …
+                  RECENT · GIT WORKTREES · SUBFOLDERS OF … (the + drop-down's own sections)
+```
+
+- **The funnel** (`_sidePanelFilterBtn`, `am.side.funnel`, named "Filter the cards"): the header line's FOURTH button, the
+  innermost — on the terminal's side of `+`, so `+` keeps its place beside Sum (§2e's "leftmost, to Sum"). The header grid
+  has five columns now; `_SidePanelApplyHeaderOrder` places the funnel in column 1 docked right and column 3 docked left
+  (the line mirrors, §2i). A ToggleButton for its accent alone: `IsChecked` is pinned to "a menu filter narrows the list"
+  (`_SidePanelUpdateFilterButton`; its ItemStatus says "N filters on"), never the click's self-flip. Its face is Segoe
+  Fluent Icons' Filter glyph (U+E71C), 12 px like `+`; its tip waits 3 s (§1); `IsTabStop` false like its siblings. A click
+  opens the panel at the click (the `+` button's press-point recipe), a second click closes it.
+- **The panel is a popup card, not a menu.** The user's "menu shouldnt close on clicking" rules out a MenuFlyout (a
+  MenuFlyoutItem closes its menu at every click — `MenuFlyoutItem::Invoke`), and a light-dismiss Flyout eats the press that
+  dismisses it and closes on Escape's KEY-DOWN, whose ESC character then reaches the terminal (a claude's interrupt). So the
+  panel is a Root()-parented Popup with the `+` card's machinery: a press outside it closes it and goes on to its target (a
+  card click closes the panel AND selects the card), Escape closes it on its KEY-UP, its first row takes the keyboard one
+  tick after it opens (Up / Down walk the rows — XY focus —, Tab cycles inside, Enter / Space pick), and focus returns to
+  the current tab when it closes while holding it. **A section opens in place of a submenu** — By State ▸, By Tag ▸ and
+  Active within ▸ are header rows whose click (or Enter) expands or folds their rows under them (`⌄` / `›`), so a pick
+  never closes or moves anything; which sections are open is remembered for the window's life (`_sidePanelFilterExpanded`).
+  The rows are rebuilt at every open from the live fleet (`_SidePanelFillFilterPanel`); a pick rewrites every row's check
+  and count IN PLACE (`_SidePanelRefreshFilterPanel`), so the row under the pointer stays put. 248 DIP wide, scrolling
+  inside the window's height (a long tag list). A pick runs one tick after its click (the clicked Button must not leave the
+  tree inside its own Click).
+- **The counts** beside each row are faceted (`_SidePanelFilterCensus`): how many sessions of the panel's scope (LOCAL /
+  GLOBAL) that pass the typed text would be listed with that pick, every OTHER filter as it is
+  (`SidePanelPassesAllBut`). A section header shows what is picked in it ("2 on", "1 h"); By Folder… shows how many
+  folders are picked. A picked tag no session carries any more keeps its row (count 0), so it can be unchecked.
+- **The rules** (`AgentMaster/SidePanelFilters.h`, pure): different filters narrow together (AND); picks inside one filter
+  add up (OR) — two states, two tags or Untagged, two folders; each of the four flags is a filter of its own (two checked =
+  both must hold). By State's six states are the tab dot's (Running · Waiting for you · Needs approval · Error · Idle ·
+  Done). By Tag lists every tag a counted session carries (most carried first, its ribbon color) and **Untagged**; tags
+  compare case-insensitively (`FoldTagName`). The flags read the same facts as the card's icon: **Unsent draft** the draft
+  (the 3 dots), **Unread** the process-wide unread census (the red ring), **Pinned to top** the §2j pin, **Favorite** the ★
+  (`IsSessionFavorite`). **Active within** (Any time · 15 minutes · 1 hour · 24 hours · 7 days, one at a time) reads the
+  card's "active … ago" source (the transcript's last activity, else the hook anchor); an unknown activity is never within
+  a window.
+- **By Folder… → the "+" picker** (the user's words). The panel closes and the **folder card** opens where it was: the `+`
+  card's own launch row — the shared `AgentLaunchBar` — in its new **folder-pick mode** (`AgentLaunchBarHost::pickFolder`;
+  the Agent Manager's bar and the `+` card are unchanged: every change is behind `_PickMode()`): the chip reads
+  `[📁] Folder`; the box starts EMPTY and takes folders only (a bare word, a relative path or a session id turns it red and
+  disables Filter; a folder not on disk turns it amber and is allowed — a session may still have worked there); **Filter**
+  stands in Launch's place, with no hover menu, no Fork, no resume and no "Create & Launch"; a Browse… pick is not pushed
+  into the recent folders (RECENT stays where you launched). Its drop-down is the `+` drop-down plus one section right under
+  Browse…, **FOLDERS YOUR SESSIONS WORK IN** (`folderChoices` → `_SidePanelFolderChoices`): every working and inferred
+  folder of the panel's scope that passes every filter but By Folder, most used first, with its tab color and "N sessions";
+  narrowed by the box's text (a word: the path contains it; a path: the folder starts with it), 20 rows at most with a "N
+  more" line. A row fills the box (drilling into it, as on `+`); **Filter** — or Enter in the box or on Filter, on its
+  KEY-UP — adds the folder; Escape (with the list closed) closes the card. **Include subfolders** (checked at every open)
+  decides that pick alone: checked = the folder and every folder under it at a segment boundary (`K:\src` covers
+  `K:\src\app`, never `K:\srcfoo`; a drive root covers the drive), unchecked = exactly that folder (its chip says
+  "(exactly)"); picking a folder already there in any spelling only changes its choice. A folder keeps a session when it
+  covers the session's working folder OR its inferred one (the Sessions page's §10 rule). The card closes like the `+` card
+  (an outside press, Escape, a tab switch, a collapse, a dock flip) and after its pick.
+- **The chips row** (`_sidePanelFilterRow`, row 1 of the panel, in the count line's place): shown in card mode ONLY while
+  something narrows the list — a filter, or text typed in the filter box — and then: **"N of M"** (its tip names the scope),
+  **one chip per filter** in the facets' order — each picked folder (its leaf, "(exactly)" when unchecked), the states
+  ("Running or Waiting for you"), the tags ("release or untagged"), each flag, the window ("active in 1 h"), the typed text
+  ("“login”") — each with a glyph (the folder icon, the first state's dot, the first tag's ribbon, …), its full meaning in
+  its tip and a **✕** that drops it (the text chip's ✕ empties the box), and **Clear** (every filter and the typed text).
+  The chips wrap onto more lines on a narrow panel (`AgentSidePanelWrapPanel`, a code-only wrap layout — UWP has no
+  WrapPanel). Each chip's rounded back is a CHILDLESS Border behind its content (§2f's composition-node rule). The row is
+  rebuilt only when its content changed (`_sidePanelFilterRowSig`).
+- **The count line is gone from the card mode's screen** (the user's "shall be replaced"). Its words — "2 sessions in this
+  window", "1 of 3 sessions across all windows" — live on as the filter box's UI Automation ItemStatus, kept in step by every
+  list update, so a screen reader still hears how many cards the box left and the e2e driver still reads the scope from them
+  (`count_line`). In AI mode the count line shows the AI view's words as before (§2h), and the chips row hides.
+- **The record** (`_sidePanelFilters`, a `SidePanelFilters`): one per window, written by `_SidePanelSetFilters` alone
+  (normalized, compared, persisted, the funnel re-pinned, the list rebuilt at once, an open panel refreshed), persisted per
+  window only (§4: `WindowRecord::sidePanelFilters`, the `"sidePanelFilters"` object — folders with their `subfolders`
+  choice, state TOKENS, tags, the flags, `activeWithinMinutes` —, omitted while empty, read back normalized: a relative
+  folder, a duplicate, an unknown state, a non-bool flag or a bad window reads as "not set", never as a filter the row could
+  not show). A new window starts unfiltered.
+- **Freshness.** The registry drain re-filters as before (a state, a draft, a pin changes there). With **Unread** on, an
+  unread-census change re-filters the list too (`_SidePanelNoteUnreadChanged`, throttled), not only the rings; with
+  **Favorite** on, the periodic tick re-filters when the facts epoch moved (a ★ set anywhere in this process); **Active
+  within** ages through the ~30 s timing pass; a tag change moves the tags epoch the tick already watches.
+- **Cost.** An unfiltered window builds no matcher: its list update is as before. A filter compiles once per update
+  (folder keys, folded tags, the update's clock); the tags and the ★ are read only while a filter needs them, through
+  per-session caches dropped when their epoch moves (`_SidePanelSyncFactCaches`; the ★ cache is bounded at 4,096). The
+  panel's census reads every session's tags and ★ in the scope at its open (one session-store stat each the first time); the
+  tag cache is not pruned while the panel is open, so a pick never re-reads them.
+- **Logs:** `[nav] sidepanel filter panel open (at the click | under the funnel)` / `… close (<reason>)`,
+  `[nav] sidepanel filter <state | tag | untagged | flag | active-within | folder+ (with subfolders | exactly) | chip x |
+  clear> -> N filter(s) on` (never a path or a tag name), `[nav] sidepanel filter folder card open` / `… close (<reason>)`,
+  `[nav] sidepanel filter chip x text`; `[sidepanel] filter panel built` / `folder filter card built` once per window; the
+  build line's `filters=N`.
+- **UI Automation** (E2E_TESTING.md §6.3): `am.side.funnel`; the panel's rows
+  `am.side.filter.{byFolder, section.<state|tag|active>, state.<token>, tag.<folded name>, untagged,
+  active.<any|15|60|1440|10080>, flag.<draft|unread|pinned|favorite>, clear}` (a pick row's ItemStatus "checked"); the folder
+  card's `am.side.folderCard.box` / `.subfolders` / `.filter`; the chips row's `am.side.filterRow.count` and
+  `am.side.filterRow.clear`, each chip's words `am.side.chip.<folder.N | state | tag | draft | unread | pinned | favorite |
+  active | text>` and its ✕ `<that id>.remove`. The containers themselves (the panel's and the folder card's Border, the
+  row's Grid) carry no id: they have no automation peer, so a reader finds them by these controls.
+- **Tested** (no build): `TestSidePanelFilters` (`tests_sidepanel.cpp`, 81 checks) — the facet bits and "every facet but
+  one", the states' bits, the window's boundary, which records filter, the edits, the matcher (no filter lists all;
+  subfolders vs exactly at a segment boundary, the inferred folder, a drive root; OR inside a facet, AND across; the flags;
+  Untagged), the chips and each ✕, the record's JSON (round trip, tokens, tolerance) and the window record's conditional
+  key. The whole m5 harness: 12,318 checks, the 3 known taskbar-badge failures only (a first run of the fresh build also
+  failed the load-sensitive "woken tab" scheduler check, which passed on a rerun of the same exe on a wiped profile). `cl /Zs`
+  against the Release worktree build of e7a8c3aa2 (§2j's recipe; no `.idl` or `pch.h` changed since) of the units that
+  changed or include a changed header: `TerminalPage.AgentSidePanel.cpp`, `AgentLaunchBar.cpp`,
+  `TerminalPage.AgentEngine.cpp`, `TerminalPage.AgentWindowRecord.cpp`, `AgentManagerContent.cpp`,
+  `AgentManagerContent.Launch.cpp`, `AgentMaster/Persistence.cpp`, plus `TerminalPage.AgentSessions.cpp` and
+  `TerminalPage.AgentObserver.cpp` (two more units of `TerminalPage.h`) and all 17 agentmaster-cli units at their `/W4 /WX`
+  (they compile `Persistence.cpp`, which now includes `SidePanelFilters.h`) — all pass; two undeclared names planted in the
+  new code (`_SidePanelSetFilters`, `_SidePanelUpdateFilterRow`) failed at exactly their lines. Not run: the e2e suite (the driver's
+  `count_line`, `HEADER_ORDER` and SP-K3's outside click are updated for the new shape; no flow test of the filters yet).
+- **Check after the build** (a PURGED build: `SessionModels.h` and `TerminalPage.h` changed):
+  - The line reads `⋯ Sum + ⏷` docked left and `⏷ + Sum ⋯` docked right; the funnel's tip opens after 3 s.
+  - The funnel opens the panel at the click; a click on a state, a tag or a flag checks it, the cards re-filter at once,
+    the counts change, and the panel stays open; a section header expands / folds its rows; the funnel again, Escape, or a
+    click outside closes it (a click on a card closes it and selects the card); no ESC reaches the terminal.
+  - By Folder… opens the folder card where the panel was, its box empty and focused, its list open with FOLDERS YOUR
+    SESSIONS WORK IN first; a row fills the box, Filter or Enter adds the folder; unchecked Include subfolders gives
+    "(exactly)"; Escape closes the list, then the card.
+  - The chips row appears under the box with "N of M", a chip per filter and Clear; ✕ drops one; Clear drops all and empties
+    the box; typing in the box alone shows the row with the text chip; with no filter and an empty box the row is gone.
+  - AI on: the count line shows the AI words, the chips row hides; AI off: the chips are back.
+  - A restart keeps this window's filters; a new window starts unfiltered; windows/<id>.json has `sidePanelFilters` only
+    while a filter is set.
+  - No `[exc] _SidePanel…Filter…` / `[exc] side panel filter …` / `[exc] side panel folder card …` line in hooks.log.
+
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 
 The bottom area hosts a REAL `AgentTabOverlay` whose summary panel is switched into the new
@@ -1568,6 +1734,7 @@ below).
 | `⌖` scroll to the selected tab (§2a) | — | `AppSettings::sidePanelScrollToSelectedTab` (true = **ON, the default**; absent key = ON) — a GLOBAL preference, broadcast live to every open window |
 | the filter box's **AI** toggle (§2h) | `WindowRecord::sidePanelAiMode` (-1 = unset; written only when set; a non-bool value reads unset) | `AppSettings::sidePanelAiMode` (false = **the session cards, the default**) |
 | a card's **Pin to Top** (§2j) | — | — **per SESSION instead**: sessions.json's `SessionInfo::sidePanelPinnedAtUnixMs` (absent / 0 = not pinned), so the pin follows the session into every window's list and through a restart |
+| the card list's **filters** (the funnel, §2l) | `WindowRecord::sidePanelFilters` (the `"sidePanelFilters"` object; absent = no filter; written only while a filter is set; read back normalized — a malformed part reads as "not set") | — **none by design**, like the scope: every new window starts unfiltered. The typed text of the filter box is not kept (the box starts empty, as before) |
 
 - **The card scope is the one field with NO last-one-wins export**: `_SidePanelSetScope`
   persists it through the window-record autosave alone — never `_SidePanelPersistDefaults`, and
@@ -1575,6 +1742,10 @@ below).
   itself; a new window (or a pre-feature record, where the key is absent) starts LOCAL. This is
   what guarantees one window's fleet-wide view can never leak into another window's list — the
   bug that motivated the scope ("the upper list shows the tabs of a different window").
+- **The filters follow the scope's rule** (§2l): `_SidePanelSetFilters` persists them through the window-record autosave
+  alone, and nothing seeds a new window with another window's filters. The record's key is CONDITIONAL (written only while
+  a filter is set), so — like the panel's other per-window keys — a build from before the filters that rewrites the record
+  drops it, and the older-writer repair cannot bring it back (PERSISTENCE.md §17, "What is still not covered").
 
 - Every drag release / collapse toggle / **Sum** click: update the live members → the window-record
   autosave captures them (`_CaptureWindowRecord`) → a GRANULAR freshest-disk RMW exports ONLY the
@@ -1749,3 +1920,17 @@ below).
   `_SidePanelOpenNewOrFork`; both card menus' hosts), `TerminalPage.AgentMessaging.cpp` (`_RemoteSessionAction`'s two
   words), `TerminalPage.h` (the declarations, `kSidePanelNewSessionNextAction` / `kSidePanelForkNextAction`),
   `TerminalPage.AgentEngine.cpp` (the spawn handler's comment), `e2e/suites/test_side_panel.py` (SP-12).
+  The filters (§2l): `AgentMaster/SidePanelFilters.h` (the facets, the six states and four windows, the edits, the matcher,
+  the chips and their ✕, the record's JSON — pure; new), `AgentMaster/SessionModels.h` (`SidePanelFolderFilter`,
+  `SidePanelFilters`, `WindowRecord::sidePanelFilters`), `Persistence.cpp` (the record's conditional key, both halves),
+  `AgentLaunchBar.{h,cpp}` (folder-pick mode: `AgentLaunchBarHost::pickFolder` / `pickLabel` / `pickTip` /
+  `folderChoices` / `folderChoicesLabel`, `AgentLaunchFolderChoice`, `_PickMode`, `_ValidatePickBox`, `_OnPickFolder`,
+  `_AppendFolderChoices`, `_MakeFolderChoiceRow`, and the launch-only paths standing aside), `TerminalPage.AgentSidePanel.cpp`
+  (the funnel, the five-column header line, `AgentSidePanelWrapPanel`, the filters section — the panel, its rows and
+  census, the folder card, the chips row, `_SidePanelSetFilters` — the filtering in `_SidePanelRebuildCards`, the closes at
+  the collapse / dock flip / settings dock move / AI-on, the Unread and Favorite belts), `TerminalPage.h` (the row view and
+  census structs, the members, the declarations, two forward declarations), `TerminalPage.AgentEngine.cpp` (the tab-switch
+  close, the folder bar's `Shutdown`), `TerminalPage.AgentWindowRecord.cpp` (capture), `TerminalAppLib.vcxproj` (the
+  header), `tests/tests_sidepanel.cpp` (`TestSidePanelFilters`), `tests/m5_tests.{h,cpp}`,
+  `e2e/amdriver/ui/sidepanel.py` (`FUNNEL_ID`, `HEADER_ORDER`, `count_line` from the box's ItemStatus, `funnel`,
+  `filter_chips`), `e2e/suites/test_side_panel.py` (the header line with the funnel; SP-K3's outside click).

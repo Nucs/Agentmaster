@@ -396,6 +396,7 @@ namespace winrt::TerminalApp::implementation
             rec.sidePanelSummaryHidden = _sidePanelSummaryHidden ? 1 : 0; // the "Sum" toggle — same tri-state commit
             rec.sidePanelAiMode = _sidePanelAiMode ? 1 : 0; // the filter box's "AI" toggle (SIDE_PANEL.md §2h) — same tri-state commit
             rec.sidePanelGlobal = _sidePanelGlobal; // the card-list scope — per-window ONLY (no global default exists for it; ToJson omits a LOCAL false)
+            rec.sidePanelFilters = _sidePanelFilters; // the card-list filters (SIDE_PANEL.md §2l) — per-window ONLY, like the scope; ToJson omits an empty record
         }
 
         // --- The window name (AGENT_MANAGER.md "The window name") ---

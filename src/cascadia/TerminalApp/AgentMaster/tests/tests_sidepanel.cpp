@@ -48,6 +48,15 @@
 // newest on top, the board's order for the rest; a pin again bringing a card back to the top on any clock; the comparator's
 // strict weak ordering; the stamp's edges; the pin a tab keeps when it switches conversation; the sessions.json key (apart
 // from Telegram's never-idle pin) and the registry's lean copies.
+//
+// TestSidePanelFilters pins the funnel's FILTERS (AgentMaster/SidePanelFilters.h, SIDE_PANEL.md section 2l): the facet bits
+// and the "every facet but one" question the panel's counts ask; the six states' bits; the "active within" boundary; which
+// records filter at all; the edits (a folder trimmed, deduped by its key and re-choosing its subfolders; a state, a tag
+// case-insensitively, a window); the matcher - an empty record passes everything, a folder with and without its subfolders
+// at a segment boundary and through the inferred folder, OR inside a facet, AND across facets, the flags each narrowing,
+// Untagged; the chips in the facets' order with their words and what each chip's x leaves; and the record's JSON - a round
+// trip, the empty record, every malformed part read as "not set", and the window record's key written only while a filter
+// is set.
 
 #include "m5_tests.h"
 
@@ -55,6 +64,7 @@
 #include "../PointerCardPlacement.h" // the "+" launcher card's tooltip-like placement (TestPointerCardPlacement)
 #include "../SessionTimingText.h" // the cards' and rows' "created 4d1h, active 2m4s ago" (TestSessionTimingText)
 #include "../SidePanelAiList.h" // the AI view's list rule: only a request's end or a reset changes it (TestSidePanelAiList)
+#include "../SidePanelFilters.h" // the funnel's FILTERS: facets, matcher, edits, chips, the record's JSON (TestSidePanelFilters)
 #include "../SidePanelPins.h" // Pin to Top: pinned cards first, the newest pin on top, the pin stamp, the re-home carry (TestSidePanelPins)
 #include "../StatusIconMotion.h" // the status icon's motion rule, shared by the tab header and the card icon (TestStatusIconMotion)
 #include "../VirtualListWindow.h" // the virtualized card list's realized rows (TestVirtualListWindow)
@@ -1433,5 +1443,292 @@ void TestSidePanelPins()
         reg.Update(L"spin-reg", [](SessionInfo& s) { s.state = SessionState::Idle; });
         const auto idle = reg.Get(L"spin-reg");
         CHECK(idle && idle->state == SessionState::Idle && !idle->pinned, "pins registry: a card pin never holds a session out of Idle (the never-idle hold is Telegram's pin)");
+    }
+}
+
+namespace
+{
+    // One session's filter facts for TestSidePanelFilters: the folder keys from the given folders (NormDirKey, as the panel
+    // computes them), the rest as given.
+    //   workingDir  - the session's working folder ("" = none).
+    //   inferredDir - its inferred folder ("" = none).
+    //   state       - its state.
+    //   tags        - its tags (null = none).
+    //   returns     - the facts.
+    SidePanelFilterFacts FilterFacts(const std::wstring& workingDir, const std::wstring& inferredDir, SessionState state = SessionState::Idle, const std::vector<std::wstring>* tags = nullptr)
+    {
+        SidePanelFilterFacts f;
+        f.launchKey = workingDir.empty() ? std::wstring{} : NormDirKey(workingDir);
+        f.inferredKey = inferredDir.empty() ? std::wstring{} : NormDirKey(inferredDir);
+        f.state = state;
+        f.tags = tags;
+        return f;
+    }
+}
+
+void TestSidePanelFilters()
+{
+    std::wprintf(L"Side panel filters (SidePanelFilters.h, SIDE_PANEL.md section 2l):\n");
+    constexpr int64_t kNow = 1'762'600'000'000; // a fixed clock (2025-11-08)
+
+    // The facet bits and the panel counts' question.
+    {
+        uint32_t all = 0;
+        for (uint32_t i = 0; i < kSidePanelFacetCount; ++i)
+        {
+            all |= SidePanelFacetBit(static_cast<SidePanelFacet>(i));
+        }
+        CHECK(all == kSidePanelAllFacets, "filters facets: the nine facet bits are distinct and make the all-pass mask");
+        const uint32_t allButState = kSidePanelAllFacets & ~SidePanelFacetBit(SidePanelFacet::State);
+        CHECK(SidePanelPassesAllBut(allButState, SidePanelFacet::State), "filters facets: failing only By State passes 'every facet but State'");
+        CHECK(!SidePanelPassesAllBut(allButState, SidePanelFacet::Tag), "filters facets: failing By State does not pass 'every facet but Tag'");
+        CHECK(SidePanelPassesAllBut(kSidePanelAllFacets, SidePanelFacet::Active), "filters facets: a listed session passes 'every facet but X' for any X");
+    }
+
+    // The six states.
+    {
+        uint32_t seen = 0;
+        bool distinct = true;
+        for (const auto& choice : kSidePanelStateChoices)
+        {
+            distinct = distinct && (seen & choice.bit) == 0 && SidePanelStateBit(choice.state) == choice.bit;
+            seen |= choice.bit;
+        }
+        CHECK(distinct && seen == kSidePanelAllStateBits, "filters states: six distinct bits, one per state, and they make the all-states mask");
+        CHECK(std::wstring{ kSidePanelStateChoices[1].label } == L"Waiting for you" && std::wstring{ kSidePanelStateChoices[1].token } == L"waiting", "filters states: WaitingForInput reads 'Waiting for you' and stores 'waiting'");
+    }
+
+    // Active within: the boundary.
+    {
+        CHECK(SidePanelActiveWithin(0, kNow, 0), "filters active: any time (0) passes even an unknown activity");
+        CHECK(!SidePanelActiveWithin(0, kNow, 60), "filters active: an unknown activity is never within a window");
+        CHECK(SidePanelActiveWithin(kNow - 60 * 60'000, kNow, 60), "filters active: exactly 1 h old is within 1 h");
+        CHECK(!SidePanelActiveWithin(kNow - 60 * 60'000 - 1, kNow, 60), "filters active: 1 h and 1 ms old is not within 1 h");
+        CHECK(SidePanelActiveWithin(kNow + 5'000, kNow, 15), "filters active: a stamp in the future (clock skew) counts as now");
+        CHECK(SidePanelActiveChipText(60) == L"active in 1 h" && SidePanelActiveChipText(7) == L"active in 7 min", "filters active: the chip names an offered window by its words, any other in minutes");
+    }
+
+    // Which records filter at all.
+    {
+        SidePanelFilters f;
+        CHECK(!SidePanelFiltersActive(f) && SidePanelActiveFacets(f, false) == 0, "filters active: the empty record filters nothing");
+        CHECK(SidePanelActiveFacets(f, true) == SidePanelFacetBit(SidePanelFacet::Text), "filters active: the typed text alone is the Text facet");
+        f.untagged = true;
+        CHECK(SidePanelFiltersActive(f) && SidePanelActiveFacets(f, false) == SidePanelFacetBit(SidePanelFacet::Tag), "filters active: Untagged alone is the Tag facet");
+        f = {};
+        f.favorite = true;
+        f.activeWithinMinutes = 15;
+        CHECK(SidePanelActiveFacets(f, false) == (SidePanelFacetBit(SidePanelFacet::Favorite) | SidePanelFacetBit(SidePanelFacet::Active)), "filters active: each flag and the window are their own facets");
+    }
+
+    // The edits.
+    {
+        SidePanelFilters f;
+        CHECK(SidePanelAddFolderFilter(f, L"  \"K:/src/app/\"  ", true) && f.folders.size() == 1 && f.folders[0].path == L"K:\\src\\app" && f.folders[0].includeSubfolders,
+              "filters edits: a folder is trimmed (spaces, quotes, '/' and the trailing separator) and keeps its subfolders");
+        CHECK(!SidePanelAddFolderFilter(f, L"k:\\SRC\\app", true) && f.folders.size() == 1, "filters edits: the same folder in another case is no second pick");
+        CHECK(SidePanelAddFolderFilter(f, L"k:\\SRC\\app", false) && f.folders.size() == 1 && !f.folders[0].includeSubfolders && f.folders[0].path == L"K:\\src\\app",
+              "filters edits: picking it again unchecked makes it 'exactly' in place (its first spelling kept)");
+        CHECK(!SidePanelAddFolderFilter(f, L"src\\app", true) && !SidePanelAddFolderFilter(f, L"K:", true) && !SidePanelAddFolderFilter(f, L"   ", true) && f.folders.size() == 1,
+              "filters edits: a relative path, a bare drive and blanks are no folders");
+        CHECK(SidePanelAddFolderFilter(f, L"\\\\server\\share\\x", true) && f.folders.size() == 2, "filters edits: a UNC folder is a folder");
+        CHECK(SidePanelToggleState(f, kSidePanelStateChoices[0].bit) && f.states == kSidePanelStateChoices[0].bit, "filters edits: a state toggles on");
+        CHECK(SidePanelToggleState(f, kSidePanelStateChoices[0].bit) && f.states == 0, "filters edits: and off again");
+        CHECK(!SidePanelToggleState(f, 1u << 20) && f.states == 0, "filters edits: a bit no state owns changes nothing");
+        CHECK(SidePanelToggleTag(f, L"Release") && f.tags.size() == 1 && f.tags[0] == L"Release", "filters edits: a tag toggles on in its spelling");
+        CHECK(SidePanelToggleTag(f, L"release") && f.tags.empty(), "filters edits: and off again in any case");
+        CHECK(!SidePanelToggleTag(f, L"   "), "filters edits: a blank tag name changes nothing");
+        CHECK(SidePanelSetActiveWithin(f, 60) && f.activeWithinMinutes == 60 && !SidePanelSetActiveWithin(f, 60), "filters edits: a window is set once");
+        CHECK(SidePanelSetActiveWithin(f, kSidePanelActiveMaxMinutes + 1) && f.activeWithinMinutes == 0, "filters edits: a window past a year reads as any time");
+    }
+
+    // The matcher.
+    {
+        const std::vector<std::wstring> releaseTags{ L"Release", L"ui" };
+        const std::vector<std::wstring> noTags;
+        // An empty record passes everything; the typed text is the caller's verdict.
+        {
+            const SidePanelFilterMatcher m{ SidePanelFilters{}, kNow };
+            const auto facts = FilterFacts(L"K:\\a", L"");
+            CHECK(m.Passed(facts, true) == kSidePanelAllFacets && m.Matches(facts, true), "filters matcher: no filter lists every session");
+            CHECK(!m.Matches(facts, false) && m.Passed(facts, false) == (kSidePanelAllFacets & ~SidePanelFacetBit(SidePanelFacet::Text)), "filters matcher: the typed text's 'no' hides it, and only the Text facet fails");
+            CHECK(!m.NeedsTags() && !m.NeedsFavorite() && !m.NeedsUnread(), "filters matcher: an empty record reads no tags, no star, no census");
+        }
+        // By Folder: subfolders (the default) vs exactly, the segment boundary, the inferred folder, OR between folders.
+        {
+            SidePanelFilters f;
+            SidePanelAddFolderFilter(f, L"K:\\src", true);
+            const SidePanelFilterMatcher sub{ f, kNow };
+            CHECK(sub.Matches(FilterFacts(L"K:\\src", L""), true), "filters folder: the folder itself");
+            CHECK(sub.Matches(FilterFacts(L"k:\\SRC\\app\\e2e", L""), true), "filters folder: a folder under it, in any case");
+            CHECK(!sub.Matches(FilterFacts(L"K:\\srcfoo", L""), true), "filters folder: a prefix that is no folder boundary does not match");
+            CHECK(sub.Matches(FilterFacts(L"C:\\Users\\me", L"K:\\src\\lib"), true), "filters folder: the inferred folder counts as where the session works");
+            CHECK(!sub.Matches(FilterFacts(L"C:\\Users\\me", L""), true), "filters folder: a session elsewhere does not match");
+            SidePanelAddFolderFilter(f, L"K:\\src", false);
+            const SidePanelFilterMatcher exact{ f, kNow };
+            CHECK(exact.Matches(FilterFacts(L"K:\\src", L""), true) && !exact.Matches(FilterFacts(L"K:\\src\\app", L""), true), "filters folder: 'exactly' keeps the folder and drops its subfolders");
+            SidePanelAddFolderFilter(f, L"Q:\\tmp\\wt", true);
+            const SidePanelFilterMatcher either{ f, kNow };
+            CHECK(either.Matches(FilterFacts(L"Q:\\tmp\\wt\\x", L""), true) && either.Matches(FilterFacts(L"K:\\src", L""), true), "filters folder: two folders - a session in either is listed (OR)");
+            SidePanelFilters root;
+            SidePanelAddFolderFilter(root, L"K:\\", true);
+            CHECK(SidePanelFilterMatcher(root, kNow).Matches(FilterFacts(L"K:\\anything\\deep", L""), true), "filters folder: a drive root covers the drive");
+        }
+        // By State: OR.
+        {
+            SidePanelFilters f;
+            SidePanelToggleState(f, SidePanelStateBit(SessionState::Running));
+            SidePanelToggleState(f, SidePanelStateBit(SessionState::WaitingForInput));
+            const SidePanelFilterMatcher m{ f, kNow };
+            CHECK(m.Matches(FilterFacts(L"", L"", SessionState::Running), true) && m.Matches(FilterFacts(L"", L"", SessionState::WaitingForInput), true), "filters state: either picked state is listed (OR)");
+            CHECK(!m.Matches(FilterFacts(L"", L"", SessionState::Idle), true), "filters state: another state is not");
+        }
+        // By Tag: OR, any case, Untagged.
+        {
+            SidePanelFilters f;
+            SidePanelToggleTag(f, L"release");
+            SidePanelToggleTag(f, L"bug");
+            const SidePanelFilterMatcher m{ f, kNow };
+            CHECK(m.NeedsTags(), "filters tag: a tag pick reads the tags");
+            CHECK(m.Matches(FilterFacts(L"", L"", SessionState::Idle, &releaseTags), true), "filters tag: a session carrying a picked tag in another case is listed");
+            CHECK(!m.Matches(FilterFacts(L"", L"", SessionState::Idle, &noTags), true) && !m.Matches(FilterFacts(L"", L"", SessionState::Idle, nullptr), true), "filters tag: an untagged session is not (Untagged not picked)");
+            f.untagged = true;
+            const SidePanelFilterMatcher withUntagged{ f, kNow };
+            CHECK(withUntagged.Matches(FilterFacts(L"", L"", SessionState::Idle, nullptr), true) && withUntagged.Matches(FilterFacts(L"", L"", SessionState::Idle, &releaseTags), true),
+                  "filters tag: with Untagged picked, an untagged session OR a tagged one is listed");
+            SidePanelFilters onlyUntagged;
+            onlyUntagged.untagged = true;
+            CHECK(!SidePanelFilterMatcher(onlyUntagged, kNow).Matches(FilterFacts(L"", L"", SessionState::Idle, &releaseTags), true), "filters tag: Untagged alone hides every tagged session");
+        }
+        // The flags (AND) and the window, and AND across facets.
+        {
+            SidePanelFilters f;
+            f.draft = true;
+            f.unread = true;
+            const SidePanelFilterMatcher m{ f, kNow };
+            auto facts = FilterFacts(L"", L"");
+            facts.draft = true;
+            CHECK(!m.Matches(facts, true), "filters flags: an unsent draft alone does not pass 'draft AND unread'");
+            facts.unread = true;
+            CHECK(m.Matches(facts, true) && m.NeedsUnread(), "filters flags: both flags hold - listed");
+            SidePanelFilters active;
+            active.activeWithinMinutes = 15;
+            auto recent = FilterFacts(L"", L"");
+            recent.lastActivityMs = kNow - 10 * 60'000;
+            auto stale = recent;
+            stale.lastActivityMs = kNow - 16 * 60'000;
+            const SidePanelFilterMatcher w{ active, kNow };
+            CHECK(w.Matches(recent, true) && !w.Matches(stale, true), "filters active: 10 min old is within 15 min, 16 min old is not");
+            SidePanelFilters both;
+            SidePanelAddFolderFilter(both, L"K:\\src", true);
+            SidePanelToggleState(both, SidePanelStateBit(SessionState::Running));
+            const SidePanelFilterMatcher bm{ both, kNow };
+            const auto idleHere = FilterFacts(L"K:\\src\\app", L"", SessionState::Idle);
+            const uint32_t passed = bm.Passed(idleHere, true);
+            CHECK(!bm.Matches(idleHere, true) && SidePanelPassesAllBut(passed, SidePanelFacet::State) && !SidePanelPassesAllBut(passed, SidePanelFacet::Folder),
+                  "filters AND: the right folder in the wrong state is hidden, and counts for By State's rows (every facet but State)");
+            SidePanelFilters fav;
+            fav.favorite = true;
+            auto starred = FilterFacts(L"", L"");
+            starred.favorite = true;
+            CHECK(SidePanelFilterMatcher(fav, kNow).NeedsFavorite() && SidePanelFilterMatcher(fav, kNow).Matches(starred, true) && !SidePanelFilterMatcher(fav, kNow).Matches(FilterFacts(L"", L""), true),
+                  "filters flags: Favorite lists the starred session alone");
+        }
+    }
+
+    // The chips row.
+    {
+        CHECK(SidePanelFilterChips(SidePanelFilters{}, L"").empty(), "filters chips: no filter and no text - no chip (the row hides)");
+        SidePanelFilters f;
+        SidePanelAddFolderFilter(f, L"K:\\source\\Agentmaster", true);
+        SidePanelAddFolderFilter(f, L"K:\\work\\webapp", false);
+        SidePanelToggleState(f, SidePanelStateBit(SessionState::WaitingForInput));
+        SidePanelToggleState(f, SidePanelStateBit(SessionState::Running));
+        SidePanelToggleTag(f, L"release");
+        f.untagged = true;
+        f.draft = true;
+        f.favorite = true;
+        f.activeWithinMinutes = 60;
+        const auto chips = SidePanelFilterChips(f, L"login");
+        std::wstring kinds;
+        for (const auto& c : chips)
+        {
+            kinds += std::to_wstring(static_cast<int>(c.kind));
+        }
+        CHECK(chips.size() == 8 && kinds == L"00123678", "filters chips: one per folder, the states, the tags, each flag set, the window, the text - in the facets' order");
+        CHECK(chips.size() == 8 && chips[0].text == L"Agentmaster" && chips[1].text == L"webapp (exactly)" && chips[1].folderIndex == 1, "filters chips: a folder chip shows its leaf, '(exactly)' when unchecked");
+        CHECK(chips.size() == 8 && chips[2].text == L"Running or Waiting for you", "filters chips: the states in the board's order, joined with 'or'");
+        CHECK(chips.size() == 8 && chips[3].text == L"release or untagged", "filters chips: the tags, then 'untagged'");
+        CHECK(chips.size() == 8 && chips[6].text == L"active in 1 h" && chips[7].text == L"\x201Clogin\x201D", "filters chips: the window's words and the typed text in quotes");
+        CHECK(chips.size() == 8 && chips[0].tip.find(L"K:\\source\\Agentmaster") != std::wstring::npos && chips[1].tip.find(L"Exactly") != std::wstring::npos, "filters chips: a folder chip's tip names the whole path and its choice");
+        // Each chip's x.
+        const auto without = [&](size_t i) { return SidePanelFiltersWithoutChip(f, chips[i]); };
+        CHECK(without(0).folders.size() == 1 && without(0).folders[0].path == L"K:\\work\\webapp", "filters chips x: a folder chip drops its folder alone");
+        CHECK(without(2).states == 0 && without(2).folders.size() == 2, "filters chips x: the states chip drops every state, nothing else");
+        CHECK(without(3).tags.empty() && !without(3).untagged, "filters chips x: the tags chip drops the tags and Untagged");
+        CHECK(!without(4).draft && without(4).favorite, "filters chips x: a flag chip drops its flag alone");
+        CHECK(without(6).activeWithinMinutes == 0, "filters chips x: the window chip drops the window");
+        CHECK(without(7) == f, "filters chips x: the text chip leaves the record (the caller empties the box)");
+        SidePanelFilterChip stale;
+        stale.kind = SidePanelChipKind::Folder;
+        stale.folderIndex = 9;
+        CHECK(SidePanelFiltersWithoutChip(f, stale) == f, "filters chips x: a folder index past the record drops nothing");
+        CHECK(SidePanelFolderLeaf(L"K:\\") == L"K:\\" && SidePanelFolderLeaf(L"\\\\server\\share") == L"share" && SidePanelFolderLeaf(L"K:\\a\\b\\") == L"b", "filters chips: a folder's leaf (a drive root names itself)");
+    }
+
+    // The record's JSON.
+    {
+        // json::Parse answers an optional (empty for text that does not parse): a null Value then, which the loader reads as
+        // no filter - every text below parses.
+        const auto ParseJsonOrNull = [](std::wstring_view text) {
+            auto v = json::Parse(text);
+            return v ? *v : json::Value{};
+        };
+        SidePanelFilters f;
+        SidePanelAddFolderFilter(f, L"K:\\src", true);
+        SidePanelAddFolderFilter(f, L"Q:\\wt", false);
+        SidePanelToggleState(f, SidePanelStateBit(SessionState::NeedsApproval));
+        SidePanelToggleState(f, SidePanelStateBit(SessionState::Done));
+        SidePanelToggleTag(f, L"Release");
+        f.untagged = true;
+        f.draft = true;
+        f.unread = true;
+        f.pinned = true;
+        f.favorite = true;
+        f.activeWithinMinutes = 1440;
+        const auto text = json::Dump(SidePanelFiltersToJson(f));
+        const auto back = SidePanelFiltersFromJson(ParseJsonOrNull(text));
+        CHECK(back == f, "filters json: a full record round-trips");
+        CHECK(text.find(L"\"approval\"") != std::wstring::npos && text.find(L"Needs approval") == std::wstring::npos, "filters json: states are stored as tokens, never as their words");
+        CHECK(json::Dump(SidePanelFiltersToJson(SidePanelFilters{})) == L"{}", "filters json: the empty record is an empty object");
+        const auto bad = SidePanelFiltersFromJson(ParseJsonOrNull(LR"({"folders":[{"path":"src\\rel"},{"path":"K:\\a"},{"path":"k:\\A","subfolders":false},7,{"path":"K:\\b","subfolders":"no"}],
+            "states":["running","teleporting",3,"waiting"],"tags":["x","X","",5,"y"],"untagged":"yes","draft":1,"favorite":true,"activeWithinMinutes":-5})"));
+        CHECK(bad.folders.size() == 2 && bad.folders[0].path == L"K:\\a" && bad.folders[0].includeSubfolders && bad.folders[1].path == L"K:\\b" && bad.folders[1].includeSubfolders,
+              "filters json: a relative folder, a duplicate by case and a non-object are dropped; a non-bool 'subfolders' reads as the default (included)");
+        CHECK(bad.states == (SidePanelStateBit(SessionState::Running) | SidePanelStateBit(SessionState::WaitingForInput)), "filters json: an unknown state token and a non-string are ignored");
+        CHECK(bad.tags.size() == 2 && bad.tags[0] == L"x" && bad.tags[1] == L"y", "filters json: tags deduped by case (the first spelling), blanks and non-strings dropped");
+        CHECK(!bad.untagged && !bad.draft && bad.favorite && bad.activeWithinMinutes == 0, "filters json: a non-bool flag is off, a negative window is any time");
+        CHECK(SidePanelFiltersFromJson(ParseJsonOrNull(L"{\"activeWithinMinutes\":1.5}")).activeWithinMinutes == 0 && SidePanelFiltersFromJson(ParseJsonOrNull(L"{\"activeWithinMinutes\":99999999}")).activeWithinMinutes == 0,
+              "filters json: a fractional or huge window is any time");
+        CHECK(!SidePanelFiltersActive(SidePanelFiltersFromJson(ParseJsonOrNull(L"[1,2]"))), "filters json: a non-object reads as no filter");
+        SidePanelFilters masked;
+        masked.states = 0xFFFFFFFFu;
+        CHECK(NormalizeSidePanelFilters(masked).states == kSidePanelAllStateBits, "filters json: bits no state owns are cut on normalizing");
+    }
+
+    // The window record: the key only while a filter is set, and a round trip through the whole record.
+    {
+        WindowRecord plain;
+        plain.windowId = L"w-filters";
+        CHECK(SerializeWindowRecord(plain).find(L"sidePanelFilters") == std::wstring::npos, "filters record: an unfiltered window writes no sidePanelFilters key");
+        WindowRecord filtered = plain;
+        SidePanelAddFolderFilter(filtered.sidePanelFilters, L"K:\\source\\Agentmaster", false);
+        filtered.sidePanelFilters.pinned = true;
+        const auto text = SerializeWindowRecord(filtered);
+        CHECK(text.find(L"sidePanelFilters") != std::wstring::npos, "filters record: a filtered window writes the key");
+        const auto back = DeserializeWindowRecord(text);
+        CHECK(back.sidePanelFilters == filtered.sidePanelFilters, "filters record: the filters round-trip through the window record");
+        CHECK(!SidePanelFiltersActive(DeserializeWindowRecord(L"{\"version\":1,\"window\":{\"windowId\":\"w\",\"sidePanelFilters\":\"nope\"}}").sidePanelFilters),
+              "filters record: a sidePanelFilters of the wrong type reads as no filter");
     }
 }

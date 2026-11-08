@@ -100,12 +100,16 @@
 #include "AgentMaster/SessionSearchAgent.h" // SharedSessionSearchAgent / SessionSearchEvent / LoadSessionIndexEntryById — the side panel's AI search, a view of the process's one search conversation (SIDE_PANEL.md §2h)
 #include "AgentMaster/SidePanelAiList.h" // SidePanelAiListStepFor / SidePanelAiListDiffers — the AI view's list changes only when a request ends (SIDE_PANEL.md §2h)
 #include "AgentMaster/SidePanelPins.h" // CompareSidePanelPins / NextSidePanelPinStamp / IsSidePanelPinStamp — Pin to Top: pinned cards first, the newest pin on top (SIDE_PANEL.md §2j)
+#include "AgentMaster/SidePanelFilters.h" // the funnel's FILTERS: the facets, the matcher, the chips, the record's edits (SIDE_PANEL.md §2l)
+#include "AgentMaster/SessionFolderFilter.h" // CollectSessionFolders / SortFoldersByUse — the folder card's "folders of the sessions" section (SIDE_PANEL.md §2l)
 #include "AgentMaster/SessionStore.h" // GetSessionTags / LoadAllTagColors / SessionTagsEpoch — the cards' bookmark-tag strip (cached per card until a tag changes)
 
 #include <algorithm>
+#include <bit> // std::popcount — how many filters a facet mask holds (the build's log line, the [nav] lines; SIDE_PANEL.md §2l)
 #include <chrono> // kCardTipDelay (the Internal.h card-tip hold-back) + the tip helpers' delay overrides
 #include <cmath>
 #include <cwctype> // towlower — the fold for the in-process matchers
+#include <limits> // the chips row's wrap panel measures its children with an unbounded height (SIDE_PANEL.md §2l)
 #include <map> // the cached tag-color map (folded tag name -> "#AARRGGBB") the cards' ribbons resolve against
 #include <shobjidl.h> // IFileOpenDialog — required BY AgentManagerContent.Internal.h's PickClaudeExe helper (per-TU anonymous-namespace copy)
 #include <string_view> // the list update's duplicate-id belt (a set of views into the snapshot's ids)
@@ -381,6 +385,266 @@ namespace
     constexpr double kSidePanelAiSweepInsetBottom = 1.0;
     // The light's color: the strip's working blue (the busy dot's and the busy status ink's hue).
     constexpr Color kSidePanelAiWorkingColor{ 0xFF, 0x4E, 0xA1, 0xFF };
+
+    // --- The FILTERS (SIDE_PANEL.md §2l) ------------------------------------------------------------------------------------
+    // The funnel button's face: Segoe Fluent Icons' Filter (U+E71C; the same code point in Segoe MDL2 Assets, named after it
+    // for a Windows 10 without the Fluent font). An icon button, the "+" size (kSidePanelIconFontSize).
+    constexpr const wchar_t* kSidePanelFilterGlyph = L"\xE71C";
+    constexpr const wchar_t* kSidePanelFluentFont = L"Segoe Fluent Icons, Segoe MDL2 Assets";
+    // The icon font's glyphs the panel's rows and the chips wear (each also in Segoe MDL2 Assets).
+    constexpr const wchar_t* kSidePanelFolderGlyph = L"\xE8B7"; // Folder — By Folder…, a folder chip
+    constexpr const wchar_t* kSidePanelTagGlyph = L"\xE8EC"; // Tag — By Tag's section header
+    constexpr const wchar_t* kSidePanelClockGlyph = L"\xE823"; // Recent (a clock) — Active within
+    constexpr const wchar_t* kSidePanelSearchGlyph = L"\xE721"; // Search — the typed text's chip
+    constexpr const wchar_t* kSidePanelClearGlyph = L"\xE894"; // Clear — "Clear all filters"
+    // The panel's width (DIPs): its longest row ("Waiting for you" / a long tag name with a count) fits at the panel's font;
+    // a longer tag name ends in "…". Fixed, so a pick that changes a count never resizes the card under the pointer.
+    constexpr double kSidePanelFilterPanelWidth = 248.0;
+    // A section's rows are indented by this much under its header (DIPs), so they read as the section's, like a submenu's.
+    constexpr double kSidePanelFilterIndentPx = 14.0;
+    // The panel's tooltips wait the header buttons' 3 s (kSidePanelButtonTipDelay): the rows are crossed on the way to a pick.
+    // The chips row: a chip's height-defining font (10.5 DIPs, a hair under the card's 11 so the row stays slim), the gap
+    // between two chips and between two lines of chips (DIPs), and the chip's rounded corners.
+    constexpr double kSidePanelChipFontSize = 10.5;
+    constexpr double kSidePanelChipGapX = 4.0;
+    constexpr double kSidePanelChipGapY = 3.0;
+    constexpr double kSidePanelChipCornerRadius = 9.0;
+    // The "Clear" link's color: the AI strip's working blue family, the panel's one link-like text.
+    constexpr Color kSidePanelLinkColor{ 0xFF, 0x7F, 0xB5, 0xFF };
+
+    // A Segoe Fluent Icons glyph as a TextBlock (a TextBlock, not a FontIcon: its line box matches the text beside it, the
+    // launch bar's Browse… row idiom).
+    //   glyph   - the code point (one of the kSidePanel*Glyph above).
+    //   size    - its font size (DIPs).
+    //   opacity - its opacity.
+    //   returns - the element.
+    //   throws  - hresult_error / bad_alloc from creating it (the callers' builds contain it).
+    TextBlock SidePanelFluentGlyph(const wchar_t* glyph, double size, double opacity)
+    {
+        auto t = Text(glyph, size, false, opacity);
+        t.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ kSidePanelFluentFont });
+        return t;
+    }
+
+    // The CHIPS ROW's layout: a code-only Panel that lays its children out left to right and WRAPS onto a new line when the
+    // next one does not fit — UWP XAML has no WrapPanel, and a horizontal StackPanel would cut the last chips off on a narrow
+    // panel. Every child keeps its desired size (a chip is as wide as its words, a long folder chip ends in "…" by its own
+    // MaxWidth); a child wider than the whole line gets a line of its own at the line's width.
+    // Code-only (no IDL, never named in markup — the AgentTranscriptChunkPanel idiom): winrt::make returns it as a Panel.
+    struct AgentSidePanelWrapPanel : winrt::Windows::UI::Xaml::Controls::PanelT<AgentSidePanelWrapPanel>
+    {
+        // Measure every child against the line's width and stack the lines.
+        //   available - the room the row gives (its width bounds a line; the height is unbounded in practice).
+        //   returns   - the widest line and the lines' total height.
+        //   throws    - nothing of its own; a child's Measure that throws fails XAML's layout pass (never seen: plain chips).
+        winrt::Windows::Foundation::Size MeasureOverride(const winrt::Windows::Foundation::Size& available)
+        {
+            const float lineWidth = available.Width;
+            const winrt::Windows::Foundation::Size childAvailable{ lineWidth, std::numeric_limits<float>::infinity() };
+            float x = 0.0f;
+            float y = 0.0f;
+            float lineHeight = 0.0f;
+            float widest = 0.0f;
+            for (const auto& child : Children())
+            {
+                child.Measure(childAvailable);
+                const auto desired = child.DesiredSize();
+                const float w = std::min(desired.Width, lineWidth);
+                if (x > 0.0f && x + w > lineWidth)
+                {
+                    // The next line. Never before the line's first child: a child wider than the line still gets placed.
+                    y += lineHeight + static_cast<float>(kSidePanelChipGapY);
+                    x = 0.0f;
+                    lineHeight = 0.0f;
+                }
+                x += w;
+                widest = std::max(widest, x);
+                x += static_cast<float>(kSidePanelChipGapX);
+                lineHeight = std::max(lineHeight, desired.Height);
+            }
+            return winrt::Windows::Foundation::Size{ widest, y + lineHeight };
+        }
+
+        // Arrange every child where MeasureOverride's walk put it, against the final width.
+        //   finalSize - the room the row arranged the panel in.
+        //   returns   - finalSize (the panel takes what it was given).
+        //   throws    - nothing of its own (see MeasureOverride).
+        winrt::Windows::Foundation::Size ArrangeOverride(const winrt::Windows::Foundation::Size& finalSize)
+        {
+            const float lineWidth = finalSize.Width;
+            // Two passes over each line: one to learn the line's height (children are vertically centered in it), one to
+            // place. A line is the run of children MeasureOverride's rule puts together.
+            std::vector<winrt::Windows::UI::Xaml::UIElement> line;
+            float x = 0.0f;
+            float y = 0.0f;
+            float lineHeight = 0.0f;
+            const auto place = [&]() {
+                float cx = 0.0f;
+                for (const auto& child : line)
+                {
+                    const auto desired = child.DesiredSize();
+                    const float w = std::min(desired.Width, lineWidth);
+                    const float top = y + (lineHeight - desired.Height) / 2.0f;
+                    child.Arrange(winrt::Windows::Foundation::Rect{ cx, top, w, desired.Height });
+                    cx += w + static_cast<float>(kSidePanelChipGapX);
+                }
+            };
+            for (const auto& child : Children())
+            {
+                const auto desired = child.DesiredSize();
+                const float w = std::min(desired.Width, lineWidth);
+                if (x > 0.0f && x + w > lineWidth)
+                {
+                    place();
+                    y += lineHeight + static_cast<float>(kSidePanelChipGapY);
+                    line.clear();
+                    x = 0.0f;
+                    lineHeight = 0.0f;
+                }
+                line.push_back(child);
+                x += w + static_cast<float>(kSidePanelChipGapX);
+                lineHeight = std::max(lineHeight, desired.Height);
+            }
+            place();
+            return finalSize;
+        }
+    };
+
+    // The words for the scope at the end of a count ("in this window" / "across all windows") — the old count line's, kept
+    // as the filter box's ItemStatus and in the chips row's count tooltip.
+    //   global  - the panel lists every window's sessions.
+    //   returns - the words, with their leading space.
+    //   throws  - nothing.
+    const wchar_t* SidePanelScopeWords(bool global) noexcept
+    {
+        return global ? L" across all windows" : L" in this window";
+    }
+
+    // Is a facet bit set in a mask? (The panel's expanded sections are kept as SidePanelFacetBit bits.)
+    //   mask    - the bits.
+    //   facet   - the facet asked about.
+    //   returns - true when its bit is set.
+    //   throws  - nothing.
+    bool SidePanelHasFacet(uint32_t mask, ::Agentmaster::SidePanelFacet facet) noexcept
+    {
+        return (mask & ::Agentmaster::SidePanelFacetBit(facet)) != 0;
+    }
+
+    // The two texts one row of the funnel's panel shows from the record and the census: its CHECK column (a pick row: "✓" or
+    // nothing; an Active within row: "●" for the window in effect, "○" for the others; a section header: "⌄" expanded, "›"
+    // folded) and its COUNT column (how many sessions would be listed with that pick, every other facet as it is; a section
+    // header: what is picked in it). By Folder… and Clear show neither. One function for the build and the in-place refresh,
+    // so the two can never write different texts for one state.
+    //   row      - the row (what it stands for).
+    //   census   - the counts (_SidePanelFilterCensus).
+    //   filters  - the window's record.
+    //   expanded - the panel's expanded sections (SidePanelFacetBit bits).
+    //   returns  - { check, count }.
+    //   throws   - std::bad_alloc.
+    std::pair<std::wstring, std::wstring> SidePanelFilterRowTexts(const winrt::TerminalApp::implementation::AgentSidePanelFilterRowView& row,
+                                                                  const winrt::TerminalApp::implementation::AgentSidePanelFilterCensus& census,
+                                                                  const ::Agentmaster::SidePanelFilters& filters,
+                                                                  uint32_t expanded)
+    {
+        using Kind = winrt::TerminalApp::implementation::AgentSidePanelFilterRowView::Kind;
+        using ::Agentmaster::SidePanelFacet;
+        const auto mark = [](bool on) { return std::wstring{ on ? L"\x2713" : L"" }; }; // ✓
+        switch (row.kind)
+        {
+        case Kind::ByFolder:
+            // The folders already picked, as the count ("2"): the folder card adds one more each time.
+            return { std::wstring{}, filters.folders.empty() ? std::wstring{} : std::to_wstring(filters.folders.size()) };
+        case Kind::Section:
+        {
+            const std::wstring chevron = SidePanelHasFacet(expanded, row.facet) ? L"\x2304" : L"\x203A"; // ⌄ / ›
+            std::wstring picked;
+            if (row.facet == SidePanelFacet::State)
+            {
+                const auto n = std::popcount(filters.states & ::Agentmaster::kSidePanelAllStateBits);
+                picked = n ? std::to_wstring(n) + L" on" : L"";
+            }
+            else if (row.facet == SidePanelFacet::Tag)
+            {
+                const size_t n = filters.tags.size() + (filters.untagged ? 1u : 0u);
+                picked = n ? std::to_wstring(n) + L" on" : L"";
+            }
+            else if (row.facet == SidePanelFacet::Active && filters.activeWithinMinutes != 0)
+            {
+                picked = ::Agentmaster::SidePanelActiveChipText(filters.activeWithinMinutes).substr(std::wstring_view{ L"active in " }.size());
+            }
+            return { chevron, picked };
+        }
+        case Kind::State:
+        {
+            for (size_t i = 0; i < std::size(::Agentmaster::kSidePanelStateChoices); ++i)
+            {
+                if (::Agentmaster::kSidePanelStateChoices[i].bit == row.stateBit)
+                {
+                    return { mark((filters.states & row.stateBit) != 0), std::to_wstring(census.states[i]) };
+                }
+            }
+            return { mark((filters.states & row.stateBit) != 0), std::wstring{} };
+        }
+        case Kind::Tag:
+        {
+            const std::wstring folded = ::Agentmaster::FoldTagName(row.tag);
+            const bool on = std::any_of(filters.tags.begin(), filters.tags.end(), [&](const std::wstring& t) { return ::Agentmaster::FoldTagName(t) == folded; });
+            size_t count = 0;
+            for (const auto& [name, n] : census.tags)
+            {
+                if (::Agentmaster::FoldTagName(name) == folded)
+                {
+                    count = n;
+                    break;
+                }
+            }
+            return { mark(on), std::to_wstring(count) };
+        }
+        case Kind::Untagged:
+            return { mark(filters.untagged), std::to_wstring(census.untagged) };
+        case Kind::Flag:
+            switch (row.facet)
+            {
+            case SidePanelFacet::Draft:
+                return { mark(filters.draft), std::to_wstring(census.draft) };
+            case SidePanelFacet::Unread:
+                return { mark(filters.unread), std::to_wstring(census.unread) };
+            case SidePanelFacet::Pinned:
+                return { mark(filters.pinned), std::to_wstring(census.pinned) };
+            case SidePanelFacet::Favorite:
+                return { mark(filters.favorite), std::to_wstring(census.favorite) };
+            default:
+                return {};
+            }
+        case Kind::Active:
+        {
+            const bool on = filters.activeWithinMinutes == row.minutes;
+            size_t count = census.active[0];
+            for (size_t i = 0; i < std::size(::Agentmaster::kSidePanelActiveChoices); ++i)
+            {
+                if (::Agentmaster::kSidePanelActiveChoices[i].minutes == row.minutes)
+                {
+                    count = census.active[i + 1];
+                }
+            }
+            return { std::wstring{ on ? L"\x25CF" : L"\x25CB" }, std::to_wstring(count) }; // ● / ○ — one window at a time
+        }
+        case Kind::Clear:
+        default:
+            return {};
+        }
+    }
+
+    // Are two rows of the funnel's panel the SAME pick (the kind and what it stands for)? A refill (a section expanded, a tag
+    // that appeared) rebuilds every row; the focus goes back to the row equal to the one that had it.
+    //   a, b    - the rows.
+    //   returns - true when they stand for the same thing.
+    //   throws  - nothing.
+    bool SidePanelSameFilterRow(const winrt::TerminalApp::implementation::AgentSidePanelFilterRowView& a,
+                                const winrt::TerminalApp::implementation::AgentSidePanelFilterRowView& b) noexcept
+    {
+        return a.kind == b.kind && a.facet == b.facet && a.stateBit == b.stateBit && a.minutes == b.minutes && a.tag == b.tag;
+    }
 
     // The first element named `name` in the visual tree under `root`, depth first — a template part of the filter box.
     //   root    - where to look; its own name is not tested.
@@ -876,6 +1140,90 @@ namespace
         return false;
     }
 
+    // --- The FILTERS' two popup cards (SIDE_PANEL.md §2l): the "+" card's walk and placement, shared ------------------------
+
+    // Does a press under `source` lie inside one of the `inside` elements, or inside another open popup of `xamlRoot` than the
+    // `own` ones (a dialog's content, a model prompt)? The "+" card's outside-press walk (_SidePanelLaunchPressIsInside), for
+    // the funnel's panel and the folder card. A TextElement source starts from its host.
+    //   source   - the press's OriginalSource.
+    //   inside   - the identities that count as inside (SidePanelLaunchIdentity of each element; nulls are ignored).
+    //   xamlRoot - the island's root, for its open popups (null: none are counted).
+    //   own      - the identities of the filter surfaces' OWN popups: their content is inside only through `inside`, so a
+    //              press on the panel is never "inside the folder card" merely because both are open popups.
+    //   returns  - true = keep the surface open.
+    //   throws   - what the visual tree walk throws (the caller contains it and closes the surface).
+    bool SidePanelPressInside(DependencyObject source, std::vector<void*> inside, const winrt::Windows::UI::Xaml::XamlRoot& xamlRoot, const std::vector<void*>& own)
+    {
+        if (!source)
+        {
+            return false;
+        }
+        if (xamlRoot)
+        {
+            for (const auto& popup : VisualTreeHelper::GetOpenPopupsForXamlRoot(xamlRoot))
+            {
+                const void* const id = SidePanelLaunchIdentity(popup);
+                if (std::find(own.begin(), own.end(), id) == own.end())
+                {
+                    if (const auto child = popup.Child())
+                    {
+                        inside.push_back(SidePanelLaunchIdentity(child));
+                    }
+                }
+            }
+        }
+        if (const auto textElement = source.try_as<winrt::Windows::UI::Xaml::Documents::TextElement>())
+        {
+            source = textElement.ElementStart().VisualParent();
+        }
+        for (int guard = 0; source && guard < 1024; ++guard)
+        {
+            const void* const id = SidePanelLaunchIdentity(source);
+            if (id && std::find(inside.begin(), inside.end(), id) != inside.end())
+            {
+                return true;
+            }
+            source = VisualTreeHelper::GetParent(source);
+        }
+        return false;
+    }
+
+    // Place a Root()-parented popup card with its corner at `anchor`, extending toward the window's center (PlacePointerCard,
+    // the "+" card's placement), measured afresh (a Popup measures its child with no limit). Offsets are written only on a
+    // real move, so a re-placement that changes nothing invalidates nothing.
+    //   popup  - the card's Popup.
+    //   card   - the card (the Popup's child).
+    //   anchor - the corner's point, in Root() coordinates.
+    //   root   - Root(), for the window's size (0 = unmeasured: no clamp).
+    //   returns - true when an offset was written.
+    //   throws  - what the measure and the writes throw (the callers contain it).
+    bool SidePanelPlaceCardAt(const winrt::Windows::UI::Xaml::Controls::Primitives::Popup& popup,
+                              const FrameworkElement& card,
+                              const winrt::Windows::Foundation::Point& anchor,
+                              const FrameworkElement& root)
+    {
+        card.Measure(winrt::Windows::Foundation::Size{ kSidePanelLaunchMeasureBound, kSidePanelLaunchMeasureBound });
+        const auto size = card.DesiredSize();
+        const auto placed = ::Agentmaster::PlacePointerCard(static_cast<double>(anchor.X),
+                                                            static_cast<double>(anchor.Y),
+                                                            static_cast<double>(size.Width),
+                                                            static_cast<double>(size.Height),
+                                                            root ? root.ActualWidth() : 0.0,
+                                                            root ? root.ActualHeight() : 0.0);
+        bool moved = false;
+        if (std::abs(popup.HorizontalOffset() - placed.left) > kSidePanelLaunchPlaceEpsilonPx)
+        {
+            popup.HorizontalOffset(placed.left);
+            moved = true;
+        }
+        if (std::abs(popup.VerticalOffset() - placed.top) > kSidePanelLaunchPlaceEpsilonPx)
+        {
+            popup.VerticalOffset(placed.top);
+            moved = true;
+        }
+        return moved;
+    }
+
     // --- FOLLOW vs a focus RETURN (SIDE_PANEL.md §3) --------------------------------------------------------------
     // Does this arrival of focus in the terminal column END a peek, that is, is it the user coming back to the terminal?
     // YES in two cases: focus moved within the terminal column itself (another pane of the tab), and focus came from the
@@ -1001,6 +1349,10 @@ namespace winrt::TerminalApp::implementation
         // (LOCAL), and a fleet-wide (GLOBAL) view is an explicit choice that stays with the window
         // that made it, so it can never leak into another window's list.
         _sidePanelGlobal = _windowRecord.sidePanelGlobal;
+        // The card list's FILTERS (SIDE_PANEL.md §2l): the same per-window-only contract as the scope — this window's record,
+        // never a global default, so a new window starts unfiltered. Normalized again (the loader already did): the record
+        // copy could have been edited in memory, and a filter the chips row cannot show must never hide a card.
+        _sidePanelFilters = ::Agentmaster::NormalizeSidePanelFilters(_windowRecord.sidePanelFilters);
         // Belt the seeds into the drag bands: the loaders band-check too, but the AppSettings copy
         // could have been mutated in-process — a degenerate fraction must never reach layout.
         _sidePanelWidthFraction = std::clamp(_sidePanelWidthFraction, kSidePanelMinWidthFrac, kSidePanelMaxWidthFrac);
@@ -1133,16 +1485,17 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Header: TWO lines.
-        //   line 1 (row 0): the three buttons at the panel's OUTER end — the window's edge, away from the terminal — in a
+        //   line 1 (row 0): the four buttons at the panel's OUTER end — the window's edge, away from the terminal — in a
         //     line that MIRRORS with the dock (SIDE_PANEL.md §2i, the user's layout of 2026-11-04), so ⋯ is always the
-        //     outermost button: docked right [ spacer * ][ + ][ Sum ][ ⋯ ] (right-aligned), docked left
-        //     [ ⋯ ][ Sum ][ + ][ spacer * ] (left-aligned). "+" is the innermost (the launcher card — SIDE_PANEL.md §2e;
-        //     the user's "leftmost, to Sum" of the right-aligned line), "Sum" the middle (it reshapes the whole panel), ⋯
-        //     the outermost, where the collapse chevron was (the user's layout of 2026-11-03): its menu holds ⌖, the card
-        //     scope, the card order, the dock flip and the collapse, which were five more buttons on this line and made it
-        //     wider than a narrow panel. The build below seeds the docked-right shape; _SidePanelApplyHeaderOrder (run by
-        //     every _SidePanelApplyDock, the first one at the end of this build, before the panel is ever drawn) moves the
-        //     star and the three buttons to the columns of the dock in effect.
+        //     outermost button: docked right [ spacer * ][ funnel ][ + ][ Sum ][ ⋯ ] (right-aligned), docked left
+        //     [ ⋯ ][ Sum ][ + ][ funnel ][ spacer * ] (left-aligned). The FUNNEL (SIDE_PANEL.md §2l, 2026-11-08: the user's "a
+        //     button for FILTER", "like the +") is the innermost, on the terminal's side of "+", so "+" keeps its place beside
+        //     Sum (the user's "leftmost, to Sum" of the right-aligned line — SIDE_PANEL.md §2e); "Sum" the middle (it
+        //     reshapes the whole panel), ⋯ the outermost, where the collapse chevron was (the user's layout of 2026-11-03):
+        //     its menu holds ⌖, the card scope, the card order, the dock flip and the collapse, which were five more buttons
+        //     on this line and made it wider than a narrow panel. The build below seeds the docked-right shape;
+        //     _SidePanelApplyHeaderOrder (run by every _SidePanelApplyDock, the first one at the end of this build, before the
+        //     panel is ever drawn) moves the star and the four buttons to the columns of the dock in effect.
         //   line 2 (row 1): the filter box across the FULL width. On a line of its own it no longer
         //     competes with the buttons for room — sharing one line, a narrow panel squeezed the box down
         //     to its minimum while the buttons kept their natural widths.
@@ -1156,20 +1509,23 @@ namespace winrt::TerminalApp::implementation
             hr1.Height(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
             header.RowDefinitions().Append(hr0);
             header.RowDefinitions().Append(hr1);
-            // FOUR columns: one star spacer and three Auto button columns. Seeded docked right (the spacer first); docked
-            // left the star is the LAST column and the buttons fill columns 0-2 in mirror order (_SidePanelApplyHeaderOrder).
+            // FIVE columns: one star spacer and four Auto button columns. Seeded docked right (the spacer first); docked
+            // left the star is the LAST column and the buttons fill columns 0-3 in mirror order (_SidePanelApplyHeaderOrder).
             ColumnDefinition c0{}; // the spacer docked right; "⋯" docked left
             c0.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
-            ColumnDefinition c1{}; // "+" (the launcher, SIDE_PANEL.md §2e) docked right; "Sum" docked left
+            ColumnDefinition c1{}; // the funnel (the filters, SIDE_PANEL.md §2l) docked right; "Sum" docked left
             c1.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-            ColumnDefinition c2{}; // "Sum" (the summary area, SIDE_PANEL.md §2d) docked right; "+" docked left
+            ColumnDefinition c2{}; // "+" (the launcher, SIDE_PANEL.md §2e) in both docks — the line's middle
             c2.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-            ColumnDefinition c3{}; // "⋯" (the menu, SIDE_PANEL.md §2i) docked right; the spacer docked left
+            ColumnDefinition c3{}; // "Sum" (the summary area, SIDE_PANEL.md §2d) docked right; the funnel docked left
             c3.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            ColumnDefinition c4{}; // "⋯" (the menu, SIDE_PANEL.md §2i) docked right; the spacer docked left
+            c4.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
             header.ColumnDefinitions().Append(c0);
             header.ColumnDefinitions().Append(c1);
             header.ColumnDefinitions().Append(c2);
             header.ColumnDefinitions().Append(c3);
+            header.ColumnDefinitions().Append(c4);
             header.Padding(ThicknessHelper::FromLengths(4, 4, 4, 2));
             header.ColumnSpacing(3);
             header.RowSpacing(3); // a little air between the buttons line and the filter line
@@ -1414,7 +1770,7 @@ namespace winrt::TerminalApp::implementation
                 self->_SidePanelToggleLaunchCard();
             }
         });
-        Grid::SetColumn(_sidePanelLaunchBtn, 1); // the docked-right seed; docked left it is column 2 (_SidePanelApplyHeaderOrder)
+        Grid::SetColumn(_sidePanelLaunchBtn, 2); // column 2 in both docks: the five-column line's middle (_SidePanelApplyHeaderOrder)
         header.Children().Append(_sidePanelLaunchBtn);
 
         // The "Sum" toggle — the summary area below the cards ON (checked, the default) / OFF. OFF hides the
@@ -1437,7 +1793,7 @@ namespace winrt::TerminalApp::implementation
                 self->_SidePanelToggleSummary();
             }
         });
-        Grid::SetColumn(_sidePanelSumBtn, 2); // the docked-right seed; docked left it is column 1 (_SidePanelApplyHeaderOrder)
+        Grid::SetColumn(_sidePanelSumBtn, 3); // the docked-right seed; docked left it is column 1 (_SidePanelApplyHeaderOrder)
         header.Children().Append(_sidePanelSumBtn);
 
         // The "⋯" MENU button (SIDE_PANEL.md §2i) — the OUTERMOST of the three buttons, at the window's edge, where the
@@ -1490,16 +1846,95 @@ namespace winrt::TerminalApp::implementation
             });
             _sidePanelMoreBtn.Flyout(moreMenu);
         }
-        Grid::SetColumn(_sidePanelMoreBtn, 3); // the docked-right seed; docked left it is column 0 (_SidePanelApplyHeaderOrder)
+        Grid::SetColumn(_sidePanelMoreBtn, 4); // the docked-right seed; docked left it is column 0 (_SidePanelApplyHeaderOrder)
         header.Children().Append(_sidePanelMoreBtn);
+
+        // The FUNNEL (SIDE_PANEL.md §2l, 2026-11-08 — the user's "a button for FILTER and in it have menu appear on click"): the
+        // innermost button of the line, on the terminal's side of "+". Its click opens the FILTER PANEL at the click — a card
+        // that looks like a menu (By Folder… · By State ▸ · By Tag ▸ · Active within ▸ · the four flags · Clear all filters)
+        // and STAYS OPEN while you pick (the user's "Multiselect enabled, menu shouldnt close on clicking"): a Root() popup
+        // with the "+" card's outside-press close, never a MenuFlyout (which closes at every click). An ICON button like "+"
+        // (12 px, the "+" padding), IsTabStop false like its siblings (the panel focuses its own first row). A ToggleButton for
+        // its accent fill alone — "a filter narrows the list" at a glance — whose IsChecked the member pins
+        // (_SidePanelUpdateFilterButton), never the click's self-flip. Appended LAST: the header's children keep the order
+        // the e2e driver walks (+ · Sum · ⋯), and the line's order on screen is the columns' business.
+        _sidePanelFilterBtn = winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton{};
+        _sidePanelFilterBtn.FontSize(kSidePanelIconFontSize);
+        _sidePanelFilterBtn.Padding(ThicknessHelper::FromLengths(6, 1, 6, 1));
+        _sidePanelFilterBtn.VerticalAlignment(VerticalAlignment::Center);
+        _sidePanelFilterBtn.IsTabStop(false);
+        {
+            // The glyph keeps the "+" glyph's line height: a 12 px icon font glyph in a TextBlock (the Browse… row's idiom).
+            auto funnel = SidePanelFluentGlyph(kSidePanelFilterGlyph, kSidePanelIconFontSize - 1.0, 1.0);
+            funnel.VerticalAlignment(VerticalAlignment::Center);
+            _sidePanelFilterBtn.Content(funnel);
+        }
+        AgentSetTitledTip(_sidePanelFilterBtn, L"Filter the cards", winrt::hstring{ L"Narrow the cards: By Folder (the + launcher's folder picker), By State, By Tag, how recently a session was active, and four checks \x2014 an unsent draft, unread, pinned to the top, \x2605 favorite. The panel stays open while you pick; different filters narrow together, picks inside one filter add up.\nWhile a filter is on this button is lit, and the row under the filter box says what the cards are filtered by \x2014 \x2715 on a chip drops that filter, Clear drops them all.\nThis window keeps its own filters." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        // The PRESS point anchors the panel (the "+" button's two handlers: the point on the press, handledEventsToo because
+        // a ToggleButton marks its presses handled; a press that ends without a click drops it).
+        _sidePanelFilterBtn.AddHandler(
+            UIElement::PointerPressedEvent(),
+            winrt::box_value(PointerEventHandler{ [weakThis](const IInspectable&, const PointerRoutedEventArgs& e) {
+                const auto self = weakThis.get();
+                if (!self)
+                {
+                    return;
+                }
+                try
+                {
+                    self->_sidePanelFilterAnchor = e.GetCurrentPoint(self->Root()).Position();
+                    self->_sidePanelFilterAnchorFromPress = true;
+                }
+                catch (...)
+                {
+                    // The open then anchors under the funnel instead (the no-press fallback). Recorded (Rule #18).
+                    self->_sidePanelFilterAnchorFromPress = false;
+                    ::Agentmaster::AgentLogCaughtException(L"side panel filter: funnel press point");
+                }
+            } }),
+            true /* handledEventsToo — the ToggleButton handles its own presses */);
+        _sidePanelFilterBtn.AddHandler(
+            UIElement::PointerCaptureLostEvent(),
+            winrt::box_value(PointerEventHandler{ [weakThis](const IInspectable&, const PointerRoutedEventArgs&) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_sidePanelFilterAnchorFromPress = false;
+                }
+            } }),
+            true /* handledEventsToo */);
+        _sidePanelFilterBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+            if (const auto self = weakThis.get())
+            {
+                self->_SidePanelUpdateFilterButton(); // undo the ToggleButton's own flip first: the member is the truth
+                self->_SidePanelToggleFilterPanel();
+            }
+        });
+        Grid::SetColumn(_sidePanelFilterBtn, 1); // the docked-right seed; docked left it is column 3 (_SidePanelApplyHeaderOrder)
+        header.Children().Append(_sidePanelFilterBtn);
         Grid::SetRow(header, 0);
         _sidePanelExpandedRoot.Children().Append(header);
 
-        // Count line: "N of M sessions" — the filter's effect at a glance.
+        // Row 1 holds two elements, one shown at a time (_SidePanelShowRowForMode):
+        //   - the COUNT LINE, which since SIDE_PANEL.md §2l speaks for the AI view alone ("3 sessions found", "AI search —
+        //     searching…"): the cards' "N of M sessions in this window" is gone from the screen (the user's 2026-11-08 "The row
+        //     below the filter with N sessions across all window, shall be replaced by a row only shown when filter is on"),
+        //     and its words live on as the filter box's UI Automation ItemStatus (_SidePanelUpdateFilterRow);
+        //   - the CHIPS ROW, in card mode, shown only while a filter narrows the list: "N of M", a chip per filter, Clear.
         _sidePanelCountText = Text(L"", 10, false, 0.5);
         _sidePanelCountText.Margin(ThicknessHelper::FromLengths(8, 0, 8, 2));
+        _sidePanelCountText.Visibility(Visibility::Collapsed); // card mode at the build; an AI-mode window shows it at the end of the build
         Grid::SetRow(_sidePanelCountText, 1);
         _sidePanelExpandedRoot.Children().Append(_sidePanelCountText);
+        _sidePanelFilterRow = Grid{};
+        _sidePanelFilterRow.Margin(ThicknessHelper::FromLengths(6, 0, 6, 3));
+        _sidePanelFilterRow.Visibility(Visibility::Collapsed); // nothing filters yet: the first list update shows it when one does
+        _sidePanelFilterChips = winrt::make<AgentSidePanelWrapPanel>();
+        _sidePanelFilterRow.Children().Append(_sidePanelFilterChips);
+        // The chips' ✕ and Clear are Buttons: the Agent Manager's six Button state brushes, or under the forced-Dark theme
+        // their hover and press fills resolve to null (a click lands only on the glyph).
+        AgentLaunchBar::SeedButtonStateBrushes(_sidePanelFilterRow.Resources());
+        Grid::SetRow(_sidePanelFilterRow, 1);
+        _sidePanelExpandedRoot.Children().Append(_sidePanelFilterRow);
 
         // Body: cards area (star*split) / horizontal splitter / summary area (star*(1-split)).
         _sidePanelBody = Grid{};
@@ -1725,6 +2160,11 @@ namespace winrt::TerminalApp::implementation
         AgentSetAccessibleName(_sidePanelMoreBtn, L"More options");
         AgentSetAutomationId(_sidePanelStripBtn, L"am.side.expand");
         AgentSetAccessibleName(_sidePanelStripBtn, L"Expand the side panel");
+        // The filters (SIDE_PANEL.md §2l): the funnel — named, its face is a glyph (am.side.filter is the filter BOX's id, taken
+        // since 2026-10-23: ids are added, never renamed) — and the chips row (each chip's id is set when the row builds it).
+        AgentSetAutomationId(_sidePanelFilterBtn, L"am.side.funnel");
+        AgentSetAccessibleName(_sidePanelFilterBtn, L"Filter the cards");
+        // (The chips row itself is a Grid, which has no automation peer: a reader finds it by its count, am.side.filterRow.count.)
 
         area.Children().Append(_sidePanelSplitter);
         area.Children().Append(_sidePanelHost);
@@ -1870,6 +2310,7 @@ namespace winrt::TerminalApp::implementation
         _sidePanelBuilt = true;
         _SidePanelApplyDock(); // assigns the three columns per the global dock side + applies widths/glyphs (and the summary rows per "Sum")
         _SidePanelUpdateSumButton(); // "Sum" checked == the summary area shown (no Click => nothing persisted)
+        _SidePanelUpdateFilterButton(); // the funnel lit == this window's record filters the list (SIDE_PANEL.md §2l; no Click => nothing persisted)
         // Nothing to seed for the ⋯ menu: it reads the dock, ⌖, the scope and the order when it opens (SIDE_PANEL.md §2i);
         // its placement, the one thing about it that follows the dock before an open, was set by _SidePanelApplyDock above.
         _SidePanelRebuildCards(); // with "Sum" off, every new card is armed with its rich tooltip as it is built
@@ -1896,6 +2337,7 @@ namespace winrt::TerminalApp::implementation
                                           (_sidePanelSummaryHidden ? L" summary=hidden(card-tooltips)" : L" summary=shown") +
                                           (_sidePanelAiMode ? L" ai=on" : L" ai=off") +
                                           (_sidePanelGlobal ? L" scope=global" : L" scope=local") +
+                                          L" filters=" + std::to_wstring(std::popcount(::Agentmaster::SidePanelActiveFacets(_sidePanelFilters, false))) +
                                           (_appSettings.sidePanelScrollToSelectedTab ? L" scroll-to-tab=on" : L" scroll-to-tab=off") +
                                           (_appSettings.sidePanelOnLeft ? L" dock=left\n" : L" dock=right\n"));
     }
@@ -1923,22 +2365,23 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Lay the header's button line out for the dock in effect (SIDE_PANEL.md §2i, the user's layout of 2026-11-04): the line
-    // is the MIRROR image of itself in the other dock, so ⋯ is always the outermost button — at the window's edge — and "+"
-    // the innermost, on the terminal's side:
-    //   docked right: [ spacer * ][ + ][ Sum ][ ⋯ ]   the menu opens below ⋯ with the RIGHT edges aligned;
-    //   docked left:  [ ⋯ ][ Sum ][ + ][ spacer * ]   the menu opens below ⋯ with the LEFT edges aligned.
+    // is the MIRROR image of itself in the other dock, so ⋯ is always the outermost button — at the window's edge — and the
+    // funnel (SIDE_PANEL.md §2l, 2026-11-08) the innermost, on the terminal's side, with "+" beside it:
+    //   docked right: [ spacer * ][ funnel ][ + ][ Sum ][ ⋯ ]   the menu opens below ⋯ with the RIGHT edges aligned;
+    //   docked left:  [ ⋯ ][ Sum ][ + ][ funnel ][ spacer * ]   the menu opens below ⋯ with the LEFT edges aligned.
     // Either way the menu spreads over the panel's own width, never out past the window's edge (a flyout pushed off the
     // window is slid or flipped by the framework, and lands over the terminal). Only the columns move: which column is the
-    // star spacer, which column each button sits in, and the menu's placement. The three buttons keep their place in the
-    // header's Children (appended + · Sum · ⋯), so every handler stays as the build made them and the e2e driver's walk
-    // ("+" comes before the cards) holds in either dock — but the tree order need not follow the screen, so a reader of
-    // the line's order goes by position (the driver's header_buttons). The filter box and the AI toggle span all four
-    // columns, so neither moves.
+    // star spacer, which column each button sits in, and the menu's placement. The four buttons keep their place in the
+    // header's Children (appended + · Sum · ⋯ · funnel), so every handler stays as the build made them and the e2e driver's
+    // walk ("+" comes before the cards) holds in either dock — but the tree order need not follow the screen, so a reader of
+    // the line's order goes by position (the driver's header_buttons). The filter box and the AI toggle span all five
+    // columns, so neither moves. (The funnel's panel needs no placement here: it opens at the click, toward the window's
+    // center, like the "+" card.)
     // Every write is change-gated (a same-value Width or Grid.Column write still invalidates layout), so a re-apply with an
     // unchanged dock — a settings broadcast that moved nothing, the build's first apply over its docked-right seed when the
     // panel docks right — writes nothing. Called by every _SidePanelApplyDock: the panel's build (before its first frame,
     // so a left-docked panel is never drawn with the seed), a dock flip here and a settings broadcast that moved the dock.
-    //   returns - nothing; a no-op before the panel is built or when the header lacks its four columns.
+    //   returns - nothing; a no-op before the panel is built or when the header lacks its five columns.
     //   throws  - nothing: a failed XAML write (a window tearing down) is logged (Rule #18) and leaves the line in whatever
     //             shape the writes before it made — a cosmetic loss; the panel itself has already moved.
     void TerminalPage::_SidePanelApplyHeaderOrder() noexcept
@@ -1951,14 +2394,14 @@ namespace winrt::TerminalApp::implementation
         {
             const bool left = _appSettings.sidePanelOnLeft;
             const auto cols = _sidePanelHeader.ColumnDefinitions();
-            if (cols.Size() < 4)
+            if (cols.Size() < 5)
             {
-                return; // the build's four columns are the contract: with fewer there is no line to mirror
+                return; // the build's five columns are the contract: with fewer there is no line to mirror
             }
-            // The star spacer is the line's TERMINAL end: column 0 docked right, column 3 docked left. The other three are
+            // The star spacer is the line's TERMINAL end: column 0 docked right, column 4 docked left. The other four are
             // Auto, each as wide as its button.
-            const uint32_t spacerColumn = left ? 3u : 0u;
-            for (uint32_t i = 0; i < 4u; ++i)
+            const uint32_t spacerColumn = left ? 4u : 0u;
+            for (uint32_t i = 0; i < 5u; ++i)
             {
                 const auto col = cols.GetAt(i);
                 const auto cur = col.Width();
@@ -1974,16 +2417,17 @@ namespace winrt::TerminalApp::implementation
                     col.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
                 }
             }
-            // The buttons, outermost first: ⋯ (3 / 0), Sum (2 / 1), + (1 / 2) — docked right / docked left.
+            // The buttons, outermost first: ⋯ (4 / 0), Sum (3 / 1), + (2 / 2), the funnel (1 / 3) — docked right / docked left.
             const auto place = [](const FrameworkElement& button, int32_t column) {
                 if (button && Grid::GetColumn(button) != column)
                 {
                     Grid::SetColumn(button, column);
                 }
             };
-            place(_sidePanelMoreBtn, left ? 0 : 3);
-            place(_sidePanelSumBtn, left ? 1 : 2);
-            place(_sidePanelLaunchBtn, left ? 2 : 1);
+            place(_sidePanelMoreBtn, left ? 0 : 4);
+            place(_sidePanelSumBtn, left ? 1 : 3);
+            place(_sidePanelLaunchBtn, 2);
+            place(_sidePanelFilterBtn, left ? 3 : 1);
             // The menu's placement is read when it opens, so setting it now (the menu is closed: a dock change comes from a
             // menu command that runs after the menu closed, or from another window's broadcast) takes effect at the next open.
             if (_sidePanelMoreBtn)
@@ -2243,6 +2687,8 @@ namespace winrt::TerminalApp::implementation
             // menu that holds the collapse) already closed it as an outside press; this is the belt for a collapse with no
             // press (UI Automation, the keyboard in the menu).
             _SidePanelCloseLaunchCard(L"panel collapsed");
+            // The funnel's panel and the folder card hang from the same header (SIDE_PANEL.md §2l): the same belt.
+            _SidePanelCloseFilterSurfaces(L"panel collapsed");
         }
         _SidePanelApplyLayout();
         // The cards' status icons (SIDE_PANEL.md §2g): a collapse only COLLAPSES the panel's content, so the cards stay
@@ -2405,6 +2851,7 @@ namespace winrt::TerminalApp::implementation
         // press on ⋯ (the menu that holds the dock item) already closed it as an outside press; this is the belt for a
         // flip with no press (UI Automation, the keyboard in the menu).
         _SidePanelCloseLaunchCard(L"dock flip");
+        _SidePanelCloseFilterSurfaces(L"dock flip"); // the funnel moves with the header too (SIDE_PANEL.md §2l)
         _SidePanelApplyDock();
     }
 
@@ -2926,6 +3373,13 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::_SidePanelNoteUnreadChanged()
     {
         _SidePanelRefreshIndicators(/*rereadCacheWarm*/ false);
+        // With the Unread flag on (SIDE_PANEL.md §2l) the census decides which cards are LISTED, not only which ring: a session
+        // that turned unread must appear, one just visited must leave. The in-place patch above never adds or drops a row, so
+        // the list update runs too — the throttled one (an unread flip is no user action), which the next tick catches up.
+        if (_sidePanelFilters.unread)
+        {
+            _SidePanelScheduleRebuild(/*force*/ false);
+        }
     }
 
     void TerminalPage::_SidePanelRefreshIndicators(bool rereadCacheWarm)
@@ -3089,6 +3543,13 @@ namespace winrt::TerminalApp::implementation
         {
             _sidePanelDirty = true;
         }
+        // Favorites belt (SIDE_PANEL.md §2l): with the Favorite flag on, a ★ set or cleared anywhere in this process (the
+        // Sessions page, a tab's menu, another window) moves the facts epoch the ★ cache was read at — and decides which
+        // cards are listed. One atomic load per tick, only while the flag is on.
+        if (!_sidePanelDirty && _sidePanelFilters.favorite && ::Agentmaster::SessionFactsEpoch() != _sidePanelFavoritesEpoch)
+        {
+            _sidePanelDirty = true;
+        }
         if (_sidePanelDirty)
         {
             _SidePanelRebuildCards(); // the update refreshes the timing texts too — no separate timing pass
@@ -3207,6 +3668,24 @@ namespace winrt::TerminalApp::implementation
             }
             _sidePanelRenderedLocalIds = hosted; // empty under GLOBAL — the belt only diffs while LOCAL
 
+            // Bookmark tags and ★, from their per-session caches. The epochs are loaded BEFORE any read (the SessionStore.h
+            // contract): a write landing during the reads below leaves the older epoch stored, so the next update re-reads — a
+            // cache refreshed once too often, never kept stale. A moved epoch means some tag, tag color or favorite changed in
+            // this process since the last read, so that cache is dropped (_SidePanelSyncFactCaches). A card new to the list
+            // reads its tags once (GetSessionTags: SessionStore's (size,mtime)-validated record cache — one file stat); a card
+            // that stays reads nothing. Rows the filters hid are never read — unless a filter needs them (By Tag, Favorite).
+            _SidePanelSyncFactCaches();
+            // The status icon's per-update inputs (SIDE_PANEL.md §2g) — read here, before the rows, because the Unread filter
+            // (SIDE_PANEL.md §2l) judges membership by the same census the rings show.
+            const SidePanelIndicatorInputs indicators = SidePanelReadIndicatorInputs(_appSettings);
+            // The FILTERS (SIDE_PANEL.md §2l): compiled once per update (folder keys, folded tag names, this update's clock). An
+            // unfiltered window builds no matcher and judges nothing beyond the typed text — the list as before the feature.
+            std::optional<::Agentmaster::SidePanelFilterMatcher> matcher;
+            if (::Agentmaster::SidePanelFiltersActive(_sidePanelFilters))
+            {
+                matcher.emplace(_sidePanelFilters, indicators.nowMs);
+            }
+
             // The rows, each with its sort key built ONCE: a comparator that built both keys per comparison
             // (a title copy each) cost O(n log n) string copies per update.
             struct CardRow
@@ -3219,6 +3698,9 @@ namespace winrt::TerminalApp::implementation
             std::vector<CardRow> rows;
             rows.reserve(snap.size());
             size_t liveTotal = 0; // the IN-SCOPE total (what "N of M" counts against — never another window's sessions under LOCAL)
+            // The sessions the TAG filter read tags for: their cache entries are kept below like the listed rows', so a tag
+            // filter over a big scope does not re-read every unlisted session's tags at every update.
+            std::unordered_set<std::wstring_view> tagJudged;
             for (const auto& s : snap)
             {
                 if (!s.live)
@@ -3230,10 +3712,26 @@ namespace winrt::TerminalApp::implementation
                     continue; // hosted by another window (or a live session with no tab here) — not "here"
                 }
                 ++liveTotal;
-                if (SidePanelSessionMatches(s, terms, mode))
+                if (!SidePanelSessionMatches(s, terms, mode))
                 {
-                    rows.push_back(CardRow{ MakeSortKey(s), &s });
+                    continue; // the typed text hides it (and the filters need not look)
                 }
+                if (matcher)
+                {
+                    // Only what the active facets read: the tags (a cached session-store read) for By Tag, the ★ for Favorite;
+                    // the rest are fields of the lean snapshot and the census read above.
+                    const bool needTags = matcher->NeedsTags();
+                    const auto facts = _SidePanelFilterFactsOf(s, needTags, matcher->NeedsFavorite(), indicators.unreadIds);
+                    if (needTags)
+                    {
+                        tagJudged.insert(s.id);
+                    }
+                    if (!matcher->Matches(facts, /*textOk*/ true))
+                    {
+                        continue; // a filter hides it
+                    }
+                }
+                rows.push_back(CardRow{ MakeSortKey(s), &s });
             }
             // PINNED FIRST (SIDE_PANEL.md §2j, the user's "pinning puts on top and repinning will bring a tab to the top again"):
             // every card pinned to the top comes before the rest, the newest pin first — a pin again restamps a card, so it goes
@@ -3246,20 +3744,7 @@ namespace winrt::TerminalApp::implementation
                 return pin < 0 || (pin == 0 && SortKeyLess(_appSettings.boardSort, a.key, b.key));
             });
 
-            // Bookmark tags, from the per-card cache. The epoch is loaded BEFORE any read (the SessionStore.h
-            // contract): a write landing during the reads below leaves the older epoch stored here, so the next
-            // update re-reads — a cache refreshed once too often, never kept stale. A moved epoch means some tag
-            // or tag color changed in this process since the last read, so everything cached is dropped. A card
-            // new to the list reads its tags once (GetSessionTags: SessionStore's (size,mtime)-validated record
-            // cache — one file stat); a card that stays reads nothing. Rows the filter hid are never read.
-            const uint64_t tagsEpoch = ::Agentmaster::SessionTagsEpoch();
-            if (tagsEpoch != _sidePanelTagsEpoch)
-            {
-                _sidePanelTagsById.clear();
-                _sidePanelTagColors.clear();
-                _sidePanelTagColorsLoaded = false;
-                _sidePanelTagsEpoch = tagsEpoch;
-            }
+            // Bookmark tags, from the per-card cache (its epoch was checked above, _SidePanelSyncFactCaches, before any read).
             bool anyTagged = false;
             for (const auto& row : rows)
             {
@@ -3270,20 +3755,31 @@ namespace winrt::TerminalApp::implementation
                 }
                 anyTagged = anyTagged || !it->second.empty();
             }
-            if (_sidePanelTagsById.size() > rows.size())
+            // While the funnel's panel is open its counts read every session's tags (the census, at every pick): nothing is
+            // pruned then, so a pick never re-reads the whole scope's tags; the first update after it closes prunes.
+            if (!_SidePanelFilterPanelOpen() && _sidePanelTagsById.size() > rows.size() + tagJudged.size())
             {
-                // Keep only the listed rows' entries, so the cache can't grow with every session that ever
-                // passed through the list (a session that comes back re-reads its tags once). Node handles move
-                // each kept entry over without copying its strings.
+                // Keep only the listed rows' entries — and, while By Tag filters (SIDE_PANEL.md §2l), the entries of every
+                // session it judged, listed or not — so the cache can't grow with every session that ever passed through the
+                // list (a session that comes back re-reads its tags once). Node handles move each kept entry over without
+                // copying its strings. ⚠ The judged views point into `snap`'s ids, which outlive this block; the facts' tag
+                // pointers into the old map are not used past the loop above.
                 std::unordered_map<std::wstring, std::vector<std::wstring>> kept;
-                kept.reserve(rows.size());
-                for (const auto& row : rows)
-                {
-                    auto node = _sidePanelTagsById.extract(row.session->id);
+                kept.reserve(rows.size() + tagJudged.size());
+                const auto keep = [&](const std::wstring& id) {
+                    auto node = _sidePanelTagsById.extract(id);
                     if (!node.empty())
                     {
                         kept.insert(std::move(node));
                     }
+                };
+                for (const auto& row : rows)
+                {
+                    keep(row.session->id);
+                }
+                for (const auto& judged : tagJudged)
+                {
+                    keep(std::wstring{ judged });
                 }
                 _sidePanelTagsById.swap(kept);
             }
@@ -3304,7 +3800,7 @@ namespace winrt::TerminalApp::implementation
             // dark body, so the configured LIGHT color (the same value the cards used before the rule was applied here).
             const uint32_t pendingArgb = SidePanelPackArgb(PendingDotsColorFor(kSidePanelCardBodyColor, _appSettings.pendingDotsLightColor, _appSettings.pendingDotsDarkColor));
             const bool animationsEnabled = AgentAnimationsEnabled();
-            const SidePanelIndicatorInputs indicators = SidePanelReadIndicatorInputs(_appSettings);
+            // (The status icon's per-update inputs, `indicators`, were read before the rows: the Unread filter needs the census.)
             std::vector<std::wstring> order; // the new row order, as session ids (the realized range is a window over it)
             std::vector<AgentSidePanelCardModel> models; // parallel to `order`
             // Parallel to `order` too: each row's lean session (pointers into `snap`, alive for this whole update)
@@ -3348,20 +3844,10 @@ namespace winrt::TerminalApp::implementation
                 return;
             }
 
-            if (_sidePanelCountText)
-            {
-                const std::wstring shown = std::to_wstring(_sidePanelRowIds.size());
-                const std::wstring total = std::to_wstring(liveTotal);
-                // The count names the scope, so a short list under LOCAL reads as "this window" rather
-                // than "the fleet shrank" — the cue that the toggle exists when a session seems missing.
-                const std::wstring where = local ? L" in this window" : L" across all windows";
-                std::wstring countText = terms.empty() ? (total + L" session" + (liveTotal == 1 ? L"" : L"s") + where) : (shown + L" of " + total + L" sessions" + where);
-                if (countText != _sidePanelCountValue)
-                {
-                    _sidePanelCountText.Text(winrt::hstring{ countText });
-                    _sidePanelCountValue = std::move(countText);
-                }
-            }
+            // The row under the filter box (SIDE_PANEL.md §2l): the count line's words are gone from the screen (the user's
+            // 2026-11-08 "replaced by a row only shown when filter is on") — the chips row says what narrows the list while
+            // something does; the count words live on as the filter box's ItemStatus.
+            _SidePanelUpdateFilterRow(_sidePanelRowIds.size(), liveTotal, !terms.empty());
         }
         catch (...)
         {
@@ -3683,6 +4169,7 @@ namespace winrt::TerminalApp::implementation
         _sidePanelRealizedFirst = 0;
         _sidePanelRealizedLast = 0;
         _sidePanelCountValue.clear(); // the next update writes the count line again
+        _sidePanelFilterRowSig.clear(); // ...and redraws the chips row (SIDE_PANEL.md §2l), whatever it showed before the reset
         if (!_sidePanelCards)
         {
             return;
@@ -5258,6 +5745,12 @@ namespace winrt::TerminalApp::implementation
         {
             _SidePanelCloseLaunchCard(L"dock moved by a settings change");
         }
+        // The funnel's panel and the folder card follow the same rule (SIDE_PANEL.md §2l): kept across a broadcast, closed when
+        // it moved the dock (the funnel they opened from went to the other side).
+        if ((_SidePanelFilterPanelOpen() || _SidePanelFolderCardOpen()) && _sidePanelFilterDockLeft != _appSettings.sidePanelOnLeft)
+        {
+            _SidePanelCloseFilterSurfaces(L"dock moved by a settings change");
+        }
         _SidePanelApplyDock(); // no-op when the dock side didn't change (idempotent assignments)
         // ⌖ scroll-to-tab is GLOBAL (another window's ⋯ menu may have broadcast it here): if it just turned OFF,
         // drop a reveal still owed so nothing scrolls after the user asked it not to — except a PIN's (SIDE_PANEL.md §2j),
@@ -6149,6 +6642,2017 @@ namespace winrt::TerminalApp::implementation
     }
 
     // ======================================================================================
+    // The side panel's FILTERS (SIDE_PANEL.md §2l)
+    // ======================================================================================
+    // WHAT (the user's request of 2026-11-08): "introduce ability to filter, filter by folder and even have like the +, but a
+    // button for FILTER and in it have menu appear on click and then By Folder -> <the picker of +>. The row below the filter
+    // with N sessions across all window, shall be replaced by a row only shown when filter is on and in that row we show what
+    // we filter based on. Add other filterables." Their picks the same day (design-ask with mockups): By Folder opens the "+"
+    // card itself in a folder-picking mode; a folder keeps its subfolders unless the user unchecks Include subfolders; the
+    // other filters are By State, By Tag, the four flags and Active within, and the menu must NOT close on a click; the row is
+    // the count, a chip per filter and Clear.
+    // THE PIECES:
+    //   - the FUNNEL (_sidePanelFilterBtn): the header line's innermost button; lit while a menu filter is on;
+    //   - the PANEL (_sidePanelFilterPopup): a card that looks like a menu and stays open while you pick — a Root() popup with
+    //     the "+" card's outside-press close and the KEY-UP Escape, because a MenuFlyout closes at every click and a
+    //     light-dismiss Flyout eats the press that closes it and closes on Escape's key-down (its ESC would reach claude);
+    //   - the FOLDER CARD (_sidePanelFolderPopup): the "+" card's own launch row, AgentLaunchBar in folder-pick mode;
+    //   - the CHIPS ROW (_sidePanelFilterRow): in the count line's place, shown only while something narrows the list.
+    // THE ONE RECORD (_sidePanelFilters, AgentMaster/SidePanelFilters.h's rules): every surface reads it, _SidePanelSetFilters
+    // alone writes it; it is persisted per window (WindowRecord::sidePanelFilters) and never becomes a global default.
+    // COST: the panel and the card are built on first use; the panel's rows are rebuilt at every open (about twenty); the
+    // filters add one compiled matcher per list update and read tags / ★ only while a filter needs them (cached per epoch).
+
+    void TerminalPage::_SidePanelSetFilters(::Agentmaster::SidePanelFilters next, std::wstring_view what) noexcept
+    {
+        if (!_sidePanelBuilt)
+        {
+            return;
+        }
+        try
+        {
+            // Normalized first, so "no change" is judged on the record as it would be stored (a re-pick of a folder in another
+            // spelling, a tag in another case) and nothing un-normalized ever reaches the rebuild or the window record.
+            next = ::Agentmaster::NormalizeSidePanelFilters(next);
+            if (next == _sidePanelFilters)
+            {
+                _SidePanelUpdateFilterButton(); // a pick that changed nothing: keep the funnel honest anyway
+                return;
+            }
+            _sidePanelFilters = std::move(next);
+            // The nav line names the facet and the action and how many filters are on now — never a folder path or a tag
+            // name (the nav trail keeps the user's words out, like the AI search box's length-only lines).
+            const int facets = std::popcount(::Agentmaster::SidePanelActiveFacets(_sidePanelFilters, false));
+            ::Agentmaster::LogNav(L"sidepanel filter " + std::wstring{ what } + L" -> " + std::to_wstring(facets) + (facets == 1 ? L" filter on" : L" filters on"));
+            _ScheduleWindowRecordSave(); // per window only (no AppSettings default exists for the filters)
+            _SidePanelUpdateFilterButton();
+            // A user's action: past the min-gap throttle. The update re-filters the cards and redraws the chips row; in AI mode
+            // it is owed until the cards come back (_SidePanelScheduleRebuild's rule).
+            _SidePanelScheduleRebuild(/*force*/ true);
+            _SidePanelRefreshFilterPanel(); // an open panel's checks and counts follow (noexcept)
+        }
+        catch (...)
+        {
+            // The record keeps what was assigned before the throw (normally all or nothing: the move is the last step that
+            // can allocate); the next update or pick catches up. Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelSetFilters");
+        }
+    }
+
+    void TerminalPage::_SidePanelUpdateFilterButton() noexcept
+    {
+        try
+        {
+            if (!_sidePanelFilterBtn)
+            {
+                return;
+            }
+            const bool on = ::Agentmaster::SidePanelFiltersActive(_sidePanelFilters);
+            // A programmatic IsChecked raises no Click, so re-pinning can never loop back into the toggle or persist anything.
+            _sidePanelFilterBtn.IsChecked(on);
+            // In words for UI Automation (the accent is pixels only): how many filters narrow the list.
+            const int facets = std::popcount(::Agentmaster::SidePanelActiveFacets(_sidePanelFilters, false));
+            AgentSetItemStatus(_sidePanelFilterBtn, on ? (std::to_wstring(facets) + (facets == 1 ? L" filter on" : L" filters on")) : std::wstring{});
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelUpdateFilterButton"); // the accent may lag one change; the next one re-pins it
+        }
+    }
+
+    void TerminalPage::_SidePanelSyncFactCaches() noexcept
+    {
+        // Each epoch is loaded BEFORE any read of its cache (the SessionStore.h contract): a write landing during the reads
+        // that follow leaves the older epoch stored, so the next sync drops the cache again — refreshed once too often,
+        // never kept stale. Every call here is noexcept (atomic loads, clear()).
+        const uint64_t tagsEpoch = ::Agentmaster::SessionTagsEpoch();
+        if (tagsEpoch != _sidePanelTagsEpoch)
+        {
+            _sidePanelTagsById.clear();
+            _sidePanelTagColors.clear();
+            _sidePanelTagColorsLoaded = false;
+            _sidePanelTagsEpoch = tagsEpoch;
+        }
+        const uint64_t factsEpoch = ::Agentmaster::SessionFactsEpoch();
+        if (factsEpoch != _sidePanelFavoritesEpoch)
+        {
+            _sidePanelFavoriteById.clear();
+            _sidePanelFavoritesEpoch = factsEpoch;
+        }
+    }
+
+    const std::vector<std::wstring>& TerminalPage::_SidePanelTagsOf(const std::wstring& id)
+    {
+        auto it = _sidePanelTagsById.find(id);
+        if (it == _sidePanelTagsById.end())
+        {
+            // One session-store read (a stat when its record is cached and unchanged). The entry stays until the epoch moves
+            // or a list update prunes it (the listed rows, the sessions By Tag judged, everything while the panel is open).
+            it = _sidePanelTagsById.emplace(id, ::Agentmaster::GetSessionTags(id)).first;
+        }
+        return it->second;
+    }
+
+    bool TerminalPage::_SidePanelFavoriteOf(const std::wstring& id) noexcept
+    {
+        try
+        {
+            if (const auto it = _sidePanelFavoriteById.find(id); it != _sidePanelFavoriteById.end())
+            {
+                return it->second;
+            }
+            const bool favorite = ::Agentmaster::IsSessionFavorite(id); // one session-store read
+            // Bounded: the map only grows between two moves of the facts epoch, by the sessions the filters judged; a fleet
+            // past this many sessions re-reads from empty instead of growing without end.
+            if (_sidePanelFavoriteById.size() >= 4096)
+            {
+                _sidePanelFavoriteById.clear();
+            }
+            _sidePanelFavoriteById.emplace(id, favorite);
+            return favorite;
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelFavoriteOf"); // reads as no ★: the Favorite flag hides it this update
+            return false;
+        }
+    }
+
+    ::Agentmaster::SidePanelFilterFacts TerminalPage::_SidePanelFilterFactsOf(const ::Agentmaster::SessionInfo& s, bool needTags, bool needFavorite, const std::vector<std::wstring>& unreadSorted)
+    {
+        ::Agentmaster::SidePanelFilterFacts f;
+        // The folder keys only while By Folder has a pick: a NormDirKey per session per update is cheap, but not free.
+        if (!_sidePanelFilters.folders.empty())
+        {
+            f.launchKey = s.workingDir.empty() ? std::wstring{} : ::Agentmaster::NormDirKey(s.workingDir);
+            f.inferredKey = s.inferredWorkingDir.empty() ? std::wstring{} : ::Agentmaster::NormDirKey(s.inferredWorkingDir);
+        }
+        f.state = s.state;
+        f.tags = needTags ? &_SidePanelTagsOf(s.id) : nullptr; // valid until the cache drops the entry (after the caller's loop)
+        f.draft = !s.pendingInput.empty(); // the lean snapshot keeps the draft (the cards' 3 dots)
+        f.unread = std::binary_search(unreadSorted.begin(), unreadSorted.end(), s.id); // the census the rings show
+        f.pinned = ::Agentmaster::IsSidePanelPinStamp(s.sidePanelPinnedAtUnixMs);
+        f.favorite = needFavorite && _SidePanelFavoriteOf(s.id);
+        // The card's "active … ago" source (SidePanelCardModelFor): the transcript's last activity, else the hook anchor.
+        f.lastActivityMs = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
+        return f;
+    }
+
+    AgentSidePanelFilterCensus TerminalPage::_SidePanelFilterCensus()
+    {
+        using ::Agentmaster::SidePanelFacet;
+        AgentSidePanelFilterCensus census;
+        if (!_sessionRegistry)
+        {
+            return census;
+        }
+        _SidePanelSyncFactCaches();
+        const auto mode = _appSettings.tabColorMode;
+        const auto snap = _sessionRegistry->SnapshotLiveForCards();
+        const auto terms = ::Agentmaster::ParseSessionQuery(_sidePanelSearchText);
+        const bool local = !_sidePanelGlobal;
+        std::unordered_set<std::wstring> hosted;
+        if (local)
+        {
+            hosted = _HostedSessionIds();
+        }
+        const auto unread = ::Agentmaster::CurrentUnreadSessionIds();
+        const int64_t now = NowMs();
+        const ::Agentmaster::SidePanelFilterMatcher matcher{ _sidePanelFilters, now };
+        // folded tag -> (display spelling, sessions): the first spelling seen is shown (every carrier folds to one tag).
+        std::map<std::wstring, std::pair<std::wstring, size_t>> tagCounts;
+        for (const auto& s : snap)
+        {
+            if (!s.live || (local && hosted.find(s.id) == hosted.end()))
+            {
+                continue;
+            }
+            ++census.inScope;
+            if (!SidePanelSessionMatches(s, terms, mode))
+            {
+                continue; // the typed text hides it: no facet counts it
+            }
+            // Every fact, for every session: each facet's counts need the facts the OTHER facets judge.
+            const auto facts = _SidePanelFilterFactsOf(s, /*needTags*/ true, /*needFavorite*/ true, unread);
+            const uint32_t passed = matcher.Passed(facts, /*textOk*/ true);
+            if (passed == ::Agentmaster::kSidePanelAllFacets)
+            {
+                ++census.listed;
+            }
+            if (::Agentmaster::SidePanelPassesAllBut(passed, SidePanelFacet::State))
+            {
+                for (size_t i = 0; i < std::size(::Agentmaster::kSidePanelStateChoices); ++i)
+                {
+                    if (::Agentmaster::kSidePanelStateChoices[i].state == facts.state)
+                    {
+                        ++census.states[i];
+                    }
+                }
+            }
+            if (::Agentmaster::SidePanelPassesAllBut(passed, SidePanelFacet::Tag))
+            {
+                if (!facts.tags || facts.tags->empty())
+                {
+                    ++census.untagged;
+                }
+                else
+                {
+                    for (const auto& tag : *facts.tags)
+                    {
+                        auto& entry = tagCounts[::Agentmaster::FoldTagName(tag)];
+                        if (entry.first.empty())
+                        {
+                            entry.first = tag;
+                        }
+                        ++entry.second;
+                    }
+                }
+            }
+            census.draft += (facts.draft && ::Agentmaster::SidePanelPassesAllBut(passed, SidePanelFacet::Draft)) ? 1u : 0u;
+            census.unread += (facts.unread && ::Agentmaster::SidePanelPassesAllBut(passed, SidePanelFacet::Unread)) ? 1u : 0u;
+            census.pinned += (facts.pinned && ::Agentmaster::SidePanelPassesAllBut(passed, SidePanelFacet::Pinned)) ? 1u : 0u;
+            census.favorite += (facts.favorite && ::Agentmaster::SidePanelPassesAllBut(passed, SidePanelFacet::Favorite)) ? 1u : 0u;
+            if (::Agentmaster::SidePanelPassesAllBut(passed, SidePanelFacet::Active))
+            {
+                ++census.active[0]; // "Any time"
+                for (size_t i = 0; i < std::size(::Agentmaster::kSidePanelActiveChoices); ++i)
+                {
+                    if (::Agentmaster::SidePanelActiveWithin(facts.lastActivityMs, now, ::Agentmaster::kSidePanelActiveChoices[i].minutes))
+                    {
+                        ++census.active[i + 1];
+                    }
+                }
+            }
+        }
+        // A picked tag no counted session carries any more still gets its row (count 0), so it can be unchecked.
+        for (const auto& tag : _sidePanelFilters.tags)
+        {
+            auto& entry = tagCounts[::Agentmaster::FoldTagName(tag)];
+            if (entry.first.empty())
+            {
+                entry.first = tag;
+            }
+        }
+        census.tags.reserve(tagCounts.size());
+        for (auto& [folded, entry] : tagCounts)
+        {
+            census.tags.emplace_back(std::move(entry.first), entry.second);
+        }
+        // Most carried first; the folded name breaks ties (the map's order, kept by the stable sort), so the rows never shuffle.
+        std::stable_sort(census.tags.begin(), census.tags.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+        return census;
+    }
+
+    bool TerminalPage::_SidePanelFilterPanelOpen() const noexcept
+    {
+        try
+        {
+            return _sidePanelFilterPopup && _sidePanelFilterPopup.IsOpen();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel filter panel: IsOpen read"); // a torn-down popup reads as closed
+            return false;
+        }
+    }
+
+    bool TerminalPage::_SidePanelFolderCardOpen() const noexcept
+    {
+        try
+        {
+            return _sidePanelFolderPopup && _sidePanelFolderPopup.IsOpen();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel folder card: IsOpen read"); // a torn-down popup reads as closed
+            return false;
+        }
+    }
+
+    void TerminalPage::_SidePanelToggleFilterPanel()
+    {
+        // Consume the press FIRST (the "+" button's rule): one press belongs to one Click, so a later Click without a press of
+        // its own (UI Automation) anchors under the funnel, never at an old point.
+        const bool fromPress = _sidePanelFilterAnchorFromPress;
+        _sidePanelFilterAnchorFromPress = false;
+        if (_SidePanelFilterPanelOpen())
+        {
+            // The funnel is INSIDE for the outside-press close (its Click toggles), so a click on it with the panel open lands
+            // here: the panel closes, like a second click on any button that opened a pane.
+            _SidePanelCloseFilterPanel(L"funnel again");
+            return;
+        }
+        _SidePanelOpenFilterPanel(fromPress);
+    }
+
+    bool TerminalPage::_SidePanelEnsureFilterPanel() noexcept
+    {
+        if (_sidePanelFilterPopup && _sidePanelFilterCard && _sidePanelFilterRowsHost)
+        {
+            return true;
+        }
+        try
+        {
+            const auto root = Root();
+            if (!root)
+            {
+                return false; // no page root to parent into (never after the first layout)
+            }
+            const auto weakThis = get_weak();
+
+            // The card: a menu's dark look (every Agentmaster surface is dark, whatever the app theme), 7 DIP corners. Tab
+            // cycles inside it, and the arrow keys move between its rows (XY navigation on the rows host below).
+            Border card{};
+            card.RequestedTheme(ElementTheme::Dark);
+            card.Background(Fill(0xFF, 0x2B, 0x2B, 0x2B));
+            card.BorderBrush(Fill(0xFF, 0x47, 0x47, 0x47));
+            card.BorderThickness(ThicknessHelper::FromUniformLength(1));
+            card.CornerRadius(CornerRadiusHelper::FromUniformRadius(7));
+            card.Padding(ThicknessHelper::FromLengths(0, 4, 0, 4));
+            card.TabFocusNavigation(KeyboardNavigationMode::Cycle);
+            // The rows are Buttons: the Agent Manager's six Button state brushes, or under the forced-Dark theme their hover and
+            // press fills resolve to null (a row would take a click only on its text and never light up under the pointer).
+            AgentLaunchBar::SeedButtonStateBrushes(card.Resources());
+            StackPanel rows{};
+            rows.Width(kSidePanelFilterPanelWidth);
+            rows.XYFocusKeyboardNavigation(XYFocusKeyboardNavigationMode::Enabled); // Up / Down walk the rows
+            ScrollViewer scroll{};
+            scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+            scroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+            scroll.IsTabStop(false); // the scroller itself never holds the keyboard: the rows do
+            scroll.Content(rows);
+            card.Child(scroll);
+
+            // Keys, acted on at the KEY-UP (the "+" card's rule): closing the panel moves focus to a terminal, and Windows still
+            // delivers the rest of the keystroke (the ESC of an Escape, the CR of an Enter) to whatever holds focus next — a
+            // claude would interrupt its turn or submit its draft. PreviewKeyDown TUNNELS, so it runs before the focused row:
+            //   - Escape: closes the panel (on its key-up);
+            //   - Enter / Space on "By Folder…": opens the folder card (on its key-up — focus moves to the card's box);
+            //   - Enter / Space on any other row: the row's own Button handles it (a pick toggles in place, focus stays on the
+            //     row, so its character goes nowhere);
+            //   - never a Ctrl / Alt chord (Alt+Enter is Terminal's full-screen toggle).
+            card.PreviewKeyDown([weakThis](const IInspectable&, const KeyRoutedEventArgs& e) {
+                const auto self = weakThis.get();
+                if (!self)
+                {
+                    return;
+                }
+                try
+                {
+                    self->_sidePanelFilterArmedKey = VirtualKey::None; // any key-down disarms: the next key-up must be its own
+                    self->_sidePanelFilterArmedByFolder = false;
+                    const auto key = e.Key();
+                    if ((GetKeyState(VK_CONTROL) & 0x8000) || (GetKeyState(VK_MENU) & 0x8000))
+                    {
+                        return; // an app chord: not ours
+                    }
+                    if (key == VirtualKey::Escape)
+                    {
+                        self->_sidePanelFilterArmedKey = key;
+                        e.Handled(true);
+                        return;
+                    }
+                    if (key == VirtualKey::Enter || key == VirtualKey::Space)
+                    {
+                        const void* const source = SidePanelLaunchIdentity(e.OriginalSource());
+                        for (const auto& row : self->_sidePanelFilterRows)
+                        {
+                            if (row.kind == AgentSidePanelFilterRowView::Kind::ByFolder && source && source == SidePanelLaunchIdentity(row.button))
+                            {
+                                self->_sidePanelFilterArmedKey = key;
+                                self->_sidePanelFilterArmedByFolder = true;
+                                e.Handled(true); // the Button must not click on this key-down
+                                return;
+                            }
+                        }
+                    }
+                }
+                catch (...)
+                {
+                    // The key then does what the focused row does with it. Recorded (Rule #18).
+                    ::Agentmaster::AgentLogCaughtException(L"side panel filter panel: key-down");
+                }
+            });
+            card.PreviewKeyUp([weakThis](const IInspectable&, const KeyRoutedEventArgs& e) {
+                const auto self = weakThis.get();
+                if (!self || self->_sidePanelFilterArmedKey == VirtualKey::None || e.Key() != self->_sidePanelFilterArmedKey)
+                {
+                    return; // its key-down was not armed here
+                }
+                const bool byFolder = self->_sidePanelFilterArmedByFolder;
+                self->_sidePanelFilterArmedKey = VirtualKey::None;
+                self->_sidePanelFilterArmedByFolder = false;
+                e.Handled(true); // set BEFORE acting: the close takes the card out of the tree synchronously
+                try
+                {
+                    if (byFolder)
+                    {
+                        for (size_t i = 0; i < self->_sidePanelFilterRows.size(); ++i)
+                        {
+                            if (self->_sidePanelFilterRows[i].kind == AgentSidePanelFilterRowView::Kind::ByFolder)
+                            {
+                                self->_SidePanelOnFilterRowClick(i);
+                                break;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        self->_SidePanelCloseFilterPanel(L"esc");
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"side panel filter panel: key-up");
+                }
+            });
+            // A section expanded or folded changes the card's height: re-place it (queued — SizeChanged is a layout pass, and
+            // moving a parented Popup inside one is the E_LAYOUTCYCLE fail-fast).
+            card.SizeChanged([weakThis](const IInspectable&, const SizeChangedEventArgs&) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelQueueFilterSurfacesPlacement();
+                }
+            });
+
+            // The Popup: Root()-parented across its three rows, top/left aligned, so its offsets are Root-relative (the tag
+            // editor's and the "+" card's recipe). Not light-dismiss: the outside-press hook below decides what closes it.
+            winrt::Windows::UI::Xaml::Controls::Primitives::Popup popup{};
+            popup.Child(card);
+            popup.HorizontalAlignment(HorizontalAlignment::Left);
+            popup.VerticalAlignment(VerticalAlignment::Top);
+            Grid::SetRow(popup, 0);
+            Grid::SetRowSpan(popup, 3);
+            root.Children().Append(popup);
+            // No id on the card: a Border has no automation peer, so the panel is found by its rows (am.side.filter.byFolder…).
+
+            if (!_sidePanelFilterHooked)
+            {
+                _sidePanelFilterHooked = true;
+                // The outside-press close of BOTH filter surfaces: ONE handledEventsToo hook on Root() (inert while both are
+                // closed), the "+" card's recipe. A press inside the surface (or on the funnel, whose Click toggles the panel;
+                // or in the folder card's own drop-down; or in another open popup — a dialog) keeps it; anything else closes
+                // it. Popup open / close is no tree mutation, so closing inside a pointer handler is safe.
+                root.AddHandler(
+                    UIElement::PointerPressedEvent(),
+                    winrt::box_value(PointerEventHandler{ [weakThis](const IInspectable&, const PointerRoutedEventArgs& e) {
+                        const auto self = weakThis.get();
+                        if (!self)
+                        {
+                            return;
+                        }
+                        const bool panelOpen = self->_SidePanelFilterPanelOpen();
+                        const bool cardOpen = self->_SidePanelFolderCardOpen();
+                        if (!panelOpen && !cardOpen)
+                        {
+                            return;
+                        }
+                        try
+                        {
+                            const auto source = e.OriginalSource().try_as<DependencyObject>();
+                            const auto xr = self->Root().XamlRoot();
+                            const std::vector<void*> own{ SidePanelLaunchIdentity(self->_sidePanelFilterPopup), SidePanelLaunchIdentity(self->_sidePanelFolderPopup) };
+                            if (panelOpen && !SidePanelPressInside(source, { SidePanelLaunchIdentity(self->_sidePanelFilterCard), SidePanelLaunchIdentity(self->_sidePanelFilterBtn) }, xr, own))
+                            {
+                                self->_SidePanelCloseFilterPanel(L"outside press");
+                            }
+                            if (cardOpen)
+                            {
+                                std::vector<void*> inside{ SidePanelLaunchIdentity(self->_sidePanelFolderCard) };
+                                if (self->_sidePanelFolderBar)
+                                {
+                                    inside.push_back(SidePanelLaunchIdentity(self->_sidePanelFolderBar->PathPanel())); // its folder list (a separate Root() popup)
+                                }
+                                if (!SidePanelPressInside(source, std::move(inside), xr, own))
+                                {
+                                    self->_SidePanelCloseFolderCard(L"outside press");
+                                }
+                            }
+                        }
+                        catch (...)
+                        {
+                            // The press goes on to its own target either way; only the close was lost (logged).
+                            ::Agentmaster::AgentLogCaughtException(L"side panel filter surfaces: outside press");
+                        }
+                    } }),
+                    true /* handledEventsToo */);
+                // A window resize: re-place both (queued — SizeChanged is a layout pass) and re-fit the folder card's open list.
+                root.SizeChanged([weakThis](const IInspectable&, const SizeChangedEventArgs&) {
+                    const auto self = weakThis.get();
+                    if (!self || (!self->_SidePanelFilterPanelOpen() && !self->_SidePanelFolderCardOpen()))
+                    {
+                        return; // closed surfaces cost nothing: every open places afresh
+                    }
+                    self->_SidePanelQueueFilterSurfacesPlacement();
+                    if (self->_sidePanelFolderBar)
+                    {
+                        self->_sidePanelFolderBar->QueuePathPickerRelayout(); // never throws
+                    }
+                });
+            }
+
+            _sidePanelFilterPopup = popup;
+            _sidePanelFilterCard = card;
+            _sidePanelFilterRowsHost = rows;
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[sidepanel] filter panel built (window " + ::Agentmaster::ShortId(_windowId) + L")\n");
+            return true;
+        }
+        catch (...)
+        {
+            // Nothing was kept (the members are set only at the end), so the next funnel click builds from scratch.
+            ::Agentmaster::AgentLogCaughtException(L"side panel filter panel: build");
+            return false;
+        }
+    }
+
+    void TerminalPage::_SidePanelOpenFilterPanel(bool fromPress)
+    {
+        if (!_sidePanelBuilt || _SidePanelFilterPanelOpen())
+        {
+            return;
+        }
+        if (!_SidePanelEnsureFilterPanel())
+        {
+            return; // the build failed (logged); the next click tries again
+        }
+        try
+        {
+            _SidePanelCloseFolderCard(L"filter panel opened"); // belt: the press on the funnel closed it already as an outside press
+            // The anchor: the funnel's press point; without a press (a Click from UI Automation), the funnel's bottom center.
+            if (!fromPress && _sidePanelFilterBtn)
+            {
+                const auto bottomCenter = winrt::Windows::Foundation::Point{ static_cast<float>(_sidePanelFilterBtn.ActualWidth() / 2.0), static_cast<float>(_sidePanelFilterBtn.ActualHeight()) };
+                _sidePanelFilterAnchor = _sidePanelFilterBtn.TransformToVisual(Root()).TransformPoint(bottomCenter);
+            }
+            _sidePanelFilterDockLeft = _appSettings.sidePanelOnLeft; // a broadcast that moves the dock closes the panel
+            _sidePanelFilterArmedKey = VirtualKey::None;
+            _sidePanelFilterArmedByFolder = false;
+            _SidePanelFillFilterPanel();
+            _sidePanelFilterPopup.IsOpen(true);
+            // Placed NOW, in this tick, at its real size (a panel placed a tick later would show for a frame at the previous spot).
+            _SidePanelPlaceFilterSurfaces();
+            ::Agentmaster::LogNav(fromPress ? L"sidepanel filter panel open (at the click)" : L"sidepanel filter panel open (under the funnel)");
+            // The first row takes the keyboard one tick later (the card was only just realized; a same-tick Focus on an element
+            // not laid out yet can do nothing — the tag editor's lesson): Escape then reaches the panel, not a terminal.
+            Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis = get_weak()]() {
+                const auto self = weakThis.get();
+                if (!self || !self->_SidePanelFilterPanelOpen() || self->_sidePanelFilterRows.empty())
+                {
+                    return; // closed before the tick ran
+                }
+                try
+                {
+                    if (const auto first = self->_sidePanelFilterRows.front().button)
+                    {
+                        first.Focus(FocusState::Programmatic);
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"side panel filter panel: focus the first row"); // a click on a row works anyway
+                }
+            });
+        }
+        catch (...)
+        {
+            // A half-opened panel must not stay on screen with no rows or placement: close it again (best effort).
+            ::Agentmaster::AgentLogCaughtException(L"side panel filter panel: open");
+            try
+            {
+                if (_sidePanelFilterPopup)
+                {
+                    _sidePanelFilterPopup.IsOpen(false);
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"side panel filter panel: open rollback");
+            }
+        }
+    }
+
+    void TerminalPage::_SidePanelCloseFilterPanel(std::wstring_view reason)
+    {
+        if (!_SidePanelFilterPanelOpen())
+        {
+            return;
+        }
+        _sidePanelFilterArmedKey = VirtualKey::None; // a key held across the close must not act on its release elsewhere
+        _sidePanelFilterArmedByFolder = false;
+        // Did the panel hold the keyboard? (A press on a focusable element outside it — the terminal, a text box — moved focus
+        // there before this ran, and that focus stays.)
+        bool hadFocus = false;
+        try
+        {
+            if (const auto xr = Root().XamlRoot())
+            {
+                if (const auto focused = FocusManager::GetFocusedElement(xr).try_as<DependencyObject>())
+                {
+                    hadFocus = SidePanelLaunchIsUnder(focused, _sidePanelFilterCard);
+                }
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel filter panel: focus read at close"); // no restore: focus stays where XAML puts it
+        }
+        try
+        {
+            _sidePanelFilterPopup.IsOpen(false);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel filter panel: close");
+        }
+        ::Agentmaster::LogNav(L"sidepanel filter panel close (" + std::wstring{ reason } + L")");
+        if (hadFocus)
+        {
+            try
+            {
+                // Low priority, after the close settles. The folder card (By Folder…) focuses its own box on a Normal tick, so
+                // by then it is open and this gives nothing back; otherwise the terminal the user was in gets the keyboard.
+                Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Low, [weakThis = get_weak()]() {
+                    const auto self = weakThis.get();
+                    if (!self || self->_SidePanelFilterPanelOpen() || self->_SidePanelFolderCardOpen())
+                    {
+                        return; // reopened, or the folder card took over: it holds the keyboard
+                    }
+                    try
+                    {
+                        self->_FocusCurrentTab(true);
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"side panel filter panel: focus back to the tab"); // a click in the terminal focuses it
+                    }
+                });
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"side panel filter panel: queue the focus restore"); // the window is closing
+            }
+        }
+    }
+
+    void TerminalPage::_SidePanelFillFilterPanel()
+    {
+        using Kind = AgentSidePanelFilterRowView::Kind;
+        using ::Agentmaster::SidePanelFacet;
+        if (!_sidePanelFilterRowsHost)
+        {
+            return;
+        }
+        const auto census = _SidePanelFilterCensus();
+        // The tags' colors for the tag rows' ribbons: the cards' cache (one read per tags epoch), loaded here when no listed
+        // card needed it yet.
+        if (!_sidePanelTagColorsLoaded && !census.tags.empty())
+        {
+            _sidePanelTagColors = ::Agentmaster::LoadAllTagColors();
+            _sidePanelTagColorsLoaded = true;
+        }
+        _sidePanelFilterRowsHost.Children().Clear();
+        _sidePanelFilterRows.clear();
+        const auto weakThis = get_weak();
+
+        // ONE row: a transparent full-width Button — [check][icon][text *][count] — the panel's line. The handler captures the
+        // weak page and the row's INDEX, never the row's elements (an element must not own itself through its handler).
+        //   view    - what the row stands for (its check and count are made here).
+        //   icon    - the icon column's element (null = none): a FrameworkElement, so it can take its column and alignment.
+        //   text    - the row's words.
+        //   indent  - a section's row: indented under its header.
+        //   tip     - the row's tooltip ("" = none).
+        //   autoId  - its AutomationId.
+        const auto addRow = [&](AgentSidePanelFilterRowView view, const FrameworkElement& icon, const std::wstring& text, bool indent, const std::wstring& tip, const std::wstring& autoId) {
+            Grid line{};
+            line.Margin(ThicknessHelper::FromLengths(indent ? kSidePanelFilterIndentPx : 0.0, 0, 0, 0));
+            ColumnDefinition cCheck{};
+            cCheck.Width(GridLengthHelper::FromPixels(16));
+            ColumnDefinition cIcon{};
+            cIcon.Width(GridLengthHelper::FromPixels(20));
+            ColumnDefinition cText{};
+            cText.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            ColumnDefinition cCount{};
+            cCount.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            line.ColumnDefinitions().Append(cCheck);
+            line.ColumnDefinitions().Append(cIcon);
+            line.ColumnDefinitions().Append(cText);
+            line.ColumnDefinitions().Append(cCount);
+            if (view.kind != Kind::ByFolder && view.kind != Kind::Clear)
+            {
+                view.check = Text(L"", 12, false, 0.9);
+                view.check.VerticalAlignment(VerticalAlignment::Center);
+                Grid::SetColumn(view.check, 0);
+                line.Children().Append(view.check);
+            }
+            if (icon)
+            {
+                icon.VerticalAlignment(VerticalAlignment::Center);
+                icon.HorizontalAlignment(HorizontalAlignment::Left);
+                Grid::SetColumn(icon, 1);
+                line.Children().Append(icon);
+            }
+            auto label = Text(winrt::hstring{ text }, 12.5, false, 0.95);
+            label.TextTrimming(TextTrimming::CharacterEllipsis);
+            label.VerticalAlignment(VerticalAlignment::Center);
+            Grid::SetColumn(label, 2);
+            line.Children().Append(label);
+            if (view.kind != Kind::Clear)
+            {
+                view.count = Text(L"", 11.5, false, 0.55);
+                view.count.VerticalAlignment(VerticalAlignment::Center);
+                view.count.Margin(ThicknessHelper::FromLengths(8, 0, 0, 0));
+                Grid::SetColumn(view.count, 3);
+                line.Children().Append(view.count);
+            }
+            Button btn{};
+            btn.Content(line);
+            btn.HorizontalAlignment(HorizontalAlignment::Stretch);
+            btn.HorizontalContentAlignment(HorizontalAlignment::Stretch);
+            btn.Background(SolidColorBrush{ Colors::Transparent() }); // hit-testable everywhere; hover / press take the seeded brushes
+            btn.BorderThickness(ThicknessHelper::FromUniformLength(0));
+            btn.CornerRadius(CornerRadiusHelper::FromUniformRadius(0)); // flat rows (a rounded Button is a composition node each)
+            btn.Padding(ThicknessHelper::FromLengths(10, 4, 10, 4));
+            if (!tip.empty())
+            {
+                AgentSetTip(btn, winrt::hstring{ tip }, kSidePanelButtonTipDelay); // opens after 3 s of rest: the rows are crossed on the way to a pick
+            }
+            AgentSetAutomationId(btn, autoId);
+            AgentSetAccessibleName(btn, text);
+            const size_t index = _sidePanelFilterRows.size();
+            btn.Click([weakThis, index](const IInspectable&, const RoutedEventArgs&) {
+                const auto self = weakThis.get();
+                if (!self)
+                {
+                    return;
+                }
+                try
+                {
+                    // On a clean tick: a section's expand rebuilds the rows, and the clicked Button must not be taken out of
+                    // the tree inside its own Click.
+                    self->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, index]() {
+                        if (const auto page = weakThis.get())
+                        {
+                            page->_SidePanelOnFilterRowClick(index);
+                        }
+                    });
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"side panel filter panel: queue a row click"); // the click is lost
+                }
+            });
+            view.button = btn;
+            _sidePanelFilterRowsHost.Children().Append(btn);
+            _sidePanelFilterRows.push_back(std::move(view));
+        };
+        const auto separator = [&]() {
+            Border rule{};
+            rule.Height(1);
+            rule.Margin(ThicknessHelper::FromLengths(0, 4, 0, 4));
+            rule.Background(Fill(0xFF, 0x45, 0x45, 0x45));
+            _sidePanelFilterRowsHost.Children().Append(rule);
+        };
+        const auto dot = [](const Color& color) {
+            auto t = Text(L"\x25CF", 11, false, 1.0); // ●
+            t.Foreground(SolidColorBrush{ color });
+            return t;
+        };
+
+        // 1. By Folder… — the user's "By Folder -> <the picker of +>": the folder card opens where the panel was.
+        {
+            AgentSidePanelFilterRowView view;
+            view.kind = Kind::ByFolder;
+            addRow(std::move(view), SidePanelFluentGlyph(kSidePanelFolderGlyph, 12, 0.9), L"By Folder\x2026", false,
+                   L"Pick a folder in the + launcher's folder picker: the cards then list the sessions that work in it (and, unless you uncheck Include subfolders, in every folder under it). Pick again to add more folders: a session in any of them is listed.",
+                   L"am.side.filter.byFolder");
+        }
+        // 2. By State ▸ — the six states, any of them (OR).
+        {
+            AgentSidePanelFilterRowView view;
+            view.kind = Kind::Section;
+            view.facet = SidePanelFacet::State;
+            addRow(std::move(view), dot(StateColor(::Agentmaster::SessionState::Running)), L"By State", false,
+                   L"Show the states to pick from. Picks add up: Running and Waiting for you lists the sessions in either state.",
+                   L"am.side.filter.section.state");
+            if (SidePanelHasFacet(_sidePanelFilterExpanded, SidePanelFacet::State))
+            {
+                for (const auto& choice : ::Agentmaster::kSidePanelStateChoices)
+                {
+                    AgentSidePanelFilterRowView row;
+                    row.kind = Kind::State;
+                    row.stateBit = choice.bit;
+                    addRow(std::move(row), dot(StateColor(choice.state)), choice.label, true, L"", std::wstring{ L"am.side.filter.state." } + choice.token);
+                }
+            }
+        }
+        // 3. By Tag ▸ — every tag of the counted sessions (most carried first), then Untagged.
+        {
+            AgentSidePanelFilterRowView view;
+            view.kind = Kind::Section;
+            view.facet = SidePanelFacet::Tag;
+            addRow(std::move(view), SidePanelFluentGlyph(kSidePanelTagGlyph, 12, 0.9), L"By Tag", false,
+                   L"Show the tags to pick from: every tag a session here carries, and Untagged. Picks add up.",
+                   L"am.side.filter.section.tag");
+            if (SidePanelHasFacet(_sidePanelFilterExpanded, SidePanelFacet::Tag))
+            {
+                for (const auto& [name, count] : census.tags)
+                {
+                    AgentSidePanelFilterRowView row;
+                    row.kind = Kind::Tag;
+                    row.tag = name;
+                    addRow(std::move(row), SidePanelMakeTagRibbon(ResolveTagDisplayColor(name, _sidePanelTagColors)), name, true, L"",
+                           L"am.side.filter.tag." + ::Agentmaster::FoldTagName(name));
+                }
+                AgentSidePanelFilterRowView untagged;
+                untagged.kind = Kind::Untagged;
+                addRow(std::move(untagged), SidePanelMakeTagRibbon(Color{ 0xFF, 0x55, 0x55, 0x55 }), L"Untagged", true,
+                       L"Sessions that carry no tag.", L"am.side.filter.untagged");
+            }
+        }
+        // 4. Active within ▸ — one window at a time ("Any time" = none).
+        {
+            AgentSidePanelFilterRowView view;
+            view.kind = Kind::Section;
+            view.facet = SidePanelFacet::Active;
+            addRow(std::move(view), SidePanelFluentGlyph(kSidePanelClockGlyph, 12, 0.9), L"Active within", false,
+                   L"Show how recently a session must have been active to be listed (the card's \x201C" L"active \x2026 ago\x201D).",
+                   L"am.side.filter.section.active");
+            if (SidePanelHasFacet(_sidePanelFilterExpanded, SidePanelFacet::Active))
+            {
+                AgentSidePanelFilterRowView any;
+                any.kind = Kind::Active;
+                any.minutes = 0;
+                addRow(std::move(any), nullptr, L"Any time", true, L"", L"am.side.filter.active.any");
+                for (const auto& choice : ::Agentmaster::kSidePanelActiveChoices)
+                {
+                    AgentSidePanelFilterRowView row;
+                    row.kind = Kind::Active;
+                    row.minutes = choice.minutes;
+                    addRow(std::move(row), nullptr, choice.label, true, L"", L"am.side.filter.active." + std::to_wstring(choice.minutes));
+                }
+            }
+        }
+        separator();
+        // 5. The four flags — each one narrows (two checked: both must hold).
+        {
+            const auto flag = [&](SidePanelFacet facet, const FrameworkElement& icon, const wchar_t* text, const wchar_t* tip, const wchar_t* token) {
+                AgentSidePanelFilterRowView row;
+                row.kind = Kind::Flag;
+                row.facet = facet;
+                addRow(std::move(row), icon, text, false, tip, std::wstring{ L"am.side.filter.flag." } + token);
+            };
+            auto dots = Text(L"\x2022\x2022\x2022", 11, true, 0.9); // the 3 dots of an unsent draft
+            flag(SidePanelFacet::Draft, dots, L"Unsent draft", L"Sessions whose input box holds a prompt you have not sent (the 3 dots under the dot).", L"draft");
+            auto ring = Text(L"\x25CB", 13, true, 1.0); // ○ in the flash ring's red
+            ring.Foreground(SolidColorBrush{ Color{ 0xFF, 0xE5, 0x39, 0x35 } });
+            flag(SidePanelFacet::Unread, ring, L"Unread", L"Sessions with news you have not looked at (the red ring on their tab and card).", L"unread");
+            flag(SidePanelFacet::Pinned, SidePanelFluentGlyph(kSidePanelPinGlyph, 11, 0.9), L"Pinned to top", L"Cards you pinned with their right-click Pin to Top.", L"pinned");
+            auto star = Text(L"\x2605", 12, false, 1.0); // ★ in gold
+            star.Foreground(SolidColorBrush{ Color{ 0xFF, 0xF5, 0xC5, 0x18 } });
+            flag(SidePanelFacet::Favorite, star, L"Favorite", L"Sessions you marked with the \x2605 (the Sessions page, a tab's menu).", L"favorite");
+        }
+        separator();
+        // 6. Clear all filters (the typed text too, like the chips row's Clear).
+        {
+            AgentSidePanelFilterRowView view;
+            view.kind = Kind::Clear;
+            addRow(std::move(view), SidePanelFluentGlyph(kSidePanelClearGlyph, 11, 0.9), L"Clear all filters", false,
+                   L"Drop every filter, and empty the filter box: the cards list every session again.", L"am.side.filter.clear");
+        }
+
+        // The checks, the counts and the Clear row's enabled state, written by the one function the in-place refresh uses.
+        for (auto& row : _sidePanelFilterRows)
+        {
+            const auto [check, count] = SidePanelFilterRowTexts(row, census, _sidePanelFilters, _sidePanelFilterExpanded);
+            if (row.check)
+            {
+                row.check.Text(winrt::hstring{ check });
+            }
+            if (row.count)
+            {
+                row.count.Text(winrt::hstring{ count });
+            }
+            if (row.kind == Kind::Clear && row.button)
+            {
+                row.button.IsEnabled(::Agentmaster::SidePanelFiltersActive(_sidePanelFilters) || !::Agentmaster::ParseSessionQuery(_sidePanelSearchText).empty());
+            }
+            if (row.button && row.kind != Kind::ByFolder && row.kind != Kind::Section && row.kind != Kind::Clear)
+            {
+                AgentSetItemStatus(row.button, check == L"\x2713" || check == L"\x25CF" ? L"checked" : L"");
+            }
+        }
+    }
+
+    void TerminalPage::_SidePanelRefreshFilterPanel() noexcept
+    {
+        using Kind = AgentSidePanelFilterRowView::Kind;
+        if (!_SidePanelFilterPanelOpen())
+        {
+            return;
+        }
+        try
+        {
+            const auto census = _SidePanelFilterCensus();
+            // A tag row set that no longer matches the census (a tag that appeared, a picked tag gone and dropped) cannot be
+            // patched in place: refill, keeping the keyboard on the row it was on.
+            if (SidePanelHasFacet(_sidePanelFilterExpanded, ::Agentmaster::SidePanelFacet::Tag))
+            {
+                std::vector<std::wstring> shownTags;
+                for (const auto& row : _sidePanelFilterRows)
+                {
+                    if (row.kind == Kind::Tag)
+                    {
+                        shownTags.push_back(::Agentmaster::FoldTagName(row.tag));
+                    }
+                }
+                std::vector<std::wstring> wantTags;
+                for (const auto& [name, count] : census.tags)
+                {
+                    wantTags.push_back(::Agentmaster::FoldTagName(name));
+                }
+                std::sort(shownTags.begin(), shownTags.end());
+                std::sort(wantTags.begin(), wantTags.end());
+                if (shownTags != wantTags)
+                {
+                    std::optional<AgentSidePanelFilterRowView> focusedRow;
+                    if (const auto xr = Root().XamlRoot())
+                    {
+                        if (const auto focused = FocusManager::GetFocusedElement(xr).try_as<DependencyObject>())
+                        {
+                            for (const auto& row : _sidePanelFilterRows)
+                            {
+                                if (row.button && SidePanelLaunchIsUnder(focused, row.button))
+                                {
+                                    focusedRow = row;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    _SidePanelFillFilterPanel();
+                    if (focusedRow)
+                    {
+                        for (const auto& row : _sidePanelFilterRows)
+                        {
+                            if (row.button && SidePanelSameFilterRow(row, *focusedRow))
+                            {
+                                row.button.Focus(FocusState::Programmatic);
+                                break;
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+            const bool clearable = ::Agentmaster::SidePanelFiltersActive(_sidePanelFilters) || !::Agentmaster::ParseSessionQuery(_sidePanelSearchText).empty();
+            for (auto& row : _sidePanelFilterRows)
+            {
+                const auto [check, count] = SidePanelFilterRowTexts(row, census, _sidePanelFilters, _sidePanelFilterExpanded);
+                // Written only on a change: a same-value Text write still re-measures the TextBlock.
+                if (row.check && std::wstring_view{ row.check.Text() } != check)
+                {
+                    row.check.Text(winrt::hstring{ check });
+                }
+                if (row.count && std::wstring_view{ row.count.Text() } != count)
+                {
+                    row.count.Text(winrt::hstring{ count });
+                }
+                if (row.kind == Kind::Clear && row.button && row.button.IsEnabled() != clearable)
+                {
+                    row.button.IsEnabled(clearable);
+                }
+                if (row.button && row.kind != Kind::ByFolder && row.kind != Kind::Section && row.kind != Kind::Clear)
+                {
+                    AgentSetItemStatus(row.button, check == L"\x2713" || check == L"\x25CF" ? L"checked" : L""); // change-gated inside
+                }
+            }
+        }
+        catch (...)
+        {
+            // The panel shows the previous checks and counts until the next pick or open. Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelRefreshFilterPanel");
+        }
+    }
+
+    void TerminalPage::_SidePanelOnFilterRowClick(size_t index) noexcept
+    {
+        using Kind = AgentSidePanelFilterRowView::Kind;
+        using ::Agentmaster::SidePanelFacet;
+        try
+        {
+            if (!_SidePanelFilterPanelOpen() || index >= _sidePanelFilterRows.size())
+            {
+                return; // closed before the tick ran, or the rows were rebuilt meanwhile
+            }
+            const AgentSidePanelFilterRowView row = _sidePanelFilterRows[index]; // a copy: a refill below replaces the vector
+            auto next = _sidePanelFilters;
+            switch (row.kind)
+            {
+            case Kind::ByFolder:
+                // The user's "By Folder -> <the picker of +>": the panel gives way to the "+" card in folder-pick mode, at the
+                // same anchor (the funnel's click). The card focuses its box on its own tick; the panel's close sees the card
+                // open by then and gives the keyboard to nothing else.
+                _SidePanelCloseFilterPanel(L"by folder");
+                _SidePanelOpenFolderCard();
+                return;
+            case Kind::Section:
+            {
+                // Expand / fold the section, in place: the rows are rebuilt (a few dozen) and the keyboard stays on the header.
+                _sidePanelFilterExpanded ^= ::Agentmaster::SidePanelFacetBit(row.facet);
+                _SidePanelFillFilterPanel();
+                for (const auto& rebuilt : _sidePanelFilterRows)
+                {
+                    if (rebuilt.button && SidePanelSameFilterRow(rebuilt, row))
+                    {
+                        rebuilt.button.Focus(FocusState::Programmatic);
+                        break;
+                    }
+                }
+                return;
+            }
+            case Kind::State:
+                ::Agentmaster::SidePanelToggleState(next, row.stateBit);
+                _SidePanelSetFilters(std::move(next), L"state");
+                return;
+            case Kind::Tag:
+                ::Agentmaster::SidePanelToggleTag(next, row.tag);
+                _SidePanelSetFilters(std::move(next), L"tag");
+                return;
+            case Kind::Untagged:
+                next.untagged = !next.untagged;
+                _SidePanelSetFilters(std::move(next), L"untagged");
+                return;
+            case Kind::Flag:
+                switch (row.facet)
+                {
+                case SidePanelFacet::Draft:
+                    next.draft = !next.draft;
+                    break;
+                case SidePanelFacet::Unread:
+                    next.unread = !next.unread;
+                    break;
+                case SidePanelFacet::Pinned:
+                    next.pinned = !next.pinned;
+                    break;
+                case SidePanelFacet::Favorite:
+                    next.favorite = !next.favorite;
+                    break;
+                default:
+                    return;
+                }
+                _SidePanelSetFilters(std::move(next), L"flag");
+                return;
+            case Kind::Active:
+                ::Agentmaster::SidePanelSetActiveWithin(next, row.minutes);
+                _SidePanelSetFilters(std::move(next), L"active-within");
+                return;
+            case Kind::Clear:
+                _SidePanelClearFilterText(); // the box's TextChanged re-filters the cards (asynchronously)
+                _SidePanelSetFilters(::Agentmaster::SidePanelFilters{}, L"clear");
+                _SidePanelRefreshFilterPanel(); // the Clear row grays even when the record was already empty (text only)
+                return;
+            default:
+                return;
+            }
+        }
+        catch (...)
+        {
+            // The pick is lost; the panel shows the record as it is. Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelOnFilterRowClick");
+        }
+    }
+
+    void TerminalPage::_SidePanelClearFilterText() noexcept
+    {
+        try
+        {
+            if (_sidePanelSearchBox && !_sidePanelAiMode && !_sidePanelSearchBox.Text().empty())
+            {
+                // In AI mode the box is the request line, whose text is the user's unsent request: never ours to empty.
+                _sidePanelSearchBox.Text(L"");
+                // The filter's mirror of the box, emptied NOW: the box's TextChanged (which would set it and rebuild) comes
+                // later, asynchronously, and the caller's own update or panel refresh must already see "no text" (Clear grays).
+                _sidePanelSearchText.clear();
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelClearFilterText"); // the text stays; the box's own ✕ empties it
+        }
+    }
+
+    bool TerminalPage::_SidePanelEnsureFolderCard() noexcept
+    {
+        if (_sidePanelFolderPopup && _sidePanelFolderCard && _sidePanelFolderBar)
+        {
+            return true;
+        }
+        try
+        {
+            const auto root = Root();
+            if (!root)
+            {
+                return false;
+            }
+            const auto weakThis = get_weak();
+
+            // The card: the "+" card's dark look, its Button brushes, Tab cycling inside it.
+            Border card{};
+            card.RequestedTheme(ElementTheme::Dark);
+            card.Background(Fill(0xFF, 0x26, 0x26, 0x26));
+            card.BorderBrush(Fill(0xFF, 0x3A, 0x3A, 0x3A));
+            card.BorderThickness(ThicknessHelper::FromUniformLength(1));
+            card.CornerRadius(CornerRadiusHelper::FromUniformRadius(6));
+            card.Padding(ThicknessHelper::FromLengths(10, 8, 10, 8));
+            card.TabFocusNavigation(KeyboardNavigationMode::Cycle);
+            AgentLaunchBar::SeedButtonStateBrushes(card.Resources());
+
+            // The bar: the "+" card's own launch row, in FOLDER-PICK MODE (AgentLaunchBarHost::pickFolder) — the user's "By
+            // Folder -> <the picker of +>": the same box, underline and drop-down (Browse…, RECENT, GIT WORKTREES, SUBFOLDERS),
+            // plus the folders the panel's sessions work in, and "Filter" in Launch's place.
+            AgentLaunchBarHost host;
+            host.codexToggle = false; // the fixed chip, which pick mode turns into "Folder"
+            if (const auto ipc = _agentManagerContent.get())
+            {
+                if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+                {
+                    host.recentDirs = mgr->LaunchRecentDirs(); // RECENT lists where you launched (pick mode never pushes into it)
+                }
+            }
+            if (!host.recentDirs)
+            {
+                host.recentDirs = std::make_shared<AgentLaunchRecentDirs>();
+                host.recentDirs->dirs = ::Agentmaster::LoadRecentDirs();
+            }
+            host.popupHost = root;
+            host.popupRowSpan = 3;
+            host.dialogAnchor = card;
+            host.dispatcher = winrt::Windows::System::DispatcherQueue::GetForCurrentThread();
+            host.registry = [weakThis]() -> std::shared_ptr<::Agentmaster::SessionRegistry> {
+                if (const auto self = weakThis.get())
+                {
+                    return self->_sessionRegistry;
+                }
+                return nullptr;
+            };
+            host.recentDirsLimit = [weakThis]() -> uint32_t {
+                if (const auto self = weakThis.get())
+                {
+                    return self->_appSettings.recentDirsLimit;
+                }
+                return 0u;
+            };
+            host.pickFolder = [weakThis](const std::wstring& dir) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelPickFilterFolder(dir);
+                }
+            };
+            host.pickLabel = L"Filter";
+            host.pickTip = L"List only the sessions that work in this folder \x2014 and in every folder under it while Include subfolders is checked. Another folder picked later adds to this one: a session in either is listed.";
+            host.folderChoices = [weakThis]() -> std::vector<AgentLaunchFolderChoice> {
+                if (const auto self = weakThis.get())
+                {
+                    return self->_SidePanelFolderChoices();
+                }
+                return {};
+            };
+            host.folderChoicesLabel = L"FOLDERS YOUR SESSIONS WORK IN";
+            host.layoutChanged = [weakThis]() {
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelQueueFilterSurfacesPlacement(); // the row's width may have changed: re-fit and re-place later
+                }
+            };
+            auto bar = AgentLaunchBar::Create(std::move(host));
+
+            // "Include subfolders" — the user's "some way to get Exactly that folder": checked at every open (their default),
+            // unchecked = this pick is exactly that folder. A real CheckBox (its own check glyph and keyboard toggle).
+            CheckBox subfolders{};
+            subfolders.Content(winrt::box_value(winrt::hstring{ L"Include subfolders" }));
+            subfolders.MinWidth(0);
+            subfolders.IsChecked(true);
+            subfolders.VerticalAlignment(VerticalAlignment::Center);
+            AgentSetTitledTip(subfolders, L"Include subfolders", L"Checked: the folder and every folder under it (K:\\source covers all of its repositories). Unchecked: exactly this folder. Each folder you pick keeps its own choice; its chip says \x201C(exactly)\x201D when unchecked.", kSidePanelButtonTipDelay);
+            AgentSetAutomationId(subfolders, L"am.side.folderCard.subfolders");
+
+            // [Folder] [ box / underline ] [☑ Include subfolders] [Filter] — the "+" row's shape, Fork left out (pick mode
+            // never shows it).
+            StackPanel row{};
+            row.Orientation(Orientation::Horizontal);
+            row.Spacing(kSidePanelLaunchRowSpacingPx);
+            row.VerticalAlignment(VerticalAlignment::Center);
+            row.Children().Append(bar->AgentElement());
+            row.Children().Append(bar->CwdColumn());
+            row.Children().Append(subfolders);
+            row.Children().Append(bar->LaunchButton());
+            card.Child(row);
+            // Ids on the controls (a Border card has no automation peer, so the card is found by its box).
+            AgentSetAutomationId(bar->CwdBox(), L"am.side.folderCard.box");
+            AgentSetAutomationId(bar->LaunchButton(), L"am.side.folderCard.filter");
+
+            // Keys at the KEY-UP (the "+" card's rule — the close hands the keyboard to a terminal):
+            //   - Escape with the folder list CLOSED closes the card (with it open, the box's own Escape closes the list);
+            //   - Enter in the box or on Filter picks the folder (what Filter's click does: the box's own Enter would only
+            //     commit the text, the launch bar's rule — here the box IS the filter's input, so Enter applies it);
+            //   - never a Ctrl / Alt chord.
+            card.PreviewKeyDown([weakThis](const IInspectable&, const KeyRoutedEventArgs& e) {
+                const auto self = weakThis.get();
+                if (!self)
+                {
+                    return;
+                }
+                try
+                {
+                    self->_sidePanelFolderArmedKey = VirtualKey::None;
+                    self->_sidePanelFolderArmedPick = false;
+                    const auto key = e.Key();
+                    if (key != VirtualKey::Enter && key != VirtualKey::Escape)
+                    {
+                        return;
+                    }
+                    if ((GetKeyState(VK_CONTROL) & 0x8000) || (GetKeyState(VK_MENU) & 0x8000))
+                    {
+                        return;
+                    }
+                    const auto bar = self->_sidePanelFolderBar;
+                    if (!bar)
+                    {
+                        return;
+                    }
+                    if (key == VirtualKey::Escape)
+                    {
+                        if (bar->PathPickerOpen())
+                        {
+                            return; // the box's own Escape closes the list first
+                        }
+                        self->_sidePanelFolderArmedKey = key;
+                        self->_sidePanelFolderArmedPick = false;
+                        e.Handled(true);
+                        return;
+                    }
+                    const void* const source = SidePanelLaunchIdentity(e.OriginalSource());
+                    if (source && (source == SidePanelLaunchIdentity(bar->CwdBox()) || source == SidePanelLaunchIdentity(bar->LaunchButton())))
+                    {
+                        self->_sidePanelFolderArmedKey = key;
+                        self->_sidePanelFolderArmedPick = true;
+                        e.Handled(true); // neither the box's commit nor the Button's key-down click runs: the key-up picks
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"side panel folder card: key-down");
+                }
+            });
+            card.PreviewKeyUp([weakThis](const IInspectable&, const KeyRoutedEventArgs& e) {
+                const auto self = weakThis.get();
+                if (!self || self->_sidePanelFolderArmedKey == VirtualKey::None || e.Key() != self->_sidePanelFolderArmedKey)
+                {
+                    return;
+                }
+                const bool pick = self->_sidePanelFolderArmedPick;
+                self->_sidePanelFolderArmedKey = VirtualKey::None;
+                self->_sidePanelFolderArmedPick = false;
+                e.Handled(true); // before acting: a pick closes the card synchronously
+                try
+                {
+                    if (pick)
+                    {
+                        if (const auto bar = self->_sidePanelFolderBar)
+                        {
+                            bar->ClickLaunch(); // exactly Filter's click: the box's folder, or nothing for an invalid text
+                        }
+                    }
+                    else
+                    {
+                        self->_SidePanelCloseFolderCard(L"esc");
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"side panel folder card: key-up");
+                }
+            });
+            card.SizeChanged([weakThis](const IInspectable&, const SizeChangedEventArgs&) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelQueueFilterSurfacesPlacement();
+                }
+            });
+
+            winrt::Windows::UI::Xaml::Controls::Primitives::Popup popup{};
+            popup.Child(card);
+            popup.HorizontalAlignment(HorizontalAlignment::Left);
+            popup.VerticalAlignment(VerticalAlignment::Top);
+            Grid::SetRow(popup, 0);
+            Grid::SetRowSpan(popup, 3);
+            root.Children().Append(popup);
+
+            _sidePanelFolderPopup = popup;
+            _sidePanelFolderCard = card;
+            _sidePanelFolderSubfolders = subfolders;
+            _sidePanelFolderBar = std::move(bar);
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[sidepanel] folder filter card built (window " + ::Agentmaster::ShortId(_windowId) + L")\n");
+            return true;
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel folder card: build"); // nothing kept: the next By Folder… retries
+            return false;
+        }
+    }
+
+    void TerminalPage::_SidePanelOpenFolderCard()
+    {
+        if (!_sidePanelBuilt || _SidePanelFolderCardOpen())
+        {
+            return;
+        }
+        // The outside-press and resize hooks are the panel's (registered by its build, which By Folder… always follows); a belt
+        // for an open with no panel built yet registers them here.
+        if (!_sidePanelFilterHooked && !_SidePanelEnsureFilterPanel())
+        {
+            return;
+        }
+        if (!_SidePanelEnsureFolderCard())
+        {
+            return;
+        }
+        try
+        {
+            _sidePanelFilterDockLeft = _appSettings.sidePanelOnLeft;
+            _sidePanelFolderArmedKey = VirtualKey::None;
+            _sidePanelFolderArmedPick = false;
+            // An EMPTY box: the list under it then shows every folder of the sessions, the recent ones and Browse… (a typed
+            // word narrows them). SetBoxText re-validates explicitly (Filter disabled until a folder is in the box).
+            _sidePanelFolderBar->SetBoxText(L"");
+            if (_sidePanelFolderSubfolders)
+            {
+                _sidePanelFolderSubfolders.IsChecked(true); // the user's default at every open: the folder and its subfolders
+            }
+            _SidePanelFitFolderBox();
+            _sidePanelFolderPopup.IsOpen(true);
+            _SidePanelPlaceFilterSurfaces();
+            ::Agentmaster::LogNav(L"sidepanel filter folder card open");
+            // The "+" card's three steps one tick later: lay it out at its place, focus the box, open the folder list.
+            Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis = get_weak()]() {
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelFinishFolderCardOpen();
+                }
+            });
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel folder card: open");
+            try
+            {
+                if (_sidePanelFolderPopup)
+                {
+                    _sidePanelFolderPopup.IsOpen(false);
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"side panel folder card: open rollback");
+            }
+        }
+    }
+
+    void TerminalPage::_SidePanelFinishFolderCardOpen() noexcept
+    {
+        if (!_SidePanelFolderCardOpen() || !_sidePanelFolderBar || !_sidePanelFolderCard)
+        {
+            return; // closed again before the tick ran
+        }
+        // 1. Lay the card out at the offsets the open wrote (a popup's child moves only in a layout pass), so the list anchors
+        //    under the box where it really is — never over the box (the "+" card's 2026-10-12 lesson).
+        try
+        {
+            _sidePanelFolderCard.UpdateLayout();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel folder card: lay the card out before its folder list opens");
+        }
+        if (!_SidePanelFolderCardOpen())
+        {
+            return;
+        }
+        // 2. The caret in the box: typing narrows the list at once; Enter and Escape reach the card's key handlers.
+        try
+        {
+            if (const auto box = _sidePanelFolderBar->CwdBox())
+            {
+                if (!box.Focus(FocusState::Programmatic))
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[sidepanel] folder filter card: its box did not take focus (window " + ::Agentmaster::ShortId(_windowId) + L")\n");
+                }
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel folder card: focus the box");
+        }
+        // 3. The folder list open under the box — the "+" card's rule ("the path textbox's dropdown menu is supposed to be open
+        //    by default"): the folders of the sessions first.
+        _sidePanelFolderBar->OpenPathPicker(); // noexcept
+    }
+
+    void TerminalPage::_SidePanelCloseFolderCard(std::wstring_view reason)
+    {
+        if (!_SidePanelFolderCardOpen())
+        {
+            return;
+        }
+        _sidePanelFolderArmedKey = VirtualKey::None;
+        _sidePanelFolderArmedPick = false;
+        bool hadFocus = false;
+        try
+        {
+            if (const auto xr = Root().XamlRoot())
+            {
+                if (const auto focused = FocusManager::GetFocusedElement(xr).try_as<DependencyObject>())
+                {
+                    hadFocus = SidePanelLaunchIsUnder(focused, _sidePanelFolderCard);
+                }
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel folder card: focus read at close");
+        }
+        if (_sidePanelFolderBar)
+        {
+            _sidePanelFolderBar->DismissForHide(); // its folder list closed, the dismissal latched (noexcept)
+        }
+        try
+        {
+            _sidePanelFolderPopup.IsOpen(false);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel folder card: close");
+        }
+        ::Agentmaster::LogNav(L"sidepanel filter folder card close (" + std::wstring{ reason } + L")");
+        if (hadFocus)
+        {
+            try
+            {
+                Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Low, [weakThis = get_weak()]() {
+                    const auto self = weakThis.get();
+                    if (!self || self->_SidePanelFolderCardOpen() || self->_SidePanelFilterPanelOpen())
+                    {
+                        return; // reopened, or the panel took the keyboard
+                    }
+                    try
+                    {
+                        self->_FocusCurrentTab(true);
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"side panel folder card: focus back to the tab");
+                    }
+                });
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"side panel folder card: queue the focus restore");
+            }
+        }
+    }
+
+    void TerminalPage::_SidePanelPickFilterFolder(const std::wstring& dir) noexcept
+    {
+        try
+        {
+            bool includeSubfolders = true;
+            if (_sidePanelFolderSubfolders)
+            {
+                const auto checked = _sidePanelFolderSubfolders.IsChecked();
+                includeSubfolders = !checked || checked.Value(); // an indeterminate (null) box keeps the default
+            }
+            auto next = _sidePanelFilters;
+            const bool added = ::Agentmaster::SidePanelAddFolderFilter(next, dir, includeSubfolders);
+            _SidePanelCloseFolderCard(L"picked");
+            if (added)
+            {
+                _SidePanelSetFilters(std::move(next), includeSubfolders ? L"folder+ (with subfolders)" : L"folder+ (exactly)");
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelPickFilterFolder"); // nothing added; the card may stay open
+        }
+    }
+
+    std::vector<AgentLaunchFolderChoice> TerminalPage::_SidePanelFolderChoices() noexcept
+    {
+        std::vector<AgentLaunchFolderChoice> out;
+        try
+        {
+            if (!_sessionRegistry)
+            {
+                return out;
+            }
+            _SidePanelSyncFactCaches();
+            const auto mode = _appSettings.tabColorMode;
+            const auto snap = _sessionRegistry->SnapshotLiveForCards();
+            const auto terms = ::Agentmaster::ParseSessionQuery(_sidePanelSearchText);
+            const bool local = !_sidePanelGlobal;
+            std::unordered_set<std::wstring> hosted;
+            if (local)
+            {
+                hosted = _HostedSessionIds();
+            }
+            const auto unread = ::Agentmaster::CurrentUnreadSessionIds();
+            const ::Agentmaster::SidePanelFilterMatcher matcher{ _sidePanelFilters, NowMs() };
+            const auto dirColors = ::Agentmaster::LoadDirColorIndex();
+            std::vector<::Agentmaster::SessionFolderFacts> facts;
+            std::unordered_map<std::wstring, uint32_t> colorByKey; // folder key -> the dot's color (the first session's band)
+            for (const auto& s : snap)
+            {
+                if (!s.live || (local && hosted.find(s.id) == hosted.end()) || !SidePanelSessionMatches(s, terms, mode))
+                {
+                    continue;
+                }
+                // Every facet but By Folder itself: the folders offered are those where another pick still lists something.
+                const auto f = _SidePanelFilterFactsOf(s, matcher.NeedsTags(), matcher.NeedsFavorite(), unread);
+                if (!::Agentmaster::SidePanelPassesAllBut(matcher.Passed(f, true), ::Agentmaster::SidePanelFacet::Folder))
+                {
+                    continue;
+                }
+                const int64_t last = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
+                facts.push_back(::Agentmaster::SessionFolderFacts{ s.workingDir, s.inferredWorkingDir, last });
+                if (const auto band = HexToColor(::Agentmaster::ResolveSessionColorHex(mode, s, dirColors)))
+                {
+                    const uint32_t argb = SidePanelPackArgb(*band);
+                    for (const auto* dir : { &s.workingDir, &s.inferredWorkingDir })
+                    {
+                        if (!dir->empty())
+                        {
+                            colorByKey.try_emplace(::Agentmaster::NormDirKey(::Agentmaster::TrimFolderPath(*dir)), argb);
+                        }
+                    }
+                }
+            }
+            auto uses = ::Agentmaster::CollectSessionFolders(facts); // launch + inferred folders, each session once per folder
+            ::Agentmaster::SortFoldersByUse(uses); // most used first (the folder card's list is a "where do my sessions work")
+            out.reserve(uses.size());
+            for (const auto& use : uses)
+            {
+                AgentLaunchFolderChoice choice;
+                choice.dir = use.path;
+                choice.sessions = static_cast<uint32_t>(use.sessions);
+                if (const auto it = colorByKey.find(use.key); it != colorByKey.end())
+                {
+                    choice.colorArgb = it->second;
+                }
+                out.push_back(std::move(choice));
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelFolderChoices"); // the section is left out; RECENT and Browse… still list
+            out.clear();
+        }
+        return out;
+    }
+
+    void TerminalPage::_SidePanelFitFolderBox() noexcept
+    {
+        if (!_sidePanelFolderBar || !_sidePanelFolderCard)
+        {
+            return;
+        }
+        try
+        {
+            const auto box = _sidePanelFolderBar->CwdBox();
+            if (!box)
+            {
+                return;
+            }
+            const auto root = Root();
+            const double rootW = root ? root.ActualWidth() : 0.0;
+            double width = kSidePanelLaunchBoxMaxPx; // an unmeasured window: the comfortable width, re-fitted on its first SizeChanged
+            if (rootW > 0.0)
+            {
+                // The "+" card's fit (_SidePanelFitLaunchBox): the window's width less the margins, the card's chrome, the row's
+                // gaps and every other part's natural width (the chip, the check box, Filter).
+                const auto natural = [](const FrameworkElement& el) -> double {
+                    if (!el || el.Visibility() == Visibility::Collapsed)
+                    {
+                        return 0.0;
+                    }
+                    el.Measure(winrt::Windows::Foundation::Size{ kSidePanelLaunchMeasureBound, kSidePanelLaunchMeasureBound });
+                    return static_cast<double>(el.DesiredSize().Width);
+                };
+                const FrameworkElement others[] = { _sidePanelFolderBar->AgentElement(), _sidePanelFolderSubfolders, _sidePanelFolderBar->LaunchButton() };
+                double othersW = 0.0;
+                double gaps = 0.0;
+                for (const auto& el : others)
+                {
+                    const double w = natural(el);
+                    if (w > 0.0)
+                    {
+                        othersW += w;
+                        gaps += kSidePanelLaunchRowSpacingPx;
+                    }
+                }
+                const auto pad = _sidePanelFolderCard.Padding();
+                const auto edge = _sidePanelFolderCard.BorderThickness();
+                const double chrome = pad.Left + pad.Right + edge.Left + edge.Right;
+                const double room = rootW - 2.0 * ::Agentmaster::kPointerCardMarginDips - chrome - gaps - othersW;
+                width = std::clamp(room, kSidePanelLaunchBoxMinPx, kSidePanelLaunchBoxMaxPx);
+            }
+            if (std::abs(width - _sidePanelFolderBoxWidth) < 0.5)
+            {
+                return; // unchanged: no layout invalidation
+            }
+            _sidePanelFolderBoxWidth = width;
+            box.MinWidth(width); // fixed (Min = Max): the card keeps its size while you type, its corner at the anchor
+            box.MaxWidth(width);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel folder card: fit the box"); // the box keeps its previous width
+        }
+    }
+
+    void TerminalPage::_SidePanelPlaceFilterSurfaces() noexcept
+    {
+        try
+        {
+            const auto root = Root();
+            if (_SidePanelFilterPanelOpen() && _sidePanelFilterCard)
+            {
+                // The rows scroll inside the window's height (a long tag list): the cap is written only when it changes.
+                if (const auto scroll = _sidePanelFilterCard.Child().try_as<ScrollViewer>(); scroll && root && root.ActualHeight() > 0.0)
+                {
+                    const double cap = std::max(120.0, root.ActualHeight() - 2.0 * ::Agentmaster::kPointerCardMarginDips - 10.0);
+                    if (std::abs(scroll.MaxHeight() - cap) > 0.5)
+                    {
+                        scroll.MaxHeight(cap);
+                    }
+                }
+                SidePanelPlaceCardAt(_sidePanelFilterPopup, _sidePanelFilterCard, _sidePanelFilterAnchor, root);
+            }
+            if (_SidePanelFolderCardOpen() && _sidePanelFolderCard)
+            {
+                if (SidePanelPlaceCardAt(_sidePanelFolderPopup, _sidePanelFolderCard, _sidePanelFilterAnchor, root) && _sidePanelFolderBar)
+                {
+                    // Moved with its folder list open: the list follows the box after the next pass (noexcept; a no-op when closed).
+                    _sidePanelFolderBar->ReanchorPathPickerAfterLayout();
+                }
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel filter surfaces: place"); // they keep their offsets
+        }
+    }
+
+    void TerminalPage::_SidePanelQueueFilterSurfacesPlacement() noexcept
+    {
+        if (_sidePanelFilterPlaceQueued)
+        {
+            return; // a tick is already queued: this change folds into it
+        }
+        _sidePanelFilterPlaceQueued = true;
+        try
+        {
+            Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis = get_weak()]() {
+                const auto self = weakThis.get();
+                if (!self)
+                {
+                    return;
+                }
+                self->_sidePanelFilterPlaceQueued = false; // BEFORE the work: a size change during it queues another tick
+                if (self->_SidePanelFolderCardOpen())
+                {
+                    self->_SidePanelFitFolderBox();
+                }
+                self->_SidePanelPlaceFilterSurfaces();
+            });
+        }
+        catch (...)
+        {
+            // The dispatcher is going away with the window: re-arm, never latch shut.
+            _sidePanelFilterPlaceQueued = false;
+            ::Agentmaster::AgentLogCaughtException(L"side panel filter surfaces: queue placement");
+        }
+    }
+
+    void TerminalPage::_SidePanelCloseFilterSurfaces(std::wstring_view reason)
+    {
+        _SidePanelCloseFilterPanel(reason);
+        _SidePanelCloseFolderCard(reason);
+    }
+
+    void TerminalPage::_SidePanelShowRowForMode() noexcept
+    {
+        try
+        {
+            if (_sidePanelCountText)
+            {
+                _sidePanelCountText.Visibility(_sidePanelAiMode ? Visibility::Visible : Visibility::Collapsed);
+            }
+            if (_sidePanelAiMode)
+            {
+                if (_sidePanelFilterRow)
+                {
+                    _sidePanelFilterRow.Visibility(Visibility::Collapsed); // the AI view's count line owns row 1
+                }
+                if (_sidePanelSearchBox)
+                {
+                    // The box is the AI request line now: the cards' count words are not its status (the old count line
+                    // showed the AI view's words in this mode too).
+                    AgentSetItemStatus(_sidePanelSearchBox, L"");
+                }
+            }
+            // Card mode: the chips row is shown by the list update that follows (_SidePanelUpdateFilterRow decides).
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelShowRowForMode");
+        }
+    }
+
+    void TerminalPage::_SidePanelUpdateFilterRow(size_t shown, size_t total, bool textActive)
+    {
+        if (!_sidePanelFilterRow || !_sidePanelFilterChips)
+        {
+            return;
+        }
+        // The old count line's words, unchanged — "2 sessions in this window", "1 of 3 sessions across all windows" — as the
+        // filter box's ItemStatus: a screen reader still hears how many cards the box's filtering left, and the e2e driver
+        // reads the scope from them (count_line). Change-gated inside AgentSetItemStatus.
+        const std::wstring where = SidePanelScopeWords(_sidePanelGlobal);
+        const bool narrowed = textActive || ::Agentmaster::SidePanelFiltersActive(_sidePanelFilters);
+        const std::wstring countWords = narrowed ? (std::to_wstring(shown) + L" of " + std::to_wstring(total) + L" sessions" + where) :
+                                                   (std::to_wstring(total) + (total == 1 ? L" session" : L" sessions") + where);
+        if (_sidePanelSearchBox)
+        {
+            AgentSetItemStatus(_sidePanelSearchBox, countWords);
+        }
+        // The row shows only while something narrows the list (the user's "a row only shown when filter is on").
+        const auto chips = ::Agentmaster::SidePanelFilterChips(_sidePanelFilters, textActive ? SidePanelAiTrim(_sidePanelSearchText) : std::wstring{});
+        if (chips.empty())
+        {
+            if (_sidePanelFilterRow.Visibility() != Visibility::Collapsed)
+            {
+                _sidePanelFilterRow.Visibility(Visibility::Collapsed);
+            }
+            if (!_sidePanelFilterRowSig.empty())
+            {
+                _sidePanelFilterChips.Children().Clear(); // a hidden row keeps no elements (the next filter builds afresh)
+                _sidePanelFilterRowSig.clear();
+            }
+            return;
+        }
+        // The row's content as one string: the count, the scope and every chip's words. Equal to the last build = nothing to
+        // write (the list updates up to twice a second, and the chips change only with a pick).
+        std::wstring sig = std::to_wstring(shown) + L"/" + std::to_wstring(total) + where;
+        for (const auto& chip : chips)
+        {
+            sig += L"\x1F" + std::to_wstring(static_cast<int>(chip.kind)) + L":" + chip.text;
+        }
+        if (sig != _sidePanelFilterRowSig)
+        {
+            _sidePanelFilterRowSig = sig;
+            auto children = _sidePanelFilterChips.Children();
+            children.Clear();
+            const auto weakThis = get_weak();
+            // "N of M": dim, its tooltip naming the scope (the count line's old cue that a short list is "this window").
+            {
+                auto count = Text(winrt::hstring{ std::to_wstring(shown) + L" of " + std::to_wstring(total) }, kSidePanelChipFontSize, false, 0.6);
+                count.VerticalAlignment(VerticalAlignment::Center);
+                count.Margin(ThicknessHelper::FromLengths(2, 0, 2, 0));
+                AgentSetTip(count, winrt::hstring{ L"Cards listed of the sessions" + where + L" (Card scope in the \x22EF menu)." }, kSidePanelButtonTipDelay);
+                AgentSetAutomationId(count, L"am.side.filterRow.count");
+                children.Append(count);
+            }
+            // One chip per filter: [glyph][words][✕]. Its rounded background is a CHILDLESS Border behind the content in the same
+            // Grid cell (a rounded element with children is a composition node every frame walks — UI_THREAD.md §10h).
+            size_t folderOrdinal = 0;
+            for (const auto& chip : chips)
+            {
+                Grid cell{};
+                Border back{};
+                back.Background(Fill(0xFF, 0x3B, 0x3B, 0x3B));
+                back.BorderBrush(Fill(0xFF, 0x56, 0x56, 0x56));
+                back.BorderThickness(ThicknessHelper::FromUniformLength(1));
+                back.CornerRadius(CornerRadiusHelper::FromUniformRadius(kSidePanelChipCornerRadius));
+                cell.Children().Append(back);
+                StackPanel content{};
+                content.Orientation(Orientation::Horizontal);
+                content.Spacing(4);
+                content.Margin(ThicknessHelper::FromLengths(7, 1, 1, 1));
+                content.VerticalAlignment(VerticalAlignment::Center);
+                // The glyph of the facet (the state's dot, the first tag's ribbon, the icon font for the rest).
+                UIElement glyph{ nullptr };
+                switch (chip.kind)
+                {
+                case ::Agentmaster::SidePanelChipKind::Folder:
+                    glyph = SidePanelFluentGlyph(kSidePanelFolderGlyph, 10, 0.85);
+                    break;
+                case ::Agentmaster::SidePanelChipKind::State:
+                {
+                    auto stateDot = Text(L"\x25CF", 9, false, 1.0);
+                    for (const auto& choice : ::Agentmaster::kSidePanelStateChoices)
+                    {
+                        if ((_sidePanelFilters.states & choice.bit) != 0)
+                        {
+                            stateDot.Foreground(SolidColorBrush{ StateColor(choice.state) }); // the first picked state's color
+                            break;
+                        }
+                    }
+                    glyph = stateDot;
+                    break;
+                }
+                case ::Agentmaster::SidePanelChipKind::Tag:
+                    glyph = _sidePanelFilters.tags.empty() ? SidePanelMakeTagRibbon(Color{ 0xFF, 0x55, 0x55, 0x55 }) :
+                                                             SidePanelMakeTagRibbon(ResolveTagDisplayColor(_sidePanelFilters.tags.front(), _sidePanelTagColors));
+                    break;
+                case ::Agentmaster::SidePanelChipKind::Draft:
+                    glyph = Text(L"\x2022\x2022\x2022", 9, true, 0.9);
+                    break;
+                case ::Agentmaster::SidePanelChipKind::Unread:
+                {
+                    auto ring = Text(L"\x25CB", 10, true, 1.0);
+                    ring.Foreground(SolidColorBrush{ Color{ 0xFF, 0xE5, 0x39, 0x35 } });
+                    glyph = ring;
+                    break;
+                }
+                case ::Agentmaster::SidePanelChipKind::Pinned:
+                    glyph = SidePanelFluentGlyph(kSidePanelPinGlyph, 9, 0.9);
+                    break;
+                case ::Agentmaster::SidePanelChipKind::Favorite:
+                {
+                    auto star = Text(L"\x2605", 10, false, 1.0);
+                    star.Foreground(SolidColorBrush{ Color{ 0xFF, 0xF5, 0xC5, 0x18 } });
+                    glyph = star;
+                    break;
+                }
+                case ::Agentmaster::SidePanelChipKind::Active:
+                    glyph = SidePanelFluentGlyph(kSidePanelClockGlyph, 9, 0.85);
+                    break;
+                case ::Agentmaster::SidePanelChipKind::Text:
+                default:
+                    glyph = SidePanelFluentGlyph(kSidePanelSearchGlyph, 9, 0.85);
+                    break;
+                }
+                if (const auto fe = glyph.try_as<FrameworkElement>())
+                {
+                    fe.VerticalAlignment(VerticalAlignment::Center);
+                }
+                content.Children().Append(glyph);
+                auto words = Text(winrt::hstring{ chip.text }, kSidePanelChipFontSize, false, 0.95);
+                words.VerticalAlignment(VerticalAlignment::Center);
+                words.TextTrimming(TextTrimming::CharacterEllipsis);
+                words.MaxWidth(180); // a long folder or tag list ends in "…"; the chip's tooltip has it whole
+                content.Children().Append(words);
+                // ✕: drops what this chip stands for — the chip is captured BY VALUE (its kind, its folder's index, its words),
+                // never an element; the page weakly.
+                Button remove{};
+                remove.Content(winrt::box_value(L"\x2715"));
+                remove.FontSize(8);
+                remove.Padding(ThicknessHelper::FromLengths(4, 0, 4, 0));
+                remove.MinWidth(0);
+                remove.MinHeight(0);
+                remove.VerticalAlignment(VerticalAlignment::Center);
+                remove.Background(SolidColorBrush{ Colors::Transparent() });
+                remove.BorderThickness(ThicknessHelper::FromUniformLength(0));
+                remove.CornerRadius(CornerRadiusHelper::FromUniformRadius(0));
+                remove.IsTabStop(false); // like the header's buttons: a click must not pull the keyboard out of the terminal
+                remove.Click([weakThis, chip](const IInspectable&, const RoutedEventArgs&) {
+                    const auto self = weakThis.get();
+                    if (!self)
+                    {
+                        return;
+                    }
+                    try
+                    {
+                        // On a clean tick: the row is rebuilt by the list update this triggers, and the clicked ✕ must not
+                        // leave the tree inside its own Click.
+                        self->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, chip]() {
+                            const auto page = weakThis.get();
+                            if (!page)
+                            {
+                                return;
+                            }
+                            if (chip.kind == ::Agentmaster::SidePanelChipKind::Text)
+                            {
+                                page->_SidePanelClearFilterText();
+                                ::Agentmaster::LogNav(L"sidepanel filter chip x text");
+                                return;
+                            }
+                            // A Folder chip whose index no longer names its folder (the record changed since the row was drawn —
+                            // never between a draw and a click on one thread, but cheap to check) drops nothing.
+                            if (chip.kind == ::Agentmaster::SidePanelChipKind::Folder &&
+                                (chip.folderIndex >= page->_sidePanelFilters.folders.size() ||
+                                 ::Agentmaster::SidePanelFolderLeaf(page->_sidePanelFilters.folders[chip.folderIndex].path) + (page->_sidePanelFilters.folders[chip.folderIndex].includeSubfolders ? L"" : L" (exactly)") != chip.text))
+                            {
+                                return;
+                            }
+                            page->_SidePanelSetFilters(::Agentmaster::SidePanelFiltersWithoutChip(page->_sidePanelFilters, chip), L"chip x");
+                        });
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"side panel filter chip: queue the remove"); // the click is lost
+                    }
+                });
+                AgentSetTip(remove, winrt::hstring{ chip.kind == ::Agentmaster::SidePanelChipKind::Text ? std::wstring{ L"Empty the filter box." } : L"Drop this filter." }, kSidePanelButtonTipDelay);
+                content.Children().Append(remove);
+                cell.Children().Append(content);
+                // The chip's whole meaning in its tooltip (on the cell: the ✕ keeps its own).
+                AgentSetTip(cell, winrt::hstring{ chip.tip }, kSidePanelButtonTipDelay);
+                // Ids: am.side.chip.<kind>[.<n>] — n counts the folder chips from 0 — and the ✕ beside it, ".remove".
+                std::wstring id = L"am.side.chip.";
+                switch (chip.kind)
+                {
+                case ::Agentmaster::SidePanelChipKind::Folder:
+                    id += L"folder." + std::to_wstring(folderOrdinal++);
+                    break;
+                case ::Agentmaster::SidePanelChipKind::State:
+                    id += L"state";
+                    break;
+                case ::Agentmaster::SidePanelChipKind::Tag:
+                    id += L"tag";
+                    break;
+                case ::Agentmaster::SidePanelChipKind::Draft:
+                    id += L"draft";
+                    break;
+                case ::Agentmaster::SidePanelChipKind::Unread:
+                    id += L"unread";
+                    break;
+                case ::Agentmaster::SidePanelChipKind::Pinned:
+                    id += L"pinned";
+                    break;
+                case ::Agentmaster::SidePanelChipKind::Favorite:
+                    id += L"favorite";
+                    break;
+                case ::Agentmaster::SidePanelChipKind::Active:
+                    id += L"active";
+                    break;
+                case ::Agentmaster::SidePanelChipKind::Text:
+                default:
+                    id += L"text";
+                    break;
+                }
+                AgentSetAutomationId(words, id);
+                AgentSetAutomationId(remove, id + L".remove");
+                AgentSetAccessibleName(remove, L"Remove the filter " + chip.text);
+                children.Append(cell);
+            }
+            // Clear: every filter and the typed text (the panel's "Clear all filters").
+            {
+                Button clear{};
+                auto words = Text(L"Clear", kSidePanelChipFontSize, false, 1.0);
+                words.Foreground(SolidColorBrush{ kSidePanelLinkColor });
+                clear.Content(words);
+                clear.Padding(ThicknessHelper::FromLengths(4, 0, 4, 0));
+                clear.MinWidth(0);
+                clear.MinHeight(0);
+                clear.VerticalAlignment(VerticalAlignment::Center);
+                clear.Background(SolidColorBrush{ Colors::Transparent() });
+                clear.BorderThickness(ThicknessHelper::FromUniformLength(0));
+                clear.CornerRadius(CornerRadiusHelper::FromUniformRadius(0));
+                clear.IsTabStop(false);
+                clear.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+                    const auto self = weakThis.get();
+                    if (!self)
+                    {
+                        return;
+                    }
+                    try
+                    {
+                        self->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis]() {
+                            if (const auto page = weakThis.get())
+                            {
+                                page->_SidePanelClearFilterText();
+                                page->_SidePanelSetFilters(::Agentmaster::SidePanelFilters{}, L"clear");
+                            }
+                        });
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"side panel filter row: queue Clear"); // the click is lost
+                    }
+                });
+                AgentSetTip(clear, winrt::hstring{ L"Drop every filter and empty the filter box." }, kSidePanelButtonTipDelay);
+                AgentSetAutomationId(clear, L"am.side.filterRow.clear");
+                children.Append(clear);
+            }
+        }
+        if (_sidePanelFilterRow.Visibility() != Visibility::Visible)
+        {
+            _sidePanelFilterRow.Visibility(Visibility::Visible);
+        }
+    }
+
+    // ======================================================================================
     // The side panel's AI SEARCH (SIDE_PANEL.md §2h)
     // ======================================================================================
     // WHAT: the filter box's "AI" toggle (inside the box, at its right end — the user's choice of 2026-10-31) turns the box
@@ -6309,8 +8813,14 @@ namespace winrt::TerminalApp::implementation
             // caches would otherwise skip a text that the other view overwrote).
             _sidePanelCountValue.clear();
             _sidePanelAiCountValue.clear();
+            _sidePanelFilterRowSig.clear(); // the chips row is redrawn by the card list's catch-up (SIDE_PANEL.md §2l)
+            // Row 1 shows the element of the mode (SIDE_PANEL.md §2l): the AI view's count line with AI on, the chips row (when
+            // a filter is on) with AI off. The funnel's panel and the folder card close with an AI-on: the view they filter is
+            // covered (their filters still apply when the cards come back).
+            _SidePanelShowRowForMode();
             if (on)
             {
+                _SidePanelCloseFilterSurfaces(L"AI search on");
                 auto& agent = ::Agentmaster::SharedSessionSearchAgent();
                 const auto snapshot = agent.Snapshot();
                 _sidePanelAiEpoch = snapshot.epoch;

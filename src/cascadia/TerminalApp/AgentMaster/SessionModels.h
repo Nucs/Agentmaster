@@ -4041,6 +4041,45 @@ namespace Agentmaster
         bool boardShowUntagged{ true };
     };
 
+    // Agentmaster (SIDE_PANEL.md §2l — the side panel's FILTERS): one folder picked in the funnel's By Folder (the "+" card in
+    // its folder-picking mode). Plain data; the rules — matching, edits, chips, JSON — are AgentMaster/SidePanelFilters.h.
+    struct SidePanelFolderFilter
+    {
+        // The folder, in its display spelling (TrimFolderPath: '\' separators, no trailing one but a drive root's). Always an
+        // absolute folder path (IsAbsoluteFolderPath): the edits and the loader drop anything else, so a corrupt record can
+        // never carry a folder no session can be in.
+        std::wstring path;
+        // true (the default — the user's pick of 2026-11-08): the folder AND every folder under it, matched at a segment
+        // boundary (FolderKeyCovers: K:\src covers K:\src\app, never K:\srcfoo); false: exactly that folder — the user's
+        // "some way to get Exactly that folder", the folder card's "Include subfolders" unchecked for this pick.
+        bool includeSubfolders{ true };
+
+        // Equal when both the spelling and the choice are (the edits compare folders by NormDirKey on their own).
+        bool operator==(const SidePanelFolderFilter&) const = default;
+    };
+
+    // Agentmaster (SIDE_PANEL.md §2l): every filter of ONE window's side panel — what the funnel button's panel and the folder
+    // card set, what the chips row under the filter box shows, and what TerminalPage::_SidePanelRebuildCards narrows the card
+    // list by. Different facets narrow together (AND); picks inside one facet combine with OR; an empty record filters nothing.
+    // Persisted per window only (WindowRecord::sidePanelFilters — never an AppSettings default: a new window starts unfiltered,
+    // so one window's narrowed list can never hide another window's cards). The typed text in the filter box is NOT part of it
+    // (the box starts empty at every open, as before). Every writer keeps it normalized (NormalizeSidePanelFilters).
+    struct SidePanelFilters
+    {
+        std::vector<SidePanelFolderFilter> folders; // By Folder: OR between them; empty = no folder constraint
+        uint32_t states{ 0 }; // By State: SidePanelStateChoice bits (SidePanelFilters.h), OR between them; 0 = no state constraint
+        std::vector<std::wstring> tags; // By Tag: display spellings, OR between them and `untagged`; empty + !untagged = no tag constraint
+        bool untagged{ false }; // By Tag's "Untagged": a session carrying no tag passes (OR with `tags`)
+        bool draft{ false }; // the flag "Unsent draft": only sessions whose input box holds a draft
+        bool unread{ false }; // the flag "Unread": only sessions in the unread census (their tab's red ring)
+        bool pinned{ false }; // the flag "Pinned to top": only cards pinned with Pin to Top (SIDE_PANEL.md §2j)
+        bool favorite{ false }; // the flag "Favorite": only ★ favorites (FAVORITES.md)
+        uint32_t activeWithinMinutes{ 0 }; // Active within: 0 = any time; else only sessions active in the last N minutes
+
+        // Field by field: the panel compares the record before and after an edit, and persists / rebuilds only on a change.
+        bool operator==(const SidePanelFilters&) const = default;
+    };
+
     // Per-window UI state: geometry + lens + ordered tab refs. One file per window
     // (windows/<windowId>.json) so opening/closing windows never contend on a single document.
     // NOT the session source of truth — that is sessions.json (the archive model).
@@ -4113,5 +4152,12 @@ namespace Agentmaster
         //     motivated it: a window's card list listing another window's tabs). Persisted only when
         //     true (an absent key IS the default), captured by _CaptureWindowRecord once the panel built.
         bool sidePanelGlobal{ false };
+        //   sidePanelFilters: the card list's FILTERS (SIDE_PANEL.md §2l — the funnel button: By Folder, By State, By Tag,
+        //     the four flags, Active within). Per window only, like the scope above and for the same reason (a new window
+        //     starts unfiltered; no AppSettings default exists). Written as the "sidePanelFilters" object only while a filter
+        //     is set (an empty record is omitted, so an untouched window's file stays byte-identical); read back normalized
+        //     (SidePanelFiltersFromJson), so a hand-edited value can only ever filter less, never hide cards for a reason the
+        //     chips row cannot show. Captured by _CaptureWindowRecord once the panel built.
+        SidePanelFilters sidePanelFilters;
     };
 }

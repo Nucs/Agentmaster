@@ -71,6 +71,12 @@ namespace Agentmaster
     struct ApiErrorRewindPlan; // Agentmaster: ApiErrorRewind.h — the take-back plan the automatic restart after a lost connection judges (complete type included by TerminalPage.AgentTurns.cpp)
     struct ConnectionLostRestartFacts; // Agentmaster: ConnectionLostRestart.h — the registry facts of the automatic restart's gate (complete type included by TerminalPage.AgentTurns.cpp)
     struct DirColorIndex; // Agentmaster: Persistence.h — one snapshot of the folder colors; a parameter of the side panel's AI result model (complete type included by TerminalPage.AgentSidePanel.cpp)
+    // Agentmaster (SIDE_PANEL.md §2l): SidePanelFilters.h — the kind of filter a row of the funnel's panel belongs to. An OPAQUE
+    // declaration (its underlying type fixed, so the type is complete): the panel's row views store one, and only
+    // TerminalPage.AgentSidePanel.cpp, which includes the header, names its values. Keeps the header's Persistence.h /
+    // SessionFolderFilter.h chain out of every TU that includes TerminalPage.h.
+    enum class SidePanelFacet : uint8_t;
+    struct SidePanelFilterFacts; // Agentmaster (SIDE_PANEL.md §2l): SidePanelFilters.h — what the filters read of one session (the return type of _SidePanelFilterFactsOf; complete in TerminalPage.AgentSidePanel.cpp)
 }
 
 namespace winrt::TerminalApp::implementation
@@ -80,6 +86,7 @@ namespace winrt::TerminalApp::implementation
     class AgentTabOverlay; // Agentmaster: the per-tab "link badge" overlay (TAB_OVERLAY.md)
     class AgentTranscriptOverlay; // Agentmaster: the window-level transcript reading view ("Show Transcript"); complete in the TUs that include AgentTranscriptOverlay.h (the ctor / dtor TUs + TerminalPage.AgentTranscript.cpp)
     class AgentLaunchBar; // Agentmaster: the shared LAUNCH BAR (the Agent Manager's launch row) the side panel's "+" launcher card hosts; complete in the TUs that include AgentLaunchBar.h (TerminalPage.AgentSidePanel.cpp builds it, TerminalPage.AgentEngine.cpp's destructor shuts it down)
+    struct AgentLaunchFolderChoice; // Agentmaster (SIDE_PANEL.md §2l): AgentLaunchBar.h — one row of the folder card's "folders of the sessions" section (the return type of _SidePanelFolderChoices; complete in TerminalPage.AgentSidePanel.cpp)
     class AgentStatusGlyph; // Agentmaster (SIDE_PANEL.md §2g): the tab strip's status icon built in code — every side-panel card's dot with the tab's 3 dots, flash ring and spark crown; complete only in TerminalPage.AgentSidePanel.cpp (the one TU that builds and drives it), held by AgentSidePanelCardView through a shared_ptr, which a TU may destroy without the complete type
 
     inline constexpr uint32_t DefaultRowsToScroll{ 3 };
@@ -245,6 +252,53 @@ namespace winrt::TerminalApp::implementation
         std::wstring dir; // the session's working directory (the cwd a resume or a fork launches in); "" while its data is still being read from disk
         std::wstring title; // the title a resume pins / a fork derives its name from; "" while unknown
         bool hasMessages{ false }; // the session was prompted at least once (a never-prompted fork source lets the fork seam derive a name)
+    };
+
+    // Agentmaster (SIDE_PANEL.md §2l — the side panel's FILTERS): what one row of the funnel button's panel stands for, and the
+    // two texts a pick rewrites in place (its check and its count). The panel is rebuilt at every open from the live fleet
+    // (_SidePanelFillFilterPanel); a pick inside it changes the record and only REWRITES these texts on every row
+    // (_SidePanelRefreshFilterPanel), so the row under the pointer — and the keyboard focus on it — stays where it is.
+    struct AgentSidePanelFilterRowView
+    {
+        // What the row does when it is clicked (one row kind per panel line):
+        enum class Kind : uint8_t
+        {
+            ByFolder, // "By Folder…": close the panel, open the "+" card in folder-pick mode (the user's "the picker of +")
+            Section, // a section header ("By State", "By Tag", "Active within"): expand / fold its rows
+            State, // one state of By State (stateBit)
+            Tag, // one tag of By Tag (tag)
+            Untagged, // By Tag's "Untagged"
+            Flag, // one of the four flags (facet: Draft / Unread / Pinned / Favorite)
+            Active, // one window of Active within (minutes; 0 = any time)
+            Clear, // "Clear all filters"
+        };
+        Kind kind{ Kind::Clear };
+        // Section / Flag rows: which facet (State / Tag / Active for a section; Draft / Unread / Pinned / Favorite for a flag).
+        // Value-initialized ({} = the enum's first value): the enum is only declared here, its values live in SidePanelFilters.h.
+        ::Agentmaster::SidePanelFacet facet{};
+        uint32_t stateBit{ 0 }; // State rows: the SidePanelStateChoice bit
+        std::wstring tag; // Tag rows: the tag's display name
+        uint32_t minutes{ 0 }; // Active rows: the window (0 = any time)
+        winrt::Windows::UI::Xaml::Controls::Button button{ nullptr }; // the row itself (a transparent, full-width Button)
+        winrt::Windows::UI::Xaml::Controls::TextBlock check{ nullptr }; // the check column: "✓" / "" (a radio row: "●" / "○"; a section: "›" / "⌄"); null for By Folder… and Clear
+        winrt::Windows::UI::Xaml::Controls::TextBlock count{ nullptr }; // the count column ("3"): how many sessions would be listed with this pick added; a section's: what is picked in it; null when the row has none
+    };
+
+    // Agentmaster (SIDE_PANEL.md §2l): the counts the funnel's panel shows, for the sessions of the panel's SCOPE (LOCAL / GLOBAL)
+    // that pass the typed text. Each facet's counts apply every OTHER facet as it is set ("how many would be listed if this were
+    // picked too"), the classic faceted search, so a count never promises cards another filter already hides.
+    struct AgentSidePanelFilterCensus
+    {
+        size_t inScope{ 0 }; // the sessions of the scope (before any filter, the typed text included)
+        size_t listed{ 0 }; // those every facet passes: what the card list shows
+        uint32_t states[6]{}; // per kSidePanelStateChoices entry (same order)
+        std::vector<std::pair<std::wstring, size_t>> tags; // every tag a counted session carries, or one picked: (display name, count), most carried first
+        size_t untagged{ 0 }; // sessions carrying no tag
+        size_t draft{ 0 }; // the four flags
+        size_t unread{ 0 };
+        size_t pinned{ 0 };
+        size_t favorite{ 0 };
+        size_t active[5]{}; // index 0 = any time, then per kSidePanelActiveChoices entry
     };
 
     struct TerminalPage : TerminalPageT<TerminalPage>
@@ -834,6 +888,64 @@ namespace winrt::TerminalApp::implementation
             Fork, // Enter on the focused Fork button: what its click does
         };
         SidePanelLaunchKeyAction _sidePanelLaunchArmedAction{ SidePanelLaunchKeyAction::None };
+        // --- The side panel's FILTERS (SIDE_PANEL.md §2l) ---
+        // The user's request of 2026-11-08: a FILTER button "like the +" whose click opens a menu — By Folder (the "+" card's
+        // picker), By State, By Tag, four flags, Active within — that stays open while you pick, and a row under the filter box,
+        // shown only while a filter is on, that says what the list is filtered by (the count, a chip per filter, Clear). This
+        // window's filters: the one record every surface reads and _SidePanelSetFilters alone writes. Persisted per window
+        // only (WindowRecord::sidePanelFilters, seeded at the build, captured by _CaptureWindowRecord); never a global default.
+        ::Agentmaster::SidePanelFilters _sidePanelFilters;
+        // The FUNNEL (header line 1: the innermost button, on the terminal's side of "+" — column 1 docked right, column 3
+        // docked left: the line mirrors, _SidePanelApplyHeaderOrder). A ToggleButton for its accent look alone: IsChecked is
+        // pinned to "a menu filter narrows the list" (_SidePanelUpdateFilterButton) — its own click's self-flip is undone.
+        winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sidePanelFilterBtn{ nullptr };
+        // The funnel's PANEL: a Root()-parented Popup holding a dark card (the "+" card's recipe), NOT a light-dismiss flyout
+        // or a MenuFlyout — a menu closes at every click, and the user asked for one that stays open while they pick. The
+        // outside-press hook and the window-resize hook on Root() (_sidePanelFilterHooked) close and re-place it; Esc closes
+        // it on its KEY-UP. Built on the first click (_SidePanelEnsureFilterPanel); its rows are rebuilt at every open.
+        winrt::Windows::UI::Xaml::Controls::Primitives::Popup _sidePanelFilterPopup{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Border _sidePanelFilterCard{ nullptr }; // the panel's card: the outside-press boundary, the key handlers' owner, the placement's measured size
+        winrt::Windows::UI::Xaml::Controls::StackPanel _sidePanelFilterRowsHost{ nullptr }; // the card's rows (cleared and refilled at every open)
+        std::vector<AgentSidePanelFilterRowView> _sidePanelFilterRows; // what each row stands for + its check and count texts (rewritten in place after each pick)
+        // Which sections of the panel are expanded (SidePanelFacetBit of State / Tag / Active): remembered for the window's
+        // life, so the panel reopens as the user left it. All folded at first (the panel opens short).
+        uint32_t _sidePanelFilterExpanded{ 0 };
+        // Where the panel's corner sits, in Root() coordinates (the funnel's press point, else under the funnel) — and where the
+        // folder card opens after "By Folder…" (the panel closes, the card takes its place).
+        winrt::Windows::Foundation::Point _sidePanelFilterAnchor{ 0.0f, 0.0f };
+        bool _sidePanelFilterAnchorFromPress{ false }; // _sidePanelFilterAnchor holds a press on the funnel that its Click has not consumed yet (the "+" button's rule)
+        bool _sidePanelFilterPlaceQueued{ false }; // a coalesced placement tick of the panel / the folder card is queued (_SidePanelQueueFilterSurfacesPlacement)
+        bool _sidePanelFilterHooked{ false }; // the two Root() hooks of the panel and the folder card (outside press, window resize) are registered — once per page
+        bool _sidePanelFilterDockLeft{ true }; // the dock side when the panel / the folder card opened: a settings broadcast that moved the dock closes them
+        // The key the panel's PreviewKeyDown armed (Escape, or Enter / Space on "By Folder…"; None = nothing armed): acted on at
+        // the KEY-UP, because both close the panel and hand focus on — the CR / ESC of the keystroke would reach a terminal.
+        winrt::Windows::System::VirtualKey _sidePanelFilterArmedKey{ winrt::Windows::System::VirtualKey::None };
+        bool _sidePanelFilterArmedByFolder{ false }; // the armed key opens the folder card (true) or closes the panel (false)
+        // The FOLDER CARD ("By Folder…"): the "+" card's own launch row in FOLDER-PICK MODE (AgentLaunchBarHost::pickFolder) —
+        // [Folder] [ box ] [☑ Include subfolders] [Filter] and the "+" box's drop-down with one more section, the folders the
+        // panel's sessions work in. Built on the first "By Folder…", kept for the window's life.
+        winrt::Windows::UI::Xaml::Controls::Primitives::Popup _sidePanelFolderPopup{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Border _sidePanelFolderCard{ nullptr };
+        std::shared_ptr<AgentLaunchBar> _sidePanelFolderBar; // shut down in ~TerminalPage, like the "+" card's bar
+        // "Include subfolders": checked at every open (the user's pick: a folder and everything under it); unchecked = this
+        // pick is exactly that folder (their "some way to get Exactly that folder").
+        winrt::Windows::UI::Xaml::Controls::CheckBox _sidePanelFolderSubfolders{ nullptr };
+        double _sidePanelFolderBoxWidth{ 0.0 }; // the card box's width as last fitted (_SidePanelFitFolderBox) — written again only when it changes
+        // The folder card's armed key (Escape with the drop-down closed, or Enter in the box / on Filter; None = nothing armed)
+        // and whether its key-up picks (true) or closes (false) — the KEY-UP rule again.
+        winrt::Windows::System::VirtualKey _sidePanelFolderArmedKey{ winrt::Windows::System::VirtualKey::None };
+        bool _sidePanelFolderArmedPick{ false };
+        // The CHIPS ROW: row 1 of the expanded root, in the count line's place — shown in card mode only while a filter narrows
+        // the list (the typed text counts), and then holding "N of M", one chip per filter (its ✕ drops it) and Clear. The
+        // count line itself (_sidePanelCountText) now speaks for the AI view alone.
+        winrt::Windows::UI::Xaml::Controls::Grid _sidePanelFilterRow{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Panel _sidePanelFilterChips{ nullptr }; // the row's wrapping panel (a code-only wrap layout): [N of M][chips…][Clear]
+        std::wstring _sidePanelFilterRowSig; // the row's content as last built (count, chips, scope) — rebuilt only when it changes
+        // The ★ of each session the filters judged, read once per SessionFactsEpoch (a favorite set anywhere in this process
+        // moves the epoch): the Favorite flag and the panel's counts need it for every session of the scope, and a read is a
+        // session-store stat. UINT64_MAX = never read.
+        std::unordered_map<std::wstring, bool> _sidePanelFavoriteById;
+        uint64_t _sidePanelFavoritesEpoch{ UINT64_MAX };
         // --- The side panel's AI SEARCH (SIDE_PANEL.md §2h) ---
         // The filter box's "AI" toggle (an "AI" ToggleButton drawn over the box's right end, like the Sessions page's) turns
         // the box into the AI search's REQUEST line and replaces the card list with the model's answer and its list of
@@ -3538,6 +3650,122 @@ namespace winrt::TerminalApp::implementation
         bool _SidePanelLaunchPressIsInside(const winrt::Windows::UI::Xaml::DependencyObject& source);
         // True while the card's Popup is open. Never throws (a failed read answers false).
         bool _SidePanelLaunchCardOpen() const noexcept;
+        // --- The side panel's FILTERS (SIDE_PANEL.md §2l) ---
+        // THE ONE WRITER of this window's filters: normalize `next` (NormalizeSidePanelFilters), and when it differs from the
+        // record, take it, persist it (the window-record autosave), re-pin the funnel's accent, rebuild the card list at once
+        // (a user's action: past the throttle — the rebuild redraws the chips row) and rewrite an open panel's checks and
+        // counts. One [nav] sidepanel filter <what> line (the facet and the action, never a folder path or a tag name).
+        //   next - the record wanted.
+        //   what - what the user did, for the [nav] line ("state", "folder+", "chip x", "clear", ...).
+        //   returns - nothing; a no-op before the panel is built.
+        //   throws  - nothing: a failure is logged (Rule #18) and the record keeps whatever was assigned before it.
+        void _SidePanelSetFilters(::Agentmaster::SidePanelFilters next, std::wstring_view what) noexcept;
+        // Pin the funnel's IsChecked (its accent fill) to "a menu filter narrows the list". The member is the truth: the
+        // ToggleButton's own self-flip at a click is undone here. Never throws (logged).
+        void _SidePanelUpdateFilterButton() noexcept;
+        // The funnel's Click: close the open panel, else open it at the recorded press (or under the funnel). Consumes the
+        // recorded press. Never throws.
+        void _SidePanelToggleFilterPanel();
+        // Build the panel ONCE (the dark card with the Agent Manager's Button brushes, its rows host, its key handlers, the
+        // Root()-parented Popup) and register the two Root() hooks the panel and the folder card share. Returns true when the
+        // panel exists, false when the build failed (logged; the next click retries). Never throws.
+        bool _SidePanelEnsureFilterPanel() noexcept;
+        // Open the panel: fill its rows from the live fleet (_SidePanelFillFilterPanel), place it at the anchor toward the
+        // window's center (PlacePointerCard), and focus its first row one tick later (keys then reach the panel, not a
+        // terminal). Logs [nav] sidepanel filter panel open. Never throws (a failure is logged and the panel stays closed).
+        //   fromPress - true when _sidePanelFilterAnchor holds the press on the funnel that led here.
+        void _SidePanelOpenFilterPanel(bool fromPress);
+        // Close the open panel; when it held the keyboard, focus goes back to the current tab on a later tick (the "+" card's
+        // rule). Logs [nav] sidepanel filter panel close (<reason>). A no-op when closed. Never throws.
+        //   reason - why it closed ("outside press", "esc", "funnel again", "by folder", "tab switch", ...).
+        void _SidePanelCloseFilterPanel(std::wstring_view reason);
+        // True while the panel's Popup is open. Never throws.
+        bool _SidePanelFilterPanelOpen() const noexcept;
+        // (Re)build the panel's rows from the live fleet and this window's filters: By Folder… · By State ▸ (six states) ·
+        // By Tag ▸ (every tag of the counted sessions, plus Untagged) · Active within ▸ (Any time and four windows) · the four
+        // flags · Clear all filters. Sections show their rows while expanded (_sidePanelFilterExpanded). Counts come from
+        // _SidePanelFilterCensus. Throws what building XAML throws (the open contains it).
+        void _SidePanelFillFilterPanel();
+        // After a pick: rewrite every row's check and count IN PLACE (the census again), never rebuild the rows — the row
+        // under the pointer and the keyboard focus on it stay. A row set that no longer matches the panel (a tag that
+        // appeared) triggers a full refill instead. A no-op while the panel is closed. Never throws (logged).
+        void _SidePanelRefreshFilterPanel() noexcept;
+        // One click on the panel's row `index`: toggle its pick (the panel stays open), expand / fold its section, open the
+        // folder card (By Folder…) or clear every filter. Runs on a clean tick (the pointer-handler rule). Never throws.
+        //   index - the row's index in _sidePanelFilterRows at the time the row was built (checked again here).
+        void _SidePanelOnFilterRowClick(size_t index) noexcept;
+        // The counts the panel shows (AgentSidePanelFilterCensus): every session of the panel's scope that passes the typed
+        // text, judged by every facet; the tags and the ★ read through their per-epoch caches. Throws what the reads throw
+        // (std::bad_alloc; the callers contain it).
+        AgentSidePanelFilterCensus _SidePanelFilterCensus();
+        // The facts the filters read for one session (SidePanelFilterFacts): its folder keys, state, draft, the unread census,
+        // pin, activity — and its tags / ★ only when `needTags` / `needFavorite` (each a cached session-store read). The tags
+        // pointer stays valid until _sidePanelTagsById drops the entry (the end of the update that read it). Throws what the
+        // reads throw.
+        ::Agentmaster::SidePanelFilterFacts _SidePanelFilterFactsOf(const ::Agentmaster::SessionInfo& s, bool needTags, bool needFavorite, const std::vector<std::wstring>& unreadSorted);
+        // The session's bookmark tags from the per-card tag cache (read once per SessionTagsEpoch: one session-store stat).
+        // Throws what the read throws (std::bad_alloc).
+        const std::vector<std::wstring>& _SidePanelTagsOf(const std::wstring& id);
+        // Whether the session carries the ★, from _sidePanelFavoriteById (read once per SessionFactsEpoch). Never throws
+        // (a failed read answers false and is logged).
+        bool _SidePanelFavoriteOf(const std::wstring& id) noexcept;
+        // Drop the tag and ★ caches when their epoch moved (a tag or a favorite changed somewhere in this process). Called
+        // before any read of an update or a census (the SessionStore.h epoch contract: load the epoch first). Never throws.
+        void _SidePanelSyncFactCaches() noexcept;
+        // Open the FOLDER CARD at _sidePanelFilterAnchor (By Folder…): build it if needed, empty its box, check Include
+        // subfolders, fit and place it, then — one tick later — lay it out, focus its box and open its folder list (the "+"
+        // card's three steps, _SidePanelFinishFolderCardOpen). Logs [nav] sidepanel filter folder card open. Never throws.
+        void _SidePanelOpenFolderCard();
+        // The folder card's build, once: the dark card, the bar in folder-pick mode (its host: pickFolder, the "Filter"
+        // words, the folders of the panel's sessions), the Include subfolders box, the key handlers, the Popup. Returns
+        // whether the card exists. Never throws (logged; the next By Folder… retries).
+        bool _SidePanelEnsureFolderCard() noexcept;
+        // The open's second half, one tick later: UpdateLayout on the card, focus its box, open its folder list. A no-op when
+        // the card closed meanwhile. Never throws (each step logged on its own).
+        void _SidePanelFinishFolderCardOpen() noexcept;
+        // Close the folder card (its bar dismissed, the Popup closed; focus back to the current tab when the card held it).
+        // Logs [nav] sidepanel filter folder card close (<reason>). A no-op when closed. Never throws.
+        //   reason - why ("outside press", "esc", "picked", "tab switch", ...).
+        void _SidePanelCloseFolderCard(std::wstring_view reason);
+        // True while the folder card's Popup is open. Never throws.
+        bool _SidePanelFolderCardOpen() const noexcept;
+        // The bar's pickFolder: add `dir` to By Folder with the card's Include subfolders choice (SidePanelAddFolderFilter),
+        // through _SidePanelSetFilters, then close the card. Never throws.
+        //   dir - the folder the bar picked (absolute, NormPath'd).
+        void _SidePanelPickFilterFolder(const std::wstring& dir) noexcept;
+        // The bar's folderChoices: the folders the sessions of the panel's scope work in (their working and inferred
+        // folders), counted over the sessions that pass every facet but By Folder, most used first, each with its tab color.
+        // Never throws (a failure is logged and lists nothing).
+        std::vector<AgentLaunchFolderChoice> _SidePanelFolderChoices() noexcept;
+        // Size the folder card's box for the window (the "+" card's band, 160–504 DIPs, less what the chip, the check box and
+        // Filter take). Written only when it changes. Never throws (logged).
+        void _SidePanelFitFolderBox() noexcept;
+        // Place the open panel and the open folder card at _sidePanelFilterAnchor (PlacePointerCard, toward the window's
+        // center), writing offsets only on a real move; a moved folder card re-anchors its open list after the next pass.
+        // Never throws (logged).
+        void _SidePanelPlaceFilterSurfaces() noexcept;
+        // Coalesce _SidePanelFitFolderBox + _SidePanelPlaceFilterSurfaces onto one later tick — the only legal path from a
+        // layout-driven trigger (a card's / Root's SizeChanged: moving a parented Popup inside a pass is E_LAYOUTCYCLE).
+        // Never throws (a failed enqueue re-arms the latch).
+        void _SidePanelQueueFilterSurfacesPlacement() noexcept;
+        // Close the panel and the folder card together — a tab switch, a collapse, a dock flip, the dock moved by another
+        // window, AI mode turning on. Never throws.
+        //   reason - why, for both [nav] lines.
+        void _SidePanelCloseFilterSurfaces(std::wstring_view reason);
+        // Bring the CHIPS ROW up to date (card mode): hidden while nothing narrows the list; else "N of M", one chip per
+        // filter (SidePanelFilterChips), Clear. Rebuilt only when its content changed (_sidePanelFilterRowSig). The count
+        // words of the old count line ("2 sessions in this window", "1 of 3 sessions across all windows") are kept as the
+        // filter box's UI Automation ItemStatus in every case, so a screen reader and the e2e driver still read them.
+        //   shown      - the cards listed.
+        //   total      - the sessions of the scope.
+        //   textActive - the filter box holds a query.
+        //   returns    - nothing. Throws what building XAML throws (the list update contains it).
+        void _SidePanelUpdateFilterRow(size_t shown, size_t total, bool textActive);
+        // Show the row 1 element of the mode in effect: the AI view's count line in AI mode, else the chips row (whose own
+        // update decides whether it shows). Never throws (logged).
+        void _SidePanelShowRowForMode() noexcept;
+        // Empty the filter box (a Text chip's ✕, Clear): the box's own TextChanged then filters the cards again. Never throws.
+        void _SidePanelClearFilterText() noexcept;
         // The ⋯ ▸ Card order pick: put the SHARED board sort (AppSettings::boardSort) on `order` through the Manager
         // content's own setter (AgentManagerContent::SetBoardSort — persist, broadcast, re-sort the board), then re-sort this
         // list at once. One sort spec for the board and the panel, as when the panel had its own cycling button.

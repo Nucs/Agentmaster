@@ -460,6 +460,46 @@ question when its source is mid-turn).
 
 ---
 
+### SP-13 · The filters: the funnel, By Folder and the chips row
+
+> **Since** 2026-11-08 (NOT BUILT) · **P1** · **Needs** F-S2 (two sessions in two folders) · **Spec** SIDE_PANEL.md §2l
+
+**Promise.** The header's funnel opens a panel that looks like a menu and STAYS OPEN while you pick: By Folder… (the `+`
+card's own folder picker, with Filter in Launch's place), By State, By Tag, Active within, four flags, Clear all filters. The
+cards re-filter at every pick; a row under the filter box — shown only while something narrows the list — says what does,
+one chip per filter with ✕, and Clear. Different filters narrow together; picks inside one add up. The window keeps its
+filters across a restart; a new window starts unfiltered. With no filter there is no count line on the screen.
+
+**Phases**
+1. **No filter, no row.** *Expect:* the header line `⋯ Sum + ⏷` (docked left; `am.side.funnel` innermost); no chips row
+   (`am.side.filterRow.count` absent from the tree); the count words read from the filter box's ItemStatus (`count_line`) —
+   "2 sessions in this window".
+2. **The panel stays open.** *Do:* click the funnel; expand By State; check Running, then Waiting for you. *Expect:* the
+   panel (its rows, `am.side.filter.*`) is still open after each click; each row's ItemStatus reads "checked"; the cards list only
+   those states; the funnel's ItemStatus "1 filter on"; the chips row shows "N of 2" and one chip "Running or Waiting for
+   you" (`am.side.chip.state`).
+3. **Close.** *Do:* Escape. *Expect:* the panel closes on the key's release; no ESC reached the terminal (a running claude
+   keeps running); the chips stay.
+4. **By Folder.** *Do:* funnel ▸ By Folder…. *Expect:* the folder card (`am.side.folderCard.box`) opens where the panel was, its
+   box empty and focused, its list open with FOLDERS YOUR SESSIONS WORK IN first (both sessions' folders, "1 session" each).
+   *Do:* click A's folder row, then Filter (`am.side.folderCard.filter`). *Expect:* the card closes; only A's card is
+   listed (if A is in a listed state); a folder chip with the folder's leaf (`am.side.chip.folder.0`).
+5. **Exactly.** *Do:* By Folder… again, type A's folder, uncheck Include subfolders, Enter. *Expect:* the folder chip reads
+   "<leaf> (exactly)" (one chip, not two).
+6. **The chips' ✕ and Clear.** *Do:* ✕ on the state chip. *Expect:* the state filter is gone, the folder one stays. *Do:*
+   Clear (`am.side.filterRow.clear`). *Expect:* every filter gone, the row gone, the funnel unlit, every card back.
+7. **Restart.** *Do:* set a filter, close and reopen the window. *Expect:* the same chips and cards; windows/<id>.json has
+   `sidePanelFilters`; a NEW window starts unfiltered.
+
+**Edge cases**
+- **E1 Typed text** → typing in the filter box alone shows the row with a “text” chip; its ✕ empties the box.
+- **E2 A click outside** → a click on a card closes the panel AND selects the card in one click (no light dismiss).
+- **E3 AI mode** → AI on: the chips row hides and the count line shows the AI words; AI off: the chips come back.
+- **E4 Unread** → with Unread checked, a session that turns unread appears without a registry change (the census hop).
+- **E5 Dock right** → the line reads `⏷ + Sum ⋯`; the panel opens at the click toward the window's center.
+
+---
+
 ## Known defects (expected failures until fixed)
 
 ### SP-K1 · In the + card, Launch needs a second click while its presets menu is open — FIXED in code 2026-10-23 (NOT BUILT into a release)

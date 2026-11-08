@@ -581,6 +581,12 @@ namespace winrt::TerminalApp::implementation
         {
             _sidePanelLaunchBar->Shutdown();
         }
+        // Agentmaster (the side panel's folder filter card, SIDE_PANEL.md §2l): the same launch bar class in folder-pick mode —
+        // its drop-down and its re-anchor hook must not outlive the page either. Noexcept and self-guarded, like the line above.
+        if (_sidePanelFolderBar)
+        {
+            _sidePanelFolderBar->Shutdown();
+        }
         // Agentmaster (the Sessions page's AI search, SESSIONS.md §9): remove this page's listener from
         // the process-wide search agent and leave its in-use tally — the last page out lets the agent
         // free its session index and park its idle process (Rule #10). Thread-safe and noexcept, no
@@ -2955,6 +2961,9 @@ namespace winrt::TerminalApp::implementation
         // box to the newly selected session's folder — exactly what a tab switch does when no card is open. A no-op
         // while the card is closed (a launch from the card already closed it before its new tab was selected).
         _SidePanelCloseLaunchCard(L"tab switch");
+        // Agentmaster (the side panel's filters, SIDE_PANEL.md §2l): the funnel's panel and the folder card close with it, for the
+        // same reason (the user moved away). A no-op while both are closed.
+        _SidePanelCloseFilterSurfaces(L"tab switch");
         // Agentmaster (transcript overlay): "moving a tab closes the overlay" — any change of what is on
         // screen (a tab switch, a close successor, the Agent Manager page shown / left) closes it. A no-op
         // when it isn't open. It also hands focus back to the tab now on screen: the overlay's focus guard

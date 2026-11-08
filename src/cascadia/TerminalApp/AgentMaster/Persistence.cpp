@@ -8,6 +8,7 @@
 #include "LaunchPresets.h" // PERSISTENCE.md §17: launch-presets.json's round trip (LaunchPresetsConfigFromJson / ...ToJson; pure, Json.h only)
 #include "ProcessInspect.h" // ReadGitBranchForDir — the configured DeriveSessionTitle's Branch* techniques
 #include "SidePanelPins.h" // SIDE_PANEL.md §2j: IsSidePanelPinStamp — which side panel pin stamps sessions.json writes and reads back
+#include "SidePanelFilters.h" // SIDE_PANEL.md §2l: SidePanelFiltersToJson / SidePanelFiltersFromJson — a window record's side panel filters
 #include "StateBackups.h" // PERSISTENCE.md §17: the writer identity, the shadow paths, the repair's state snapshot
 #include "StateCompat.h" // PERSISTENCE.md §17: the residue (unknown fields kept) and the older-writer repair
 
@@ -1628,6 +1629,13 @@ namespace Agentmaster
         {
             o.Set(L"sidePanelGlobal", json::Value::MkBool(true));
         }
+        // The card list's FILTERS (SIDE_PANEL.md §2l): per window only, like the scope. Written only while a filter is set —
+        // an unfiltered window's record stays byte-identical to a pre-feature one — and normalized on the way out too, so a
+        // record edited in memory past the rules (a relative folder, a duplicate tag) is never written as such.
+        if (SidePanelFiltersActive(w.sidePanelFilters))
+        {
+            o.Set(L"sidePanelFilters", SidePanelFiltersToJson(NormalizeSidePanelFilters(w.sidePanelFilters)));
+        }
         return o;
     }
 
@@ -1686,6 +1694,14 @@ namespace Agentmaster
             // true bool reads LOCAL — the fixed per-window default; there is no global setting for it
             // by design (SIDE_PANEL.md §4), so nothing else is consulted.
             w.sidePanelGlobal = v.BoolAt(L"sidePanelGlobal", false);
+            // The card list's FILTERS (SIDE_PANEL.md §2l): absent (a pre-feature record, an unfiltered window) or not an
+            // object reads as no filter; anything inside that is malformed reads as "not set" for that part alone
+            // (SidePanelFiltersFromJson normalizes), so a corrupt value can only filter less, never hide cards for a reason
+            // the chips row cannot show.
+            if (const auto* f = v.Find(L"sidePanelFilters"))
+            {
+                w.sidePanelFilters = SidePanelFiltersFromJson(*f);
+            }
         }
         if (const auto* m = v.Find(L"manager"); m && m->type == json::Value::Type::Obj)
         {

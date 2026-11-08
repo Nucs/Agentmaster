@@ -297,6 +297,10 @@
     <!-- Agentmaster (SIDE_PANEL.md section 2j): the side panel's PIN TO TOP - pinned cards first, the newest pin on top, the
          stamp a pin gets, the pin a tab keeps when it switches conversation (pure, header-only; TestSidePanelPins). -->
     <ClInclude Include="AgentMaster\SidePanelPins.h" />
+    <!-- Agentmaster (SIDE_PANEL.md section 2l): the side panel's FILTERS - the funnel's facets (By Folder, By State, By Tag,
+         the four flags, Active within), the matcher, the edits, the chips and the window record's JSON (pure, header-only;
+         TestSidePanelFilters). -->
+    <ClInclude Include="AgentMaster\SidePanelFilters.h" />
     <ClInclude Include="SnippetsPaneContent.h">
       <DependentUpon>SnippetsPaneContent.xaml</DependentUpon>
     </ClInclude>

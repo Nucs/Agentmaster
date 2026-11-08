@@ -22,6 +22,11 @@
 //     drop-down parented into the page Root(), the page's own "Claude not detected" dialog, and three extra hooks the
 //     Manager does not need: launched (the card closes after a launch), textEdited (the card's box mirrors the
 //     Manager's box) and the dialog anchor (the card, so a "Couldn't create folder" dialog is dark).
+//   - the side panel's FOLDER FILTER card (SIDE_PANEL.md §2l, the user's "By Folder -> <the picker of +>"): the same bar in
+//     FOLDER-PICK MODE (AgentLaunchBarHost::pickFolder) — a "Folder" chip, the same box and drop-down with one more section
+//     (the folders the panel's sessions work in), and a "Filter" button that hands the folder to the host instead of
+//     launching anything. Every launch-only path (the hover menu, resume, fork, "Create & Launch", Browse…'s recent push)
+//     stands aside in that mode (_PickMode()); with pickFolder empty the bar is the launch bar, byte for byte in behavior.
 //
 // THE RULES THIS CLASS KEEPS (each one has a comment at its code):
 //   - The drop-down opens on a USER focus (Pointer / Keyboard), a tap, a keystroke, or when the HOST asks for it
@@ -81,6 +86,16 @@ namespace Agentmaster
 
 namespace winrt::TerminalApp::implementation
 {
+    // Agentmaster (SIDE_PANEL.md §2l — the side panel's By Folder filter): ONE row of the folder-picking bar's own drop-down
+    // section, above RECENT — a folder the host's sessions work in, with how many do. Plain values: the host computes the
+    // list (AgentLaunchBarHost::folderChoices) every time the drop-down is re-listed, so it follows the fleet.
+    struct AgentLaunchFolderChoice
+    {
+        std::wstring dir; // the folder, in its display spelling (a row click drills the box into it, like a RECENT row)
+        uint32_t sessions{ 0 }; // how many of the host's sessions work there (shown as "N sessions"; 0 shows no count)
+        uint32_t colorArgb{ 0 }; // the dot before the path, 0xAARRGGBB — the folder's tab color; 0 = no dot (Remove colors)
+    };
+
     // The recent-folders list (recent-dirs.json) of ONE window, newest first. Shared by every launch bar of the
     // window through a std::shared_ptr, so a folder launched from the side panel's card is at the top of the Agent
     // Manager's drop-down at once, and the other way round: one list, so the two bars can never save over each
@@ -153,6 +168,29 @@ namespace winrt::TerminalApp::implementation
         // The box text changed (typing, a drop-down pick, Browse, a programmatic set). The side panel mirrors it into
         // the Agent Manager's box, so the two boxes show the same text.
         std::function<void(const std::wstring& text)> textEdited;
+
+        // --- FOLDER-PICK MODE (SIDE_PANEL.md §2l — the side panel's filter card: "By Folder -> <the picker of +>") ---
+        // Set: the bar PICKS A FOLDER instead of launching — the same box, underline and drop-down (Browse…, RECENT, GIT
+        // WORKTREES, MATCHES / SUBFOLDERS, plus the folderChoices section below), but the Launch button reads `pickLabel`,
+        // has no hover menu (no models, no presets), never resumes or forks (a session id is no folder: red), never creates
+        // a folder, and its click (or the host's key-up Enter, through ClickLaunch) calls this with the box's folder,
+        // normalized. The agent element is a fixed "Folder" chip (codexToggle must be false), the box starts EMPTY (no
+        // %USERPROFILE% seed), and a Browse… pick is NOT pushed into the recent folders (filtering is no launch; RECENT
+        // stays the folders you launched in). Empty (the default): the launch bar, every path exactly as before.
+        //   dir - the picked folder: an absolute path (the button is disabled for anything else), NormPath'd. A folder that
+        //         is not on disk any more is allowed (a session may still have worked there): the underline turns amber.
+        std::function<void(const std::wstring& dir)> pickFolder;
+        // Pick mode only: the Launch button's words ("Filter"), and its tooltip. Empty = "Pick" / a generic tip.
+        std::wstring pickLabel;
+        std::wstring pickTip;
+        // Pick mode only: the drop-down's own section, right under Browse… — the folders the host's sessions work in, most
+        // used first (the side panel: the sessions in its scope that pass its other filters). Called at every re-list (an
+        // open, each keystroke); the rows the box's text does not match are left out (a bare word: the path contains it,
+        // case-insensitively; a rooted path: the folder lies under what is typed). Empty callback or an empty list: no
+        // section. Never called outside pick mode.
+        std::function<std::vector<AgentLaunchFolderChoice>()> folderChoices;
+        // Pick mode only: that section's header ("FOLDERS OF THIS WINDOW'S SESSIONS"). Empty = "SESSION FOLDERS".
+        std::wstring folderChoicesLabel;
     };
 
     // ONE launch bar: build it with Create, put its parts into the host's layout (AgentElement, CwdColumn, LaunchButton,
@@ -382,6 +420,30 @@ namespace winrt::TerminalApp::implementation
         // case-insensitive fuzzy matches ranked by Levenshtein closeness (closest first); an empty query keeps the
         // historical MRU order. Returns at most recentDirsLimit folders.
         std::vector<std::wstring> _CollectRecentDirs(const std::wstring& current, const std::wstring& query) const;
+
+        // True when the host made this a FOLDER-PICKING bar (AgentLaunchBarHost::pickFolder is set — SIDE_PANEL.md §2l). Every
+        // launch-only path asks it: the hover menu, Fork, resume, "Create & Launch", the recent-folders push of Browse….
+        // Never throws.
+        bool _PickMode() const noexcept { return static_cast<bool>(_host.pickFolder); }
+        // Pick mode's half of _OnLaunch: the box's folder, normalized and trimmed, handed to host.pickFolder when it is an
+        // absolute path (the button is disabled otherwise; this re-checks). The drop-down is closed first. Throws what the
+        // host's callback throws (a click's own exposure).
+        void _OnPickFolder();
+        // Pick mode's half of _ValidateLaunchBox: an empty box or a text that is no absolute folder path (a bare word, a
+        // relative path, a session id) = the button disabled (red underline, but none for an empty box); an absolute path on
+        // disk = neutral and enabled; one not on disk = amber and enabled (sessions may still have worked there). Fork stays
+        // hidden. Throws what a XAML property write throws.
+        void _ValidatePickBox();
+        // Pick mode's section of the drop-down (AgentLaunchBarHost::folderChoices): appends its header and one row per choice
+        // that matches the box's text (see folderChoices), right under Browse…. A failing host callback lists no section
+        // (logged). Throws what XAML element creation throws.
+        //   current   - the box's text.
+        //   queryMode - the text is a bare word (no root): the rows whose path CONTAINS it; else the rows under the typed path.
+        void _AppendFolderChoices(const std::wstring& current, bool queryMode);
+        // One row of that section: "● <path>   N sessions" — the dot in the folder's color, a click drills the box into the
+        // folder (_PickPath, like a RECENT row). Transparent and focus-neutral like every drop-down row. Throws what XAML
+        // element creation throws.
+        winrt::Windows::UI::Xaml::Controls::Button _MakeFolderChoiceRow(const AgentLaunchFolderChoice& choice);
 
         // --- The path-picker drop-down (moved from AgentManagerContent.Launch.cpp) ---
         // A transparent, focus-neutral row: a click drills the box into `fullPath`. `branch` (RECENT rows) appends

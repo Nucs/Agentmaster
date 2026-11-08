@@ -11,7 +11,7 @@ import pytest
 from amdriver import inputs
 from amdriver.session import wait_new_session
 from amdriver.ui.menus import Menu
-from amdriver.ui.sidepanel import COUNT_RE, HEADER_ORDER, MORE_ITEM_IDS, MORE_ITEM_ORDER, ORDER_TOKENS
+from amdriver.ui.sidepanel import HEADER_ORDER, MORE_ITEM_IDS, MORE_ITEM_ORDER, ORDER_TOKENS
 from amdriver.waits import hold_true, wait_until
 
 SHELL = "Administrator: Windows PowerShell"
@@ -138,10 +138,13 @@ def test_card_menu_keeps_the_peek(am, s2):
     open_menu_on_t2().close()
     hold_true(lambda: panel.summary_title() == "t2", 2.0, what="t2 still selected after Esc closed its menu",
               describe=panel.summary_texts)
-    # 2. A click outside the menu, on the panel's count line: the popup root takes that press (it reaches no element).
+    # 2. A click outside the menu, on the card list's empty area below the two cards: the popup root takes that press (it
+    # reaches no element). It was the count line until the filters (SIDE_PANEL.md §2l) took that line off the screen while
+    # no filter is on; the empty list area is as inert a target (no card, no control, nothing that takes focus).
     open_menu_on_t2()
-    count = next(k for k in panel.controls() if k.role == "text" and COUNT_RE.match(k.name))
-    count.click()
+    view = panel.cards_view()
+    assert view is not None, "the card list's ScrollViewer is not in the tree"
+    inputs.click(view.rect[0] + view.rect[2] - 12, view.rect[1] + view.rect[3] - 12)
     wait_until(lambda: not Menu.open_hwnds(am), 5, what="the click outside closes the menu")
     hold_true(lambda: panel.summary_title() == "t2", 2.0, what="t2 still selected after a click outside closed its menu",
               describe=panel.summary_texts)
@@ -292,8 +295,9 @@ def test_collapse_and_dock(am, s1):
 
 
 def _assert_header_line(panel, side: str) -> None:
-    """The header line for a dock side (SIDE_PANEL.md §2i, the user's layout of 2026-11-04): exactly +, Sum and ⋯ above
-    the filter box, HEADER_ORDER[side] from left to right — ⋯ leftmost docked left, rightmost docked right — with ⋯ in
+    """The header line for a dock side (SIDE_PANEL.md §2i, the user's layout of 2026-11-04; the funnel of §2l, 2026-11-08): exactly
+    the funnel, +, Sum and ⋯ above the filter box, HEADER_ORDER[side] from left to right — ⋯ leftmost docked left, rightmost
+    docked right, the funnel innermost — with ⋯ in
     the panel's OUTER half, at the window's edge. Waits up to 5 s: a dock flip re-lays the line in the layout pass that
     moves the panel, and UI Automation can report the old positions for a moment.
 
