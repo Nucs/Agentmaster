@@ -1,29 +1,30 @@
-<!-- ⚠ NOT RELEASED. The last gate (2026-11-03, on 89cbb9e26) FAILED: build server build b20261103-1 (purged Release)
-     + the whole suite r20261103-135156-5b0994 = 205 tests, 190 passed, 15 failed. One failure is a confirmed
-     regression against v0.8.1: SP-K2 - with Sum off, hovering a side-panel card opens the rich session card beside the
-     panel (test_sum_off_card_hover_opens_no_rich_card: 3/3 there, passes on v0.8.1's b20261029-1; suspect 7bbb63137's
-     side-panel AI work). The other 14 are flaky, pre-existing on v0.8.1, expected from a fix (PQR-K11) or Claude
-     Code's own dialog (memory e2e-gate-2026-11-03-v082). As of 2026-11-10 no commit since mentions SP-K2. Before
-     cutting: fix SP-K2 (or the owner rules the card may show), then gate the RELEASE commit again (a purged Release
-     build + the whole suite pinned to that commit's e2e/), fill the Gate line, and add the fix to the notes.
-     No tag was pushed and no release.yml run was started.
+<!-- RELEASED 2026-11-10 13:14:43Z as a PRE-RELEASE (the owner: "Release as 0.8.2 prerelease"), from 29b683148:
+     https://github.com/Nucs/Agentmaster/releases/tag/v0.8.2-prerelease (release id 440382543; the stable 0.8.1 stays
+     Latest). release.yml run 42818285009: prep, build x64, build arm64, bundle, release all green (~29.5 min); ci.yml
+     run 42818279628 on the same push (the from-scratch x64 Release build + the symbols check, the clean-build gate in
+     place of a local one): success. Assets checked: the 6 names, each the expected size; the x64 zip holds 16 PDBs,
+     its TerminalApp.dll bakes 29b683148, its .am-version reads 0.8.2.0. The notes below were applied unchanged.
+     ⚠ Shipped WITHOUT a new e2e gate, by the owner's go after being told: the last gate (2026-11-03, on 89cbb9e26,
+     build server build b20261103-1 + the whole suite r20261103-135156-5b0994 = 205 tests, 190 passed, 15 failed) had
+     one confirmed regression against v0.8.1, SP-K2 - with Sum off, hovering a side-panel card opens the rich session
+     card beside the panel (test_sum_off_card_hover_opens_no_rich_card) - and no commit since mentions it; it was not
+     re-checked on 29b683148 (the other 14: flaky, pre-existing on v0.8.1, PQR-K11's expected change, or Claude Code's
+     own dialog; memory e2e-gate-2026-11-03-v082).
      Agentmaster 0.8.2-prerelease release notes - PRE-RELEASE (the stable 0.8.1 stays Latest).
-     Range: v0.8.1..12aea10e0 = 72 commits (rewritten 2026-11-10; the 11-03 draft covered v0.8.1..89cbb9e26, 37).
-     44 user-facing: 30 feat + 14 fix. 28 internal: docs (the Builds table, the notes archive, the private-data
+     Range: v0.8.1..29b683148 = 73 commits (rewritten 2026-11-10; the 11-03 draft covered v0.8.1..89cbb9e26, 37).
+     44 user-facing: 30 feat + 14 fix. 29 internal: docs (the Builds table, the notes archive, the private-data
      scrub's hash re-pointing, studies), the build server (amb install, admission, capped e2e VMs, measurements), a
      test, the dev identity's orange icon (dev builds only), and two build fixes no release ever carried (c41e78ba0,
      ad89700e3: agentmaster-cli failed to link since 0d3ed3b02). Baseline = the previous NON-nightly release = the
      0.8.1 stable (no release since).
-     RELEASING from: the origin tip once pushed. On 2026-11-10 HEAD 12aea10e0 was 35 commits ahead of
-     origin/agentmaster, all unpushed (a push needs the owner's go); if more commits land, re-run
-     `git log v0.8.1..<release commit>` and add them. What runs on the owner's PC: ad89700e3 (= 12aea10e0 minus two
-     docs commits) as production 0.8.0.12 and dev 0.0.1.44, local builds of clean worktrees (2026-11-10); no e2e
-     suite has run on it.
-     Gate: build <BUILD ID> (purged Release, release identity) + the whole e2e suite (<E2E REQUEST IDS>).
+     RELEASED from 29b683148 (= origin/agentmaster at the release: this draft's own commit, pushed as a fast-forward
+     with the 35 before it; origin had stopped at 89cbb9e26). Its code is ad89700e3's (the three commits after it
+     are docs), which runs on the owner's PC as production 0.8.0.12 and dev 0.0.1.44 (local builds, 2026-11-10).
+     Gate: none on the release commit (see above); ci.yml's from-scratch build is the only build check.
      Version: tag v0.8.2-prerelease -> ver4 0.8.2.0, rawver 0.8.2-prerelease. The updater compares major.minor.patch,
      so 0.8.2 is offered over 0.8.1 to users who allow pre-releases. nightly=false: release.yml does NOT mark it a
      pre-release - mark it at publish. The installer's -Version maps to the TAG (0.8.2-prerelease).
-     Tag:     git tag -a v0.8.2-prerelease -m "Agentmaster 0.8.2-prerelease" <release commit>
+     Tag:     git tag -a v0.8.2-prerelease -m "Agentmaster 0.8.2-prerelease" 29b683148ac5b12df05ebd07b241a086213674bf
               env -u GH_TOKEN -u GITHUB_TOKEN git push origin v0.8.2-prerelease
      Notes:   strip this comment (awk 'f{print} /^## Agentmaster 0.8.2-prerelease/{f=1; print}' <draft> > body.md), then
               gh release edit v0.8.2-prerelease -R Nucs/Agentmaster --notes-file body.md
