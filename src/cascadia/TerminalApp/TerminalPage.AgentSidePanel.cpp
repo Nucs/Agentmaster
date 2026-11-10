@@ -396,6 +396,10 @@ namespace
     // The funnel button's face: Segoe Fluent Icons' Filter (U+E71C; the same code point in Segoe MDL2 Assets, named after it
     // for a Windows 10 without the Fluent font). An icon button, the "+" size (kSidePanelIconFontSize).
     constexpr const wchar_t* kSidePanelFilterGlyph = L"\xE71C";
+    // The "+" launcher's face (SIDE_PANEL.md §2e): Segoe Fluent Icons' Add (U+E710; the same code point in Segoe MDL2 Assets),
+    // the funnel's own icon font — the user's pick of 2026-11-10 ("Both from the icon font") when the funnel and the "+" were
+    // not one size: the two glyphs are drawn on one icon grid, so they read as a matched pair at one size.
+    constexpr const wchar_t* kSidePanelAddGlyph = L"\xE710";
     constexpr const wchar_t* kSidePanelFluentFont = L"Segoe Fluent Icons, Segoe MDL2 Assets";
     // The icon font's glyphs the panel's rows and the chips wear (each also in Segoe MDL2 Assets).
     constexpr const wchar_t* kSidePanelFolderGlyph = L"\xE8B7"; // Folder — By Folder…, a folder chip
@@ -516,6 +520,42 @@ namespace
         auto t = Text(glyph, size, false, opacity);
         t.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ kSidePanelFluentFont });
         return t;
+    }
+
+    // The face of the header's two ICON buttons, the "+" launcher and the funnel — the user's report of 2026-11-10, "the
+    // filter icon is not same size as the + button", and their pick "Both from the icon font": the Segoe Fluent Icons glyph
+    // at the header's icon size, centered over an INVISIBLE "+" in the button's own text font.
+    //   - One width: both glyphs are one-em squares of the icon font (12 x 12 DIPs at 12 px), whichever glyph shows.
+    //   - One height, the text buttons' (⋯, Sum): the icon font's line box is only one em tall, the text font's is 1.33 em
+    //     (Segoe UI: ~16 DIPs at 12 px), and a button grows with its content — so the invisible "+" lends both faces the text
+    //     line's height. Measured from the font files (font_boxes.py, SIDE_PANEL.md §2l): before, the "+" button was
+    //     22.2 x 20 DIPs (the text "+") and the funnel 25 x 15 (an 11 px icon); with this face both are 26 x 20.
+    //   - Scaled with the text: the sizer is text too, so a Windows text size change grows both faces alike — never a fixed
+    //     number of DIPs that a larger text size would overflow.
+    //   glyph   - the icon's code point (kSidePanelAddGlyph, kSidePanelFilterGlyph).
+    //   returns - the face (a Grid): the button's Content. Its foreground follows the button's state (nothing local is set).
+    //   throws  - hresult_error / bad_alloc from building the elements (the panel's build contains it).
+    Grid SidePanelIconButtonFace(const wchar_t* glyph)
+    {
+        Grid face{};
+        // The sizer inherits the button's FontSize (kSidePanelIconFontSize) and its theme text font: exactly what the old
+        // "+" text was drawn in. Opacity 0 keeps its layout box (Collapsed would drop it); it never takes a press; and it is
+        // out of UI Automation's content and control views, so a screen reader never reads a "+" nobody can see.
+        TextBlock sizer{};
+        sizer.Text(L"+");
+        sizer.Opacity(0.0);
+        sizer.IsHitTestVisible(false);
+        sizer.HorizontalAlignment(HorizontalAlignment::Center);
+        sizer.VerticalAlignment(VerticalAlignment::Center);
+        winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetAccessibilityView(sizer, winrt::Windows::UI::Xaml::Automation::Peers::AccessibilityView::Raw);
+        face.Children().Append(sizer);
+        auto icon = SidePanelFluentGlyph(glyph, kSidePanelIconFontSize, 1.0);
+        icon.HorizontalAlignment(HorizontalAlignment::Center);
+        icon.VerticalAlignment(VerticalAlignment::Center);
+        // A private-use code point reads as nothing useful aloud: the button's own name speaks for it.
+        winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetAccessibilityView(icon, winrt::Windows::UI::Xaml::Automation::Peers::AccessibilityView::Raw);
+        face.Children().Append(icon);
+        return face;
     }
 
     // The CHIPS ROW's layout: a code-only Panel that lays its children out left to right and WRAPS onto a new line when the
@@ -1638,11 +1678,13 @@ namespace winrt::TerminalApp::implementation
         // Header: TWO lines.
         //   line 1 (row 0): the four buttons at the panel's OUTER end — the window's edge, away from the terminal — in a
         //     line that MIRRORS with the dock (SIDE_PANEL.md §2i, the user's layout of 2026-11-04), so ⋯ is always the
-        //     outermost button: docked right [ spacer * ][ funnel ][ + ][ Sum ][ ⋯ ] (right-aligned), docked left
-        //     [ ⋯ ][ Sum ][ + ][ funnel ][ spacer * ] (left-aligned). The FUNNEL (SIDE_PANEL.md §2l, 2026-11-08: the user's "a
-        //     button for FILTER", "like the +") is the innermost, on the terminal's side of "+", so "+" keeps its place beside
-        //     Sum (the user's "leftmost, to Sum" of the right-aligned line — SIDE_PANEL.md §2e); "Sum" the middle (it
-        //     reshapes the whole panel), ⋯ the outermost, where the collapse chevron was (the user's layout of 2026-11-03):
+        //     outermost button: docked right [ spacer * ][ + ][ funnel ][ Sum ][ ⋯ ] (right-aligned), docked left
+        //     [ ⋯ ][ Sum ][ funnel ][ + ][ spacer * ] (left-aligned). "+" is the innermost, on the terminal's side of the
+        //     FUNNEL (SIDE_PANEL.md §2l: the user's "a button for FILTER", "like the +"), which sits beside Sum — the user's
+        //     "Swap between filter and + button" of 2026-11-10 (the funnel was the innermost before); docked right "+" is the
+        //     leftmost again (§2e's "leftmost"). "+" and the funnel wear one face (SidePanelIconButtonFace: two Fluent icons,
+        //     one box); "Sum" the middle (it reshapes the whole panel), ⋯ the outermost, where the collapse chevron was (the
+        //     user's layout of 2026-11-03):
         //     its menu holds ⌖, the card scope, the card order, the dock flip and the collapse, which were five more buttons
         //     on this line and made it wider than a narrow panel. The build below seeds the docked-right shape;
         //     _SidePanelApplyHeaderOrder (run by every _SidePanelApplyDock, the first one at the end of this build, before the
@@ -1664,11 +1706,11 @@ namespace winrt::TerminalApp::implementation
             // left the star is the LAST column and the buttons fill columns 0-3 in mirror order (_SidePanelApplyHeaderOrder).
             ColumnDefinition c0{}; // the spacer docked right; "⋯" docked left
             c0.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
-            ColumnDefinition c1{}; // the funnel (the filters, SIDE_PANEL.md §2l) docked right; "Sum" docked left
+            ColumnDefinition c1{}; // "+" (the launcher, SIDE_PANEL.md §2e) docked right; "Sum" docked left
             c1.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-            ColumnDefinition c2{}; // "+" (the launcher, SIDE_PANEL.md §2e) in both docks — the line's middle
+            ColumnDefinition c2{}; // the funnel (the filters, SIDE_PANEL.md §2l) in both docks — the line's middle
             c2.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-            ColumnDefinition c3{}; // "Sum" (the summary area, SIDE_PANEL.md §2d) docked right; the funnel docked left
+            ColumnDefinition c3{}; // "Sum" (the summary area, SIDE_PANEL.md §2d) docked right; "+" docked left
             c3.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
             ColumnDefinition c4{}; // "⋯" (the menu, SIDE_PANEL.md §2i) docked right; the spacer docked left
             c4.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
@@ -1860,21 +1902,22 @@ namespace winrt::TerminalApp::implementation
         Grid::SetColumnSpan(_sidePanelAiBtn, static_cast<int32_t>(header.ColumnDefinitions().Size())); // the box's own cell, so HorizontalAlignment Right lands on the box's right end
         header.Children().Append(_sidePanelAiBtn); // after the box: drawn over it
 
-        // The "+" LAUNCHER (SIDE_PANEL.md §2e) — the INNERMOST of the three buttons, beside "Sum" on the terminal's side
-        // (docked right it is the leftmost, the user's "leftmost, to Sum"; docked left the line mirrors and it is the
-        // rightmost, _SidePanelApplyHeaderOrder): a click opens a card AT the click point holding the Agent Manager's own
-        // launch row ([● Claude] [ box ] [Launch Claude] [Fork] — the shared AgentLaunchBar, Claude only), so a session
-        // starts from the side panel without leaving the tab. Built on the first click (_SidePanelEnsureLaunchCard): a
-        // window that never opens it pays nothing. An ICON button (the ⌖ / ⇄ size and padding). IsTabStop false like its
-        // siblings: a click must never pull keyboard focus out of the terminal by itself (the card focuses its own
-        // box when it opens, and hands focus back when it closes).
+        // The "+" LAUNCHER (SIDE_PANEL.md §2e) — the INNERMOST button of the line, on the terminal's side of the funnel (the
+        // user's "Swap between filter and + button" of 2026-11-10; docked right it is the leftmost, §2e's "leftmost"; docked
+        // left the line mirrors and it is the rightmost, _SidePanelApplyHeaderOrder): a click opens a card AT the click
+        // point holding the Agent Manager's own launch row ([● Claude] [ box ] [Launch Claude] [Fork] — the shared
+        // AgentLaunchBar, Claude only), so a session starts from the side panel without leaving the tab. Built on the first
+        // click (_SidePanelEnsureLaunchCard): a window that never opens it pays nothing. An ICON button wearing the funnel's
+        // face (SidePanelIconButtonFace: Segoe Fluent Icons' Add, the user's pick of 2026-11-10 "Both from the icon font"),
+        // so the two are one size. IsTabStop false like its siblings: a click must never pull keyboard focus out of the
+        // terminal by itself (the card focuses its own box when it opens, and hands focus back when it closes).
         _sidePanelLaunchBtn = Button{};
-        _sidePanelLaunchBtn.FontSize(kSidePanelIconFontSize);
+        _sidePanelLaunchBtn.FontSize(kSidePanelIconFontSize); // the face's invisible sizer inherits it (the text line's height)
         _sidePanelLaunchBtn.Padding(ThicknessHelper::FromLengths(6, 1, 6, 1));
         _sidePanelLaunchBtn.VerticalAlignment(VerticalAlignment::Center);
         _sidePanelLaunchBtn.IsTabStop(false);
-        _sidePanelLaunchBtn.Content(winrt::box_value(L"+"));
-        // A screen reader would otherwise announce the glyph ("plus"): name the button for what it does.
+        _sidePanelLaunchBtn.Content(SidePanelIconButtonFace(kSidePanelAddGlyph));
+        // A screen reader would otherwise have no words for the icon (a private-use glyph): name the button for what it does.
         winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(_sidePanelLaunchBtn, winrt::hstring{ L"Launch a session" });
         AgentSetTitledTip(_sidePanelLaunchBtn, L"Launch a session", winrt::hstring{ L"Open the launcher at the click: the Agent Manager's own launch box \x2014 a working directory (recent and matching folders as you type, Browse\x2026) or a session id to resume or fork \x2014 and Launch Claude (hover it for a model or a preset).\nIt shows the same text as the Agent Manager's box. Click outside it, press Esc, or click + again to close it." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
         // The PRESS point, in Root() coordinates: the card's corner sits where the user clicked. Read on the press, not
@@ -1921,7 +1964,7 @@ namespace winrt::TerminalApp::implementation
                 self->_SidePanelToggleLaunchCard();
             }
         });
-        Grid::SetColumn(_sidePanelLaunchBtn, 2); // column 2 in both docks: the five-column line's middle (_SidePanelApplyHeaderOrder)
+        Grid::SetColumn(_sidePanelLaunchBtn, 1); // the docked-right seed; docked left it is column 3 (_SidePanelApplyHeaderOrder)
         header.Children().Append(_sidePanelLaunchBtn);
 
         // The "Sum" toggle — the summary area below the cards ON (checked, the default) / OFF. OFF hides the
@@ -1951,8 +1994,9 @@ namespace winrt::TerminalApp::implementation
         // collapse chevron was (the user's layout of 2026-11-03): the rightmost docked right, the leftmost docked left (the
         // line mirrors with the dock, the user's layout of 2026-11-04 — _SidePanelApplyHeaderOrder). Its menu holds the
         // five controls that were buttons on this line: Scroll to the selected tab (⌖) · Card scope ▸ · Card order ▸ · a
-        // separator · Dock on the left / right (⇄) · Collapse the side panel (« / »), so the line reads "+ Sum ⋯" (or
-        // "⋯ Sum +") and fits a narrow panel. An ICON button (the "+" size and padding); IsTabStop false like its siblings:
+        // separator · Dock on the left / right (⇄) · Collapse the side panel (« / »), so the line stays four buttons wide
+        // ("+ ⏷ Sum ⋯" or "⋯ Sum ⏷ +") and fits a narrow panel. An ICON button (the "+" font size and padding; its "⋯" is
+        // text, so it stands as tall as the icon buttons' faces); IsTabStop false like its siblings:
         // a click must never pull keyboard focus out of the terminal by itself (the open menu holds the keyboard while it
         // shows and hands it back as it closes).
         // The menu is an EMPTY MenuFlyout that fills itself at every open (_SidePanelFillMoreMenu; the Agent Manager's
@@ -2000,26 +2044,23 @@ namespace winrt::TerminalApp::implementation
         Grid::SetColumn(_sidePanelMoreBtn, 4); // the docked-right seed; docked left it is column 0 (_SidePanelApplyHeaderOrder)
         header.Children().Append(_sidePanelMoreBtn);
 
-        // The FUNNEL (SIDE_PANEL.md §2l, 2026-11-08 — the user's "a button for FILTER and in it have menu appear on click"): the
-        // innermost button of the line, on the terminal's side of "+". Its click opens the FILTER PANEL at the click — a card
-        // that looks like a menu (By Folder… · By State ▸ · By Tag ▸ · Active within ▸ · the four flags · Clear all filters)
-        // and STAYS OPEN while you pick (the user's "Multiselect enabled, menu shouldnt close on clicking"): a Root() popup
-        // with the "+" card's outside-press close, never a MenuFlyout (which closes at every click). An ICON button like "+"
-        // (12 px, the "+" padding), IsTabStop false like its siblings (the panel focuses its own first row). A ToggleButton for
-        // its accent fill alone — "a filter narrows the list" at a glance — whose IsChecked the member pins
-        // (_SidePanelUpdateFilterButton), never the click's self-flip. Appended LAST: the header's children keep the order
-        // the e2e driver walks (+ · Sum · ⋯), and the line's order on screen is the columns' business.
+        // The FUNNEL (SIDE_PANEL.md §2l, 2026-11-08 — the user's "a button for FILTER and in it have menu appear on click"):
+        // the button between "+" and Sum (the user's "Swap between filter and + button" of 2026-11-10 put "+" on its terminal
+        // side). Its click opens the FILTER PANEL at the click — a card that looks like a menu (By Folder… · By State ▸ · By
+        // Tag ▸ · Active within ▸ · the four flags · Clear all filters) and STAYS OPEN while you pick (the user's
+        // "Multiselect enabled, menu shouldnt close on clicking"): a Root() popup with the "+" card's outside-press close,
+        // never a MenuFlyout (which closes at every click). An ICON button with the "+" button's face and padding
+        // (SidePanelIconButtonFace — the user's "the filter icon is not same size as the + button": it was 25 x 15 DIPs
+        // beside the "+" button's 22.2 x 20; now both are 26 x 20), IsTabStop false like its siblings (the panel focuses its
+        // own first row). A ToggleButton for its accent fill alone — "a filter narrows the list" at a glance — whose
+        // IsChecked the member pins (_SidePanelUpdateFilterButton), never the click's self-flip. Appended LAST: the header's
+        // children keep the order the e2e driver walks (+ · Sum · ⋯), and the line's order on screen is the columns' business.
         _sidePanelFilterBtn = winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton{};
-        _sidePanelFilterBtn.FontSize(kSidePanelIconFontSize);
+        _sidePanelFilterBtn.FontSize(kSidePanelIconFontSize); // the face's invisible sizer inherits it (the text line's height)
         _sidePanelFilterBtn.Padding(ThicknessHelper::FromLengths(6, 1, 6, 1));
         _sidePanelFilterBtn.VerticalAlignment(VerticalAlignment::Center);
         _sidePanelFilterBtn.IsTabStop(false);
-        {
-            // The glyph keeps the "+" glyph's line height: a 12 px icon font glyph in a TextBlock (the Browse… row's idiom).
-            auto funnel = SidePanelFluentGlyph(kSidePanelFilterGlyph, kSidePanelIconFontSize - 1.0, 1.0);
-            funnel.VerticalAlignment(VerticalAlignment::Center);
-            _sidePanelFilterBtn.Content(funnel);
-        }
+        _sidePanelFilterBtn.Content(SidePanelIconButtonFace(kSidePanelFilterGlyph)); // the funnel at 12 px, the "+" Add's size
         AgentSetTitledTip(_sidePanelFilterBtn, L"Filter the cards", winrt::hstring{ L"Narrow the cards: By Folder (the + launcher's folder picker), By State, By Tag, how recently a session was active, and four checks \x2014 an unsent draft, unread, pinned to the top, \x2605 favorite. The panel stays open while you pick; different filters narrow together, picks inside one filter add up.\nWhile a filter is on this button is lit, and the row under the filter box says what the cards are filtered by \x2014 \x2715 on a chip drops that filter, Clear drops them all.\nThis window keeps its own filters." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
         // The PRESS point anchors the panel (the "+" button's two handlers: the point on the press, handledEventsToo because
         // a ToggleButton marks its presses handled; a press that ends without a click drops it).
@@ -2060,7 +2101,7 @@ namespace winrt::TerminalApp::implementation
                 self->_SidePanelToggleFilterPanel();
             }
         });
-        Grid::SetColumn(_sidePanelFilterBtn, 1); // the docked-right seed; docked left it is column 3 (_SidePanelApplyHeaderOrder)
+        Grid::SetColumn(_sidePanelFilterBtn, 2); // column 2 in both docks: the five-column line's middle (_SidePanelApplyHeaderOrder)
         header.Children().Append(_sidePanelFilterBtn);
         Grid::SetRow(header, 0);
         _sidePanelExpandedRoot.Children().Append(header);
@@ -2516,10 +2557,11 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Lay the header's button line out for the dock in effect (SIDE_PANEL.md §2i, the user's layout of 2026-11-04): the line
-    // is the MIRROR image of itself in the other dock, so ⋯ is always the outermost button — at the window's edge — and the
-    // funnel (SIDE_PANEL.md §2l, 2026-11-08) the innermost, on the terminal's side, with "+" beside it:
-    //   docked right: [ spacer * ][ funnel ][ + ][ Sum ][ ⋯ ]   the menu opens below ⋯ with the RIGHT edges aligned;
-    //   docked left:  [ ⋯ ][ Sum ][ + ][ funnel ][ spacer * ]   the menu opens below ⋯ with the LEFT edges aligned.
+    // is the MIRROR image of itself in the other dock, so ⋯ is always the outermost button — at the window's edge — and "+"
+    // the innermost, on the terminal's side, with the funnel (SIDE_PANEL.md §2l) between it and Sum — the user's "Swap
+    // between filter and + button" of 2026-11-10 (the funnel was the innermost from 2026-11-08):
+    //   docked right: [ spacer * ][ + ][ funnel ][ Sum ][ ⋯ ]   the menu opens below ⋯ with the RIGHT edges aligned;
+    //   docked left:  [ ⋯ ][ Sum ][ funnel ][ + ][ spacer * ]   the menu opens below ⋯ with the LEFT edges aligned.
     // Either way the menu spreads over the panel's own width, never out past the window's edge (a flyout pushed off the
     // window is slid or flipped by the framework, and lands over the terminal). Only the columns move: which column is the
     // star spacer, which column each button sits in, and the menu's placement. The four buttons keep their place in the
@@ -2568,7 +2610,7 @@ namespace winrt::TerminalApp::implementation
                     col.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
                 }
             }
-            // The buttons, outermost first: ⋯ (4 / 0), Sum (3 / 1), + (2 / 2), the funnel (1 / 3) — docked right / docked left.
+            // The buttons, outermost first: ⋯ (4 / 0), Sum (3 / 1), the funnel (2 / 2), + (1 / 3) — docked right / docked left.
             const auto place = [](const FrameworkElement& button, int32_t column) {
                 if (button && Grid::GetColumn(button) != column)
                 {
@@ -2577,8 +2619,8 @@ namespace winrt::TerminalApp::implementation
             };
             place(_sidePanelMoreBtn, left ? 0 : 4);
             place(_sidePanelSumBtn, left ? 1 : 3);
-            place(_sidePanelLaunchBtn, 2);
-            place(_sidePanelFilterBtn, left ? 3 : 1);
+            place(_sidePanelFilterBtn, 2);
+            place(_sidePanelLaunchBtn, left ? 3 : 1);
             // The menu's placement is read when it opens, so setting it now (the menu is closed: a dock change comes from a
             // menu command that runs after the menu closed, or from another window's broadcast) takes effect at the next open.
             if (_sidePanelMoreBtn)
@@ -6803,7 +6845,7 @@ namespace winrt::TerminalApp::implementation
     // other filters are By State, By Tag, the four flags and Active within, and the menu must NOT close on a click; the row is
     // the count, a chip per filter and Clear.
     // THE PIECES:
-    //   - the FUNNEL (_sidePanelFilterBtn): the header line's innermost button; lit while a menu filter is on;
+    //   - the FUNNEL (_sidePanelFilterBtn): the header line's button between "+" and Sum; lit while a menu filter is on;
     //   - the PANEL (_sidePanelFilterPopup): a card that looks like a menu and stays open while you pick — a Root() popup with
     //     the "+" card's outside-press close and the KEY-UP Escape, because a MenuFlyout closes at every click and a
     //     light-dismiss Flyout eats the press that closes it and closes on Escape's key-down (its ESC would reach claude);

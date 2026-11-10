@@ -8,7 +8,7 @@ per-tab overlay's components, so it carries their business logic verbatim instea
 ## 1. Layout
 
 Shown in the DEFAULT dock (LEFT); the header's `⋯` ▸ **Dock on the right** flips it to the mirror image (dock
-RIGHT), which also flips the header's button line (`⋯ Sum + ⏷` from the left edge here, `⏷ + Sum ⋯` against the right
+RIGHT), which also flips the header's button line (`⋯ Sum ⏷ +` from the left edge here, `+ ⏷ Sum ⋯` against the right
 edge docked right — `⋯` always at the window's edge, §2i; `⏷` is the funnel, the filters' button, §2l) and the collapse
 symbols (the menu's `«` here and the collapsed strip's `»` — the collapse always points toward the docked edge).
 
@@ -85,14 +85,17 @@ model's answer and its list of sessions instead of the session cards; the summar
   **Collapse the side panel**, which shrinks the panel to a 20px expander strip (the strip's chevron
   brings it back).
 - The header is **two lines** (one 2-row grid): the buttons, at the panel's OUTER end (the window's
-  edge) and in a line that mirrors with the dock — `⋯ Sum + ⏷` left-aligned docked left, `⏷ + Sum ⋯`
-  right-aligned docked right, so `⋯` is always outermost (§2i) and the funnel innermost (§2l) — over the filter box,
+  edge) and in a line that mirrors with the dock — `⋯ Sum ⏷ +` left-aligned docked left, `+ ⏷ Sum ⋯`
+  right-aligned docked right, so `⋯` is always outermost (§2i) and `+` innermost with the funnel beside it (the user's
+  swap of 2026-11-10, §2l *The header's swap and one icon size*) — over the filter box,
   which spans every column. Sharing one line with the buttons, the box was squeezed toward its minimum on a narrow panel
   while the buttons kept their natural widths.
 - **Two font sizes.** The worded button (Sum) is 11 px; the ICON buttons (`+`, `⋯`, the funnel and the
   collapsed strip's chevron) are 12 px
   (`kSidePanelIconFontSize`, 2026-10-05 — they were 11 px, and a symbol reads smaller than a word at
-  the same size).
+  the same size). `+` and the funnel are Segoe Fluent Icons glyphs (*Add*, *Filter*) on ONE face
+  (`SidePanelIconButtonFace`: the glyph over an invisible text `+`), so both buttons are 26 × 20 DIPs (§2l *The header's
+  swap and one icon size*).
 - **The two separators are 3 px thick** (`kSidePanelSplitterPx`: the vertical one's ContentArea
   column and the horizontal one's body row; 2026-10-05 — they were 6 px, the size of the per-tab
   overlay's resize grips, and read as heavy borders). They stay solid gray, `#3E3E3E` at rest and
@@ -533,9 +536,9 @@ Built 2026-10-06 (commit f73481af7); in production 0.6.8.19 since 2026-10-12 and
 pre-release. The fix of item 5 below (2026-10-12, commit bd9ba2eae) is in dev since 0.0.1.6 and in
 production since 0.6.8.20. The folder list opening WITH the card (item 5, 2026-10-19) and the
 one-click Launch (item 8, 2026-10-19) are in no build yet. The
-header's **+** button (the innermost of the header's buttons, beside **Sum** on the terminal's side —
-left of it docked right, the user's "leftmost, to Sum"; right of it docked left, where the line
-mirrors, §2i) opens a small card AT THE CLICK that holds the Agent
+header's **+** button (the innermost of the header's buttons, on the terminal's side — the leftmost docked
+right, the user's "leftmost"; the rightmost docked left, where the line mirrors, §2i; beside **Sum** until the
+funnel took that place in the user's swap of 2026-11-10, §2l) opens a small card AT THE CLICK that holds the Agent
 Manager's own launch row, so a session starts from the side panel without leaving the tab:
 
 ```
@@ -555,7 +558,9 @@ Manager's own launch row, so a session starts from the side panel without leavin
    `IsTabStop` false like its siblings, an automation name ("Launch a session"). (Since §2i the line is
    `+` · Sum · `⋯`: LOCAL / GLOBAL, the sort, `⌖`, `⇄` and the chevron are the `⋯` menu's items. Since 2026-11-04 the
    line mirrors with the dock, `⋯` at the window's edge: `+` is column 1 docked right, left of Sum, and column 2 docked
-   left, right of Sum — the innermost button either way, `_SidePanelApplyHeaderOrder`.)
+   left, right of Sum — the innermost button either way, `_SidePanelApplyHeaderOrder`. From 2026-11-08 the funnel (§2l)
+   was the innermost; the user's swap of 2026-11-10 made `+` the innermost again, the funnel between it and Sum, and
+   gave `+` Segoe Fluent Icons' *Add* glyph, the funnel's icon font, so the two buttons are one size.)
 2. **Placement — tooltip-like, but interactive.** The card's corner sits at the click point and the
    card extends toward the window's center: a click in the left half opens it rightward (its left
    edge at the click), in the right half leftward (its right edge at the click), and the same with
@@ -1265,6 +1270,8 @@ Docked RIGHT (the mirror; the menu hangs from `⋯`'s right edge):
   build — before its first frame, so a left-docked panel is never drawn with the build's docked-right seed —, a dock flip
   here and a settings broadcast that moved the dock): docked right `[ spacer * ][ + ][ Sum ][ ⋯ ]`, docked left
   `[ ⋯ ][ Sum ][ + ][ spacer * ]`, so `⋯` is the outermost button and `+` the innermost, on the terminal's side, in both.
+  (§2l's funnel joined the line on 2026-11-08 as its innermost button; since the user's swap of 2026-11-10 it sits
+  between `+` and Sum: `[ spacer * ][ + ][ ⏷ ][ Sum ][ ⋯ ]` / `[ ⋯ ][ Sum ][ ⏷ ][ + ][ spacer * ]`.)
   It moves grid columns only — which of the header's four columns is the star spacer, each button's `Grid.Column`, the
   menu's placement — never the header's children (appended `+ · Sum · ⋯`, so the UI Automation tree need not follow the
   screen: the e2e driver reads the line by position), every handler stays as built, and the filter box and the AI toggle,
@@ -1510,10 +1517,11 @@ based on. Add other filterables." Their answers the same day to the four design 
 | The other filters | **By State** ("Multiselect enabled, menu shouldnt close on clicking"), **By Tag**, **the four flags** (the same words), **Active within** — not By Kind, not By Branch |
 | The row under the filter box | **The count + a chip per filter + Clear**, kept per window |
 
-Docked left (docked right the line mirrors: `⏷ + Sum ⋯`, the funnel still the innermost):
+Docked left (docked right the line mirrors: `+ ⏷ Sum ⋯`; the funnel was the innermost until the user's swap of 2026-11-10,
+*The header's swap and one icon size* below):
 
 ```
- [⋯][Sum][+][⏷]                       ⏷ = the funnel: lit (the accent) while a filter is on
+ [⋯][Sum][⏷][+]                       ⏷ = the funnel: lit (the accent) while a filter is on
  [filter sessions…                [AI]]
  3 of 12 [📁 Agentmaster ✕] [● Running or Waiting for you ✕] [“login” ✕]  Clear     ← the chips row: only while
  ┌─ card ─────────────────────┐                                                     something narrows the list
@@ -1540,13 +1548,15 @@ Docked left (docked right the line mirrors: `⏷ + Sum ⋯`, the funnel still th
                   RECENT · GIT WORKTREES · SUBFOLDERS OF … (the + drop-down's own sections)
 ```
 
-- **The funnel** (`_sidePanelFilterBtn`, `am.side.funnel`, named "Filter the cards"): the header line's FOURTH button, the
-  innermost — on the terminal's side of `+`, so `+` keeps its place beside Sum (§2e's "leftmost, to Sum"). The header grid
-  has five columns now; `_SidePanelApplyHeaderOrder` places the funnel in column 1 docked right and column 3 docked left
-  (the line mirrors, §2i). A ToggleButton for its accent alone: `IsChecked` is pinned to "a menu filter narrows the list"
-  (`_SidePanelUpdateFilterButton`; its ItemStatus says "N filters on"), never the click's self-flip. Its face is Segoe
-  Fluent Icons' Filter glyph (U+E71C), 12 px like `+`; its tip waits 3 s (§1); `IsTabStop` false like its siblings. A click
-  opens the panel at the click (the `+` button's press-point recipe), a second click closes it.
+- **The funnel** (`_sidePanelFilterBtn`, `am.side.funnel`, named "Filter the cards"): the header line's FOURTH button,
+  between `+` and Sum since the user's swap of 2026-11-10 (from 2026-11-08 it was the innermost, on the terminal's side of
+  `+`). The header grid has five columns now; `_SidePanelApplyHeaderOrder` places the funnel in column 2 in both docks
+  and `+` in column 1 docked right, column 3 docked left (the line mirrors, §2i). A ToggleButton for its accent alone:
+  `IsChecked` is pinned to "a menu filter narrows the list" (`_SidePanelUpdateFilterButton`; its ItemStatus says "N
+  filters on"), never the click's self-flip. Its face is Segoe Fluent Icons' Filter glyph (U+E71C) on the `+` button's
+  own face (`SidePanelIconButtonFace`, 12 px — *The header's swap and one icon size* below); its tip waits 3 s (§1);
+  `IsTabStop` false like its siblings. A click opens the panel at the click (the `+` button's press-point recipe), a
+  second click closes it.
 - **The panel is a popup card, not a menu.** The user's "menu shouldnt close on clicking" rules out a MenuFlyout (a
   MenuFlyoutItem closes its menu at every click — `MenuFlyoutItem::Invoke`), and a light-dismiss Flyout eats the press that
   dismisses it and closes on Escape's KEY-DOWN, whose ESC character then reaches the terminal (a claude's interrupt). So the
@@ -1645,7 +1655,8 @@ Docked left (docked right the line mirrors: `⏷ + Sum ⋯`, the funnel still th
   new code (`_SidePanelSetFilters`, `_SidePanelUpdateFilterRow`) failed at exactly their lines. Not run: the e2e suite (the driver's
   `count_line`, `HEADER_ORDER` and SP-K3's outside click are updated for the new shape; no flow test of the filters yet).
 - **Check after the build** (a PURGED build: `SessionModels.h` and `TerminalPage.h` changed):
-  - The line reads `⋯ Sum + ⏷` docked left and `⏷ + Sum ⋯` docked right; the funnel's tip opens after 3 s.
+  - The line reads `⋯ Sum + ⏷` docked left and `⏷ + Sum ⋯` docked right (`⋯ Sum ⏷ +` / `+ ⏷ Sum ⋯` from the swap of
+    2026-11-10, *The header's swap and one icon size*); the funnel's tip opens after 3 s.
   - The funnel opens the panel at the click; a click on a state, a tag or a flag checks it, the cards re-filter at once,
     the counts change, and the panel stays open; a section header expands / folds its rows; the funnel again, Escape, or a
     click outside closes it (a click on a card closes it and selects the card); no ESC reaches the terminal.
@@ -1766,6 +1777,41 @@ the same day to the two design questions (asked with mockups):
   - →, ↑ / ↓, Enter, ← and Escape as above; no ESC or CR reaches the terminal.
   - Near the window's right edge the submenu opens on the panel's left.
   - No `[exc] … side panel folder menu …` / `_SidePanel…FolderMenu…` line in hooks.log.
+
+#### The header's swap and one icon size (2026-11-10, NOT BUILT yet)
+
+The user's two requests the same evening: "1. the filter icon is not same size as the + button 2. Swap between filter and
++ button".
+
+- **Why they differed — measured from the font files** (scratchpad `font_boxes.py`: each font's OS/2 / hhea line metrics,
+  the glyph's advance and ink box, as DirectWrite reads them): a Button grows with its content, and a TextBlock's box is
+  the glyph's advance × the font's line height. The `+` was the TEXT "+" in Segoe UI at 12 px — 8.21 × 15.96 px (Segoe UI's
+  line is 1.33 em), ink 5.5 × 5.5 px — so its button was **22.2 × 20 DIPs**. The funnel was U+E71C in Segoe Fluent Icons at
+  11 px — 11 × 11 px (the icon font's line is exactly one em), ink 11 × 10.3 px — so its button was **25 × 15 DIPs**: 5 DIPs
+  shorter, 3 wider, with twice the ink.
+- **The user's pick** (three options rendered with the real fonts at 1× and 3×, both docks, unlit and lit): **"Both from
+  the icon font"** — the `+` becomes Segoe Fluent Icons' *Add* (U+E710, `kSidePanelAddGlyph`), the funnel's own icon font,
+  both at 12 px, both buttons one box — over "Same box, glyphs kept" (both 25 × 20, the glyphs as they were) and "+ box,
+  smaller funnel" (the funnel shrunk to 8 px to fit the `+` button).
+- **The face** (`SidePanelIconButtonFace`): the icon (a 12 × 12 one-em square in either case) centered over an INVISIBLE
+  text `+` that inherits the button's 12 px theme font (Opacity 0 — it keeps its layout box —, never hit-tested, out of
+  UI Automation's views), so both faces are 12 × 15.96 and both buttons **26 × 20 DIPs**: as tall as the line's text
+  buttons (`⋯`), and equal at every Windows text size because the sizer is text too. The icon glyph is out of the
+  automation views as well (a private-use code point has no words); the buttons keep their names ("Launch a session",
+  "Filter the cards"). The funnel lit (a filter on) keeps the ToggleButton's accent fill and its foreground.
+- **The swap:** `+` is the innermost button again, the funnel between it and Sum — `⋯ Sum ⏷ +` docked left, `+ ⏷ Sum ⋯`
+  docked right (`_SidePanelApplyHeaderOrder`: the funnel in column 2 in both docks, `+` in column 1 / 3; the build's
+  docked-right seeds follow). Only grid columns move: the header's children keep their order, every handler and anchor is
+  as before (both cards open at the click). The e2e driver's `HEADER_ORDER` follows.
+- **Tested** (no build): nothing pure changed (the m5 harness has no XAML). `cl /Zs` against the Release worktree build
+  of ad89700e3 of `TerminalPage.AgentSidePanel.cpp` and `TerminalPage.AgentSessions.cpp` (a `TerminalPage.h` unit): both
+  pass; two undeclared names planted in the new face helper and the swapped placement failed at exactly their lines. The
+  e2e driver and suite files parse. Not seen on screen; the e2e suite not run (its header test reads `HEADER_ORDER`).
+- **Check after the build** (purged — §2l's submenu above needs it anyway):
+  - The `+` shows the thin Fluent plus, the funnel the Fluent funnel, the two buttons the same width and height as each
+    other and as tall as `⋯`; the funnel lit (a filter on) is the same size as unlit.
+  - Docked left the line reads `⋯ Sum ⏷ +`, docked right `+ ⏷ Sum ⋯`; each card still opens at the click.
+  - At a larger Windows text size both grow alike.
 
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 

@@ -480,7 +480,8 @@ one chip per filter with ✕, and Clear. Different filters narrow together; pick
 filters across a restart; a new window starts unfiltered. With no filter there is no count line on the screen.
 
 **Phases**
-1. **No filter, no row.** *Expect:* the header line `⋯ Sum + ⏷` (docked left; `am.side.funnel` innermost); no chips row
+1. **No filter, no row.** *Expect:* the header line `⋯ Sum ⏷ +` (docked left; `am.side.launch` innermost, `am.side.funnel`
+   beside it — the swap of 2026-11-10; `⋯ Sum + ⏷` on a build before it), the `+` and funnel buttons one size; no chips row
    (`am.side.filterRow.count` absent from the tree); the count words read from the filter box's ItemStatus (`count_line`) —
    "2 sessions in this window".
 2. **The panel stays open.** *Do:* click the funnel; expand By State; check Running, then Waiting for you. *Expect:* the
@@ -505,7 +506,8 @@ filters across a restart; a new window starts unfiltered. With no filter there i
 - **E2 A click outside** → a click on a card closes the panel AND selects the card in one click (no light dismiss).
 - **E3 AI mode** → AI on: the chips row hides and the count line shows the AI words; AI off: the chips come back.
 - **E4 Unread** → with Unread checked, a session that turns unread appears without a registry change (the census hop).
-- **E5 Dock right** → the line reads `⏷ + Sum ⋯`; the panel opens at the click toward the window's center.
+- **E5 Dock right** → the line reads `+ ⏷ Sum ⋯` (`⏷ + Sum ⋯` before the swap of 2026-11-10); the panel opens at the
+  click toward the window's center.
 
 ### SP-14 · By Folder's hover submenu: the folders picked, each a toggle
 

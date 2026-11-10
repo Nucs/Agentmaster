@@ -38,8 +38,10 @@ the cards whatever their order. The 2026-11-03 build kept '+ Sum ⋯' right-alig
 item first, above Scroll to the selected tab.
 
 The FILTERS (SIDE_PANEL.md §2l; a build of 2026-11-08 or later — NOT BUILT on that day): a fourth header button, the
-funnel (ToggleButton "Filter the cards", am.side.funnel), the innermost of the line: '⋯' · 'Sum' · '+' · funnel docked
-left, funnel · '+' · 'Sum' · '⋯' docked right (HEADER_ORDER), appended LAST to the header's children. Its click opens an
+funnel (ToggleButton "Filter the cards", am.side.funnel), between '+' and 'Sum' since the user's swap of 2026-11-10 (the
+innermost of the line before): '⋯' · 'Sum' · funnel · '+' docked left, '+' · funnel · 'Sum' · '⋯' docked right
+(HEADER_ORDER), appended LAST to the header's children. '+' and the funnel are both Segoe Fluent Icons glyphs (Add and
+Filter) in one box, so their buttons are one size (no text of their own: read them by AutomationId). Its click opens an
 in-window Popup that looks like a menu and stays open while you pick (no id of its own — a Border has no automation
 peer —; its rows am.side.filter.byFolder, .section.<state|tag|active>, .state.<token>, .tag.<folded name>, .untagged,
 .active.<any|15|60|1440|10080>, .flag.<draft|unread|pinned|favorite>, .clear; a pick row's ItemStatus is "checked"). By
@@ -85,11 +87,12 @@ FUNNEL_ID = "am.side.funnel"
 """The header's filter button (the funnel, SIDE_PANEL.md §2l; a build of 2026-11-08 or later) by AutomationId."""
 FILTER_BOX_ID = "am.side.filter"
 """The filter box by AutomationId: since the filters (SIDE_PANEL.md §2l) its ItemStatus holds the old count line's words."""
-HEADER_ORDER = {"right": [FUNNEL_ID, "am.side.launch", "am.side.sum", MORE_ID],
-                "left": [MORE_ID, "am.side.sum", "am.side.launch", FUNNEL_ID]}
+HEADER_ORDER = {"right": ["am.side.launch", FUNNEL_ID, "am.side.sum", MORE_ID],
+                "left": [MORE_ID, "am.side.sum", FUNNEL_ID, "am.side.launch"]}
 """The header line's buttons LEFT TO RIGHT on screen, per dock side -> their AutomationIds: the line mirrors with the dock,
-⋯ always at the window's edge (the user's layout of 2026-11-04; header_buttons reads it), the funnel always the innermost
-(SIDE_PANEL.md §2l, 2026-11-08). A build before the filters shows the three-button line without FUNNEL_ID."""
+⋯ always at the window's edge (the user's layout of 2026-11-04; header_buttons reads it), '+' always the innermost and the
+funnel beside it (the user's swap of 2026-11-10, SIDE_PANEL.md §2l). A build of 2026-11-08 to 2026-11-10 has the funnel
+innermost ('⋯ Sum + ⏷'); a build before the filters shows the three-button line without FUNNEL_ID."""
 ORDER_TOKENS = {"MOST ACTIVE": "active", "MOST RECENT": "recent", "NEWEST": "newest", "OLDEST": "oldest", "A–Z": "alpha"}
 """The Card order submenu's words, top to bottom -> the settings.json `boardSort` token (its entry is am.side.sort.<token>)."""
 

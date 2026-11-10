@@ -877,8 +877,9 @@ namespace winrt::TerminalApp::implementation
         // panel without leaving the tab. The card is built on the FIRST click (_SidePanelEnsureLaunchCard) and kept for
         // the window's life; a window that never opens it pays nothing. Closed by a press outside it, Esc, "+" again,
         // a launch, a tab switch, a collapse and a dock flip. UI-thread-only, like every side panel member.
-        // The "+" header button (line 1: the innermost of the three buttons, beside "Sum" on the terminal's side — column 1
-        // docked right, left of "Sum"; column 2 docked left, right of it: the line mirrors, _SidePanelApplyHeaderOrder).
+        // The "+" header button (line 1: the innermost button, on the terminal's side of the funnel — the user's swap of
+        // 2026-11-10 — column 1 docked right, column 3 docked left: the line mirrors, _SidePanelApplyHeaderOrder). Its face
+        // is Segoe Fluent Icons' Add over an invisible "+" (SidePanelIconButtonFace), the funnel's face: one size for both.
         winrt::Windows::UI::Xaml::Controls::Button _sidePanelLaunchBtn{ nullptr };
         // The card's Popup, parented into Root() across its three rows (the tag editor's recipe), so its offsets are
         // Root-relative and it can sit anywhere in the window; null until the first click.
@@ -921,8 +922,8 @@ namespace winrt::TerminalApp::implementation
         // window's filters: the one record every surface reads and _SidePanelSetFilters alone writes. Persisted per window
         // only (WindowRecord::sidePanelFilters, seeded at the build, captured by _CaptureWindowRecord); never a global default.
         ::Agentmaster::SidePanelFilters _sidePanelFilters;
-        // The FUNNEL (header line 1: the innermost button, on the terminal's side of "+" — column 1 docked right, column 3
-        // docked left: the line mirrors, _SidePanelApplyHeaderOrder). A ToggleButton for its accent look alone: IsChecked is
+        // The FUNNEL (header line 1: between "+" and "Sum" since the user's swap of 2026-11-10 — column 2 in both docks: the
+        // line mirrors around it, _SidePanelApplyHeaderOrder; the "+" button's face). A ToggleButton for its accent look alone: IsChecked is
         // pinned to "a menu filter narrows the list" (_SidePanelUpdateFilterButton) — its own click's self-flip is undone.
         winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sidePanelFilterBtn{ nullptr };
         // The funnel's PANEL: a Root()-parented Popup holding a dark card (the "+" card's recipe), NOT a light-dismiss flyout

@@ -296,8 +296,8 @@ def test_collapse_and_dock(am, s1):
 
 def _assert_header_line(panel, side: str) -> None:
     """The header line for a dock side (SIDE_PANEL.md §2i, the user's layout of 2026-11-04; the funnel of §2l, 2026-11-08): exactly
-    the funnel, +, Sum and ⋯ above the filter box, HEADER_ORDER[side] from left to right — ⋯ leftmost docked left, rightmost
-    docked right, the funnel innermost — with ⋯ in
+    +, the funnel, Sum and ⋯ above the filter box, HEADER_ORDER[side] from left to right — ⋯ leftmost docked left, rightmost
+    docked right, + innermost with the funnel beside it (the user's swap of 2026-11-10) — with ⋯ in
     the panel's OUTER half, at the window's edge. Waits up to 5 s: a dock flip re-lays the line in the layout pass that
     moves the panel, and UI Automation can report the old positions for a moment.
 
