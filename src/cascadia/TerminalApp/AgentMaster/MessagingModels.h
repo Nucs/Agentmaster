@@ -4910,7 +4910,7 @@ namespace Agentmaster::Msg
     /// </remarks>
     enum class CardPage
     {
-        Main, // ⚙ Session (+ 🔄 Restart Session in Error / after an exit, or ▶ Reactivate for a parked tab); never ⎋ Esc (the Session page's alone)
+        Main, // ⚙ Session (+ 🖼️ while the cards carry pictures, §21.49; + 🔄 Restart Session in Error / after an exit, or ▶ Reactivate for a parked tab); never ⎋ Esc (the Session page's alone)
         Session, // ⑂ Fork · 🆕 New Session · 🔄 Restart Session (+ 🔧 Resume Session in Error) · the runner · Queue · Pin · Transcript · 🖥 Screen Text · 🖼 Screen Image · 📜 All Screen ▸ · ⎋ Esc · 🌙 Deactivate (while claude runs) · ◀ Back
         AllScreen, // §21.39: ⬜ File Diffs · ⬜ Last Turn (both unchecked) · one button per transcript level (Minimal · Compact · Default · Full · Max; the default level wears ⭐) · ◀ Back (to Session); a picked level takes the card back to Main
         AllScreenDiffs, // §21.39: the same picker with ☑️ File Diffs checked - its levels draw every file change as a diff, whatever the level
@@ -5151,6 +5151,13 @@ namespace Agentmaster::Msg
         bool turnInFlight{ false };
         bool takesEsc{ false }; // SessionTakesEsc: a Claude session whose claude reads keys - ⎋ Esc on the Session page
         bool deactivatable{ false }; // SessionIsDeactivatable: a started tab Agentmaster launched - 🌙 Deactivate on the Session page
+        // §21.49 (the user's request of 2026-11-10): 🖼️ right of ⚙️ Session on Main - the card's screenshot, taken only when it is
+        // tapped. A setting of the service, not a fact of the session (like allScreenLevel): CardButtonFactsFor leaves it false,
+        // and the service sets it while the cards can carry pictures at all (MessagingService::_cardMarkupFor). Even then
+        // BuildCardButtonRows leaves it off a card whose tab shows no screen to read (a parked tab in any state, a closed session:
+        // neither `deactivatable` nor `takesEsc`).
+        // ⚠ A member added to a struct every card-rendering unit shares: a build over older intermediates must purge.
+        bool pictureButton{ false };
     };
 
     /// <summary>Reads the card's button facts from a session: its pin, its runner's mode, whether its state has an action of its own (an error, an exit, a parked tab), and whether ⎋ Esc and 🌙 Deactivate apply (§21.41).</summary>
@@ -5189,6 +5196,20 @@ namespace Agentmaster::Msg
     inline constexpr std::wstring_view kCardVerbResume = L"resume";
     /// <summary>🖼 Screen Image: the topic's /screenimage (the terminal's screen as a picture).</summary>
     inline constexpr std::wstring_view kCardVerbScreenImage = L"screenimg";
+    /// <summary>
+    /// 🖼️ (§21.49, Main, right of ⚙️ Session; the user's request of 2026-11-10: "add a picture emoji button ... When user clicks
+    /// on that emoji, it updates the bottom pinned tab with a picture"): the sticky card's screenshot, ON DEMAND - the hosting
+    /// window reads the session's screen once, a changed screen is drawn on the worker, and the card's next edit carries it (an
+    /// unchanged screen reuses the photo Telegram holds, captioned with the moment it was read). Nothing else reads the screen for
+    /// the card (MessagingCardPicture.h). "c:cardpic:" with a 36-character id is 46 bytes of Telegram's 64.
+    /// </summary>
+    /// <remarks>
+    /// Not the Session page's 🖼 Screen Image (kCardVerbScreenImage): that one posts the screen as a photo message of its own in
+    /// the thread, and this one changes the picture the sticky card itself carries, posting nothing. Stable data like every card
+    /// verb: a tap acts on the card the button sits on as it is NOW (the service finds that card by its message, so a card a
+    /// /clear carried over to the tab's next session gets that session's screen).
+    /// </remarks>
+    inline constexpr std::wstring_view kCardVerbCardPicture = L"cardpic";
     /// <summary>
     /// ⎋ Esc (§21.41; Main while a turn is in flight, the Session page while claude runs): ONE Esc key into the session's terminal,
     /// pressed by the hosting window at once - no question, the button is the key (MessagingSessionControl.h). The tap's toast is
@@ -5345,9 +5366,12 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// The sticky card's buttons on one page, as rows of (label, callback data) - the service turns them into Telegram's
-    /// inline keyboard. MAIN is one row: ⚙ Session, and beside it 🔄 Restart Session for a session in Error or one whose claude
-    /// exited (the user's rule of 2026-10-19: Restart shows outside the Session page only then), or ▶ Reactivate for a parked
-    /// tab. SESSION holds ⑂ Fork · 🆕 New Session; 🔄 Restart Session, with 🔧 Resume Session beside it in Error (the user's
+    /// inline keyboard. MAIN starts with ⚙ Session; beside it 🖼️ while the cards carry pictures (§21.49, facts.pictureButton:
+    /// the card's screenshot, taken only when tapped - only where the tab shows a screen to read, never on a parked tab's card or
+    /// a closed session's); and the
+    /// state's own action - 🔄 Restart Session for a session in Error or one whose claude exited (the user's rule of 2026-10-19:
+    /// Restart shows outside the Session page only then), or ▶ Reactivate for a parked tab - beside the cog when the row has
+    /// room, else on a row of its own under it. SESSION holds ⑂ Fork · 🆕 New Session; 🔄 Restart Session, with 🔧 Resume Session beside it in Error (the user's
     /// "in case of error"); the runner · 📋 Queue; 📌 Pin · 📄 Transcript; 🖥 Screen Text · 🖼 Screen Image; 📜 All Screen ▸ alone
     /// (§21.39: the whole conversation as tall pictures - the user's request of 2026-10-25, a row of its own so the existing
     /// buttons keep their places); and ◀ Back. ALL SCREEN (§21.39, the requests of 2026-10-26 and 2026-10-29) is the level
@@ -5369,6 +5393,12 @@ namespace Agentmaster::Msg
     /// The §21.41 row sits LAST, above ◀ Back, so every button the Session page had keeps its row (the rule §21.39's All Screen
     /// row followed), and the two stopping buttons are the farthest from the ones tapped most - a stray tap on the page's top rows
     /// never parks a tab or stops a turn.
+    /// §21.49's 🖼️ is an emoji alone, right of the cog where the user placed it. Telegram gives every button of a row an equal
+    /// share (the Bot API has no width), so it takes half the row, not the 10-20% the user would have liked; a third button there
+    /// would cut "Restart Session" short, so in Error or after an exit 🔄 Restart Session moves to a row of its own under the two
+    /// (the cog and 🖼️ keep their places in every state). ⚠ The service adds or drops 🖼️ on EVERY card when the cog's switch
+    /// flips (and at the first start of a build that has it): a card whose only change is that button is re-edited by the slow
+    /// upgrade, one card at a time (MessagingService::_refreshCard), never in a burst.
     /// </remarks>
     /// <param name="sessionId">The card's session (it goes into every button's data).</param>
     /// <param name="facts">The facts the labels and the conditional buttons depend on (CardButtonFactsFor).</param>
@@ -5387,18 +5417,40 @@ namespace Agentmaster::Msg
             // The cog carries U+FE0F so every app draws it as the emoji (U+2699 alone may be drawn as a text glyph). It comes
             // first in every state, so it never moves under the user's thumb.
             std::vector<std::pair<std::wstring, std::wstring>> row{ { L"\x2699\xFE0F Session", CardCallbackData(kCardVerbSessionPage, sessionId) } };
+            // §21.49: 🖼️ right of the cog (the user's placement, 2026-11-10), the emoji alone - U+1F5BC + U+FE0F, so every app
+            // draws it as the emoji. Only where the tab shows a screen to read: a tab Agentmaster started (deactivatable) or an
+            // adopted claude in the user's own tab (takesEsc counts it; its `started` flag means nothing) - never a parked tab, in
+            // any state (its claude not started: ▶ Reactivate or 🔄 Restart Session starts it first, and keeps the place beside
+            // the cog it always had), nor a closed session.
+            const bool pictureOnMain = facts.pictureButton && (facts.deactivatable || facts.takesEsc);
+            if (pictureOnMain)
+            {
+                row.push_back({ L"\U0001F5BC\xFE0F", CardCallbackData(kCardVerbCardPicture, sessionId) });
+            }
+            // The state's own action: beside the cog when the row has room, else on a row of its own under it - three buttons in
+            // one row would cut "Restart Session" short on a phone (two a row at most, the rows' rule).
+            std::optional<std::pair<std::wstring, std::wstring>> action;
             if (restartOnMain)
             {
-                row.push_back({ L"\U0001F504 Restart Session", CardCallbackData(kCardVerbRestart, sessionId) });
+                action.emplace(L"\U0001F504 Restart Session", CardCallbackData(kCardVerbRestart, sessionId));
             }
             else if (reactivateParked)
             {
-                row.push_back({ L"\x25B6 Reactivate", CardCallbackData(L"reactivate", sessionId) });
+                action.emplace(L"\x25B6 Reactivate", CardCallbackData(L"reactivate", sessionId));
+            }
+            if (action && !pictureOnMain)
+            {
+                row.push_back(std::move(*action));
+                action.reset();
             }
             // §21.41: NO ⎋ Esc here, a turn in flight included — the user's rule of 2026-10-28, "The ESC button should be only
             // inside Sessions menu" (it sat right of the cog while a turn ran, where a tap meant for ⚙ Session could stop the
             // turn). Esc is the Session page's, in its stopping row above ◀ Back (below).
             rows.push_back(std::move(row));
+            if (action)
+            {
+                rows.push_back({ std::move(*action) });
+            }
             return rows;
         }
         if (const auto boxes = AllScreenBoxesOf(page))

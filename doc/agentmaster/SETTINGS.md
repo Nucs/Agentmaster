@@ -209,10 +209,11 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
 - `messagingAllScreenLevel` (`full`): 📜 All Screen's default transcript level (`minimal` / `compact` / `default` / `full` /
   `max`): what a bare `/allscreen` draws and the level the card's level picker marks with ⭐; an empty or unknown word reads
   as `full`. Applied live (MESSAGING.md §21.39).
-- `messagingCardScreenshots` (true): every session's sticky card carries a screenshot of its terminal, read again at each card
-  update (a changed screen is uploaded with the card's own edit, an unchanged one reused by `file_id`, a parked tab keeps its
-  last picture); off = text-only cards. Needs rich messages. Costs upload bandwidth (~0.1–0.6 MB a new picture; a running card
-  updates every ~20 s). Applied live (MESSAGING.md §21.42).
+- `messagingCardScreenshots` (true): every session's sticky card can carry a screenshot of its terminal, taken ONLY when its 🖼️
+  (Main, beside ⚙️ Session) is tapped — a changed screen uploaded with the card's next edit, an unchanged one reused by
+  `file_id` — and kept, carried by every later post and edit by `file_id`, until the next tap; off = text-only cards and no 🖼️.
+  Needs rich messages. Costs one upload (~0.1–0.6 MB) per tap on a changed screen. Applied live; a flip adds or drops 🖼️ on every
+  card one card at a time (the slow upgrade's slot). MESSAGING.md §21.42, §21.49.
 - File links: `messagingFileLinksMode` (`off` / home network / through the hosted address),
   `messagingFileLinkStation`, `messagingFileLinkPort`, `messagingFileLinkLanBase`,
   `messagingFileLinkHostedBase` (the user's own public address; empty = `https://example.com`, a placeholder that reaches

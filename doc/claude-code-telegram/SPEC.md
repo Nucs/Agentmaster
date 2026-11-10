@@ -71,7 +71,7 @@ Claude's final reply — rich Markdown (tables render), quoting the prompt it an
 │ /source/project · main · opus-5-5 · max · 182K                     │
 │ ✎ unsent at the PC: "and then rebase onto…"                        │
 │ [screenshot of the terminal]   🖥 the screen at 14:05:12           │
-│ [⚙️ Session]                                                        │
+│ [⚙️ Session] [🖼️]   (🖼️: take the screen now, §17.2)                 │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -462,7 +462,7 @@ Every default reproduces the behavior of a settings file that lacks the field.
 | `messagingSearchThinking` | high | The Search agent's thinking level (low · medium · high · xhigh · max). |
 | `messagingRichMessages` | on | Claude's Markdown as rich messages, title chips, the card's picture. Off = classic HTML everywhere (for apps too old for rich messages). |
 | `messagingVerbose` | off | The default topic mode: verbose (the work too) or the conversation only (§9.1). |
-| `messagingCardScreenshots` | on | The card carries the terminal's screenshot (needs rich messages). |
+| `messagingCardScreenshots` | on | The card can carry the terminal's screenshot, taken when its 🖼️ is tapped (needs rich messages). Off = text-only cards, no 🖼️. |
 | `messagingAllScreenLevel` | full | The default level of 📜 All Screen (minimal · compact · default · full · max; an unknown word reads full). |
 | `messagingFileLinksMode` | off | `off` · `lan` · `hosted` (§20). |
 | `messagingFileLinkStation` / `Port` / `LanBase` / `HostedBase` / `Exclude` | per install | §20.4. |
@@ -1043,7 +1043,7 @@ Two buttons a row at most (a phone shows every label whole).
 
 | Page | Rows |
 |---|---|
-| **Main** (every card's default) | `[⚙️ Session]`, plus `[🔄 Restart Session]` for a session in Error or one whose claude exited, or `[▶ Reactivate]` for a parked tab; alone otherwise (running, waiting, idle, needs approval, closed). The cog never moves under the thumb. |
+| **Main** (every card's default) | `[⚙️ Session]`, then `[🖼️]` (the card's screenshot, taken only when tapped, §17.2) while the cards carry pictures and the tab shows a screen (a tab the host started, or an adopted claude — never a parked tab or a closed session); the state's action — `[🔄 Restart Session]` for a session in Error or one whose claude exited, `[▶ Reactivate]` for a parked tab — beside the cog when the row has room, else on a row of its own under it. The cog alone otherwise. The cog and 🖼️ never move under the thumb. |
 | **Session** | `[⑂ Fork] [🆕 New Session]` · `[🔄 Restart Session]` (with `[🔧 Resume Session]` beside it in Error) · `[⏸ Pause runner]` or `[▶ Runner auto]` `[📋 Queue]` · `[📌 Pin]` or `[Unpin]` `[📄 Transcript]` · `[🖥 Screen Text] [🖼 Screen Image]` · `[📜 All Screen ▸]` · `[⎋ Esc] [🌙 Deactivate]` (while the session's claude runs: Esc only for a Claude session whose claude reads keys — not an exited one; Deactivate only for a started tab the host launched — not an adopted shell; no row for a parked tab or a closed session) · `[◀ Back]` |
 | **All Screen** (four variants, §17.3) | `[⬜ File Diffs · the level's default]` / `[☑️ File Diffs · at every level]` · `[⬜ Last Turn · the whole conversation]` / `[☑️ Last Turn · the newest turn only]` · one row each: `[📜 Minimal · prompts & replies]` `[📜 Compact · + call reasons & answers]` `[📜 Default · + every tool call]` `[⭐ Full · + commands & output]` `[📜 Max · + written files]` (⭐ marks the default level) · `[◀ Back]` (to the Session page) |
 
@@ -1064,7 +1064,8 @@ in the result). A card whose text is unchanged but whose form is not the wanted 
 existed, or after the rich switch flipped) is re-edited only through a slow slot: one card per **10 s** across all topics,
 none for 5 min after a 429 or while `editMessageText` is parked, only while the last minute's calls leave room under 18. A
 card whose text changes is edited in the wanted form at once (the upgrade rides the ordinary traffic too). A rich form
-Telegram refused is not tried again for the same text.
+Telegram refused is not tried again for the same text. The same slot carries a card whose ONLY change is the 🖼️ button (§17.2):
+the button joins or leaves every card's keyboard at once when its switch flips, and the slot spreads those edits out.
 
 ### 10.6 The screenshot
 
@@ -1318,6 +1319,7 @@ work runs:
 | Button | Its answer goes when |
 |---|---|
 | ⚙️ Session, ◀ Back | the card's new keyboard is in |
+| 🖼️ (the card's picture) | the card's edit that carries the new picture is in (or the toast says why there is none) |
 | 🖥 Screen Text · 🖼 Screen Image | the text · the picture (or the line saying why there is none) is in the topic |
 | ⑂ Fork · 🆕 New Session | "Opened …" (or the refusal) is in the thread |
 | 🔄 Restart · ▶ Reactivate · 🔧 Resume | the card shows the restarted / started session |
@@ -2106,54 +2108,45 @@ No link opens a bot-chat topic on Android, so the phone's way in is to make the 
   new (a double tap must not draw and send two photos); a session with no tab: "This session is not open in a tab, so it has no
   screen to show." `/screen` is the visible TEXT of the same screen.
 
-### 17.2 The card's screenshot
+### 17.2 The card's screenshot: taken when 🖼️ is tapped
 
 The rich card's LAST block is the terminal's screen: `<figure><img src="tg://photo?id=screen"/><figcaption>🖥 the screen at
-19:50:12</figcaption></figure>` (seconds: a running card takes a new picture every ~20 s).
+19:50:12</figcaption></figure>`. The screen is read ONLY when the user taps the card's **🖼️** (Main, right of ⚙️ Session, §10.4)
+— never by itself. (The reference read it at every change of the card's text and looked again after state changes; at a few
+hundred topics that meant a card edit with a NEW upload every few seconds, and the chat met a 429 asking for 21,890 s — six hours
+with every method parked — after 2.5 hours of 58–166 calls per 10 minutes, under the ~18-a-minute pace. Taken on demand, a
+picture costs one upload per tap.)
 
-- **A card UPDATE** (its classic TEXT changed: a state, the since-clock, a running turn's context size, the runner, the queue,
-  the draft, the recap): the hosting window reads the screen (§17.1's snapshot, ~0.5 ms); a screen that CHANGED since the card's
-  last picture (by its hash) is drawn on the ONE drawing worker (a queue; a job a newer update overtook is not drawn) and
-  uploaded IN THE SAME CALL as the card's edit or post (a multipart `editMessageText` / `sendRichMessage` with `attach://screen`):
-  the picture costs no call of its own, and the number of card edits is what it was. An unchanged screen reuses the photo
-  Telegram holds by its `file_id` (no upload), captioned with the moment it was read again.
-- **Not an update** (a page flip, a form upgrade): the card keeps its picture with no read and no drawing — a page flip stays
-  instant (the picture's text hash is the classic text WITHOUT the buttons).
-- **No screen** (a parked tab, a window that is not up): the card keeps its last picture, captioned with ITS moment; a card that
-  never had one goes as text. Every POST of the card (first, re-post, ring, re-sort) reads the screen; the card is marked in
-  flight at once so no second post starts while the screen is read and drawn.
-- **Order**: each picture-carrying post or edit stamps a generation; an EDIT that a newer post or edit of the same card overtook is
-  dropped when its picture settles (finishing last, it would put older text back). The card's send runs EXACTLY ONCE whatever
-  settles the picture (the window's answer, the worker, a guard for a read no window answered, a failure), and a card change is
-  never lost to its picture.
-- **A card never waits more than 4 s for its picture**: a FROZEN window would otherwise stop its cards exactly when the phone
-  is needed most; past the bound the card goes with the picture it shows, and a late picture is dropped.
+- **A tap**: the card the button sits on (found by its message: a card a `/clear` carried to the tab's next session gets that
+  session's screen). Refused at once with a toast that says why — a closed session, pictures off, pictures stopped for the run
+  (below), classic cards, a parked tab (no screen until it starts), no card, or a read for this card still running (one at a
+  time per card, **60 s** at most: the belt for a send that is never answered). Otherwise the hosting window reads the screen
+  once (§17.1's snapshot, ~0.5 ms): a screen that CHANGED since the card's picture (by its hash) is drawn on the ONE drawing
+  worker (a queue); an unchanged one reuses the photo Telegram holds by its `file_id`, captioned with the moment it was read
+  again; a BLANK screen (only empty rows: a claude still starting) is never drawn, and neither is no screen (a terminal not up)
+  — the toast says to tap again in a moment. The read waits at most **30 s** for the window — longer than the tap's 9 s hold
+  (§21): a busy window can answer 5–9 s late, and the picture still lands after the tap's "still working" answer.
+- **Delivery**: the picture waits on the card; the tap's hold moves to the card, and the next refresh (at once) makes a
+  PICTURE-ONLY edit — the card's same text and buttons with the new picture — at the answers' priority, without moving the card's
+  20 s edit gap. The new picture is uploaded IN THAT CALL (a multipart `editMessageText` with `attach://screen`): no call of its
+  own. A post or edit decided meanwhile carries it too. The button spins until Telegram answered that edit; its answer records the
+  photo's `file_id`, its moment and its screen's hash, and ends the wait. A refused or failed picture is dropped with a toast — it
+  is never sent again by itself — and a card the user deleted keeps it waiting for the card posted in its place.
+- **Every other post and edit** (a status update, a page flip, a re-post, a form upgrade) carries the picture the card HAS — the
+  tap's until it is delivered, else the held photo by its `file_id` with its own moment — and reads nothing: a rich edit without
+  the picture would drop the photo. A card that never had a picture goes as text until the first tap.
+- **The button on every card**: 🖼️ joins or leaves EVERY card's keyboard when the switch (or rich messages) flips, and at the
+  first start of a version that has it — and a card's hash covers its buttons. A card whose ONLY change is that button MUST go
+  through the slow form upgrade's slot (§10.5: one card per 10 s across all topics, within the budget), never at the edit gap: a
+  chat of a few hundred cards would otherwise be edited within a minute. The run's refusal stop (below) does NOT take the button
+  away (it flips by itself, and back at the next start); a tap then says why nothing happens.
 - **Refusals**: a post or edit WITH its picture that Telegram refuses is sent once more WITHOUT it in the next slot of the same
   outbox sequence (no key — a fresh slot could land after a newer edit), and only that retry's refusal falls back to classic.
   Three refusals in a row stop the pictures for the run.
 - **Kept across a restart**: the photo's `file_id`, its moment and its screen's hash (progress), so a tab restored parked keeps
   its picture.
-- **The picture follows the status: LOOKS** (SHOULD; the newest refinement of the reference). One read at the moment of a change
-  can miss — the window answers after the 4 s bound (a busy UI thread), the read comes before Claude Code has drawn the new state
-  (a turn ends, and its idle prompt is drawn, only once its Stop hooks have exited, while the bridge learns of the Stop at once),
-  or a page flip overtakes the read — and a card at rest is never edited again (its text names clock times), so it would keep the
-  old picture for good. So every picture step records how it settled (fresh · no screen · kept · stale) and the card LOOKS at its
-  screen again when one is owed:
-  - a **settle look** 3 s after every post or edit that shows a new state AT REST (anything but Running; a change into Running
-    cancels it — a running card reads its screen at every edit anyway);
-  - a **retry** 5 s after a step that got no screen in time, then 10, 20, 40, 60 s (each look waits up to 30 s for the window; no
-    text waits for it), giving up after 8 looks in a row until the card's next status update;
-  - a **page flip's look** 3 s after a flip that overtook a read, or that carries an OLDER picture than the one handed before.
-
-  A look runs only while the card shows its current text and buttons, while no post or edit of the card waits for its picture,
-  and one at a time. It compares the screen with the picture the card's newest post or edit CARRIED (maybe still in the outbox):
-  the same → nothing is sent; changed → drawn (or the held photo reused) and the card edited with its same text and buttons and
-  the new picture, at the cards' priority, without moving the 20 s edit gap or the hashes. A post or edit decided while a look
-  runs wins (the look is dropped). Every picture step's generation number is unique across the run (a rebound or recreated
-  topic's card must never match an old step by chance). Cost: one more screen read per change into a state at rest, and one more
-  edit with its upload only where the screen changed in those 3 s or a read came late.
-- The switch: `messagingCardScreenshots` (on). A classic card has no picture. Cost: upload bandwidth, not calls — ~0.1–0.6 MB
-  per new picture, roughly 100–250 MB an hour with several sessions running.
+- The switch: `messagingCardScreenshots` (on). A classic card has no picture. Cost: one upload (~0.1–0.6 MB) and one edit per tap
+  that finds a changed screen; one edit (no upload) per tap on an unchanged screen; nothing else.
 
 ### 17.3 📜 All Screen: the whole conversation as tall pictures
 
@@ -2554,7 +2547,7 @@ card form upgrades (room for one), the directory. Live traffic never checks it: 
 ### 21.7 The traffic census
 
 Every 10 minutes one log line: calls per method, 429s, edits by kind (`card`, `prompt`, `worklog`, `directory`, `other`), and the
-card pictures (`drawn`, `kept`, `none`, `reused`, `skipped`, KB drawn). It is where the chat's real call rate is read. Expected:
+card pictures (the taps' `tapped`, `drawn`, `reused`, `noscreen`, `blank`, `late`, `skipped`; the sends' `carried`, `kept`, `none`; KB drawn). It is where the chat's real call rate is read. Expected:
 a quiet fleet makes a handful of calls per 10 minutes; a replay at its cap ~180 per 10 minutes; a mass creation of 413 topics ran
 at ~45 calls a minute without a 429.
 
@@ -2840,7 +2833,7 @@ All ≤ 64 bytes; every parser refuses anything that does not match exactly.
 
 | Data | Meaning |
 |---|---|
-| `c:<verb>:<session id>` | the card. Verbs: `panel` (⚙️ Session), `main` (◀ Back), `runner`, `queue`, `pin` (toggles), `transcript`, `screen`, `screenimg`, `sendnow`, `reactivate`, `resume`, `fork`, `newsession`, `restart`, `esc`, `deactivate`, `allscreen` (the picker), `allscreen+d` · `allscreen+l` · `allscreen+dl` (the picker with its boxes), `allscreen-<level>[+d\|+l\|+dl]` (draw). Longest 59 bytes. Older verbs stay understood until a card's next edit. |
+| `c:<verb>:<session id>` | the card. Verbs: `panel` (⚙️ Session), `main` (◀ Back), `cardpic` (🖼️: the card's picture, §17.2), `runner`, `queue`, `pin` (toggles), `transcript`, `screen`, `screenimg`, `sendnow`, `reactivate`, `resume`, `fork`, `newsession`, `restart`, `esc`, `deactivate`, `allscreen` (the picker), `allscreen+d` · `allscreen+l` · `allscreen+dl` (the picker with its boxes), `allscreen-<level>[+d\|+l\|+dl]` (draw). Longest 59 bytes. Older verbs stay understood until a card's next edit. |
 | `p:<n>:<session id>` | a Search answer's pick (`n` 1–2 digits; the id 8–40 hex digits and dashes) |
 | `s:clear` | Search's ⊘ Clear |
 | `d:front:<thread>` | a directory dot (1–18 digits) |
@@ -2915,6 +2908,7 @@ All ≤ 64 bytes; every parser refuses anything that does not match exactly.
 > level, full unless set; diffs: every file change as a diff; last: the last turn only)
 > /activate · /restartsession · /deactivate · /interrupt
 > On ⚙️ Session's page the card has ⎋ Esc (one Esc at once, as at the PC) and 🌙 Deactivate (claude stops, the tab keeps its place)
+> The card's 🖼️ (beside ⚙️ Session) puts the terminal's screen on the card as it is now; the card takes no picture by itself
 > /forksession [model] · /newsession [model]
 > /takedraft — queue the unsent draft at the PC
 > /cc /x — force /x through to Claude Code

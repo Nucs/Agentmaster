@@ -1300,7 +1300,7 @@ namespace winrt::TerminalApp::implementation
         // §21.42: the card's screenshot. Under the rich switch because it needs it: the picture is a block of the rich card.
         _setMsgCardScreens = ToggleSwitch{};
         _setMsgCardScreens.Header(winrt::box_value(L"Show the screen in each session's card"));
-        AgentSetTip(_setMsgCardScreens, L"On (the default): every session's status card in Telegram carries a picture of its terminal, taken again at each card update \x2014 a running session's card updates about every 20 s. A screen that changed is uploaded with the card's own edit (no extra message); an unchanged one reuses the picture Telegram already has; a parked tab keeps its last picture. The cost is upload bandwidth: about half a megabyte per new picture. Needs rich messages (above). Off: text-only cards. Applies at once.");
+        AgentSetTip(_setMsgCardScreens, L"On (the default): every session's status card in Telegram has a \U0001F5BC\xFE0F button beside \x2699\xFE0F Session. A tap puts a picture of the terminal, as it is now, on the card: a screen that changed is uploaded with the card's next edit (no extra message), an unchanged one reuses the picture Telegram already has. The picture stays until the next tap; the card never takes one by itself. About half a megabyte per new picture. Needs rich messages (above). Off: text-only cards, no \U0001F5BC\xFE0F. Applies at once.");
         panel.Children().Append(_setMsgCardScreens);
         // §21.39: 📜 All Screen's default level. One item per Msg::kAllScreenLevels entry, in its order, so an item's index is the
         // table's row on load and on Save; the built-in default (Full) says so, as the other boxes' placeholders do.

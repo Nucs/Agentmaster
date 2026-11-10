@@ -6476,7 +6476,13 @@ fail. `cl /Zs` of all 111 TerminalAppLib units over a shadow tree passes. No dat
    no row.
 8. `/interrupt` and `/deactivate` typed: the same outcomes, as lines in the thread.
 
-### 21.42 The card carries the screen: a fresh screenshot at every card update (2026-10-27; in dev since 0.0.1.38, in production since 0.8.0.1; the picture follows the status - the card's looks - and the tab's start - the launch watch - 2026-11-01, NOT BUILT)
+### 21.42 The card carries the screen: a fresh screenshot at every card update (2026-10-27; in dev since 0.0.1.38, in production since 0.8.0.1; the picture follows the status - the card's looks - and the tab's start - the launch watch - 2026-11-01, in both installs since ad89700e3; the automatic reads REPLACED by §21.49's 🖼️ on 2026-11-10, NOT BUILT)
+
+> **Since §21.49 (2026-11-10) the screen is read ONLY when the card's 🖼️ is tapped.** Every other post and edit carries the
+> picture the card has, by its `file_id`. Of this section, "When a picture is taken", "The picture follows the status", "The tab's
+> start", the 4 s bound in "Order and races" and the census kinds describe the automatic reads that §21.49 removed. What Telegram
+> allows, the block and its caption, the media list, the refusals, the record across a restart, the switch and the "Not changed,
+> still open" list still hold.
 
 > The user's request (2026-10-27): "the running since messgae, called also i think status message that is pinned to the
 > bottom - whenever it updates, have it produce a screenshot (if possible) and have it shown and so every update we produce a
@@ -7420,6 +7426,129 @@ view: “🆕 New session”` (or `for words written in …`), `[nav] remote tel
 N was opened with /newsession: renamed “🆕 New session” until the session's title replaces it`; `[nav] … /newsession ->
 already launching`; `[msg] new thread N aborted (its only message was /help, answered in the main view): the thread is deleted`;
 `[nav] remote telegram /help (main view) -> help`.
+
+### 21.49 The card's 🖼️: the screenshot is taken only when it is tapped (2026-11-10; NOT BUILT — the next build must purge: `MessagingModels.h`'s `CardButtonFacts` and `Messaging.h`'s `CardState` changed)
+
+> The user's request (2026-11-10), on the flakiness study's row "Card screenshots time out": "I think we abuse sending
+> screenshots. to the right of Session button, add a picture emoji button that takes jsut 10%-20% (fit the emoji) of the row and
+> not all the row its sharing with session. When user clicks on that emoji, it updates the bottom pinned tab with a picture like
+> we do now automatically".
+
+#### 21.49.1 What was wrong (production, the flakiness study of 2026-11-10)
+
+- **The 6-hour flood hold.** A 429 asking for 21,890 s parked every method: the bot silent, its buttons unanswerable. The 2.5
+  hours before it carried 58–166 calls per 10 minutes, nearly all sticky-card edits, each uploading a NEW picture (`drawn=43–128`
+  per 10 minutes, 10–28 MB). That is under the ~18 calls a minute the outbox keeps (§21.9), so card edits with uploads meet a
+  limit of their own.
+- **~35,000 screen reads the windows did not answer in time** — `card picture not ready within 4 s` (a post or edit) and `card
+  picture look not answered within 30 s` (a look) — across hundreds of sessions, worst in the minutes after each restart; each
+  one a dispatcher item on a busy UI thread.
+- Why so many: §21.42 read the screen at every change of a card's text (a running card at every 20 s edit), and since 2026-11-01
+  looked again 3 s after every change into a state at rest, with a backoff after each late read, and every 1.5 s during a tab's
+  start.
+
+#### 21.49.2 The decision (the user's, 2026-11-10)
+
+- **Where: in the card's keyboard, right of ⚙️ Session** (option A of three mockups). Telegram splits a keyboard row EQUALLY —
+  the Bot API (10.3) has no width — so 🖼️ takes half the row, not the 10–20% asked for. The other two mockups kept ⚙️ Session's
+  full width but put the button elsewhere: an in-text button at the end of the card's first line, or the rich message's own
+  button row at the card's bottom right (new in Bot API 10.3, its look unverified).
+- **After a tap: keep it.** The picture stays on the card until the next tap; every later post and edit reuses it by its
+  `file_id` (no upload), and its caption keeps the moment it was taken. **No screenshot is ever taken automatically.**
+
+#### 21.49.3 How it works
+
+- **The button** (`BuildCardButtonRows`, `CardButtonFacts::pictureButton`, `kCardVerbCardPicture` = `c:cardpic:<id>`, 46 bytes):
+  Main's first row is `[⚙️ Session][🖼️]` — the emoji alone, U+1F5BC + U+FE0F. In Error or after an exit, 🔄 Restart Session moves
+  to a row of its own under them: three buttons in one row would cut its label short. Never on a card whose tab shows no screen —
+  a parked tab in any state (its row stays `[⚙️ Session][▶ Reactivate]` or `[⚙️ Session][🔄 Restart Session]`) or a closed session:
+  the rule is `deactivatable || takesEsc` (a tab Agentmaster started, or an adopted claude). The service shows it while
+  `_cardPictureButtonWanted()`: the cog's switch, rich cards, a window that can read screens — NOT the run's refusal stop
+  (§21.42's three refusals), which flips by itself and back at the next start and would re-edit the whole chat twice; a tap then
+  says why nothing happens. ⚠ Not the Session page's 🖼 Screen Image, which posts the screen as a photo message of its own.
+- **The tap** (`_handleCallback` → `_cardPictureFromTap`): the card the button sits on is found by its message, as a page flip
+  finds it (a `/clear` carried it to the tab's next session: that one's screen). Refused at once, the toast saying why
+  (`CardPictureTapRefusal`): a closed session, pictures off, pictures stopped for the run, classic cards, no window hooks, a
+  parked tab, no card, or BUSY — a tap's read, drawing or delivery for this card still runs (`CardState::tapPictureSinceTickMs`;
+  `kCardPictureTapBusyMs`, 60 s at most, the belt for a send never answered). Otherwise the hosting window reads the screen once
+  (`_withCardPicture`, §21.42's read: `screen-snapshot`, `PlanCardPicture`): a changed screen is drawn on the worker; an unchanged
+  one reuses the card's photo, captioned now; a blank screen (a claude still starting) or none (a terminal not up yet) brings no
+  picture and a toast; no answer within `kCardPictureTapWaitMs` (30 s, longer than the tap's 9 s hold on purpose: a busy window
+  answered 5–9 s late on 2026-11-01, and the picture still lands after the tap's "still working" answer) is `Stale`.
+- **Delivery.** The picture becomes `CardState::tapPicture`; the tap's hold moves to the card (`_awaitCardChange`) and the tick
+  runs at once. `_refreshCard` then makes a PICTURE-ONLY edit — the card's same text and buttons with the new picture — at an
+  answer's priority, without moving the card's 20 s edit gap; a post or edit decided meanwhile carries the picture too
+  (`CardState::tapPictureQueued` keeps a second picture-only edit out). The tapped button spins until that edit is answered
+  (§21.28). Telegram's answer records the photo (`_noteCardPictureShown`), and `_settleTapPicture` ends the wait — or, when
+  Telegram refused the picture or the call failed, drops it with a toast (`CardPictureDeliveryText`): a failed picture is never
+  sent again by itself. A card the user deleted keeps the picture waiting: the card posted in its place carries it.
+- **Every other post and edit** carries the picture the card has (`CardPictureToCarry`: the tap's picture until it is
+  delivered, else the held photo by its `file_id`, captioned with its own moment) — a rich edit without it would drop the photo
+  (§21.42's probe) — and reads nothing. A card that never had a picture goes as text until the first tap.
+- **The rollout.** At the first start of a build with the button, and whenever the cog's switch (or the rich switch) flips, 🖼️
+  joins or leaves EVERY card's Main keyboard, and a card's hash covers its buttons: edited at the 20 s gap, a chat of a few
+  hundred cards would be re-edited within a minute — the very burst that earned the flood holds. A card whose ONLY change is that
+  button (its twin with the other value of `pictureButton` is what the topic shows) goes through the slow form upgrade's slot
+  instead (`_takeCardFormatSlot(…, pictureButton = true)`: one card per 10 s across all topics, within the call budget — dev's ~50
+  cards in ~8 minutes, production's ~500 in ~1.5 hours); a card with any other change (its text, its page, a state, a tap waiting)
+  brings the button along in its own edit.
+- **Removed** — §21.42's automatic reads and their machinery (the reads of 2026-10-27 and the looks and launch watch of
+  2026-11-01, commits `35426a13d` and `60cf43c87`, in both installs today, ad89700e3): every post and edit's screen read and its 4 s
+  bound (`kCardPictureWaitMs`), the looks (`CardPictureTrack`, the settle look, the backoff, the give-up, `_lookAtCardPicture`),
+  the launch watch (`kCardPictureLaunch*`, `_logCardLaunchWatch*`), the reads `Kept` / `Unchanged` / `Moving`, `PlanCardPicture`'s
+  look basis and their tests. They are in git at `6d14f793c`, this change's parent.
+
+#### 21.49.4 The cost now
+
+Per tap on a changed screen: one screen read (0.3–0.6 ms on the window's UI thread), one drawing on the worker (~90–185 ms)
+and one edit with its upload (~0.1–0.6 MB); per tap on an unchanged screen: one edit reusing the photo. Nothing else — no read,
+no upload, no extra edit. The census line: `pictures(tapped=N drawn=N reused=N noscreen=N blank=N late=N skipped=N carried=N
+kept=N none=N, K KB drawn)` (a kind with no count is left out; `carried` the sends that delivered a tap's picture, `kept` the
+ones that carried the card's photo by `file_id`).
+
+#### 21.49.5 Logs
+
+`[nav] remote telegram cardpic <sid8> -> reading | drawn (the card's next edit carries it) | reused (…) | noscreen | blank |
+stale | dropped (the card moved on) | closed | pictures-off | pictures-stopped | classic-cards | unavailable | parked | no-card |
+busy`; `[msg] <sid8> card picture of a tap not ready within 30 s (…): no picture this time, the card keeps the one it shows`;
+`[msg] <sid8> card picture of a tap was not delivered (…); the next tap tries again`; `[msg] <sid8> card re-edited for its picture
+button (its buttons only; …)`. §21.42's drawing and refusal lines stay.
+
+#### 21.49.6 The code, the tests, what was checked
+
+- **Code.** `MessagingCardPicture.h` (the pure half: `CardPictureToCarry`, `kCardPictureTapWaitMs`, `kCardPictureTapBusyMs`,
+  `CardPictureTapBusy`, `CardPictureTapRefusal` with its text and log word, `CardPictureTapReadText`, `CardPictureReadWord`,
+  `CardPictureDeliveryText`; the looks' rules removed); `MessagingModels.h` (`kCardVerbCardPicture`, `CardButtonFacts::pictureButton`,
+  Main's rows); `Messaging.h` / `Messaging.cpp` (`CardState`'s tap fields, `_cardPictureButtonWanted`, `_cardPictureFromTap`,
+  `_settleTapPicture`, `_withCardPicture` for a tap only, `_refreshCard`'s carry, picture-only edit and 🖼️-only slow upgrade,
+  `_takeCardFormatSlot`'s `pictureButton`, `_cardMarkupFor`'s override, `_postCard`'s answer, the census); `Messaging.Inbound.cpp`
+  (the verb, the topic's `/help` line); the cog's tooltip (`AgentManagerContent.Settings.cpp`).
+- **Tests** (`TestMessagingCard`, `tests_messaging_card.cpp`): section 1 pins the button — Main with and without it; Error and an
+  exit with 🔄 Restart Session on its own row; never on a parked tab, a parked tab in Error or a closed session; an adopted claude
+  has it; not on the Session page; its data's 46 bytes; two buttons a row and 64 bytes on every page with and without it. Section
+  1d keeps §21.42's checks that still hold and adds the carry, the tap's two bounds, every toast (refusals, reads, deliveries) and
+  the log words.
+- **Checked** (2026-11-10, HEAD 82a626ecf + this change, isolated copies on Q: with their own profile — peer sessions were
+  committing beside it): the m5 suite 12,534 checks, only the 3 known `TestTaskbarBadge` failures; `cl /Zs`
+  with TerminalAppLib's recorded flags (the clean Release worktree's PCH, ad89700e3) on the eleven units that include the changed
+  headers — `Messaging.cpp`, `Messaging.Inbound.cpp`, `.Files`, `.Menus`, `.Questions`, `.Status`, `.Voice`, `Engine.cpp`,
+  `AgentManagerContent.Settings.cpp`, `TerminalPage.AgentEngine.cpp`, `MessagingSearchBridge.cpp`: all pass; two negative
+  controls fail exactly at their lines (C2039 inside `_cardPictureFromTap`, C2338 beside the verb's dispatch). The CLI compiles no
+  messaging unit. NOT BUILT; nothing tried live.
+
+**Check after the build** (the dev bot; watch `hooks.log` and the census):
+1. Within minutes of the start every card's Main shows `[⚙️ Session][🖼️]`, one card per ~10 s (`card re-edited for its picture
+   button`), with no burst of edits in the census; a parked tab's card still shows `[⚙️ Session][▶ Reactivate]`.
+2. A running session: the card's text updates every ~20 s as before, its picture does NOT change; no `drawn` in the census
+   without a tap.
+3. 🖼️ on a waiting session's card: the button spins, then the card shows the screen captioned with the tap's time; 🖼️ again with
+   nothing changed on screen → the same photo with a new caption time and no upload (`reused`).
+4. 🖼️ twice quickly → the second: "Taking the screen already …".
+5. A session in Error: `[⚙️ Session][🖼️]` over `[🔄 Restart Session]`.
+6. A new message in the topic: the card re-posts below it WITH its picture (by `file_id`).
+7. The cog's switch off: 🖼️ leaves the cards one at a time and each picture goes with its card's next edit; on again: 🖼️ comes
+   back the same way.
+8. 🖼️ right after ▶ Reactivate, while claude is starting → "Claude is still starting …"; again a few seconds later → the screen.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

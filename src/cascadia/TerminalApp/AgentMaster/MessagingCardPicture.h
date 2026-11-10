@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Agentmaster — the sticky card's SCREENSHOT (MESSAGING.md §21.42). The user's request (2026-10-27): "the running since
-// message, called also i think status message that is pinned to the bottom - whenever it updates, have it produce a
-// screenshot (if possible) and have it shown and so every update we produce a screenshot to show in the status message".
+// Agentmaster — the sticky card's SCREENSHOT (MESSAGING.md §21.42), taken only when the card's 🖼️ is tapped (§21.49). The
+// user's request (2026-10-27): "the running since message, called also i think status message that is pinned to the
+// bottom - whenever it updates, have it produce a screenshot (if possible) and have it shown and so every update we produce a
+// screenshot to show in the status message".
 //
 // The card stays what it is - a RICH message (its title a chip, its buttons below) - and carries the session's terminal as
 // its last block: <figure><img src="tg://photo?id=screen"/><figcaption>🖥 the screen at 19:50:12</figcaption></figure>, the
@@ -14,28 +15,26 @@
 // upload; a text-only rich edit dropped the photo and a later edit by file_id put it back; an identical edit answered
 // "message is not modified"; a re-post by file_id needed no upload either.
 //
-// So a card UPDATE (its text changed: a status, the since-clock, the context size of a running turn, the runner, the
-// draft) reads the hosting window's screen (the 🖼 Screen Image snapshot) in the same moment; a screen that changed since the
-// card's last picture is drawn and uploaded IN THE SAME CALL as the text (no extra call on the chat's ~20-a-minute budget);
-// an unchanged screen reuses the picture Telegram already holds by its file_id (no upload). A change that is not an update -
-// a page flip of the buttons, the slow form upgrade - keeps the current picture without reading the screen (a page flip
-// must stay instant). A screen that cannot be read (a parked tab, no window hosts the tab) keeps the last picture, captioned
-// with the moment it was taken; a card that never had one goes without.
+// WHEN the screen is read changed with §21.49. Until then every update of the card's text read the hosting window's screen
+// (a changed one drawn and uploaded in the card's own edit or post), and since 2026-11-01 the card also LOOKED at its screen
+// again - 3 s after a change into a state at rest, with a backoff after a read that came too late, and every 1.5 s while a
+// starting tab's claude drew (the launch watch). Production paid for it: the 6-hour flood hold the owner's chat sat in (a 429
+// asking for 21,890 s, every method parked) came after 2.5 hours of 58-166 calls per 10 minutes, nearly all card edits
+// uploading a new picture (43-128 drawn per 10 minutes), and the windows left ~35,000 screen reads unanswered within the
+// 4 s and 30 s bounds, worst right after the restarts. The user's call (2026-11-10): "I think we abuse sending screenshots.
+// to the right of Session button, add a picture emoji button [...] When user clicks on that emoji, it updates the bottom pinned
+// tab with a picture like we do now automatically" - and the picture stays until the next tap.
 //
-// The picture FOLLOWS THE STATUS (the user's report of 2026-11-01: "When status changes, we update the message but I think we
-// don't update the image - we should"). One read at the moment of a status update can miss: the hosting window answered too
-// late (production, 2026-11-01 12:03: the Agent Manager page's 3-4 s rebuilds held a card's read 5-9 s, past the 4 s bound, so
-// the card went with its old picture and the late one was dropped), the read came before Claude Code drew the new state (a Stop
-// hook's line arrives while the hook still runs, and Claude Code ends the turn only after it exits: the spinner can still
-// show), or a page flip overtook the update's read or put an older picture back. A card at rest never changes its text again
-// ("since 12:03" is a clock, not a span), so before this it kept that picture for good. Now the card LOOKS at its screen again
-// (CardPictureTrack): a settle look after every change into a state at rest, and looks with a backoff after a read that got no
-// screen in time; a look edits the card only when the screen differs from the picture its newest post or edit carried.
+// So the screen is read ONLY for a 🖼️ tap (MessagingService::_cardPictureFromTap): the hosting window reads it once; a screen
+// that changed since the card's picture is drawn on the worker and uploaded by the card's next edit (no call of its own); an
+// unchanged one reuses the photo Telegram holds, captioned with the moment it was read again. Every other post and edit of the
+// card CARRIES the picture it has (CardPictureToCarry: by its file_id - no upload, no read), since a rich edit without it would
+// drop the photo; a card that never had one goes as text until the first tap.
 //
-// This header is the pure half: the media id, the picture as a message carries it, the plan (upload, reuse, none, unchanged),
-// how a picture step settled (CardPictureRead), the looks' bookkeeping and rules, the rich HTML block, the media list, reading
-// the photo back from Telegram's answer, and the caption's clock. The m5 suite pins every rule (tests_messaging_card.cpp,
-// section 1d).
+// This header is the pure half: the media id, the picture as a message carries it, the plan (upload, reuse, none), the picture
+// a post or edit carries, how a tap's read settled (CardPictureRead), the tap's bounds and its toasts, the rich HTML block, the
+// media list, reading the photo back from Telegram's answer, and the caption's clock. The m5 suite pins every rule
+// (tests_messaging_card.cpp, section 1d).
 
 #pragma once
 
@@ -46,7 +45,7 @@
 #include <string_view>
 
 #include "Json.h"
-#include "ScreenSnapshot.h" // ScreenSnapshotShowsNothing: a blank screen (a tab whose claude is still starting) is never sent
+#include "ScreenSnapshot.h" // ScreenSnapshotShowsNothing: a blank screen (a tab whose claude is still starting) is never drawn
 
 namespace Agentmaster::Msg
 {
@@ -61,22 +60,24 @@ namespace Agentmaster::Msg
     inline constexpr std::wstring_view kCardPictureFileName = L"screen.png";
 
     /// <summary>
-    /// The picture one card post or edit carries: either a NEW one to upload (`png`) or one Telegram already holds (`fileId`,
-    /// reused with no upload), plus what it shows - the moment its screen was read and that screen's hash. Shared by the
-    /// outbox items that carry it (a refused send goes again without it), never changed once made.
+    /// The picture one card post or edit carries: either a NEW one to upload (`png`: a 🖼️ tap's drawing) or one Telegram already
+    /// holds (`fileId`, reused with no upload), plus what it shows - the moment its screen was read and that screen's hash.
+    /// Shared by the outbox items that carry it (a refused send goes again without it) and, while a tap's picture waits for the
+    /// send that delivers it, by the card's state (MessagingService::CardState::tapPicture, which a send's answer matches by
+    /// IDENTITY - the same object). Never changed once made.
     /// </summary>
     struct CardPicture
     {
         std::string png; // the PNG to upload ("" = reuse fileId); a picture is ~0.1-0.6 MB (§21.24's measures)
         std::wstring fileId; // Telegram's file_id of a photo it holds; used only when png is empty
         int64_t shotAtMs{ 0 }; // when the screen this picture shows was read (Unix ms): the caption's clock
-        uint32_t shotHash{ 0 }; // CardPictureShotHash of that screen: an unchanged screen reuses the picture
+        uint32_t shotHash{ 0 }; // CardPictureShotHash of that screen: a tap on an unchanged screen reuses the picture
     };
 
     /// <summary>
     /// The identity of a screen snapshot (ScreenSnapshot.h's serialized form, as the window answers it): FNV-1a 32 over its
-    /// UTF-16 code units, never 0 (0 = "no picture recorded"). A collision only shows the previous picture once more: the next
-    /// change of the screen draws a new one.
+    /// UTF-16 code units, never 0 (0 = "no picture recorded"). A collision only makes one tap reuse the previous picture: the
+    /// next tap on a changed screen draws a new one.
     /// </summary>
     /// <param name="snapshot">The serialized snapshot.</param>
     /// <returns>The hash, 1..2^32-1.</returns>
@@ -91,38 +92,31 @@ namespace Agentmaster::Msg
         return h == 0 ? 1u : h;
     }
 
-    /// <summary>What a card post or edit does about its picture (PlanCardPicture).</summary>
+    /// <summary>What a 🖼️ tap's read does about the card's picture (PlanCardPicture).</summary>
     enum class CardPictureSource
     {
-        None, // no picture: the card goes as text (no screen could be read and the card never had a picture)
+        None, // no picture: no screen could be read and the card never had a picture
         Reuse, // the picture Telegram already holds, by its file_id (no upload)
-        Upload, // a new picture: the screen is drawn and uploaded in the same call
-        Unchanged, // a LOOK only: the screen read now is the one the card's newest post or edit carried - nothing to draw or send
+        Upload, // a new picture: the screen is drawn and uploaded with the card's next edit
     };
 
     /// <summary>
-    /// How a card's picture step settled - what the step's send learns besides the picture itself (MessagingService::_withCardPicture
-    /// hands both over). Only Stale owes the card a look (CardPictureStepSettled), so "the window did not answer in time" is never
-    /// mistaken for "there is no screen to read", which would retry a parked tab forever.
+    /// How a 🖼️ tap's read settled - what the tap's continuation learns besides the picture itself (MessagingService::
+    /// _withCardPicture hands both over). Only Fresh brings a picture for the card; every other outcome picks the tap's toast
+    /// (CardPictureTapReadText), so "the window did not answer" is never told as "there is no screen to read".
     /// </summary>
     enum class CardPictureRead
     {
-        Fresh, // the hosting window answered in time and the screen was read for this step: the picture (drawn, or the held
-               // photo of that very screen) shows this moment
-        NoScreen, // the hosting window answered in time, but its tab shows no screen (a parked tab, a control not up): nothing
-                  // newer can be had, so the card keeps its last picture with that picture's own moment, or goes without
-        Unchanged, // a LOOK only: the screen read now is the one the card's newest post or edit carried - nothing to send
-        Kept, // no read was asked for (a page flip of the buttons, the slow form upgrade): the card keeps the picture it shows
-        Stale, // no screen in time: the window did not answer within the step's wait (a busy or frozen UI thread), no window
-               // answered, or the read or the drawing failed - the card goes with its held picture at best and looks again later
+        Fresh, // the hosting window answered in time and the screen was read: the picture (drawn, or the held photo of that very
+               // screen) shows this moment
+        NoScreen, // the hosting window answered, but its tab shows no screen: a parked tab, or a terminal not up yet
+        Stale, // no picture in time: the window did not answer within kCardPictureTapWaitMs (a busy or frozen UI thread), no window
+               // answered (none hosts the tab), or the read or the drawing failed
         Blank, // the hosting window answered with a screen that shows NOTHING (ScreenSnapshotShowsNothing: a tab whose claude is
-               // still starting) - never drawn or sent: the card keeps its last picture with its own moment, and watches for the
-               // real screen (the LAUNCH WATCH, CardPictureTrack::launchUntilMs)
-        Moving, // a launch watch's look only: the screen shows text but differs from the one the watch's previous look saw - claude
-                // is still drawing; nothing is drawn or sent (the picture handed over carries only its screen hash)
+               // still starting) - never drawn: a black picture would replace the card's last real one
     };
 
-    /// <summary>The decision for one card post or edit: where its picture comes from, and the moment its caption names.</summary>
+    /// <summary>The decision for one 🖼️ tap's read: where its picture comes from, and the moment its caption names.</summary>
     struct CardPicturePlan
     {
         CardPictureSource source{ CardPictureSource::None };
@@ -130,39 +124,23 @@ namespace Agentmaster::Msg
     };
 
     /// <summary>
-    /// Plans a card's picture from what was read and what the card shows: a screen read NOW that differs from the stored
+    /// Plans a 🖼️ tap's picture from what was read and what the card shows: a screen read NOW that differs from the stored
     /// picture's (or with no stored picture) is drawn and uploaded; a screen read now that is the stored picture's own reuses
     /// it, captioned with NOW (the screen was looked at and is still that); no screen (a parked tab, no window, a read that
-    /// failed) keeps the stored picture with its OWN moment ("the screen at 19:50" stays true), or none at all. A LOOK passes
-    /// the screen hash of the picture the card's newest post or edit carried: a screen read now that is that one is Unchanged,
-    /// so nothing is drawn or sent. Pure.
+    /// failed) keeps the stored picture with its OWN moment ("the screen at 19:50" stays true), or none at all. Pure.
     /// </summary>
-    /// <remarks>
-    /// The look compares with what the card CARRIES (its newest post or edit, maybe still in the outbox), not with the stored
-    /// picture (what Telegram last confirmed): a look that runs while a new upload is on its way would otherwise draw and upload
-    /// that same screen a second time.
-    /// </remarks>
-    /// <param name="readable">The window answered with a screen (a non-empty snapshot).</param>
+    /// <param name="readable">The window answered with a screen (a non-empty snapshot that shows something).</param>
     /// <param name="shotHash">That screen's CardPictureShotHash (ignored when not readable).</param>
     /// <param name="nowMs">Now (Unix ms).</param>
     /// <param name="storedFileId">The file_id of the picture the card last showed ("" = none).</param>
     /// <param name="storedShotHash">That picture's screen hash (0 = unknown: never reused for a read screen).</param>
     /// <param name="storedAtMs">The moment that picture's screen was read.</param>
-    /// <param name="unchangedShotHash">A look's basis: the screen hash of the picture the card carries (0 = no basis - every
-    /// post and edit, and a look at a card that carries no picture).</param>
     /// <returns>The plan.</returns>
-    inline CardPicturePlan PlanCardPicture(bool readable, uint32_t shotHash, int64_t nowMs, std::wstring_view storedFileId, uint32_t storedShotHash, int64_t storedAtMs, uint32_t unchangedShotHash = 0) noexcept
+    inline CardPicturePlan PlanCardPicture(bool readable, uint32_t shotHash, int64_t nowMs, std::wstring_view storedFileId, uint32_t storedShotHash, int64_t storedAtMs) noexcept
     {
         CardPicturePlan plan;
         if (readable)
         {
-            if (unchangedShotHash != 0 && shotHash == unchangedShotHash)
-            {
-                // A look at a screen the card already carries: the caption keeps its own moment (nothing is sent to change it).
-                plan.source = CardPictureSource::Unchanged;
-                plan.shotAtMs = nowMs;
-                return plan;
-            }
             if (!storedFileId.empty() && storedShotHash != 0 && storedShotHash == shotHash)
             {
                 plan.source = CardPictureSource::Reuse;
@@ -183,10 +161,40 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
+    /// The picture a card post or edit carries (§21.49): the picture a 🖼️ tap took, while it waits for the send that delivers it;
+    /// else the photo the card shows, reused by its file_id (no upload, no screen read) and captioned with ITS moment; else none.
+    /// Every post and edit of a card that has a picture carries one, because a rich edit without it drops the photo (measured,
+    /// §21.42) - so a status update, a page flip or a re-post below newer messages keeps the picture until the next tap. Pure.
+    /// </summary>
+    /// <param name="tapPicture">The tap's picture waiting for its send (null = none).</param>
+    /// <param name="storedFileId">The file_id of the photo the card shows (TopicRecord::cardPictureFileId; "" = none).</param>
+    /// <param name="storedAtMs">The moment that photo's screen was read (its caption's clock).</param>
+    /// <param name="storedShotHash">That screen's hash (kept with the photo, so the next tap reuses it when the screen is the same).</param>
+    /// <returns>The picture to carry: `tapPicture` itself (the same object, so the send's answer can match it), a held picture, or
+    /// null when the card has none.</returns>
+    /// <exception cref="std::bad_alloc">If the held picture cannot be allocated.</exception>
+    inline std::shared_ptr<const CardPicture> CardPictureToCarry(const std::shared_ptr<const CardPicture>& tapPicture, std::wstring_view storedFileId, int64_t storedAtMs, uint32_t storedShotHash)
+    {
+        if (tapPicture)
+        {
+            return tapPicture;
+        }
+        if (storedFileId.empty())
+        {
+            return nullptr;
+        }
+        auto held = std::make_shared<CardPicture>();
+        held->fileId = std::wstring{ storedFileId };
+        held->shotAtMs = storedAtMs;
+        held->shotHash = storedShotHash;
+        return held;
+    }
+
+    /// <summary>
     /// A moment as a LOCAL clock time with seconds, for the picture's caption: "19:50:12" on the same local day as `nowMs`,
-    /// else "16 Oct 19:50:12". With seconds because a running card takes a new picture every ~20 s (its edit gap): two
-    /// pictures of one minute must not read alike. The caption is outside the card's hash (MessagingService::_refreshCard
-    /// hashes the classic text and the buttons), so a ticking clock here never causes an edit by itself.
+    /// else "16 Oct 19:50:12". With seconds because two taps of one minute must not read alike. The caption is outside the card's
+    /// hash (MessagingService::_refreshCard hashes the classic text and the buttons), so a new picture's caption never causes an
+    /// edit by itself.
     /// </summary>
     /// <param name="unixMs">The moment (Unix ms).</param>
     /// <param name="nowMs">The clock the "same day" test is made against.</param>
@@ -325,472 +333,179 @@ namespace Agentmaster::Msg
     /// <summary>
     /// How many refusals of a card WITH a picture in a row switch the pictures off for the rest of the run: a refusal is retried
     /// once without the picture (the card's text must go), and three in a row mean the chat or this Bot API will not take them -
-    /// the cards then go as text, and a log line says so. A picture that goes through resets the count.
+    /// the cards then go as text, a 🖼️ tap says why (CardPictureTapRefusal::PicturesStopped), and a log line says so. A picture
+    /// that goes through resets the count.
     /// </summary>
     inline constexpr int kCardPictureRefusalsToStop = 3;
 
-    /// <summary>
-    /// The longest a card post or edit waits for its picture - the hosting window's screen read plus the drawing - before it goes
-    /// with the picture it shows (or none). A window answers in well under a second (the read itself is 0.3-0.6 ms, the drawing
-    /// ~90-185 ms), but a FROZEN window (a UI stall) would hold its copy of the request unanswered: without this bound the card,
-    /// whose new text is already recorded, would not change for as long as the freeze lasts - and that is when the phone is
-    /// needed most. Past it the late picture is dropped (the card's send runs once). The send loop checks the deadlines
-    /// (MessagingService::_expireCardPictureWaits, every pass: at least every 0.5 s). Since 2026-11-01 a step that misses the
-    /// bound owes the card a LOOK (CardPictureRead::Stale), so a late window delays the picture instead of losing it.
-    /// </summary>
-    inline constexpr int64_t kCardPictureWaitMs = 4 * 1000;
-
-    // ===== The picture follows the status: the card's LOOKS at its screen (2026-11-01) =====
+    // ===== The 🖼️ tap (§21.49) ==================================================================
 
     /// <summary>
-    /// How long after a change of the session's state into a state AT REST (anything but Running) the card looks at its screen
-    /// once more - the SETTLE look. The status update reads the screen at the moment it learns of the change, and that moment
-    /// can come before Claude Code drew the new state: a Stop hook's line reaches the engine while the hook still runs, and Claude
-    /// Code ends the turn (and draws its idle prompt) only once its Stop hooks exited - one may block the stop - so the turn's
-    /// spinner can still be on the screen read at that line. A card at rest is never edited again on its own
-    /// (its text names clock times, never spans), so without this look that early picture would stay. 3 s covers the hook's
-    /// exit and Claude Code's next frame with room to spare; a later look only costs latency.
+    /// The longest a 🖼️ tap waits for its picture - the hosting window's screen read plus the drawing - before it settles as
+    /// Stale. Longer than the tap's own hold (kTapAnswerHoldMaxMs, 9 s, MessagingTaps.h) on purpose: a busy window answered 5-9 s
+    /// late in production (2026-11-01, the Agent Manager page's rebuilds), and past the hold the tap's answer says the work goes
+    /// on (kTapStillWorkingToast) while the picture still reaches the card when it comes. Bounded so a frozen window's read is
+    /// forgotten: a picture later than this is dropped (one log line), and the next tap asks again. The send loop checks the
+    /// deadline every pass (MessagingService::_expireCardPictureWaits).
     /// </summary>
-    inline constexpr int64_t kCardPictureSettleMs = 3 * 1000;
+    inline constexpr int64_t kCardPictureTapWaitMs = 30 * 1000;
 
     /// <summary>
-    /// The longest a LOOK waits for the hosting window's answer before it counts as Stale. Much longer than kCardPictureWaitMs:
-    /// a look carries no text change, so nothing on the card waits for it, and a busy window that answers in 9 s (measured
-    /// 2026-11-01) must still bring its picture. Bounded so a frozen window cannot stop the looks for good: past it the next look
-    /// is scheduled (CardPictureLookDelayMs) and asks again.
+    /// The longest a card counts as BUSY with a 🖼️ tap - its read, drawing and the card edit that carries the picture - so a
+    /// second tap meanwhile is answered "already taking it" instead of reading and uploading the same screen twice. A tap's work
+    /// clears it as soon as it ends (no picture, or the carrying send answered); the bound is the belt for a send that is never
+    /// answered (an item the outbox dropped), which would otherwise keep the button refusing until the next start.
     /// </summary>
-    inline constexpr int64_t kCardPictureLookWaitMs = 30 * 1000;
+    inline constexpr int64_t kCardPictureTapBusyMs = 60 * 1000;
 
-    /// <summary>The pause before the first look after a read that got no screen in time; each further miss doubles it.</summary>
-    inline constexpr int64_t kCardPictureLookFirstDelayMs = 5 * 1000;
-
-    /// <summary>The longest pause between two looks (the doubling stops here).</summary>
-    inline constexpr int64_t kCardPictureLookMaxDelayMs = 60 * 1000;
-
-    /// <summary>
-    /// How many looks in a row may get no screen in time before the card stops looking until its next status update: 8 looks
-    /// spread over ~9 minutes (each waits up to kCardPictureLookWaitMs; the pauses before them 5, 10, 20, 40, then 60 s). A window
-    /// that answers nothing for that long is hung or gone, and without a cap it would be asked every minute forever - each ask
-    /// one more item on a dispatcher queue that is not being served.
-    /// </summary>
-    inline constexpr int kCardPictureLookTriesMax = 8;
-
-    // ----- The tab's start: the LAUNCH WATCH (the user's request of 2026-11-01: "when a tab activates, we should update once the
-    // screenshot when the tab launched and claude is showing and no longer black screen") -----
-
-    /// <summary>
-    /// How often the launch watch looks at a starting tab's screen: a tab that was just launched, activated (a parked or restored
-    /// tab whose claude starts) or restarted shows a BLANK screen for the first seconds, and the card waits for claude's own. The
-    /// bot's tick runs every 1.5 s, so a look cannot come sooner anyway; each look is one screen read on the window's UI thread
-    /// (0.3-0.6 ms) and a cheap blank test (ScreenSnapshotShowsNothing).
-    /// </summary>
-    inline constexpr int64_t kCardPictureLaunchPollMs = 1500;
-
-    /// <summary>
-    /// How long the launch watch waits for a starting tab's claude to show its screen. A resume of a long conversation takes
-    /// seconds; a claude that shows nothing for 2 minutes is stuck (or the tab is a program that keeps its screen empty), and the
-    /// card keeps its last picture until its next status update (one log line).
-    /// </summary>
-    inline constexpr int64_t kCardPictureLaunchWatchMs = 120 * 1000;
-
-    /// <summary>
-    /// How many of the watch's looks may see claude's screen still CHANGING (CardPictureRead::Moving) before the watch takes the
-    /// screen as it is: the picture goes once a look sees the same screen as the look before it (claude finished drawing), or
-    /// after this many changing ones - a screen that never holds still (a turn resumed mid-way with its spinner, a clock in a
-    /// status line) must not wait out the whole watch.
-    /// </summary>
-    inline constexpr int kCardPictureLaunchSettleLooks = 3;
-
-    /// <summary>
-    /// The pause before the next look after `tries` looks in a row got no screen in time: kCardPictureLookFirstDelayMs doubled
-    /// `tries` times, at most kCardPictureLookMaxDelayMs (0 tries = 5 s, then 10, 20, 40, 60, 60, ...). Pure.
-    /// </summary>
-    /// <param name="tries">The looks in a row that missed so far (0 for the first look after a status update's own miss);
-    /// a negative count reads as 0.</param>
-    /// <returns>The pause in ms, 5,000 to 60,000.</returns>
-    inline int64_t CardPictureLookDelayMs(int tries) noexcept
+    /// <summary>Whether a card is still busy with a 🖼️ tap that began at `sinceTickMs` (kCardPictureTapBusyMs). Pure.</summary>
+    /// <param name="sinceTickMs">When the tap's read began (GetTickCount64 ms; 0 = no tap's work runs).</param>
+    /// <param name="nowTickMs">Now, on the same monotonic clock.</param>
+    /// <returns>True while a tap's work may still run.</returns>
+    inline bool CardPictureTapBusy(int64_t sinceTickMs, int64_t nowTickMs) noexcept
     {
-        int64_t delay = kCardPictureLookFirstDelayMs;
-        // Doubling until the cap, never past it: the loop ends at the cap whatever `tries` says, so no count can overflow it.
-        for (int i = 0; i < tries && delay < kCardPictureLookMaxDelayMs; ++i)
-        {
-            delay *= 2;
-        }
-        return delay < kCardPictureLookMaxDelayMs ? delay : kCardPictureLookMaxDelayMs;
+        return sinceTickMs != 0 && nowTickMs - sinceTickMs < kCardPictureTapBusyMs;
     }
 
-    /// <summary>
-    /// The earlier of a look already scheduled and a new one, so a rule that wants a look soon never pushes an earlier one back.
-    /// </summary>
-    /// <param name="scheduledAtMs">The look scheduled now (0 = none).</param>
-    /// <param name="atMs">The moment the new rule wants a look.</param>
-    /// <returns>The moment of the next look.</returns>
-    inline int64_t EarlierCardPictureLook(int64_t scheduledAtMs, int64_t atMs) noexcept
+    /// <summary>Why a 🖼️ tap asks no window for the screen (MessagingService::_cardPictureFromTap's own checks, in this order).</summary>
+    enum class CardPictureTapRefusal
     {
-        return scheduledAtMs != 0 && scheduledAtMs < atMs ? scheduledAtMs : atMs;
-    }
-
-    /// <summary>
-    /// A card's LOOKS at its screen: what MessagingService::CardState keeps between the card's posts and edits so that a status
-    /// update's picture that missed is taken again - a window that answered too late, a screen read before Claude Code drew the
-    /// new state, a page flip that overtook the update's read or put an older picture back. Plain data, changed only by the rules
-    /// below (pure, so the m5 suite pins them); the service holds it under `_mtx`. The generation of the card's newest post or
-    /// edit itself stays CardState::pictureSeq.
-    /// </summary>
-    /// <remarks>
-    /// A look never overtakes a post or edit: it starts only while none waits for its picture (stepPending), and a post or edit
-    /// decided while it runs wins - the look's result is dropped (lookBase), because the newer one carries its own read and an
-    /// older text must never be edited back over it.
-    /// </remarks>
-    struct CardPictureTrack
-    {
-        bool stepPending{ false }; // the card's newest post or edit WITH a picture step waits for its picture (its send has not run)
-        bool stepReads{ false }; // ...and that step reads the screen (a status update), rather than keeping the picture (a page flip)
-        uint32_t handedShotHash{ 0 }; // the screen hash of the picture the newest post or edit carried (0 = none): what the card
-                                      // shows once the outbox delivered it - a look's basis (PlanCardPicture's unchangedShotHash)
-        int64_t lookAtMs{ 0 }; // when the card looks at its screen again (WallMs; 0 = no look owed)
-        int lookTries{ 0 }; // looks in a row that got no screen in time (the backoff; every status update starts it over)
-        bool lookPending{ false }; // a look's read or drawing runs (one look at a time)
-        uint64_t lookSeq{ 0 }; // the running look's generation (service-wide unique, like CardState::pictureSeq)
-        uint64_t lookBase{ 0 }; // CardState::pictureSeq when that look started: a post or edit decided since makes it stale
-        // ----- the tab's start (the LAUNCH WATCH) -----
-        bool tabStarted{ false }; // the session's tab ran its claude (SessionInfo live and started) when the newest post, edit or
-                                  // look was decided: "no screen" then means "not drawn yet", not "parked"
-        int64_t launchUntilMs{ 0 }; // the launch watch's deadline (WallMs; 0 = no watch): the card waits for its claude's screen
-        uint32_t launchShotHash{ 0 }; // the screen the watch's previous look saw showing text (0 = none yet)
-        int launchShows{ 0 }; // the watch's looks that saw that screen still changing (CardPictureRead::Moving)
-        bool launchSpent{ false }; // a watch ran for the newest status update already (one watch per update; a reading update resets it)
+        Closed, // the session is closed: its tab is gone, nothing shows its screen
+        PicturesOff, // the cog's "Show the screen in each session's card" is off
+        PicturesStopped, // Telegram refused kCardPictureRefusalsToStop card pictures in a row: none for the rest of this run
+        NoRich, // the cards go as classic HTML (rich messages off, or a Bot API without them): no classic message holds a picture
+        Unavailable, // no window can read screens (a host without the window hooks: the m5 harness)
+        Parked, // the tab is parked (its claude not started): it shows nothing until ▶ Reactivate starts it
+        NoCard, // the session has no topic, or its topic no card, to put the picture on
+        Busy, // a tap's read, drawing or delivery for this card runs already (kCardPictureTapBusyMs at most)
     };
 
-    /// <summary>
-    /// What a LOOK asks of its screen read (MessagingService::_withCardPicture): the basis it compares with, and - while the launch
-    /// watch waits for a starting claude - the gate that keeps a screen still changing from being drawn. Posts and edits ask
-    /// nothing (they pass none). Plain data, made by CardPictureLookAskFor.
-    /// </summary>
-    struct CardPictureLookAsk
-    {
-        uint32_t unchangedShotHash{ 0 }; // the screen the card carries: a look at it is Unchanged (0 = the card carries none)
-        bool launchGate{ false }; // the launch watch is on: a screen that shows text is drawn only once it held still since the
-                                  // previous look (CardPictureLaunchGateHolds)
-        uint32_t launchShotHash{ 0 }; // the screen the watch's previous look saw (0 = none yet: the first screen with text waits)
-    };
+    // The PicturesStopped toast names the count in words of its own (a string_view constant cannot be built from the number).
+    static_assert(kCardPictureRefusalsToStop == 3, "CardPictureTapRefusalText says \"3 card pictures in a row\"");
 
-    /// <summary>
-    /// Starts the LAUNCH WATCH: the card waits up to kCardPictureLaunchWatchMs for its starting claude's screen, looking every
-    /// kCardPictureLaunchPollMs (the first look after one poll). Pure.
-    /// </summary>
-    /// <param name="t">The card's looks.</param>
-    /// <param name="nowMs">Now (WallMs).</param>
-    inline void CardPictureLaunchBegin(CardPictureTrack& t, int64_t nowMs) noexcept
+    /// <summary>The toast of a 🖼️ tap that asks no window (CardPictureTapRefusal): why, and what to do. Pure.</summary>
+    /// <param name="why">The refusal.</param>
+    /// <returns>The toast (a static string; within kTapToastMaxChars).</returns>
+    inline std::wstring_view CardPictureTapRefusalText(CardPictureTapRefusal why) noexcept
     {
-        t.launchUntilMs = nowMs + kCardPictureLaunchWatchMs;
-        t.launchShotHash = 0;
-        t.launchShows = 0;
-        t.launchSpent = true; // one watch per status update: a later blank read of the same update waits for the next one
-        t.lookAtMs = EarlierCardPictureLook(t.lookAtMs, nowMs + kCardPictureLaunchPollMs);
-    }
-
-    /// <summary>Ends the launch watch (its picture went, it timed out, or the tab was parked again). Pure.</summary>
-    /// <param name="t">The card's looks.</param>
-    inline void CardPictureLaunchEnd(CardPictureTrack& t) noexcept
-    {
-        t.launchUntilMs = 0;
-        t.launchShotHash = 0;
-        t.launchShows = 0;
-    }
-
-    /// <summary>
-    /// Ends a launch watch whose deadline passed - the belt for a card whose text kept changing so that no look could run (a look
-    /// runs only while the card shows its current text); its edits then read the screen again. Called at every post or edit's
-    /// decision. Pure.
-    /// </summary>
-    /// <param name="t">The card's looks.</param>
-    /// <param name="nowMs">Now (WallMs).</param>
-    /// <returns>True when a watch ended here (the caller logs it).</returns>
-    inline bool CardPictureLaunchExpire(CardPictureTrack& t, int64_t nowMs) noexcept
-    {
-        if (t.launchUntilMs != 0 && nowMs >= t.launchUntilMs)
+        switch (why)
         {
-            CardPictureLaunchEnd(t);
-            return true;
+        case CardPictureTapRefusal::Closed:
+            return L"This session is closed. Resume it from the \U0001F50E Search topic.";
+        case CardPictureTapRefusal::PicturesOff:
+            return L"The cards' screen pictures are off (the cog's Messaging tab: \x201CShow the screen in each session's card\x201D).";
+        case CardPictureTapRefusal::PicturesStopped:
+            return L"Telegram refused 3 card pictures in a row, so the cards go without them until Agentmaster starts again.";
+        case CardPictureTapRefusal::NoRich:
+            return L"The cards go as plain HTML (rich messages are off), and a plain card cannot hold a picture.";
+        case CardPictureTapRefusal::Parked:
+            return L"This tab is parked: its screen shows nothing until \x25B6 Reactivate starts it.";
+        case CardPictureTapRefusal::NoCard:
+            return L"This session has no card to put the picture on.";
+        case CardPictureTapRefusal::Busy:
+            return L"Taking the screen already \x2014 it shows on the card in a moment.";
+        case CardPictureTapRefusal::Unavailable:
+        default:
+            return L"Not available here.";
         }
-        return false;
     }
 
-    /// <summary>
-    /// Whether a card EDIT reads the screen: a status update (its text changed since the card's last update) that is not the slow
-    /// form upgrade, unless the launch watch is on - then the edit keeps the card's picture (Kept) and the watch's own look sends
-    /// claude's screen ONCE, when it shows and held still (the user's "update once ... when claude is showing"). A POST always
-    /// reads (it is a new message; a blank screen still never goes, Blank). Pure.
-    /// </summary>
-    /// <param name="t">The card's looks.</param>
-    /// <param name="textChanged">The card's text differs from its last status update's (CardState::pictureTextHash).</param>
-    /// <param name="formOnly">The edit is the slow form upgrade (§21.15): never a read.</param>
-    /// <returns>True when the edit reads the screen.</returns>
-    inline bool CardPictureEditReads(const CardPictureTrack& t, bool textChanged, bool formOnly) noexcept
+    /// <summary>A refusal's word in hooks.log's "[nav] remote telegram cardpic" line. Pure.</summary>
+    /// <param name="why">The refusal.</param>
+    /// <returns>The word (a static string).</returns>
+    inline const wchar_t* CardPictureTapRefusalWord(CardPictureTapRefusal why) noexcept
     {
-        return textChanged && !formOnly && t.launchUntilMs == 0;
-    }
-
-    /// <summary>
-    /// What a look asks of its read: the picture the card carries as the basis (an unchanged screen sends nothing), and while the
-    /// launch watch is on, the gate - open for the watch's last look (its deadline within a poll) and after
-    /// kCardPictureLaunchSettleLooks changing looks, so a screen that never holds still still goes. Pure.
-    /// </summary>
-    /// <param name="t">The card's looks.</param>
-    /// <param name="nowMs">Now (WallMs).</param>
-    /// <returns>The ask.</returns>
-    inline CardPictureLookAsk CardPictureLookAskFor(const CardPictureTrack& t, int64_t nowMs) noexcept
-    {
-        CardPictureLookAsk ask;
-        ask.unchangedShotHash = t.handedShotHash;
-        if (t.launchUntilMs != 0)
+        switch (why)
         {
-            ask.launchGate = t.launchShows < kCardPictureLaunchSettleLooks && nowMs + kCardPictureLaunchPollMs < t.launchUntilMs;
-            ask.launchShotHash = t.launchShotHash;
+        case CardPictureTapRefusal::Closed:
+            return L"closed";
+        case CardPictureTapRefusal::PicturesOff:
+            return L"pictures-off";
+        case CardPictureTapRefusal::PicturesStopped:
+            return L"pictures-stopped";
+        case CardPictureTapRefusal::NoRich:
+            return L"classic-cards";
+        case CardPictureTapRefusal::Parked:
+            return L"parked";
+        case CardPictureTapRefusal::NoCard:
+            return L"no-card";
+        case CardPictureTapRefusal::Busy:
+            return L"busy";
+        case CardPictureTapRefusal::Unavailable:
+        default:
+            return L"unavailable";
         }
-        return ask;
     }
 
     /// <summary>
-    /// Whether the launch watch's gate HOLDS a screen back: the look asked for the gate, the screen shows text, and it is not the
-    /// one the watch's previous look saw (or no look saw one yet) - claude is still drawing, so nothing is drawn or sent and the
-    /// watch looks again (CardPictureRead::Moving). A screen that held still since the previous look passes. Pure.
+    /// The toast of a 🖼️ tap whose read brought no picture: why, and what to do. "" for Fresh - the picture appearing on the card
+    /// is the answer (the tapped button keeps spinning until the edit that carries it is in, MessagingTaps.h). Pure.
     /// </summary>
-    /// <param name="ask">The look's ask (null for a post or an edit: never gated).</param>
-    /// <param name="showsText">The read found a screen that shows something (not "", not blank).</param>
-    /// <param name="shotHash">That screen's CardPictureShotHash.</param>
-    /// <returns>True when the screen is held back as still changing.</returns>
-    inline bool CardPictureLaunchGateHolds(const CardPictureLookAsk* ask, bool showsText, uint32_t shotHash) noexcept
-    {
-        return ask && ask->launchGate && showsText && (ask->launchShotHash == 0 || shotHash != ask->launchShotHash);
-    }
-
-    /// <summary>
-    /// Whether a read says the tab's claude is STILL STARTING: its screen shows nothing yet (Blank), or there is none at all while
-    /// the tab runs its claude (NoScreen on a started tab: the terminal is not up yet). NoScreen on a tab that does not run
-    /// (parked, restored dormant) is final - nothing will show until it starts. Pure.
-    /// </summary>
-    /// <param name="t">The card's looks (tabStarted: as of the step's or the look's decision).</param>
     /// <param name="read">How the read settled.</param>
-    /// <returns>True when the read is a starting claude's.</returns>
-    inline bool CardPictureReadIsStarting(const CardPictureTrack& t, CardPictureRead read) noexcept
+    /// <param name="tabStarted">The session's tab runs its claude (SessionInfo live and started): NoScreen then means the terminal
+    /// is not up yet; otherwise the tab is parked.</param>
+    /// <returns>The toast (a static string; "" = none).</returns>
+    inline std::wstring_view CardPictureTapReadText(CardPictureRead read, bool tabStarted) noexcept
     {
-        return read == CardPictureRead::Blank || (read == CardPictureRead::NoScreen && t.tabStarted);
+        switch (read)
+        {
+        case CardPictureRead::NoScreen:
+            return tabStarted ? std::wstring_view{ L"The tab's screen is not up yet \x2014 tap \U0001F5BC\xFE0F again in a moment." } :
+                                CardPictureTapRefusalText(CardPictureTapRefusal::Parked);
+        case CardPictureRead::Blank:
+            return L"Claude is still starting: its screen shows nothing yet \x2014 tap \U0001F5BC\xFE0F again in a moment.";
+        case CardPictureRead::Stale:
+            return L"No picture this time: the tab's window did not answer, or the screen could not be drawn \x2014 tap \U0001F5BC\xFE0F again.";
+        case CardPictureRead::Fresh:
+        default:
+            return {};
+        }
     }
 
-    /// <summary>
-    /// Records a post or edit WITH a picture step that was just decided - the caller stamped CardState::pictureSeq for it under
-    /// the same lock. A step that READS the screen (a status update) starts the look backoff over (and, with no watch on, allows
-    /// a new launch watch), and a change of the state schedules the settle look (kCardPictureSettleMs) when the new state is at
-    /// rest, or cancels a look still owed when the session runs (a running card is edited with a fresh read whenever its text
-    /// changes). A step that only KEEPS the picture (a page flip, an edit while the launch watch waits) and overtakes a read that
-    /// has not settled - a status update's or a look's - owes the card the look that read was: the overtaken read's picture is
-    /// dropped with it. A tab that no longer runs its claude ends a launch watch (nothing will show). Pure.
-    /// </summary>
-    /// <param name="t">The card's looks.</param>
-    /// <param name="reads">The step reads the screen (a status update) rather than keeping the picture it shows.</param>
-    /// <param name="stateChanged">The session's state differs from the one the card showed last (CardState::lastState).</param>
-    /// <param name="atRest">The new state is not Running (Waiting, Idle, Needs approval, Error, Done).</param>
-    /// <param name="tabStarted">The session's tab runs its claude (SessionInfo live and started).</param>
-    /// <param name="nowMs">Now (WallMs).</param>
-    inline void CardPictureStepDecided(CardPictureTrack& t, bool reads, bool stateChanged, bool atRest, bool tabStarted, int64_t nowMs) noexcept
+    /// <summary>A read's word in hooks.log's "[nav] remote telegram cardpic" line ("fresh", "noscreen", "stale", "blank"). Pure.</summary>
+    /// <param name="read">How the read settled.</param>
+    /// <returns>The word (a static string).</returns>
+    inline const wchar_t* CardPictureReadWord(CardPictureRead read) noexcept
     {
-        t.tabStarted = tabStarted;
-        if (!tabStarted && t.launchUntilMs != 0)
+        switch (read)
         {
-            CardPictureLaunchEnd(t); // the tab was parked (or its session closed) while the watch waited
-        }
-        if (!reads && (t.lookPending || (t.stepPending && t.stepReads)))
-        {
-            // The page flip goes at once with the picture the card shows, and the read it overtook is dropped when it settles: look
-            // again once this step settled, so the screen the dropped read was for still reaches the card.
-            t.lookAtMs = EarlierCardPictureLook(t.lookAtMs, nowMs + kCardPictureSettleMs);
-        }
-        t.stepPending = true;
-        t.stepReads = reads;
-        if (reads)
-        {
-            t.lookTries = 0;
-            if (t.launchUntilMs == 0)
-            {
-                t.launchSpent = false; // a new status update may watch a starting claude again
-            }
-            if (stateChanged)
-            {
-                t.lookAtMs = atRest ? nowMs + kCardPictureSettleMs : 0;
-            }
+        case CardPictureRead::NoScreen:
+            return L"noscreen";
+        case CardPictureRead::Stale:
+            return L"stale";
+        case CardPictureRead::Blank:
+            return L"blank";
+        case CardPictureRead::Fresh:
+        default:
+            return L"fresh";
         }
     }
 
     /// <summary>
-    /// Records how the card's NEWEST post or edit settled its picture (the caller checked that the step is still the newest:
-    /// CardState::pictureSeq) - the picture it carries is now what the card shows, or will once the outbox delivered it. A read of
-    /// a claude still starting (CardPictureReadIsStarting) begins the LAUNCH WATCH, once per status update; while a watch is on,
-    /// its next look comes within kCardPictureLaunchPollMs whatever this step was. Otherwise a step that got no screen in time
-    /// (Stale) owes the card a look after CardPictureLookDelayMs, and a step that kept an OLDER picture than the one handed before
-    /// (a page flip whose stored picture predates an upload still on its way, or that lands after it) owes one after
-    /// kCardPictureSettleMs. Pure.
+    /// The toast after the send that carried a 🖼️ tap's picture was answered: "" when the card shows it; else why it does not -
+    /// Telegram refused the picture (the card's text went again without it), or the call failed. The caller leaves out a card
+    /// the user deleted ("message to edit not found": the card posted in its place carries the picture). Pure.
     /// </summary>
-    /// <param name="t">The card's looks.</param>
-    /// <param name="handedShotHash">The screen hash of the picture the step carries (0 = it goes without one).</param>
-    /// <param name="read">How the step's picture settled.</param>
-    /// <param name="nowMs">Now (WallMs).</param>
-    /// <returns>True when this step began a launch watch (the caller logs it).</returns>
-    inline bool CardPictureStepSettled(CardPictureTrack& t, uint32_t handedShotHash, CardPictureRead read, int64_t nowMs) noexcept
+    /// <param name="answered">Telegram answered ok, or "message is not modified" (the card shows this very content already).</param>
+    /// <param name="photoShown">The card shows the photo: the answer's message has one (CardPictureFromMessage), or it was not
+    /// modified.</param>
+    /// <param name="httpStatus">The call's HTTP status (0 = no answer at all: a transport failure).</param>
+    /// <returns>The toast ("" = none).</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring CardPictureDeliveryText(bool answered, bool photoShown, int httpStatus)
     {
-        t.stepPending = false;
-        const uint32_t before = t.handedShotHash;
-        t.handedShotHash = handedShotHash;
-        bool began = false;
-        if (CardPictureReadIsStarting(t, read) && t.launchUntilMs == 0 && !t.launchSpent)
+        if (answered && photoShown)
         {
-            CardPictureLaunchBegin(t, nowMs);
-            began = true;
+            return {};
         }
-        if (t.launchUntilMs != 0)
+        if (answered)
         {
-            // The watch looks every poll; a post that read the screen meanwhile (or overtook a look) does not stop it.
-            t.lookAtMs = EarlierCardPictureLook(t.lookAtMs, nowMs + kCardPictureLaunchPollMs);
+            return L"Telegram refused the picture; the card's text went on without it.";
         }
-        else if (read == CardPictureRead::Stale)
+        if (httpStatus <= 0)
         {
-            t.lookAtMs = EarlierCardPictureLook(t.lookAtMs, nowMs + CardPictureLookDelayMs(t.lookTries));
+            return L"The picture did not reach Telegram (no answer) \x2014 tap \U0001F5BC\xFE0F again.";
         }
-        else if (read == CardPictureRead::Kept && before != 0 && handedShotHash != before)
-        {
-            t.lookAtMs = EarlierCardPictureLook(t.lookAtMs, nowMs + kCardPictureSettleMs);
-        }
-        return began;
-    }
-
-    /// <summary>
-    /// Whether the card should look at its screen now: a look is owed and due, no post or edit of the card waits for its picture
-    /// (a look never overtakes one), and no other look runs. The caller also requires the card to show its current text and
-    /// buttons (MessagingService::_refreshCard asks only then), so the look's edit changes the picture alone. Pure.
-    /// </summary>
-    /// <param name="t">The card's looks.</param>
-    /// <param name="nowMs">Now (WallMs).</param>
-    /// <returns>True when the look should start.</returns>
-    inline bool CardPictureLookDue(const CardPictureTrack& t, int64_t nowMs) noexcept
-    {
-        return t.lookAtMs != 0 && nowMs >= t.lookAtMs && !t.stepPending && !t.lookPending;
-    }
-
-    /// <summary>
-    /// Records a look that starts (CardPictureLookDue said so): one at a time, owed no more, stale once a post or edit is decided.
-    /// A tab that no longer runs its claude ends a launch watch here too (the look then reads no screen and is done).
-    /// </summary>
-    /// <param name="t">The card's looks.</param>
-    /// <param name="lookSeq">The look's generation (service-wide unique).</param>
-    /// <param name="pictureSeq">CardState::pictureSeq now: the newest post or edit the look builds on.</param>
-    /// <param name="tabStarted">The session's tab runs its claude (SessionInfo live and started).</param>
-    inline void CardPictureLookStarted(CardPictureTrack& t, uint64_t lookSeq, uint64_t pictureSeq, bool tabStarted) noexcept
-    {
-        t.lookPending = true;
-        t.lookAtMs = 0;
-        t.lookSeq = lookSeq;
-        t.lookBase = pictureSeq;
-        t.tabStarted = tabStarted;
-        if (!tabStarted && t.launchUntilMs != 0)
-        {
-            CardPictureLaunchEnd(t);
-        }
-    }
-
-    /// <summary>What a card's look does once its read settled (CardPictureLookSettled).</summary>
-    enum class CardPictureLookStep
-    {
-        Dropped, // a post or edit was decided while the look ran (it carries its own picture), or this is not the card's look any more
-        Send, // the screen changed: edit the card - its same text and buttons - with the new picture
-        Done, // nothing to send: the screen is the one the card carries, or the tab shows none
-        Again, // no screen in time, or the launch watch looks again (blank, still changing): the next look is scheduled (lookAtMs)
-        GiveUp, // no screen in time for kCardPictureLookTriesMax looks in a row: no more looks until the next status update
-        Watch, // the look found the tab's claude still starting: the launch watch began (its first look is scheduled)
-        WatchTimedOut, // the launch watch's deadline passed with nothing on the screen: the card keeps its picture
-    };
-
-    /// <summary>
-    /// Records how a look settled and says what to do with it. A look that a post or edit overtook (CardState::pictureSeq moved
-    /// since it started) is dropped. While the LAUNCH WATCH is on, a screen still changing (Moving) is remembered and looked at
-    /// again, a blank screen (or none on a started tab, or no answer in time) is looked at again until the watch's deadline, and a
-    /// screen that held still ends the watch - sent when it differs from the picture the card carries. Without a watch, a read of
-    /// a claude still starting begins one (once per status update); a changed screen (Fresh, with a picture) is sent, and the
-    /// picture it carries becomes the next look's basis at once; an unchanged screen or none ends the looks; a look that got no
-    /// screen in time schedules the next one after CardPictureLookDelayMs - until kCardPictureLookTriesMax of them missed in a
-    /// row. Pure.
-    /// </summary>
-    /// <param name="t">The card's looks.</param>
-    /// <param name="lookSeq">The look's generation (CardPictureLookStarted's).</param>
-    /// <param name="pictureSeq">CardState::pictureSeq now.</param>
-    /// <param name="hasPicture">The look's read brought a picture (a drawing, or the held photo of the screen read now).</param>
-    /// <param name="shotHash">The screen hash of what the read saw: the picture's for Fresh, the screen's for Moving, the look's
-    /// basis for Unchanged (0 when it saw no screen).</param>
-    /// <param name="read">How the look's read settled.</param>
-    /// <param name="nowMs">Now (WallMs).</param>
-    /// <returns>What the look does.</returns>
-    inline CardPictureLookStep CardPictureLookSettled(CardPictureTrack& t, uint64_t lookSeq, uint64_t pictureSeq, bool hasPicture, uint32_t shotHash, CardPictureRead read, int64_t nowMs) noexcept
-    {
-        if (!t.lookPending || t.lookSeq != lookSeq)
-        {
-            return CardPictureLookStep::Dropped; // not the look that runs (the card state was made anew since it started)
-        }
-        t.lookPending = false;
-        if (pictureSeq != t.lookBase)
-        {
-            // A post or edit decided meanwhile owns the card now; it scheduled whatever look it owes (CardPictureStepDecided, and
-            // CardPictureStepSettled keeps a launch watch looking).
-            return CardPictureLookStep::Dropped;
-        }
-        const bool starting = CardPictureReadIsStarting(t, read);
-        if (starting && t.launchUntilMs == 0 && !t.launchSpent)
-        {
-            // A look (the settle look, a retry) found the tab's claude still starting: wait for its screen.
-            t.lookTries = 0;
-            CardPictureLaunchBegin(t, nowMs);
-            return CardPictureLookStep::Watch;
-        }
-        if (t.launchUntilMs != 0)
-        {
-            if (read == CardPictureRead::Moving)
-            {
-                // Claude is drawing: remember this screen; the next look passes the gate when it sees the same one (or once the
-                // watch stops gating - its deadline near, or kCardPictureLaunchSettleLooks of these).
-                t.launchShotHash = shotHash;
-                ++t.launchShows;
-                t.lookAtMs = nowMs + kCardPictureLaunchPollMs;
-                return CardPictureLookStep::Again;
-            }
-            if (starting || read == CardPictureRead::Stale)
-            {
-                if (nowMs >= t.launchUntilMs)
-                {
-                    CardPictureLaunchEnd(t);
-                    return CardPictureLookStep::WatchTimedOut;
-                }
-                t.lookAtMs = nowMs + kCardPictureLaunchPollMs;
-                return CardPictureLookStep::Again;
-            }
-            // The screen shows text and held still (or the watch took it as it was), or the tab shows none any more: the watch
-            // is over, and the rules below send it when it is new.
-            CardPictureLaunchEnd(t);
-        }
-        if (read == CardPictureRead::Stale)
-        {
-            if (++t.lookTries >= kCardPictureLookTriesMax)
-            {
-                return CardPictureLookStep::GiveUp;
-            }
-            t.lookAtMs = nowMs + CardPictureLookDelayMs(t.lookTries);
-            return CardPictureLookStep::Again;
-        }
-        t.lookTries = 0;
-        if (read == CardPictureRead::Fresh && hasPicture)
-        {
-            // The edit is queued right after this: a look (or a page flip's regression check) from now on compares with it.
-            t.handedShotHash = shotHash;
-            return CardPictureLookStep::Send;
-        }
-        return CardPictureLookStep::Done;
+        return L"The picture did not reach Telegram (HTTP " + std::to_wstring(httpStatus) + L") \x2014 tap \U0001F5BC\xFE0F again.";
     }
 }

@@ -3007,6 +3007,18 @@ namespace Agentmaster::Msg
                 }
                 return;
             }
+            else if (verb == kCardVerbCardPicture)
+            {
+                // §21.49: 🖼️ on Main - the card's OWN picture, on demand (the only way it changes): the hosting window reads the
+                // screen once, and the card's next edit carries it. A refusal decided here is the toast; otherwise the read's outcome
+                // sets it (from a window's UI thread or the worker, possibly before _cardPictureFromTap returns), or the picture on the
+                // card answers the tap - so, as for ⎋ Esc, no answer here then: an answer("") after that would wipe its toast.
+                if (const std::wstring toast = _cardPictureFromTap(sid, messageId); !toast.empty())
+                {
+                    answer(toast);
+                }
+                return;
+            }
             else if (verb == kCardVerbScreenImage)
             {
                 // §21.24: 🖼 Screen Image - the photo lands in the topic (or a line saying why it cannot). §21.28: no toast — the
@@ -7001,6 +7013,8 @@ namespace Agentmaster::Msg
                    // §21.41: the card's two stopping buttons, the typed commands' twins (one path each, so they behave alike). Both
                    // live on the Session page only (the user's rule of 2026-10-28 for Esc: "only inside Sessions menu").
                    L"On \x2699\xFE0F Session's page the card has \x238B Esc (one Esc at once, as at the PC) and \U0001F319 Deactivate (claude stops, the tab keeps its place)\n"
+                   // §21.49: the card's 🖼️ (the user's request of 2026-11-10) - the only way the card's picture changes.
+                   L"The card's \U0001F5BC\xFE0F (beside \x2699\xFE0F Session) puts the terminal's screen on the card as it is now; the card takes no picture by itself\n"
                    L"/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not\n"
                    // §21.19: <code> keeps "/search-tab" from becoming a "/search" link (see the Search help above).
                    L"/search_tab \x2014 jump to the \U0001F50E Search topic: it goes first in the thread list (typed, <code>/search-tab</code> works too)\n"

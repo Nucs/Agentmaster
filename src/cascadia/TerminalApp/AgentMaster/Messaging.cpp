@@ -357,18 +357,17 @@ namespace Agentmaster::Msg
         }
 
         /// <summary>
-        /// §21.42: runs a card's post or edit EXACTLY ONCE with its picture, whichever path settles it first - the hosting window's
-        /// answer, the picture worker, the guard of a read no window answered, the send loop past the wait, or a failure in
+        /// §21.42: runs a 🖼️ tap's continuation EXACTLY ONCE with its picture (§21.49), whichever path settles it first - the hosting
+        /// window's answer, the picture worker, the guard of a read no window answered, the send loop past the wait, or a failure in
         /// MessagingService::_withCardPicture. A second Run is a no-op, so every path may call it without knowing what the others
-        /// did; and the send never runs twice (a card posted twice would leave two cards in the topic). The send also learns HOW
-        /// the picture settled (CardPictureRead): only the path that runs first is heard, so a window's late answer after the wait
-        /// ran out reads as the Stale it was and the card looks again (CardPictureStepSettled).
+        /// did, and a tap is told once. The continuation also learns HOW the picture settled (CardPictureRead): only the path that
+        /// runs first is heard, so a window's late answer after the wait ran out reads as the Stale it was.
         /// </summary>
         class CardPictureOnce
         {
         public:
-            /// <summary>Holds the send until the first Run.</summary>
-            /// <param name="then">The card's post or edit, given the picture (null = none) and how it settled.</param>
+            /// <summary>Holds the continuation until the first Run.</summary>
+            /// <param name="then">The tap's continuation, given the picture (null = none) and how it settled.</param>
             explicit CardPictureOnce(std::function<void(std::shared_ptr<const CardPicture>, CardPictureRead)> then) noexcept :
                 _then{ std::move(then) }
             {
@@ -377,9 +376,9 @@ namespace Agentmaster::Msg
             CardPictureOnce(const CardPictureOnce&) = delete;
             CardPictureOnce& operator=(const CardPictureOnce&) = delete;
 
-            /// <summary>Runs the send with `picture` the first time; does nothing after. Contains what the send throws (Rule #18).</summary>
-            /// <param name="picture">The picture (null = the card goes without one).</param>
-            /// <param name="read">How the picture settled (Stale: no screen in time, so the card owes a look).</param>
+            /// <summary>Runs the continuation with `picture` the first time; does nothing after. Contains what it throws (Rule #18).</summary>
+            /// <param name="picture">The picture (null = none for the card).</param>
+            /// <param name="read">How the picture settled (Stale: no screen in time, or a failure).</param>
             void Run(std::shared_ptr<const CardPicture> picture, CardPictureRead read) noexcept
             {
                 if (_ran.exchange(true))
@@ -395,13 +394,13 @@ namespace Agentmaster::Msg
                 }
                 catch (...)
                 {
-                    // Rule #18. Recovery: this card change is lost (a post's in-flight mark then stays until the next start, which
-                    // clears it, or until a "message to edit not found" answer resets the card); the next update tries again.
-                    LogSwallowedException(L"CardPictureOnce (the card's post or edit)");
+                    // Rule #18. Recovery: this tap's picture is lost (its card's busy mark then expires by itself after
+                    // kCardPictureTapBusyMs); the next tap asks again.
+                    LogSwallowedException(L"CardPictureOnce (a picture tap's continuation)");
                 }
             }
 
-            /// <summary>Whether the send ran (or is running): the wait for the picture is over.</summary>
+            /// <summary>Whether the continuation ran (or is running): the wait for the picture is over.</summary>
             /// <returns>True after the first Run.</returns>
             bool Ran() const noexcept
             {
@@ -409,7 +408,7 @@ namespace Agentmaster::Msg
             }
 
         private:
-            std::atomic<bool> _ran{ false }; // the send ran (or is running): every later Run is a no-op
+            std::atomic<bool> _ran{ false }; // the continuation ran (or is running): every later Run is a no-op
             std::function<void(std::shared_ptr<const CardPicture>, CardPictureRead)> _then;
         };
 
@@ -417,7 +416,7 @@ namespace Agentmaster::Msg
         /// §21.42: the ONE answer of a card's screen read (the "screen-snapshot" session action, sent to every window). Shared by
         /// every window's copy of the reply: the hosting window's reply Claim()s it; when the LAST copy goes unclaimed - no window
         /// hosts the tab (it closed, a claude outside Agentmaster's tabs), or the windows dropped the work - the destructor runs
-        /// the card's send with the stored picture (or none), so a card change is never lost to a read that nobody answered.
+        /// the tap's continuation with no picture (Stale), so a tap whose read nobody answered is still told.
         /// </summary>
         /// <remarks>
         /// The destructor runs on whichever thread drops the last copy: a window's UI thread, or the calling thread itself when no
@@ -427,15 +426,15 @@ namespace Agentmaster::Msg
         {
         public:
             /// <summary>Arms the guard.</summary>
-            /// <param name="once">The card's one send.</param>
-            /// <param name="fallback">What it goes with when no window answers (the stored picture, or null).</param>
-            /// <param name="taps">§21.28: the tapped buttons that wait for this card change (the send runs inside a scope of them).</param>
+            /// <param name="once">The tap's one continuation.</param>
+            /// <param name="fallback">What it gets when no window answers (null: a tap's read has no picture to fall back on).</param>
+            /// <param name="taps">§21.28: the tapped button that waits for the picture (the continuation runs inside a scope of it).</param>
             CardPictureReadGuard(std::shared_ptr<CardPictureOnce> once, std::shared_ptr<const CardPicture> fallback, std::vector<TapHoldRef> taps) noexcept :
                 _once{ std::move(once) }, _fallback{ std::move(fallback) }, _taps{ std::move(taps) }
             {
             }
 
-            /// <summary>Sends the card with the fallback when no window claimed the read.</summary>
+            /// <summary>Runs the continuation with the fallback when no window claimed the read.</summary>
             ~CardPictureReadGuard()
             {
                 if (_claimed.exchange(true) || !_once)
@@ -444,7 +443,7 @@ namespace Agentmaster::Msg
                 }
                 const TapScope tapScope{ _taps }; // never throws
                 // Stale, not NoScreen: no window answered at all (the windows are not up yet at a start, or the work was dropped), so
-                // the screen may well be readable a moment later - the card looks again (CardPictureStepSettled).
+                // the screen may well be readable a moment later - the tap's toast says to tap again.
                 _once->Run(_fallback, CardPictureRead::Stale);
             }
 
@@ -921,7 +920,8 @@ namespace Agentmaster::Msg
             // §21.39: 📜 All Screen's default level, live: the next bare /allscreen draws it, and the next render of a card's level
             // picker marks it (an empty or unknown word reads as Full).
             _allScreenLevel.store(static_cast<int>(AllScreenLevelSetting(settings.messagingAllScreenLevel)));
-            // §21.42: whether the cards carry the terminal's screen, live: the next card update reads (or no longer reads) it.
+            // §21.42 + §21.49: whether the cards carry a picture and show 🖼️, live: the next post or edit of a card carries its picture
+            // (or no longer does), and a flip adds or drops 🖼️ on every card through the slow upgrade (_refreshCard), one at a time.
             _cardPictures.store(settings.messagingCardScreenshots);
             int64_t owner = 0;
             for (const wchar_t c : settings.messagingTelegramOwnerId)
@@ -2262,8 +2262,10 @@ namespace Agentmaster::Msg
                     }
                     if (!pictures.empty())
                     {
-                        // §21.42: what the cards' screenshots cost - "drawn" pictures were uploaded with their card's own call (their
-                        // KB is the bandwidth), "reused" ones were an unchanged screen, "kept" ones an unreadable screen or a page flip.
+                        // §21.42 + §21.49: what the cards' screenshots cost - "tapped" the 🖼️ taps that read a screen, "drawn" the
+                        // changed screens drawn for them (their KB is the bandwidth: each goes up once, with its card's next edit),
+                        // "reused" a tap on an unchanged screen; "carried" the posts and edits that delivered a tap's new picture,
+                        // "kept" the ones that carried the card's photo by its file_id (no upload, no read).
                         std::wstring parts;
                         for (const auto& [kind, count] : pictures)
                         {
@@ -3780,7 +3782,7 @@ namespace Agentmaster::Msg
         _enqueue(std::move(item));
     }
 
-    std::wstring MessagingService::_cardMarkupFor(const std::wstring& sessionId, const CardButtonFacts& facts, CardPage page, json::Value& markupOut) const
+    std::wstring MessagingService::_cardMarkupFor(const std::wstring& sessionId, const CardButtonFacts& facts, CardPage page, json::Value& markupOut, std::optional<bool> pictureButton) const
     {
         // Card buttons use STABLE callback data ("c:<verb>:<session id>", at most 49 bytes of the 64 allowed): each verb acts
         // on the session's CURRENT state (a toggle reads it first), so a stale button cannot do something old (M5 is about
@@ -3789,6 +3791,10 @@ namespace Agentmaster::Msg
         // caller (the card's hash covers the buttons: a changed default re-edits a card that shows the picker, and no other).
         CardButtonFacts withLevel = facts;
         withLevel.allScreenLevel = static_cast<TurnsLevel>(_allScreenLevel.load());
+        // §21.49: Main's 🖼️ follows the settings too (_cardPictureButtonWanted) - unlike the ⭐ it is on EVERY card's Main page, so
+        // a flip changes every card's hash; _refreshCard asks for the other value to tell that change from a real one and sends it
+        // through the slow upgrade.
+        withLevel.pictureButton = pictureButton.value_or(_cardPictureButtonWanted());
         markupOut = _buttons(BuildCardButtonRows(sessionId, withLevel, page));
         return {};
     }
@@ -5329,6 +5335,12 @@ namespace Agentmaster::Msg
                 // §21.42: the photo the new card shows (its file_id, for the next update to reuse), recorded on the record that now
                 // holds this card's id (set just above, by thread).
                 me->_noteCardPictureShown(threadId, id, *picture, r);
+            }
+            if (picture)
+            {
+                // §21.49: when this post carried a 🖼️ tap's new picture, its wait is over: delivered (just recorded), or - the post
+                // refused - dropped with a toast that says why. After the record, so the card's next post or edit reuses the photo.
+                me->_settleTapPicture(sessionId, picture, r);
             }
         }, 0, false, nullptr, picture); // a COPY: the callback above captured it in this same call (argument order is unspecified)
     }
@@ -7154,16 +7166,20 @@ namespace Agentmaster::Msg
         extras.colorSquare = topic.nameColor;
         extras.threadId = topic.threadId; // §21.17: the card's title links to its topic (in the chat's "All" view, the way in)
         const std::wstring text = BuildCardText(*s, now, idleLeaves, _scheduler ? _scheduler->GlobalPaused() : false, &extras);
+        const CardButtonFacts facts = CardButtonFactsFor(*s);
+        // §21.49: whether Main shows 🖼️, read ONCE for this refresh: the slow upgrade below compares this card with its twin that
+        // has the other value, and a cog Save between two reads must not make the twin equal the card itself.
+        const bool pictureButton = _cardPictureButtonWanted();
         json::Value markup;
-        _cardMarkupFor(sessionId, CardButtonFactsFor(*s), page, markup);
+        _cardMarkupFor(sessionId, facts, page, markup, pictureButton);
         // The text AND the buttons: a card whose text is unchanged but whose buttons differ is a change too. §21.15: over the
         // card's CLASSIC render (its title token as the §21.13 square and title), so the hash does not move with the form the
         // card is shown in — an unchanged card keeps the hash its record holds, and the upgrade to chips edits no card at once.
-        const uint32_t hash = CardTextHash(TgRenderTitleTokensClassic(text) + L"\x1F" + json::Dump(markup));
-        // §21.42: the TEXT alone (no buttons): a post or edit whose text changed since the card's last update is a status update and
-        // reads the screen again; one whose text is the same (a page flip, the slow form upgrade) keeps its picture with no read.
-        const uint32_t textHash = CardTextHash(TgRenderTitleTokensClassic(text));
-        // §21.42: whether this post or edit carries the terminal's screen (the switch, rich cards, a window that can read screens).
+        const std::wstring classicText = TgRenderTitleTokensClassic(text);
+        const uint32_t hash = CardTextHash(classicText + L"\x1F" + json::Dump(markup));
+        // §21.42 + §21.49: whether this post or edit carries a picture - the one the card has (a 🖼️ tap's new one on its way, else
+        // the held photo by its file_id); no post or edit reads the screen any more. The switch, rich cards, a window that can
+        // read screens.
         const bool pictured = _cardPicturesWanted();
         // The STICKY CARD (§21.5): posts newer than the card push it down — once they have been quiet for
         // kCardStickyLagMs the old card is deleted and a fresh one sent at the bottom (two calls per burst, not
@@ -7177,17 +7193,33 @@ namespace Agentmaster::Msg
         if (topic.cardMessageId == 0 || behind || pingWanted || resort)
         {
             std::vector<TapHoldRef> waiting; // §21.28: the taps that wait for this card's change, taken by the post (below)
-            // §21.42: whether this post shows a new STATE - the picture's settle look is owed only then (CardPictureStepDecided).
-            bool stateChanged = false;
+            // §21.42 + §21.49: the picture this post carries - the card's own, never a new read (CardPictureToCarry) - and whether it
+            // is a 🖼️ tap's picture still on its way (this post then delivers it: CardState::tapPictureQueued).
+            std::shared_ptr<const CardPicture> carried;
+            bool carriesTap = false;
             {
                 std::lock_guard lk{ _mtx };
                 auto& card = _cards[sessionId];
                 card.pingWanted = false;
                 card.repostWanted = false;
                 card.lastEditMs = now;
-                stateChanged = card.lastState != s->state;
                 card.lastState = s->state;
                 waiting.swap(card.tapHolds);
+                if (pictured)
+                {
+                    // Under `_mtx`: a tap's continuation sets the card's tapPicture under the same lock, so the post either carries
+                    // the new picture and marks it queued, or misses it entirely - then the next refresh makes its picture-only edit.
+                    carried = CardPictureToCarry(card.tapPicture, topic.cardPictureFileId, topic.cardPictureAtMs, topic.cardPictureShotHash);
+                    carriesTap = carried && carried == card.tapPicture;
+                    if (carriesTap)
+                    {
+                        card.tapPictureQueued = true;
+                    }
+                }
+            }
+            if (pictured)
+            {
+                _countCardPicture(carriesTap ? L"carried" : (carried ? L"kept" : L"none"), 0);
             }
             if (pingWanted)
             {
@@ -7198,134 +7230,104 @@ namespace Agentmaster::Msg
             const TapScope tapScope{ waiting };
             const SendPriority prio = (tapped || !waiting.empty()) ? SendPriority::Final : SendPriority::CardEdit;
             const int64_t deleteFirst = topic.cardMessageId > 0 ? topic.cardMessageId : 0;
-            if (pictured)
-            {
-                // §21.42: the post carries the terminal's screen, which takes a window's read (and maybe a drawing) first. The card
-                // goes "in flight" (-1) NOW - every refresh meanwhile waits for it, so no second post starts - and the post itself
-                // (the old card's delete, then the new card) when the picture is settled. A post always reads the screen: it is the
-                // first card, a re-post below newer messages, a ping or a re-sort, each a moment the screen belongs on the card.
-                uint64_t pictureSeq = 0;
-                bool launchExpired = false; // a launch watch ran out at this decision (logged outside the lock)
-                {
-                    std::lock_guard lk{ _mtx };
-                    if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
-                    {
-                        it->second.cardMessageId = -1;
-                        it->second.cardTextHash = hash;
-                        _stateDirty = true;
-                    }
-                    auto& card = _cards[sessionId];
-                    // A new generation overtakes any edit still waiting for its picture (it targets the card this post replaces).
-                    // Within a run the post itself is never overtaken: while it is in flight no refresh posts or edits this card.
-                    pictureSeq = card.pictureSeq = ++_cardPictureGen;
-                    card.pictureTextHash = textHash;
-                    // §21.42, the picture follows the status: a post reads the screen, so a new state owes its settle look (at rest)
-                    // and every earlier look is overtaken (CardPictureStepDecided). A launch watch past its deadline ends here (a
-                    // card that kept changing gave its looks no turn), and a tab that does not run its claude ends one.
-                    launchExpired = CardPictureLaunchExpire(card.picture, now);
-                    CardPictureStepDecided(card.picture, true, stateChanged, s->state != SessionState::Running, s->live && s->started, now);
-                }
-                if (launchExpired)
-                {
-                    _logCardLaunchWatchExpired(sessionId);
-                }
-                auto self = weak_from_this();
-                const int64_t thread = topic.threadId;
-                _withCardPicture(sessionId, true, [self, sessionId, pictureSeq, thread, text, markup, deleteFirst, pingWanted, hash, prio](std::shared_ptr<const CardPicture> picture, CardPictureRead read) {
-                    if (const auto me = self.lock())
-                    {
-                        bool watchBegan = false; // §21.42: this post's read began the launch watch (logged outside the lock)
-                        {
-                            // A step of a run the bot was stopped in (a cog Save that restarts it): the new run cleared the card
-                            // states and the in-flight mark, and posts its own card - this late post would make a second one.
-                            std::lock_guard lk{ me->_mtx };
-                            const auto it = me->_cards.find(sessionId);
-                            if (it == me->_cards.end() || it->second.pictureSeq != pictureSeq)
-                            {
-                                return;
-                            }
-                            // §21.42: the picture this post carries is what the card shows from now on; a read that got no screen in
-                            // time owes the card a look, and one that found its claude still starting begins the launch watch
-                            // (CardPictureStepSettled).
-                            if (CardPictureStepSettled(it->second.picture, picture ? picture->shotHash : 0u, read, WallMs()))
-                            {
-                                watchBegan = true;
-                            }
-                        }
-                        if (watchBegan)
-                        {
-                            me->_logCardLaunchWatch(sessionId, read);
-                        }
-                        // _postCard queues the old card's delete and the new card (with the picture, or without one when none
-                        // could be had) and its answer clears the in-flight mark. Contained: `then` runs on a window's UI thread,
-                        // the picture worker or a destructor (CardPictureOnce contains a throw and logs it).
-                        me->_postCard(sessionId, thread, text, markup, deleteFirst, pingWanted, hash, prio, std::move(picture));
-                    }
-                });
-                return;
-            }
-            _postCard(sessionId, topic.threadId, text, std::move(markup), deleteFirst, pingWanted, hash, prio);
+            // _postCard marks the card in flight (-1) at once - every refresh meanwhile waits for its answer, so no second post
+            // starts - and its answer records the picture the new card shows and settles a tap's picture it carried.
+            _postCard(sessionId, topic.threadId, text, std::move(markup), deleteFirst, pingWanted, hash, prio, std::move(carried));
             return;
         }
         const bool wantRich = _titleChipsWanted();
         // §21.17: the link is part of the FORM, not of the hash (taken without the username above): every card posted before the
         // links, or before this run's getMe answered, is linked by the slow upgrade, one card at a time.
         const bool wantLinked = !_linkBot().empty();
+        // §21.49: a 🖼️ tap's picture that no queued post or edit carries yet: the card is edited for it now, even when its text and
+        // buttons are what it shows. Read under the lock the tap's continuation sets it under.
+        bool tapPictureOwed = false;
+        if (pictured)
+        {
+            std::lock_guard lk{ _mtx };
+            if (const auto it = _cards.find(sessionId); it != _cards.end())
+            {
+                tapPictureOwed = it->second.tapPicture && !it->second.tapPictureQueued;
+            }
+        }
         bool formOnly = false;
+        bool pictureOnly = false; // §21.49: the edit brings a tap's picture to a card whose text and buttons did not change
         if (hash == topic.cardTextHash)
         {
             if (topic.cardRich == wantRich && topic.cardLinked == wantLinked)
             {
-                // §21.42, the picture follows the status: the card's text and buttons are what it shows, but its screenshot may be
-                // owed a LOOK - the settle look after a change into a state at rest, a look after a read that got no screen in
-                // time, or the launch watch's while a starting tab's claude has not shown its screen. Only here, where an edit
-                // would change the picture alone; a changed text reads the screen by itself below.
-                if (pictured)
+                if (!tapPictureOwed)
                 {
-                    _lookAtCardPicture(sessionId, topic, text, markup, hash, wantRich, wantLinked, s->live && s->started, now);
+                    return; // the topic shows this very card already, in the wanted form (also after a restart: both are persisted)
                 }
-                return; // the topic shows this very card already, in the wanted form (also after a restart: both are persisted)
+                // §21.49: the card's same text and buttons go again, with the tap's picture (below).
+                pictureOnly = true;
             }
-            // §21.15: the text is unchanged and only the FORM differs — a card posted before the chips (or the links), or the
-            // rich switch flipped. Re-edited only when the slow upgrade gives this card the turn: one card at a time, within the
-            // budget.
-            if (!_takeCardFormatSlot(sessionId, hash, wantRich, wantLinked))
+            else if (tapPictureOwed)
             {
-                return;
+                // §21.49: the form differs too (§21.15), and a tap's picture waits: its edit goes now anyway and carries the wanted
+                // form, so this card needs no turn of the slow upgrade.
+                pictureOnly = true;
             }
-            formOnly = true;
+            else
+            {
+                // §21.15: the text is unchanged and only the FORM differs — a card posted before the chips (or the links), or the
+                // rich switch flipped. Re-edited only when the slow upgrade gives this card the turn: one card at a time, within the
+                // budget.
+                if (!_takeCardFormatSlot(sessionId, hash, wantRich, wantLinked))
+                {
+                    return;
+                }
+                formOnly = true;
+            }
+        }
+        else if (!force && !awaited && !tapPictureOwed && page == CardPage::Main && topic.cardTextHash != 0)
+        {
+            // §21.49: the card's ONLY change may be 🖼️ itself - every card's Main gains it at the first start of a build that has it,
+            // and every card gains or drops it when the cog's switch (or the rich switch) flips. Edited at the 20 s gap, a chat of a
+            // few hundred cards would be re-edited within a minute: the very burst that earned the flood holds. Its twin with the
+            // other value of the button is the card the topic shows, so the change goes through the slow upgrade's slot instead -
+            // one card per kCardFormatGapMs across all topics, within the call budget. A card with any other change (its text, its
+            // page, a state, a tap waiting) is edited as before and brings the button along.
+            json::Value otherMarkup;
+            _cardMarkupFor(sessionId, facts, page, otherMarkup, !pictureButton);
+            if (CardTextHash(classicText + L"\x1F" + json::Dump(otherMarkup)) == topic.cardTextHash)
+            {
+                if (!_takeCardFormatSlot(sessionId, hash, wantRich, wantLinked, /*pictureButton*/ true))
+                {
+                    return;
+                }
+                formOnly = true; // a change no tap waits for, like the form upgrade's: the taps stay
+            }
         }
         bool send = false;
         std::vector<TapHoldRef> waiting; // §21.28: the taps that wait for this card's change, taken by the edit (below)
-        // §21.42: this edit's picture generation (CardState::pictureSeq) and whether its text changed, i.e. whether the screen is
-        // read again (a page flip of the buttons and the slow form upgrade keep the card's picture without a read).
-        uint64_t pictureSeq = 0;
-        bool readScreen = false;
-        bool launchExpired = false; // §21.42: a launch watch ran out at this decision (logged outside the lock)
+        // §21.42 + §21.49: the picture this edit carries - the card's own, never a new read (CardPictureToCarry) - and whether it is
+        // a 🖼️ tap's picture still on its way (this edit then delivers it: CardState::tapPictureQueued).
+        std::shared_ptr<const CardPicture> carried;
+        bool carriesTap = false;
         {
             std::lock_guard lk{ _mtx };
             auto& card = _cards[sessionId];
             const bool stateChanged = card.lastState != s->state;
-            if (formOnly || force || awaited || stateChanged || now - card.lastEditMs >= kCardEditGapMs)
+            if (pictureOnly || formOnly || force || awaited || stateChanged || now - card.lastEditMs >= kCardEditGapMs)
             {
-                card.lastEditMs = now;
+                if (!pictureOnly)
+                {
+                    // §21.49: a picture-only edit leaves the gap alone - the card's text keeps its own cadence.
+                    card.lastEditMs = now;
+                }
                 card.lastState = s->state;
                 if (pictured)
                 {
-                    // A picture step of an older edit still running is overtaken: it is dropped (the run-wide counter: CardState::pictureSeq).
-                    pictureSeq = card.pictureSeq = ++_cardPictureGen;
-                    // §21.42, the tab's start: a launch watch past its deadline ends here (a card that kept changing gave its looks no
-                    // turn); while one waits for a starting claude, the edit keeps the card's picture and the watch sends claude's
-                    // screen once, when it shows (CardPictureEditReads).
-                    launchExpired = CardPictureLaunchExpire(card.picture, now);
-                    readScreen = CardPictureEditReads(card.picture, card.pictureTextHash != textHash, formOnly);
-                    if (readScreen)
+                    // Every edit of a card that has a picture carries it: a rich edit without the picture drops the photo (§21.42's
+                    // probe). Under `_mtx`, like the post's: the tap's continuation sets tapPicture under the same lock.
+                    carried = CardPictureToCarry(card.tapPicture, topic.cardPictureFileId, topic.cardPictureAtMs, topic.cardPictureShotHash);
+                    carriesTap = carried && carried == card.tapPicture;
+                    if (carriesTap)
                     {
-                        card.pictureTextHash = textHash;
+                        card.tapPictureQueued = true;
                     }
-                    // §21.42, the picture follows the status: a status update reads the screen (a new state at rest owes its settle
-                    // look); a page flip that overtakes a read still running owes the look that read was (CardPictureStepDecided).
-                    CardPictureStepDecided(card.picture, readScreen, stateChanged, s->state != SessionState::Running, s->live && s->started, now);
                 }
                 if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
                 {
@@ -7338,17 +7340,18 @@ namespace Agentmaster::Msg
                 send = true;
                 if (!formOnly)
                 {
-                    // §21.28: a form-only edit (the slow upgrade to chips or links) is not the change a tap waits for: the taps stay.
+                    // §21.28: a form-only edit (the slow upgrade to chips or links, or to 🖼️) is not the change a tap waits for: the
+                    // taps stay. A picture-only edit is exactly what the 🖼️ tap waits for (its continuation stashed its hold here).
                     waiting.swap(card.tapHolds);
                 }
             }
         }
-        if (launchExpired)
-        {
-            _logCardLaunchWatchExpired(sessionId);
-        }
         if (send)
         {
+            if (pictured)
+            {
+                _countCardPicture(carriesTap ? L"carried" : (carried ? L"kept" : L"none"), 0);
+            }
             // A card the user deleted on the phone cannot be edited: the answer clears the record's card, and the next
             // refresh posts a new one at the bottom (cardPostedMs 0 = no failure wait).
             auto self = weak_from_this();
@@ -7358,69 +7361,40 @@ namespace Agentmaster::Msg
             const TapScope tapScope{ waiting };
             // §21.24: a tap on the card's own buttons (⚙ Session, ◀ Back) is answered at once: the edit takes an answer's priority.
             // §21.28: so does a change a tapped button waits for (a restart that shows on the card, a page flip that met a post).
-            const SendPriority prio = (tapped || !waiting.empty()) ? SendPriority::Final : SendPriority::CardEdit;
-            // §21.42 named the two answer handlers (they were inline) so the edit can also be made later, once its picture is settled;
-            // since 2026-11-01 they are members, so a look's edit of the same card shares them (_lookAtCardPicture).
+            // §21.49: and so does the edit that brings a 🖼️ tap's picture, even once the tap was answered (past its hold's limit):
+            // the user asked for it.
+            const SendPriority prio = (tapped || pictureOnly || !waiting.empty()) ? SendPriority::Final : SendPriority::CardEdit;
+            // §21.42 named the two answer handlers (they were inline in this function), so the edit's answer can take them along.
             std::function<void(const TgResult&)> onDeleted = _cardEditDeletedHandler(thread, cardId);
             std::function<void(bool)> onForm = _cardEditFormHandler(thread, cardId, hash, wantRich, wantLinked);
-            if (pictured)
+            std::function<void(const TgResult&)> done = onDeleted;
+            if (carried)
             {
-                // §21.42: the edit carries the terminal's screen. Settled asynchronously (a window's read, maybe a drawing), so the
-                // edit goes when the picture is - unless a newer post or edit of this card was decided meanwhile (its pictureSeq):
-                // then this one is dropped, because finishing last it would put an older text back. Its taps go with it; the newer
-                // change carries what they waited for.
-                _withCardPicture(sessionId, readScreen, [self, sessionId, pictureSeq, cardId, thread, text, prio, markup, onDeleted, onForm](std::shared_ptr<const CardPicture> picture, CardPictureRead read) {
-                    const auto me = self.lock();
-                    if (!me)
+                // Its answer also records the photo the card shows now (a tap's upload's file_id, for every later post and edit to
+                // reuse) and, when the picture is a tap's, ends that tap's wait (delivered, or dropped with a toast that says why).
+                done = [self, onDeleted, carried, thread, cardId, sessionId, carriesTap](const TgResult& r) {
+                    if (onDeleted)
                     {
-                        return;
+                        onDeleted(r);
                     }
-                    bool watchBegan = false; // §21.42: this edit's read began the launch watch (logged outside the lock)
+                    if (const auto m = self.lock())
                     {
-                        std::lock_guard lk{ me->_mtx };
-                        const auto it = me->_cards.find(sessionId);
-                        if (it == me->_cards.end() || it->second.pictureSeq != pictureSeq)
+                        m->_noteCardPictureShown(thread, cardId, *carried, r);
+                        if (carriesTap)
                         {
-                            return; // overtaken by a newer post or edit of this card
+                            m->_settleTapPicture(sessionId, carried, r);
                         }
-                        // §21.42, the picture follows the status: the picture this edit carries is what the card shows from now on; a
-                        // read that got no screen in time, or a page flip that puts an older picture back, owes the card a look, and a
-                        // read that found its claude still starting begins the launch watch.
-                        watchBegan = CardPictureStepSettled(it->second.picture, picture ? picture->shotHash : 0u, read, WallMs());
                     }
-                    if (watchBegan)
-                    {
-                        me->_logCardLaunchWatch(sessionId, read);
-                    }
-                    std::function<void(const TgResult&)> done = onDeleted;
-                    if (picture)
-                    {
-                        // Its answer also records the photo the card shows now (for the next update to reuse).
-                        done = [self, onDeleted, picture, thread, cardId](const TgResult& r) {
-                            if (onDeleted)
-                            {
-                                onDeleted(r);
-                            }
-                            if (const auto m = self.lock())
-                            {
-                                m->_noteCardPictureShown(thread, cardId, *picture, r);
-                            }
-                        };
-                    }
-                    me->_editText(cardId, text, prio, L"card:" + sessionId, markup, std::move(done), onForm, std::move(picture));
-                });
+                };
             }
-            else
-            {
-                _editText(topic.cardMessageId, text, prio, L"card:" + sessionId, markup, std::move(onDeleted), std::move(onForm));
-            }
+            _editText(cardId, text, prio, L"card:" + sessionId, std::move(markup), std::move(done), std::move(onForm), std::move(carried));
         }
     }
 
     std::function<void(const TgResult&)> MessagingService::_cardEditDeletedHandler(int64_t threadId, int64_t cardMessageId)
     {
         // A card the user deleted on the phone cannot be edited: the answer clears the record's card, and the next refresh posts a
-        // new one at the bottom (cardPostedMs 0 = no failure wait). Moved here unchanged from _refreshCard (§21.42's look shares it).
+        // new one at the bottom (cardPostedMs 0 = no failure wait). Moved here unchanged from _refreshCard (§21.42).
         auto self = weak_from_this();
         const int64_t thread = threadId;
         const int64_t cardId = cardMessageId;
@@ -7456,7 +7430,7 @@ namespace Agentmaster::Msg
 
     std::function<void(bool)> MessagingService::_cardEditFormHandler(int64_t threadId, int64_t cardMessageId, uint32_t hash, bool wantRich, bool wantLinked)
     {
-        // Moved here unchanged from _refreshCard (§21.42's look shares it).
+        // Moved here unchanged from _refreshCard (§21.42).
         auto self = weak_from_this();
         const int64_t thread = threadId;
         const int64_t cardId = cardMessageId;
@@ -7495,7 +7469,7 @@ namespace Agentmaster::Msg
         };
     }
 
-    bool MessagingService::_takeCardFormatSlot(const std::wstring& sessionId, uint32_t hash, bool wantRich, bool wantLinked)
+    bool MessagingService::_takeCardFormatSlot(const std::wstring& sessionId, uint32_t hash, bool wantRich, bool wantLinked, bool pictureButton)
     {
         size_t waiting = 0;
         {
@@ -7529,13 +7503,22 @@ namespace Agentmaster::Msg
                 return false;
             }
             _lastCardFormatEditMs = tick;
+            // The form's count only: which cards still lack (or still show) 🖼️ would take a render of every card, and a log line
+            // is not worth that (§21.49's rollout says so in its own words below).
             for (const auto& [sid, t] : _state.topics)
             {
-                if (sid != sessionId && t.threadId != 0 && t.cardMessageId > 0 && (t.cardRich != wantRich || t.cardLinked != wantLinked))
+                if (!pictureButton && sid != sessionId && t.threadId != 0 && t.cardMessageId > 0 && (t.cardRich != wantRich || t.cardLinked != wantLinked))
                 {
                     ++waiting;
                 }
             }
+        }
+        if (pictureButton)
+        {
+            // §21.49: the card's only change is its picture button (the cog's switch flipped, or the first start of a build that
+            // has the button): one card per slot, so the whole chat is converted without a burst of edits.
+            _log(L"[msg] " + ShortId(sessionId) + L" card re-edited for its picture button (its buttons only; the other cards follow one at a time)");
+            return true;
         }
         _log(L"[msg] " + ShortId(sessionId) + L" card re-edited " + std::wstring{ wantRich ? L"with a title chip" : L"as HTML" } +
              (wantLinked ? L" that links to its topic" : L"") + L" (its form only; " + std::to_wstring(waiting) + L" more card(s) to go)");
@@ -7551,11 +7534,209 @@ namespace Agentmaster::Msg
         return _cardPictures.load() && !_cardPicturesStopped.load() && _titleChipsWanted() && static_cast<bool>(_hooks.sessionAction);
     }
 
-    void MessagingService::_withCardPicture(const std::wstring& sessionId, bool readScreen, std::function<void(std::shared_ptr<const CardPicture>, CardPictureRead)> then, std::optional<CardPictureLookAsk> look) noexcept
+    bool MessagingService::_cardPictureButtonWanted() const noexcept
     {
-        // The card's send runs EXACTLY ONCE, whichever path below settles the picture first (CardPictureOnce); a failure anywhere
-        // here still runs it, without a picture, so a card change is never lost to its picture (a post would otherwise stay "in
-        // flight" until the next start). Every failure settles as Stale: the card looks at its screen again later.
+        // _cardPicturesWanted minus the run's refusal stop: the button belongs to every card's keyboard, so only the user's own acts
+        // (the cog's switch, the rich switch) may add or drop it - each such flip converts the cards through the slow upgrade.
+        return _cardPictures.load() && _titleChipsWanted() && static_cast<bool>(_hooks.sessionAction);
+    }
+
+    std::wstring MessagingService::_cardPictureFromTap(const std::wstring& sessionId, int64_t messageId)
+    {
+        // The card the button sits on, found by its message, as a page flip finds it (_showCardPage): after a /clear or /resume
+        // in the tab the card belongs to the tab's next session (a Rekey), whatever session the button's data names.
+        std::wstring cardOwner = sessionId;
+        if (messageId > 0)
+        {
+            std::lock_guard lk{ _mtx };
+            for (const auto& [sid, t] : _state.topics)
+            {
+                if (t.cardMessageId == messageId)
+                {
+                    cardOwner = sid;
+                    break;
+                }
+            }
+        }
+        const auto refuse = [&cardOwner](CardPictureTapRefusal why) {
+            LogNav(L"remote telegram cardpic " + ShortId(cardOwner) + L" -> " + CardPictureTapRefusalWord(why));
+            return std::wstring{ CardPictureTapRefusalText(why) };
+        };
+        // The lean read: nothing here needs the queue. The cheap refusals first, each with its own words, so a tap that cannot get
+        // a picture costs no window a thing.
+        const auto s = _registry->GetWithoutQueue(cardOwner);
+        if (!s || !s->live)
+        {
+            return refuse(CardPictureTapRefusal::Closed);
+        }
+        if (!_cardPictures.load())
+        {
+            return refuse(CardPictureTapRefusal::PicturesOff); // a card posted before the switch went off still shows the button
+        }
+        if (_cardPicturesStopped.load())
+        {
+            return refuse(CardPictureTapRefusal::PicturesStopped); // the button stays while they are stopped (_cardPictureButtonWanted)
+        }
+        if (!_titleChipsWanted())
+        {
+            return refuse(CardPictureTapRefusal::NoRich);
+        }
+        if (!_hooks.sessionAction)
+        {
+            return refuse(CardPictureTapRefusal::Unavailable);
+        }
+        // A parked tab (its claude not started; an adopted claude runs in a tab of its own) shows nothing: the read would only say
+        // so. SessionIsReactivatable's parked half, which also takes 🖼️ off the card (BuildCardButtonRows).
+        const bool tabStarted = s->started || s->external;
+        if (!tabStarted)
+        {
+            return refuse(CardPictureTapRefusal::Parked);
+        }
+        // One read per card at a time, stamped with a run-wide generation: the worker and the continuation drop a read whose card
+        // state was made anew meanwhile (a topic rebound or recreated, a restarted bot).
+        uint64_t seq = 0;
+        {
+            std::lock_guard lk{ _mtx };
+            const auto topic = _state.topics.find(cardOwner);
+            if (topic == _state.topics.end() || topic->second.threadId == 0 || topic->second.cardMessageId == 0)
+            {
+                return refuse(CardPictureTapRefusal::NoCard);
+            }
+            auto& card = _cards[cardOwner];
+            const int64_t nowTick = static_cast<int64_t>(::GetTickCount64());
+            if (CardPictureTapBusy(card.tapPictureSinceTickMs, nowTick))
+            {
+                return refuse(CardPictureTapRefusal::Busy);
+            }
+            card.tapPictureSinceTickMs = nowTick;
+            seq = card.pictureSeq = ++_cardPictureGen;
+        }
+        LogNav(L"remote telegram cardpic " + ShortId(cardOwner) + L" -> reading");
+        _countCardPicture(L"tapped", 0);
+        auto self = weak_from_this();
+        // The continuation runs once, on whichever thread settled the read (a window's UI thread, the worker, the send loop past the
+        // wait, or here when no window is registered), inside a TapScope of the tap's holds (_withCardPicture takes them now).
+        _withCardPicture(cardOwner, [self, cardOwner, seq, tabStarted](std::shared_ptr<const CardPicture> picture, CardPictureRead read) {
+            const auto me = self.lock();
+            if (!me)
+            {
+                return; // the service is going: nothing to show the picture on
+            }
+            const bool fresh = read == CardPictureRead::Fresh && picture;
+            bool current = false;
+            {
+                std::lock_guard lk{ me->_mtx };
+                const auto it = me->_cards.find(cardOwner);
+                current = it != me->_cards.end() && it->second.pictureSeq == seq;
+                if (current)
+                {
+                    if (fresh)
+                    {
+                        // The card's next post or edit carries it (a picture-only edit when nothing else changes); the busy mark
+                        // stays until Telegram answered that send (_settleTapPicture).
+                        it->second.tapPicture = picture;
+                        it->second.tapPictureQueued = false;
+                    }
+                    else
+                    {
+                        it->second.tapPictureSinceTickMs = 0; // no picture: the next tap may ask again at once
+                    }
+                }
+            }
+            if (!current)
+            {
+                // The card state was made anew while the window read (a topic rebound or recreated, the bot restarted): this screen
+                // belongs to a card that is gone. The tap's answer then says nothing (or that the work went on, past its limit).
+                LogNav(L"remote telegram cardpic " + ShortId(cardOwner) + L" -> dropped (the card moved on)");
+                return;
+            }
+            if (fresh)
+            {
+                // The tapped button keeps spinning until the edit that carries the picture is in: its hold moves to the card
+                // (_awaitCardChange, inside this continuation's tap scope), and the tick runs now instead of within 1.5 s.
+                me->_awaitCardChange(cardOwner);
+                {
+                    std::lock_guard lk{ me->_mtx };
+                    me->_tickRequested = true;
+                }
+                me->_tickCv.notify_one();
+                LogNav(L"remote telegram cardpic " + ShortId(cardOwner) + L" -> " + (picture->png.empty() ? L"reused" : L"drawn") + L" (the card's next edit carries it)");
+                return;
+            }
+            // No picture: the toast says why, and what to do (the read's own words: parked, starting, no answer).
+            const std::wstring_view toast = CardPictureTapReadText(read, tabStarted);
+            for (const auto& tap : TapScope::CurrentTaps())
+            {
+                if (tap)
+                {
+                    tap->SetToast(toast);
+                }
+            }
+            LogNav(L"remote telegram cardpic " + ShortId(cardOwner) + L" -> " + CardPictureReadWord(read));
+        });
+        return {}; // the read's outcome sets the toast, or the picture on the card answers the tap: the caller leaves the tap alone
+    }
+
+    void MessagingService::_settleTapPicture(const std::wstring& sessionId, const std::shared_ptr<const CardPicture>& picture, const TgResult& r) noexcept
+    {
+        try
+        {
+            if (!picture)
+            {
+                return;
+            }
+            // A card the user deleted on the phone: the edit's own handler forgot the card (_cardEditDeletedHandler), and the card
+            // posted in its place carries the waiting picture - so the wait goes on.
+            if (!r.ok && r.httpStatus == 400 && r.description.find(L"message to edit not found") != std::wstring::npos)
+            {
+                return;
+            }
+            {
+                std::lock_guard lk{ _mtx };
+                const auto it = _cards.find(sessionId);
+                if (it == _cards.end() || it->second.tapPicture != picture)
+                {
+                    return; // not the card's waiting picture (a newer tap's, or one another send's answer settled already)
+                }
+                // Delivered (its photo is recorded: TopicRecord::cardPictureFileId) or not (refused, failed): either way the wait is
+                // over. A failed one is not sent again by itself - a 502 or a refusal repeated with every card edit would upload the
+                // same picture again and again; the toast tells the user to tap again.
+                it->second.tapPicture.reset();
+                it->second.tapPictureQueued = false;
+                it->second.tapPictureSinceTickMs = 0;
+            }
+            // For an edit whose rich form was refused WITH the picture, `r` is its retry's answer without it: ok, but no photo.
+            const bool answered = r.ok || r.NotModified();
+            const bool shown = r.NotModified() || (r.ok && !CardPictureFromMessage(r.result).fileId.empty());
+            const std::wstring toast = CardPictureDeliveryText(answered, shown, r.httpStatus);
+            if (toast.empty())
+            {
+                return;
+            }
+            // The send loop runs this inside the answered item's tap scope: the tapped button, while it still waits, carries the
+            // toast in its answer.
+            for (const auto& tap : TapScope::CurrentTaps())
+            {
+                if (tap)
+                {
+                    tap->SetToast(toast);
+                }
+            }
+            _log(L"[msg] " + ShortId(sessionId) + L" card picture of a tap was not delivered (" + std::to_wstring(r.httpStatus) + L": " +
+                 (answered ? std::wstring{ L"refused, the card's text went without it" } : r.description) + L"); the next tap tries again");
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the waiting picture may stay (its card's busy mark then expires after kCardPictureTapBusyMs, and
+            // the next send of the card carries the picture again); a toast may be missing.
+            LogSwallowedException(L"MessagingService::_settleTapPicture");
+        }
+    }
+
+    void MessagingService::_withCardPicture(const std::wstring& sessionId, std::function<void(std::shared_ptr<const CardPicture>, CardPictureRead)> then) noexcept
+    {
+        // The tap's continuation runs EXACTLY ONCE, whichever path below settles the picture first (CardPictureOnce); a failure
+        // anywhere here still runs it, without a picture (Stale), so the tap is always told and the card's busy mark always goes.
         std::shared_ptr<CardPictureOnce> once;
         try
         {
@@ -7563,8 +7744,8 @@ namespace Agentmaster::Msg
         }
         catch (...)
         {
-            // Rule #18. Recovery: no memory for the wrapper - `then` is intact (the allocation failed before the move): send now.
-            LogSwallowedException(L"MessagingService::_withCardPicture (the send's wrapper)");
+            // Rule #18. Recovery: no memory for the wrapper - `then` is intact (the allocation failed before the move): run it now.
+            LogSwallowedException(L"MessagingService::_withCardPicture (the continuation's wrapper)");
             try
             {
                 if (then)
@@ -7574,14 +7755,14 @@ namespace Agentmaster::Msg
             }
             catch (...)
             {
-                // Rule #18. Recovery: this card change is lost; the next update tries again.
-                LogSwallowedException(L"MessagingService::_withCardPicture (the send)");
+                // Rule #18. Recovery: this tap gets no picture and no toast; its card's busy mark expires after kCardPictureTapBusyMs.
+                LogSwallowedException(L"MessagingService::_withCardPicture (the continuation)");
             }
             return;
         }
         try
         {
-            // The picture the card shows now (its topic record), and the generation the caller stamped for this change.
+            // The picture the card shows now (its topic record: an unchanged screen reuses it), and the generation the tap stamped.
             std::wstring storedId;
             int64_t storedAt = 0;
             uint32_t storedHash = 0;
@@ -7599,42 +7780,21 @@ namespace Agentmaster::Msg
                     seq = it->second.pictureSeq;
                 }
             }
-            std::shared_ptr<const CardPicture> stored;
-            if (!storedId.empty())
-            {
-                auto held = std::make_shared<CardPicture>();
-                held->fileId = storedId;
-                held->shotAtMs = storedAt;
-                held->shotHash = storedHash;
-                stored = std::move(held);
-            }
-            if (!readScreen)
-            {
-                // Not a status update (a page flip of the buttons, the slow form upgrade): the card keeps the picture it shows, with no
-                // read and no drawing - a page flip must stay instant. (Kept: a stored picture older than the one handed before - an
-                // upload still on its way - owes a look, CardPictureStepSettled.)
-                _countCardPicture(stored ? L"kept" : L"none", 0);
-                once->Run(stored, CardPictureRead::Kept);
-                return;
-            }
-            // §21.28: the tapped buttons that wait for this change ride the read and the drawing (the caller's TapScope holds them).
+            // §21.28: the tapped button that waits for its picture rides the read and the drawing (the caller's TapScope holds it).
             std::vector<TapHoldRef> taps = _holdTaps();
-            // No window answering (every copy of the reply going uncalled) sends the card with the stored picture.
-            const auto guard = std::make_shared<CardPictureReadGuard>(once, stored, taps);
+            // No window answering (every copy of the reply going uncalled) settles the read as Stale, with no picture...
+            const auto guard = std::make_shared<CardPictureReadGuard>(once, nullptr, taps);
             {
                 // ...and so does a window that does not answer IN TIME (a frozen UI thread holds its copy of the request): past
-                // kCardPictureWaitMs the send loop sends the card with the stored picture, a late picture is dropped, and the card
-                // owes a look (Stale). A look itself waits kCardPictureLookWaitMs: no text waits for it.
-                const int64_t waitMs = look ? kCardPictureLookWaitMs : kCardPictureWaitMs;
+                // kCardPictureTapWaitMs the send loop settles the read, and a late picture is dropped.
                 PendingCardPicture wait;
-                wait.deadlineTickMs = static_cast<int64_t>(::GetTickCount64()) + waitMs;
+                wait.deadlineTickMs = static_cast<int64_t>(::GetTickCount64()) + kCardPictureTapWaitMs;
                 wait.sessionId = sessionId;
-                wait.waitMs = waitMs;
-                wait.look = look.has_value();
+                wait.waitMs = kCardPictureTapWaitMs;
                 wait.settled = [once]() { return once->Ran(); };
-                wait.expire = [once, stored, taps]() {
+                wait.expire = [once, taps]() {
                     const TapScope tapScope{ taps };
-                    once->Run(stored, CardPictureRead::Stale);
+                    once->Run(nullptr, CardPictureRead::Stale);
                 };
                 std::lock_guard lk{ _pictureMtx };
                 _pendingCardPictures.push_back(std::move(wait));
@@ -7643,7 +7803,7 @@ namespace Agentmaster::Msg
             // The hosting window reads the live screen with its colors on its UI thread (one pass over the viewport's cells under the
             // terminal's read lock: 0.3-0.6 ms optimized, measured for §21.24) and answers with the serialized snapshot ("" for a parked
             // tab, whose claude shows nothing, or a control that is not up).
-            _hooks.sessionAction(sessionId, L"screen-snapshot", L"", [self, sessionId, seq, once, stored, storedId, storedAt, storedHash, look, taps, guard](std::wstring snapshot) {
+            _hooks.sessionAction(sessionId, L"screen-snapshot", L"", [self, sessionId, seq, once, storedId, storedAt, storedHash, taps, guard](std::wstring snapshot) {
                 if (!guard->Claim())
                 {
                     return;
@@ -7652,86 +7812,62 @@ namespace Agentmaster::Msg
                 const auto me = self.lock();
                 if (!me)
                 {
-                    once->Run(nullptr, CardPictureRead::Stale); // the service is going: whatever runs now sends nothing
+                    once->Run(nullptr, CardPictureRead::Stale); // the service is going: nothing will show the picture
                     return;
                 }
                 try
                 {
                     const int64_t now = WallMs();
-                    // §21.42, the tab's start: a screen that shows NOTHING is a claude still starting (a tab just launched, activated or
-                    // restarted). It is never drawn or sent - the card keeps its last real picture, as for a tab with no screen - and
-                    // the step settles as Blank, so the launch watch waits for claude's own screen. The test reads no cell
-                    // (ScreenSnapshotShowsNothing: only empty rows), so it costs this UI thread next to nothing.
+                    // A screen that shows NOTHING is a claude still starting (a tab just launched, activated or restarted): never drawn -
+                    // a black picture would replace the card's last real one - and the toast says to tap again in a moment. The test
+                    // reads no cell (ScreenSnapshotShowsNothing: only empty rows), so it costs this UI thread next to nothing.
                     const bool blank = !snapshot.empty() && ScreenSnapshotShowsNothing(snapshot);
                     const bool readable = !snapshot.empty() && !blank;
                     const uint32_t shotHash = readable ? CardPictureShotHash(snapshot) : 0u;
-                    const CardPictureLookAsk* ask = look ? &*look : nullptr;
-                    if (CardPictureLaunchGateHolds(ask, readable, shotHash))
-                    {
-                        // The launch watch: claude's screen shows text but changed since the watch's previous look - it is still being
-                        // drawn. Nothing is drawn now; the look remembers this screen (its hash, in a picture that carries nothing else)
-                        // and looks again, and the picture goes once a look sees the same screen twice.
-                        auto seen = std::make_shared<CardPicture>();
-                        seen->shotHash = shotHash;
-                        seen->shotAtMs = now;
-                        me->_countCardPicture(L"moving", 0);
-                        once->Run(std::move(seen), CardPictureRead::Moving);
-                        return;
-                    }
-                    const CardPicturePlan plan = PlanCardPicture(readable, shotHash, now, storedId, storedHash, storedAt, ask ? ask->unchangedShotHash : 0u);
-                    if (plan.source == CardPictureSource::Unchanged)
-                    {
-                        // A look at the screen the card already carries: nothing is drawn, nothing is sent.
-                        me->_countCardPicture(L"unchanged", 0);
-                        once->Run(nullptr, CardPictureRead::Unchanged);
-                        return;
-                    }
+                    const CardPicturePlan plan = PlanCardPicture(readable, shotHash, now, storedId, storedHash, storedAt);
                     if (plan.source == CardPictureSource::Upload)
                     {
                         // A screen that changed: drawn on the picture worker (never on this UI thread: ~90-185 ms), uploaded by the card's
-                        // own post or edit. The stored picture stays the fallback should the drawing fail (then Stale: a look follows).
+                        // next edit. No fallback: a drawing that fails ends the tap's read (Stale).
                         CardPictureJob job;
                         job.sessionId = sessionId;
                         job.seq = seq;
                         job.snapshot = std::move(snapshot);
                         job.shotHash = shotHash;
                         job.shotAtMs = now;
-                        job.fallback = stored;
                         job.then = [once](std::shared_ptr<const CardPicture> picture, CardPictureRead read) { once->Run(std::move(picture), read); };
                         job.taps = taps;
                         me->_queueCardPictureRender(std::move(job));
                         return;
                     }
-                    // The read's outcome when it found no screen to draw: Blank (a starting claude: the launch watch follows) or NoScreen
-                    // (a parked tab, a control not up).
-                    const CardPictureRead unreadable = blank ? CardPictureRead::Blank : CardPictureRead::NoScreen;
-                    if (plan.source == CardPictureSource::Reuse)
+                    if (readable && plan.source == CardPictureSource::Reuse)
                     {
-                        // The screen is the one the card shows (read now: captioned now - Fresh), or it could not be read (a parked tab, a
-                        // blank screen: the last picture with its own moment - NoScreen or Blank). Either way the held photo, by file_id: no
-                        // upload.
+                        // The screen is the one the card's photo shows: the held photo by its file_id (no upload), captioned with the
+                        // moment it was read again - the tap's answer is "this is still the screen".
                         auto reused = std::make_shared<CardPicture>();
                         reused->fileId = storedId;
                         reused->shotAtMs = plan.shotAtMs;
                         reused->shotHash = storedHash;
-                        me->_countCardPicture(shotHash != 0 ? L"reused" : (blank ? L"blank" : L"kept"), 0);
-                        once->Run(std::move(reused), shotHash != 0 ? CardPictureRead::Fresh : unreadable);
+                        me->_countCardPicture(L"reused", 0);
+                        once->Run(std::move(reused), CardPictureRead::Fresh);
                         return;
                     }
-                    me->_countCardPicture(blank ? L"blank" : L"none", 0); // no screen to show and no picture yet: the card goes as text
-                    once->Run(nullptr, unreadable);
+                    // No screen to draw: Blank (a starting claude) or NoScreen (a parked tab, a control not up). The card keeps the
+                    // picture it shows; the tap's toast says why.
+                    me->_countCardPicture(blank ? L"blank" : L"noscreen", 0);
+                    once->Run(nullptr, blank ? CardPictureRead::Blank : CardPictureRead::NoScreen);
                 }
                 catch (...)
                 {
-                    // Rule #18. Recovery: the card goes with the picture it shows (or none), and looks at the screen again later (Stale).
+                    // Rule #18. Recovery: no picture for this tap (Stale): the card keeps the one it shows, the toast says to tap again.
                     LogSwallowedException(L"MessagingService::_withCardPicture (the window's answer)");
-                    once->Run(stored, CardPictureRead::Stale);
+                    once->Run(nullptr, CardPictureRead::Stale);
                 }
             });
         }
         catch (...)
         {
-            // Rule #18. Recovery: the card goes now without a picture (a no-op when a path above already sent it), and looks later.
+            // Rule #18. Recovery: no picture for this tap (a no-op when a path above already settled it): the toast says to tap again.
             LogSwallowedException(L"MessagingService::_withCardPicture");
             once->Run(nullptr, CardPictureRead::Stale);
         }
@@ -7767,12 +7903,10 @@ namespace Agentmaster::Msg
             }
             for (auto& wait : late)
             {
-                // §21.42, the picture follows the status: the late one is dropped, but the card owes a look (Stale), so the screen still
-                // reaches it once the window answers - the 4 s bound now delays the picture instead of losing it.
-                _log(L"[msg] " + ShortId(wait.sessionId) + (wait.look ? L" card picture look not answered within " : L" card picture not ready within ") +
-                     std::to_wstring(wait.waitMs / 1000) +
-                     (wait.look ? L" s (the window's screen read or its drawing): the card keeps its picture and looks again later" :
-                                  L" s (the window's screen read or its drawing): the card goes with the picture it shows and looks at the screen again in a few seconds"));
+                // §21.49: the late picture is dropped - the card keeps the one it shows, and the next tap asks again. The tap itself was
+                // answered long before (its hold's limit), so the log line is all that says so.
+                _log(L"[msg] " + ShortId(wait.sessionId) + L" card picture of a tap not ready within " + std::to_wstring(wait.waitMs / 1000) +
+                     L" s (the window's screen read or its drawing): no picture this time, the card keeps the one it shows");
                 _countCardPicture(L"late", 0);
                 if (wait.expire)
                 {
@@ -7782,166 +7916,9 @@ namespace Agentmaster::Msg
         }
         catch (...)
         {
-            // Rule #18. Recovery: the waits stay (or are lost with the throw); a late card is then sent by its own picture's arrival.
+            // Rule #18. Recovery: the waits stay (or are lost with the throw); a late read then settles by its own picture's arrival,
+            // and its card's busy mark expires by itself after kCardPictureTapBusyMs.
             LogSwallowedException(L"MessagingService::_expireCardPictureWaits");
-        }
-    }
-
-    void MessagingService::_lookAtCardPicture(const std::wstring& sessionId, const TopicRecord& topic, const std::wstring& text, const json::Value& markup, uint32_t hash, bool wantRich, bool wantLinked, bool tabStarted, int64_t nowMs)
-    {
-        // Take the look under the lock - the check and the mark together, since a tap's refresh may run this beside the tick's. The
-        // common case leaves here: no look owed, not due yet, or a read of this card still runs.
-        uint64_t lookSeq = 0;
-        CardPictureLookAsk ask;
-        {
-            std::lock_guard lk{ _mtx };
-            const auto it = _cards.find(sessionId);
-            if (it == _cards.end() || !CardPictureLookDue(it->second.picture, nowMs))
-            {
-                return;
-            }
-            auto& card = it->second;
-            lookSeq = ++_cardPictureGen;
-            CardPictureLookStarted(card.picture, lookSeq, card.pictureSeq, tabStarted);
-            // The look's basis is the picture the card's newest post or edit CARRIED (maybe still in the outbox), not the stored one
-            // Telegram last confirmed: a look racing an upload on its way must not draw and upload that same screen again. While the
-            // launch watch waits for a starting claude, the ask also gates a screen still changing (CardPictureLookAskFor).
-            ask = CardPictureLookAskFor(card.picture, nowMs);
-        }
-        // The screen hash an Unchanged answer stands for (the basis itself): the launch watch compares it with the screen it saw before.
-        const uint32_t basis = ask.unchangedShotHash;
-        try
-        {
-            _countCardPicture(L"looked", 0);
-            auto self = weak_from_this();
-            const int64_t thread = topic.threadId;
-            const int64_t cardId = topic.cardMessageId;
-            // The same answer handlers as a status update's edit of this card: a card the user deleted is posted anew, and the form
-            // Telegram shows is recorded (a refused rich edit goes as HTML, and the slow upgrade must know).
-            std::function<void(const TgResult&)> onDeleted = _cardEditDeletedHandler(thread, cardId);
-            std::function<void(bool)> onForm = _cardEditFormHandler(thread, cardId, hash, wantRich, wantLinked);
-            _withCardPicture(
-                sessionId,
-                true,
-                [self, sessionId, lookSeq, basis, cardId, thread, text, markup, onDeleted, onForm](std::shared_ptr<const CardPicture> picture, CardPictureRead read) {
-                    const auto me = self.lock();
-                    if (!me)
-                    {
-                        return;
-                    }
-                    CardPictureLookStep step = CardPictureLookStep::Dropped;
-                    int tries = 0;
-                    // §21.42, the tab's start: whether this look ended a launch watch, and when that watch began (for the log line).
-                    bool watchEnded = false;
-                    int64_t watchBeganMs = 0;
-                    const int64_t now = WallMs();
-                    {
-                        std::lock_guard lk{ me->_mtx };
-                        const auto it = me->_cards.find(sessionId);
-                        if (it == me->_cards.end())
-                        {
-                            return; // the card state went with its topic (rebound, recreated or deleted): its new card reads anew
-                        }
-                        auto& track = it->second.picture;
-                        const int64_t watchUntil = track.launchUntilMs;
-                        // What the read saw: the picture's screen (Fresh), the screen still changing (Moving), or the basis (Unchanged).
-                        const uint32_t seenHash = read == CardPictureRead::Unchanged ? basis : (picture ? picture->shotHash : 0u);
-                        step = CardPictureLookSettled(track, lookSeq, it->second.pictureSeq, picture != nullptr, seenHash, read, now);
-                        tries = track.lookTries;
-                        watchEnded = watchUntil != 0 && track.launchUntilMs == 0;
-                        watchBeganMs = watchUntil - kCardPictureLaunchWatchMs;
-                    }
-                    if (step == CardPictureLookStep::GiveUp)
-                    {
-                        me->_log(L"[msg] " + ShortId(sessionId) + L" card picture: " + std::to_wstring(tries) +
-                                 L" looks in a row got no screen in time; the card keeps its picture until its next status update");
-                        return;
-                    }
-                    if (step == CardPictureLookStep::Watch)
-                    {
-                        me->_logCardLaunchWatch(sessionId, read);
-                        return;
-                    }
-                    if (step == CardPictureLookStep::WatchTimedOut)
-                    {
-                        me->_log(L"[msg] " + ShortId(sessionId) + L" card picture: the tab's screen showed nothing for " + std::to_wstring(kCardPictureLaunchWatchMs / 1000) +
-                                 L" s after its claude started; the card keeps its picture until its next status update");
-                        return;
-                    }
-                    if (watchEnded && (step == CardPictureLookStep::Send || step == CardPictureLookStep::Done))
-                    {
-                        // The launch watch's one outcome: claude shows its screen (held still, or taken as it was) - the picture follows it,
-                        // or the card carries that very screen already.
-                        me->_log(L"[msg] " + ShortId(sessionId) + L" card picture: the tab's claude shows its screen " + std::to_wstring((now - watchBeganMs) / 1000) + L" s after the watch began" +
-                                 (step == CardPictureLookStep::Send ? std::wstring{ L"; the card's picture follows it" } : std::wstring{ L"; the card carries it already" }));
-                    }
-                    if (step != CardPictureLookStep::Send || !picture)
-                    {
-                        return; // dropped (a newer post or edit owns the card), nothing changed, or the next look is scheduled
-                    }
-                    if (!me->_cardPicturesWanted())
-                    {
-                        // The cog's switch went off (or three refusals stopped the pictures) while the window answered: a look is an
-                        // edit for the picture alone, so it has nothing left to send.
-                        return;
-                    }
-                    // The card's same text and buttons with the new picture: one edit at the cards' own priority, holding no tap. Its
-                    // answer records the photo the card shows now, for the next update or look to reuse.
-                    std::function<void(const TgResult&)> done = [self, onDeleted, picture, thread, cardId](const TgResult& r) {
-                        if (onDeleted)
-                        {
-                            onDeleted(r);
-                        }
-                        if (const auto m = self.lock())
-                        {
-                            m->_noteCardPictureShown(thread, cardId, *picture, r);
-                        }
-                    };
-                    me->_editText(cardId, text, SendPriority::CardEdit, L"card:" + sessionId, markup, std::move(done), onForm, std::move(picture));
-                },
-                ask);
-        }
-        catch (...)
-        {
-            // Rule #18. Recovery: the look did not start (no memory for its handlers): release it and try again after the first pause,
-            // so the card is not left with a look marked running that nothing will ever settle.
-            LogSwallowedException(L"MessagingService::_lookAtCardPicture");
-            std::lock_guard lk{ _mtx };
-            if (const auto it = _cards.find(sessionId); it != _cards.end() && it->second.picture.lookSeq == lookSeq && it->second.picture.lookPending)
-            {
-                it->second.picture.lookPending = false;
-                it->second.picture.lookAtMs = WallMs() + CardPictureLookDelayMs(it->second.picture.lookTries);
-            }
-        }
-    }
-
-    void MessagingService::_logCardLaunchWatch(const std::wstring& sessionId, CardPictureRead read) noexcept
-    {
-        try
-        {
-            // Blank: the terminal is up and shows nothing yet; NoScreen on a started tab: the terminal itself is not up yet.
-            _log(L"[msg] " + ShortId(sessionId) + L" card picture: the tab's claude is starting (" +
-                 std::wstring{ read == CardPictureRead::Blank ? L"its screen shows nothing yet" : L"its screen is not up yet" } +
-                 L"); the card keeps its picture and sends claude's screen once it shows (at most " + std::to_wstring(kCardPictureLaunchWatchMs / 1000) + L" s)");
-        }
-        catch (...)
-        {
-            // Rule #18. Recovery: the line is lost; the watch itself runs on (its state was set before this call).
-            LogSwallowedException(L"MessagingService::_logCardLaunchWatch");
-        }
-    }
-
-    void MessagingService::_logCardLaunchWatchExpired(const std::wstring& sessionId) noexcept
-    {
-        try
-        {
-            _log(L"[msg] " + ShortId(sessionId) + L" card picture: the launch watch's " + std::to_wstring(kCardPictureLaunchWatchMs / 1000) +
-                 L" s ran out while the card kept changing (no look got its turn); the card's updates read the screen again");
-        }
-        catch (...)
-        {
-            // Rule #18. Recovery: the line is lost; the watch ended already (its state was cleared before this call).
-            LogSwallowedException(L"MessagingService::_logCardLaunchWatchExpired");
         }
     }
 
@@ -7976,8 +7953,8 @@ namespace Agentmaster::Msg
             }
             catch (...)
             {
-                // Rule #18. Recovery: no thread could start - every queued job goes now with its fallback (no picture drawn, Stale: each
-                // card looks again later), so no card change is lost, and the next job tries to start the worker again.
+                // Rule #18. Recovery: no thread could start - every queued job ends now with its fallback (no picture drawn, Stale: each
+                // tap's toast says to tap again), so no tap waits for nothing, and the next job tries to start the worker again.
                 LogSwallowedException(L"MessagingService::_queueCardPictureRender (the worker thread)");
                 std::deque<CardPictureJob> left;
                 {
@@ -7997,7 +7974,7 @@ namespace Agentmaster::Msg
         }
         catch (...)
         {
-            // Rule #18. Recovery: the job could not be queued (no memory): its card goes now with the fallback, and looks later (Stale).
+            // Rule #18. Recovery: the job could not be queued (no memory): its tap's read ends now with the fallback (Stale).
             LogSwallowedException(L"MessagingService::_queueCardPictureRender");
             const TapScope tapScope{ job.taps };
             if (job.then)
@@ -8023,8 +8000,8 @@ namespace Agentmaster::Msg
                 _pictureJobs.pop_front();
             }
             std::shared_ptr<const CardPicture> result = job.fallback;
-            // §21.42: Fresh only for a picture drawn here; the fallback (a job overtaken, a screen that did not parse or draw, a throw)
-            // is Stale, so a card whose drawing failed looks at its screen again later instead of keeping the old picture for good.
+            // §21.42: Fresh only for a picture drawn here; the fallback (a job whose card moved on, a screen that did not parse or draw,
+            // a throw) is Stale, so the tap's toast says to tap again instead of nothing happening.
             CardPictureRead read = CardPictureRead::Stale;
             try
             {
@@ -8036,8 +8013,8 @@ namespace Agentmaster::Msg
                 }
                 if (!current)
                 {
-                    // A newer post or edit of this card was decided while this one waited: its edit is dropped anyway, so nothing is
-                    // drawn for it (the fallback lets its `then` see that and stop).
+                    // The card moved on while this one waited (its state made anew: a topic rebound or recreated): its continuation
+                    // drops the picture anyway, so nothing is drawn for it (the fallback lets its `then` see that and stop).
                     _countCardPicture(L"skipped", 0);
                 }
                 else if (const auto parsed = ParseScreenSnapshot(job.snapshot); !parsed)
@@ -8066,11 +8043,11 @@ namespace Agentmaster::Msg
             }
             catch (...)
             {
-                // Rule #18. Recovery: the card goes with its fallback (the picture it shows, or none) and looks again later (Stale,
-                // unless the drawing had finished - `read` says which); the worker goes on.
+                // Rule #18. Recovery: the tap's read ends with its fallback (no picture: Stale, unless the drawing had finished -
+                // `read` says which); the worker goes on.
                 LogSwallowedException(L"MessagingService::_runCardPictureWorker");
             }
-            // The card's post or edit, with what came of it. CardPictureOnce never throws; the scope never throws.
+            // The tap's continuation, with what came of it. CardPictureOnce never throws; the scope never throws.
             const TapScope tapScope{ job.taps };
             if (job.then)
             {
@@ -8103,8 +8080,8 @@ namespace Agentmaster::Msg
                     t.cardPictureFileId = shown.fileId;
                     t.cardPictureAtMs = picture.shotAtMs;
                     t.cardPictureShotHash = picture.shotHash;
-                    // PROGRESS (§21.35): a running card changes its picture every ~20 s; lost after an unexpected end, the next update
-                    // just uploads once more.
+                    // PROGRESS (§21.35): the photo only spares the next start an upload; lost after an unexpected end, the card's
+                    // posts and edits carry the older photo until the next 🖼️ tap.
                     _stateProgressDirty = true;
                     break;
                 }
