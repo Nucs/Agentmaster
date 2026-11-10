@@ -3140,7 +3140,9 @@ namespace winrt::TerminalApp::implementation
         //      AgentMaster/ConnectionLostRestart.h; TerminalPage.AgentTurns.cpp) ----
         // The user's request of 2026-11-08: a session whose turn dies on "API Error: Connection lost mid-response. The response
         // above may be incomplete." — since 2026-11-10 any response Claude Code cut off ("The response stopped arriving", …:
-        // IsCutOffResponseError) — is restarted by the window that hosts its tab as "Restart uninterrupted"
+        // IsCutOffResponseError), and any temporary API failure that outlived Claude Code's own retries ("… This is a server-side
+        // issue, usually temporary …", "Repeated 529 Overloaded errors", "Connection error.", …: ClassifyAutoRestartError) after a
+        // back-off of 1, 5 and 15 minutes — is restarted by the window that hosts its tab as "Restart uninterrupted"
         // (RestartTurnChoice::LetTurnContinue), with no question and no tab switch, so the turn simply goes on. One TRACK per
         // session this window is dealing with, from the first sight of its Error episode until the episode ends (the session
         // leaves Error) or, after a restart, until the turn runs again or the confirm window passes.
@@ -3152,6 +3154,7 @@ namespace winrt::TerminalApp::implementation
             Declined, // the registry gate declined this Error episode (logged once): the switch is off, an adopted tab, no take-back, a stop intent the user recorded. A change (a setting turned on) re-judges it.
             Held, // the registry gate waits for a hold to pass: an unsent draft, a delivery / draft fill / stop watch owning the box, background work.
             Judging, // the transcript gate's tail read (PlanApiErrorRewindForSession) runs off the UI thread (_JudgeConnectionLostRestart).
+            Waiting, // a temporary API failure's back-off runs (the registry gate's Wait; logged once with its length): the sweep restarts it once the back-off passed. The Running -> Error toast stays held meanwhile.
             Settled, // the transcript gate said no for this episode (or the session's own pane could not be found): nothing more until the episode ends.
             Restarted, // the restart ran; DecideConnectionLostRestartOutcome watches for the turn to run again.
         };
@@ -3160,7 +3163,7 @@ namespace winrt::TerminalApp::implementation
         {
             int64_t errorEpisodeMs{ 0 }; // SessionInfo::stateChangedAtUnixMs of the Error episode this track is about (a new episode starts a new track)
             ConnectionLostRestartPhase phase{ ConnectionLostRestartPhase::Held };
-            std::wstring loggedReason; // the hold / decline reason last written to hooks.log (one line per change, not per notify)
+            std::wstring loggedReason; // the hold / decline / back-off reason last written to hooks.log (one line per change, not per notify)
             std::wstring errorUuid; // the transcript's error row the restart was made for (Restarted; the log)
             int64_t judgingSinceTickMs{ 0 }; // GetTickCount64 when the tail read started (Judging) — a read that never comes back is settled by the sweep
             int64_t restartedTickMs{ 0 }; // GetTickCount64 when the restart ran (Restarted) — DecideConnectionLostRestartOutcome's clock
@@ -3178,18 +3181,21 @@ namespace winrt::TerminalApp::implementation
         bool _connectionLostRestartInFlight{ false };
         std::wstring _connectionLostRestartRefusal; // the refusal a seam recorded while _connectionLostRestartInFlight was set ("" = none)
         // The registry-change reaction: run the gate for one session this window may host, and move its track — open it on a
-        // new Error episode of this error, log a decline or a hold once, start the transcript gate (Go), watch a restarted
-        // session (Restarted), drop the track when the episode ends. Called by the tab-dot drain BEFORE _UpdateTabAgentDot, so
-        // a track that starts judging here makes the same pass's Running -> Error toast wait (_HoldToastForConnectionLostRestart),
-        // and by the sweep with a fresh read. Cheap for every other session (one map lookup and a state test). UI thread.
+        // new Error episode of an error the restart heals, log a decline, a hold or a temporary failure's back-off once (a
+        // decline or a hold also shows a toast a back-off held), start the transcript gate (Go), watch a restarted session
+        // (Restarted), drop the track when the episode ends. Called by the tab-dot drain BEFORE _UpdateTabAgentDot, so a track
+        // that starts judging or waiting here makes the same pass's Running -> Error toast wait
+        // (_HoldToastForConnectionLostRestart), and by the sweep with a fresh read. Cheap for every other session (one map
+        // lookup and a state test). UI thread.
         //   info — the session's record as the registry holds it now (a fresh read: the drain and the sweep never pass a snapshot
         //          older than their own hop).
         // Never throws (every failure is logged, Rule #18; the track then stays as it was).
         void _EvaluateConnectionLostRestart(const ::Agentmaster::SessionInfo& info);
         // The registry facts DecideConnectionLostRestart reads, gathered from the record and this window's state (its tabs,
-        // its settings copy, the delivery gate, the draft swap / draft type-back / fork stop watch maps, the heartbeat). The
-        // side-file probe of background work (two directory enumerations) runs only when `probeSideFiles` is true, so a
-        // session whose gate stops earlier never touches the disk.
+        // its settings copy, the delivery gate, the draft swap / draft type-back / fork stop watch maps, the heartbeat; for a
+        // temporary failure also its back-off from the process ledger and the Error episode's age). The side-file probe of
+        // background work (two directory enumerations) runs only when `probeSideFiles` is true, so a session whose gate stops
+        // earlier never touches the disk.
         //   info           — the session's record; the facts' errorMessage VIEWS info.errorMessage (keep `info` alive while
         //                    the facts are used).
         //   probeSideFiles — also read the session's subagent / tool-result side files (SubagentActivityUnixMs).
@@ -3202,9 +3208,11 @@ namespace winrt::TerminalApp::implementation
         //   errorEpisodeMs — the Error episode the read was started for (a finish for an older episode is dropped).
         winrt::fire_and_forget _JudgeConnectionLostRestart(std::wstring sessionId, int64_t errorEpisodeMs);
         // The UI-thread half of the transcript gate: re-run the registry gate on a FRESH read (the user may have typed, the
-        // setting may have changed while the file was read), then DecideConnectionLostRestartFromPlan with this process's
-        // ledger, then restart (_RestartAfterConnectionLost) or settle the episode; a held toast is shown whenever the answer
-        // is "no restart". A finish for a track that moved on (another episode, another phase, gone) is dropped.
+        // setting may have changed while the file was read; a back-off that is not over sends the track back to Waiting), then
+        // DecideConnectionLostRestartFromPlan with this process's ledger and the registry's HTTP status (only for the plan's own
+        // row: SameApiErrorText), then restart (_RestartAfterConnectionLost) or settle the episode; a held toast is shown
+        // whenever the answer is "no restart". A finish for a track that moved on (another episode, another phase, gone) is
+        // dropped.
         //   sessionId      — the session judged.
         //   errorEpisodeMs — the episode the read was made for.
         //   plan           — the take-back plan the read produced.
@@ -3224,13 +3232,14 @@ namespace winrt::TerminalApp::implementation
         // new claude already ENDED a turn out of Error — SessionInfo::turnEndUnixMs newer than the restart: drop the held toast,
         // give the Prompt Queue Runner back the mode the stop-on-error pause took, end the track), not healed (the confirm
         // window passed, or the continued turn ended in Error again: show the held toast with the session's current state, end
-        // the track — a new lost connection then starts its own track), gone (end the track).
+        // the track — a new error then starts its own track, a temporary failure on the next back-off step), gone (end the
+        // track).
         //   sessionId — the session; info — its fresh record.
         // Never throws past a logged catch.
         void _CheckConnectionLostRestartOutcome(const std::wstring& sessionId, const ::Agentmaster::SessionInfo& info);
         // _EvaluateAgentNotification's question at a Running -> Error edge: is this window restarting that session by itself
-        // right now (a track Judging)? Then the toast is HELD on the track — the error is not the user's to fix unless the
-        // restart fails — and the caller shows nothing.
+        // (a track Judging, or Waiting out a temporary failure's back-off)? Then the toast is HELD on the track — the error is
+        // not the user's to fix unless the restart fails — and the caller shows nothing.
         //   sessionId      — the session whose toast is due.
         //   runningSinceMs — the Running-entry stamp the toast would carry (kept for the late toast's "after <span>").
         // Returns true when the toast was held. Never throws (a failure is logged and returns false: the toast shows, as it
@@ -3244,8 +3253,9 @@ namespace winrt::TerminalApp::implementation
         void _ReleaseConnectionLostRestartToast(const std::wstring& sessionId, ConnectionLostRestartTrack& track, ::Agentmaster::SessionState state, std::wstring_view why);
         // The liveness tick's pass over every track (the scanner's ~2.5 s cadence, the _SweepAgentPendingToasts shape): re-run
         // _EvaluateConnectionLostRestart on a fresh read — a hold whose cause raises no registry change (fresh side files
-        // aging out) is re-judged here, a restarted session's confirm window is timed here, a track whose session left the
-        // registry is dropped, and a Judging track whose read never came back (2 minutes) is settled. A no-op with no tracks.
+        // aging out) is re-judged here, a temporary failure's back-off is timed here (nothing in the registry changes while it
+        // runs), a restarted session's confirm window is timed here, a track whose session left the registry is dropped, and a
+        // Judging track whose read never came back (2 minutes) is settled. A no-op with no tracks.
         // Self-marshals to the UI thread. fire_and_forget with a terminate-net (Rule #18).
         winrt::fire_and_forget _SweepConnectionLostRestarts();
         void _DetachClaudeTabForMove(const winrt::com_ptr<Tab>& tab); // Agentmaster (cross-window move): a Claude tab is moving to ANOTHER window (tear-out / moveTab) — evict this window's per-window binding (NOT the injector/live) so teardown can't archive a session now alive elsewhere; the destination re-homes it

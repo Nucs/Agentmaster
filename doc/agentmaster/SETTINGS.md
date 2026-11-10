@@ -83,8 +83,13 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
   restarted by the window that hosts its tab as "Restart uninterrupted", with no question and no tab switch — not while
   its box holds an unsent draft, a delivery owns the box or claude still runs background work; never twice for one
   error row; at most 3 times per session in 30 minutes; the Error toast waits for the outcome; a healed session's Prompt
-  Queue Runner gets back the mode stop-on-error took. Needs `resumeApiErrorTurns`. Read live from each window's settings
-  copy (HOOKS.md *Connection lost mid-response — the automatic restart*).
+  Queue Runner gets back the mode stop-on-error took. The same switch covers every TEMPORARY API failure that outlived
+  Claude Code's own retries — "… This is a server-side issue, usually temporary …" (any 5xx), "Repeated 529 Overloaded
+  errors", "Server is temporarily limiting requests (not your usage limit)", "Connection error.", "Request timed out", … —
+  matched by phrases and HTTP status, restarted after a back-off of 1, 5 and 15 minutes (+0–20 % per session), at most 3
+  times per session in 60 minutes; an error that needs the user (a limit, credits, /login, /model, a refusal, a prompt too
+  long, a certificate) or an unknown wording is never restarted. Needs `resumeApiErrorTurns`. Read live from each window's
+  settings copy (HOOKS.md *Connection lost mid-response — the automatic restart*).
 - **Hidden sessions:** Reset hidden sessions clears `hiddenSessionIds` (the Sessions page's Hide from
   list).
 

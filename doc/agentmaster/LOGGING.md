@@ -47,8 +47,9 @@ with a local-time `[HH:MM:SS.mmm]` stamp (only at a line boundary, so a partial 
    `[orphan]`, `[orphan-reap]`, `[close-successor]`, `[unread]`, `[taskbar-badge]`, `[tags]`, `[harness]`,
    `[ai-search]`, `[sessdb]`, `[msg]`, `[render]`, `[tab-size]`, `[strip]`, `[deactivate]`,
    `[retired-host]`, `[restore-wake]`, `[api-error-rewind]`, `[interrupt-rewind]`, `[fork-stop]`, `[auto-restart]` (the
-   automatic restart after a lost connection: its gates, the restart, healed / not healed — HOOKS.md *Connection lost
-   mid-response — the automatic restart*), `[notify-release]` (a toast that restart held, shown after all);
+   automatic restart after a cut-off response or a temporary API failure: its gates, a temporary failure's back-off, the
+   restart, healed / not healed — HOOKS.md *Connection lost mid-response — the automatic restart*), `[notify-release]` (a
+   toast that restart held, shown after all);
    - **delivery forensics:** `[ups]` (one per UserPromptSubmit: echo consumed / recorded as Typed / noise
      / EMPTY), `[pull-echo]`, `[gate]`, `[draft-swap]`, `[draft-fork]`, `[draft-restore]`,
      `[send-verify]`, the verified presser's `[enter-retry]`, `[delivered]` (bytes that reached the

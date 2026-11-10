@@ -21,7 +21,10 @@ too (INT-10), and Agentmaster ships `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` as a
 **2026-11-08 (in production 0.8.0.12):** a turn that dies on "API Error: Connection lost mid-response" is restarted by the
 window that hosts its tab as "Restart uninterrupted" — no question, no tab switch — and goes on by itself (INT-12).
 **2026-11-10 (NOT BUILT):** so does every other response Claude Code cut off — "The response stopped arriving", "Server error
-mid-response", the "… before a response was produced. Try again." ones (INT-12 phase 6, E3).
+mid-response", the "… before a response was produced. Try again." ones (INT-12 phase 6, E3) — and, after a back-off of 1, 5
+and 15 minutes, every temporary API failure that outlived Claude Code's own retries: "500 Internal server error … a
+server-side issue, usually temporary", "Repeated 529 Overloaded errors", "Connection error.", "Request timed out", … (INT-12
+phase 7, E3, E11).
 
 **Test environment rule.** These flows need `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` in the test machine's
 Claude settings (Appendix A of E2E_TESTING.md) unless a flow says otherwise: without it Claude Code only
@@ -40,6 +43,10 @@ env by itself (INT-11), so the settings line is then needed only by a flow that 
                                                   …): restarted by itself, uninterrupted, no question (INT-12)
  API error before any output                    Claude Code alone: continues on a resume (nothing to take back)
                                                 → a stream cut ("… Try again."): restarted by itself (NOT BUILT, INT-12)
+ API error after Claude Code's own retries      Claude Code alone: sits at the error (it retried minutes first)
+ (a 5xx, "Overloaded", "Connection error.")     → restarted by itself after 1 / 5 / 15 minutes, 3 per hour (NOT BUILT, INT-12)
+ API error that needs the user (a limit,        sits at the error; never restarted by Agentmaster
+ /login, /model, a prompt too long)
  cut off by a shutdown / crash                  Claude Code alone: continues (interruptedByShutdown)
                                                 → a Restart of it asks interrupted / uninterrupted (NOT BUILT)
  a Restart of a RUNNING turn                    its own shutdown cuts the turn; the new claude continues it
@@ -437,21 +444,25 @@ after a restart without the user's own Claude Code settings; a user who removes 
 
 ---
 
-### INT-12 · A cut-off response restarts the session by itself
+### INT-12 · A cut-off response or a temporary API failure restarts the session by itself
 
-> **Since** production 0.8.0.12 / v0.8.2-prerelease for "Connection lost mid-response"; **NOT BUILT** (2026-11-10) for the rest of the family (phase 6, E3) · **P0** · **Needs** mock (`say` + `drop`; `hold` for phase 6), a second tab · **Spec** HOOKS.md *Connection lost mid-response — the automatic restart*
+> **Since** production 0.8.0.12 / v0.8.2-prerelease for "Connection lost mid-response"; **NOT BUILT** (2026-11-10) for the rest of the cut-off family (phase 6, E3) and the temporary API failures (phase 7, E3, E11) · **P0** · **Needs** mock (`say` + `drop`; `hold` for phase 6; a 5xx `error` past Claude Code's retries for phase 7), a second tab · **Spec** HOOKS.md *Connection lost mid-response — the automatic restart*
 
 **Promise.** A turn that dies on a response Claude Code cut off — "API Error: Connection lost mid-response. The response above
 may be incomplete.", "The response stopped arriving", every other "… The response above may be incomplete." and the "… before a
 response was produced. Try again." ones — goes on by itself: the window that hosts the tab restarts the session as "Restart
-uninterrupted" — no question, no tab switch — and the restarted Claude continues the turn. Nothing in the input box and nothing
-running in the background is lost to it, and the Error toast shows only when the restart does not heal the session.
+uninterrupted" — no question, no tab switch — and the restarted Claude continues the turn. A turn that dies on a TEMPORARY API
+failure after Claude Code's own retries ("… This is a server-side issue, usually temporary …", "Repeated 529 Overloaded errors",
+"Connection error.", "Request timed out", …) goes on the same way after a back-off of 1, 5 and 15 minutes, at most 3 times per
+hour. An error that needs the user (a limit, credits, /login, /model, a refusal, a prompt too long) is never restarted. Nothing
+in the input box and nothing running in the background is lost to it, and the Error toast shows only when the restart does not
+heal the session.
 
 **Phases**
 1. **The failure in a background tab.** *Do:* F-S in tab A; `fix it [[mock bash "echo step1"; say "I will now"; drop]]`;
    select tab B at once. *Expect:* tab A reads Error for a moment, then restarts in place — Idle → (Error) → Waiting → Running
    → Waiting; tab B stays selected; no dialog; no Error toast. *Check:* [LOG] `[auto-restart] <sid8> a cut-off response: … —
-   reading its transcript to restart it uninterrupted`, `[notify-hold] <sid8> running -> error (a cut-off response …)`,
+   reading its transcript to restart it uninterrupted`, `[notify-hold] <sid8> running -> error (an API error …)`,
    `[nav] auto-restart-begin <sid8> (… automatic restart 1 of at most 3 in 30 min)`, `[api-error-rewind] <sid8> restart:
    rewound past "API Error: Connection lost mid-response…"`, `[nav] auto-restart-done <sid8> (restarted in place,
    uninterrupted …)`, `[auto-restart] <sid8> healed: …; its held Error toast is dropped`; [TR] ONE `last-prompt` line
@@ -467,14 +478,27 @@ running in the background is lost to it, and the Error toast shows only when the
 4. **The budget.** *Do:* fail the same session four times within 30 minutes (a new error row each time). *Expect:* three
    restarts; the fourth logs `not restarted (over-budget): 3 automatic restarts of this session in the last 30 minutes — the
    session waits at the error for you`, and its toast shows.
-5. **Off.** *Do:* cog → Sessions → "Restart a session by itself when its response is cut off (connection lost, stopped
-   arriving, …)" off, Save; fail. *Expect:* `not restarted: the automatic restart is off (Settings > Sessions)`, Error as
-   before, the toast at once.
+5. **Off.** *Do:* cog → Sessions → "Restart a session by itself after a cut-off response or a temporary API failure" off,
+   Save; fail. *Expect:* `not restarted: the automatic restart is off (Settings > Sessions)`, Error as before, the toast at
+   once.
 6. **The response stopped arriving** (the 2026-11-10 report, session `0c947da9`). *Do:* `fix it [[mock bash "echo step1"; think
    "…"; hold g]]` and leave the gate shut past Claude Code's stream watchdog (5.5 minutes of silence in the report). *Expect:*
    the tab shows "API Error: The response stopped arriving. The response above may be incomplete." for a moment, then phase 1's
    restart and continuation. *Check:* [TR] the error row's `streamCutCause:"watchdog"`; [LOG] phase 1's lines, the
    `[api-error-rewind]` line naming the stopped-arriving error.
+7. **A temporary API failure** (the user's "Search claude code for other variants of errors we should recover from",
+   2026-11-10). *Do:* in tab A, a turn whose request the mock fails with a 5xx (`error 529 overloaded_error`, or `error 500`)
+   on every attempt until Claude Code's own retries give up (minutes: up to 15 attempts), then answers normally; select tab B.
+   *Expect:* tab A shows "API Error: 529 Overloaded. This is a server-side issue, usually temporary …" (or "Repeated 529
+   Overloaded errors …") and stays in Error ~1 minute (60–72 s: its own share); no toast; then phase 1's restart, onto the
+   prompt (nothing was produced), and the turn goes on. *Check:* [LOG] `[auto-restart] <sid8> waiting 1 min N s before the
+   restart: the back-off after a temporary API failure (Claude Code's own retries have just given up) — automatic restart 1 of
+   at most 3 in 60 min`, `[notify-hold] <sid8> running -> error (an API error …)`, then `no longer waiting (…)`, `[auto-restart]
+   <sid8> a temporary API failure: … reading its transcript`, `[nav] auto-restart-begin <sid8> (a temporary API failure: error row
+   <uuid8>, taken back to the prompt <uuid8>; automatic restart 1 of at most 3 in 60 min)`, `healed …`. *Then:* fail it twice
+   more (the mock failing past the retries again each time). *Expect:* the second restart after ~5 minutes, the third after ~15,
+   and a fourth error within the hour `not restarted (over-budget): 3 automatic restarts of this session in the last 60 minutes,
+   and the API keeps failing`, with one toast.
 
 **Edge cases**
 - **E1 A split tab** (tab A split, a shell in the focused pane) → only Claude's pane (its `WT_SESSION`) is restarted; the
@@ -483,7 +507,8 @@ running in the background is lost to it, and the Error toast shows only when the
   background work …`; the restart comes when the job ends.
 - **E3 A server error mid-response** (`drop server_error`: "Server error mid-response") → restarted like phase 1 (the whole
   cut-off family; INT-09's question stays for a manual Restart). An HTTP error that outlived Claude Code's own retries (`error
-  529 overloaded_error` with retries exhausted) is NOT a cut-off response → no automatic restart, the toast at once.
+  529 overloaded_error` with retries exhausted) is a TEMPORARY failure since 2026-11-10 → restarted after its back-off (phase
+  7), not at once.
 - **E4 The take-back skipped** (the same conversation runs in a second tab, OBSERVER.md §20) → one restart; the error stays;
   the re-asserted Error reads `not restarted (already-restarted)`; `NOT healed … 120 s after the automatic restart`, then the
   held toast (`[notify-release]`).
@@ -496,4 +521,10 @@ running in the background is lost to it, and the Error toast shows only when the
 - **E9 A Deactivated (dormant) tab in Error** → no automatic restart; entering the tab resumes it and the Deactivate seam's
   take-back continues the turn (INT-02).
 - **E10 The user types a prompt into the errored session before the restart** → the episode ends (`let go: the Error
-  episode ended …`); the user's turn runs; nothing is restarted.
+  episode ended …`); the user's turn runs; nothing is restarted. The same during a temporary failure's back-off (phase 7):
+  the held toast is dropped with the track.
+- **E11 An error that needs the user** (the mock's `error 429` shaped as a usage limit — "You've hit your session limit ·
+  resets …" —, "Prompt is too long", "Opus is experiencing high load, please use /model to switch to Sonnet", a 401 "Please run
+  /login") → no `[auto-restart]` line at all (the gate ignores it), Error and the toast at once, as before the feature.
+- **E12 A draft typed during a temporary failure's back-off** → `waiting before the restart: an unsent draft …` and the held
+  toast shows now; emptying the box restarts it at once if the back-off has passed meanwhile.

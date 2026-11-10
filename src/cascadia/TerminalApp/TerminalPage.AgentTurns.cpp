@@ -45,7 +45,10 @@
 //     rules are AgentMaster/ConnectionLostRestart.h; HOOKS.md "Connection lost mid-response — the automatic restart". Since the
 //     user's report of 2026-11-10 ("● API Error: The response stopped arriving. The response above may be incomplete." — "is
 //     now stuck and did not self heal") it covers EVERY response Claude Code cut off (IsCutOffResponseError), not only the
-//     lost connection it is named after.
+//     lost connection it is named after; since the user's "Search claude code for other variants of errors we should recover
+//     from, also consider accepting part of the message and not exact message" (the same day) also every TEMPORARY API
+//     failure that outlived Claude Code's own retries (a 5xx, "Overloaded", "Connection error.", "Request timed out", …:
+//     ClassifyAutoRestartError, matched by phrases), restarted after a back-off of 1, 5 and 15 minutes.
 //
 // Measured on 2.1.291 against the e2e mock (tools/e2e-spike): a fork of a running session went busy ~5 s after launch and
 // sent its first request ~0.4–1.1 s later; one Esc then left Claude Code's "Continue from where you left off." row
@@ -119,6 +122,25 @@ namespace
         if (text.size() > maxChars)
         {
             out += L"\x2026";
+        }
+        return out;
+    }
+
+    // A wait as hooks.log words: "45 s", "1 min 7 s", "15 min" (the automatic restart's back-off line).
+    //   ms — the wait in milliseconds (negative reads as 0; rounded UP to a whole second, so a wait never reads shorter than
+    //        it is).
+    // Returns the words. Throws std::bad_alloc only (the caller's catch logs it, Rule #18).
+    std::wstring WaitWords(int64_t ms)
+    {
+        const int64_t seconds = ms <= 0 ? 0 : (ms + 999) / 1000;
+        if (seconds < 60)
+        {
+            return std::to_wstring(seconds) + L" s";
+        }
+        std::wstring out = std::to_wstring(seconds / 60) + L" min";
+        if (seconds % 60 != 0)
+        {
+            out += L" " + std::to_wstring(seconds % 60) + L" s";
         }
         return out;
     }
@@ -1267,11 +1289,15 @@ namespace winrt::TerminalApp::implementation
     // HOOKS.md "Connection lost mid-response — the automatic restart"; the pure rules are AgentMaster/ConnectionLostRestart.h.
     // A session whose turn dies on a CUT-OFF RESPONSE — "API Error: Connection lost mid-response. The response above may be
     // incomplete.", "… The response stopped arriving. …", every other "… The response above may be incomplete." and the
-    // "… before a response was produced. Try again." family (IsCutOffResponseError) — is restarted by the window hosting its tab
-    // as "Restart uninterrupted" — no question, no tab switch — in four steps, all on this window's UI thread except the
-    // transcript read:
+    // "… before a response was produced. Try again." family (IsCutOffResponseError) — or on a TEMPORARY API FAILURE that outlived
+    // Claude Code's own retries ("API Error: 500 Internal server error. This is a server-side issue, usually temporary …",
+    // "Repeated 529 Overloaded errors", "Connection error.", "Request timed out", …: ClassifyAutoRestartError, by phrases and by
+    // HTTP status) — is restarted by the window hosting its tab as "Restart uninterrupted" — no question, no tab switch — at once
+    // for a cut-off response, after a back-off (1, 5, 15 minutes: TransientRestartBackoffMs) for a temporary failure, in four
+    // steps, all on this window's UI thread except the transcript read:
     //   1. the REGISTRY gate on every change of the session (_EvaluateConnectionLostRestart, from the tab-dot drain and the
-    //      liveness sweep): is it this error, on a tab this window can restart safely, with nothing a restart would destroy?
+    //      liveness sweep): is it an error the restart heals, on a tab this window can restart safely, with nothing a restart
+    //      would destroy — and has a temporary failure's back-off passed (Wait until it has)?
     //   2. the TRANSCRIPT gate (_JudgeConnectionLostRestart → _FinishConnectionLostJudge): one tail read per Error episode, off
     //      the UI thread — does the take-back continue the turn, is this error row new, is budget left?
     //   3. the RESTART of the session's own pane (_RestartAfterConnectionLost → _RestartManagedSession with LetTurnContinue);
@@ -1295,11 +1321,27 @@ namespace winrt::TerminalApp::implementation
         f.state = info.state;
         f.errorDismissed = info.errorDismissed;
         f.errorMessage = info.errorMessage;
-        if (!f.hostedHere || f.state != ::Agentmaster::SessionState::Error || !f.started || !::Agentmaster::IsCutOffResponseError(f.errorMessage))
+        f.errorStatus = info.errorStatus;
+        if (!f.hostedHere || f.state != ::Agentmaster::SessionState::Error || !f.started)
         {
             // The gate answers Ignore before it reads anything below, so the fleet's other sessions (every window's drain sees
-            // every session's change) — and sessions in another error, or dormant — cost no registry lock and no map lookups.
+            // every session's change) — and dormant ones — cost no classification, no registry lock and no map lookups.
             return f;
+        }
+        const auto kind = ::Agentmaster::ClassifyAutoRestartError(f.errorMessage, f.errorStatus);
+        if (kind == ::Agentmaster::AutoRestartErrorKind::None)
+        {
+            return f; // an error the restart does not heal: Ignore, likewise before any lookup
+        }
+        if (kind == ::Agentmaster::AutoRestartErrorKind::Transient)
+        {
+            // The back-off before a temporary failure's restart: the ledger's count of this session's automatic restarts in the
+            // last hour picks the step (1, 5, 15 minutes), the session's own share spreads a fleet hit by one outage. The age is
+            // the wall clock since the registry stamped the Error entry (a negative age — a clock that went back — reads as 0,
+            // so it only ever waits longer; an unstamped entry, which the registry never leaves, would read as long past).
+            const auto look = ::Agentmaster::SharedConnectionLostRestartLedger().Look(info.id, TurnsTickMs());
+            f.backoffMs = ::Agentmaster::TransientRestartBackoffMs(look.restartsInTransientWindow, info.id);
+            f.errorAgeMs = (std::max)(int64_t{ 0 }, TurnsUnixMs() - info.stateChangedAtUnixMs);
         }
         f.draftInBox = !info.pendingInput.empty();
         // Every owner of the input box a restart would pull the box from under: a delivery or the mail button's clear (the
@@ -1352,7 +1394,7 @@ namespace winrt::TerminalApp::implementation
                     // a NEW Error episode. A read still out then finds no track and does nothing; a held toast is dropped, since
                     // the session moved on without the restart.
                     const auto& old = it->second;
-                    if (old.phase == ConnectionLostRestartPhase::Held || old.phase == ConnectionLostRestartPhase::Judging || old.toastOwed)
+                    if (old.phase == ConnectionLostRestartPhase::Held || old.phase == ConnectionLostRestartPhase::Waiting || old.phase == ConnectionLostRestartPhase::Judging || old.toastOwed)
                     {
                         ::Agentmaster::AppendStateLog(L"hooks.log", L"[auto-restart] " + ::Agentmaster::ShortId(id) + L" let go: the Error episode ended without the automatic restart (now " +
                                                                         std::wstring{ AgentStateWord(info.state) } + L")" + (old.toastOwed ? L"; its held Error toast is dropped" : L"") + L"\n");
@@ -1393,16 +1435,38 @@ namespace winrt::TerminalApp::implementation
                 it = _connectionLostRestarts.emplace(id, std::move(fresh)).first;
             }
             auto& track = it->second;
-            if (ruling.gate == ConnectionLostRestartGate::Decline || ruling.gate == ConnectionLostRestartGate::Hold)
+            if (ruling.gate == ConnectionLostRestartGate::Decline || ruling.gate == ConnectionLostRestartGate::Hold || ruling.gate == ConnectionLostRestartGate::Wait)
             {
                 const bool decline = ruling.gate == ConnectionLostRestartGate::Decline;
-                track.phase = decline ? ConnectionLostRestartPhase::Declined : ConnectionLostRestartPhase::Held;
+                const bool wait = ruling.gate == ConnectionLostRestartGate::Wait;
+                track.phase = decline ? ConnectionLostRestartPhase::Declined : (wait ? ConnectionLostRestartPhase::Waiting : ConnectionLostRestartPhase::Held);
                 if (track.loggedReason != ruling.reason)
                 {
-                    // Once per reason, not per notify: a held session is judged again on every registry change and every tick.
+                    // Once per reason, not per notify: a held or waiting session is judged again on every registry change and
+                    // every tick.
                     track.loggedReason.assign(ruling.reason);
-                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[auto-restart] " + ::Agentmaster::ShortId(id) + (decline ? L" not restarted: " : L" waiting before the restart: ") + track.loggedReason +
-                                                                    L" (\"" + OneLogLine(info.title, 80) + L"\" stopped on \"" + OneLogLine(info.errorMessage, 120) + L"\")\n");
+                    std::wstring line = L"[auto-restart] " + ::Agentmaster::ShortId(id);
+                    if (wait)
+                    {
+                        // The back-off's length and the restart it leads to, said once: the sweep re-judges the track every tick
+                        // and the next line is "no longer waiting".
+                        const auto look = ::Agentmaster::SharedConnectionLostRestartLedger().Look(id, TurnsTickMs());
+                        line += L" waiting " + WaitWords(facts.backoffMs - facts.errorAgeMs) + L" before the restart: " + track.loggedReason + L" \x2014 automatic restart " +
+                                std::to_wstring(look.restartsInTransientWindow + 1) + L" of at most " + std::to_wstring(::Agentmaster::kTransientRestartBudget) + L" in " +
+                                std::to_wstring(::Agentmaster::kTransientRestartWindowMs / 60000) + L" min";
+                    }
+                    else
+                    {
+                        line += (decline ? L" not restarted: " : L" waiting before the restart: ") + track.loggedReason;
+                    }
+                    ::Agentmaster::AppendStateLog(L"hooks.log", line + L" (\"" + OneLogLine(info.title, 80) + L"\" stopped on \"" + OneLogLine(info.errorMessage, 120) + L"\")\n");
+                }
+                if (!wait && track.toastOwed)
+                {
+                    // A Waiting track held the Running -> Error toast for a restart that may still heal the session. A decline or
+                    // a hold makes the error the user's again until the gate says otherwise: the held toast shows now (a restart
+                    // made later, once a hold passes, heals without a second toast) — as the transcript gate's finish does.
+                    _ReleaseConnectionLostRestartToast(id, track, info.state, ruling.reason);
                 }
                 return;
             }
@@ -1417,8 +1481,10 @@ namespace winrt::TerminalApp::implementation
             }
             track.phase = ConnectionLostRestartPhase::Judging;
             track.judgingSinceTickMs = TurnsTickMs();
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[auto-restart] " + ::Agentmaster::ShortId(id) + L" a cut-off response: \"" + OneLogLine(info.title, 80) + L"\" stopped on \"" +
-                                                            OneLogLine(info.errorMessage, 120) + L"\" \x2014 reading its transcript to restart it uninterrupted\n");
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[auto-restart] " + ::Agentmaster::ShortId(id) + L" " +
+                                                            ::Agentmaster::AutoRestartErrorKindWords(::Agentmaster::ClassifyAutoRestartError(info.errorMessage, info.errorStatus)) + L": \"" +
+                                                            OneLogLine(info.title, 80) + L"\" stopped on \"" + OneLogLine(info.errorMessage, 120) +
+                                                            L"\" \x2014 reading its transcript to restart it uninterrupted\n");
             _JudgeConnectionLostRestart(id, track.errorEpisodeMs);
         }
         catch (...)
@@ -1483,6 +1549,17 @@ namespace winrt::TerminalApp::implementation
             // was read all count, and the side files are probed again.
             const auto facts = _ConnectionLostRestartFactsFor(*info, true);
             const auto ruling = ::Agentmaster::DecideConnectionLostRestart(facts);
+            if (ruling.gate == ConnectionLostRestartGate::Wait)
+            {
+                // The back-off is not over after all (the read started once it was, so only a restart this process noted
+                // meanwhile — another step of the ladder — can bring this): back to waiting, the held toast kept, the sweep
+                // re-judges it every tick.
+                track.phase = ConnectionLostRestartPhase::Waiting;
+                track.loggedReason.assign(ruling.reason);
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[auto-restart] " + sid8 + L" not restarted yet: " + track.loggedReason + L" (" +
+                                                                WaitWords(facts.backoffMs - facts.errorAgeMs) + L" left)\n");
+                return;
+            }
             if (ruling.gate != ConnectionLostRestartGate::Go)
             {
                 const std::wstring reason{ ruling.reason };
@@ -1501,9 +1578,12 @@ namespace winrt::TerminalApp::implementation
                 }
                 return;
             }
-            // 2. THE TRANSCRIPT GATE: the take-back must continue the turn, the error row must be new, the budget must allow it.
+            // 2. THE TRANSCRIPT GATE: the error must be one the restart heals, the take-back must continue the turn, the error row
+            // must be new, its kind's budget must allow it. The registry's HTTP status counts only when the registry's text is the
+            // plan's row (a newer error the scanner has not reported yet must not borrow an older row's status).
             const auto look = ::Agentmaster::SharedConnectionLostRestartLedger().Look(sessionId, TurnsTickMs());
-            const auto verdict = ::Agentmaster::DecideConnectionLostRestartFromPlan(plan, look.lastErrorUuid, look.restartsInWindow);
+            const int status = ::Agentmaster::SameApiErrorText(info->errorMessage, plan.errorText) ? info->errorStatus : 0;
+            const auto verdict = ::Agentmaster::DecideConnectionLostRestartFromPlan(plan, status, look);
             if (verdict.verdict != ::Agentmaster::ConnectionLostPlanVerdict::Restart)
             {
                 track.phase = ConnectionLostRestartPhase::Settled;
@@ -1620,12 +1700,20 @@ namespace winrt::TerminalApp::implementation
         }
         auto& ledger = ::Agentmaster::SharedConnectionLostRestartLedger();
         const int64_t now = TurnsTickMs();
-        const size_t before = ledger.Look(sessionId, now).restartsInWindow;
+        // The kind decides which budget the [nav] line counts against (the transcript gate already checked it): a cut-off
+        // response's 3 in 30 minutes, a temporary failure's 3 in 60.
+        const int status = ::Agentmaster::SameApiErrorText(info.errorMessage, plan.errorText) ? info.errorStatus : 0;
+        const auto kind = ::Agentmaster::ClassifyAutoRestartError(plan.errorText, status);
+        const bool transient = kind == ::Agentmaster::AutoRestartErrorKind::Transient;
+        const auto look = ledger.Look(sessionId, now);
+        const size_t before = transient ? look.restartsInTransientWindow : look.restartsInWindow;
+        const size_t budget = transient ? ::Agentmaster::kTransientRestartBudget : ::Agentmaster::kConnectionLostRestartBudget;
+        const int64_t windowMs = transient ? ::Agentmaster::kTransientRestartWindowMs : ::Agentmaster::kConnectionLostRestartWindowMs;
         // Noted BEFORE the restart: nothing that runs inside it can start a second one for this error row.
         ledger.Note(sessionId, plan.errorUuid, now);
-        ::Agentmaster::LogNav(L"auto-restart-begin " + ::Agentmaster::ShortId(sessionId) + L" (a cut-off response: error row " + ::Agentmaster::ShortId(plan.errorUuid) + L", taken back to the " +
-                              plan.targetKind + L" " + ::Agentmaster::ShortId(plan.targetUuid) + L"; automatic restart " + std::to_wstring(before + 1) + L" of at most " +
-                              std::to_wstring(::Agentmaster::kConnectionLostRestartBudget) + L" in " + std::to_wstring(::Agentmaster::kConnectionLostRestartWindowMs / 60000) + L" min)");
+        ::Agentmaster::LogNav(L"auto-restart-begin " + ::Agentmaster::ShortId(sessionId) + L" (" + ::Agentmaster::AutoRestartErrorKindWords(kind) + L": error row " +
+                              ::Agentmaster::ShortId(plan.errorUuid) + L", taken back to the " + plan.targetKind + L" " + ::Agentmaster::ShortId(plan.targetUuid) +
+                              L"; automatic restart " + std::to_wstring(before + 1) + L" of at most " + std::to_wstring(budget) + L" in " + std::to_wstring(windowMs / 60000) + L" min)");
         bool handled = false;
         {
             // No dialog on this path (the user's "without opening a prompt"): _PromptPresetLaunchError records a preset refusal
@@ -1693,9 +1781,10 @@ namespace winrt::TerminalApp::implementation
                 }
                 // Erased BEFORE the give-back: the runner's registry update notifies, and the drain it queues must find no track.
                 _connectionLostRestarts.erase(it);
-                // The stop-on-error backstop paused this session's runner when the lost connection put it in Error. The turn runs
-                // again, so the queue gets its mode back — decided again inside the registry update, so a mode the user set
-                // meanwhile wins (ClearInterruptHold forgets the pause at every such decision).
+                // The stop-on-error backstop paused this session's runner when the API error (a cut-off response or a temporary
+                // failure) put it in Error. The turn runs again, so the queue gets its mode back — decided again inside the
+                // registry update, so a mode the user set meanwhile wins (ClearInterruptHold forgets the pause at every such
+                // decision).
                 ::Agentmaster::AutorunnerMode givenBack = ::Agentmaster::AutorunnerMode::Off;
                 if (_sessionRegistry && ::Agentmaster::ShouldGiveRunnerBackAfterRestart(info.autorunner, episode))
                 {
@@ -1711,9 +1800,9 @@ namespace winrt::TerminalApp::implementation
                 }
                 if (givenBack != ::Agentmaster::AutorunnerMode::Off)
                 {
-                    line += std::wstring{ L"; the Prompt Queue Runner is back to " } + ::Agentmaster::AutorunnerModeLabel(givenBack) + L" (stop-on-error had paused it for the cut-off response)";
+                    line += std::wstring{ L"; the Prompt Queue Runner is back to " } + ::Agentmaster::AutorunnerModeLabel(givenBack) + L" (stop-on-error had paused it for the API error)";
                     ::Agentmaster::AppendStateLog(L"autorunner.log", L"[auto-restart] " + sessionId + L" runner back to " + ::Agentmaster::AutorunnerModeLabel(givenBack) +
-                                                                         L" (the cut-off response's stop-on-error pause is given back: the turn runs again after the automatic restart)\n");
+                                                                         L" (the API error's stop-on-error pause is given back: the turn runs again after the automatic restart)\n");
                 }
                 ::Agentmaster::AppendStateLog(L"hooks.log", line + L"\n");
                 return;
@@ -1741,7 +1830,9 @@ namespace winrt::TerminalApp::implementation
         try
         {
             const auto it = _connectionLostRestarts.find(sessionId);
-            if (it == _connectionLostRestarts.end() || it->second.phase != ConnectionLostRestartPhase::Judging)
+            // Judging: the transcript read is out. Waiting: a temporary failure's back-off runs, and the restart after it may
+            // still heal the session — the toast waits for that outcome too.
+            if (it == _connectionLostRestarts.end() || (it->second.phase != ConnectionLostRestartPhase::Judging && it->second.phase != ConnectionLostRestartPhase::Waiting))
             {
                 return false;
             }
@@ -1758,7 +1849,7 @@ namespace winrt::TerminalApp::implementation
         try
         {
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[notify-hold] " + ::Agentmaster::ShortId(sessionId) +
-                                                            L" running -> error (a cut-off response that this window restarts by itself: the toast shows only if the restart does not heal it)\n");
+                                                            L" running -> error (an API error that this window restarts by itself: the toast shows only if the restart does not heal it)\n");
         }
         catch (...)
         {
@@ -1837,7 +1928,8 @@ namespace winrt::TerminalApp::implementation
                     continue;
                 }
                 // Every other phase is the registry change's own path on a fresh read: a hold re-judged (fresh side files age out
-                // without a registry change), a restarted session's confirm window timed, an ended episode let go.
+                // without a registry change), a temporary failure's back-off timed (Waiting: nothing changes in the registry while
+                // it runs, so this tick is what restarts it), a restarted session's confirm window timed, an ended episode let go.
                 _EvaluateConnectionLostRestart(*info);
             }
         }

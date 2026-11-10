@@ -674,8 +674,9 @@ verdict in particular runs BEFORE the resume check on the very message that drew
 fires on a HELD session too (`mode != Off || InterruptHoldActive`), converting the hold into a
 real, sticky pause. **The one give-back (2026-11-08, in production 0.8.0.12):** stop-on-error records the mode it took and the Error
 episode it paused in (`AutorunnerState::stopOnErrorPausedMode` / `stopOnErrorPausedEpisodeMs`, transient; an interrupt
-hold's Off records nothing), and when the automatic restart after a cut-off response HEALS that episode — the turn runs
-again — the session gets that mode back (HOOKS.md *Connection lost mid-response — the automatic restart*). `ClearInterruptHold`
+hold's Off records nothing), and when the automatic restart after a cut-off response or a temporary API failure HEALS that
+episode — the turn runs again — the session gets that mode back (HOOKS.md *Connection lost mid-response — the automatic
+restart*). `ClearInterruptHold`
 forgets the record, so the user's pick and every other backstop pause still win over it. **A hold survives a reopen** (2026-10-26; in dev since 0.0.1.36, not in production — the owner's rule "we need
 the mode per session persisted"): it is part of the session's persisted mode. While a hold is active
 `sessions.json` keeps the held mode and the marker's stamp beside `mode: Off`

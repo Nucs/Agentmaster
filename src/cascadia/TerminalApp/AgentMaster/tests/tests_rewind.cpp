@@ -1285,6 +1285,155 @@ namespace
         CHECK(!ContainsAsciiWordsNoCase(L"anything", L""), "cut-off text: an empty needle matches nothing");
     }
 
+    // The 2026-11-10 classifier (the user: "Search claude code for other variants of errors we should recover from, also
+    // consider accepting part of the message and not exact message"): every text below is Claude Code 2.1.310's bundle
+    // (`${Kl}: …` templates, kbe()'s connection words) or a real error row of this PC's transcripts (older versions included).
+    void TestAutoRestartClassifier()
+    {
+        using K = AutoRestartErrorKind;
+        // Every cut-off response stays a cut-off response (restarted at once, as before).
+        const wchar_t* const cutOff[] = {
+            L"API Error: Connection lost mid-response. The response above may be incomplete.",
+            L"API Error: The response stopped arriving. The response above may be incomplete.",
+            L"API Error: Server error mid-response. The response above may be incomplete.",
+            L"API Error: Part of the response never arrived. The response above may be incomplete.",
+            L"API Error: The response stream was malformed. The response above may be incomplete.",
+            L"API Error: Your computer went to sleep mid-response. The response above may be incomplete.",
+            L"API Error: Connection closed mid-response. The response above may be incomplete.",
+            L"API Error: Connection lost before a response was produced. Try again.",
+            L"API Error: The response stalled before a response was produced. Try again.",
+            L"API Error: Part of the response never arrived and no response was produced. Try again.",
+            L"API Error: The response stream was malformed and no response was produced. Try again.",
+            L"API Error: Your computer went to sleep before a response was produced. Try again.",
+        };
+        for (const auto* text : cutOff)
+        {
+            CHECK(ClassifyAutoRestartError(text, 0) == K::CutOff, "classifier: every stream cut is a cut-off response (restarted at once)");
+        }
+        // Temporary failures: what Claude Code writes once its own retries gave up.
+        const wchar_t* const transient[] = {
+            L"API Error: 500 Internal server error. This is a server-side issue, usually temporary \x2014 try again in a moment. If it persists, check status.claude.com.",
+            L"API Error: 529 Overloaded. This is a server-side issue, usually temporary \x2014 try again in a moment. If it persists, check https://status.claude.com.",
+            L"API Error: 502 Bad Gateway. This is a server-side issue, usually temporary \x2014 try again in a moment. If it persists, check your inference gateway (gw.example).",
+            L"API Error: Repeated 529 Overloaded errors. The API is at capacity \x2014 this is usually temporary. Try again in a moment. If it persists, check https://status.claude.com.",
+            L"API Error: 500 {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Internal server error\"},\"request_id\":\"req_011CaX\"}",
+            L"API Error: Internal server error",
+            L"API Error: Overloaded",
+            L"API Error: Server is temporarily limiting requests (not your usage limit) \x00B7 Rate limited",
+            L"API Error: Request rejected (429) \x00B7 this may be a temporary capacity issue. If it persists, check https://status.claude.com.",
+            L"API Error: Connection error.",
+            L"API Error: Connection dropped (ECONNRESET)",
+            L"API Error: Connection lost",
+            L"API Error: Connection lost while your computer was asleep",
+            L"API Error: Connection closed before the response finished",
+            L"API Error: Connection refused \x2014 a firewall or proxy may be blocking it (ECONNREFUSED)",
+            L"API Error: Connection to the API was lost (EPIPE). This is usually temporary \x2014 try again.",
+            L"API Error: Unable to connect to API (ECONNREFUSED)",
+            L"API Error: Unable to connect to API. Check your internet connection",
+            L"API Error: Can't reach the API server \x2014 check your internet or DNS (ENOTFOUND)",
+            L"API Error: No internet route \x2014 check your connection or VPN (ENETUNREACH)",
+            L"API Error: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()",
+            L"Request timed out",
+            L"API Error: Request timed out. Check your internet connection and proxy settings",
+            L"API Error: No response from API (waited 5m). If a proxy or gateway on your network holds responses until they complete, raise API_TIMEOUT_MS or CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS to wait longer.",
+            L"API Error: Stream idle timeout - no chunks received",
+            L"The model returned an empty response (retry also failed).",
+            L"The model's tool call could not be parsed (retry also failed).",
+        };
+        for (const auto* text : transient)
+        {
+            CHECK(ClassifyAutoRestartError(text, 0) == K::Transient, "classifier: a server-side or network failure after Claude Code's retries is temporary (restarted after a back-off)");
+        }
+        // Errors that need the user: never restarted — the tricky ones first (a "temporary" phrase in a text that needs the user).
+        const wchar_t* const never[] = {
+            L"API Error: Unable to connect to API: SSL certificate verification failed (SELF_SIGNED_CERT_IN_CHAIN). The certificate comes from an authority Claude Code doesn't trust",
+            L"API Error: Unable to connect to API: SSL certificate has expired", // "certificate" alone keeps these two the user's
+            L"API Error: Unable to connect to API: Self-signed certificate detected (DEPTH_ZERO_SELF_SIGNED_CERT)",
+            L"API Error: Unable to connect to API: SSL error (ERR_SSL_WRONG_VERSION_NUMBER)",
+            L"Opus is experiencing high load, please use /model to switch to Sonnet",
+            L"Please run /login \x00B7 API Error: 401 Invalid authentication credentials",
+            L"API Error: 403 terminated \x00B7 Please run /login",
+            L"API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired. Please obtain a new token or refresh your existing token.\"}}",
+            L"Not logged in \x00B7 Please run /login",
+            L"You've hit your limit \x00B7 resets 2am (Asia/Jerusalem)",
+            L"You've hit your session limit \x00B7 resets 10:30am (Asia/Jerusalem)",
+            L"You're out of extra usage \x00B7 resets 3am (Asia/Jerusalem)",
+            L"You're out of usage credits. Run /usage-credits to keep using Fable 5 or /model to switch models.",
+            L"Usage credits are required for this model.",
+            L"Credit balance is too low",
+            L"Prompt is too long",
+            L"Prompt is too long \x00B7 the request is ~1000000 tokens (limit 1000000) but this conversation is only ~900000 tokens",
+            L"API Error: Opus 5.5 (1M context)'s safeguards flagged this session (https://www.anthropic.com/legal/aup).",
+            L"API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Output blocked by content filtering policy\"}}",
+            L"API Error: 400 {\"error\":\"Missing model in request body\"}",
+            L"API Error: Claude's response exceeded the 32000 output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.",
+            L"API Error: The model has reached its context window limit.",
+            L"Autocompact is thrashing: the context refilled to the limit within 3 turns of the previous compact, 3 times in a row.",
+            L"There's an issue with the selected model (claude-fable-5). It may not exist or you may not have access to it. Run /model to pick a different model.",
+            L"API Error: 400 due to tool use concurrency issues. Run /rewind to recover the conversation.",
+            L"API Error: Request rejected (429) \x00B7 Rate limit exceeded: free-models-per-day",
+            L"API Error: Could not load AWS credentials \x00B7 ExpiredToken. Check or refresh your AWS credentials and try again.",
+            L"The last turn stopped before it finished.",
+            L"Something no list knows",
+            L"",
+        };
+        for (const auto* text : never)
+        {
+            CHECK(ClassifyAutoRestartError(text, 0) == K::None, "classifier: an error that needs the user, or an unknown wording, is never restarted");
+        }
+        // Partial and case-free: the words anywhere, in any ASCII case, with other words around them.
+        CHECK(ClassifyAutoRestartError(L"API ERROR: REPEATED 529 OVERLOADED ERRORS", 0) == K::Transient, "classifier: the match ignores ASCII case");
+        CHECK(ClassifyAutoRestartError(L"\x05E9\x05D2\x05D9\x05D0\x05D4: upstream says Internal Server Error (retry later)", 0) == K::Transient, "classifier: the words count anywhere, after any prefix");
+        // The HTTP status: the row's own, else the one the text names; a user-action status vetoes even a temporary phrase.
+        CHECK(ClassifyAutoRestartError(L"Something no list knows", 503) == K::Transient, "classifier: a 5xx status makes an unknown wording temporary");
+        CHECK(ClassifyAutoRestartError(L"Something no list knows", 408) == K::Transient, "classifier: ...so does a 408");
+        CHECK(ClassifyAutoRestartError(L"Something no list knows", 429) == K::None, "classifier: a bare 429 is a limit, not temporary");
+        CHECK(ClassifyAutoRestartError(L"API Error: 503 upstream connect error", 0) == K::Transient, "classifier: the status the text names counts when the row has none");
+        CHECK(ClassifyAutoRestartError(L"API Error: 418 I'm a teapot", 0) == K::None, "classifier: a 4xx the text names is the user's");
+        CHECK(ClassifyAutoRestartError(L"API Error: Connection error.", 400) == K::None, "classifier: a 4xx status vetoes a temporary phrase (the request itself was refused)");
+        CHECK(ClassifyAutoRestartError(L"API Error: Internal server error", 404) == K::None, "classifier: ...whatever the words");
+        CHECK(ClassifyAutoRestartError(L"API Error: Connection lost mid-response. The response above may be incomplete.", 529) == K::CutOff, "classifier: a 5xx never turns a cut-off response into a delayed one");
+        CHECK(HttpStatusInErrorText(L"API Error: 529 Overloaded.") == 529 && HttpStatusInErrorText(L"api error: 500 {\"type\":\"error\"}") == 500 &&
+                  HttpStatusInErrorText(L"Please run /login \x00B7 API Error: 401 Invalid") == 401 && HttpStatusInErrorText(L"API Error: 500") == 500,
+              "status in text: three digits right after \"API Error: \", in any case, anywhere, at the end too");
+        CHECK(HttpStatusInErrorText(L"API Error: Connection lost") == 0 && HttpStatusInErrorText(L"API Error: 1234 x") == 0 && HttpStatusInErrorText(L"API Error: 50") == 0 &&
+                  HttpStatusInErrorText(L"API Error: 042 x") == 0 && HttpStatusInErrorText(L"Request timed out") == 0 && HttpStatusInErrorText(L"") == 0,
+              "status in text: no status without exactly three digits (a leading 0, four digits, two, none)");
+        CHECK(IsTransientHttpStatus(500) && IsTransientHttpStatus(529) && IsTransientHttpStatus(599) && IsTransientHttpStatus(408) && !IsTransientHttpStatus(429) && !IsTransientHttpStatus(499) &&
+                  !IsTransientHttpStatus(600) && !IsTransientHttpStatus(0),
+              "status: 408 and 5xx are temporary, nothing else");
+        CHECK(IsUserActionHttpStatus(400) && IsUserActionHttpStatus(401) && IsUserActionHttpStatus(413) && IsUserActionHttpStatus(499) && !IsUserActionHttpStatus(408) &&
+                  !IsUserActionHttpStatus(429) && !IsUserActionHttpStatus(500) && !IsUserActionHttpStatus(0),
+              "status: every 4xx but 408 and 429 needs the user");
+        CHECK(std::wstring{ AutoRestartErrorKindWords(K::CutOff) } == L"a cut-off response" && std::wstring{ AutoRestartErrorKindWords(K::Transient) } == L"a temporary API failure" &&
+                  std::wstring{ AutoRestartErrorKindWords(K::None) } == L"another error" && std::wstring{ AutoRestartErrorKindWords(static_cast<K>(99)) } == L"another error",
+              "classifier: the kinds' log words (a stray value reads as another error)");
+        // The position-returning search.
+        CHECK(FindAsciiWordsNoCase(L"xx API error: yy", L"api ERROR") == 3 && FindAsciiWordsNoCase(L"abcabc", L"ABC", 1) == 3 && FindAsciiWordsNoCase(L"abc", L"abc", 4) == std::wstring_view::npos &&
+                  FindAsciiWordsNoCase(L"abc", L"") == std::wstring_view::npos && FindAsciiWordsNoCase(L"ab", L"abc") == std::wstring_view::npos,
+              "find: the first match at or after `from`, case-free; past the end, an empty needle or a longer needle find nothing");
+        // The registry's text against the planner's first line (its status counts only for that row).
+        CHECK(SameApiErrorText(L"API Error: 529 Overloaded. This is a server-side issue", L"API Error: 529 Overloaded. This is a server-side issue"), "same row: equal texts");
+        CHECK(SameApiErrorText(L"  API Error: 500 Internal\nserver error", L"API Error: 500 Internal"), "same row: the planner's first line, after leading white space");
+        CHECK(SameApiErrorText(L"API Error: 500 Internal server error and a very long tail", L"API Error: 500 Internal server\x2026"), "same row: the planner's cut line, its ellipsis dropped");
+        CHECK(!SameApiErrorText(L"API Error: 500 Internal server error", L"Prompt is too long") && !SameApiErrorText(L"", L"x") && !SameApiErrorText(L"x", L"") && !SameApiErrorText(L"abc", L"\x2026"),
+              "same row: another text, or an empty side, is not the same row");
+        // The back-off ladder: Claude Code's /goal steps, lengthened by a fixed 0-20 % share per session.
+        CHECK(kTransientRestartBudget == 3 && kTransientRestartWindowMs == 60LL * 60 * 1000, "back-off: three steps, counted over an hour");
+        const wchar_t* const ids[] = { L"0c947da9-4a4b-4bed-b303-6ffafac36195", L"d42f0aea-61a4-43be-93bc-9785cb87a406", L"s1", L"s2", L"s3", L"" };
+        bool spread = false;
+        const int64_t first = TransientRestartBackoffMs(0, ids[0]);
+        for (const auto* id : ids)
+        {
+            const int64_t a = TransientRestartBackoffMs(0, id), b = TransientRestartBackoffMs(1, id), c = TransientRestartBackoffMs(2, id);
+            CHECK(a >= 60000 && a <= 72000 && b >= 300000 && b <= 360000 && c >= 900000 && c <= 1080000, "back-off: 1, 5 and 15 minutes, each at most 20 % longer");
+            CHECK(TransientRestartBackoffMs(9, id) == c && TransientRestartBackoffMs(0, id) == a, "back-off: past the last step it stays there, and a session's share never changes");
+            CHECK(a * 5 == b && a * 15 == c, "back-off: one share per session, the same for every step");
+            spread = spread || a != first;
+        }
+        CHECK(spread, "back-off: different sessions get different shares (a fleet hit by one outage does not restart in the same second)");
+    }
+
     void TestConnectionLostRegistryGate()
     {
         using G = ConnectionLostRestartGate;
@@ -1320,8 +1469,30 @@ namespace
         }
         {
             auto f = GoFacts();
+            // Since the user's "Search claude code for other variants of errors we should recover from" (2026-11-10): an HTTP
+            // error that outlived Claude Code's own retries is a TEMPORARY failure — restarted after its back-off.
             f.errorMessage = L"API Error: 529 Overloaded. This is a server-side issue, usually temporary.";
-            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate: another API error (an HTTP error after Claude Code's retries) is ignored");
+            f.backoffMs = 60000;
+            f.errorAgeMs = 0;
+            const auto waiting = DecideConnectionLostRestart(f);
+            CHECK(waiting.gate == G::Wait && waiting.reason.find(L"back-off") != std::wstring_view::npos, "gate: a temporary failure (529 Overloaded) waits for its back-off first, and says so");
+            f.errorAgeMs = 59999;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Wait, "gate: ...still waiting a millisecond before the back-off ends");
+            f.errorAgeMs = 60000;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Go, "gate: ...and restarts once it passed");
+            f.errorMessage = L"Something the lists do not know";
+            f.errorStatus = 503;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Go, "gate: the row's HTTP status (503) makes an unknown wording a temporary failure");
+            f.errorStatus = 0;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate: ...and without a status the unknown wording is ignored");
+            f.errorMessage = L"API Error: Server is temporarily limiting requests (not your usage limit) \x00B7 Rate limited";
+            f.errorStatus = 429;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Go, "gate: the transient 429 (\"not your usage limit\") restarts once its back-off passed");
+            f.errorMessage = L"You've hit your session limit \x00B7 resets 4am (Asia/Jerusalem)";
+            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate: a usage limit (a 429 too) is ignored");
+            f.errorStatus = 0;
+            f.errorMessage = L"Prompt is too long";
+            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate: an error that needs the user (a prompt too long) is ignored");
             f.errorMessage = L"The last turn stopped before it finished.";
             CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate: a cut-off turn's Error is ignored");
             // The 2026-11-10 report (session 0c947da9): the stream watchdog's cut, and the other members of the family.
@@ -1403,9 +1574,29 @@ namespace
         }
         {
             auto f = GoFacts();
-            f.errorMessage = L"API Error: Overloaded";
+            f.errorMessage = L"Prompt is too long";
             f.draftInBox = true;
-            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate order: another error never holds");
+            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate order: an error the restart does not heal never holds");
+        }
+        // The order around the back-off: it is the restart's own pacing, so a decline and a hold come first.
+        {
+            auto f = GoFacts();
+            f.errorMessage = L"API Error: Overloaded";
+            f.backoffMs = 60000;
+            f.draftInBox = true;
+            const auto r = DecideConnectionLostRestart(f);
+            CHECK(r.gate == G::Hold && r.reason.find(L"draft") != std::wstring_view::npos, "gate order: a temporary failure with a draft in the box is a hold, not a back-off");
+            f.draftInBox = false;
+            f.settingOn = false;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Decline, "gate order: ...and the switch off declines it before any back-off");
+            f.settingOn = true;
+            f.started = false;
+            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate order: a dormant tab's temporary failure is ignored (its own start takes it back)");
+        }
+        {
+            auto f = GoFacts(); // a cut-off response
+            f.backoffMs = 60000; // never set for one by the window; even so a cut-off response restarts at once
+            CHECK(DecideConnectionLostRestart(f).gate == G::Go, "gate: a cut-off response never waits for a back-off");
         }
     }
 
@@ -1426,15 +1617,50 @@ namespace
         // Already taken back (the line is in the file): nothing left to heal.
         const auto rewound = PlanApiErrorRewind(ConnectionLostTail310() + plan.markerLine + "\n", true, sid);
         CHECK(DecideConnectionLostRestartFromPlan(rewound, L"", 0).verdict == ConnectionLostPlanVerdict::NothingToTakeBack, "transcript gate: a transcript already taken back has nothing to heal");
-        // Another error at the active leaf: an HTTP error that outlived Claude Code's retries (its first response to a prompt).
+        // A TEMPORARY failure at the active leaf (2026-11-10): an HTTP error that outlived Claude Code's retries, its first
+        // response to a prompt — the take-back lands on the prompt, which the resume sends again.
         {
             const auto bytes = Join({
                 UserPrompt("u1", "", "go"),
                 ApiError("e1", "u1", "API Error: 529 Overloaded. This is a server-side issue, usually temporary.", false, "stop_sequence", ",\"apiErrorStatus\":529"),
                 TurnDuration("t1", "e1"),
             });
-            const auto r = DecideConnectionLostRestartFromPlan(PlanApiErrorRewind(bytes, true, sid), L"", 0);
-            CHECK(r.verdict == ConnectionLostPlanVerdict::NotThisError && r.reason.find(L"529 Overloaded") != std::wstring::npos, "transcript gate: the transcript's error is another one - not restarted, and the log quotes it");
+            const auto p = PlanApiErrorRewind(bytes, true, sid);
+            CHECK(p.verdict == ApiErrorRewindVerdict::Rewind && p.targetUuid == L"u1" && p.targetKind == L"prompt" && p.partialRows == 0,
+                  "transcript gate: a 529 after Claude Code's retries plans the take-back onto the prompt");
+            AutoRestartHistory none;
+            CHECK(DecideConnectionLostRestartFromPlan(p, 529, none).verdict == ConnectionLostPlanVerdict::Restart, "transcript gate: a temporary failure (529 Overloaded) restarts");
+            AutoRestartHistory two;
+            two.lastErrorUuid = L"e0";
+            two.restartsInWindow = 0; // the cut-off window may have forgotten them already...
+            two.restartsInTransientWindow = kTransientRestartBudget - 1;
+            CHECK(DecideConnectionLostRestartFromPlan(p, 529, two).verdict == ConnectionLostPlanVerdict::Restart, "transcript gate: ...while under the temporary-failure budget");
+            two.restartsInTransientWindow = kTransientRestartBudget;
+            const auto over = DecideConnectionLostRestartFromPlan(p, 529, two);
+            CHECK(over.verdict == ConnectionLostPlanVerdict::OverBudget && over.reason.find(L"60 minutes") != std::wstring::npos,
+                  "transcript gate: ...and its own 60-minute budget caps it (counted even when the 30-minute window forgot the restarts)");
+            AutoRestartHistory again;
+            again.lastErrorUuid = L"e1";
+            CHECK(DecideConnectionLostRestartFromPlan(p, 529, again).verdict == ConnectionLostPlanVerdict::AlreadyRestarted, "transcript gate: a temporary failure's row is never restarted twice either");
+            CHECK(DecideConnectionLostRestartFromPlan(p, L"", kTransientRestartBudget).verdict == ConnectionLostPlanVerdict::OverBudget,
+                  "transcript gate: the original call shape counts its one number against the temporary-failure budget too");
+        }
+        // A wording neither list knows: only the registry's HTTP status makes it a temporary failure.
+        {
+            const auto bytes = Join({ UserPrompt("u1", "", "go"), ApiError("e1", "u1", "API Error: upstream connect error or disconnect/reset before headers", false), TurnDuration("t1", "e1") });
+            const auto p = PlanApiErrorRewind(bytes, true, sid);
+            CHECK(DecideConnectionLostRestartFromPlan(p, 503, AutoRestartHistory{}).verdict == ConnectionLostPlanVerdict::Restart, "transcript gate: an unknown wording with the row's 503 restarts");
+            CHECK(DecideConnectionLostRestartFromPlan(p, 0, AutoRestartHistory{}).verdict == ConnectionLostPlanVerdict::NotThisError, "transcript gate: ...and without it is left to the user");
+        }
+        // Another error at the active leaf: one that needs the user (a prompt too long).
+        {
+            const auto bytes = Join({
+                UserPrompt("u1", "", "go"),
+                ApiError("e1", "u1", "Prompt is too long", false, "stop_sequence", ",\"apiErrorStatus\":400"),
+                TurnDuration("t1", "e1"),
+            });
+            const auto r = DecideConnectionLostRestartFromPlan(PlanApiErrorRewind(bytes, true, sid), 400, AutoRestartHistory{});
+            CHECK(r.verdict == ConnectionLostPlanVerdict::NotThisError && r.reason.find(L"Prompt is too long") != std::wstring::npos, "transcript gate: the transcript's error needs the user - not restarted, and the log quotes it");
         }
         // The 2026-11-10 report's shape (session 0c947da9, 2.1.310, dummy text): a tool result, a THINKING-ONLY half-response, the
         // stream watchdog's error row ("The response stopped arriving", streamCutCause "watchdog") and its turn_duration.
@@ -1582,13 +1808,35 @@ namespace
         ConnectionLostRestartLedger back;
         back.Note(L"s", L"e", 10 * kMin);
         CHECK(back.Look(L"s", 5 * kMin).restartsInWindow == 1, "ledger: a restart stamped after the asked time (a clock that went back) still counts - the budget only gets stricter");
+        CHECK(back.Look(L"s", 5 * kMin).restartsInTransientWindow == 1, "ledger: ...in the temporary-failure window too");
         CHECK(&SharedConnectionLostRestartLedger() == &SharedConnectionLostRestartLedger(), "ledger: one shared ledger per process");
+        // The temporary-failure window (60 minutes) beside the cut-off one (30): the back-off ladder's restarts.
+        {
+            ConnectionLostRestartLedger t;
+            t.Note(L"t", L"e1", 1 * kMin); // the first step's restart
+            t.Note(L"t", L"e2", 12 * kMin); // the second's
+            t.Note(L"t", L"e3", 33 * kMin); // the third's
+            auto h = t.Look(L"t", 40 * kMin);
+            CHECK(h.restartsInTransientWindow == 3 && h.restartsInWindow == 2 && h.lastErrorUuid == L"e3",
+                  "ledger: 40 minutes into an outage the hour still counts all three restarts while the half hour has forgotten the first");
+            CHECK(t.Look(L"t", 1 * kMin + kTransientRestartWindowMs - 1).restartsInTransientWindow == 3, "ledger: a restart counts in the hour until its last millisecond");
+            CHECK(t.Look(L"t", 1 * kMin + kTransientRestartWindowMs).restartsInTransientWindow == 2, "ledger: ...and leaves it after");
+            // Note keeps every restart the LONGER window still counts: a note 45 minutes after the first restart must not drop
+            // it, as a prune by the 30-minute window would.
+            t.Note(L"t", L"e4", 46 * kMin);
+            h = t.Look(L"t", 46 * kMin);
+            CHECK(h.restartsInTransientWindow == 4 && h.restartsInWindow == 2, "ledger: a new note keeps the restarts the hour still counts (only the half hour forgets the old ones)");
+            t.Note(L"t", L"e5", 200 * kMin);
+            h = t.Look(L"t", 200 * kMin);
+            CHECK(h.restartsInTransientWindow == 1 && h.restartsInWindow == 1 && h.lastErrorUuid == L"e5", "ledger: hours later only the new restart counts in either window");
+        }
     }
 }
 
 void TestConnectionLostRestart()
 {
     TestConnectionLostText();
+    TestAutoRestartClassifier();
     TestConnectionLostRegistryGate();
     TestConnectionLostTranscriptGate();
     TestConnectionLostOutcome();

@@ -845,7 +845,7 @@ continue them by itself.
 | "Deactivate" (`_DeactivateManagedTab`, resume only, state `Error` or `midTurnAtRestore`) | Plans before the swap, then `_RewindApiErrorAfterExit` waits for the parked claude's exit and appends. A tab woken before that has a live claude, and the append refuses rather than race it. |
 | A restored resume (`_LaunchClaudeSession` with a `restored` record: window restore, Sessions-page "Resume here", a reopened closed session) | `_RewindApiErrorBeforeRestore` appends synchronously before the connection is built, only for a record whose state is `Error` or whose `midTurnAtRestore` is set, so a 600-tab window restore reads no transcript for a healthy tab. |
 | A fork answered "Fork uninterrupted" or "Fork interrupted" (2026-11-06, NOT BUILT: `ForkTurnChoice::TakeBackAndContinue` / `TakeBackAndInterrupt`, `_TakeBackStopForFork`) | Appends to the SOURCE's transcript right before the fork's launch, a live source claude ALLOWED (`RewindApiErrorTailForForkSource`), launches the fork with `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` and starts it in place one Low-priority tick later (`_StartForkSoonAfterTakeBack`); "Fork interrupted" also arms the fork stop watch, whose ONE Esc leaves a regular interrupt where the error was. HOOKS.md *Interrupted turns*, situation B. |
-| The automatic restart after a cut-off response (2026-11-08, in production 0.8.0.12; the whole family 2026-11-10, NOT BUILT: `_RestartAfterConnectionLost`) | A session whose turn died on a response Claude Code cut off — "Connection lost mid-response", "The response stopped arriving", every "… The response above may be incomplete." and "… Try again." stream cut — is restarted by its hosting window as "Restart uninterrupted" — the Restart row above with `LetTurnContinue` — with no question and no tab switch, once the transcript gate agrees. *Connection lost mid-response — the automatic restart*, below. |
+| The automatic restart after a cut-off response or a temporary API failure (2026-11-08, in production 0.8.0.12; the whole cut-off family and the temporary failures 2026-11-10, NOT BUILT: `_RestartAfterConnectionLost`) | A session whose turn died on a response Claude Code cut off — "Connection lost mid-response", "The response stopped arriving", every "… The response above may be incomplete." and "… Try again." stream cut — or on a temporary API failure that outlived Claude Code's own retries ("… This is a server-side issue, usually temporary …", "Repeated 529 Overloaded errors", "Connection error.", …) is restarted by its hosting window as "Restart uninterrupted" — the Restart row above with `LetTurnContinue` — with no question and no tab switch, once the transcript gate agrees (a temporary failure after a back-off of 1, 5, 15 minutes). *Connection lost mid-response — the automatic restart*, below. |
 
 Since 2026-11-06 (NOT BUILT) the restart's rewind is ASKED about when the restart is interactive: the restart question
 (situation B, *Interrupted turns*). BOTH answers take the error back as above and add `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1`
@@ -1167,7 +1167,7 @@ one cut result; the resume wrote `Continue from where you left off.` and finishe
 live source inside `sleep 40` as `ContinuesTurn`, dropped `Bash`. The app's dialogs, the fan-out and the stop watch are
 not yet run live.
 
-### Connection lost mid-response — the automatic restart (2026-11-08, in production 0.8.0.12, dev 0.0.1.44 and v0.8.2-prerelease; every cut-off response 2026-11-10, NOT BUILT)
+### Connection lost mid-response — the automatic restart (2026-11-08, in production 0.8.0.12, dev 0.0.1.44 and v0.8.2-prerelease; every cut-off response and every temporary API failure 2026-11-10, NOT BUILT)
 
 **The request** (the user, 2026-11-08): "Lets add self healing for error "● API Error: Connection lost mid-response. The
 response above may be incomplete." by restarting session as uninterrupted automatically. As soon as this error state is
@@ -1202,8 +1202,62 @@ tells a partial result by (`result.endsWith("The response above may be incomplet
 mid-response texts, should the sentence ever go), `before a response was produced` or `no response was produced`. Only API-error
 rows are ever asked, so Claude Code's unrelated "may be incomplete" messages (a download, IDE detection) cannot meet it. A cut
 before any output has no half-reply to take back: the take-back lands on the tool result or the prompt with nothing to step
-over, and the resume sends the turn again — the claude waited at that error all the same. NOT matched: HTTP errors that outlived
-Claude Code's own retries ("API Error: 500 …", "529 Overloaded", "Rate limited"), usage limits, refusals.
+over, and the resume sends the turn again — the claude waited at that error all the same.
+
+**Temporary API failures too (2026-11-10).** The user, the same day: "Search claude code for other variants of errors we
+should recover from, also consider accepting part of the message and not exact message". What Claude Code 2.1.310 does
+(read from its bundle):
+
+- **It retries a failed request by itself first** and writes an error row only when it gives up: 10 retries by default,
+  `CLAUDE_CODE_MAX_RETRIES` clamped to 15 (so Agentmaster's shipped `50000` means 15), a 529 three times; delays of seconds
+  growing to half a minute, so the row lands after minutes. A Retry-After longer than a minute is not waited for. The
+  unattended mode `CLAUDE_CODE_RETRY_WATCHDOG=1` (Claude Code's own remote sessions) retries for up to 6 hours instead; it is
+  undocumented, and Agentmaster does not set it.
+- **Its own `/goal` feature retries the same errors itself** — its turn classifier (`wm`): overloaded, `server_error`, a row
+  marked `apiErrorIsTransient`, an unclassified error, an unreadable tool call → "retry" after 1, 5 and 15 minutes (+0–20 %),
+  three times, then "Goal paused after 3 automatic retries"; rate and usage limits, a rejected request → "pause"; sign-in,
+  billing, verification, a missing model, a context limit → "stop".
+- **A session left on such a row waits forever**, like a cut-off one, and the same "Restart uninterrupted" continues it (the
+  take-back lands on the prompt or the tool result; nothing was produced).
+
+So the automatic restart heals two KINDS of API error (`ClassifyAutoRestartError` → `AutoRestartErrorKind`):
+
+| Kind | What Claude Code writes (2.1.310's templates and real rows on this PC) | When |
+|---|---|---|
+| **CutOff** | the stream cuts above (`IsCutOffResponseError`) | at once |
+| **Transient** | "… This is a server-side issue, usually temporary — try again in a moment." (every 5xx: "500 Internal server error", "529 Overloaded", "502 Bad Gateway") · "Repeated 529 Overloaded errors. The API is at capacity — this is usually temporary." · "Internal server error" / `{"type":"api_error","message":"Internal server error"}` (older) · "Overloaded" · "Server is temporarily limiting requests (not your usage limit) · Rate limited" · "Request rejected (429) · this may be a temporary capacity issue." · "Connection error." · "Connection dropped (ECONNRESET)" · "Connection lost" / "… while your computer was asleep" · "Connection closed before the response finished" · "Connection refused — a firewall or proxy may be blocking it" · "Connection to the API was lost (EPIPE). This is usually temporary" · "Unable to connect to API (ECONNREFUSED)" · "Can't reach the API server" · "No internet route" · "The socket connection was closed unexpectedly" (older) · "Request timed out" · "No response from API (waited 5m) …" · "Stream idle timeout - no chunks received" (2.1.220–2.1.291) · "The model returned an empty response (retry also failed)." · "The model's tool call could not be parsed (retry also failed)." | after a back-off |
+
+**The match is by PHRASES, never the exact message:** case-insensitive ASCII words anywhere in the text
+(`kTransientFailurePhrases`: "server-side issue", "usually temporary", "overloaded", "internal server error", "connection
+error", "connection dropped", "request timed out", "no response from api", …), so another prefix, a JSON body around them, a
+status in front or a changed tail still match. **The HTTP status counts too:** the row's `apiErrorStatus`
+(`SessionInfo::errorStatus`), else the three digits right after "API Error: " in the text (`HttpStatusInErrorText`): 408 and
+every 5xx are temporary whatever the words (`IsTransientHttpStatus`); a bare 429 is not (a usage limit is a 429 too).
+
+**Never restarted, checked FIRST** — anything that needs the user, even when its text also carries a "temporary" phrase
+("Unable to connect to API: SSL certificate verification failed"):
+
+- the words of `kAutoRestartNeverPhrases`: a usage or session limit ("hit your"), "extra usage", "usage credits", "spend
+  limit", "credit balance", billing, "/login", "log in", "sign in", "authentication", OAuth, "api key", "credentials",
+  "verification", "/model" ("Opus is experiencing high load, please use /model to switch to Sonnet" — a model choice is the
+  user's), "safeguards" (a refusal), "content filtering", "prompt is too long", "context window", "output token maximum",
+  "autocompact", "certificate", "ssl error";
+- a 4xx status but 408 and 429 (`IsUserActionHttpStatus`: a bad request, a sign-in, a missing model, a prompt too large — the
+  same request would be refused again);
+- every wording neither list knows. The lists only ever ADD a restart for words they know.
+
+The rule order is `ClassifyAutoRestartError`'s: never-phrases and a user-action status → None; a cut-off response → CutOff; a
+temporary phrase or status → Transient; anything else → None.
+
+**The back-off** (`TransientRestartBackoffMs`). Claude Code has just spent minutes on the same failure, so an outage gets time
+to pass before the restart sends the request again. The steps are `/goal`'s: 1 minute before the first restart, 5 before the
+second, 15 before the third (`kTransientRestartBackoffMs`), by the restarts the ledger counts in the last hour. Each step is
+lengthened by a share fixed per session (0–20 %, an FNV-1a hash of its id, not a random draw: the gate is pure and re-judged
+every tick), so one outage that hits a whole fleet does not restart every tab in the same second. The back-off runs from the
+Error episode's start (`SessionInfo::stateChangedAtUnixMs`). **The budget:** at most 3 restarts for temporary failures per
+session within 60 minutes (`kTransientRestartBudget`, `kTransientRestartWindowMs`). The hour holds the whole ladder (1 + 5 + 15
+minutes, plus Claude Code's own retries before each new row), so a server that stays down sees three restarts, and the fourth
+error is the user's. A cut-off response keeps its own budget (3 in 30 minutes). Restarts of either kind count against both.
 
 **What happens now.** The window that hosts the session's tab answers the restart question itself — "Restart uninterrupted",
 `RestartTurnChoice::LetTurnContinue` (situation B of *Interrupted turns*: the take-back line once the old claude exited, plus
@@ -1217,12 +1271,14 @@ window brought forward. The pure rules are `AgentMaster/ConnectionLostRestart.h`
 
    | Verdict | When | What happens |
    |---|---|---|
-   | Ignore | not a live Claude session hosted here; not in an unacknowledged Error; another error than a cut-off response; a DORMANT tab (its own start takes the error back: the restore and Deactivate seams do, and the shipped switch continues it) | nothing, nothing logged |
-   | Decline | the switch is off (`autoRestartOnConnectionLost`); an ADOPTED session (its ConPTY is the user's shell: a restart would replay the shell); `resumeApiErrorTurns` off (a restart could not take the error back); a recorded stop intent (`SessionInfo::stopForkedTurn` — "Fork interrupted" / "Restart interrupted": "uninterrupted" is the answer the user did not give) | logged once per Error episode; the session waits for the user, as before |
-   | Hold | an unsent draft in the box (a restart wipes it — the restart seam's one eager clear); the box owned by a delivery, the draft swap, a draft type-back or the fork stop watch; background work (claude's heartbeat `busy` / `shell`, or its subagent / tool-result side files written within 15 s) that a restart would end | logged once per reason; restarted once the reason passes |
+   | Ignore | not a live Claude session hosted here; not in an unacknowledged Error; an error the restart does not heal (`ClassifyAutoRestartError` → None: it needs the user, or its words are unknown); a DORMANT tab (its own start takes the error back: the restore and Deactivate seams do, and the shipped switch continues it) | nothing, nothing logged |
+   | Decline | the switch is off (`autoRestartOnConnectionLost`); an ADOPTED session (its ConPTY is the user's shell: a restart would replay the shell); `resumeApiErrorTurns` off (a restart could not take the error back); a recorded stop intent (`SessionInfo::stopForkedTurn` — "Fork interrupted" / "Restart interrupted": "uninterrupted" is the answer the user did not give) | logged once per Error episode; the session waits for the user, as before (a toast a back-off held shows now) |
+   | Hold | an unsent draft in the box (a restart wipes it — the restart seam's one eager clear); the box owned by a delivery, the draft swap, a draft type-back or the fork stop watch; background work (claude's heartbeat `busy` / `shell`, or its subagent / tool-result side files written within 15 s) that a restart would end | logged once per reason; restarted once the reason passes (a toast a back-off held shows now) |
+   | Wait | a TEMPORARY failure whose back-off (`ConnectionLostRestartFacts::backoffMs`: `TransientRestartBackoffMs` of the ledger's count in the last hour) has not passed since the Error episode began (`errorAgeMs`) | the track is `Waiting`, logged once with the time left; the liveness sweep re-judges it every tick and restarts it once the back-off passed; the Running → Error toast stays held |
    | Go | anything else | the transcript gate |
 
-   The checks run in that order: a decline stays a decline whatever holds, and a session out of Error is never logged.
+   The checks run in that order: a decline stays a decline whatever holds, a hold or a decline comes before the back-off (the
+   restart's own pacing), and a session out of Error is never logged.
    An Error EPISODE is identified by `SessionInfo::stateChangedAtUnixMs` (the registry's stamp of the Error entry), so the
    window reads the transcript at most once per episode.
 2. **The transcript gate** (`DecideConnectionLostRestartFromPlan`), on one tail read off the UI thread
@@ -1231,16 +1287,17 @@ window brought forward. The pure rules are `AgentMaster/ConnectionLostRestart.h`
 
    | Verdict | When |
    |---|---|
-   | `restart` | the planner says `Rewind`, the active error is a cut-off response, the take-back lands on a tool result or a prompt (`ApiErrorTakeBackContinues`), the error row is new, budget is left |
+   | `restart` | the planner says `Rewind`, the active error is one the restart heals (`ClassifyAutoRestartError` on the plan's text, with the registry's HTTP status only when the registry's text is that very row: `SameApiErrorText`), the take-back lands on a tool result or a prompt (`ApiErrorTakeBackContinues`), the error row is new, the kind's budget is left |
    | `nothing-to-take-back` | the active branch no longer ends in an API error (a retry, a rewind, a take-back already written) |
    | `not-taken-back` | the planner leaves the error alone: a refusal, an unknown shape, a torn last line |
-   | `not-this-error` | the transcript's active error is another one |
+   | `not-this-error` | the transcript's active error is one the restart does not heal |
    | `would-not-continue` | the take-back lands on a meta row or a compaction summary |
    | `already-restarted` | the previous automatic restart of this session was made for this very error row — it did not take it back (another tab's claude runs the conversation, the old claude outlived the 15 s wait), so a second one would fail alike |
-   | `over-budget` | 3 automatic restarts of this session within 30 minutes (`kConnectionLostRestartBudget`, `kConnectionLostRestartWindowMs`): a connection that keeps dropping leaves the session in Error |
+   | `over-budget` | a cut-off response: 3 automatic restarts of this session within 30 minutes (`kConnectionLostRestartBudget`, `kConnectionLostRestartWindowMs`) — a connection that keeps dropping leaves the session in Error; a temporary failure: 3 within 60 minutes (`kTransientRestartBudget`, `kTransientRestartWindowMs`) — a server that stays down does too |
 
    The memory of restarts is one process-wide ledger (`SharedConnectionLostRestartLedger`: per session, the last error row
-   and the restart times; in memory only), noted BEFORE each restart runs.
+   and the restart times, kept for the longest window; in memory only), noted BEFORE each restart runs. `Look` counts them in
+   both windows (`AutoRestartHistory::restartsInWindow` / `restartsInTransientWindow`).
 3. **The restart** (`_RestartAfterConnectionLost`): the session's OWN pane — the one whose connection's `WT_SESSION` is the
    record's `tabToken`; without a match only a tab with a single terminal pane — then `_RestartManagedSession(pane,
    LetTurnContinue)`. ⚠ Never `_RestartClaudeSessionLocal`: it restarts the tab's ACTIVE pane and falls through to the upstream
@@ -1256,17 +1313,22 @@ window brought forward. The pure rules are `AgentMaster/ConnectionLostRestart.h`
    (`SessionInfo::turnEndUnixMs` newer than the restart: only a real Stop or a terminal reply line stamps it, and the old
    claude's hooks are dropped once retired — a continuation answered faster than a scan, measured with the e2e mock in
    flows/06 INT-01). **Not healed** = 2 minutes (`kConnectionLostRestartConfirmMs`) without either, or a turn that ended with
-   the session in Error again (the continuation failed; a new cut-off response then starts a new track).
+   the session in Error again (the continuation failed; a new error then starts a new track — a temporary failure on the
+   next back-off step). ⚠ For a temporary failure "healed" can come early: while the server is still down, the continued
+   claude retries the request in place (flows/05 STA-04 E6: "running the whole time"), and only its next error row shows that
+   the outage went on. The ladder and the hour's budget bound that case, not the watch.
 
-**The Error toast waits for the outcome.** The Running → Error completion toast of a session whose track is judging is HELD
-on the track (`_HoldToastForConnectionLostRestart`, called by `_EvaluateAgentNotification` right before it would fire):
-dropped when the restart heals the session, shown — with the session's state at that moment, through
-`_FireAgentCompletionToast` and its cog switches, focused-tab skip and duplicate guard — when the gate declines or holds after
-the read, when the transcript gate says no, when the restart is refused, or when the watch says not healed. A session held
-from the start (a draft) toasts at once, as before.
+**The Error toast waits for the outcome.** The Running → Error completion toast of a session whose track is judging — or
+waiting out a temporary failure's back-off — is HELD on the track (`_HoldToastForConnectionLostRestart`, called by
+`_EvaluateAgentNotification` right before it would fire): dropped when the restart heals the session, shown — with the
+session's state at that moment, through `_FireAgentCompletionToast` and its cog switches, focused-tab skip and duplicate guard —
+when the gate declines or holds (after the read, or while a back-off runs), when the transcript gate says no, when the restart
+is refused, or when the watch says not healed. A session held from the start (a draft) toasts at once, as before. During a
+long outage this usually means one toast per session, when the automatic restarts stop (the last one did not heal, or the
+budget is spent), instead of one per error.
 
-**The queue is given back.** The scheduler's stop-on-error backstop paused an Auto runner when the cut-off response put the
-session in Error. It now records what it took and in which Error episode (`AutorunnerState::stopOnErrorPausedMode` /
+**The queue is given back.** The scheduler's stop-on-error backstop paused an Auto runner when the API error put the session
+in Error. It now records what it took and in which Error episode (`AutorunnerState::stopOnErrorPausedMode` /
 `stopOnErrorPausedEpisodeMs`, transient), and a HEALED restart gives that mode back (`ShouldGiveRunnerBackAfterRestart`: the
 same episode, the runner still Off, a real mode taken). `ClearInterruptHold` — called by every mode decision: the user's pick
 on the badge, the Manager or Telegram, every other engine pause, an interrupt hold's resume — forgets the record, so the
@@ -1276,22 +1338,34 @@ give-back never undoes a choice made after the pause. An interrupt hold's Off is
 ended in an API error"), read live from each window's settings copy. Off: the session waits at the error, as before.
 
 **Logs** (hooks.log): `[auto-restart] <sid8> a cut-off response: "<title>" stopped on "API Error: Connection lost mid-response…"
-— reading its transcript to restart it uninterrupted`; `[notify-hold] <sid8> running -> error (a cut-off response that this window
-restarts by itself …)`; `[nav] auto-restart-begin <sid8> (a cut-off response: error row <uuid8>, taken back to the tool result
-<target8>; automatic restart 1 of at most 3 in 30 min)`, the restart's own `[restart] claude <id> (resume)` and
-`[api-error-rewind] <sid8> restart: rewound past …`, `[nav] auto-restart-done <sid8> (restarted in place, uninterrupted …)`;
-`[auto-restart] <sid8> healed: the turn runs again (running) N s after the automatic restart; its held Error toast is dropped
-(held N s); the Prompt Queue Runner is back to Full …` (and autorunner.log's `[auto-restart] <sid> runner back to Full`).
-Refusals: `[auto-restart] <sid8> not restarted: <why>`, `waiting before the restart: <why>`, `no longer waiting (<why>)`, `not
-restarted (<verdict>): <reason> — the session waits at the error for you`, `NOT healed: …`, `let go: the Error episode ended …`,
-and `[notify-release] <sid8> the held running -> error toast is shown as <state> after N s: <why>`.
+— reading its transcript to restart it uninterrupted` (`a temporary API failure: …` for the other kind); for a temporary
+failure first `[auto-restart] <sid8> waiting 1 min 7 s before the restart: the back-off after a temporary API failure (Claude
+Code's own retries have just given up) — automatic restart 1 of at most 3 in 60 min ("<title>" stopped on "API Error: 529
+Overloaded…")`, then `no longer waiting (…)`; `[notify-hold] <sid8> running -> error (an API error that this window restarts by
+itself …)`; `[nav] auto-restart-begin <sid8> (a cut-off response: error row <uuid8>, taken back to the tool result <target8>;
+automatic restart 1 of at most 3 in 30 min)` (`a temporary API failure: … of at most 3 in 60 min`), the restart's own `[restart]
+claude <id> (resume)` and `[api-error-rewind] <sid8> restart: rewound past …`, `[nav] auto-restart-done <sid8> (restarted in place,
+uninterrupted …)`; `[auto-restart] <sid8> healed: the turn runs again (running) N s after the automatic restart; its held Error
+toast is dropped (held N s); the Prompt Queue Runner is back to Full (stop-on-error had paused it for the API error)` (and
+autorunner.log's `[auto-restart] <sid> runner back to Full`). Refusals: `[auto-restart] <sid8> not restarted: <why>`, `waiting
+before the restart: <why>`, `no longer waiting (<why>)`, `not restarted yet: <the back-off> (N s left)`, `not restarted
+(<verdict>): <reason> — the session waits at the error for you`, `NOT healed: …`, `let go: the Error episode ended …`, and
+`[notify-release] <sid8> the held running -> error toast is shown as <state> after N s: <why>`.
 
 **Tests.** `TestConnectionLostRestart` (`tests_rewind.cpp`): the cut-off family's match (every text above, an older wording,
 "mid-response" without the sentence; HTTP errors, usage limits, refusals and unrelated "may be incomplete" messages not
-matched); `0c947da9`'s watchdog shape and a cut before any output through the transcript gate; every Ignore / Decline / Hold / Go case of the
-registry gate and their order; the transcript gate on the 2.1.310 shape of `d42f0aea` (dummy text) and on every refusal; the
-outcome rule (the held start's Error, the fast continuation, a continuation that failed, the confirm window); the give-back rule
-with `ClearInterruptHold`; the ledger's window to the millisecond. `TestInterruptHold` (`tests_spawn_sched.cpp`): the scheduler's
+matched); `TestAutoRestartClassifier`: every cut-off text a CutOff, 27 temporary failures from the bundle and this PC's rows a
+Transient, 30 texts None — 27 errors that need the user (the certificate ones with "Unable to connect to API", "use /model",
+"/login" with a 401 in the text, the usage limits, a 400 JSON body, a 429 "Rate limit exceeded", …), Agentmaster's own
+cut-off-turn text, an unknown wording and an empty one — case and position free,
+the status rules (a 5xx / 408 makes an unknown wording temporary, a bare 429 does not, a 4xx vetoes a temporary phrase, a 5xx
+never delays a cut-off response), `HttpStatusInErrorText`, `SameApiErrorText`, the back-off ladder and its per-session share;
+`0c947da9`'s watchdog shape and a cut before any output through the transcript gate; every Ignore / Decline / Hold / Wait / Go
+case of the registry gate and their order (a draft or the switch off before the back-off, a cut-off response never waits); the
+transcript gate on the 2.1.310 shape of `d42f0aea` (dummy text), on a 529 after Claude Code's retries (restarted onto the prompt,
+its own 60-minute budget, never twice for one row), on an unknown wording with and without the row's 503, and on every refusal;
+the outcome rule (the held start's Error, the fast continuation, a continuation that failed, the confirm window); the give-back
+rule with `ClearInterruptHold`; the ledger's two windows to the millisecond (a note keeps what the hour still counts). `TestInterruptHold` (`tests_spawn_sched.cpp`): the scheduler's
 record, a repeated observation, the user's pick forgetting it, the interrupt hold recording nothing. `tests_persistence.cpp`: the
 setting's round trip and its absent-key default. Every new check was proven able to fail by two planted-defect runs (the budget,
 a decline turned into a hold, the outcome rule, the record, the forgetting, the stop intent, the failed continuation). The real
