@@ -79,6 +79,13 @@
     <ClCompile Include="..\ClaudeInvisibleChars.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <!-- SIDE_PANEL.md 2l: Persistence.cpp saves and loads a window record's side panel filters through the
+         inline SidePanelFiltersToJson(NormalizeSidePanelFilters(...)) / SidePanelFiltersFromJson of
+         SidePanelFilters.h, which fold tag names with FoldTagName / NormalizeTagName, defined in SessionStore.cpp.
+         The same kind of LINK dependency: without it this project fails LNK2019 / LNK1120 (0d3ed3b02). -->
+    <ClCompile Include="..\SessionStore.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
   </ItemGroup>
 
   <Import Project="$(OpenConsoleDir)src\common.build.post.props" />

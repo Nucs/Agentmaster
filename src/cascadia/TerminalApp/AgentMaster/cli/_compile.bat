@@ -23,9 +23,12 @@ REM echo/dedupe compares and the BuildPromptFill it links call NormalizePromptTe
 REM SanitizeForClaudeInput; icu.lib (the Windows SDK's ICU) is what that TU links against.
 REM TranscriptWatcher.cpp (HOOKS.md "Transcript watcher") is the same kind of LINK dependency:
 REM SessionScanner::Start constructs the watcher, even though the CLI never starts a scanner.
+REM SessionStore.cpp (SIDE_PANEL.md 2l) is the same kind of LINK dependency: Persistence.cpp saves and loads a
+REM window record's side panel filters through SidePanelFilters.h's inline helpers, which fold tag names with
+REM FoldTagName / NormalizeTagName, defined in SessionStore.cpp (LNK2019 / LNK1120 without it, 0d3ed3b02).
 cl /std:c++20 /EHsc /nologo /W3 /utf-8 /MP /DUNICODE /D_UNICODE /D AGENTMASTER_DEV /Fe:agentcli.exe agentcli.cpp ^
    ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\CommandWatch.cpp ^
-   ..\SessionScanner.cpp ..\TranscriptWatcher.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ..\ClaudeInvisibleChars.cpp ..\SessionDbClient.cpp ^
+   ..\SessionScanner.cpp ..\TranscriptWatcher.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ..\ClaudeInvisibleChars.cpp ..\SessionDbClient.cpp ..\SessionStore.cpp ^
    ole32.lib user32.lib oleaut32.lib icu.lib
 if errorlevel 1 (
   echo [error] compile failed
