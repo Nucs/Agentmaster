@@ -1824,6 +1824,38 @@ namespace Agentmaster
             }
             return out;
         }
+
+        // The filter-folders.json document (SIDE_PANEL.md §2l "The By Folder submenu"): {"version":1,"folders":[...]}, By
+        // Folder's pick history, most recent first — each entry the window record's own folder object
+        // (SidePanelFolderHistoryToJson), so a picked folder has one shape in every file.
+        //   history - the picks, as given.
+        //   returns - the document.
+        // Throws std::bad_alloc only.
+        json::Value FilterFoldersDocument(const std::vector<SidePanelFolderFilter>& history)
+        {
+            auto root = json::Value::MkObj();
+            root.Set(L"version", json::Value::MkNum(1));
+            root.Set(L"folders", SidePanelFolderHistoryToJson(history));
+            return root;
+        }
+
+        // The history a parsed filter-folders.json holds, normalized (SidePanelFolderHistoryFromJson: absolute folders, unique
+        // by NormDirKey, at most kSidePanelFolderHistoryMax).
+        //   doc     - the parsed document; anything but an object with a "folders" array reads as an empty history.
+        //   returns - the history, most recent first.
+        // Throws std::bad_alloc only.
+        std::vector<SidePanelFolderFilter> FilterFoldersFromDocument(const json::Value& doc)
+        {
+            if (doc.type != json::Value::Type::Obj)
+            {
+                return {};
+            }
+            if (const auto* arr = doc.Find(L"folders"))
+            {
+                return SidePanelFolderHistoryFromJson(*arr); // a non-array reads as empty there
+            }
+            return {};
+        }
     }
 
     std::wstring SerializeSessions(const std::vector<SessionInfo>& sessions)
@@ -1871,6 +1903,21 @@ namespace Agentmaster
         return RecentDirsFromDocument(*parsed);
     }
 
+    std::wstring SerializeFilterFolderHistory(const std::vector<SidePanelFolderFilter>& history)
+    {
+        return json::Dump(FilterFoldersDocument(history));
+    }
+
+    std::vector<SidePanelFolderFilter> DeserializeFilterFolderHistory(std::wstring_view text)
+    {
+        const auto parsed = json::Parse(text);
+        if (!parsed)
+        {
+            return {}; // no text (a missing file) or text that does not parse: no history
+        }
+        return FilterFoldersFromDocument(*parsed);
+    }
+
     json::Value SessionsRoundTrip(const json::Value& disk)
     {
         return SessionsDocument(SessionsFromDocument(disk));
@@ -1884,6 +1931,11 @@ namespace Agentmaster
     json::Value RecentDirsRoundTrip(const json::Value& disk)
     {
         return RecentDirsDocument(RecentDirsFromDocument(disk));
+    }
+
+    json::Value FilterFoldersRoundTrip(const json::Value& disk)
+    {
+        return FilterFoldersDocument(FilterFoldersFromDocument(disk));
     }
 
     namespace
@@ -3451,6 +3503,8 @@ namespace Agentmaster
                 { profileDir + L"\\open-windows.json", L"open-windows.json", &OpenWindowsRoundTrip, true, nullptr },
                 { profileDir + L"\\templates.json", L"templates.json", &TemplatesRoundTrip, true, nullptr },
                 { profileDir + L"\\recent-dirs.json", L"recent-dirs.json", &RecentDirsRoundTrip, true, nullptr },
+                // keepDropped false: the history's loader drops entries ON PURPOSE (the cap, a duplicate), like launch-presets.
+                { profileDir + L"\\filter-folders.json", L"filter-folders.json", &FilterFoldersRoundTrip, false, nullptr },
                 { profileDir + L"\\model-list.json", L"model-list.json", &ModelListRoundTrip, true, nullptr },
                 { profileDir + L"\\dir-colors.json", L"dir-colors.json", &DirColorsRoundTrip, true, nullptr },
                 { profileDir + L"\\dir-env.json", L"dir-env.json", &DirEnvRoundTrip, true, nullptr },
@@ -3744,6 +3798,46 @@ namespace Agentmaster
     std::vector<std::wstring> LoadRecentDirs()
     {
         return DeserializeRecentDirs(ReadAllUtf8(AgentmasterStateDir() + L"\\recent-dirs.json"));
+    }
+
+    std::vector<SidePanelFolderFilter> LoadFilterFolderHistoryIn(const std::wstring& profileDir)
+    {
+        return DeserializeFilterFolderHistory(ReadAllUtf8(profileDir + L"\\filter-folders.json"));
+    }
+    std::vector<SidePanelFolderFilter> LoadFilterFolderHistory()
+    {
+        return LoadFilterFolderHistoryIn(AgentmasterStateDir());
+    }
+    std::vector<SidePanelFolderFilter> RememberFilterFolderPicksIn(const std::wstring& profileDir, const std::vector<SidePanelFolderFilter>& picks, bool onlyMissing)
+    {
+        // One read-modify-write at a time in this process: every window's UI thread writes this one list, and two picks
+        // racing between one window's read and its write would lose the other's. Function-local, so it is built on first
+        // use (C++11 thread-safe) and never held across anything but this file's own read and write.
+        static std::mutex s_rmw;
+        const std::lock_guard<std::mutex> hold{ s_rmw };
+        const std::wstring path = profileDir + L"\\filter-folders.json";
+        // The FRESHEST file, never an in-memory copy: another window may have picked a folder a moment ago.
+        // PERSISTENCE.md §15: a history that exists but cannot be read is not an empty one — pushing onto nothing and saving
+        // would replace every remembered pick with these. Write nothing then (the read logged it and marked the file).
+        const StateFileRead current = ReadStateFileUtf8(path);
+        if (current.status == StateFileStatus::Unreadable)
+        {
+            return {};
+        }
+        const std::vector<SidePanelFolderFilter> before = DeserializeFilterFolderHistory(current.text);
+        std::vector<SidePanelFolderFilter> after = SidePanelFolderHistoryAfterPicks(before, picks, onlyMissing);
+        if (after == before)
+        {
+            return after; // nothing moved (a repick of the top folder, a seeding that found everything): no write
+        }
+        // keepDropped false: the loader drops entries on purpose (the cap, a duplicate), so a dropped one must stay dropped
+        // instead of riding along as residue at every save (PERSISTENCE.md §17, as launch-presets.json).
+        WriteStateDocumentIn(profileDir, path, FilterFoldersDocument(after), &FilterFoldersRoundTrip, /*keepDroppedElements*/ false);
+        return after;
+    }
+    std::vector<SidePanelFolderFilter> RememberFilterFolderPicks(const std::vector<SidePanelFolderFilter>& picks, bool onlyMissing)
+    {
+        return RememberFilterFolderPicksIn(AgentmasterStateDir(), picks, onlyMissing);
     }
 
     void SaveModelList(const std::vector<std::wstring>& models)

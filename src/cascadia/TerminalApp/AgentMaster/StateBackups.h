@@ -60,6 +60,7 @@ namespace Agentmaster::StateBackups
         L"open-windows.json",
         L"templates.json",
         L"recent-dirs.json",
+        L"filter-folders.json", // the side panel's By Folder pick history (SIDE_PANEL.md §2l)
         L"model-list.json",
         L"dir-colors.json",
         L"dir-env.json",

@@ -1496,7 +1496,7 @@ same, in the window that hosts the card's tab.
     strip of the window they were used in.
   - No `[exc] _SidePanelLaunchNextToTab` line in hooks.log.
 
-### 2l. The filters — the funnel, its panel, By Folder and the chips row (2026-11-08, NOT BUILT yet)
+### 2l. The filters — the funnel, its panel, By Folder and the chips row (2026-11-08; in dev 0.0.1.44 and production 0.8.0.12) — By Folder's hover submenu (2026-11-10, NOT BUILT yet)
 
 The user's request: "In sidemenu, we need to introduce ability to filter, Filter by folder and even have like the +, but a
 button for FILTER and in it have menu appear on click and then By Folder -> <the picker of +>. The row below the filter with
@@ -1658,6 +1658,114 @@ Docked left (docked right the line mirrors: `⏷ + Sum ⋯`, the funnel still th
   - A restart keeps this window's filters; a new window starts unfiltered; windows/<id>.json has `sidePanelFilters` only
     while a filter is set.
   - No `[exc] _SidePanel…Filter…` / `[exc] side panel filter …` / `[exc] side panel folder card …` line in hooks.log.
+
+#### The By Folder submenu (2026-11-10, NOT BUILT yet)
+
+The user's request, after using the built filters: "By Folder works great and as expected, keep By Folder AS IS, clickable,
+but when hovered have a submenu with / Pick / --- / <each line is an item we picked, repicking moves to top>". Their answers
+the same day to the two design questions (asked with mockups):
+
+| Question | Answer |
+|---|---|
+| What a click on a folder line does | **Toggle** — ✓ marks a folder that filters this window now; a click on an unchecked line turns it on (it moves to the top at the next open), a click on a ✓ line turns it off; the submenu stays open, and its lines keep their place while it is open |
+| Whose list it is | **One list for the app** — every window's submenu shows the same folders, the last picked anywhere on top, kept across restarts in a small profile file; each window still filters on its own (the ✓ marks follow the window) |
+
+```
+      ┌──────────────────────────────┐┌───────────────────────────────────────────────┐
+      │    📁 By Folder…          2 › ││    📁 Pick…                                   │  ← what By Folder…'s click does
+      │ ›  ● By State                ││ ──────────────────────────────────────────── │
+      │ ›  🏷 By Tag                  ││ ✓  Agentmaster  K:\source\Agentmaster       2 │  ← ✓ = filters this window now
+      │ ›  ⏱ Active within           ││ ✓  kvnode (exactly)  K:\source\kvnode       1 │
+      │ ──────────────────────────── ││    webapp  K:\work\webapp                   1 │  ← a click turns it on (or off)
+      │    …                          ││    source  K:\source                        4 │
+      └──────────────────────────────┘└───────────────────────────────────────────────┘
+```
+
+- **By Folder… is unchanged when clicked** (the `+` card in folder-pick mode). It gains a `›` at its end, and its tip says
+  that resting on it, or →, shows the folders picked before.
+- **Opening and closing — the desktop menu's hover intent** (`_SidePanelFolderMenuHover`, one one-shot timer): the pointer
+  RESTING on By Folder… for Windows' own menu delay (`SPI_GETMENUSHOWDELAY`, 400 ms by default, read at each arm, 5 s at
+  most) opens the submenu; resting on ANOTHER row of the panel for the delay closes it; reaching the submenu meanwhile cancels
+  that close (a diagonal move crosses By State on its way); leaving By Folder… before the delay drops a pending open. Touch
+  never opens it (a finger has no hover). It also closes with the panel — every reason the panel closes (a press outside both
+  cards, Escape, the funnel, By Folder… or Pick…, a tab switch, a collapse, a dock flip, AI mode). A press inside the submenu
+  is inside the panel (the outside-press hook counts it, and lists it among the surfaces' own popups).
+- **The card**: a second Root()-parented Popup in the panel's look (the dark card, 7 DIP corners, the Button brushes), 400 DIP
+  wide, scrolling inside the window's height. **Placement** (`PlaceSubmenuCard`, pure, `PointerCardPlacement.h`): beside the
+  panel's right edge when the whole card fits there inside the 8 DIP margin, else beside its left edge, else on the side
+  with more room, clamped into the window; its first row level with By Folder… (By Folder…'s place read through its
+  transform, scroll included); re-placed by every placement of the panel (a resize, a section that changes the panel's
+  height) and by its own size change (queued: the layout-cycle rule).
+- **The rows** (built at every open, `_SidePanelFillFolderMenu`): **Pick…** (`📁 Pick…` — closes the panel and opens the
+  folder card, exactly By Folder…'s click), a separator, then one line per folder (`SidePanelFolderMenuLines`, pure): first
+  every folder that filters THIS window but is missing from the history (a filter an older build saved, a folder the cap
+  pushed out — it filters now, so it is listed, checked, on top), then the history, most recent pick first. A line reads
+  `✓  <leaf>[ (exactly)]  <whole path, dim>  <count>`: the leaf and "(exactly)" are its chip's words
+  (`SidePanelFolderLineName`), the path trims with "…", the tip has it whole with its choice. A checked line shows the
+  window's own spelling and choice of the folder; an unchecked one the last pick's. With no line at all: "No folder picked
+  yet — Pick… adds one here."
+- **The count** of a line (`_SidePanelFolderMenuCounts`): the sessions of the panel's scope that pass the typed text and every
+  filter BUT By Folder, and that this folder alone keeps (`SidePanelFolderLineCovers` — the matcher's own rule for one folder:
+  the working or inferred folder, with or without its subfolders by the line's choice), so it says what turning that line on
+  would list.
+- **A click on a line** (one tick later, the pointer-handler rule; `SidePanelToggleFolderLine`, pure) is judged against the
+  record AS IT IS: a folder the window filters by is dropped, one it does not is added with the line's choice — through
+  `_SidePanelSetFilters`, so the cards re-filter, the chips row and the funnel follow and the window record is saved. The
+  submenu stays open; its checks and counts are rewritten IN PLACE (`_SidePanelRefreshFolderMenu`, also run by every panel
+  refresh), so the line under the pointer stays put; a line turned off keeps its words, so turning it back on restores the
+  folder exactly as it was (`SidePanelSyncFolderMenuLine`).
+- **The pick history** — `filter-folders.json` in the profile, `{"version":1,"folders":[{"path":…,"subfolders":…}]}`, most
+  recent first, at most TEN folders (`kSidePanelFolderHistoryMax`), one list for every window of every install sharing the
+  profile. A PICK goes on top in its spelling and choice, a repick moves the folder up (`SidePanelFolderHistoryAfterPicks`):
+  every Filter of the folder card (a folder already filtering included) and every line turned ON in the submenu. Turning a
+  line off is not a pick (the order stays). The submenu's open SEEDS the window's own filtering folders the history lacks
+  (only missing ones, so an ordinary open writes nothing), so a folder an older build saved stays listed once turned off.
+  Each read and write is a read-modify-write of the freshest file (`RememberFilterFolderPicks`, a process-wide lock around
+  it): another window's pick a moment ago is there at the next open. Like every state document (PERSISTENCE.md §17): written
+  through `WriteStateDocument` (the writer stamp, the residue, the shadow; `keepDropped` false — its loader drops past the
+  cap on purpose), in the older-writer repair and the version-change snapshot; an unreadable file is never replaced (the
+  submenu then lists the window's own filters alone).
+- **Keys**: → on By Folder… opens the submenu with Pick… focused (on the key-down: focus moves into a popup of the panel and
+  → writes no character); inside, ↑ / ↓ walk the rows, Enter / Space on a line toggles it (the Button's own key), Enter /
+  Space on Pick… opens the folder card on the KEY-UP (the card's box takes the keyboard), ← closes the submenu and Escape
+  does on its KEY-UP — both give the keyboard back to By Folder… BEFORE the close (a Popup closed while it holds focus drops
+  it anywhere: the Gotcha); Escape in the panel while the submenu is open closes the submenu first, the next one the panel.
+  Tab cycles inside the card.
+- **Logs:** `[nav] sidepanel filter folder menu open (hover | keyboard)` / `… close (<reason>)`, `[nav] sidepanel filter
+  folder+ (folder menu, with subfolders | exactly) -> N filter(s) on` / `folder- (folder menu) -> …` (never a path),
+  `[sidepanel] filter folder menu built` once per window; a failure is an `[exc] … side panel folder menu: …` or
+  `_SidePanel…FolderMenu…` line.
+- **UI Automation** (E2E_TESTING.md §6.3): `am.side.filter.folderMenu.pick` and `am.side.filter.folderMenu.folder.<N>` (N = the
+  line's place, 0 on top; named "<leaf>[ (exactly)], <whole path>"; ItemStatus "checked" while it filters the window). UI
+  Automation cannot hover: a driver opens the submenu with → on `am.side.filter.byFolder`.
+- **Tested** (no build): `TestSidePanelFilters` (`tests_sidepanel.cpp`) gained the pick history (a pick on top, a repick in any
+  spelling moved up with its new choice, several picks at once, two picks of one folder, the seeding of missing folders only,
+  the cap, the normalizing), its JSON and the `filter-folders.json` document, the file itself through the `...In` seams on a
+  scratch profile (no file for a seeding that adds nothing, picks kept newest first, the seeding's answer, a repick in the file,
+  the writer stamp), the submenu's lines (the record's unlisted folder first and checked, the history's order and choices, the
+  record's spelling and choice on a checked line), the toggle judged against the record as it is, a line turned off turning
+  back on as it was, a moved choice adopted, the removal by any spelling, the line's words, and a line's coverage equal to the
+  matcher's By Folder verdict; `TestSubmenuCardPlacement` (new) pins `PlaceSubmenuCard` (both sides, the exact edge, neither
+  side, a card wider than the window, a panel past the right edge, the vertical clamps, an unmeasured window, NaN / negative /
+  reversed inputs, and a seeded 20,000-case sweep: inside the window, never over the panel while a side holds it, right first,
+  exactly the gap off the panel). `cl /Zs` against the Release worktree build of ad89700e3 of `TerminalPage.AgentSidePanel.cpp`,
+  `TerminalPage.AgentEngine.cpp`, `AgentMaster/Persistence.cpp`, `TerminalPage.AgentObserver.cpp`,
+  `TerminalPage.AgentSessions.cpp` and `AgentManagerContent.cpp` (units of the changed `TerminalPage.h` / `Persistence.h`) and
+  all 18 agentmaster-cli units at their `/W4 /WX` (they compile `Persistence.cpp`; the new code calls nothing they do not link
+  already) — all pass; two undeclared names planted in the new code failed at exactly their lines; on d3e617f84 (§2h's copy
+  button committed meanwhile) `TerminalPage.AgentSidePanel.cpp`, `TerminalPage.AgentSessions.cpp` and `Persistence.cpp`
+  pass again. The whole m5 harness on `git archive` of d3e617f84 with only this change laid over it (other sessions' unfinished
+  work was in the tree): 12,442 checks, the 3 known taskbar-badge failures only (on the live tree two real-time scheduler
+  checks failed once at 64–79 % CPU and passed on a rerun at 16 %).
+- **Check after the build** (a PURGED build: `TerminalPage.h` gains data members):
+  - Hovering By Folder… opens the submenu after the menu delay, beside the panel, Pick… level with By Folder…; a click on By
+    Folder… still opens the `+` folder card; resting on another row closes the submenu; a diagonal move into it keeps it.
+  - Pick… opens the folder card; its pick shows on top at the next open; a line's click toggles its folder (✓, chip, cards)
+    and the submenu stays open with its lines in place; a repick moves the folder up at the next open.
+  - A second window shows the same lines with its own ✓ marks; a restart keeps the list (`filter-folders.json`).
+  - →, ↑ / ↓, Enter, ← and Escape as above; no ESC or CR reaches the terminal.
+  - Near the window's right edge the submenu opens on the panel's left.
+  - No `[exc] … side panel folder menu …` / `_SidePanel…FolderMenu…` line in hooks.log.
 
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 

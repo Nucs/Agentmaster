@@ -28,8 +28,10 @@
 // windows the panel offers, the filter record and its edits, the per-session facts the predicate reads, the compiled
 // matcher (folder keys and tag names folded once per list update), the chips the row shows and what each chip's ✕ leaves,
 // and the record's JSON (normalized on load: a hand-edited file can never make a filter that hides cards for a reason the
-// row cannot show). The app applies it (TerminalPage::_SidePanelRebuildCards, the funnel's panel, the chips row); the m5
-// harness pins it (TestSidePanelFilters, tests_sidepanel.cpp).
+// row cannot show), and By Folder's PICK HISTORY with the rules of its hover submenu (the user's request of 2026-11-10: the
+// folders picked, the last on top, one list for the app; each line toggles that folder in this window's record). The app
+// applies it (TerminalPage::_SidePanelRebuildCards, the funnel's panel and its By Folder submenu, the chips row; the history
+// file is Persistence.h's RememberFilterFolderPicks); the m5 harness pins it (TestSidePanelFilters, tests_sidepanel.cpp).
 
 #pragma once
 
@@ -817,5 +819,302 @@ namespace Agentmaster
                                           0u;
         }
         return NormalizeSidePanelFilters(raw);
+    }
+
+    // ===== By Folder's PICK HISTORY and its hover SUBMENU (SIDE_PANEL.md §2l "The By Folder submenu") =====================
+    // The user's request of 2026-11-10: "keep By Folder AS IS, clickable, but when hovered have a submenu with / Pick / --- /
+    // <each line is an item we picked, repicking moves to top>". Their picks the same day (design-ask with mockups):
+    //   - a folder line TOGGLES: ✓ marks a folder that filters this window now; a click on an unchecked line turns it on, a
+    //     click on a ✓ line turns it off; the submenu stays open, and its lines keep their place while it is open;
+    //   - ONE LIST FOR THE APP: every window's submenu shows the same folders, the last picked anywhere on top, kept across
+    //     restarts (the profile's filter-folders.json, Persistence.h RememberFilterFolderPicks); each window still filters on
+    //     its own — the ✓ marks follow the window's record, never the history.
+    // A history entry is a pick as it was made: the folder and its Include-subfolders choice (the record's own folder type).
+
+    // How many picks the history keeps; the oldest falls off past it. Ten folder lines keep the submenu a glance, and the
+    // folder card's FOLDERS YOUR SESSIONS WORK IN still lists every folder of the fleet.
+    inline constexpr size_t kSidePanelFolderHistoryMax = 10;
+
+    // The pick history normalized: each path trimmed (TrimFolderPath), only absolute folders, unique by NormDirKey (the first
+    // entry — the most recent pick — and its spelling and choice kept), at most `cap` entries. What the loader returns, so a
+    // hand-edited file can never list a line the submenu could not turn on.
+    //   history - the entries, most recent first (as read or edited).
+    //   cap     - the most entries kept (kSidePanelFolderHistoryMax by default; 0 keeps none, SIZE_MAX keeps all).
+    //   returns - the normalized copy.
+    //   throws  - std::bad_alloc.
+    [[nodiscard]] inline std::vector<SidePanelFolderFilter> NormalizeSidePanelFolderHistory(const std::vector<SidePanelFolderFilter>& history, size_t cap = kSidePanelFolderHistoryMax)
+    {
+        std::vector<SidePanelFolderFilter> out;
+        std::vector<std::wstring> keys;
+        for (const auto& entry : history)
+        {
+            if (out.size() >= cap)
+            {
+                break;
+            }
+            std::wstring path = TrimFolderPath(entry.path);
+            if (path.empty() || !IsAbsoluteFolderPath(path))
+            {
+                continue;
+            }
+            std::wstring key = NormDirKey(path);
+            if (std::find(keys.begin(), keys.end(), key) != keys.end())
+            {
+                continue; // an older entry of a folder already listed: the newer pick stands for it
+            }
+            keys.push_back(std::move(key));
+            out.push_back(SidePanelFolderFilter{ std::move(path), entry.includeSubfolders });
+        }
+        return out;
+    }
+
+    // The history after `picks`: each pick goes to the TOP in its own spelling and with its own choice — a folder already
+    // listed, in any spelling, moves up (the user's "repicking moves to top") — and the first pick ends first. With
+    // `onlyMissing`, a pick whose folder the history already lists changes nothing: the seeding of a window's own filters
+    // (they filter now, so the submenu must list them, but opening it must not reorder the list every time). Normalized
+    // and cut to `cap` afterwards, so the oldest picks fall off.
+    //   history     - the current history, most recent first (normalized here too: the caller may pass what it read).
+    //   picks       - the folders picked, most recent first (a path that is not an absolute folder is skipped).
+    //   onlyMissing - add only the folders the history does not list yet, leaving every listed one where it is.
+    //   cap         - as NormalizeSidePanelFolderHistory.
+    //   returns     - the new history.
+    //   throws      - std::bad_alloc.
+    [[nodiscard]] inline std::vector<SidePanelFolderFilter> SidePanelFolderHistoryAfterPicks(const std::vector<SidePanelFolderFilter>& history,
+                                                                                            const std::vector<SidePanelFolderFilter>& picks,
+                                                                                            bool onlyMissing,
+                                                                                            size_t cap = kSidePanelFolderHistoryMax)
+    {
+        // Uncapped while the picks go in: a pick of the 11th folder must find (and move) it, never add a second copy.
+        std::vector<SidePanelFolderFilter> out = NormalizeSidePanelFolderHistory(history, SIZE_MAX);
+        // "Already listed" for onlyMissing is judged against the history as it CAME, so two picks of one folder in one call
+        // resolve like any other repick (the first pick wins) instead of the second being skipped as "listed".
+        std::vector<std::wstring> listedBefore;
+        listedBefore.reserve(out.size());
+        for (const auto& entry : out)
+        {
+            listedBefore.push_back(NormDirKey(entry.path));
+        }
+        // From the last pick to the first, each put on top: the first pick ends first.
+        for (auto it = picks.rbegin(); it != picks.rend(); ++it)
+        {
+            std::wstring path = TrimFolderPath(it->path);
+            if (path.empty() || !IsAbsoluteFolderPath(path))
+            {
+                continue;
+            }
+            const std::wstring key = NormDirKey(path);
+            if (onlyMissing && std::find(listedBefore.begin(), listedBefore.end(), key) != listedBefore.end())
+            {
+                continue;
+            }
+            const auto found = std::find_if(out.begin(), out.end(), [&](const SidePanelFolderFilter& entry) { return NormDirKey(entry.path) == key; });
+            if (found != out.end())
+            {
+                out.erase(found);
+            }
+            out.insert(out.begin(), SidePanelFolderFilter{ std::move(path), it->includeSubfolders });
+        }
+        return NormalizeSidePanelFolderHistory(out, cap);
+    }
+
+    // The history as filter-folders.json's "folders" array — [{"path":…,"subfolders":…}, …], most recent first: the window
+    // record's own folder objects (SidePanelFiltersToJson), so one shape describes a picked folder in every file.
+    //   history - the history (written as given: normalize first when it may be raw).
+    //   returns - the array.
+    //   throws  - std::bad_alloc.
+    [[nodiscard]] inline json::Value SidePanelFolderHistoryToJson(const std::vector<SidePanelFolderFilter>& history)
+    {
+        json::Value arr = json::Value::MkArr();
+        for (const auto& entry : history)
+        {
+            json::Value f = json::Value::MkObj();
+            f.Set(L"path", json::Value::MkStr(entry.path));
+            f.Set(L"subfolders", json::Value::MkBool(entry.includeSubfolders));
+            arr.Push(std::move(f));
+        }
+        return arr;
+    }
+
+    // The history from filter-folders.json's "folders" array, normalized (NormalizeSidePanelFolderHistory). Tolerant: a
+    // non-object entry, a missing or relative path and a duplicate are dropped; a non-bool "subfolders" reads as the default
+    // (included, the user's pick for every folder); anything but an array reads as an empty history.
+    //   arr     - the array.
+    //   returns - the history, most recent first.
+    //   throws  - std::bad_alloc.
+    [[nodiscard]] inline std::vector<SidePanelFolderFilter> SidePanelFolderHistoryFromJson(const json::Value& arr)
+    {
+        std::vector<SidePanelFolderFilter> raw;
+        if (arr.type != json::Value::Type::Arr)
+        {
+            return raw;
+        }
+        for (const auto& f : arr.arr)
+        {
+            if (f.type != json::Value::Type::Obj)
+            {
+                continue;
+            }
+            raw.push_back(SidePanelFolderFilter{ f.StrAt(L"path"), f.BoolAt(L"subfolders", true) });
+        }
+        return NormalizeSidePanelFolderHistory(raw);
+    }
+
+    // One FOLDER LINE of By Folder's submenu: a folder of the history (or of the window's record), as THIS window shows it.
+    struct SidePanelFolderMenuLine
+    {
+        std::wstring path; // the folder: the record's spelling while checked, else the history's
+        std::wstring key; // NormDirKey(path): what the record, the history and the sessions are matched by
+        bool includeSubfolders{ true }; // the choice the line shows and a click on it adds: the window's own while checked, else the last pick's
+        bool checked{ false }; // the window's record filters by this folder now (the line's ✓)
+        bool operator==(const SidePanelFolderMenuLine&) const = default;
+    };
+
+    // Bring one line up to date with the window's record: checked while the record holds its folder (by key), and then in
+    // the record's spelling and choice; an unchecked line keeps the spelling and choice it had, so a folder turned off from
+    // the submenu turns back on exactly as it was (the lines keep their place while the submenu is open, and are rebuilt
+    // from the history only at the next open).
+    //   line    - the line to update (its key must be NormDirKey of its path).
+    //   filters - the window's record.
+    //   returns - true when the line's WORDS change (its spelling or its choice moved): the caller rewrites its label. A
+    //             check that merely flips returns false (the check column is rewritten by the caller anyway).
+    //   throws  - std::bad_alloc.
+    inline bool SidePanelSyncFolderMenuLine(SidePanelFolderMenuLine& line, const SidePanelFilters& filters)
+    {
+        for (const auto& folder : filters.folders)
+        {
+            std::wstring path = TrimFolderPath(folder.path);
+            if (path.empty() || NormDirKey(path) != line.key)
+            {
+                continue;
+            }
+            const bool wordsMoved = path != line.path || folder.includeSubfolders != line.includeSubfolders;
+            line.checked = true;
+            line.path = std::move(path);
+            line.includeSubfolders = folder.includeSubfolders;
+            return wordsMoved;
+        }
+        line.checked = false;
+        return false;
+    }
+
+    // The submenu's folder lines, top to bottom: first every folder of the window's record that the history does not list (a
+    // pick an older build made, or one the cap pushed out — it filters now, so it is listed, checked, on top, in the record's
+    // order), then the history in its order (most recent pick first), each brought up to date with the record
+    // (SidePanelSyncFolderMenuLine: checked, in the record's spelling and choice, while the record holds it).
+    //   history - the pick history, most recent first (normalized here: a relative path or a duplicate is skipped).
+    //   filters - the window's record.
+    //   returns - the lines (empty when nothing was ever picked and nothing filters).
+    //   throws  - std::bad_alloc.
+    [[nodiscard]] inline std::vector<SidePanelFolderMenuLine> SidePanelFolderMenuLines(const std::vector<SidePanelFolderFilter>& history, const SidePanelFilters& filters)
+    {
+        const std::vector<SidePanelFolderFilter> listed = NormalizeSidePanelFolderHistory(history, SIZE_MAX);
+        std::vector<std::wstring> listedKeys;
+        listedKeys.reserve(listed.size());
+        for (const auto& entry : listed)
+        {
+            listedKeys.push_back(NormDirKey(entry.path));
+        }
+        std::vector<SidePanelFolderMenuLine> lines;
+        std::vector<std::wstring> shownKeys; // every key a line already stands for (the record is unique by key once normalized; a raw one may not be)
+        for (const auto& folder : filters.folders)
+        {
+            std::wstring path = TrimFolderPath(folder.path);
+            if (path.empty() || !IsAbsoluteFolderPath(path))
+            {
+                continue;
+            }
+            std::wstring key = NormDirKey(path);
+            if (std::find(listedKeys.begin(), listedKeys.end(), key) != listedKeys.end() || std::find(shownKeys.begin(), shownKeys.end(), key) != shownKeys.end())
+            {
+                continue; // the history's line stands for it (checked below), or a duplicate of the record
+            }
+            shownKeys.push_back(key);
+            lines.push_back(SidePanelFolderMenuLine{ std::move(path), std::move(key), folder.includeSubfolders, true });
+        }
+        for (size_t i = 0; i < listed.size(); ++i)
+        {
+            SidePanelFolderMenuLine line{ listed[i].path, listedKeys[i], listed[i].includeSubfolders, false };
+            (void)SidePanelSyncFolderMenuLine(line, filters); // the words are new anyway: nothing to rewrite yet
+            lines.push_back(std::move(line));
+        }
+        return lines;
+    }
+
+    // The words of a folder line: the folder's leaf, then " (exactly)" when its subfolders are not included — what a folder
+    // chip of the chips row says for the same pick (SidePanelFilterChips), so the line and the chip read alike.
+    //   path              - the folder (a display spelling).
+    //   includeSubfolders - the line's choice.
+    //   returns           - the words.
+    //   throws            - std::bad_alloc.
+    [[nodiscard]] inline std::wstring SidePanelFolderLineName(const std::wstring& path, bool includeSubfolders)
+    {
+        return SidePanelFolderLeaf(path) + (includeSubfolders ? L"" : L" (exactly)");
+    }
+
+    // Does a folder line keep a session? The matcher's own rule for one picked folder (SidePanelFilterMatcher::_FolderOk): the
+    // folder covers the session's working folder or its inferred one, with or without its subfolders by the line's choice —
+    // so a line's count is exactly what turning it on would add.
+    //   line    - the line (its key and choice).
+    //   facts   - the session's facts; BOTH folder keys must be filled, whatever the record holds (the panel fills them only
+    //             while By Folder has a pick, so the submenu's census fills them itself).
+    //   returns - true when the line's folder keeps the session.
+    //   throws  - nothing.
+    [[nodiscard]] inline bool SidePanelFolderLineCovers(const SidePanelFolderMenuLine& line, const SidePanelFilterFacts& facts) noexcept
+    {
+        return FolderKeyCovers(line.key, facts.launchKey, line.includeSubfolders) || FolderKeyCovers(line.key, facts.inferredKey, line.includeSubfolders);
+    }
+
+    // Drop a folder from By Folder by its key — a ✓ line's click in the submenu (a chip's ✕ drops by index instead).
+    //   filters - the record to edit.
+    //   rawPath - the folder, in any spelling (trimmed and matched by NormDirKey).
+    //   returns - true when a folder was dropped; false when the record does not hold it.
+    //   throws  - std::bad_alloc.
+    inline bool SidePanelRemoveFolderFilter(SidePanelFilters& filters, std::wstring_view rawPath)
+    {
+        const std::wstring path = TrimFolderPath(rawPath);
+        if (path.empty())
+        {
+            return false;
+        }
+        const std::wstring key = NormDirKey(path);
+        const auto it = std::find_if(filters.folders.begin(), filters.folders.end(), [&](const SidePanelFolderFilter& folder) {
+            const std::wstring own = TrimFolderPath(folder.path);
+            return !own.empty() && NormDirKey(own) == key;
+        });
+        if (it == filters.folders.end())
+        {
+            return false;
+        }
+        filters.folders.erase(it);
+        return true;
+    }
+
+    // A click on a folder line of the submenu: judged against the record AS IT IS NOW (by the line's folder), never against
+    // the check drawn when the line was built — a held folder leaves the record, a missing one joins it with the line's choice.
+    //   filters  - the record to edit.
+    //   line     - the line clicked.
+    //   turnedOn - receives true when the folder joined the record (the caller then records the pick in the history: the
+    //              user's "repicking moves to top"); false for a folder turned off or nothing changed.
+    //   returns  - true when the record changed.
+    //   throws   - std::bad_alloc.
+    inline bool SidePanelToggleFolderLine(SidePanelFilters& filters, const SidePanelFolderMenuLine& line, bool& turnedOn)
+    {
+        turnedOn = false;
+        // The line's key when it has one (SidePanelFolderMenuLines fills it), else its path's: a line made by hand still toggles.
+        const std::wstring key = line.key.empty() ? NormDirKey(TrimFolderPath(line.path)) : line.key;
+        const bool held = std::any_of(filters.folders.begin(), filters.folders.end(), [&](const SidePanelFolderFilter& folder) {
+            const std::wstring own = TrimFolderPath(folder.path);
+            return !own.empty() && NormDirKey(own) == key;
+        });
+        if (held)
+        {
+            return SidePanelRemoveFolderFilter(filters, line.path);
+        }
+        if (!SidePanelAddFolderFilter(filters, line.path, line.includeSubfolders))
+        {
+            return false; // not an absolute folder: nothing to add
+        }
+        turnedOn = true;
+        return true;
     }
 }

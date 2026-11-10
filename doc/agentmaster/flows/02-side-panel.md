@@ -507,6 +507,47 @@ filters across a restart; a new window starts unfiltered. With no filter there i
 - **E4 Unread** → with Unread checked, a session that turns unread appears without a registry change (the census hop).
 - **E5 Dock right** → the line reads `⏷ + Sum ⋯`; the panel opens at the click toward the window's center.
 
+### SP-14 · By Folder's hover submenu: the folders picked, each a toggle
+
+> **Since** 2026-11-10 (NOT BUILT) · **P1** · **Needs** F-S2 (two sessions in two folders A and B), two windows for phase 6 ·
+> **Spec** SIDE_PANEL.md §2l *The By Folder submenu*
+
+**Promise.** By Folder… stays exactly as it was when CLICKED (the `+` card's folder picker). RESTING the pointer on it (the
+system's menu delay), or pressing → on it, opens a submenu beside the panel: **Pick…** (the same picker), a separator, then
+one line per folder picked before — the last pick on top. A ✓ marks a folder that filters THIS window now; a click on a line
+turns its folder on or off, the submenu stays open and its lines keep their place; a repick moves the folder to the top at
+the next open. The list is one for the app (every window shows the same folders), kept across restarts in the profile's
+`filter-folders.json`; each window's ✓ marks are its own.
+
+**Phases**
+1. **Empty at first.** *Do:* on a fresh profile, open the funnel's panel, rest the pointer on By Folder…. *Expect:* after
+   about the menu delay (400 ms by default) the submenu opens beside the panel's right edge (left edge near the window's
+   right side), Pick… (`am.side.filter.folderMenu.pick`) level with By Folder…, then "No folder picked yet — Pick… adds one
+   here."; no `filter-folders.json` was written by the open.
+2. **A click still picks.** *Do:* click By Folder… itself. *Expect:* the panel and the submenu close, the folder card opens
+   (SP-13 phase 4 unchanged). *Do:* pick A's folder. *Expect:* `filter-folders.json` lists A.
+3. **The line toggles.** *Do:* reopen the panel, rest on By Folder…. *Expect:* one line, A's leaf in bold and its path dim,
+   ✓ (`am.side.filter.folderMenu.folder.0`, ItemStatus "checked"), its count. *Do:* click it. *Expect:* the ✓ goes, the
+   folder chip goes, every card is back, the submenu is still open and the line still there. *Do:* click it again.
+   *Expect:* ✓ and the chip are back.
+4. **Repick moves to top.** *Do:* Pick… → B's folder (unchecked Include subfolders). *Expect:* at the next open: B "(exactly)"
+   first, A second, both ✓.
+5. **Hover rules.** *Do:* with the submenu open, rest on By State. *Expect:* the submenu closes after the delay. *Do:* move
+   from By Folder… diagonally into the submenu across By State. *Expect:* it stays open.
+6. **One list, own checks.** *Do:* in a second window, open its panel and rest on By Folder…. *Expect:* the same lines in
+   the same order, none checked (that window filters nothing); a click there filters THAT window only.
+7. **Keyboard.** *Do:* focus By Folder… (the panel's first row), press →. *Expect:* the submenu opens with Pick… focused;
+   ↓ walks the lines, Enter toggles one (the submenu stays); ← (or Escape, on its release) closes it and the keyboard is back
+   on By Folder…; another Escape closes the panel. No ESC reaches the terminal.
+8. **Restart.** *Do:* restart the app. *Expect:* the submenu lists the same folders in the same order.
+
+**Edge cases**
+- **E1 An older filter** → a window whose record filters by a folder the history lacks (saved before the submenu existed)
+  lists it on top, checked, and from then on it stays listed when turned off.
+- **E2 The cap** → after eleven different picks the oldest folder is gone from the list (ten kept).
+- **E3 Touch** → a finger never opens the submenu by itself (no hover); a tap on By Folder… opens the folder card.
+- **E4 A narrow window** → the submenu opens on the side with room, or clamped inside the window when neither side holds it.
+
 ---
 
 ## Known defects (expected failures until fixed)

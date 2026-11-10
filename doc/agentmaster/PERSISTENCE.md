@@ -1006,6 +1006,8 @@ trip loses is the residue (`ExtractResidue`), and the save puts it back into the
   id. A record this build removed since stays removed. A record this build could not read at all is appended back unless
   one with its id exists now. `launch-presets.json` passes `keepDropped` false: its loader drops 0.6.8.18's untouched template
   presets on purpose, so dropped records stay dropped there, and an array it compares whole is never restored.
+  `filter-folders.json` (the side panel's By Folder pick history, SIDE_PANEL.md §2l) passes false too: its loader drops the
+  picks past the cap of ten and a folder's older duplicates on purpose.
 - **Cost:** the residue is cached by the file's size and time. A file costs one read and parse per process (the first save),
   and again only after someone else changed it. Our own write records the residue its text carries.
 
@@ -1044,8 +1046,8 @@ file as it left it; this build's changes to that file are not saved.
 update prompt, Windows Terminal's settings load, the engine and every window: when the build that ran last
 (`<profile>\last-run.json`) is not this one, or none is recorded, every state file is copied into
 `<profile>\backups\<yyyyMMdd-HHmmss> <from> to <to>\` with a `README.txt` (when, why, how to put the files back). The files:
-`sessions.json`, `settings.json`, `layout.json`, `open-windows.json`, `templates.json`, `recent-dirs.json`, `model-list.json`,
-`dir-colors.json`, `dir-env.json`, `launch-presets.json`, `tags.json`, `tag-colors.json`, the bot's `state.json`,
+`sessions.json`, `settings.json`, `layout.json`, `open-windows.json`, `templates.json`, `recent-dirs.json`, `filter-folders.json`,
+`model-list.json`, `dir-colors.json`, `dir-env.json`, `launch-presets.json`, `tags.json`, `tag-colors.json`, the bot's `state.json`,
 `state.json.prev` and `filelinks.json`, Windows Terminal's `terminal\settings.json`, `state.json` and `elevated-state.json`, every
 `windows\*.json`, and every `session-store\*.json`.
 - Copies keep each file's time.
@@ -1070,6 +1072,9 @@ update prompt, Windows Terminal's settings load, the engine and every window: wh
   when the read failed for a reason a rename ignores (an ACL that denies reading the data). It now tells unreadable from
   missing (`ReadFileWideForUpdate`, with retries) and refuses.
 - **`model-list.json`'s read-modify-writes** write nothing when the file cannot be read.
+- **`filter-folders.json`'s read-modify-writes** (`RememberFilterFolderPicks`: a By Folder pick, the submenu's seeding of a
+  window's own filters) write nothing when the file cannot be read, and nothing when the picks moved nothing; every window
+  of the process writes this one list, one read-modify-write at a time (a process-wide lock).
 - **The bot's `state.json`:** its save goes through `PrepareStateDocument` (residue, stamp, format guard) and
   `NoteStateDocumentWritten` (the shadow); its load runs the repair first.
 - **A state file that is valid JSON but no document of ours** (an array, a number) is marked for the state-file guard, which

@@ -574,6 +574,17 @@ namespace winrt::TerminalApp::implementation
             }
             CATCH_LOG();
         }
+        // Agentmaster (the side panel's By Folder submenu, SIDE_PANEL.md §2l): stop its hover timer (UI-affine — the same guard
+        // as the timers above). Unstopped would be harmless too: its tick stops itself through the sender and reaches the page
+        // only through a weak reference.
+        if (_sidePanelFolderMenuTimer)
+        {
+            try
+            {
+                _sidePanelFolderMenuTimer.Stop();
+            }
+            CATCH_LOG();
+        }
         // Agentmaster (side panel "+" launcher, SIDE_PANEL.md §2e): stop its launch bar's PRESETS hover timer and close
         // an open hover menu and drop-down. Shutdown is noexcept and guards each UI-affine call itself (a pool-thread
         // teardown throws RPC_E_WRONG_THREAD there — caught and logged inside), so it needs no guard here.

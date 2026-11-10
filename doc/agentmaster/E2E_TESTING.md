@@ -557,7 +557,10 @@ differs from the plan above, and why:
   the side panel's FILTERS (SIDE_PANEL.md §2l, 2026-11-08, NOT BUILT): `am.side.funnel` (the header's fourth button, the
   innermost — named "Filter the cards"; ItemStatus "N filters on" while lit), its panel's rows (an in-window popup, open
   only after a click) `am.side.filter.{byFolder, section.<state|tag|active>, state.<token>, tag.<folded name>, untagged,
-  active.<any|15|60|1440|10080>, flag.<draft|unread|pinned|favorite>, clear}` (a pick row's ItemStatus "checked"), the
+  active.<any|15|60|1440|10080>, flag.<draft|unread|pinned|favorite>, clear}` (a pick row's ItemStatus "checked"), By
+  Folder's hover submenu (2026-11-10, NOT BUILT; opened by → on `am.side.filter.byFolder`, since UI Automation cannot hover)
+  `am.side.filter.folderMenu.pick` and `am.side.filter.folderMenu.folder.<N>` (N = the line's place, 0 on top; named by its
+  words and whole path; ItemStatus "checked" while that folder filters the window), the
   folder card's `am.side.folderCard.{box,subfolders,filter}`, and the chips row's `am.side.filterRow.{count,clear}` with per
   chip `am.side.chip.<folder.N|state|tag|draft|unread|pinned|favorite|active|text>` (its words) + `<that id>.remove` (its ✕)
   — the containers (a Border, a Grid) have no automation peer and no id. From that build the card mode shows NO count line: its words

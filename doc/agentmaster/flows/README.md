@@ -229,7 +229,9 @@ pins it to the top of the list, right under Jump to Tab, with a pushpin on its b
 (SP-11; SIDE_PANEL.md §2j) · a side-panel card's Open New Session Here and Fork session open the new tab right after the
 card's tab, in the window that hosts it (SP-12; SIDE_PANEL.md §2k) · the side panel's funnel filters the cards — By Folder
 through the `+` card's folder picker, By State, By Tag, Active within, four flags — from a panel that stays open while you
-pick, with a chips row under the filter box only while a filter is on (SP-13; SIDE_PANEL.md §2l; no test written yet).
+pick, with a chips row under the filter box only while a filter is on (SP-13; SIDE_PANEL.md §2l; no test written yet) · By
+Folder… keeps its click and opens a submenu on hover: Pick…, then the folders picked before (the last on top, one list for
+every window), each line turning its folder on or off for that window (SP-14; SIDE_PANEL.md §2l; no test written yet).
 
 **The regression base** — older behaviors the recent releases build on, covered because every new feature leans on
 them: the /handover family (HND-01, HND-03, HND-04, HND-05, HND-07, HND-08), the Sessions browser (SES-01, SES-02,

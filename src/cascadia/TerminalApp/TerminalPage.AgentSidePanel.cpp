@@ -417,6 +417,92 @@ namespace
     constexpr double kSidePanelChipCornerRadius = 9.0;
     // The "Clear" link's color: the AI strip's working blue family, the panel's one link-like text.
     constexpr Color kSidePanelLinkColor{ 0xFF, 0x7F, 0xB5, 0xFF };
+    // By Folder's hover SUBMENU (SIDE_PANEL.md §2l "The By Folder submenu"): its width (DIPs). A folder line holds the leaf,
+    // "(exactly)", the dim whole path and a count; a longer path ends in "…" (the line's tooltip has it whole). Fixed, so a
+    // click that changes a count never resizes the card under the pointer.
+    constexpr double kSidePanelFolderMenuWidth = 400.0;
+    // The submenu card's chrome above its first row (DIPs): its 1 DIP border and 4 DIP top padding. The placement lifts the
+    // card by this much, so Pick… sits level with By Folder… (both cards share the look).
+    constexpr double kSidePanelFolderMenuChromeTop = 5.0;
+    // The hover delay when Windows' own menu delay cannot be read (ms): Windows' default MenuShowDelay.
+    constexpr DWORD kSidePanelFolderMenuDefaultDelayMs = 400;
+    // The longest hover delay honored (ms): a larger MenuShowDelay (a hand-edited registry) reads as this.
+    constexpr DWORD kSidePanelFolderMenuMaxDelayMs = 5000;
+    // The ink of a folder line's path: dim beside the leaf (the mockup's #8C8C8C).
+    constexpr Color kSidePanelFolderMenuPathColor{ 0xFF, 0x8C, 0x8C, 0x8C };
+
+    // The hover delay of By Folder's submenu: Windows' own menu show delay (SPI_GETMENUSHOWDELAY — what every desktop menu
+    // waits before a resting pointer opens or leaves a submenu; Control Panel's MenuShowDelay), so the panel's submenu feels
+    // like the user's other menus. Read at each arm (one cheap call), so a changed setting applies at once.
+    //   returns - the delay, at most kSidePanelFolderMenuMaxDelayMs.
+    //   throws  - nothing.
+    std::chrono::milliseconds SidePanelFolderMenuDelay() noexcept
+    {
+        DWORD ms = kSidePanelFolderMenuDefaultDelayMs;
+        if (!::SystemParametersInfoW(SPI_GETMENUSHOWDELAY, 0, &ms, 0))
+        {
+            ms = kSidePanelFolderMenuDefaultDelayMs; // unreadable: Windows' default
+        }
+        return std::chrono::milliseconds{ std::min(ms, kSidePanelFolderMenuMaxDelayMs) };
+    }
+
+    // Write a folder line's words into its label: the leaf in SemiBold — "(exactly)" after it without subfolders, the chip's
+    // words (SidePanelFolderLineName) — then the whole path in a dim, smaller ink. ONE TextBlock of two runs, so the
+    // TextBlock's own trimming ends a long path in "…" (a StackPanel of two blocks would never trim).
+    //   label             - the line's TextBlock.
+    //   path              - the folder.
+    //   includeSubfolders - the line's choice.
+    //   throws            - hresult_error / bad_alloc from the XAML calls (the callers contain it).
+    void SidePanelSetFolderMenuLabel(const TextBlock& label, const std::wstring& path, bool includeSubfolders)
+    {
+        label.Inlines().Clear();
+        winrt::Windows::UI::Xaml::Documents::Run leaf{};
+        leaf.Text(winrt::hstring{ SidePanelFolderLineName(path, includeSubfolders) });
+        leaf.FontWeight(FontWeights::SemiBold());
+        winrt::Windows::UI::Xaml::Documents::Run where{};
+        where.Text(winrt::hstring{ L"   " + path });
+        where.FontSize(11.5);
+        where.Foreground(SolidColorBrush{ kSidePanelFolderMenuPathColor });
+        label.Inlines().Append(leaf);
+        label.Inlines().Append(where);
+    }
+
+    // The words a screen reader and the e2e driver hear for a folder line: the line's own words, then the whole path (two
+    // folders of one leaf in different places must not sound alike).
+    //   path              - the folder.
+    //   includeSubfolders - the line's choice.
+    //   returns           - the accessible name.
+    //   throws            - std::bad_alloc.
+    std::wstring SidePanelFolderMenuLineAccessibleName(const std::wstring& path, bool includeSubfolders)
+    {
+        return SidePanelFolderLineName(path, includeSubfolders) + L", " + path;
+    }
+
+    // The funnel panel's "By Folder…" row, the submenu's anchor and the keyboard's way back from it.
+    //   rows    - the panel's rows (_sidePanelFilterRows).
+    //   returns - its Button; null while the panel has no such row (never built, or being rebuilt).
+    //   throws  - nothing (a projected object's copy is an AddRef).
+    Button SidePanelByFolderButton(const std::vector<winrt::TerminalApp::implementation::AgentSidePanelFilterRowView>& rows) noexcept
+    {
+        for (const auto& row : rows)
+        {
+            if (row.kind == winrt::TerminalApp::implementation::AgentSidePanelFilterRowView::Kind::ByFolder)
+            {
+                return row.button;
+            }
+        }
+        return nullptr;
+    }
+
+    // The pure line (SidePanelFilters.h) a submenu row stands for: the row view keeps the line's facts in plain members,
+    // because TerminalPage.h does not include SidePanelFilters.h.
+    //   row     - the submenu row (a Folder row; a Pick row gives an empty line).
+    //   returns - the line.
+    //   throws  - std::bad_alloc.
+    SidePanelFolderMenuLine SidePanelLineOf(const winrt::TerminalApp::implementation::AgentSidePanelFolderMenuRowView& row)
+    {
+        return SidePanelFolderMenuLine{ row.path, row.key, row.includeSubfolders, row.checked };
+    }
 
     // A Segoe Fluent Icons glyph as a TextBlock (a TextBlock, not a FontIcon: its line box matches the text beside it, the
     // launch bar's Browse… row idiom).
@@ -7091,6 +7177,19 @@ namespace winrt::TerminalApp::implementation
                             }
                         }
                     }
+                    // Right on By Folder… opens its submenu with Pick… focused (SIDE_PANEL.md §2l "The By Folder submenu"), the
+                    // desktop menu's key. On the key-down: focus moves into the submenu, a popup of this panel, and Right
+                    // writes no character anywhere.
+                    if (key == VirtualKey::Right)
+                    {
+                        const void* const source = SidePanelLaunchIdentity(e.OriginalSource());
+                        if (source && source == SidePanelLaunchIdentity(SidePanelByFolderButton(self->_sidePanelFilterRows)))
+                        {
+                            e.Handled(true); // no XY move: the submenu takes the keyboard
+                            self->_SidePanelOpenFolderMenu(/*focusFirst*/ true);
+                            return;
+                        }
+                    }
                 }
                 catch (...)
                 {
@@ -7120,6 +7219,12 @@ namespace winrt::TerminalApp::implementation
                                 break;
                             }
                         }
+                    }
+                    else if (self->_SidePanelFolderMenuOpen())
+                    {
+                        // A submenu open beside the panel (by hover — the keyboard is still here): Escape closes the innermost
+                        // level first, the desktop menu's rule; the next Escape closes the panel.
+                        self->_SidePanelCloseFolderMenu(L"esc in the panel", /*focusByFolder*/ false);
                     }
                     else
                     {
@@ -7176,10 +7281,19 @@ namespace winrt::TerminalApp::implementation
                         {
                             const auto source = e.OriginalSource().try_as<DependencyObject>();
                             const auto xr = self->Root().XamlRoot();
-                            const std::vector<void*> own{ SidePanelLaunchIdentity(self->_sidePanelFilterPopup), SidePanelLaunchIdentity(self->_sidePanelFolderPopup) };
-                            if (panelOpen && !SidePanelPressInside(source, { SidePanelLaunchIdentity(self->_sidePanelFilterCard), SidePanelLaunchIdentity(self->_sidePanelFilterBtn) }, xr, own))
+                            // By Folder's submenu (SIDE_PANEL.md §2l "The By Folder submenu") is one of the surfaces' OWN popups, and
+                            // a press inside it is inside the panel: a click on a folder line must keep both open.
+                            const std::vector<void*> own{ SidePanelLaunchIdentity(self->_sidePanelFilterPopup),
+                                                          SidePanelLaunchIdentity(self->_sidePanelFolderPopup),
+                                                          SidePanelLaunchIdentity(self->_sidePanelFolderMenuPopup) };
+                            if (panelOpen && !SidePanelPressInside(source,
+                                                                   { SidePanelLaunchIdentity(self->_sidePanelFilterCard),
+                                                                     SidePanelLaunchIdentity(self->_sidePanelFilterBtn),
+                                                                     SidePanelLaunchIdentity(self->_sidePanelFolderMenuCard) },
+                                                                   xr,
+                                                                   own))
                             {
-                                self->_SidePanelCloseFilterPanel(L"outside press");
+                                self->_SidePanelCloseFilterPanel(L"outside press"); // the submenu closes with it
                             }
                             if (cardOpen)
                             {
@@ -7300,12 +7414,15 @@ namespace winrt::TerminalApp::implementation
     {
         if (!_SidePanelFilterPanelOpen())
         {
+            // Belt: By Folder's submenu never outlives its panel (a no-op when it is closed; it also drops a pending hover).
+            _SidePanelCloseFolderMenu(reason, /*focusByFolder*/ false);
             return;
         }
         _sidePanelFilterArmedKey = VirtualKey::None; // a key held across the close must not act on its release elsewhere
         _sidePanelFilterArmedByFolder = false;
-        // Did the panel hold the keyboard? (A press on a focusable element outside it — the terminal, a text box — moved focus
-        // there before this ran, and that focus stays.)
+        // Did the panel — or By Folder's submenu beside it — hold the keyboard? (A press on a focusable element outside both —
+        // the terminal, a text box — moved focus there before this ran, and that focus stays.) Read BEFORE the submenu closes:
+        // its close moves the focus it held.
         bool hadFocus = false;
         try
         {
@@ -7313,7 +7430,7 @@ namespace winrt::TerminalApp::implementation
             {
                 if (const auto focused = FocusManager::GetFocusedElement(xr).try_as<DependencyObject>())
                 {
-                    hadFocus = SidePanelLaunchIsUnder(focused, _sidePanelFilterCard);
+                    hadFocus = SidePanelLaunchIsUnder(focused, _sidePanelFilterCard) || (_sidePanelFolderMenuCard && SidePanelLaunchIsUnder(focused, _sidePanelFolderMenuCard));
                 }
             }
         }
@@ -7321,6 +7438,9 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::AgentLogCaughtException(L"side panel filter panel: focus read at close"); // no restore: focus stays where XAML puts it
         }
+        // The submenu first: it stands beside the panel and must never show without it. No focus move of its own — the
+        // panel gives the keyboard back below (hadFocus counts the submenu).
+        _SidePanelCloseFolderMenu(reason, /*focusByFolder*/ false);
         try
         {
             _sidePanelFilterPopup.IsOpen(false);
@@ -7398,10 +7518,15 @@ namespace winrt::TerminalApp::implementation
             cText.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
             ColumnDefinition cCount{};
             cCount.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            // The submenu chevron's column (By Folder… alone fills it: SIDE_PANEL.md §2l "The By Folder submenu"); an empty Auto
+            // column takes no width on the other rows.
+            ColumnDefinition cChevron{};
+            cChevron.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
             line.ColumnDefinitions().Append(cCheck);
             line.ColumnDefinitions().Append(cIcon);
             line.ColumnDefinitions().Append(cText);
             line.ColumnDefinitions().Append(cCount);
+            line.ColumnDefinitions().Append(cChevron);
             if (view.kind != Kind::ByFolder && view.kind != Kind::Clear)
             {
                 view.check = Text(L"", 12, false, 0.9);
@@ -7428,6 +7553,14 @@ namespace winrt::TerminalApp::implementation
                 view.count.Margin(ThicknessHelper::FromLengths(8, 0, 0, 0));
                 Grid::SetColumn(view.count, 3);
                 line.Children().Append(view.count);
+            }
+            if (view.kind == Kind::ByFolder)
+            {
+                // "›" at the row's end: the desktop menu's sign of a submenu — the folders picked before, on hover or Right.
+                auto chevron = Text(L"\x203A", 13, false, 0.7);
+                chevron.Margin(ThicknessHelper::FromLengths(6, 0, 0, 0));
+                Grid::SetColumn(chevron, 4);
+                line.Children().Append(chevron);
             }
             Button btn{};
             btn.Content(line);
@@ -7466,6 +7599,39 @@ namespace winrt::TerminalApp::implementation
                     ::Agentmaster::AgentLogCaughtException(L"side panel filter panel: queue a row click"); // the click is lost
                 }
             });
+            // By Folder's hover SUBMENU (SIDE_PANEL.md §2l "The By Folder submenu"): every row tells the hover intent where the
+            // pointer rests — on By Folder… the submenu opens after the system's menu delay, on any other row an open one
+            // closes after it. handledEventsToo: a Button may mark its pointer events handled for its own visual states. The
+            // handlers capture the weak page and whether the row is By Folder…, never the row's elements. Touch is left out:
+            // a finger has no hover (its contact "enters" the row, and a slow tap would flash the submenu before the click).
+            const bool isByFolder = view.kind == Kind::ByFolder;
+            btn.AddHandler(
+                UIElement::PointerEnteredEvent(),
+                winrt::box_value(PointerEventHandler{ [weakThis, isByFolder](const IInspectable&, const PointerRoutedEventArgs& e) {
+                    const auto self = weakThis.get();
+                    if (!self || e.Pointer().PointerDeviceType() == winrt::Windows::Devices::Input::PointerDeviceType::Touch)
+                    {
+                        return;
+                    }
+                    self->_SidePanelFolderMenuHover(isByFolder ? SidePanelFolderMenuHover::EnterByFolder : SidePanelFolderMenuHover::EnterOtherRow);
+                } }),
+                true /* handledEventsToo */);
+            if (isByFolder)
+            {
+                // Leaving By Folder… before the delay drops a pending open (an open submenu stays: the pointer may be on its
+                // way into it).
+                btn.AddHandler(
+                    UIElement::PointerExitedEvent(),
+                    winrt::box_value(PointerEventHandler{ [weakThis](const IInspectable&, const PointerRoutedEventArgs& e) {
+                        const auto self = weakThis.get();
+                        if (!self || e.Pointer().PointerDeviceType() == winrt::Windows::Devices::Input::PointerDeviceType::Touch)
+                        {
+                            return;
+                        }
+                        self->_SidePanelFolderMenuHover(SidePanelFolderMenuHover::LeaveByFolder);
+                    } }),
+                    true /* handledEventsToo */);
+            }
             view.button = btn;
             _sidePanelFilterRowsHost.Children().Append(btn);
             _sidePanelFilterRows.push_back(std::move(view));
@@ -7488,7 +7654,7 @@ namespace winrt::TerminalApp::implementation
             AgentSidePanelFilterRowView view;
             view.kind = Kind::ByFolder;
             addRow(std::move(view), SidePanelFluentGlyph(kSidePanelFolderGlyph, 12, 0.9), L"By Folder\x2026", false,
-                   L"Pick a folder in the + launcher's folder picker: the cards then list the sessions that work in it (and, unless you uncheck Include subfolders, in every folder under it). Pick again to add more folders: a session in any of them is listed.",
+                   L"Pick a folder in the + launcher's folder picker: the cards then list the sessions that work in it (and, unless you uncheck Include subfolders, in every folder under it). Pick again to add more folders: a session in any of them is listed. Rest the pointer here, or press \x2192, for the folders you picked before: a click there turns one on or off.",
                    L"am.side.filter.byFolder");
         }
         // 2. By State ▸ — the six states, any of them (OR).
@@ -7666,6 +7832,7 @@ namespace winrt::TerminalApp::implementation
                             }
                         }
                     }
+                    _SidePanelRefreshFolderMenu(); // By Folder's open submenu follows too (noexcept; a no-op when closed)
                     return;
                 }
             }
@@ -7691,6 +7858,9 @@ namespace winrt::TerminalApp::implementation
                     AgentSetItemStatus(row.button, check == L"\x2713" || check == L"\x25CF" ? L"checked" : L""); // change-gated inside
                 }
             }
+            // By Folder's open submenu: its checks follow the record, and its counts every other filter and the typed text
+            // (SIDE_PANEL.md §2l "The By Folder submenu"). Noexcept; a no-op when it is closed.
+            _SidePanelRefreshFolderMenu();
         }
         catch (...)
         {
@@ -8204,6 +8374,10 @@ namespace winrt::TerminalApp::implementation
             {
                 _SidePanelSetFilters(std::move(next), includeSubfolders ? L"folder+ (with subfolders)" : L"folder+ (exactly)");
             }
+            // By Folder's pick history (SIDE_PANEL.md §2l "The By Folder submenu"), the user's "repicking moves to top": EVERY
+            // pick through the card joins it — a folder this window already filters by included (it moves up) — whatever the
+            // pick changed in the record. A path that is not an absolute folder is skipped there. Never throws.
+            _SidePanelRememberFolderPick(dir, includeSubfolders);
         }
         catch (...)
         {
@@ -8361,6 +8535,8 @@ namespace winrt::TerminalApp::implementation
                     }
                 }
                 SidePanelPlaceCardAt(_sidePanelFilterPopup, _sidePanelFilterCard, _sidePanelFilterAnchor, root);
+                // By Folder's submenu stands beside the panel: it follows every placement of it (noexcept; a no-op when closed).
+                _SidePanelPlaceFolderMenu();
             }
             if (_SidePanelFolderCardOpen() && _sidePanelFolderCard)
             {
@@ -8410,8 +8586,885 @@ namespace winrt::TerminalApp::implementation
 
     void TerminalPage::_SidePanelCloseFilterSurfaces(std::wstring_view reason)
     {
-        _SidePanelCloseFilterPanel(reason);
+        _SidePanelCloseFilterPanel(reason); // By Folder's submenu closes with the panel
         _SidePanelCloseFolderCard(reason);
+    }
+
+    // ===== By Folder's hover SUBMENU (SIDE_PANEL.md §2l "The By Folder submenu") ========================================
+    // The user's request of 2026-11-10: "By Folder works great and as expected, keep By Folder AS IS, clickable, but when
+    // hovered have a submenu with / Pick / --- / <each line is an item we picked, repicking moves to top>". Their picks the same
+    // day (design-ask with mockups): a folder line TOGGLES that folder in this window's record (✓ = filtering now; the submenu
+    // stays open, and its lines keep their place while it is open) and the history is ONE LIST FOR THE APP (the profile's
+    // filter-folders.json: every window's submenu shows it, the last pick anywhere on top; the ✓ marks follow each window's
+    // own record).
+    // SHAPE: a second Root()-parented Popup card in the panel's look, beside the panel's By Folder… row (PlaceSubmenuCard) — a
+    // MenuFlyout would close at every pick. HOVER: the desktop menu's intent (_SidePanelFolderMenuHover): a pointer resting on
+    // By Folder… for the system's menu delay opens it, one resting on another row of the panel for the delay closes it, and
+    // reaching the submenu meanwhile cancels that close. KEYS: Right on By Folder… opens it with Pick… focused; inside it, Left
+    // (key-down) or Escape (key-up) closes it and the keyboard goes back to By Folder…; Enter / Space on Pick… opens the folder
+    // card on its key-up; Escape in the panel closes an open submenu before the panel. PRESSES: inside the submenu is inside
+    // the panel (the outside-press hook). It closes with the panel (every reason the panel closes).
+    // COST: built at the first open; about a dozen rows rebuilt per open (the history is ten folders at most); a click
+    // rewrites the checks and counts in place, its census one pass over the scope like the panel's.
+
+    bool TerminalPage::_SidePanelFolderMenuOpen() const noexcept
+    {
+        try
+        {
+            return _sidePanelFolderMenuPopup && _sidePanelFolderMenuPopup.IsOpen();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel folder menu: IsOpen read"); // a torn-down popup reads as closed
+            return false;
+        }
+    }
+
+    bool TerminalPage::_SidePanelEnsureFolderMenu() noexcept
+    {
+        if (_sidePanelFolderMenuPopup && _sidePanelFolderMenuCard && _sidePanelFolderMenuRowsHost)
+        {
+            return true;
+        }
+        try
+        {
+            const auto root = Root();
+            if (!root)
+            {
+                return false; // no page root to parent into (never after the first layout)
+            }
+            const auto weakThis = get_weak();
+
+            // The card: the panel's own look (a menu's dark card, 7 DIP corners), so the two read as one menu and its submenu.
+            Border card{};
+            card.RequestedTheme(ElementTheme::Dark);
+            card.Background(Fill(0xFF, 0x2B, 0x2B, 0x2B));
+            card.BorderBrush(Fill(0xFF, 0x47, 0x47, 0x47));
+            card.BorderThickness(ThicknessHelper::FromUniformLength(1));
+            card.CornerRadius(CornerRadiusHelper::FromUniformRadius(7));
+            card.Padding(ThicknessHelper::FromLengths(0, 4, 0, 4)); // kSidePanelFolderMenuChromeTop = this top padding + the border
+            card.TabFocusNavigation(KeyboardNavigationMode::Cycle);
+            // The rows are Buttons: the Agent Manager's Button state brushes, or under the forced-Dark theme a row would light up
+            // only on its text (the panel's reason).
+            AgentLaunchBar::SeedButtonStateBrushes(card.Resources());
+            StackPanel rows{};
+            rows.Width(kSidePanelFolderMenuWidth);
+            rows.XYFocusKeyboardNavigation(XYFocusKeyboardNavigationMode::Enabled); // Up / Down walk the rows
+            ScrollViewer scroll{};
+            scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+            scroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+            scroll.IsTabStop(false); // the scroller itself never holds the keyboard: the rows do
+            scroll.Content(rows);
+            card.Child(scroll);
+
+            // Keys. PreviewKeyDown TUNNELS, so it runs before the focused row:
+            //   - Escape: arms the close for its KEY-UP (the keyboard then goes back to By Folder…; the panel's rule for keys
+            //     that move it);
+            //   - Left: closes at once, the keyboard back on By Folder… (Left writes no character anywhere);
+            //   - Enter / Space on Pick…: arms the folder card for the KEY-UP (focus moves to the card's box: its CR / space
+            //     must not land there);
+            //   - Enter / Space on a folder line: the row's own Button handles it (a toggle in place, the focus stays);
+            //   - never a Ctrl / Alt chord (Alt+Enter is Terminal's full-screen toggle).
+            card.PreviewKeyDown([weakThis](const IInspectable&, const KeyRoutedEventArgs& e) {
+                const auto self = weakThis.get();
+                if (!self)
+                {
+                    return;
+                }
+                try
+                {
+                    self->_sidePanelFolderMenuArmedKey = VirtualKey::None; // any key-down disarms: the next key-up must be its own
+                    self->_sidePanelFolderMenuArmedPick = false;
+                    const auto key = e.Key();
+                    if ((GetKeyState(VK_CONTROL) & 0x8000) || (GetKeyState(VK_MENU) & 0x8000))
+                    {
+                        return; // an app chord: not ours
+                    }
+                    if (key == VirtualKey::Escape)
+                    {
+                        self->_sidePanelFolderMenuArmedKey = key;
+                        e.Handled(true);
+                        return;
+                    }
+                    if (key == VirtualKey::Left)
+                    {
+                        e.Handled(true); // no XY move: the submenu gives the keyboard back
+                        self->_SidePanelCloseFolderMenu(L"left", /*focusByFolder*/ true);
+                        return;
+                    }
+                    if (key == VirtualKey::Enter || key == VirtualKey::Space)
+                    {
+                        const void* const source = SidePanelLaunchIdentity(e.OriginalSource());
+                        for (const auto& row : self->_sidePanelFolderMenuRows)
+                        {
+                            if (row.kind == AgentSidePanelFolderMenuRowView::Kind::Pick && source && source == SidePanelLaunchIdentity(row.button))
+                            {
+                                self->_sidePanelFolderMenuArmedKey = key;
+                                self->_sidePanelFolderMenuArmedPick = true;
+                                e.Handled(true); // the Button must not click on this key-down
+                                return;
+                            }
+                        }
+                    }
+                }
+                catch (...)
+                {
+                    // The key then does what the focused row does with it. Recorded (Rule #18).
+                    ::Agentmaster::AgentLogCaughtException(L"side panel folder menu: key-down");
+                }
+            });
+            card.PreviewKeyUp([weakThis](const IInspectable&, const KeyRoutedEventArgs& e) {
+                const auto self = weakThis.get();
+                if (!self || self->_sidePanelFolderMenuArmedKey == VirtualKey::None || e.Key() != self->_sidePanelFolderMenuArmedKey)
+                {
+                    return; // its key-down was not armed here
+                }
+                const bool pick = self->_sidePanelFolderMenuArmedPick;
+                self->_sidePanelFolderMenuArmedKey = VirtualKey::None;
+                self->_sidePanelFolderMenuArmedPick = false;
+                e.Handled(true); // set BEFORE acting: the close takes the card out of the tree synchronously
+                try
+                {
+                    if (pick)
+                    {
+                        for (size_t i = 0; i < self->_sidePanelFolderMenuRows.size(); ++i)
+                        {
+                            if (self->_sidePanelFolderMenuRows[i].kind == AgentSidePanelFolderMenuRowView::Kind::Pick)
+                            {
+                                self->_SidePanelOnFolderMenuClick(i);
+                                break;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        self->_SidePanelCloseFolderMenu(L"esc", /*focusByFolder*/ true);
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"side panel folder menu: key-up");
+                }
+            });
+            // The pointer reaching the submenu cancels a pending close: on its way from By Folder… it may cross a neighbour row
+            // of the panel (the desktop menu's diagonal). handledEventsToo, like the rows' hooks; touch has no hover.
+            card.AddHandler(
+                UIElement::PointerEnteredEvent(),
+                winrt::box_value(PointerEventHandler{ [weakThis](const IInspectable&, const PointerRoutedEventArgs& e) {
+                    const auto self = weakThis.get();
+                    if (!self || e.Pointer().PointerDeviceType() == winrt::Windows::Devices::Input::PointerDeviceType::Touch)
+                    {
+                        return;
+                    }
+                    self->_SidePanelFolderMenuHover(SidePanelFolderMenuHover::EnterMenu);
+                } }),
+                true /* handledEventsToo */);
+            // A different height (no folder yet → a few): re-place it, QUEUED — SizeChanged is a layout pass, and moving a
+            // parented Popup inside one is the E_LAYOUTCYCLE fail-fast.
+            card.SizeChanged([weakThis](const IInspectable&, const SizeChangedEventArgs&) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelQueueFilterSurfacesPlacement();
+                }
+            });
+
+            // The Popup: Root()-parented across its three rows, top/left aligned, so its offsets are Root-relative (the panel's
+            // recipe). Not light-dismiss: the panel's outside-press hook counts it inside the panel, and it closes with it.
+            winrt::Windows::UI::Xaml::Controls::Primitives::Popup popup{};
+            popup.Child(card);
+            popup.HorizontalAlignment(HorizontalAlignment::Left);
+            popup.VerticalAlignment(VerticalAlignment::Top);
+            Grid::SetRow(popup, 0);
+            Grid::SetRowSpan(popup, 3);
+            root.Children().Append(popup);
+            // No id on the card: a Border has no automation peer, so the submenu is found by its rows (am.side.filter.folderMenu.…).
+
+            _sidePanelFolderMenuPopup = popup;
+            _sidePanelFolderMenuCard = card;
+            _sidePanelFolderMenuRowsHost = rows;
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[sidepanel] filter folder menu built (window " + ::Agentmaster::ShortId(_windowId) + L")\n");
+            return true;
+        }
+        catch (...)
+        {
+            // Nothing was kept (the members are set only at the end), so the next hover builds from scratch.
+            ::Agentmaster::AgentLogCaughtException(L"side panel folder menu: build");
+            return false;
+        }
+    }
+
+    void TerminalPage::_SidePanelOpenFolderMenu(bool focusFirst) noexcept
+    {
+        try
+        {
+            // An open settles any pending hover intent (a key-opened submenu must not be closed by a stale hover tick).
+            _sidePanelFolderMenuIntent = SidePanelFolderMenuIntent::None;
+            if (_sidePanelFolderMenuTimer)
+            {
+                _sidePanelFolderMenuTimer.Stop();
+            }
+            if (!_sidePanelBuilt || !_SidePanelFilterPanelOpen())
+            {
+                return; // a submenu never opens without its panel
+            }
+            if (_SidePanelFolderMenuOpen())
+            {
+                // Already open (the pointer opened it): the keyboard's Right only moves the focus in, at once — the rows are
+                // laid out.
+                if (focusFirst && !_sidePanelFolderMenuRows.empty() && _sidePanelFolderMenuRows.front().button)
+                {
+                    _sidePanelFolderMenuRows.front().button.Focus(FocusState::Programmatic);
+                }
+                return;
+            }
+            if (!_SidePanelEnsureFolderMenu())
+            {
+                return; // the build failed (logged); the next hover or Right tries again
+            }
+            // The history as it stands NOW — another window may have picked a folder a moment ago (one list for the app) — with
+            // this window's filtering folders seeded when it lacks them: they filter now, so they must stay listed once turned
+            // off here (a filter an older build saved, a folder the cap pushed out). The only write an open can make, and only
+            // when something is missing. A failed read lists the record's own folders alone (SidePanelFolderMenuLines).
+            std::vector<::Agentmaster::SidePanelFolderFilter> history;
+            try
+            {
+                history = ::Agentmaster::RememberFilterFolderPicks(_sidePanelFilters.folders, /*onlyMissing*/ true);
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"side panel folder menu: read the pick history");
+            }
+            _sidePanelFolderMenuArmedKey = VirtualKey::None;
+            _sidePanelFolderMenuArmedPick = false;
+            _SidePanelFillFolderMenu(history);
+            _sidePanelFolderMenuPopup.IsOpen(true);
+            // Placed NOW, in this tick, at its real size (a card placed a tick later would show for a frame at its old spot).
+            _SidePanelPlaceFolderMenu();
+            ::Agentmaster::LogNav(focusFirst ? L"sidepanel filter folder menu open (keyboard)" : L"sidepanel filter folder menu open (hover)");
+            if (focusFirst)
+            {
+                // Pick… takes the keyboard one tick later: the card was only just realized, and a same-tick Focus on an element
+                // not laid out yet can do nothing (the panel's own open, the tag editor's lesson).
+                Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis = get_weak()]() {
+                    const auto self = weakThis.get();
+                    if (!self || !self->_SidePanelFolderMenuOpen() || self->_sidePanelFolderMenuRows.empty())
+                    {
+                        return; // closed before the tick ran
+                    }
+                    try
+                    {
+                        if (const auto first = self->_sidePanelFolderMenuRows.front().button)
+                        {
+                            first.Focus(FocusState::Programmatic);
+                        }
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"side panel folder menu: focus the first row"); // a click on a row works anyway
+                    }
+                });
+            }
+        }
+        catch (...)
+        {
+            // A half-opened submenu must not stay on screen with no rows or placement: close it again (best effort).
+            ::Agentmaster::AgentLogCaughtException(L"side panel folder menu: open");
+            try
+            {
+                if (_sidePanelFolderMenuPopup)
+                {
+                    _sidePanelFolderMenuPopup.IsOpen(false);
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"side panel folder menu: open rollback");
+            }
+        }
+    }
+
+    void TerminalPage::_SidePanelCloseFolderMenu(std::wstring_view reason, bool focusByFolder) noexcept
+    {
+        // Whatever the state, a close settles the pending intent and the armed key: a tick or a key-up after it must find
+        // nothing to act on.
+        _sidePanelFolderMenuIntent = SidePanelFolderMenuIntent::None;
+        _sidePanelFolderMenuArmedKey = VirtualKey::None;
+        _sidePanelFolderMenuArmedPick = false;
+        try
+        {
+            if (_sidePanelFolderMenuTimer)
+            {
+                _sidePanelFolderMenuTimer.Stop();
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel folder menu: stop the hover timer at close"); // its tick re-checks the state
+        }
+        if (!_SidePanelFolderMenuOpen())
+        {
+            return;
+        }
+        // Did the submenu hold the keyboard? Then it goes to By Folder… BEFORE the close: closing a Popup that holds focus lets
+        // the focus manager drop it on any focusable element (the Gotcha "Closing a plain Popup that holds focus"). When the
+        // panel closes too (focusByFolder false), the panel gives the keyboard back itself.
+        try
+        {
+            if (focusByFolder)
+            {
+                if (const auto xr = Root().XamlRoot())
+                {
+                    const auto focused = FocusManager::GetFocusedElement(xr).try_as<DependencyObject>();
+                    if (focused && SidePanelLaunchIsUnder(focused, _sidePanelFolderMenuCard))
+                    {
+                        if (const auto byFolder = SidePanelByFolderButton(_sidePanelFilterRows))
+                        {
+                            byFolder.Focus(FocusState::Programmatic);
+                        }
+                    }
+                }
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel folder menu: hand the keyboard back to By Folder"); // a click puts it anywhere
+        }
+        try
+        {
+            _sidePanelFolderMenuPopup.IsOpen(false);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel folder menu: close");
+        }
+        try
+        {
+            ::Agentmaster::LogNav(L"sidepanel filter folder menu close (" + std::wstring{ reason } + L")");
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel folder menu: the close's nav line"); // the close itself happened
+        }
+    }
+
+    void TerminalPage::_SidePanelFillFolderMenu(const std::vector<::Agentmaster::SidePanelFolderFilter>& history)
+    {
+        using Kind = AgentSidePanelFolderMenuRowView::Kind;
+        if (!_sidePanelFolderMenuRowsHost)
+        {
+            return;
+        }
+        _sidePanelFolderMenuRowsHost.Children().Clear();
+        _sidePanelFolderMenuRows.clear();
+        const auto weakThis = get_weak();
+        // The lines: this window's filtering folders the history lacks first (checked), then the history, most recent pick
+        // first — each checked, in the record's spelling and choice, while the record holds it (the pure rule, tested).
+        const auto lines = ::Agentmaster::SidePanelFolderMenuLines(history, _sidePanelFilters);
+
+        // ONE row: a transparent full-width Button around `content` — the panel's row recipe. Its Click runs one tick later (a
+        // toggle rewrites texts, Pick… closes the card: the clicked Button must not leave the tree inside its own Click). The
+        // handler captures the weak page and the row's INDEX, never the row's elements.
+        //   view    - what the row stands for (its texts are already made, inside `content`).
+        //   content - the row's Grid.
+        //   tip     - the row's tooltip.
+        //   autoId  - its AutomationId.
+        //   name    - its accessible name.
+        const auto addRow = [&](AgentSidePanelFolderMenuRowView view, const Grid& content, const std::wstring& tip, const std::wstring& autoId, const std::wstring& name) {
+            Button btn{};
+            btn.Content(content);
+            btn.HorizontalAlignment(HorizontalAlignment::Stretch);
+            btn.HorizontalContentAlignment(HorizontalAlignment::Stretch);
+            btn.Background(SolidColorBrush{ Colors::Transparent() }); // hit-testable everywhere; hover / press take the seeded brushes
+            btn.BorderThickness(ThicknessHelper::FromUniformLength(0));
+            btn.CornerRadius(CornerRadiusHelper::FromUniformRadius(0)); // flat rows (a rounded Button is a composition node each)
+            btn.Padding(ThicknessHelper::FromLengths(10, 4, 10, 4));
+            AgentSetTip(btn, winrt::hstring{ tip }, kSidePanelButtonTipDelay); // 3 s of rest: the rows are crossed on the way to a pick
+            AgentSetAutomationId(btn, autoId);
+            AgentSetAccessibleName(btn, name);
+            const size_t index = _sidePanelFolderMenuRows.size();
+            btn.Click([weakThis, index](const IInspectable&, const RoutedEventArgs&) {
+                const auto self = weakThis.get();
+                if (!self)
+                {
+                    return;
+                }
+                try
+                {
+                    self->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, index]() {
+                        if (const auto page = weakThis.get())
+                        {
+                            page->_SidePanelOnFolderMenuClick(index);
+                        }
+                    });
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"side panel folder menu: queue a row click"); // the click is lost
+                }
+            });
+            view.button = btn;
+            _sidePanelFolderMenuRowsHost.Children().Append(btn);
+            _sidePanelFolderMenuRows.push_back(std::move(view));
+        };
+        // A grid of [check 16][middle *][count Auto] — the folder lines' columns; Pick… puts its icon and words in the middle.
+        const auto makeGrid = []() {
+            Grid g{};
+            ColumnDefinition cCheck{};
+            cCheck.Width(GridLengthHelper::FromPixels(16));
+            ColumnDefinition cMiddle{};
+            cMiddle.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            ColumnDefinition cCount{};
+            cCount.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            g.ColumnDefinitions().Append(cCheck);
+            g.ColumnDefinitions().Append(cMiddle);
+            g.ColumnDefinitions().Append(cCount);
+            return g;
+        };
+
+        // 1. Pick… — what By Folder…'s own click does (the user's "Pick"): the "+" card in folder-pick mode.
+        {
+            auto g = makeGrid();
+            StackPanel words{};
+            words.Orientation(Orientation::Horizontal);
+            auto icon = SidePanelFluentGlyph(kSidePanelFolderGlyph, 12, 0.9);
+            icon.VerticalAlignment(VerticalAlignment::Center);
+            icon.Width(20);
+            words.Children().Append(icon);
+            words.Children().Append(Text(L"Pick\x2026", 12.5, false, 0.95));
+            Grid::SetColumn(words, 1);
+            g.Children().Append(words);
+            AgentSidePanelFolderMenuRowView view;
+            view.kind = Kind::Pick;
+            addRow(std::move(view), g, L"Pick a folder in the + launcher's folder picker \x2014 what a click on By Folder\x2026 does. The folder joins this list, on top.",
+                   L"am.side.filter.folderMenu.pick", L"Pick\x2026");
+        }
+        // 2. The separator, then the folders picked (or a dim line saying where they will appear).
+        {
+            Border rule{};
+            rule.Height(1);
+            rule.Margin(ThicknessHelper::FromLengths(0, 4, 0, 4));
+            rule.Background(Fill(0xFF, 0x45, 0x45, 0x45));
+            _sidePanelFolderMenuRowsHost.Children().Append(rule);
+        }
+        if (lines.empty())
+        {
+            auto none = Text(L"No folder picked yet \x2014 Pick\x2026 adds one here.", 12, false, 0.55);
+            none.Margin(ThicknessHelper::FromLengths(26, 4, 10, 6)); // under Pick…'s words (10 padding + the 16 DIP check column)
+            _sidePanelFolderMenuRowsHost.Children().Append(none);
+        }
+        for (size_t i = 0; i < lines.size(); ++i)
+        {
+            const auto& line = lines[i];
+            AgentSidePanelFolderMenuRowView view;
+            view.kind = Kind::Folder;
+            view.path = line.path;
+            view.key = line.key;
+            view.includeSubfolders = line.includeSubfolders;
+            view.checked = line.checked;
+            auto g = makeGrid();
+            view.check = Text(L"", 12, false, 0.9);
+            Grid::SetColumn(view.check, 0);
+            g.Children().Append(view.check);
+            TextBlock label{};
+            label.FontSize(12.5);
+            label.TextWrapping(TextWrapping::NoWrap);
+            label.TextTrimming(TextTrimming::CharacterEllipsis);
+            label.VerticalAlignment(VerticalAlignment::Center);
+            SidePanelSetFolderMenuLabel(label, view.path, view.includeSubfolders);
+            Grid::SetColumn(label, 1);
+            g.Children().Append(label);
+            view.label = label;
+            view.count = Text(L"", 11.5, false, 0.55);
+            view.count.Margin(ThicknessHelper::FromLengths(8, 0, 0, 0));
+            Grid::SetColumn(view.count, 2);
+            g.Children().Append(view.count);
+            const std::wstring tip = view.path +
+                                     (view.includeSubfolders ? std::wstring{ L" and every folder under it." } : std::wstring{ L" \x2014 exactly this folder (its subfolders are not included)." }) +
+                                     L" A click turns it on or off for this window's list (\x2713 = on); the count is how many sessions it alone would list.";
+            const std::wstring name = SidePanelFolderMenuLineAccessibleName(view.path, view.includeSubfolders);
+            addRow(std::move(view), g, tip, L"am.side.filter.folderMenu.folder." + std::to_wstring(i), name);
+        }
+        // The checks and the counts: the in-place refresh's own writes, so the two can never draw one state differently.
+        const auto counts = _SidePanelFolderMenuCounts();
+        for (size_t i = 0; i < _sidePanelFolderMenuRows.size(); ++i)
+        {
+            auto& row = _sidePanelFolderMenuRows[i];
+            if (row.kind != Kind::Folder)
+            {
+                continue;
+            }
+            if (row.check)
+            {
+                row.check.Text(row.checked ? L"\x2713" : L"");
+            }
+            if (row.count)
+            {
+                row.count.Text(winrt::hstring{ i < counts.size() ? std::to_wstring(counts[i]) : std::wstring{} });
+            }
+            if (row.button)
+            {
+                AgentSetItemStatus(row.button, row.checked ? L"checked" : L"");
+            }
+        }
+    }
+
+    void TerminalPage::_SidePanelRefreshFolderMenu() noexcept
+    {
+        using Kind = AgentSidePanelFolderMenuRowView::Kind;
+        if (!_SidePanelFolderMenuOpen())
+        {
+            return;
+        }
+        try
+        {
+            // 1. Each line against the record as it is NOW (SidePanelSyncFolderMenuLine): its check, and — only when the record's
+            //    spelling or choice of the folder moved — its words. A line turned off keeps its words (it turns back on as it was).
+            for (auto& row : _sidePanelFolderMenuRows)
+            {
+                if (row.kind != Kind::Folder)
+                {
+                    continue;
+                }
+                auto line = SidePanelLineOf(row);
+                const bool wordsMoved = ::Agentmaster::SidePanelSyncFolderMenuLine(line, _sidePanelFilters);
+                row.path = line.path;
+                row.includeSubfolders = line.includeSubfolders;
+                row.checked = line.checked;
+                if (wordsMoved && row.label)
+                {
+                    SidePanelSetFolderMenuLabel(row.label, row.path, row.includeSubfolders);
+                    AgentSetAccessibleName(row.button, SidePanelFolderMenuLineAccessibleName(row.path, row.includeSubfolders));
+                }
+            }
+            // 2. The checks and counts, each written only on a change (a same-value Text write still re-measures the TextBlock).
+            const auto counts = _SidePanelFolderMenuCounts();
+            for (size_t i = 0; i < _sidePanelFolderMenuRows.size(); ++i)
+            {
+                auto& row = _sidePanelFolderMenuRows[i];
+                if (row.kind != Kind::Folder)
+                {
+                    continue;
+                }
+                const std::wstring check = row.checked ? L"\x2713" : L"";
+                const std::wstring count = i < counts.size() ? std::to_wstring(counts[i]) : std::wstring{};
+                if (row.check && std::wstring_view{ row.check.Text() } != check)
+                {
+                    row.check.Text(winrt::hstring{ check });
+                }
+                if (row.count && std::wstring_view{ row.count.Text() } != count)
+                {
+                    row.count.Text(winrt::hstring{ count });
+                }
+                if (row.button)
+                {
+                    AgentSetItemStatus(row.button, row.checked ? L"checked" : L""); // change-gated inside
+                }
+            }
+        }
+        catch (...)
+        {
+            // The submenu shows the previous checks and counts until the next click or open. Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelRefreshFolderMenu");
+        }
+    }
+
+    void TerminalPage::_SidePanelOnFolderMenuClick(size_t index) noexcept
+    {
+        using Kind = AgentSidePanelFolderMenuRowView::Kind;
+        try
+        {
+            if (!_SidePanelFolderMenuOpen() || index >= _sidePanelFolderMenuRows.size())
+            {
+                return; // closed before the tick ran, or the rows were rebuilt meanwhile
+            }
+            const AgentSidePanelFolderMenuRowView row = _sidePanelFolderMenuRows[index]; // a copy: the panel's close below clears nothing, but a refill would
+            if (row.kind == Kind::Pick)
+            {
+                // The user's "Pick": exactly what By Folder…'s own click does — the panel (and this submenu with it) gives way to
+                // the "+" card in folder-pick mode, at the funnel's click. The card focuses its own box on its tick.
+                _SidePanelCloseFilterPanel(L"pick (folder menu)");
+                _SidePanelOpenFolderCard();
+                return;
+            }
+            // A folder line: judged against the record AS IT IS (the pure rule) — held → dropped, missing → added with the line's
+            // choice. _SidePanelSetFilters persists the window's record, rebuilds the cards, and rewrites the panel's and this
+            // submenu's checks and counts in place (the lines keep their place).
+            auto next = _sidePanelFilters;
+            bool turnedOn = false;
+            if (!::Agentmaster::SidePanelToggleFolderLine(next, SidePanelLineOf(row), turnedOn))
+            {
+                return; // not an absolute folder (never, for a line made from the history): nothing to change
+            }
+            _SidePanelSetFilters(std::move(next),
+                                 turnedOn ? (row.includeSubfolders ? L"folder+ (folder menu, with subfolders)" : L"folder+ (folder menu, exactly)") : L"folder- (folder menu)");
+            if (turnedOn)
+            {
+                // The user's "repicking moves to top": a folder turned on here is a pick — on top of the history from the next
+                // open (in this window and every other one).
+                _SidePanelRememberFolderPick(row.path, row.includeSubfolders);
+            }
+        }
+        catch (...)
+        {
+            // The click is lost; the submenu shows the record as it is. Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelOnFolderMenuClick");
+        }
+    }
+
+    std::vector<size_t> TerminalPage::_SidePanelFolderMenuCounts()
+    {
+        using Kind = AgentSidePanelFolderMenuRowView::Kind;
+        std::vector<size_t> counts(_sidePanelFolderMenuRows.size(), 0);
+        if (!_sessionRegistry || _sidePanelFolderMenuRows.empty())
+        {
+            return counts;
+        }
+        // The lines in their pure form (their keys and choices), by row index; a Pick row stays empty and counts 0.
+        std::vector<std::optional<::Agentmaster::SidePanelFolderMenuLine>> lines(_sidePanelFolderMenuRows.size());
+        for (size_t i = 0; i < _sidePanelFolderMenuRows.size(); ++i)
+        {
+            if (_sidePanelFolderMenuRows[i].kind == Kind::Folder)
+            {
+                lines[i] = SidePanelLineOf(_sidePanelFolderMenuRows[i]);
+            }
+        }
+        // The panel's census walk (_SidePanelFolderChoices'): the scope, the typed text, every facet but By Folder.
+        _SidePanelSyncFactCaches();
+        const auto mode = _appSettings.tabColorMode;
+        const auto snap = _sessionRegistry->SnapshotLiveForCards();
+        const auto terms = ::Agentmaster::ParseSessionQuery(_sidePanelSearchText);
+        const bool local = !_sidePanelGlobal;
+        std::unordered_set<std::wstring> hosted;
+        if (local)
+        {
+            hosted = _HostedSessionIds();
+        }
+        const auto unread = ::Agentmaster::CurrentUnreadSessionIds();
+        const ::Agentmaster::SidePanelFilterMatcher matcher{ _sidePanelFilters, NowMs() };
+        for (const auto& s : snap)
+        {
+            if (!s.live || (local && hosted.find(s.id) == hosted.end()) || !SidePanelSessionMatches(s, terms, mode))
+            {
+                continue;
+            }
+            auto f = _SidePanelFilterFactsOf(s, matcher.NeedsTags(), matcher.NeedsFavorite(), unread);
+            if (!::Agentmaster::SidePanelPassesAllBut(matcher.Passed(f, true), ::Agentmaster::SidePanelFacet::Folder))
+            {
+                continue; // another filter (or the text) already hides it: no line would list it
+            }
+            if (_sidePanelFilters.folders.empty())
+            {
+                // _SidePanelFilterFactsOf fills the folder keys only while By Folder has a pick; a line needs them always.
+                f.launchKey = s.workingDir.empty() ? std::wstring{} : ::Agentmaster::NormDirKey(s.workingDir);
+                f.inferredKey = s.inferredWorkingDir.empty() ? std::wstring{} : ::Agentmaster::NormDirKey(s.inferredWorkingDir);
+            }
+            for (size_t i = 0; i < lines.size(); ++i)
+            {
+                if (lines[i] && ::Agentmaster::SidePanelFolderLineCovers(*lines[i], f))
+                {
+                    ++counts[i];
+                }
+            }
+        }
+        return counts;
+    }
+
+    void TerminalPage::_SidePanelPlaceFolderMenu() noexcept
+    {
+        try
+        {
+            if (!_SidePanelFolderMenuOpen() || !_sidePanelFolderMenuCard || !_sidePanelFilterPopup || !_sidePanelFilterCard || !_SidePanelFilterPanelOpen())
+            {
+                return;
+            }
+            const auto root = Root();
+            const double rootW = root ? root.ActualWidth() : 0.0;
+            const double rootH = root ? root.ActualHeight() : 0.0;
+            // The panel's edges: its popup's offsets (its own placement wrote them, this tick or before) and its measured width.
+            _sidePanelFilterCard.Measure(winrt::Windows::Foundation::Size{ kSidePanelLaunchMeasureBound, kSidePanelLaunchMeasureBound });
+            const double panelLeft = _sidePanelFilterPopup.HorizontalOffset();
+            const double panelTop = _sidePanelFilterPopup.VerticalOffset();
+            const double panelRight = panelLeft + static_cast<double>(_sidePanelFilterCard.DesiredSize().Width);
+            // By Folder…'s top inside the panel's card, its scroll included; the first row's place (the card's chrome) when the
+            // transform cannot be read (a row not laid out yet).
+            double rowTop = kSidePanelFolderMenuChromeTop;
+            if (const auto byFolder = SidePanelByFolderButton(_sidePanelFilterRows))
+            {
+                try
+                {
+                    rowTop = static_cast<double>(byFolder.TransformToVisual(_sidePanelFilterCard).TransformPoint(winrt::Windows::Foundation::Point{ 0.0f, 0.0f }).Y);
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"side panel folder menu: read By Folder's place"); // the first row's place stands in
+                }
+            }
+            // The rows scroll inside the window's height, like the panel's (a short window): the cap, written only on a change.
+            if (const auto scroll = _sidePanelFolderMenuCard.Child().try_as<ScrollViewer>(); scroll && rootH > 0.0)
+            {
+                const double cap = std::max(120.0, rootH - 2.0 * ::Agentmaster::kPointerCardMarginDips - 10.0);
+                if (std::abs(scroll.MaxHeight() - cap) > 0.5)
+                {
+                    scroll.MaxHeight(cap);
+                }
+            }
+            _sidePanelFolderMenuCard.Measure(winrt::Windows::Foundation::Size{ kSidePanelLaunchMeasureBound, kSidePanelLaunchMeasureBound });
+            const auto size = _sidePanelFolderMenuCard.DesiredSize();
+            // Beside the panel (its right edge first, else its left), the submenu's first row level with By Folder….
+            const auto placed = ::Agentmaster::PlaceSubmenuCard(panelLeft,
+                                                                panelRight,
+                                                                panelTop + rowTop - kSidePanelFolderMenuChromeTop,
+                                                                static_cast<double>(size.Width),
+                                                                static_cast<double>(size.Height),
+                                                                rootW,
+                                                                rootH);
+            // Written only on a real move: a re-placement that changes nothing invalidates nothing.
+            if (std::abs(_sidePanelFolderMenuPopup.HorizontalOffset() - placed.left) > kSidePanelLaunchPlaceEpsilonPx)
+            {
+                _sidePanelFolderMenuPopup.HorizontalOffset(placed.left);
+            }
+            if (std::abs(_sidePanelFolderMenuPopup.VerticalOffset() - placed.top) > kSidePanelLaunchPlaceEpsilonPx)
+            {
+                _sidePanelFolderMenuPopup.VerticalOffset(placed.top);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel folder menu: place"); // it keeps its offsets
+        }
+    }
+
+    void TerminalPage::_SidePanelFolderMenuHover(SidePanelFolderMenuHover what) noexcept
+    {
+        try
+        {
+            if (!_SidePanelFilterPanelOpen())
+            {
+                return; // a row of a closing panel: nothing to open or close
+            }
+            const bool open = _SidePanelFolderMenuOpen();
+            // Arm the one-shot timer for `intent`: created on first use (its tick stops it through the sender, so a page that
+            // died meanwhile leaves no running timer), its interval the system's menu delay read now, restarted from zero.
+            const auto arm = [this](SidePanelFolderMenuIntent intent) {
+                if (!_sidePanelFolderMenuTimer)
+                {
+                    _sidePanelFolderMenuTimer = winrt::Windows::UI::Xaml::DispatcherTimer{};
+                    _sidePanelFolderMenuTimer.Tick([weak = get_weak()](const IInspectable& sender, const IInspectable&) {
+                        try
+                        {
+                            if (const auto timer = sender.try_as<winrt::Windows::UI::Xaml::DispatcherTimer>())
+                            {
+                                timer.Stop(); // one-shot
+                            }
+                        }
+                        catch (...)
+                        {
+                            ::Agentmaster::AgentLogCaughtException(L"side panel folder menu: stop the hover timer"); // the intent check below still holds
+                        }
+                        if (const auto page = weak.get())
+                        {
+                            page->_SidePanelOnFolderMenuTimer();
+                        }
+                    });
+                }
+                _sidePanelFolderMenuIntent = intent;
+                _sidePanelFolderMenuTimer.Stop();
+                _sidePanelFolderMenuTimer.Interval(SidePanelFolderMenuDelay());
+                _sidePanelFolderMenuTimer.Start();
+            };
+            // Drop the pending intent (the pointer changed its mind before the delay ran out).
+            const auto cancel = [this]() {
+                _sidePanelFolderMenuIntent = SidePanelFolderMenuIntent::None;
+                if (_sidePanelFolderMenuTimer)
+                {
+                    _sidePanelFolderMenuTimer.Stop();
+                }
+            };
+            switch (what)
+            {
+            case SidePanelFolderMenuHover::EnterByFolder:
+                if (open)
+                {
+                    cancel(); // back on By Folder… with the submenu open: it stays (a pending close from a neighbour row is dropped)
+                }
+                else
+                {
+                    arm(SidePanelFolderMenuIntent::Open);
+                }
+                break;
+            case SidePanelFolderMenuHover::LeaveByFolder:
+                if (!open && _sidePanelFolderMenuIntent == SidePanelFolderMenuIntent::Open)
+                {
+                    cancel(); // left before the delay: no submenu (an open one stays: the pointer may be on its way in)
+                }
+                break;
+            case SidePanelFolderMenuHover::EnterOtherRow:
+                if (open)
+                {
+                    arm(SidePanelFolderMenuIntent::Close); // closes unless the pointer reaches the submenu or By Folder… in time
+                }
+                else if (_sidePanelFolderMenuIntent == SidePanelFolderMenuIntent::Open)
+                {
+                    cancel();
+                }
+                break;
+            case SidePanelFolderMenuHover::EnterMenu:
+                if (_sidePanelFolderMenuIntent == SidePanelFolderMenuIntent::Close)
+                {
+                    cancel(); // the pointer made it into the submenu: keep it
+                }
+                break;
+            default:
+                break;
+            }
+        }
+        catch (...)
+        {
+            // The hover is lost (the submenu opens by Right, or on the next hover). Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelFolderMenuHover");
+        }
+    }
+
+    void TerminalPage::_SidePanelOnFolderMenuTimer() noexcept
+    {
+        const auto intent = _sidePanelFolderMenuIntent;
+        _sidePanelFolderMenuIntent = SidePanelFolderMenuIntent::None; // one-shot: consumed whatever happens below
+        try
+        {
+            // Each intent is judged again against the state NOW: the panel may have closed, a key may have opened or closed the
+            // submenu while the delay ran.
+            if (intent == SidePanelFolderMenuIntent::Open)
+            {
+                if (_SidePanelFilterPanelOpen() && !_SidePanelFolderMenuOpen())
+                {
+                    _SidePanelOpenFolderMenu(/*focusFirst*/ false); // noexcept
+                }
+            }
+            else if (intent == SidePanelFolderMenuIntent::Close)
+            {
+                // The pointer rests on another row of the panel: the keyboard, if the submenu held it, goes back to By Folder….
+                _SidePanelCloseFolderMenu(L"hover left", /*focusByFolder*/ true); // noexcept; a no-op when closed
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelOnFolderMenuTimer");
+        }
+    }
+
+    void TerminalPage::_SidePanelRememberFolderPick(const std::wstring& path, bool includeSubfolders) noexcept
+    {
+        try
+        {
+            // A read-modify-write of the profile's freshest filter-folders.json (one list for the app; the process-wide lock
+            // inside). The returned history is not needed here: the submenu reads the file again at its next open.
+            (void)::Agentmaster::RememberFilterFolderPicks({ ::Agentmaster::SidePanelFolderFilter{ path, includeSubfolders } }, /*onlyMissing*/ false);
+        }
+        catch (...)
+        {
+            // The history misses this pick (the filter itself is set). Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelRememberFolderPick");
+        }
     }
 
     void TerminalPage::_SidePanelShowRowForMode() noexcept

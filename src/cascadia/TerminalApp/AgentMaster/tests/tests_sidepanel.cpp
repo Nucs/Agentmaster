@@ -23,6 +23,12 @@
 // larger than the window pinned to the near margin, an unmeasured window never clamped, and every NaN / infinity /
 // negative input neutralized; plus a seeded sweep of the invariants over random clicks, cards and windows.
 //
+// TestSubmenuCardPlacement pins where the funnel panel's "By Folder..." row opens its hover SUBMENU (PlaceSubmenuCard, the
+// same header, SIDE_PANEL.md section 2l "The By Folder submenu"): beside the panel's right edge when the whole card fits
+// there, else beside its left edge, else on the roomier side clamped into the window; its top level with the row and
+// clamped; an unmeasured window never clamped; NaN / negative / reversed inputs neutralized; plus a seeded sweep - inside
+// the window, never over the panel while a side holds it, the right side first, exactly gap off the panel.
+//
 // TestVirtualListWindow pins which rows of the VIRTUALIZED card list get cards (AgentMaster/VirtualListWindow.h,
 // SIDE_PANEL.md section 2f): the row arithmetic at exact row boundaries and outside the content, the viewport clamp
 // for a list that just shrank, the policy's hysteresis (the realized range is kept while it covers the viewport's
@@ -67,7 +73,13 @@
 // at a segment boundary and through the inferred folder, OR inside a facet, AND across facets, the flags each narrowing,
 // Untagged; the chips in the facets' order with their words and what each chip's x leaves; and the record's JSON - a round
 // trip, the empty record, every malformed part read as "not set", and the window record's key written only while a filter
-// is set.
+// is set. Then By Folder's PICK HISTORY and its hover submenu (the user's request of 2026-11-10): a pick on top, a repick in
+// any spelling moved up with its new choice, several picks at once, the seeding that adds only missing folders, the cap of
+// ten, the JSON and the filter-folders.json document, the file itself through the `...In` seams on a scratch profile (no
+// file for a seeding that adds nothing, the freshest-file read-modify-write, the writer stamp); the submenu's lines (the
+// record's unlisted folders first and checked, the history's order, the record's spelling and choice on a checked line), the
+// toggle judged against the record as it is, a line turned off turning back on as it was, the removal by any spelling, the
+// line's words, and a line's coverage equal to the matcher's By Folder verdict for that folder alone.
 
 #include "m5_tests.h"
 
@@ -616,6 +628,135 @@ void TestPointerCardPlacement()
         CHECK(wrongDirection == 0, "card placement sweep: every direction follows the click's half of the window");
         CHECK(outside == 0, "card placement sweep: a card that fits always lands inside the margins; one that doesn't is pinned to the near margin");
         CHECK(notAtClick == 0, "card placement sweep: an unclamped card always has its corner exactly gap away from the click");
+    }
+}
+
+namespace
+{
+    // One submenu placement case: checks the three results and prints what came back when any differs, so a failing case
+    // names its numbers instead of only its label (ExpectCardPlacement's rule).
+    //   got     - the placement under test.
+    //   left    - the expected left edge.
+    //   top     - the expected top edge.
+    //   onRight - the expected side.
+    //   what    - the case's label (the CHECK message).
+    void ExpectSubmenuPlacement(const SubmenuCardPlacement& got, double left, double top, bool onRight, const char* what)
+    {
+        const bool ok = std::fabs(got.left - left) < 1e-9 && std::fabs(got.top - top) < 1e-9 && got.onRight == onRight;
+        if (!ok)
+        {
+            std::wprintf(L"    got left=%g top=%g right=%d, want left=%g top=%g right=%d\n", got.left, got.top, got.onRight ? 1 : 0, left, top, onRight ? 1 : 0);
+        }
+        CHECK(ok, what);
+    }
+}
+
+// Where By Folder's hover submenu opens (AgentMaster/PointerCardPlacement.h PlaceSubmenuCard, SIDE_PANEL.md section 2l "The
+// By Folder submenu"): beside the panel's right edge, else its left edge, else on the roomier side clamped into the window;
+// its top level with the hovered row, clamped; an unmeasured window never clamped; every NaN / negative input neutralized;
+// plus a seeded sweep of the invariants (inside the window, and never over the panel while a side holds the whole card).
+void TestSubmenuCardPlacement()
+{
+    std::wprintf(L"\n[TestSubmenuCardPlacement]\n");
+    const double nan = std::nan("");
+
+    // --- the sides: a 400 x 300 submenu in a 1600 x 900 window (default gap 2, margin 8) ---
+    ExpectSubmenuPlacement(PlaceSubmenuCard(100, 350, 40, 400, 300, 1600, 900), 352, 40, true,
+                           "submenu placement: room on the right: beside the panel's right edge, 2 DIP off, its top as asked");
+    ExpectSubmenuPlacement(PlaceSubmenuCard(1200, 1450, 40, 400, 300, 1600, 900), 798, 40, false,
+                           "submenu placement: no room on the right: beside the panel's left edge");
+    ExpectSubmenuPlacement(PlaceSubmenuCard(940, 1190, 40, 400, 300, 1600, 900), 1192, 40, true,
+                           "submenu placement: a card ending exactly at the right margin still opens on the right");
+    ExpectSubmenuPlacement(PlaceSubmenuCard(940, 1191, 40, 400, 300, 1600, 900), 538, 40, false,
+                           "submenu placement: one DIP more and it opens on the left");
+
+    // --- neither side holds the whole card: the roomier side, clamped into the window ---
+    ExpectSubmenuPlacement(PlaceSubmenuCard(150, 400, 40, 400, 300, 700, 900), 292, 40, true,
+                           "submenu placement: neither side fits: the roomier right side, clamped 8 DIP inside the right edge");
+    ExpectSubmenuPlacement(PlaceSubmenuCard(300, 550, 40, 400, 300, 700, 900), 8, 40, false,
+                           "submenu placement: neither side fits: the roomier left side, clamped to the left margin");
+    ExpectSubmenuPlacement(PlaceSubmenuCard(100, 350, 40, 900, 300, 600, 900), 8, 40, true,
+                           "submenu placement: a card wider than the window is pinned to the left margin (its start stays visible)");
+    ExpectSubmenuPlacement(PlaceSubmenuCard(995, 1245, 40, 400, 300, 1000, 900), 592, 40, false,
+                           "submenu placement: a panel reaching past the right edge: the left side would end 1 DIP too far right, so it is clamped");
+
+    // --- vertically: level with the row, clamped ---
+    ExpectSubmenuPlacement(PlaceSubmenuCard(100, 350, 800, 400, 300, 1600, 900), 352, 592, true,
+                           "submenu placement: a row near the bottom: the card rises to stay 8 DIP above the bottom edge");
+    ExpectSubmenuPlacement(PlaceSubmenuCard(100, 350, -20, 400, 300, 1600, 900), 352, 8, true,
+                           "submenu placement: a top above the window is clamped to the top margin");
+    ExpectSubmenuPlacement(PlaceSubmenuCard(100, 350, 300, 400, 1000, 1600, 900), 352, 8, true,
+                           "submenu placement: a card taller than the window is pinned to the top margin");
+
+    // --- an unmeasured window: no clamp, the right side ---
+    ExpectSubmenuPlacement(PlaceSubmenuCard(1200, 1450, 5000, 400, 300, 0, 0), 1452, 5000, true,
+                           "submenu placement: an unmeasured window (0 x 0) is not clamped and opens on the right");
+    ExpectSubmenuPlacement(PlaceSubmenuCard(1200, 1450, 40, 400, 300, nan, -1), 1452, 40, true,
+                           "submenu placement: a NaN or negative window size reads as unmeasured");
+
+    // --- non-finite and negative inputs are neutralized (no NaN can reach a XAML offset) ---
+    ExpectSubmenuPlacement(PlaceSubmenuCard(nan, nan, nan, 400, 300, 1600, 900), 8, 8, true,
+                           "submenu placement: a NaN parent and top read as 0 (the card's left edge, 2 DIP off, is inside the margin: clamped to it)");
+    ExpectSubmenuPlacement(PlaceSubmenuCard(350, 100, 40, 400, 300, 1600, 900), 352, 40, true,
+                           "submenu placement: a parent whose right edge lies left of its left edge reads as a parent of no width");
+    ExpectSubmenuPlacement(PlaceSubmenuCard(100, 350, 40, -5, nan, 1600, 900), 352, 40, true,
+                           "submenu placement: a negative or NaN card size reads as 0");
+    ExpectSubmenuPlacement(PlaceSubmenuCard(100, 350, 40, 400, 300, 1600, 900, -5, -5), 350, 40, true,
+                           "submenu placement: a negative gap and margin read as 0 (the card touching the panel)");
+    ExpectSubmenuPlacement(PlaceSubmenuCard(1180, 1400, 10, 400, 300, 1600, 900, 6, 20), 774, 20, false,
+                           "submenu placement: a custom gap (6) and margin (20) both apply");
+
+    // --- a seeded sweep of the invariants ---
+    {
+        uint64_t seed = 0xD1B54A32D192ED03ull;
+        // splitmix64 -> [0, span): deterministic, so a failure reproduces exactly.
+        const auto next = [&seed](double span) {
+            seed += 0x9E3779B97F4A7C15ull;
+            uint64_t z = seed;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+            z ^= z >> 31;
+            return span * static_cast<double>(z >> 11) / 9007199254740992.0;
+        };
+        const double m = kPointerCardMarginDips;
+        const double g = kPointerCardGapDips;
+        size_t outside = 0; // a card that fits the window placed outside [margin, area - margin - size], or one too large not pinned
+        size_t overParent = 0; // a card over the panel although one side holds it whole
+        size_t notPreferred = 0; // a card on the left although the right side holds it, or not exactly gap off the side it took
+        size_t cases = 0;
+        for (int i = 0; i < 20000; ++i)
+        {
+            const double aw = 300.0 + next(3000.0);
+            const double ah = 200.0 + next(1600.0);
+            const double pw = 50.0 + next(400.0);
+            const double pl = next(aw);
+            const double pr = pl + pw;
+            const double w = next(900.0);
+            const double h = next(700.0);
+            const double t = next(ah * 1.2) - ah * 0.1;
+            const auto p = PlaceSubmenuCard(pl, pr, t, w, h, aw, ah);
+            ++cases;
+            const auto axisOk = [&](double start, double size, double area) {
+                const double hi = area - m - size;
+                return hi < m ? std::fabs(start - m) < 1e-9 : (start >= m - 1e-9 && start <= hi + 1e-9);
+            };
+            outside += (axisOk(p.left, w, aw) && axisOk(p.top, h, ah)) ? 0 : 1;
+            // A side holds the card when the whole card lies inside the margins there (the parent may reach past the right
+            // edge in this sweep: pl is anywhere in the window and pw is added to it).
+            const bool fitsRight = pr + g >= m && pr + g + w <= aw - m;
+            const bool fitsLeft = pl - g - w >= m && pl - g <= aw - m;
+            if (fitsRight || fitsLeft)
+            {
+                overParent += (p.left >= pr + g - 1e-9 || p.left + w <= pl - g + 1e-9) ? 0 : 1;
+                const bool expectRight = fitsRight;
+                const double expectLeft = expectRight ? pr + g : pl - g - w;
+                notPreferred += (p.onRight == expectRight && std::fabs(p.left - expectLeft) < 1e-9) ? 0 : 1;
+            }
+        }
+        CHECK(cases == 20000, "submenu placement sweep: 20000 random panels, cards, rows and windows");
+        CHECK(outside == 0, "submenu placement sweep: a card that fits the window always lands inside its margins; one that doesn't is pinned to the near margin");
+        CHECK(overParent == 0, "submenu placement sweep: while a side holds the whole card, it never covers the panel");
+        CHECK(notPreferred == 0, "submenu placement sweep: the right side whenever it holds the card, else the left, each exactly gap off the panel");
     }
 }
 
@@ -2041,5 +2182,143 @@ void TestSidePanelFilters()
         CHECK(back.sidePanelFilters == filtered.sidePanelFilters, "filters record: the filters round-trip through the window record");
         CHECK(!SidePanelFiltersActive(DeserializeWindowRecord(L"{\"version\":1,\"window\":{\"windowId\":\"w\",\"sidePanelFilters\":\"nope\"}}").sidePanelFilters),
               "filters record: a sidePanelFilters of the wrong type reads as no filter");
+    }
+
+    // By Folder's PICK HISTORY (its hover submenu, SIDE_PANEL.md section 2l "The By Folder submenu"; the user's request of
+    // 2026-11-10): repicking moves to the top, the seeding of a window's own filters, the cap, the JSON and the file.
+    using History = std::vector<SidePanelFolderFilter>;
+    const History start{ { L"K:\\a", true }, { L"K:\\b", false }, { L"K:\\c", true } };
+    {
+        auto h = SidePanelFolderHistoryAfterPicks(start, History{ { L"K:\\d", true } }, false);
+        CHECK(h.size() == 4 && h[0].path == L"K:\\d" && h[1].path == L"K:\\a" && h[3].path == L"K:\\c", "folder history: a new pick goes on top, the rest keep their order");
+        h = SidePanelFolderHistoryAfterPicks(start, History{ { L"  k:/C/  ", false } }, false);
+        CHECK(h.size() == 3 && h[0].path == L"k:\\C" && !h[0].includeSubfolders && h[1].path == L"K:\\a" && h[2].path == L"K:\\b",
+              "folder history: repicking a folder (any spelling) moves it to the top in the new spelling and choice");
+        CHECK(SidePanelFolderHistoryAfterPicks(start, History{ { L"K:\\a", true } }, false) == start, "folder history: repicking the top folder as it was changes nothing");
+        h = SidePanelFolderHistoryAfterPicks(start, History{ { L"K:\\x", true }, { L"K:\\c", false } }, false);
+        CHECK(h.size() == 4 && h[0].path == L"K:\\x" && h[1].path == L"K:\\c" && !h[1].includeSubfolders && h[2].path == L"K:\\a",
+              "folder history: several picks at once: the first ends first");
+        h = SidePanelFolderHistoryAfterPicks(start, History{ { L"K:\\b", true }, { L"K:\\e", false } }, true);
+        CHECK(h.size() == 4 && h[0].path == L"K:\\e" && h[1].path == L"K:\\a" && h[2].path == L"K:\\b" && !h[2].includeSubfolders,
+              "folder history: seeding (onlyMissing) adds only an unlisted folder, on top, and leaves a listed one where and as it is");
+        h = SidePanelFolderHistoryAfterPicks(start, History{ { L"K:\\y", true }, { L"k:\\Y", false } }, false);
+        CHECK(h.size() == 4 && h[0].path == L"K:\\y" && h[0].includeSubfolders, "folder history: two picks of one folder in one call: the first pick wins");
+        h = SidePanelFolderHistoryAfterPicks(start, History{ { L"rel\\dir", true }, { L"", true }, { L"\"K:\\q\"", true } }, false);
+        CHECK(h.size() == 4 && h[0].path == L"K:\\q", "folder history: a relative or empty pick is skipped; a quoted path loses its quotes");
+        History many;
+        for (int i = 0; i < 14; ++i)
+        {
+            many.push_back(SidePanelFolderFilter{ L"K:\\f" + std::to_wstring(i), true });
+        }
+        h = SidePanelFolderHistoryAfterPicks(many, History{ { L"K:\\new", true } }, false);
+        CHECK(h.size() == kSidePanelFolderHistoryMax && h[0].path == L"K:\\new" && h.back().path == L"K:\\f8", "folder history: the cap keeps the newest ten, the oldest fall off");
+        h = SidePanelFolderHistoryAfterPicks(many, History{ { L"K:\\f12", false } }, false);
+        CHECK(h.size() == kSidePanelFolderHistoryMax && h[0].path == L"K:\\f12" && !h[0].includeSubfolders && h[1].path == L"K:\\f0",
+              "folder history: repicking a folder past the cap brings it back to the top, never as a second copy");
+        CHECK(NormalizeSidePanelFolderHistory(History{ { L"K:\\a", true }, { L"k:\\A\\", false }, { L"x", true } }) == History({ { L"K:\\a", true } }),
+              "folder history: normalizing keeps a folder's first (newest) entry and drops a relative one");
+    }
+    {
+        // json::Parse answers an optional (empty for text that does not parse): a null Value then.
+        const auto parseOrNull = [](std::wstring_view text) {
+            auto v = json::Parse(text);
+            return v ? *v : json::Value{};
+        };
+        CHECK(SidePanelFolderHistoryFromJson(parseOrNull(json::Dump(SidePanelFolderHistoryToJson(start)))) == start, "folder history json: the history round-trips");
+        const auto bad = SidePanelFolderHistoryFromJson(parseOrNull(LR"([{"path":"K:\\a"},{"path":"k:\\A","subfolders":false},7,{"path":"rel"},{"subfolders":true},{"path":"K:\\b","subfolders":"no"}])"));
+        CHECK(bad == History({ { L"K:\\a", true }, { L"K:\\b", true } }),
+              "folder history json: a duplicate by case, a non-object, a relative or missing path are dropped; a non-bool subfolders reads as included");
+        CHECK(SidePanelFolderHistoryFromJson(parseOrNull(L"{\"folders\":[]}")).empty(), "folder history json: anything but an array is no history");
+        const auto doc = SerializeFilterFolderHistory(start);
+        CHECK(doc.find(L"\"version\"") != std::wstring::npos && DeserializeFilterFolderHistory(doc) == start, "folder history file: the document ({version, folders}) round-trips");
+        CHECK(DeserializeFilterFolderHistory(L"").empty() && DeserializeFilterFolderHistory(L"not json").empty() && DeserializeFilterFolderHistory(L"[1]").empty(),
+              "folder history file: no text, text that does not parse, or no object reads as no history");
+        CHECK(json::Dump(FilterFoldersRoundTrip(parseOrNull(doc))) == json::Dump(parseOrNull(doc)), "folder history file: its round trip of its own document is the document");
+    }
+    {
+        // The file itself, through the `...In` seams on a scratch profile: a direct harness run must never write the live
+        // profile's history (AgentmasterStateDir() is the harness's, resolved once per process).
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring dir = std::wstring{ tmp } + L"am-filterfolders-" + NewSessionId();
+        std::filesystem::create_directories(std::filesystem::path{ dir });
+        const std::wstring file = dir + L"\\filter-folders.json";
+        CHECK(LoadFilterFolderHistoryIn(dir).empty(), "folder history file: a fresh profile has no history");
+        CHECK(RememberFilterFolderPicksIn(dir, History{}, true).empty() && !std::filesystem::exists(std::filesystem::path{ file }),
+              "folder history file: a seeding that adds nothing writes no file");
+        RememberFilterFolderPicksIn(dir, History{ { L"K:\\a", true } }, false);
+        RememberFilterFolderPicksIn(dir, History{ { L"K:\\b", false } }, false);
+        CHECK(LoadFilterFolderHistoryIn(dir) == History({ { L"K:\\b", false }, { L"K:\\a", true } }), "folder history file: picks are kept, the newest first");
+        const auto seeded = RememberFilterFolderPicksIn(dir, History{ { L"K:\\a", false }, { L"K:\\c", true } }, true);
+        CHECK(seeded == History({ { L"K:\\c", true }, { L"K:\\b", false }, { L"K:\\a", true } }) && LoadFilterFolderHistoryIn(dir) == seeded,
+              "folder history file: a seeding adds only the missing folder, on top, and answers what the file now holds");
+        const auto repicked = RememberFilterFolderPicksIn(dir, History{ { L"K:\\a", false } }, false);
+        CHECK(repicked.size() == 3 && repicked[0].path == L"K:\\a" && !repicked[0].includeSubfolders && LoadFilterFolderHistoryIn(dir) == repicked,
+              "folder history file: a repick moves the folder to the top in the file too");
+        CHECK(ReadStateFileUtf8(file).text.find(L"\"writer\"") != std::wstring::npos, "folder history file: written as a state document (its writer stamp)");
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
+    }
+
+    // The submenu's LINES and their toggle: the record's unlisted folders first (checked), then the history, checked in the
+    // record's spelling and choice; a click judged against the record as it is; a line turned off turns back on as it was.
+    {
+        SidePanelFilters record;
+        SidePanelAddFolderFilter(record, L"K:\\z", true); // filters this window, but no history lists it
+        SidePanelAddFolderFilter(record, L"k:\\B", true); // the history lists it as K:\b (exactly)
+        const auto lines = SidePanelFolderMenuLines(start, record);
+        CHECK(lines.size() == 4 && lines[0].path == L"K:\\z" && lines[0].checked, "folder menu: a filtering folder the history lacks is listed first, checked");
+        CHECK(lines.size() == 4 && lines[1].path == L"K:\\a" && !lines[1].checked && lines[1].includeSubfolders, "folder menu: an unpicked line shows the history's spelling and choice");
+        CHECK(lines.size() == 4 && lines[2].checked && lines[2].path == L"k:\\B" && lines[2].includeSubfolders,
+              "folder menu: a line the window filters by is checked, in the record's spelling and choice");
+        CHECK(lines.size() == 4 && lines[3].path == L"K:\\c" && !lines[3].checked, "folder menu: the history's order is kept");
+        CHECK(SidePanelFolderMenuLines(History{}, SidePanelFilters{}).empty(), "folder menu: nothing picked and nothing filtering: no line");
+        if (lines.size() == 4)
+        {
+            auto rec = record;
+            bool on = true;
+            CHECK(SidePanelToggleFolderLine(rec, lines[2], on) && !on && rec.folders.size() == 1 && rec.folders[0].path == L"K:\\z", "folder menu: a click on a checked line drops its folder");
+            auto line = lines[2];
+            CHECK(!SidePanelSyncFolderMenuLine(line, rec) && !line.checked && line.path == L"k:\\B" && line.includeSubfolders,
+                  "folder menu: a line turned off keeps its words (it turns back on as it was)");
+            CHECK(SidePanelToggleFolderLine(rec, line, on) && on && rec.folders.size() == 2 && rec.folders[1].includeSubfolders,
+                  "folder menu: a click on an unchecked line adds its folder with the line's choice");
+            CHECK(!SidePanelSyncFolderMenuLine(line, rec) && line.checked, "folder menu: the line turned on reads checked, its words unchanged");
+            auto exact = rec;
+            SidePanelAddFolderFilter(exact, L"K:\\b", false);
+            CHECK(SidePanelSyncFolderMenuLine(line, exact) && !line.includeSubfolders && line.path == L"k:\\B",
+                  "folder menu: a held folder whose choice moved: the line adopts the record's and asks for its words to be rewritten");
+            auto stale = lines[1]; // drawn unchecked, but the record took the folder meanwhile
+            auto took = record;
+            SidePanelAddFolderFilter(took, L"K:\\a", true);
+            CHECK(SidePanelToggleFolderLine(took, stale, on) && !on && took.folders.size() == 2, "folder menu: a click is judged against the record as it is, never the check drawn");
+        }
+        auto dropped = record;
+        CHECK(SidePanelRemoveFolderFilter(dropped, L" k:/z/ ") && dropped.folders.size() == 1 && !SidePanelRemoveFolderFilter(dropped, L"K:\\nope"),
+              "folder menu: removing matches a folder in any spelling; an unheld one changes nothing");
+        CHECK(SidePanelFolderLineName(L"K:\\source\\kvnode", false) == L"kvnode (exactly)" && SidePanelFolderLineName(L"K:\\", true) == L"K:\\",
+              "folder menu: a line reads like its chip (the leaf, and (exactly) without subfolders)");
+
+        // A line's count rule is the matcher's By Folder verdict for that one folder.
+        const SidePanelFolderMenuLine sub{ L"K:\\src", NormDirKey(L"K:\\src"), true, false };
+        const SidePanelFolderMenuLine exactly{ L"K:\\src", NormDirKey(L"K:\\src"), false, false };
+        CHECK(SidePanelFolderLineCovers(sub, FilterFacts(L"K:\\src\\app", L"")) && !SidePanelFolderLineCovers(exactly, FilterFacts(L"K:\\src\\app", L"")),
+              "folder menu: a line with its subfolders covers a folder under it; exactly does not");
+        CHECK(SidePanelFolderLineCovers(exactly, FilterFacts(L"C:\\Users\\me", L"k:\\SRC")) && !SidePanelFolderLineCovers(sub, FilterFacts(L"K:\\srcfoo", L"")),
+              "folder menu: the inferred folder counts; a sibling that shares a prefix never does");
+        bool agree = true;
+        for (const bool withSub : { true, false })
+        {
+            SidePanelFilters only;
+            SidePanelAddFolderFilter(only, L"K:\\src", withSub);
+            const SidePanelFilterMatcher matcher(only, kNow);
+            const auto& line = withSub ? sub : exactly;
+            for (const auto* d : { L"K:\\src", L"K:\\src\\a\\b", L"K:\\srcfoo", L"K:\\", L"D:\\src", L"" })
+            {
+                const auto facts = FilterFacts(d, L"");
+                agree = agree && SidePanelFolderLineCovers(line, facts) == ((matcher.Passed(facts, true) & SidePanelFacetBit(SidePanelFacet::Folder)) != 0);
+            }
+        }
+        CHECK(agree, "folder menu: a line's coverage equals the matcher's By Folder verdict for that folder alone (with and without subfolders)");
     }
 }

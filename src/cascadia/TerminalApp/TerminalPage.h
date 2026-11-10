@@ -301,6 +301,32 @@ namespace winrt::TerminalApp::implementation
         size_t active[5]{}; // index 0 = any time, then per kSidePanelActiveChoices entry
     };
 
+    // Agentmaster (SIDE_PANEL.md §2l "The By Folder submenu" — the user's request of 2026-11-10: "keep By Folder AS IS,
+    // clickable, but when hovered have a submenu with / Pick / --- / <each line is an item we picked, repicking moves to
+    // top>"): one row of the submenu the panel's "By Folder…" row opens on hover. The rows are built at every open from the
+    // pick history (one list for the app, filter-folders.json) and this window's record; a click rewrites the checks and
+    // counts IN PLACE (_SidePanelRefreshFolderMenu), so the lines keep their place while the submenu is open — the user's
+    // "repicking moves to top" reorders the list at the NEXT open. The folder facts mirror AgentMaster/SidePanelFilters.h's
+    // SidePanelFolderMenuLine (that header stays out of this one: TerminalPage.h is included by every TerminalApp unit).
+    struct AgentSidePanelFolderMenuRowView
+    {
+        // What the row does when clicked.
+        enum class Kind : uint8_t
+        {
+            Pick, // "Pick…": what By Folder…'s own click does — the panel gives way to the "+" card in folder-pick mode
+            Folder, // a folder line: toggles that folder in this window's record (✓ = it filters now); the submenu stays open
+        };
+        Kind kind{ Kind::Folder };
+        std::wstring path; // Folder rows: the folder (the record's spelling while checked, else the history's)
+        std::wstring key; // Folder rows: NormDirKey(path) — what the record, the history and the census match it by
+        bool includeSubfolders{ true }; // Folder rows: the choice the line shows and a click adds (the window's own while checked)
+        bool checked{ false }; // Folder rows: the window's record filters by this folder now
+        winrt::Windows::UI::Xaml::Controls::Button button{ nullptr }; // the row itself (a transparent, full-width Button)
+        winrt::Windows::UI::Xaml::Controls::TextBlock check{ nullptr }; // Folder rows: "✓" / ""; null for Pick…
+        winrt::Windows::UI::Xaml::Controls::TextBlock label{ nullptr }; // Folder rows: the leaf ("(exactly)" without subfolders) and the dim path, as two runs — rewritten only when the line's choice or spelling moves
+        winrt::Windows::UI::Xaml::Controls::TextBlock count{ nullptr }; // Folder rows: how many sessions this folder alone would list, every other filter as it is; null for Pick…
+    };
+
     struct TerminalPage : TerminalPageT<TerminalPage>
     {
     public:
@@ -946,6 +972,43 @@ namespace winrt::TerminalApp::implementation
         // session-store stat. UINT64_MAX = never read.
         std::unordered_map<std::wstring, bool> _sidePanelFavoriteById;
         uint64_t _sidePanelFavoritesEpoch{ UINT64_MAX };
+        // --- By Folder's hover SUBMENU (SIDE_PANEL.md §2l "The By Folder submenu") ---
+        // The user's request of 2026-11-10: "keep By Folder AS IS, clickable, but when hovered have a submenu with / Pick /
+        // --- / <each line is an item we picked, repicking moves to top>"; their picks: a line TOGGLES its folder in this
+        // window (✓ = filtering now; the submenu stays open) and the history is ONE LIST FOR THE APP (filter-folders.json).
+        // A second Root()-parented Popup card beside the panel (the panel's recipe — a MenuFlyout would close at every pick),
+        // opened by a hover that rests on By Folder… for the system's menu delay or by Right on it, and closed with the panel,
+        // by a hover that rests on another row of the panel, by Left / Escape (on its KEY-UP) inside it. Built at the first
+        // open (_SidePanelEnsureFolderMenu); its rows are rebuilt at every open.
+        winrt::Windows::UI::Xaml::Controls::Primitives::Popup _sidePanelFolderMenuPopup{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Border _sidePanelFolderMenuCard{ nullptr }; // the submenu's card: the outside-press boundary, the key handlers' owner, the placement's measured size
+        winrt::Windows::UI::Xaml::Controls::StackPanel _sidePanelFolderMenuRowsHost{ nullptr }; // the card's rows (cleared and refilled at every open)
+        std::vector<AgentSidePanelFolderMenuRowView> _sidePanelFolderMenuRows; // what each row stands for + its texts (rewritten in place after each click)
+        // The HOVER INTENT, the desktop menu's rule: a pointer that rests on By Folder… for the delay opens the submenu, one that
+        // rests on another row of the panel for the delay closes it, and reaching the submenu meanwhile cancels the close (the
+        // pointer may cross a neighbour row on its way). One one-shot timer (_sidePanelFolderMenuTimer, the system's menu show
+        // delay, SPI_GETMENUSHOWDELAY) carries the pending intent; its tick stops it through the sender, so a page that died
+        // meanwhile leaves no running timer.
+        enum class SidePanelFolderMenuIntent : uint8_t
+        {
+            None, // nothing pending
+            Open, // the pointer rests on By Folder… with the submenu closed: open it when the timer fires
+            Close, // the pointer rests on another row of the panel with the submenu open: close it when the timer fires
+        };
+        SidePanelFolderMenuIntent _sidePanelFolderMenuIntent{ SidePanelFolderMenuIntent::None };
+        winrt::Windows::UI::Xaml::DispatcherTimer _sidePanelFolderMenuTimer{ nullptr }; // stopped in ~TerminalPage (UI-affine: guarded)
+        // What a pointer did that the hover intent reads (_SidePanelFolderMenuHover).
+        enum class SidePanelFolderMenuHover : uint8_t
+        {
+            EnterByFolder, // the pointer entered the panel's By Folder… row
+            LeaveByFolder, // the pointer left the panel's By Folder… row
+            EnterOtherRow, // the pointer entered another row of the panel
+            EnterMenu, // the pointer entered the submenu's card
+        };
+        // The key the submenu's PreviewKeyDown armed (Escape, or Enter / Space on Pick…; None = nothing armed) and whether its
+        // key-up opens the folder card (true) or closes the submenu (false): both move the keyboard, so the KEY-UP rule.
+        winrt::Windows::System::VirtualKey _sidePanelFolderMenuArmedKey{ winrt::Windows::System::VirtualKey::None };
+        bool _sidePanelFolderMenuArmedPick{ false };
         // --- The side panel's AI SEARCH (SIDE_PANEL.md §2h) ---
         // The filter box's "AI" toggle (an "AI" ToggleButton drawn over the box's right end, like the Sessions page's) turns
         // the box into the AI search's REQUEST line and replaces the card list with the model's answer and its list of
@@ -3772,6 +3835,66 @@ namespace winrt::TerminalApp::implementation
         void _SidePanelShowRowForMode() noexcept;
         // Empty the filter box (a Text chip's ✕, Clear): the box's own TextChanged then filters the cards again. Never throws.
         void _SidePanelClearFilterText() noexcept;
+        // --- By Folder's hover SUBMENU (SIDE_PANEL.md §2l "The By Folder submenu") ---
+        // Build the submenu ONCE (the panel's dark card and Button brushes, its rows host, its key and pointer handlers, the
+        // Root()-parented Popup). Returns true when it exists, false when the build failed (logged; the next hover retries).
+        // Never throws.
+        bool _SidePanelEnsureFolderMenu() noexcept;
+        // Open the submenu beside the panel's By Folder… row: seed the history with this window's filtering folders it lacks
+        // (RememberFilterFolderPicks, onlyMissing — the only write an open can make), fill the rows, place it, and — for the
+        // keyboard — focus its first row one tick later. A no-op while the panel is closed or the submenu is open (then only
+        // the focus moves, when asked). Logs [nav] sidepanel filter folder menu open (hover | keyboard). Never throws.
+        //   focusFirst - the keyboard opened it (Right on By Folder…): Pick… takes the keyboard; a hover moves no focus.
+        void _SidePanelOpenFolderMenu(bool focusFirst) noexcept;
+        // Close the submenu: the pending hover intent and the armed key are dropped; when it held the keyboard, the keyboard
+        // goes to the panel's By Folder… row FIRST (closing a Popup that holds focus would drop it anywhere — the Gotcha), or
+        // nowhere when the panel is closing too (it then hands the keyboard back itself). Logs [nav] sidepanel filter folder
+        // menu close (<reason>). A no-op when closed. Never throws.
+        //   reason        - why ("hover left", "esc", "left", "panel closed", "pick", ...).
+        //   focusByFolder - give the keyboard to By Folder… when the submenu held it (false when the panel closes with it).
+        void _SidePanelCloseFolderMenu(std::wstring_view reason, bool focusByFolder) noexcept;
+        // True while the submenu's Popup is open. Never throws.
+        bool _SidePanelFolderMenuOpen() const noexcept;
+        // (Re)build the submenu's rows: Pick… · a separator · one line per folder (SidePanelFolderMenuLines over `history` and
+        // this window's record: its unlisted filtering folders first, then the history, most recent pick first), or a dim
+        // "No folder picked yet" line; then the checks and counts (_SidePanelRefreshFolderMenu's texts).
+        //   history - the pick history as the open read (and seeded) it.
+        // Throws what building XAML throws (the open contains it).
+        void _SidePanelFillFolderMenu(const std::vector<::Agentmaster::SidePanelFolderFilter>& history);
+        // After any change to the record or the counts while the submenu is open: each folder line brought up to date with the
+        // record IN PLACE (SidePanelSyncFolderMenuLine: its check, and its words when the record's spelling or choice moved)
+        // and its count recomputed (_SidePanelFolderMenuCounts) — never a rebuild, so the line under the pointer and the
+        // keyboard on it stay. A no-op while the submenu is closed. Never throws (logged).
+        void _SidePanelRefreshFolderMenu() noexcept;
+        // One click on the submenu's row `index`: Pick… gives way to the folder card (what By Folder…'s own click does); a
+        // folder line toggles its folder in this window's record (SidePanelToggleFolderLine, through _SidePanelSetFilters)
+        // and, when it turned on, records the pick in the history (RememberFilterFolderPicks — the user's "repicking moves to
+        // top", shown at the next open). Runs on a clean tick (the pointer-handler rule). Never throws.
+        //   index - the row's index in _sidePanelFolderMenuRows when the row was built (checked again here).
+        void _SidePanelOnFolderMenuClick(size_t index) noexcept;
+        // Each folder line's count: the sessions of the panel's scope that pass the typed text and every filter but By Folder,
+        // and that the line's folder alone keeps (SidePanelFolderLineCovers — the matcher's own rule), so a count is what
+        // turning that line on would list. Pick… counts 0.
+        //   returns - one count per row of _sidePanelFolderMenuRows.
+        // Throws what the reads throw (std::bad_alloc; the callers contain it).
+        std::vector<size_t> _SidePanelFolderMenuCounts();
+        // Place the open submenu beside the panel's By Folder… row (PlaceSubmenuCard: the panel's right edge, else its left;
+        // its first row level with By Folder…), writing offsets only on a real move. Called by every placement of the panel.
+        // Never throws (logged).
+        void _SidePanelPlaceFolderMenu() noexcept;
+        // The HOVER INTENT's one input: what the pointer did (SidePanelFolderMenuHover) arms, re-arms or cancels the one-shot
+        // timer — rest on By Folder… = open, rest on another row = close, the submenu reached = no close. Never throws.
+        //   what - what the pointer did.
+        void _SidePanelFolderMenuHover(SidePanelFolderMenuHover what) noexcept;
+        // The hover timer's tick (one-shot): carry out the pending intent if it still holds (the panel open; the submenu
+        // closed for an Open, open for a Close). Never throws.
+        void _SidePanelOnFolderMenuTimer() noexcept;
+        // Record one folder PICKED through By Folder (the folder card's Filter, a submenu line turned on) in the pick history,
+        // the user's "repicking moves to top" (RememberFilterFolderPicks: a read-modify-write of the profile's freshest
+        // filter-folders.json). Never throws (a failure is logged; the history misses this pick).
+        //   path              - the folder (any spelling; trimmed and checked there).
+        //   includeSubfolders - the pick's choice.
+        void _SidePanelRememberFolderPick(const std::wstring& path, bool includeSubfolders) noexcept;
         // The ⋯ ▸ Card order pick: put the SHARED board sort (AppSettings::boardSort) on `order` through the Manager
         // content's own setter (AgentManagerContent::SetBoardSort — persist, broadcast, re-sort the board), then re-sort this
         // list at once. One sort spec for the board and the panel, as when the panel had its own cycling button.

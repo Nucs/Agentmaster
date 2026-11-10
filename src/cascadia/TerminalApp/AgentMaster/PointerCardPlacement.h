@@ -23,8 +23,12 @@
 //   - Every non-finite input reads as 0, and a negative size / gap / margin as 0, so no NaN ever reaches the
 //     XAML offsets (a NaN offset is a silent layout failure).
 //
+// The same header places a SUBMENU card beside its parent card (PlaceSubmenuCard: the filter panel's "By Folder..." row
+// opens one on hover - SIDE_PANEL.md section 2l), the way a desktop menu does: beside the parent's right edge, else its
+// left edge, its first line level with the hovered row, clamped inside the window like the pointer card.
+//
 // Pure, header-only, pure-ASCII source (the KeyedListDiff.h idiom): no Windows, no WinRT, so the m5 harness tests it
-// without a build of the app. Unit-tested: tests_sidepanel.cpp (TestPointerCardPlacement).
+// without a build of the app. Unit-tested: tests_sidepanel.cpp (TestPointerCardPlacement, TestSubmenuCardPlacement).
 
 #pragma once
 
@@ -119,6 +123,105 @@ namespace Agentmaster
         PointerCardPlacement p;
         p.left = detail::PointerCardAxis(x, w, aw, g, m, p.towardRight);
         p.top = detail::PointerCardAxis(y, h, ah, g, m, p.towardDown);
+        return p;
+    }
+
+    // Where a SUBMENU card goes (SIDE_PANEL.md section 2l - the hover submenu of the filter panel's "By Folder..." row):
+    // its top-left corner in the area's coordinates and the side it took.
+    struct SubmenuCardPlacement
+    {
+        double left{ 0.0 }; // the card's left edge (a popup HorizontalOffset)
+        double top{ 0.0 }; // the card's top edge (a popup VerticalOffset)
+        bool onRight{ true }; // true: the card stands beside the parent's RIGHT edge; false: beside its left edge
+    };
+
+    // Place a submenu card of `cardWidth` x `cardHeight` BESIDE its parent card, the way a desktop menu opens a submenu:
+    //   - Horizontally: beside the parent's right edge when the whole card fits there (inside the margin), else beside
+    //     its left edge when it fits there; when neither side fits, on the side with more room, clamped into the area
+    //     (it may then cover part of the parent - a window narrower than both cards has no better place). Right first,
+    //     the reading order, so a panel near the window's left edge opens its submenu rightward.
+    //   - Vertically: its top at `top` (the caller passes the hovered row's top less the card's own chrome, so the first
+    //     line of the submenu sits level with the row), clamped into the area; a card taller than the area is pinned to
+    //     the top margin, so its first lines stay reachable.
+    //   - An area that is not measured yet (0, negative or not finite) is not clamped: right side, top as given.
+    //   - Every non-finite input reads as 0, a negative size / gap / margin as 0, and a parent whose right edge lies left
+    //     of its left edge as a parent of no width - no NaN ever reaches a XAML offset.
+    //   parentLeft, parentRight - the parent card's left and right edges.
+    //   top                     - where the card's top edge should be.
+    //   cardWidth, cardHeight   - the submenu card's size (its DesiredSize).
+    //   areaWidth, areaHeight   - the window's size (0 / not finite = not measured yet: no clamp).
+    //   gap                     - the distance between the two cards (default kPointerCardGapDips).
+    //   margin                  - the distance the clamp keeps from each edge (default kPointerCardMarginDips).
+    //   returns                 - the card's top-left corner and the side it took. Never throws.
+    inline SubmenuCardPlacement PlaceSubmenuCard(double parentLeft,
+                                                 double parentRight,
+                                                 double top,
+                                                 double cardWidth,
+                                                 double cardHeight,
+                                                 double areaWidth,
+                                                 double areaHeight,
+                                                 double gap = kPointerCardGapDips,
+                                                 double margin = kPointerCardMarginDips) noexcept
+    {
+        const double pl = detail::PointerCardFinite(parentLeft);
+        const double prRaw = detail::PointerCardFinite(parentRight);
+        const double pr = prRaw < pl ? pl : prRaw;
+        const double t = detail::PointerCardFinite(top);
+        const double w = detail::PointerCardNonNegative(cardWidth);
+        const double h = detail::PointerCardNonNegative(cardHeight);
+        const double aw = detail::PointerCardNonNegative(areaWidth);
+        const double ah = detail::PointerCardNonNegative(areaHeight);
+        const double g = detail::PointerCardNonNegative(gap);
+        const double m = detail::PointerCardNonNegative(margin);
+
+        SubmenuCardPlacement p;
+        const double rightStart = pr + g;
+        const double leftStart = pl - g - w;
+        if (aw <= 0.0)
+        {
+            // Unmeasured: no edge to fit against, so the reading order decides (the caller re-places once it has a size).
+            p.onRight = true;
+            p.left = rightStart;
+        }
+        else
+        {
+            // A side "holds" the card when the WHOLE card lies inside [margin, area - margin] there - both edges checked, so
+            // a parent that itself reaches past a window edge (a window shrinking under an open panel) never yields a card
+            // placed off screen without the clamp below.
+            const bool fitsRight = rightStart >= m && rightStart + w <= aw - m;
+            const bool fitsLeft = leftStart >= m && leftStart + w <= aw - m;
+            if (fitsRight)
+            {
+                p.onRight = true;
+                p.left = rightStart;
+            }
+            else if (fitsLeft)
+            {
+                p.onRight = false;
+                p.left = leftStart;
+            }
+            else
+            {
+                // Neither side holds the whole card: the side with more room (ties go right), clamped into the area.
+                const double roomRight = (aw - m) - rightStart;
+                const double roomLeft = (pl - g) - m;
+                p.onRight = roomRight >= roomLeft;
+                const double start = p.onRight ? rightStart : leftStart;
+                const double lo = m;
+                const double hi = aw - m - w;
+                p.left = hi < lo ? lo : (start < lo ? lo : (start > hi ? hi : start));
+            }
+        }
+        if (ah <= 0.0)
+        {
+            p.top = t;
+        }
+        else
+        {
+            const double lo = m;
+            const double hi = ah - m - h;
+            p.top = hi < lo ? lo : (t < lo ? lo : (t > hi ? hi : t));
+        }
         return p;
     }
 }

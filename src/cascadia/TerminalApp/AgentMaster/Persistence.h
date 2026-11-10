@@ -110,6 +110,16 @@ namespace Agentmaster
     // Recent working directories (MRU) for the Launch path-picker. Front == most recent.
     std::wstring SerializeRecentDirs(const std::vector<std::wstring>& dirs);
     std::vector<std::wstring> DeserializeRecentDirs(std::wstring_view text);
+    // Agentmaster (SIDE_PANEL.md §2l "The By Folder submenu"): By Folder's PICK HISTORY — the filter-folders.json document,
+    // {"version":1,"folders":[{"path":…,"subfolders":…},…]}, most recent pick first. One list for the app (every window's
+    // submenu shows it); SidePanelFilters.h holds its rules (NormalizeSidePanelFolderHistory, SidePanelFolderHistoryAfterPicks).
+    //   history - the picks to write, as given (normalize first when they may be raw).
+    //   text    - the file's text; anything that does not parse, or is no document of ours, reads as an empty history.
+    //   returns - the document's text / the history, normalized (absolute folders, unique by NormDirKey, at most
+    //             kSidePanelFolderHistoryMax).
+    // Throw std::bad_alloc only.
+    std::wstring SerializeFilterFolderHistory(const std::vector<SidePanelFolderFilter>& history);
+    std::vector<SidePanelFolderFilter> DeserializeFilterFolderHistory(std::wstring_view text);
     // Agentmaster (launch-model picker -> "Specify..."): the MODEL LIST — the durable set of model
     // ids the Specify prompt's drop-down offers, so a model you looked up once is one click away
     // forever after. It accumulates two ways and is reset one way:
@@ -364,6 +374,7 @@ namespace Agentmaster
     json::Value SessionsRoundTrip(const json::Value& disk);
     json::Value TemplatesRoundTrip(const json::Value& disk);
     json::Value RecentDirsRoundTrip(const json::Value& disk);
+    json::Value FilterFoldersRoundTrip(const json::Value& disk); // filter-folders.json (By Folder's pick history, SIDE_PANEL.md §2l)
     json::Value ModelListRoundTrip(const json::Value& disk);
     json::Value OpenWindowsRoundTrip(const json::Value& disk);
     json::Value LayoutRoundTrip(const json::Value& disk);
@@ -377,6 +388,36 @@ namespace Agentmaster
     std::vector<PlanTemplate> LoadTemplates();
     void SaveRecentDirs(const std::vector<std::wstring>& dirs);
     std::vector<std::wstring> LoadRecentDirs();
+    // Agentmaster (SIDE_PANEL.md §2l "The By Folder submenu"): By Folder's PICK HISTORY, read from the profile's
+    // filter-folders.json on every call — another window may have just picked a folder (one list for the app).
+    //   returns - the history, most recent pick first, normalized; empty when the file is missing, unreadable (logged by
+    //             the read) or not a document of ours.
+    // Throws std::bad_alloc only.
+    std::vector<SidePanelFolderFilter> LoadFilterFolderHistory();
+    // LoadFilterFolderHistory with an explicit profile folder — the harness's seam (AgentmasterStateDir() is resolved once
+    // per process, and a direct harness run must never touch the live profile's history).
+    //   profileDir - the profile folder holding filter-folders.json.
+    //   returns    - as LoadFilterFolderHistory.
+    // Throws std::bad_alloc only.
+    std::vector<SidePanelFolderFilter> LoadFilterFolderHistoryIn(const std::wstring& profileDir);
+    // Record folders PICKED through By Folder (the folder card's Filter, a submenu line turned on) — or, with `onlyMissing`,
+    // seed the window's own filters the history lacks — as a read-modify-write of the FRESHEST file: every window of the
+    // process writes this one list, one write at a time (a process-wide lock around the read and the write). The rules are
+    // SidePanelFolderHistoryAfterPicks's: each pick to the top, in its spelling and choice, the first pick first, cut to
+    // kSidePanelFolderHistoryMax. Nothing is written when nothing moved, and nothing when the file exists but cannot be read
+    // (PERSISTENCE.md §15: an unreadable history is not an empty one — writing would replace it with these picks alone).
+    //   picks       - the folders, most recent first (a path that is not an absolute folder is skipped).
+    //   onlyMissing - add only the folders the history does not list (the submenu's seeding of the record at its open).
+    //   returns     - the history as it now stands (what the submenu then lists): the written one, the unchanged one, or
+    //                 an EMPTY one when the file could not be read (the submenu still lists the window's own filters).
+    // Throws std::bad_alloc only (a failed write is logged by the state-file writer; the file keeps its bytes).
+    std::vector<SidePanelFolderFilter> RememberFilterFolderPicks(const std::vector<SidePanelFolderFilter>& picks, bool onlyMissing);
+    // RememberFilterFolderPicks with an explicit profile folder — the harness's seam (see LoadFilterFolderHistoryIn).
+    //   profileDir          - the profile folder holding filter-folders.json.
+    //   picks, onlyMissing  - as RememberFilterFolderPicks.
+    //   returns             - as RememberFilterFolderPicks.
+    // Throws std::bad_alloc only.
+    std::vector<SidePanelFolderFilter> RememberFilterFolderPicksIn(const std::wstring& profileDir, const std::vector<SidePanelFolderFilter>& picks, bool onlyMissing);
     // Replace the saved LIST in model-list.json and KEEP its last specified model: the "last" key is
     // re-read from the freshest file and written back unchanged, so no list rewrite (a Fetch reset,
     // or any future caller) can wipe what the prompt opens with. Best-effort like every state write:

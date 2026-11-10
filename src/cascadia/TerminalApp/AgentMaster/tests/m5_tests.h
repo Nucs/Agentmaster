@@ -265,6 +265,11 @@ void TestSessionTimingText();
 // clamped, NaN / infinite / negative inputs neutralized, and a seeded 20000-case sweep of the invariants
 // (tests_sidepanel.cpp)
 void TestPointerCardPlacement();
+// PointerCardPlacement.h PlaceSubmenuCard (SIDE_PANEL.md §2l "The By Folder submenu"): where the funnel panel's "By Folder…"
+// row opens its hover submenu — beside the panel's right edge when the whole card fits there, else its left edge, else
+// the roomier side clamped into the window; its top level with the row, clamped; an unmeasured window never clamped;
+// NaN / negative / reversed inputs neutralized; and a seeded 20000-case sweep of the invariants (tests_sidepanel.cpp)
+void TestSubmenuCardPlacement();
 // VirtualListWindow.h (SIDE_PANEL.md §2f): which rows of the VIRTUALIZED side-panel card list get cards — the row
 // arithmetic at exact boundaries and outside the content, the viewport clamp of a list that shrank, the NEAR / FAR
 // hysteresis (kept while NEAR is covered, FAR otherwise, trimmed past twice FAR), the reveal range (it holds the row,
@@ -301,7 +306,10 @@ void TestSidePanelPins();
 // panel counts' "every facet but one"; the states' bits; the "active within" boundary; the edits (a folder trimmed, deduped by
 // key, re-choosing its subfolders; a state; a tag in any case; a window); the matcher (no filter lists all; a folder with or
 // without its subfolders at a segment boundary and through the inferred folder; OR inside a facet, AND across; the flags;
-// Untagged); the chips and their x; the record's JSON (round trip, tolerance) and its window-record key (tests_sidepanel.cpp)
+// Untagged); the chips and their x; the record's JSON (round trip, tolerance) and its window-record key; and By Folder's PICK
+// HISTORY behind its hover submenu (2026-11-10): repick to the top, the seeding of missing folders, the cap, the JSON, the
+// filter-folders.json file through the `...In` seams on a scratch profile, the submenu's lines and their toggle, and a
+// line's coverage equal to the matcher's verdict (tests_sidepanel.cpp)
 void TestSidePanelFilters();
 // tests_presets.cpp — HARNESSES.md, PRESETS (LaunchPresets.h, the pure core): the list starts EMPTY (no template is added
 // by itself) and an empty list offers "Add presets…" with help text naming the way to the Presets tab (a list of hidden
