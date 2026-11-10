@@ -1,6 +1,7 @@
-# The durable Telegram outbox — every message survives (DESIGN ONLY, 2026-11-10)
+# The durable Telegram outbox — every message survives (designed 2026-11-10; first part implemented, NOT BUILT)
 
-> **Status: design, nothing built.** The owner's ask (2026-11-10): "What design will allow us to never lose a message? Can we
+> **Status: designed 2026-11-10; its first part was implemented the same day ([MESSAGING.md](MESSAGING.md) §21.50, NOT BUILT
+> into any install yet). §14 says what was built and where it differs from the design below.** The owner's ask (2026-11-10): "What design will allow us to never lose a message? Can we
 > queue messages while persisting to disk and dequeueing, all efficiently. Even bad gateway, all messages must be durable and
 > queue-wise recovering. Consider persisting ways, one of them single-line jsonl writing and reading concurrently on disk."
 > The decisions are the owner's (AskUserHtmlQuestion, 2026-11-10), each recorded where it applies:
@@ -342,3 +343,34 @@ points: every durable item delivered at least once, each topic in order, nothing
   edited" notice); if Telegram no longer lets a bot delete them, the renames leave notices in the topics. Unverified.
 - **O4 — disk full**: a refused append fails the queuing call; the in-memory item still goes, the census shows `journal
   write failed`, and the next successful append resumes durability. Never a reason to stop sending.
+
+## 14. As built (2026-11-10, the owner's "Implement"; NOT BUILT into any install yet)
+
+What exists, from design phases P1, P2, part of P5 and part of P6 ([MESSAGING.md](MESSAGING.md) §21.50 describes it as it works).
+The places below where the code differs from §3 – §11 are deliberate cuts for this first part.
+
+**The code.** [`MessagingOutbox.h`](../../src/cascadia/TerminalApp/AgentMaster/MessagingOutbox.h) (pure, header-only: UTF-8,
+CRC-32, sealed lines, every record, the fold, the answer table, the item class and retry policy, the back-off, the breaker, the
+lanes, the topic probe's state machine, the plain-text fallback) ·
+[`MessagingOutboxJournal.{h,cpp}`](../../src/cascadia/TerminalApp/AgentMaster/MessagingOutboxJournal.h) (the files, `.lock`,
+the flusher, the compaction) · `Messaging.{h,cpp}` (`_enqueue`, `_sendLoop`, `_outboxRecover`, `_tendHeldThreads`,
+`_settleGoneThread`, `_outboxCheckpointIfDue`, `_queueRecoveredFallback`, `_outboxCensusText`; `_deleteTopic`'s idle wait) ·
+`TelegramApi` (`Abort` ends every request, `Shutdown`) · m5 `TestMessagingOutbox`.
+
+| Design | As built |
+|---|---|
+| §3 classes `d` / `l` / `e`, lanes `topic:<uid>` / `search` / `main` / `nt:` / `k:` | **Journaled = the plain posts** of the conversation (sendMessage / sendRichMessage with no key, no buttons, not history, not as the user, no upload — `OutboxItemIsDurable`). Keyed items and the rest stay in memory; their state machines rebuild them. **A lane is a THREAD id**: the posts of one thread keep their order behind a waiting post; there is no topic `uid` (a Rekey keeps the thread, so the lane follows the topic anyway) |
+| §3 `fb`, `ref`, `then` | `fb` is built (a rich item's classic HTML). **No `ref` and no `then`**: a recovered item goes without its callback — no quote unless its put carried one, no completion. In-run items keep their callbacks (`onDone`, `beforeSend`) as before |
+| §4 segments `j-<id>.jsonl` (8 MB), `blobs\` | **One file, `outbox.jsonl`**, rewritten compact at every start and past 16 MB (temp + rename); no blobs (uploads are not journaled). Records `hdr` (the bot's token hash and the owner's chat: another bot's or owner's journal is discarded), `put`, `try`, `ok`, `retry`, `drop`, `lane`, `flood`; no `hold`, `cursor`, `create`, `created` |
+| §5 the outbox's own leaf lock | **The service's `_mtx`** orders the queue and the put (a put is appended in the same lock as the queue's change); the journal's own mutexes are leaves under it. Every append happens under `_mtx` or on the send thread for the item it holds, which the in-run compaction (send thread, under `_mtx`) relies on. Groups (`g` / `gn`) are not built: a message's chunks are separate puts |
+| §5.5 the flusher's own handle, `.lock` | As designed: a second handle, ≤ 250 ms; `.lock` with no sharing and delete-on-close (a held lock = memory only for that run, logged) |
+| §6 recovery | As designed, minus groups, `then` replay and the cursor: torn tail and damaged lines skipped and counted, `try`-without-outcome items sent again (counted `resent`), the back-off and the redirects kept, the flood hold restored in wall time |
+| §7 the answer table and the breaker | As designed for ok / not modified / 429 / 5xx and no answer / parse and rich refusals / thread not found / other refusals (dead letters in `dead.jsonl`). **Not built**: the quote-refused row, the edit-target-gone row's re-post (edits are not journaled), 401 / 403 handling, the hourly Search note about dead letters, the status line. A **short 429** puts the item back in its place instead of calling again inline |
+| §7 retries | Durable and keyed: until Telegram answers. **Bounded** (3 attempts) for the rest; **never** for createForumTopic, tap answers, chat actions, sends as the user, the secretary's sends and uploads |
+| §8.2 confirming | As designed (two `editForumTopic` probes with the record's name and icon; a thread no record names is probed with no change), plus: no verdict waits 30 s doubling to 5 min; a thread the probes find 3 times within 10 min while it keeps refusing posts counts as gone. **Only posts hold a thread** (a topic call's or a delete's "not found" stays its answer) |
+| §8.3 making it again | **Through the topic sync**: the gone topic's record is forgotten, so the sync makes the topic again like a new one, with its history replayed (§21.9) — the queued mirror and replay items are DROPPED (the replay sends them again), the rest moves to the new thread (`lane`), a silent "♻️ This topic was made again" line goes first, the verbose mode carries over. No new topic within 15 min → the items are given up (their callbacks hear "message thread not found") |
+| §8.4 create / created + the echo | **Not built**: topic creates stay the sync's direct calls, as before |
+| §8.6 idle and closed | As designed: an idle delete waits while durable items for its thread are queued; any other delete drops them, journaled with the reason |
+| §9.2 the cursor in the journal | **Not built**: the mirror's cursor stays in `state.json` only, so a kill within `kStateProgressSaveGapMs` after a mirror pass shows that pass twice (at-least-once) |
+| §10 one Telegram client per thread | **Instead**: one client whose `Abort` ends every request in flight and whose `Shutdown` refuses new ones (`Stop` uses it) — the stop no longer misses the long poll |
+| §10 the census and the status line | The census line's `outbox(…)` part is built; the cog's status line and the start note's backlog are not |

@@ -67,6 +67,8 @@
 #include "MessagingSessionControl.h" // §21.41: the card's ⎋ Esc and 🌙 Deactivate (the window actions, its decisions, the answers' words and texts)
 #include "MessagingEnter.h" // §21.47: /enter, ONE Enter in the terminal (the window action, its decision, the read-back, the answers and texts)
 #include "MessagingFromQueue.h" // §21.44: a topic message that waited in the queue (when it waits, the mirror's test, its 🫡)
+#include "MessagingOutbox.h" // §21.50: the durable outbox's pure core (the journal's lines and fold, the answer table, the classes, lanes, probes)
+#include "MessagingOutboxJournal.h" // §21.50: the durable outbox's files (the journal, dead.jsonl, .lock, the flusher)
 #include "TuiMenus.h" // §21.34: a local command's dialog answered from Telegram (/add-dir: the screen parser, the press, the card)
 #include "RemoteLaunch.h"
 #include "WindowTabTools.h" // §21.25: WindowCensus (ServiceHooks::windowCensus)
@@ -637,6 +639,36 @@ namespace Agentmaster::Msg
             /// over (it carries the change the tap waits for); an item dropped from the outbox lets them go at once.
             /// </summary>
             std::vector<TapHoldRef> tapHolds;
+            /// <summary>
+            /// §21.50, the DURABLE OUTBOX: the caller's say over the item's class — -1 (the default) lets _enqueue decide by the rule
+            /// (OutboxItemIsDurable: a plain post of the conversation), 0 never journals it (a chunk or fallback of a KEYED message: a
+            /// card's pieces must not come back after a restart without the card's own bookkeeping), 1 always does.
+            /// </summary>
+            int durability{ -1 };
+            /// <summary>§21.50: decided by _enqueue — the item is journaled (when the journal is open), recovered at every start and
+            /// retried until Telegram takes or refuses it. A ⚠ footgun to set by hand: use `durability`.</summary>
+            bool durable{ false };
+            /// <summary>§21.50: how a transient failure (a 5xx, no answer) is retried (OutboxRetryFor), decided by _enqueue.</summary>
+            OutboxRetry retry{ OutboxRetry::Never };
+            /// <summary>§21.50: the item's id in the outbox journal (0 = not journaled: not durable, or the journal is closed or a
+            /// write failed). Every later record about the item (try / ok / retry / drop) names it.</summary>
+            uint64_t journalId{ 0 };
+            /// <summary>§21.50: transient failures so far — the back-off's step (OutboxBackoffMs) and the Bounded policy's count.</summary>
+            uint32_t attempts{ 0 };
+            /// <summary>§21.50: the back-off holds the item until this GetTickCount64 ms (0 = it may go now). While it waits, the later
+            /// posts of its thread wait behind it (OutboxLaneBlocks): a reply never lands above its prompt.</summary>
+            int64_t notBeforeMs{ 0 };
+            /// <summary>§21.50: queued by the live MIRROR's pass (the transcript's content, set by _enqueue from the tick's mirror scope):
+            /// a topic made again replays its whole history (§21.9), so such an item is dropped there instead of moved.</summary>
+            bool fromMirror{ false };
+            /// <summary>§21.50: came back from the journal at this start. It has no callback (`onDone`, `beforeSend` and the fallback
+            /// lambdas died with the last run), so the send loop applies its fallback itself (`fallbackHtml`, the plain-text rule).</summary>
+            bool recovered{ false };
+            /// <summary>§21.50: a RICH message's classic HTML form ("" = none): journaled as the put's `fb`, so a recovered rich message
+            /// Telegram refuses goes as this HTML in its place, as its lost callback would have sent it.</summary>
+            std::wstring fallbackHtml;
+            /// <summary>§21.50: when it was queued (Unix ms; _enqueue stamps it): the census's oldest age, the journal's `at`.</summary>
+            int64_t queuedWallMs{ 0 };
         };
         /// <summary>
         /// The Bot API method an outbox item calls, as the traffic census and the flood parking name it: "sendDocument" for a
@@ -661,6 +693,95 @@ namespace Agentmaster::Msg
         void _enqueue(OutItem item);
         /// <summary>The next outbox sequence number (for a message whose parts and fallbacks must keep one place). Takes `_mtx`.</summary>
         uint64_t _takeOutSeq();
+
+        // ----- §21.50: the DURABLE OUTBOX (MessagingOutbox.h, MessagingOutboxJournal.h, doc/agentmaster/MESSAGING_OUTBOX.md) -----
+
+        /// <summary>
+        /// The facts an item's class is decided by (OutboxItemFacts): its method as the census names it, its key, history, the
+        /// secretary's client, a send as the user (business_connection_id), an upload, buttons (reply_markup).
+        /// </summary>
+        /// <param name="item">The item.</param>
+        /// <param name="method">Receives the method name the facts' view points into (keep it alive while the facts are used).</param>
+        /// <returns>The facts.</returns>
+        /// <exception cref="std::bad_alloc">If the method name cannot be copied.</exception>
+        static OutboxItemFacts _outboxFactsOf(const OutItem& item, std::wstring& method);
+        /// <summary>The journal's view of an item (its put): ids, order keys, method, parameters, fallback, mirror mark, age.</summary>
+        /// <param name="item">A journaled item.</param>
+        /// <param name="withParams">Copy the parameters too (a deep copy); false when the caller passes them pre-serialized to
+        /// OutboxPutLine (_enqueue, under `_mtx`: no needless copy there).</param>
+        /// <returns>The put.</returns>
+        /// <exception cref="std::bad_alloc">If the parameters or the fallback cannot be copied.</exception>
+        static OutboxPut _outboxPutOf(const OutItem& item, bool withParams = true);
+        /// <summary>
+        /// Opens the journal at a start and puts what it still holds back into the queue (MESSAGING_OUTBOX.md §6): the lock,
+        /// the fold (a torn tail and damaged lines skipped and counted), the bot and chat check (a journal of another token or
+        /// owner is discarded, logged), the items rebuilt (recovered: no callbacks; their back-off and thread redirects kept),
+        /// the flood hold restored when it is still ahead, then the journal rewritten compact. Called by _start after the state
+        /// file is loaded and the queue cleared, before any thread runs. Without a journal (another process holds its lock, the
+        /// disk refuses it) the bot runs as before §21.50 — the queue in memory only — and says so in hooks.log.
+        /// </summary>
+        /// <param name="botHash">The token's hash (TokenHash): the journal's owner.</param>
+        /// <exception cref="std::bad_alloc">If memory runs out (the caller's catch logs it; the bot then starts without a journal).</exception>
+        void _outboxRecover(const std::wstring& botHash);
+        /// <summary>
+        /// Journals that a JOURNALED item leaves the queue unsent (a `drop` line): superseded, its topic deleted, replayed in a
+        /// topic made again, given up. Nothing for an item that is not journaled, or while no journal is open. Call with `_mtx`
+        /// held (it reads `_journal`; the in-run compaction relies on every append outside the send thread's own being under it).
+        /// </summary>
+        /// <param name="item">The item.</param>
+        /// <param name="why">Why, in words (the journal's `why`).</param>
+        void _outboxDropLocked(const OutItem& item, std::wstring_view why) noexcept;
+        /// <summary>
+        /// Puts an item that was taken out for its call back into the queue (a transient failure's back-off, a held thread, a
+        /// short 429), unless a newer item with its key replaced it meanwhile: then it is dropped, handing its tap holds over (the
+        /// newer one carries the newer change), and its drop is journaled. Call with `_mtx` held.
+        /// </summary>
+        /// <param name="item">The item (moved in).</param>
+        /// <exception cref="std::bad_alloc">If the queue cannot grow (the item is then lost for this run; its journal line keeps it
+        /// for the next start).</exception>
+        void _requeueLocked(OutItem&& item);
+        /// <summary>
+        /// The send thread's journal compaction, between two items (none in flight, so every live journaled item is in the queue):
+        /// once the journal passes kOutboxCheckpointBytes it is rewritten with the header, the live items' puts (their current
+        /// threads), their back-off and the flood hold. Takes `_mtx` for the rewrite (milliseconds: a few live items).
+        /// </summary>
+        void _outboxCheckpointIfDue() noexcept;
+        /// <summary>
+        /// Journals Telegram's flood hold as it stands (`flood`, in wall time), so a restart does not call straight into a hold it
+        /// forgot. Call with `_mtx` held, after the parking changed (_parkForFlood).
+        /// </summary>
+        void _journalFloodLocked() noexcept;
+        /// <summary>
+        /// A RECOVERED item that Telegram refused for good: its fallback, as its lost callback would have sent it — a rich message
+        /// as its classic HTML (`fallbackHtml`), an HTML message whose entities Telegram cannot parse as plain text — in its place
+        /// (seq, sub + 1). Send thread.
+        /// </summary>
+        /// <param name="item">The refused item.</param>
+        /// <param name="r">Telegram's refusal.</param>
+        /// <returns>True when a fallback was queued (the item is then no dead letter).</returns>
+        /// <exception cref="std::bad_alloc">If the fallback cannot be built or queued.</exception>
+        bool _queueRecoveredFallback(const OutItem& item, const TgResult& r);
+        /// <summary>
+        /// The tick's care of the HELD threads (MESSAGING_OUTBOX.md §8): probes the due ones (editForumTopic with the topic's own
+        /// name and icon — "exists" also puts a drifted title back in sync; at most two probes a tick, through the call slot like
+        /// every topic call), releases a thread that exists, and settles a gone one (_settleGoneThread). Tick thread, after
+        /// _syncTopics. Never throws (Rule #18 inside: a failed pass leaves the threads held for the next tick).
+        /// </summary>
+        void _tendHeldThreads() noexcept;
+        /// <summary>
+        /// A confirmed-gone thread (§8.3): the first time, its session's record is forgotten (so the topic sync makes the topic
+        /// again, with its whole history — §21.9's replay), the queued items that replay re-sends (the mirror's, the history's)
+        /// are dropped, and the Search topic's thread is cleared when it was that one (_ensureSearchTopic makes it again). Then,
+        /// every tick: once the session's topic has a new thread, the thread is REDIRECTED there (journaled `lane`), every item
+        /// still queued for it moves over, a silent note opens the new topic, and its posts go; past kTopicGoneWaitMs with no new
+        /// topic (the session went idle or closed) its items are given up — each callback hears the refusal.
+        /// </summary>
+        /// <param name="threadId">The gone thread.</param>
+        void _settleGoneThread(int64_t threadId);
+        /// <summary>The census line's outbox part (`outbox(queued=… durable=… waiting=… held=… …)`), read under `_mtx`.</summary>
+        /// <returns>The part, with a leading space.</returns>
+        /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+        std::wstring _outboxCensusText();
 
         // ----- §21.28: a tapped button's answer, held while its work runs (MessagingTaps.h) -----
 
@@ -2993,6 +3114,52 @@ namespace Agentmaster::Msg
         std::deque<OutItem> _outbox;
         uint64_t _outSeq{ 0 };
         int64_t _lastSendMs{ 0 };
+        /// <summary>
+        /// §21.50, the DURABLE OUTBOX's journal: open from _start's recovery (_outboxRecover) until Stop closes it; null while the
+        /// bot is stopped, and for a run whose journal could not be opened (the queue is then in memory only, as before §21.50).
+        /// The POINTER is read and written under `_mtx` only (a window's reply may queue an item on a UI thread while Stop closes
+        /// it); a copy taken under the lock is used outside it. Every APPEND happens under `_mtx` or on the send thread for the
+        /// item it holds — the in-run compaction (_outboxCheckpointIfDue, send thread, under `_mtx`) relies on that.
+        /// </summary>
+        std::shared_ptr<OutboxJournal> _journal;
+        /// <summary>§21.50: the last journal id given (under `_mtx`); a recovery starts it above the journal's highest id.</summary>
+        uint64_t _outboxNextId{ 0 };
+        /// <summary>§21.50: the journal's owner — the token's hash — for the header a compaction writes (set at the recovery).</summary>
+        std::wstring _outboxBot;
+        /// <summary>
+        /// §21.50: the threads whose posts are HELD because Telegram said "message thread not found" (MESSAGING_OUTBOX.md §8), by
+        /// thread id, under `_mtx`: Probing (the tick probes them), Gone (they wait for the topic made again) and Released
+        /// (remembered for kTopicReleaseMemoryMs to count releases). Run memory: a restart's first refusal holds a thread again.
+        /// </summary>
+        std::map<int64_t, HeldThread> _heldThreads;
+        /// <summary>§21.50: gone thread → the thread of its topic made again (under `_mtx`; also restored from the journal's `lane`
+        /// lines): every item queued later for a gone thread — a callback's capture, a stale record copy — goes to the new one.</summary>
+        std::map<int64_t, int64_t> _threadRedirects;
+        /// <summary>§21.50: the circuit breaker over the send loop's transient failures (under `_mtx`; GetTickCount64 ms).</summary>
+        OutboxBreaker _outboxBreaker;
+        // §21.50: the census's outbox counters since the bot's start, all under `_mtx` (the 10-minute traffic line shows them).
+        /// <summary>Items the start recovered from the journal.</summary>
+        uint64_t _outboxRecovered{ 0 };
+        /// <summary>Of the recovered items, those cut off mid-call (a `try` with no outcome): sent again — Telegram may show them twice.</summary>
+        uint64_t _outboxResent{ 0 };
+        /// <summary>Transient failures (5xx, no answer) that were backed off instead of lost.</summary>
+        uint64_t _outboxRetries{ 0 };
+        /// <summary>Journaled items Telegram refused in every form: written to dead.jsonl.</summary>
+        uint64_t _outboxDead{ 0 };
+        /// <summary>Threads held after a "message thread not found".</summary>
+        uint64_t _outboxHolds{ 0 };
+        /// <summary>Gone threads whose items moved to their topic made again.</summary>
+        uint64_t _outboxRemade{ 0 };
+        /// <summary>When a back-off was last logged (GetTickCount64 ms): one line per kOutboxRetryLogGapMs, the census counts the rest.</summary>
+        int64_t _outboxRetryLoggedMs{ 0 };
+        /// <summary>§21.50: a failed journal write was logged this run (one line; the census counts every failure). Reset at _start.</summary>
+        std::atomic<bool> _journalFailureLogged{ false };
+        /// <summary>§21.50, send thread only: no compaction is tried before this GetTickCount64 ms (10 minutes after a failed one, so a
+        /// rename a reader keeps refusing is not retried on every pass of the send loop).</summary>
+        int64_t _outboxCheckpointRetryMs{ 0 };
+        /// <summary>§21.50, tick thread only: when an IDLE topic's delete last said it waits for its queued messages (one line per
+        /// session per kIdleDeleteWaitLogMs).</summary>
+        std::unordered_map<std::wstring, int64_t> _idleDeleteWaitLoggedMs;
         /// <summary>
         /// §21.28, the tapped buttons whose answer is not sent yet, behind their OWN leaf lock `_tapMtx` — a hold can go on any
         /// thread, also one that holds `_mtx` (OnTapHoldsGone), so nothing is ever taken while `_tapMtx` is held: `_mtx` before

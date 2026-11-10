@@ -266,6 +266,11 @@
          give the links a public address (pure, header-only; the cog's button copies it). -->
     <ClInclude Include="AgentMaster\MessagingFileLinksGuide.h" />
     <ClInclude Include="AgentMaster\MessagingFileServer.h" />
+    <!-- Agentmaster (MESSAGING.md section 21.50, doc/agentmaster/MESSAGING_OUTBOX.md): the DURABLE OUTBOX - its pure core (the
+         journal's lines and fold, the answer table, the classes, back-off, breaker, lanes, the topic probe; header-only) and its
+         files (the journal, dead.jsonl, the one-writer lock, the flusher thread; no Windows header in the .h). -->
+    <ClInclude Include="AgentMaster\MessagingOutbox.h" />
+    <ClInclude Include="AgentMaster\MessagingOutboxJournal.h" />
     <ClInclude Include="AgentMaster\TelegramApi.h" />
     <ClInclude Include="AgentMaster\Messaging.h" />
     <ClInclude Include="AgentMaster\RemoteLaunch.h" />
@@ -661,6 +666,11 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\TelegramApi.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <!-- Agentmaster (MESSAGING.md section 21.50): the durable outbox's files - the journal (one WriteFile per line, compacted by
+         temp + rename), dead.jsonl, the delete-on-close lock and the flusher with its own handle. Plain C++ + Win32, no PCH. -->
+    <ClCompile Include="AgentMaster\MessagingOutboxJournal.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <!-- Agentmaster (MESSAGING.md section 21.24): the Screen Image renderer - Direct2D + DirectWrite into a WIC bitmap, encoded

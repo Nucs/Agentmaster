@@ -337,6 +337,24 @@ namespace Agentmaster::Msg
             return r.httpStatus == 400 && !r.ThreadNotFound() && r.description.find(L"chat not found") == std::wstring::npos;
         }
 
+        /// <summary>
+        /// §21.50: whether a refused POST has a fallback that takes its place — a rich message Telegram refuses as rich
+        /// (RichRefusalWantsFallback: its classic HTML goes instead), an HTML message whose entities it cannot parse (its plain
+        /// text goes instead). Such a refusal is no dead letter: the fallback carries the message (queued by the item's callback in
+        /// this run, by the sender for a recovered item).
+        /// </summary>
+        /// <param name="method">The refused call's method.</param>
+        /// <param name="r">Telegram's refusal.</param>
+        /// <returns>True when a fallback form exists for this refusal.</returns>
+        bool RefusalHasOutboxFallback(std::wstring_view method, const TgResult& r) noexcept
+        {
+            if (method == L"sendRichMessage")
+            {
+                return RichRefusalWantsFallback(r);
+            }
+            return method == L"sendMessage" && !r.ok && r.httpStatus == 400 && r.description.find(L"can't parse entities") != std::wstring::npos;
+        }
+
         // Whether a refused RICH EDIT should be made again with the classic render (§21.15): RichRefusalWantsFallback's rule,
         // minus two answers about the message itself — "message is not modified" (it already shows this content) and "message
         // to edit not found" (it is gone; the caller's own handling must see that answer, not a second refusal).
@@ -747,6 +765,39 @@ namespace Agentmaster::Msg
             return th && th->type == json::Value::Type::Num ? static_cast<int64_t>(th->num) : 0;
         }
 
+        // ----- §21.50: the durable outbox -----
+
+        /// <summary>One back-off line in hooks.log per this long at most (a Telegram outage fails every item; the census counts them).</summary>
+        constexpr int64_t kOutboxRetryLogGapMs = 60 * 1000;
+        /// <summary>An idle topic whose delete waits for its queued messages says so once per this long per session.</summary>
+        constexpr int64_t kIdleDeleteWaitLogMs = 10 * 60 * 1000;
+        /// <summary>At most this many held threads are probed per tick (each probe is a call on the chat's budget).</summary>
+        constexpr size_t kHeldThreadProbesPerTick = 2;
+
+        /// <summary>
+        /// Set on the TICK thread while the live mirror of one topic runs (_onStateEdge, _followTranscript, _flushWorkLog): what is
+        /// queued then is the transcript's content, which a topic made again replays by itself (§21.9), so _enqueue marks those
+        /// items (OutItem::fromMirror) and a gone topic's settle drops them instead of moving them (they would show twice).
+        /// </summary>
+        thread_local bool t_outboxMirrorPass = false;
+
+        /// <summary>The scope of one topic's mirror pass (t_outboxMirrorPass): set for its life, cleared when it ends — a throw too.</summary>
+        struct OutboxMirrorPassScope
+        {
+            /// <summary>Marks the calling thread as in a mirror pass.</summary>
+            OutboxMirrorPassScope() noexcept
+            {
+                t_outboxMirrorPass = true;
+            }
+            /// <summary>Ends the mark.</summary>
+            ~OutboxMirrorPassScope()
+            {
+                t_outboxMirrorPass = false;
+            }
+            OutboxMirrorPassScope(const OutboxMirrorPassScope&) = delete;
+            OutboxMirrorPassScope& operator=(const OutboxMirrorPassScope&) = delete;
+        };
+
         // FNV-1a 32 of a text with its surrounding whitespace dropped: the identity the secretary echo guard
         // compares (Telegram may trim what it stores).
         uint32_t EchoHash(std::wstring_view text)
@@ -1128,6 +1179,16 @@ namespace Agentmaster::Msg
                 _steers.clear(); // §21.33: a watch of the last run names a send this run never made
                 _menuWatches.clear(); // §21.34: a menu watch of the last run names a card this run never posted
                 _outbox.clear();
+                // §21.50: the durable outbox's run state. What the last run left in the JOURNAL comes back right after this block
+                // (_outboxRecover); everything else the queue held (cards, edits, reactions, a replay batch) is rebuilt by its own
+                // state machine, as before.
+                _heldThreads.clear();
+                _threadRedirects.clear();
+                _outboxBreaker = OutboxBreaker{};
+                _outboxRecovered = _outboxResent = _outboxRetries = _outboxDead = _outboxHolds = _outboxRemade = 0;
+                _outboxRetryLoggedMs = 0;
+                _journalFailureLogged.store(false);
+                _idleDeleteWaitLoggedMs.clear(); // the tick's map: no tick runs during _start
                 _dirty.clear();
                 _seenLive.clear();
                 _secretaryEchoes.clear();
@@ -1251,6 +1312,17 @@ namespace Agentmaster::Msg
                 _tapsDue.clear();
                 _tapAnswersDue.store(false);
             }
+            // §21.50, the DURABLE OUTBOX: the last run's undelivered messages come back from the journal (after the state file — a
+            // gone topic's record is looked up there — and before any thread runs, so the send loop starts with them in place). A
+            // failure here costs durability for this run, never the start.
+            try
+            {
+                _outboxRecover(mainHash);
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"MessagingService::_start (_outboxRecover)"); // Rule #18; recovery: the queue in memory only
+            }
             // The registry notifies every change of every session; the service only marks the session
             // dirty and wakes the tick (never any work on the notifying thread).
             {
@@ -1304,13 +1376,17 @@ namespace Agentmaster::Msg
             _stop.store(true);
             _tickCv.notify_all();
             _sendCv.notify_all();
+            // §21.50: EVERY call in flight ends at once — the long poll, the send loop's call, a topic call of the tick — and no
+            // thread starts a new one (TelegramApi::Shutdown; one Abort slot used to hold only the last call to start, so a stop
+            // during a send missed the long poll and waited up to ~40 s, on the UI thread when the cog's Save stopped the bot).
+            // An item whose call is cut off this way stays in the journal and goes at the next start.
             if (_api)
             {
-                _api->Abort(); // the long poll returns at once
+                _api->Shutdown(); // the long poll returns at once
             }
             if (_secretaryApi)
             {
-                _secretaryApi->Abort(); // the secretary's long poll too (§21.11)
+                _secretaryApi->Shutdown(); // the secretary's long poll too (§21.11)
             }
             // §21.43: the voice thread goes before the other joins — its engine is killed first, so a transcription in flight
             // fails fast instead of holding the stop (Messaging.Voice.cpp); it uses `_api`, which goes only at the very end.
@@ -1341,6 +1417,20 @@ namespace Agentmaster::Msg
             // §21.32.4: the file links' server stops with the bot, and the linked set is saved.
             _filesStop();
             _saveStateIfDirty(true);
+            // §21.50: the journal closes after every thread that appends to it is joined — flushed (a clean stop is power-safe at
+            // once) and its .lock released. What is still queued stays in it for the next start. A window's reply that queues an
+            // item from now on finds no journal (memory only, as before §21.50).
+            {
+                std::shared_ptr<OutboxJournal> journal;
+                {
+                    std::lock_guard lk{ _mtx };
+                    journal = std::move(_journal);
+                }
+                if (journal)
+                {
+                    journal->Close();
+                }
+            }
             // A clean stop removes the run marker (a marker found at the next start means a crash).
             ::DeleteFileW((_profile + L"\\messaging\\run.marker").c_str());
             if (_tokenMutex)
@@ -1968,6 +2058,9 @@ namespace Agentmaster::Msg
                 _answerDueTaps();
                 // §21.42: a card that waited too long for its picture goes now without a new one (a frozen window must not stop it).
                 _expireCardPictureWaits();
+                // §21.50: the journal's compaction, here between two items — none is in flight, so every live journaled item is in
+                // the queue and goes into the rewrite (a quick size check while the journal is small).
+                _outboxCheckpointIfDue();
                 OutItem item;
                 int64_t waitMs = 0;
                 {
@@ -1989,12 +2082,53 @@ namespace Agentmaster::Msg
                     const int64_t now = static_cast<int64_t>(::GetTickCount64());
                     auto best = _outbox.end();
                     int64_t parkedUntil = 0; // the earliest deadline among the skipped items: how long to wait when all are parked
-                    for (auto it = _outbox.begin(); it != _outbox.end(); ++it)
+                    // §21.50: the CIRCUIT BREAKER — Telegram failed kOutboxBreakerThreshold calls in a row: nothing goes until its
+                    // pause ends, then one item probes (the next pick).
+                    const int64_t breakerUntil = OutboxBreakerHoldsUntil(_outboxBreaker, now);
+                    // §21.50: the LANES — inside one thread a post never overtakes an earlier post that waits (in its back-off, or
+                    // under its method's flood hold), so a reply never lands above its prompt; and a HELD thread's posts wait for its
+                    // probe (MESSAGING_OUTBOX.md §8). Across threads the order below is unchanged.
+                    OutboxLaneBlocks lanes;
+                    int64_t backoffUntil = 0; // the earliest back-off deadline among the skipped items
+                    if (breakerUntil == 0)
                     {
-                        if (const int64_t until = FloodParkedUntil(it->asSecretary ? _secretaryFloodParking : _floodParking, _outItemMethod(*it), now); until > 0)
+                        for (const auto& o : _outbox)
+                        {
+                            const std::wstring m = _outItemMethod(o);
+                            if (OutboxMethodPostsIntoThread(m) &&
+                                (o.notBeforeMs > now || FloodParkedUntil(o.asSecretary ? _secretaryFloodParking : _floodParking, m, now) > 0))
+                            {
+                                lanes.NoteWaiting(ThreadIdOf(o.params), o.seq, o.subSeq);
+                            }
+                        }
+                    }
+                    for (auto it = breakerUntil == 0 ? _outbox.begin() : _outbox.end(); it != _outbox.end(); ++it)
+                    {
+                        const std::wstring m = _outItemMethod(*it);
+                        if (const int64_t until = FloodParkedUntil(it->asSecretary ? _secretaryFloodParking : _floodParking, m, now); until > 0)
                         {
                             parkedUntil = parkedUntil == 0 ? until : (std::min)(parkedUntil, until); // (std::min): the <windows.h> macro
                             continue;
+                        }
+                        if (it->notBeforeMs > now)
+                        {
+                            backoffUntil = backoffUntil == 0 ? it->notBeforeMs : (std::min)(backoffUntil, it->notBeforeMs);
+                            continue;
+                        }
+                        if (OutboxMethodPostsIntoThread(m))
+                        {
+                            const int64_t thread = ThreadIdOf(it->params);
+                            if (thread > 0)
+                            {
+                                if (const auto held = _heldThreads.find(thread); held != _heldThreads.end() && HeldThreadHoldsPosts(held->second))
+                                {
+                                    continue; // its topic may be gone: the tick's probe releases (or moves) it
+                                }
+                            }
+                            if (!lanes.Empty() && lanes.Blocks(thread, it->seq, it->subSeq))
+                            {
+                                continue; // an earlier post of its thread waits
+                            }
                         }
                         if (best == _outbox.end() || static_cast<int>(it->prio) < static_cast<int>(best->prio) ||
                             (it->prio == best->prio && (it->seq < best->seq || (it->seq == best->seq && it->subSeq < best->subSeq))))
@@ -2004,8 +2138,18 @@ namespace Agentmaster::Msg
                     }
                     if (best == _outbox.end())
                     {
-                        // Every queued item waits for Telegram's flood control: sleep (in slices, below) until the first deadline.
-                        waitMs = (std::max<int64_t>)(1, parkedUntil - now);
+                        // Every queued item waits — for Telegram's flood control, its back-off, the breaker, or a held thread: sleep
+                        // (in slices, below) until the first deadline. With none (only held threads), half a second: the tick's
+                        // release wakes the loop anyway.
+                        int64_t until = breakerUntil;
+                        for (const int64_t d : { parkedUntil, backoffUntil })
+                        {
+                            if (d > 0)
+                            {
+                                until = until == 0 ? d : (std::min)(until, d);
+                            }
+                        }
+                        waitMs = until > 0 ? (std::max<int64_t>)(1, until - now) : 500;
                     }
                     // A history message (§21.9) is only ever the best item when nothing else is queued; it waits the longer
                     // gap, goes only while the last minute holds fewer than kHistoryCallsPerMinute calls (the chat's flood
@@ -2059,10 +2203,28 @@ namespace Agentmaster::Msg
                     {
                         LogSwallowedException(L"MessagingService::_sendLoop (beforeSend)"); // the item goes as it is
                     }
+                    // §21.50: once — the parameters now carry the quote, and an item that goes again after a back-off or a held
+                    // thread must not have it appended a second time (json::Value::Set adds a member, it never replaces one).
+                    item.beforeSend = nullptr;
                 }
                 // §21.48: AFTER beforeSend (which may just have set the quote): a reply inside a thread never quotes a message the
                 // service moved into that thread — the message sits in "All", not in the thread.
                 _dropQuoteOfMovedMessage(item.params);
+                // §21.50: a journaled item's `try` line goes right before the call: if the process ends during the call, the next
+                // start finds a try with no outcome and sends the item again (D-O2, at-least-once). This thread is joined before
+                // Stop closes the journal, so the copy below cannot outlive it.
+                std::shared_ptr<OutboxJournal> journal;
+                if (item.journalId != 0)
+                {
+                    {
+                        std::lock_guard lk{ _mtx };
+                        journal = _journal;
+                    }
+                    if (journal)
+                    {
+                        journal->Append(OutboxTryLine(item.journalId, item.attempts + 1, WallMs()));
+                    }
+                }
                 // One call with the client the item names: a send as the user through the SECRETARY bot (§21.11) uses its
                 // client, which exists for the whole run when it was made (it is reset only after this thread is joined).
                 const auto call = [this, &item]() {
@@ -2129,14 +2291,17 @@ namespace Agentmaster::Msg
                             // §21.28: the newer item carries the change a tapped button waits for (the same message, a newer
                             // text), so it takes over this stale one's holds instead of letting the tap answer before it.
                             MoveTapHolds(item.tapHolds, newer->tapHolds);
+                            _outboxDropLocked(item, L"superseded"); // §21.50: nothing for an item that is not journaled
                         }
                     }
                     continue;
                 }
                 if (!r.ok && r.httpStatus == 429)
                 {
-                    // A SHORT wait (up to kFloodParkAfterSec): Telegram's pacing verdict is waited out here, then the same
-                    // item is retried once — the outbox's order is kept, and everything waits a moment.
+                    // A SHORT wait (up to kFloodParkAfterSec): Telegram's pacing verdict is waited out here, then the same item is put
+                    // back in its place — §21.50: no second call made inline, whose own 429 used to reach the callback as a failure (a
+                    // lost message). Its priority and sequence are unchanged, so it is the next pick: the outbox's order is kept, and
+                    // everything waits a moment.
                     const int64_t wait = std::max<int64_t>(1, r.retryAfterSec) * 1000;
                     _log(L"[msg] pacing: 429 on " + item.method + L", waiting " + std::to_wstring(wait / 1000) + L" s");
                     _noteFlood(item.method, r.retryAfterSec);
@@ -2146,10 +2311,165 @@ namespace Agentmaster::Msg
                     }
                     {
                         std::lock_guard lk{ _mtx };
+                        // The next call keeps the gap after the wait. It is counted in the call window when it is made (its pick),
+                        // as every call is — counting it here too would count it twice.
                         _lastSendMs = static_cast<int64_t>(::GetTickCount64());
-                        _noteCallLocked(_lastSendMs); // the retry is a call into the chat too
+                        _requeueLocked(std::move(item));
                     }
-                    r = call();
+                    continue;
+                }
+                // ===== §21.50: the ANSWER TABLE for everything else (ClassifyOutboxAnswer, MESSAGING_OUTBOX.md §7) =====
+                const OutboxVerdict verdict = ClassifyOutboxAnswer(r);
+                {
+                    // The CIRCUIT BREAKER hears every answer: a transient failure counts toward it; any HTTP answer below 500 — a
+                    // refusal too — proves Telegram is reachable and closes it.
+                    std::wstring breakerLog;
+                    {
+                        std::lock_guard lk{ _mtx };
+                        const int64_t tick = static_cast<int64_t>(::GetTickCount64());
+                        if (verdict == OutboxVerdict::Transient)
+                        {
+                            if (NoteOutboxFailure(_outboxBreaker, tick))
+                            {
+                                breakerLog = L"[msg] outbox: Telegram did not answer " + std::to_wstring(_outboxBreaker.failuresInRow) + L" calls in a row (" + r.description +
+                                             L"): nothing is sent for " + std::to_wstring(_outboxBreaker.pauseMs / 1000) + L" s, then one message tries; the queue is kept";
+                            }
+                        }
+                        else if (r.ok || (r.httpStatus > 0 && r.httpStatus < 500))
+                        {
+                            const int64_t openedAt = _outboxBreaker.openedAtMs;
+                            if (NoteOutboxSuccess(_outboxBreaker))
+                            {
+                                breakerLog = L"[msg] outbox: Telegram answers again after " + std::to_wstring((tick - openedAt) / 1000) + L" s; the queue goes on";
+                            }
+                        }
+                    }
+                    if (!breakerLog.empty())
+                    {
+                        _log(breakerLog);
+                    }
+                }
+                if (verdict == OutboxVerdict::Transient &&
+                    (item.retry == OutboxRetry::Forever || (item.retry == OutboxRetry::Bounded && item.attempts + 1 < kOutboxBoundedAttempts)))
+                {
+                    // A 5xx or no answer at all: Telegram may never have seen the call. Not answered, so no onDone yet: the item backs
+                    // off in its place — its thread's later posts wait behind it (OutboxLaneBlocks) — and goes again; a durable one
+                    // until Telegram answers (§2's first guarantee), a bounded one at most kOutboxBoundedAttempts times in all. Before
+                    // §21.50 this was a lost message (~1,500 502s and ~250 transport failures in production's messaging.log).
+                    ++item.attempts;
+                    const int64_t tick = static_cast<int64_t>(::GetTickCount64());
+                    const int64_t backoff = OutboxBackoffMs(item.attempts, item.seq * 131u + item.subSeq);
+                    item.notBeforeMs = tick + backoff;
+                    const std::wstring why = r.httpStatus > 0 ? L"HTTP " + std::to_wstring(r.httpStatus) : r.description;
+                    if (journal && item.journalId != 0)
+                    {
+                        journal->Append(OutboxRetryLine(item.journalId, item.attempts, WallMs() + backoff, why));
+                    }
+                    const std::wstring retryLog = L"[msg] outbox: " + method + L" " + why + L" (attempt " + std::to_wstring(item.attempts) + L"): it goes again in " +
+                                                  std::to_wstring((backoff + 500) / 1000) + L" s" + (item.durable ? L"" : L" (in memory)");
+                    bool logIt = false;
+                    {
+                        std::lock_guard lk{ _mtx };
+                        ++_outboxRetries;
+                        if (tick - _outboxRetryLoggedMs >= kOutboxRetryLogGapMs)
+                        {
+                            _outboxRetryLoggedMs = tick; // one line a minute: an outage fails every item, the census counts them
+                            logIt = true;
+                        }
+                        _requeueLocked(std::move(item));
+                    }
+                    if (logIt)
+                    {
+                        _log(retryLog);
+                    }
+                    continue;
+                }
+                if (const int64_t thread = ThreadIdOf(item.params); verdict == OutboxVerdict::ThreadGone && thread > 0 && OutboxMethodPostsIntoThread(method))
+                {
+                    // MESSAGING_OUTBOX.md §8: the topic MAY be gone — never concluded from one refusal (Telegram has answered
+                    // transient nonsense before). The THREAD is held (its posts wait, edits do not), the item keeps its place, and the
+                    // tick probes the thread by its id — never by its title, which drifts (D-O4). A card that used to be re-posted
+                    // into a deleted thread every 60 s for days (5,482 refusals) now waits here instead, keyed: one per topic. Only a
+                    // POST is held: for a topic call, a chat action or a delete, "not found" is its answer (a delete of a gone thread
+                    // is done), which its callback hears below as before.
+                    std::wstring holdLog;
+                    {
+                        std::lock_guard lk{ _mtx };
+                        auto& h = _heldThreads[thread];
+                        const bool wasHolding = h.threadId != 0 && HeldThreadHoldsPosts(h);
+                        h.threadId = thread;
+                        // Whose topic it is NOW: the record that names the thread (a Rekey moves the topic to the tab's next session
+                        // and keeps its thread, so a session id remembered from an older hold may be stale).
+                        for (const auto& [sid, t] : _state.topics)
+                        {
+                            if (t.threadId == thread)
+                            {
+                                h.sessionId = sid;
+                                h.verbose = t.verbose;
+                                break;
+                            }
+                        }
+                        h.searchTopic = h.searchTopic || thread == _state.searchThreadId;
+                        const HeldThreadPhase phase = HoldThread(h, WallMs());
+                        if (!wasHolding)
+                        {
+                            ++_outboxHolds;
+                            holdLog = L"[msg] outbox: thread " + std::to_wstring(thread) + (h.sessionId.empty() ? std::wstring{} : L" (" + ShortId(h.sessionId) + L")") +
+                                      L" refused a " + method + L" (" + r.description + L"): " +
+                                      (phase == HeldThreadPhase::Gone ? std::wstring{ L"it kept refusing after its probes found it, so it counts as gone" }
+                                                                      : L"its messages wait, and the topic is probed in " + std::to_wstring(kTopicProbeFirstMs / 1000) + L" s");
+                        }
+                        _requeueLocked(std::move(item));
+                    }
+                    if (!holdLog.empty())
+                    {
+                        _log(holdLog);
+                    }
+                    continue;
+                }
+                // The item's LAST word in the journal: Telegram took it, or it leaves unsent — its fallback takes its place (queued by
+                // its callback below in this run; by the sender itself for a RECOVERED item, whose callback died with the last run),
+                // or it is a DEAD letter, kept in dead.jsonl (§2's first guarantee: refused in every form, never silently dropped).
+                if (item.journalId != 0 || item.recovered)
+                {
+                    try
+                    {
+                        if (verdict == OutboxVerdict::Ok)
+                        {
+                            if (journal && item.journalId != 0)
+                            {
+                                journal->Append(OutboxOkLine(item.journalId, r.result.type == json::Value::Type::Obj ? r.result.I64At(L"message_id", 0) : 0));
+                            }
+                        }
+                        else
+                        {
+                            const bool replaced = item.recovered ? _queueRecoveredFallback(item, r) : RefusalHasOutboxFallback(method, r);
+                            if (journal && item.journalId != 0)
+                            {
+                                journal->Append(OutboxDropLine(item.journalId, replaced ? std::wstring{ L"replaced by its fallback" } : r.description));
+                                if (!replaced)
+                                {
+                                    journal->AppendDead(OutboxDeadLine(_outboxPutOf(item), WallMs(), r.httpStatus > 0 ? L"HTTP " + std::to_wstring(r.httpStatus) + L": " + r.description : r.description));
+                                }
+                            }
+                            if (!replaced)
+                            {
+                                {
+                                    std::lock_guard lk{ _mtx };
+                                    ++_outboxDead;
+                                }
+                                const int64_t thread = ThreadIdOf(item.params);
+                                _log(L"[msg] outbox: a " + method + L" for " + (thread > 0 ? L"thread " + std::to_wstring(thread) : std::wstring{ L"the main view" }) +
+                                     L" was refused for good (" + (r.httpStatus > 0 ? L"HTTP " + std::to_wstring(r.httpStatus) + L": " : std::wstring{}) + r.description +
+                                     L"): kept in outbox\\dead.jsonl");
+                            }
+                        }
+                    }
+                    catch (...)
+                    {
+                        LogSwallowedException(L"MessagingService::_sendLoop (journal the outcome)"); // Rule #18; recovery: the next start
+                                                                                                    // sends a journaled item again
+                    }
                 }
                 if (item.onDone)
                 {
@@ -2273,6 +2593,8 @@ namespace Agentmaster::Msg
                         }
                         line += L" pictures(" + parts + L", " + std::to_wstring(pictureBytes / 1024) + L" KB drawn)";
                     }
+                    // §21.50: the durable outbox's health — what waits, what backed off, what is held, what died, the journal.
+                    line += _outboxCensusText();
                     _log(line);
                 }
                 // §21.32.4: the file links' housekeeping (the linked set saved and pruned, a server that could not start tried
@@ -2444,6 +2766,10 @@ namespace Agentmaster::Msg
                     }
                 }
                 _syncTopics();
+                // §21.50: the threads whose posts are held after a "message thread not found" — probed, released, or (gone) moved to
+                // their topic made again. After the sync: a gone topic forgotten on one tick is made again by the next tick's sync,
+                // and this pass sees the new thread right after it.
+                _tendHeldThreads();
                 _flushIdleNotices(WallMs()); // §21.31: the main view names the sessions whose topics just left as idle, once they settled
                 _stateNameTick(); // §21.11 + §21.13: at most one topic name follows its session's state and color per tick, within the budget
                 _directoryTick(); // §21.16: the pinned directory follows the fleet (a check every 15 s, an edit at most every 2 min)
@@ -2509,9 +2835,14 @@ namespace Agentmaster::Msg
                         topic = it->second;
                         mirror = _mirrors[sid];
                     }
-                    _onStateEdge(sid, topic, mirror, *s);
-                    _followTranscript(sid, topic, mirror, *s);
-                    _flushWorkLog(sid, topic, mirror, false);
+                    {
+                        // §21.50: what these queue is the transcript's content, which a topic made again replays by itself — marked so
+                        // (OutItem::fromMirror) for the gone-topic settle, which drops it there instead of showing it twice.
+                        const OutboxMirrorPassScope mirrorPass;
+                        _onStateEdge(sid, topic, mirror, *s);
+                        _followTranscript(sid, topic, mirror, *s);
+                        _flushWorkLog(sid, topic, mirror, false);
+                    }
                     _syncReactions(*s);
                     _sweepSteers(*s); // §21.33: after the reactions, so a steer the window put back gets its ✍ last
                     _updatePromptStatus(topic, mirror, *s); // §21.12: after the reactions (a phone prompt's 👨‍💻 goes first)
@@ -2684,6 +3015,12 @@ namespace Agentmaster::Msg
             FloodParking& parking = secretary ? _secretaryFloodParking : _floodParking;
             all = ParkForFlood(parking, method, retryAfterSec, now);
             remainingMs = (std::max<int64_t>)(0, FloodParkedUntil(parking, method, now) - now);
+            if (!secretary)
+            {
+                // §21.50: the hold goes to the journal in wall time, so a restart (a hot swap, a crash) does not call straight into a
+                // hold it forgot — the secretary bot's own parking is its own flood control and is not kept.
+                _journalFloodLocked();
+            }
         }
         const int64_t wall = WallMs();
         const std::wstring who = secretary ? std::wstring{ L"the secretary bot's " } : std::wstring{};
@@ -2742,6 +3079,27 @@ namespace Agentmaster::Msg
             std::vector<TapHoldRef> holds = _holdTaps();
             MoveTapHolds(holds, item.tapHolds);
         }
+        // §21.50, the DURABLE OUTBOX: the item's class, decided once, here — durable (journaled, recovered, retried until Telegram
+        // answers), and how a transient failure is retried (OutboxItemIsDurable, OutboxRetryFor; the caller's `durability` wins).
+        // A durable item's parameters are serialized BEFORE the lock: that is the expensive part, and the lock is then held for
+        // the small record around them and one WriteFile (MESSAGING_OUTBOX.md §5.1).
+        {
+            std::wstring factsMethod;
+            const OutboxItemFacts facts = _outboxFactsOf(item, factsMethod);
+            item.durable = item.durability == 1 || (item.durability != 0 && OutboxItemIsDurable(facts));
+            item.retry = OutboxRetryFor(facts, item.durable);
+        }
+        item.fromMirror = item.fromMirror || t_outboxMirrorPass;
+        if (item.queuedWallMs == 0)
+        {
+            item.queuedWallMs = WallMs();
+        }
+        std::string paramsJson;
+        if (item.durable && item.journalId == 0)
+        {
+            paramsJson = OutboxUtf8(json::Dump(item.params));
+        }
+        bool journalFailed = false;
         {
             std::lock_guard lk{ _mtx };
             if (!item.key.empty())
@@ -2753,6 +3111,7 @@ namespace Agentmaster::Msg
                     if (it->key == item.key)
                     {
                         MoveTapHolds(it->tapHolds, item.tapHolds);
+                        _outboxDropLocked(*it, L"superseded"); // §21.50: nothing for an item that is not journaled
                         it = _outbox.erase(it);
                     }
                     else
@@ -2761,11 +3120,44 @@ namespace Agentmaster::Msg
                     }
                 }
             }
+            // §21.50: a thread whose topic was MADE AGAIN goes to its new thread — an item queued for the old one by a callback's
+            // capture or a stale record copy would otherwise be held and given up with the gone thread.
+            if (!_threadRedirects.empty())
+            {
+                if (const int64_t thread = ThreadIdOf(item.params); thread > 0)
+                {
+                    if (const int64_t now = ResolveOutboxThread(_threadRedirects, thread); now != thread)
+                    {
+                        SetOutboxThread(item.params, now);
+                        if (!paramsJson.empty())
+                        {
+                            paramsJson = OutboxUtf8(json::Dump(item.params)); // rare: the journal must carry the new thread
+                        }
+                    }
+                }
+            }
             if (item.seq == 0)
             {
                 item.seq = ++_outSeq; // a chunk or a fallback brings the seq of its message (its place in the order)
             }
+            // §21.50: the PUT goes to the journal in the same lock as the queue's change, so the file and the queue change in the
+            // same order, and the line is in the OS cache before this call returns (D-O3: a kill now loses nothing). A failed
+            // write (a full disk) leaves the item in memory only: it still goes, only not durably (MESSAGING_OUTBOX.md O4).
+            if (!paramsJson.empty() && _journal)
+            {
+                item.journalId = ++_outboxNextId;
+                if (!_journal->Append(OutboxPutLine(_outboxPutOf(item, false), paramsJson))) // the parameters are in `paramsJson` already
+                {
+                    item.journalId = 0;
+                    journalFailed = true;
+                }
+            }
             _outbox.push_back(std::move(item));
+        }
+        if (journalFailed && !_journalFailureLogged.exchange(true))
+        {
+            // Once per run (the census counts the rest): a log line under `_mtx` is avoided (a file write).
+            _log(L"[msg] outbox: a message could not be written to the journal (a full disk?); it goes from memory, and a restart before it went would lose it");
         }
         _sendCv.notify_one();
     }
@@ -2774,6 +3166,765 @@ namespace Agentmaster::Msg
     {
         std::lock_guard lk{ _mtx };
         return ++_outSeq;
+    }
+
+    // ===== §21.50: the DURABLE OUTBOX (MessagingOutbox.h, MessagingOutboxJournal.h, doc/agentmaster/MESSAGING_OUTBOX.md) =====
+
+    OutboxItemFacts MessagingService::_outboxFactsOf(const OutItem& item, std::wstring& method)
+    {
+        method = _outItemMethod(item);
+        OutboxItemFacts f;
+        f.method = method;
+        f.keyed = !item.key.empty();
+        f.history = item.prio == SendPriority::History;
+        f.asSecretary = item.asSecretary;
+        f.asUser = item.params.Find(L"business_connection_id") != nullptr; // a send AS THE USER (§21.11), whatever bot makes it
+        f.upload = item.document || !item.uploadField.empty();
+        f.buttons = item.params.Find(L"reply_markup") != nullptr;
+        return f;
+    }
+
+    OutboxPut MessagingService::_outboxPutOf(const OutItem& item, bool withParams)
+    {
+        OutboxPut put;
+        put.id = item.journalId;
+        put.prio = static_cast<int>(item.prio);
+        put.seq = item.seq;
+        put.sub = item.subSeq;
+        put.method = item.method;
+        if (withParams)
+        {
+            put.params = item.params;
+        }
+        put.fallbackHtml = item.fallbackHtml;
+        put.mirror = item.fromMirror;
+        put.queuedWallMs = item.queuedWallMs;
+        return put;
+    }
+
+    void MessagingService::_outboxDropLocked(const OutItem& item, std::wstring_view why) noexcept
+    {
+        if (item.journalId == 0 || !_journal)
+        {
+            return;
+        }
+        try
+        {
+            _journal->Append(OutboxDropLine(item.journalId, why));
+        }
+        catch (...)
+        {
+            // Rule #18 (std::bad_alloc only). Recovery: the item's put stays live in the journal, so the next start sends it once
+            // more — at-least-once, never a loss.
+            LogSwallowedException(L"MessagingService::_outboxDropLocked");
+        }
+    }
+
+    void MessagingService::_requeueLocked(OutItem&& item)
+    {
+        if (!item.key.empty())
+        {
+            const auto newer = std::find_if(_outbox.begin(), _outbox.end(), [&item](const OutItem& o) { return o.key == item.key; });
+            if (newer != _outbox.end())
+            {
+                // §21.28: the newer item carries the change a tapped button waits for, so it takes over this stale one's holds.
+                MoveTapHolds(item.tapHolds, newer->tapHolds);
+                _outboxDropLocked(item, L"superseded");
+                return;
+            }
+        }
+        _outbox.push_back(std::move(item));
+    }
+
+    void MessagingService::_journalFloodLocked() noexcept
+    {
+        if (!_journal)
+        {
+            return;
+        }
+        try
+        {
+            // The parking's deadlines are GetTickCount64 ms, which a restart does not continue: the journal takes them in WALL time.
+            const int64_t tick = static_cast<int64_t>(::GetTickCount64());
+            const int64_t wall = WallMs();
+            std::map<std::wstring, int64_t> methods;
+            for (const auto& [m, until] : _floodParking.methodUntilMs)
+            {
+                if (until > tick)
+                {
+                    methods[m] = wall + (until - tick);
+                }
+            }
+            const int64_t all = _floodParking.allUntilMs > tick ? wall + (_floodParking.allUntilMs - tick) : 0;
+            _journal->Append(OutboxFloodLine(all, methods));
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"MessagingService::_journalFloodLocked"); // Rule #18; recovery: a restart forgets this hold (as before §21.50)
+        }
+    }
+
+    void MessagingService::_outboxCheckpointIfDue() noexcept
+    {
+        try
+        {
+            std::shared_ptr<OutboxJournal> journal;
+            {
+                std::lock_guard lk{ _mtx };
+                journal = _journal;
+            }
+            const int64_t tick = static_cast<int64_t>(::GetTickCount64());
+            if (!journal || journal->Bytes() < kOutboxCheckpointBytes || tick < _outboxCheckpointRetryMs)
+            {
+                return;
+            }
+            const auto started = std::chrono::steady_clock::now();
+            const uint64_t before = journal->Bytes();
+            size_t live = 0;
+            bool ok = false;
+            bool closed = false;
+            std::wstring error;
+            {
+                // Under `_mtx` for its length: no producer can queue (and append) an item this rewrite would leave out, and the
+                // send thread — this thread — holds no item. Milliseconds: the live items are normally a handful.
+                std::lock_guard lk{ _mtx };
+                if (_journal != journal)
+                {
+                    return; // closed meanwhile (a stop)
+                }
+                const int64_t wall = WallMs();
+                std::string content = OutboxHeaderLine(_outboxBot, _ownerId, wall, _versionWord);
+                for (const auto& [from, to] : _threadRedirects)
+                {
+                    content += OutboxLaneLine(from, to);
+                }
+                for (const auto& o : _outbox)
+                {
+                    if (o.journalId == 0)
+                    {
+                        continue;
+                    }
+                    content += OutboxPutLine(_outboxPutOf(o)); // its parameters as they are now (a moved thread included)
+                    if (o.attempts > 0)
+                    {
+                        content += OutboxRetryLine(o.journalId, o.attempts, o.notBeforeMs > tick ? wall + (o.notBeforeMs - tick) : 0, L"(carried over by a compaction)");
+                    }
+                    ++live;
+                }
+                std::map<std::wstring, int64_t> methods;
+                for (const auto& [m, until] : _floodParking.methodUntilMs)
+                {
+                    if (until > tick)
+                    {
+                        methods[m] = wall + (until - tick);
+                    }
+                }
+                if (!methods.empty() || _floodParking.allUntilMs > tick)
+                {
+                    content += OutboxFloodLine(_floodParking.allUntilMs > tick ? wall + (_floodParking.allUntilMs - tick) : 0, methods);
+                }
+                ok = journal->Rewrite(content, error);
+                if (!journal->IsOpen())
+                {
+                    // Neither the compacted nor the old journal can be appended to: durability ends for this run, the queue goes on.
+                    _journal.reset();
+                    closed = true;
+                }
+            }
+            const auto tookMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+            if (ok)
+            {
+                _log(L"[msg] outbox: the journal was compacted from " + std::to_wstring(before / 1024) + L" KB to " + std::to_wstring(journal->Bytes() / 1024) +
+                     L" KB (" + std::to_wstring(live) + L" message(s) still queued) in " + std::to_wstring(tookMs) + L" ms");
+            }
+            else
+            {
+                // Not again for a while: a rename refused by a reader that holds the file without delete sharing would make every
+                // pass of this loop write the live items again.
+                _outboxCheckpointRetryMs = tick + 10 * 60 * 1000;
+                _log(L"[msg] outbox: the journal could not be compacted (" + error + L"); " +
+                     (closed ? std::wstring{ L"it could not be reopened either: messages are kept in memory only for the rest of this run" }
+                             : std::wstring{ L"it goes on uncompacted, tried again in 10 min" }));
+            }
+            if (closed)
+            {
+                journal->Close();
+            }
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"MessagingService::_outboxCheckpointIfDue"); // Rule #18; recovery: the journal stays as it is
+        }
+    }
+
+    bool MessagingService::_queueRecoveredFallback(const OutItem& item, const TgResult& r)
+    {
+        const int64_t thread = ThreadIdOf(item.params);
+        if (item.method == L"sendRichMessage" && RichRefusalWantsFallback(r) && !item.fallbackHtml.empty())
+        {
+            // The rich message's classic HTML, in its place (seq, sub + 1) — what _sendRich's / _sendTitledRich's callback sends.
+            const bool silent = item.params.BoolAt(L"disable_notification", false);
+            int64_t replyTo = 0;
+            if (const auto* rp = item.params.Find(L"reply_parameters"); rp && rp->type == json::Value::Type::Obj)
+            {
+                replyTo = rp->I64At(L"message_id", 0);
+            }
+            for (auto& fb : _htmlItems(thread, item.fallbackHtml, silent, item.prio, L"", json::Value{}, nullptr, replyTo, item.seq, item.subSeq + 1))
+            {
+                fb.fromMirror = item.fromMirror;
+                _enqueue(std::move(fb));
+            }
+            _log(L"[msg] outbox: a recovered rich message was refused (" + r.description + L"); its HTML form goes in its place");
+            return true;
+        }
+        if (item.method == L"sendMessage" && RefusalHasOutboxFallback(item.method, r))
+        {
+            // Telegram cannot parse its HTML: the plain text, in its place (seq, sub + 1) — _htmlItems' callback's rule.
+            OutItem plain;
+            plain.prio = item.prio;
+            plain.seq = item.seq;
+            plain.subSeq = item.subSeq + 1;
+            plain.method = L"sendMessage";
+            plain.params = json::Value::MkObj();
+            plain.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+            if (thread > 0)
+            {
+                plain.params.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(thread)));
+            }
+            plain.params.Set(L"text", json::Value::MkStr(OutboxPlainTextOfHtml(item.params.StrAt(L"text"))));
+            plain.params.Set(L"disable_notification", json::Value::MkBool(true));
+            plain.fromMirror = item.fromMirror;
+            _enqueue(std::move(plain));
+            _log(L"[msg] outbox: Telegram refused the HTML of a recovered message; it goes as plain text");
+            return true;
+        }
+        return false;
+    }
+
+    void MessagingService::_tendHeldThreads() noexcept
+    {
+        try
+        {
+            /// One due probe, read under the lock: the thread, the call's parameters, whose topic it is.
+            struct Probe
+            {
+                int64_t thread{ 0 };
+                json::Value params;
+                std::wstring sessionId;
+            };
+            std::vector<Probe> due;
+            std::vector<int64_t> gone;
+            {
+                std::lock_guard lk{ _mtx };
+                if (_heldThreads.empty())
+                {
+                    return;
+                }
+                const int64_t now = WallMs();
+                for (auto it = _heldThreads.begin(); it != _heldThreads.end();)
+                {
+                    HeldThread& h = it->second;
+                    if (h.phase == HeldThreadPhase::Released)
+                    {
+                        // A released thread is remembered only to count its releases (HoldThread's cap).
+                        it = now - h.releasedAtMs > kTopicReleaseMemoryMs ? _heldThreads.erase(it) : std::next(it);
+                        continue;
+                    }
+                    if (h.phase == HeldThreadPhase::Gone)
+                    {
+                        gone.push_back(it->first);
+                    }
+                    else if (h.nextProbeMs <= now && due.size() < kHeldThreadProbesPerTick)
+                    {
+                        // The PROBE (§8.2): editForumTopic with the topic's OWN name and icon as its record says — "exists" when Telegram
+                        // takes it or answers TOPIC_NOT_MODIFIED, and a title that drifted (a rename lost long ago) is put back in sync as
+                        // a side effect. A thread no record names (the Search topic, a wizard's thread) is probed with no change at all.
+                        Probe p;
+                        p.thread = it->first;
+                        p.params = json::Value::MkObj();
+                        p.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+                        p.params.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(it->first)));
+                        for (const auto& [sid, t] : _state.topics)
+                        {
+                            if (t.threadId == it->first && !t.title.empty())
+                            {
+                                const SessionState state = t.nameState >= 0 ? static_cast<SessionState>(t.nameState) : SessionState::Idle;
+                                p.params.Set(L"name", json::Value::MkStr(TopicDisplayName(state, t.nameColor, t.title, t.stateIcon)));
+                                if (t.stateIcon && !t.stateIconId.empty())
+                                {
+                                    p.params.Set(L"icon_custom_emoji_id", json::Value::MkStr(t.stateIconId));
+                                }
+                                p.sessionId = sid;
+                                break;
+                            }
+                        }
+                        due.push_back(std::move(p));
+                    }
+                    ++it;
+                }
+            }
+            for (auto& p : due)
+            {
+                if (_stop.load() || !_awaitCallSlot(L"editForumTopic"))
+                {
+                    break; // stopping, or a long 429 parks topic edits: the probes wait for a later tick (the threads stay held)
+                }
+                const TgResult r = _api->Call(L"editForumTopic", p.params, 20000);
+                _handleTickFlood(L"editForumTopic", r); // a 429 is waited out or parks the method; the probe then has no verdict
+                const TopicProbeAnswer answer = ClassifyTopicProbe(r);
+                TopicProbeStep step = TopicProbeStep::Wait;
+                int64_t nextInS = 0;
+                {
+                    std::lock_guard lk{ _mtx };
+                    if (const auto it = _heldThreads.find(p.thread); it != _heldThreads.end())
+                    {
+                        step = NoteTopicProbe(it->second, answer, WallMs());
+                        nextInS = (it->second.nextProbeMs - WallMs()) / 1000;
+                    }
+                }
+                const std::wstring who = L"thread " + std::to_wstring(p.thread) + (p.sessionId.empty() ? std::wstring{} : L" (" + ShortId(p.sessionId) + L")");
+                if (step == TopicProbeStep::Release)
+                {
+                    _log(L"[msg] outbox: the probe found " + who + L" (" + (r.ok ? std::wstring{ L"its name set" } : r.description) + L"): its messages go again");
+                    _sendCv.notify_one();
+                }
+                else if (step == TopicProbeStep::Gone)
+                {
+                    _log(L"[msg] outbox: " + who + L" is GONE (two probes: " + r.description + L"): its topic is made again, with its history");
+                    gone.push_back(p.thread);
+                }
+                else
+                {
+                    _log(L"[msg] outbox: the probe of " + who + L" " +
+                         (answer == TopicProbeAnswer::NotFound ? std::wstring{ L"did not find it" } : L"got no verdict (" + (r.description.empty() ? L"HTTP " + std::to_wstring(r.httpStatus) : r.description) + L")") +
+                         L"; probed again in " + std::to_wstring((std::max<int64_t>)(0, nextInS)) + L" s");
+                }
+            }
+            for (const int64_t thread : gone)
+            {
+                _settleGoneThread(thread);
+            }
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"MessagingService::_tendHeldThreads"); // Rule #18; recovery: the threads stay held for the next tick
+        }
+    }
+
+    void MessagingService::_settleGoneThread(int64_t threadId)
+    {
+        std::vector<OutItem> givenUp; // their callbacks hear the refusal, outside the lock
+        std::wstring sessionId;
+        std::wstring forgotLog;
+        size_t replayDropped = 0;
+        size_t moved = 0;
+        int64_t newThread = 0;
+        uint64_t noteSeq = 0;
+        bool searchTopic = false;
+        bool forgot = false;
+        {
+            std::lock_guard lk{ _mtx };
+            const auto it = _heldThreads.find(threadId);
+            if (it == _heldThreads.end() || it->second.phase != HeldThreadPhase::Gone)
+            {
+                return;
+            }
+            HeldThread& h = it->second;
+            sessionId = h.sessionId;
+            const int64_t now = WallMs();
+            bool giveUp = false;
+            if (!h.goneSettled)
+            {
+                h.goneSettled = true;
+                // The session's record is FORGOTTEN (not deleted in Telegram: the topic is gone already), so the topic sync plans it
+                // again like a new one — made with the session's current name and state, its whole history replayed (§21.9) — when
+                // the session still deserves a topic. Found by the THREAD (a Rekey keeps it), never by a title.
+                for (auto rec = _state.topics.begin(); rec != _state.topics.end(); ++rec)
+                {
+                    if (rec->second.threadId == threadId)
+                    {
+                        sessionId = rec->first;
+                        h.sessionId = rec->first;
+                        h.verbose = rec->second.verbose;
+                        _mirrors.erase(rec->first);
+                        _cards.erase(rec->first);
+                        _state.topics.erase(rec);
+                        _stateDirty = true;
+                        forgot = true;
+                        break;
+                    }
+                }
+                if (h.searchTopic || _state.searchThreadId == threadId)
+                {
+                    // The Search topic: _ensureSearchTopic makes a new one (its start note, its icon) once the thread is cleared.
+                    h.searchTopic = true;
+                    _state.searchThreadId = 0;
+                    _stateDirty = true;
+                }
+                if (_backfill.active && _backfill.threadId == threadId)
+                {
+                    _backfill = BackfillBatch{}; // its answers no longer count
+                }
+                // What the new topic's history replay sends again — the mirror's posts and the replay's own — is dropped instead of
+                // moved: it would show twice. The rest (a command's reply, a change line) moves to the new thread below.
+                for (auto o = _outbox.begin(); o != _outbox.end();)
+                {
+                    if (ThreadIdOf(o->params) == threadId && (o->fromMirror || o->prio == SendPriority::History))
+                    {
+                        _outboxDropLocked(*o, L"replayed in the topic made again");
+                        o = _outbox.erase(o);
+                        ++replayDropped;
+                    }
+                    else
+                    {
+                        ++o;
+                    }
+                }
+                giveUp = !forgot && !h.searchTopic; // no topic will be made for this thread: nothing to wait for
+            }
+            // The topic made again: the session's record names a NEW thread (the sync made it), or the Search topic has one.
+            if (!giveUp)
+            {
+                if (!h.sessionId.empty())
+                {
+                    if (const auto rec = _state.topics.find(h.sessionId); rec != _state.topics.end() && rec->second.threadId > 0 && rec->second.threadId != threadId)
+                    {
+                        newThread = rec->second.threadId;
+                        if (h.verbose != -1 && rec->second.verbose == -1)
+                        {
+                            rec->second.verbose = h.verbose; // §21.11: the gone topic's own mode carries over
+                            _stateDirty = true;
+                        }
+                    }
+                }
+                else if (h.searchTopic && _state.searchThreadId > 0 && _state.searchThreadId != threadId)
+                {
+                    newThread = _state.searchThreadId;
+                }
+            }
+            searchTopic = h.searchTopic;
+            if (newThread != 0)
+            {
+                // REDIRECTED (§8.3): journaled, so a restart moves the old thread's lines too; every queued item moves now, and the
+                // note goes first in the new topic (a seq just below the earliest moved item's).
+                _threadRedirects[threadId] = newThread;
+                if (_journal)
+                {
+                    _journal->Append(OutboxLaneLine(threadId, newThread));
+                }
+                uint64_t minSeq = 0;
+                for (auto& o : _outbox)
+                {
+                    if (ThreadIdOf(o.params) == threadId)
+                    {
+                        SetOutboxThread(o.params, newThread);
+                        minSeq = minSeq == 0 ? o.seq : (std::min)(minSeq, o.seq);
+                        ++moved;
+                    }
+                }
+                noteSeq = minSeq > 1 ? minSeq - 1 : 0;
+                ++_outboxRemade;
+                _heldThreads.erase(it);
+            }
+            else if (giveUp || now - h.goneSinceMs > kTopicGoneWaitMs)
+            {
+                // No topic is made again (the session went idle or closed, or the thread was no session's): its items are given up.
+                for (auto o = _outbox.begin(); o != _outbox.end();)
+                {
+                    if (ThreadIdOf(o->params) == threadId)
+                    {
+                        _outboxDropLocked(*o, L"its topic was deleted and is not made again");
+                        givenUp.push_back(std::move(*o));
+                        o = _outbox.erase(o);
+                    }
+                    else
+                    {
+                        ++o;
+                    }
+                }
+                _heldThreads.erase(it);
+            }
+        }
+        if (forgot)
+        {
+            _backfillPostsBy.erase(sessionId); // the tick's map (this runs on the tick thread)
+        }
+        const std::wstring who = L"thread " + std::to_wstring(threadId) + (sessionId.empty() ? std::wstring{} : L" (" + ShortId(sessionId) + L")");
+        if (forgot || replayDropped > 0)
+        {
+            _log(L"[msg] outbox: " + who + L": the record is forgotten, so the topic sync makes the topic again" +
+                 (replayDropped > 0 ? L"; " + std::to_wstring(replayDropped) + L" queued message(s) of its conversation are left to the new topic's history replay" : std::wstring{}));
+        }
+        if (newThread != 0)
+        {
+            _log(L"[msg] outbox: " + who + L" was made again as thread " + std::to_wstring(newThread) + L": " + std::to_wstring(moved) + L" queued message(s) move there");
+            // A silent line opens the new topic, before what moved: the user deleted the old one, or Telegram lost it.
+            for (auto& note : _htmlItems(newThread,
+                                         searchTopic ? std::wstring{ L"\x267B\xFE0F <b>This topic was made again</b>: the old one was deleted in Telegram." }
+                                                     : std::wstring{ L"\x267B\xFE0F <b>This topic was made again</b>: the old one was deleted in Telegram. Its conversation follows." },
+                                         true,
+                                         SendPriority::Final,
+                                         L"",
+                                         json::Value{},
+                                         nullptr,
+                                         0,
+                                         noteSeq,
+                                         0))
+            {
+                _enqueue(std::move(note));
+            }
+            _sendCv.notify_one();
+        }
+        if (!givenUp.empty())
+        {
+            _log(L"[msg] outbox: " + who + L" is gone and no topic is made again for it: " + std::to_wstring(givenUp.size()) + L" queued message(s) are given up");
+            TgResult refused;
+            refused.httpStatus = 400;
+            refused.description = L"Bad Request: message thread not found (the topic was deleted and is not made again)";
+            for (auto& o : givenUp)
+            {
+                if (o.onDone)
+                {
+                    try
+                    {
+                        const TapScope tapScope{ o.tapHolds };
+                        o.onDone(refused);
+                    }
+                    catch (...)
+                    {
+                        LogSwallowedException(L"MessagingService::_settleGoneThread (onDone)");
+                    }
+                }
+            }
+        }
+    }
+
+    std::wstring MessagingService::_outboxCensusText()
+    {
+        std::lock_guard lk{ _mtx };
+        const int64_t tick = static_cast<int64_t>(::GetTickCount64());
+        const int64_t wall = WallMs();
+        size_t journaled = 0;
+        size_t waiting = 0;
+        int64_t oldest = 0;
+        for (const auto& o : _outbox)
+        {
+            if (o.journalId != 0)
+            {
+                ++journaled;
+                oldest = oldest == 0 ? o.queuedWallMs : (std::min)(oldest, o.queuedWallMs);
+            }
+            if (o.notBeforeMs > tick)
+            {
+                ++waiting;
+            }
+        }
+        size_t held = 0;
+        for (const auto& [thread, h] : _heldThreads)
+        {
+            held += HeldThreadHoldsPosts(h) ? 1 : 0;
+        }
+        std::wstring s = L" outbox(queued=" + std::to_wstring(_outbox.size()) + L" journaled=" + std::to_wstring(journaled) + L" waiting=" + std::to_wstring(waiting) +
+                         L" held=" + std::to_wstring(held) + L" retries=" + std::to_wstring(_outboxRetries) + L" dead=" + std::to_wstring(_outboxDead);
+        if (oldest > 0)
+        {
+            s += L" oldest=" + std::to_wstring((std::max<int64_t>)(0, wall - oldest) / 60000) + L"m";
+        }
+        if (_outboxHolds > 0 || _outboxRemade > 0)
+        {
+            s += L" holds=" + std::to_wstring(_outboxHolds) + L" remade=" + std::to_wstring(_outboxRemade);
+        }
+        if (_outboxRecovered > 0)
+        {
+            s += L" recovered=" + std::to_wstring(_outboxRecovered) + L" resent=" + std::to_wstring(_outboxResent);
+        }
+        if (_journal)
+        {
+            s += L" journal=" + std::to_wstring(_journal->Bytes() / 1024) + L"KB";
+            if (const uint64_t failures = _journal->AppendFailures(); failures > 0)
+            {
+                s += L" journal-failures=" + std::to_wstring(failures);
+            }
+        }
+        else
+        {
+            s += L" journal=off";
+        }
+        if (_outboxBreaker.openedAtMs != 0)
+        {
+            s += L" unreachable=" + std::to_wstring((tick - _outboxBreaker.openedAtMs) / 1000) + L"s";
+        }
+        s += L")";
+        return s;
+    }
+
+    void MessagingService::_outboxRecover(const std::wstring& botHash)
+    {
+        const auto started = std::chrono::steady_clock::now();
+        const std::wstring folder = std::filesystem::path{ _stateFile }.parent_path().wstring() + L"\\outbox";
+        auto journal = std::make_shared<OutboxJournal>();
+        std::string bytes;
+        std::wstring error;
+        if (!journal->Open(folder, bytes, error))
+        {
+            _log(L"[msg] outbox: " + error + L" \x2014 messages are kept in memory only this run (a restart loses what waits)");
+            return;
+        }
+        size_t torn = 0;
+        OutboxRecovery rec = FoldOutboxJournal(bytes, torn);
+        const size_t readBytes = bytes.size();
+        bytes.clear();
+        bytes.shrink_to_fit();
+        // WHOSE queue it is: another token's bot or another owner's chat would get messages that are not theirs (or name threads
+        // of another chat) — such a journal's items are discarded, logged, never sent.
+        std::wstring discard;
+        if (!rec.live.empty())
+        {
+            if (!rec.header)
+            {
+                discard = L"the journal has no header";
+            }
+            else if (rec.version != kOutboxJournalVersion)
+            {
+                discard = L"the journal is of format " + std::to_wstring(rec.version);
+            }
+            else if (rec.bot != botHash)
+            {
+                discard = L"the journal belongs to another bot token";
+            }
+            else if (rec.chat != _ownerId)
+            {
+                discard = L"the journal belongs to another owner";
+            }
+        }
+        const int64_t wall = WallMs();
+        const int64_t tick = static_cast<int64_t>(::GetTickCount64());
+        std::vector<OutItem> items;
+        size_t resent = 0;
+        if (discard.empty())
+        {
+            items.reserve(rec.live.size());
+            for (auto& live : rec.live)
+            {
+                OutItem it;
+                it.prio = static_cast<SendPriority>((std::clamp)(live.put.prio, 0, static_cast<int>(SendPriority::History)));
+                it.seq = live.put.seq;
+                it.subSeq = live.put.sub;
+                it.method = std::move(live.put.method);
+                it.params = std::move(live.put.params);
+                it.fallbackHtml = std::move(live.put.fallbackHtml);
+                it.fromMirror = live.put.mirror;
+                it.queuedWallMs = live.put.queuedWallMs;
+                it.journalId = live.put.id;
+                it.durable = true;
+                it.durability = 1;
+                it.retry = OutboxRetry::Forever;
+                it.recovered = true;
+                it.attempts = live.attempts;
+                it.notBeforeMs = live.notBeforeWallMs > wall ? tick + (live.notBeforeWallMs - wall) : 0;
+                resent += live.tried ? 1 : 0;
+                items.push_back(std::move(it));
+            }
+        }
+        // The flood hold, when it is still ahead: a restart must not call straight into it (2026-11-09: 21,890 s).
+        std::map<std::wstring, int64_t> floodMethods;
+        for (const auto& [m, until] : rec.floodMethodUntilWallMs)
+        {
+            if (until > wall)
+            {
+                floodMethods[m] = until;
+            }
+        }
+        const int64_t floodAll = rec.floodAllUntilWallMs > wall ? rec.floodAllUntilWallMs : 0;
+        // The journal REWRITTEN COMPACT: the header (this bot and chat), the redirects, the live items with their back-off, the hold
+        // — the torn tail, damaged lines and every finished item's records are gone. A failure keeps the old file and goes on
+        // appending to it (OutboxJournal::Rewrite).
+        std::string content = OutboxHeaderLine(botHash, _ownerId, wall, _versionWord);
+        if (discard.empty())
+        {
+            for (const auto& [from, to] : rec.redirects)
+            {
+                content += OutboxLaneLine(from, to);
+            }
+        }
+        for (const auto& it : items)
+        {
+            content += OutboxPutLine(_outboxPutOf(it));
+            if (it.attempts > 0)
+            {
+                content += OutboxRetryLine(it.journalId, it.attempts, it.notBeforeMs > tick ? wall + (it.notBeforeMs - tick) : 0, L"(carried over by the start)");
+            }
+        }
+        if (floodAll > 0 || !floodMethods.empty())
+        {
+            content += OutboxFloodLine(floodAll, floodMethods);
+        }
+        std::wstring rewriteError;
+        const bool rewritten = journal->Rewrite(content, rewriteError);
+        const bool open = journal->IsOpen();
+        if (!open)
+        {
+            journal->Close(); // nothing can be appended: the lock goes too (the items below still go, from memory)
+        }
+        {
+            std::lock_guard lk{ _mtx };
+            for (auto& it : items)
+            {
+                _outbox.push_back(std::move(it));
+            }
+            _outSeq = (std::max)(_outSeq, rec.maxSeq); // new items sort after the recovered ones
+            _outboxNextId = (std::max)(_outboxNextId, rec.maxId);
+            if (discard.empty())
+            {
+                _threadRedirects = rec.redirects;
+            }
+            if (floodAll > 0)
+            {
+                _floodParking.allUntilMs = (std::max)(_floodParking.allUntilMs, tick + (floodAll - wall));
+            }
+            for (const auto& [m, until] : floodMethods)
+            {
+                auto& parked = _floodParking.methodUntilMs[m];
+                parked = (std::max)(parked, tick + (until - wall));
+            }
+            _outboxBot = botHash;
+            _outboxRecovered = discard.empty() ? rec.live.size() : 0;
+            _outboxResent = resent;
+            if (open)
+            {
+                _journal = journal;
+            }
+        }
+        const auto tookMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+        std::wstring line = L"[msg] outbox: journal read (" + std::to_wstring(readBytes / 1024) + L" KB, " + std::to_wstring(rec.records) + L" records, " +
+                            std::to_wstring(tookMs) + L" ms)";
+        if (!discard.empty())
+        {
+            line += L"; " + std::to_wstring(rec.live.size()) + L" queued message(s) DISCARDED: " + discard;
+        }
+        else if (!rec.live.empty())
+        {
+            line += L"; " + std::to_wstring(rec.live.size()) + L" message(s) the last run did not deliver go now" +
+                    (resent > 0 ? L" (" + std::to_wstring(resent) + L" of them were cut off mid-call: Telegram may show them twice)" : std::wstring{});
+        }
+        else
+        {
+            line += L"; nothing waited";
+        }
+        if (torn > 0 || rec.badLines > 0)
+        {
+            line += L"; " + std::to_wstring(torn) + L" byte(s) of a torn last line and " + std::to_wstring(rec.badLines) + L" damaged line(s) skipped";
+        }
+        if (floodAll > 0 || !floodMethods.empty())
+        {
+            const int64_t until = (std::max)(floodAll, floodMethods.empty() ? 0 : std::max_element(floodMethods.begin(), floodMethods.end(), [](const auto& a, const auto& b) { return a.second < b.second; })->second);
+            line += L"; Telegram's flood hold of the last run is kept until " + TgClockText(until, wall);
+        }
+        if (!rewritten)
+        {
+            line += L"; the journal could not be compacted (" + rewriteError + L")" + (open ? std::wstring{ L", appending to it as it is" } : std::wstring{ L": messages are kept in memory only this run" });
+        }
+        _log(line);
     }
 
     // ===== §21.28: a tapped button's answer, held while its work runs ========================================================
@@ -2970,6 +4121,9 @@ namespace Agentmaster::Msg
             item.seq = seq;
             item.subSeq = subSeqBase + static_cast<uint32_t>(2 * i);
             item.key = (i + 1 == chunks.size()) ? key : std::wstring{};
+            // §21.50: the chunks of a KEYED message (a card, a picker) are never journaled — only its last carries the key, so the
+            // first ones would otherwise count as plain posts and come back after a restart without the message they belong to.
+            item.durability = key.empty() ? -1 : 0;
             item.method = L"sendMessage";
             item.params = json::Value::MkObj();
             item.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
@@ -3011,9 +4165,11 @@ namespace Agentmaster::Msg
             const int64_t thread = threadId;
             const uint64_t plainSeq = seq;
             const uint32_t plainSub = item.subSeq + 1;
+            const int plainDurability = item.durability; // §21.50: the fallback is journaled exactly when its message is,
+            const bool plainMirror = t_outboxMirrorPass; // and is the mirror's content exactly when its message is (it is queued later, from the send loop)
             auto self = weak_from_this();
             auto inner = std::move(item.onDone);
-            item.onDone = [self, plainText, thread, inner, prio, plainSeq, plainSub](const TgResult& r) {
+            item.onDone = [self, plainText, thread, inner, prio, plainSeq, plainSub, plainDurability, plainMirror](const TgResult& r) {
                 if (!r.ok && r.httpStatus == 400 && r.description.find(L"can't parse entities") != std::wstring::npos)
                 {
                     if (auto me = self.lock())
@@ -3052,6 +4208,8 @@ namespace Agentmaster::Msg
                         plain.params.Set(L"text", json::Value::MkStr(stripped));
                         plain.params.Set(L"disable_notification", json::Value::MkBool(true));
                         plain.onDone = inner;
+                        plain.durability = plainDurability;
+                        plain.fromMirror = plainMirror;
                         me->_enqueue(std::move(plain));
                     }
                     return;
@@ -3215,14 +4373,21 @@ namespace Agentmaster::Msg
     {
         const uint64_t seq = _takeOutSeq(); // the rich message and its fallback keep one place in the order
         OutItem item = _titledRichItem(threadId, richHtml, silent, prio, key, replyMarkup, replyToMessageId, replyRef, picture.get(), seq, 0);
+        // §21.50: the classic render rides the item into the journal (a recovered rich message that Telegram refuses goes as it,
+        // in its place — its callback below is gone after a restart), and the fallbacks below are journaled exactly when this
+        // message is: never for a KEYED one (they carry no key, so they would count as plain posts and come back after a
+        // restart without the card or directory they stand for), and marked as the mirror's content when it is.
+        item.fallbackHtml = classicHtml;
+        const bool keyed = !key.empty();
+        const bool mirror = t_outboxMirrorPass;
         // A refusal sends the classic render in this message's place: the same buttons, the same reply, the same onDone, so a
         // caller (a card post that waits for its message id) sees one answer either way. The fallback carries NO key: queued
         // from this answer, a key would erase a NEWER item with the same key queued meanwhile (the stale text would win); its
         // sequence number already puts it before any such item. `classicSub` is the slot it takes: 1 right after the rich message,
         // 2 after the §21.42 retry without the picture (which takes 1).
         auto self = weak_from_this();
-        const auto plainDone = [self, threadId, classicHtml, silent, prio, replyMarkup, onDone, replyToMessageId, replyRef, seq](uint32_t classicSub) -> std::function<void(const TgResult&)> {
-            return [self, threadId, classicHtml, silent, prio, replyMarkup, onDone, replyToMessageId, replyRef, seq, classicSub](const TgResult& r) {
+        const auto plainDone = [self, threadId, classicHtml, silent, prio, replyMarkup, onDone, replyToMessageId, replyRef, seq, keyed, mirror](uint32_t classicSub) -> std::function<void(const TgResult&)> {
+            return [self, threadId, classicHtml, silent, prio, replyMarkup, onDone, replyToMessageId, replyRef, seq, classicSub, keyed, mirror](const TgResult& r) {
                 if (RichRefusalWantsFallback(r))
                 {
                     if (auto me = self.lock())
@@ -3237,6 +4402,8 @@ namespace Agentmaster::Msg
                         }
                         for (auto& fb : me->_htmlItems(threadId, classicHtml, silent, prio, L"", replyMarkup, onDone, replyToMessageId, seq, classicSub, replyRef))
                         {
+                            fb.durability = keyed ? 0 : -1; // §21.50: as the message it stands for
+                            fb.fromMirror = mirror;
                             me->_enqueue(std::move(fb));
                         }
                     }
@@ -3258,7 +4425,7 @@ namespace Agentmaster::Msg
             // in the next slot and with no key (the rule above), so the card's text and its title chip still land; only that
             // retry's refusal falls back to the classic render. A 404 is no picture's fault (no rich messages at all): straight to
             // the classic fallback, as before.
-            item.onDone = [self, threadId, richHtml, silent, prio, replyMarkup, replyToMessageId, replyRef, seq, plainDone](const TgResult& r) {
+            item.onDone = [self, threadId, richHtml, classicHtml, silent, prio, replyMarkup, replyToMessageId, replyRef, seq, plainDone, keyed, mirror](const TgResult& r) {
                 if (RichRefusalWantsFallback(r) && r.httpStatus != 404)
                 {
                     if (auto me = self.lock())
@@ -3266,6 +4433,9 @@ namespace Agentmaster::Msg
                         me->_noteCardPictureRefused(r);
                         OutItem plain = me->_titledRichItem(threadId, richHtml, silent, prio, L"", replyMarkup, replyToMessageId, replyRef, nullptr, seq, 1);
                         plain.onDone = plainDone(2);
+                        plain.fallbackHtml = classicHtml; // §21.50: as the message it stands for (see above)
+                        plain.durability = keyed ? 0 : -1;
+                        plain.fromMirror = mirror;
                         me->_enqueue(std::move(plain));
                     }
                     return;
@@ -3312,6 +4482,9 @@ namespace Agentmaster::Msg
             item.seq = seq;
             item.subSeq = sub;
             item.method = L"sendRichMessage";
+            // §21.50: the part's HTML rides the item into the journal: a RECOVERED rich part that Telegram refuses goes as this HTML
+            // in its place (the callback below, which does that in this run, is gone after a restart).
+            item.fallbackHtml = partHtml;
             item.params = json::Value::MkObj();
             item.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
             if (threadId > 0)
@@ -3335,7 +4508,8 @@ namespace Agentmaster::Msg
             {
                 item.beforeSend = [partRef](json::Value& p) { _applyReplyRef(p, *partRef); };
             }
-            item.onDone = [self, threadId, partHtml, quiet, prio, seq, sub, replyTo, partDone, partRef](const TgResult& r) {
+            const bool mirror = t_outboxMirrorPass; // §21.50: the fallback, queued later from the send loop, is the mirror's when this part is
+            item.onDone = [self, threadId, partHtml, quiet, prio, seq, sub, replyTo, partDone, partRef, mirror](const TgResult& r) {
                 if (RichRefusalWantsFallback(r))
                 {
                     if (auto me = self.lock())
@@ -3350,6 +4524,7 @@ namespace Agentmaster::Msg
                         }
                         for (auto& fb : me->_htmlItems(threadId, partHtml, quiet, prio, L"", json::Value{}, partDone, replyTo, seq, sub + 1, partRef))
                         {
+                            fb.fromMirror = mirror;
                             me->_enqueue(std::move(fb));
                         }
                     }
@@ -4198,6 +5373,23 @@ namespace Agentmaster::Msg
             // §21.32.4: the linked set too (its lock is never held across I/O, so the wait is short): links made in the last
             // seconds would otherwise answer 404 after the restart.
             _filesSaveStore(true);
+            // §21.50: the outbox journal's last appends go to the disk now (the app ends with TerminateProcess, so no Stop flushes
+            // it: what the flusher's next ~250 ms would have written is made power-safe here). The lock wait is bounded like the
+            // state save's; the flush itself takes no service lock.
+            {
+                std::shared_ptr<OutboxJournal> journal;
+                {
+                    std::unique_lock lk{ _mtx, std::defer_lock };
+                    if (AcquireLockWithin(lk, kAppCloseSaveLockWaitMs))
+                    {
+                        journal = _journal;
+                    }
+                }
+                if (journal)
+                {
+                    journal->FlushNow();
+                }
+            }
         }
         catch (...)
         {
@@ -4637,6 +5829,10 @@ namespace Agentmaster::Msg
                     {
                         old = oldThreads.count(static_cast<int64_t>(th->num)) > 0;
                     }
+                }
+                if (old)
+                {
+                    _outboxDropLocked(*it, L"its topic was recreated by the user"); // §21.50: the new topics replay their histories
                 }
                 it = old ? _outbox.erase(it) : std::next(it);
             }
@@ -6103,6 +7299,10 @@ namespace Agentmaster::Msg
             for (auto o = _outbox.begin(); o != _outbox.end();)
             {
                 const bool old = o->key == L"wl:" + fromSessionId || o->key == L"card:" + fromSessionId || (o->prio == SendPriority::History && ThreadIdOf(o->params) == t.threadId);
+                if (old)
+                {
+                    _outboxDropLocked(*o, L"its topic moved to the tab's next conversation"); // §21.50: nothing for these (not journaled)
+                }
                 o = old ? _outbox.erase(o) : std::next(o);
             }
             if (_backfill.active && _backfill.threadId == t.threadId)
@@ -6160,6 +7360,32 @@ namespace Agentmaster::Msg
             shownTitle = it->second.title;
             shownSquare = it->second.nameColor;
         }
+        if (reason == L"idle" && thread > 0)
+        {
+            // §21.50 (MESSAGING_OUTBOX.md §8.6): an IDLE topic leaves the list only once what waits for it was delivered — the
+            // turn's final reply after a flood hold, a reply backing off through a 502 — instead of taking it along unsent. The
+            // plan asks again every tick, so the delete happens on the first tick after the last such message went. (A CLOSED tab's
+            // topic goes at once: Telegram deletes a topic with its messages, so they would be lost there a second later anyway.)
+            size_t waiting = 0;
+            {
+                std::lock_guard lk{ _mtx };
+                for (const auto& o : _outbox)
+                {
+                    waiting += o.durable && ThreadIdOf(o.params) == thread ? 1 : 0;
+                }
+            }
+            if (waiting > 0)
+            {
+                const int64_t now = WallMs();
+                if (auto& logged = _idleDeleteWaitLoggedMs[sessionId]; now - logged >= kIdleDeleteWaitLogMs)
+                {
+                    logged = now;
+                    _log(L"[msg] the idle topic of " + ShortId(sessionId) + L" waits: " + std::to_wstring(waiting) + L" message(s) for it are still queued (it leaves once they went)");
+                }
+                return;
+            }
+            _idleDeleteWaitLoggedMs.erase(sessionId);
+        }
         auto p = json::Value::MkObj();
         p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
         p.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(thread)));
@@ -6184,12 +7410,18 @@ namespace Agentmaster::Msg
             _mirrors.erase(sessionId);
             _cards.erase(sessionId);
             _stateDirty = true;
-            // Queued edits and posts for the dead topic are pointless (a history post carries no session key: its thread).
+            // Queued edits and posts for the dead topic are pointless (a history post carries no session key: its thread). §21.50: a
+            // journaled one's drop is journaled too, with the reason, so the next start does not send it into the deleted topic.
             for (auto it = _outbox.begin(); it != _outbox.end();)
             {
                 const bool mine = it->key.find(sessionId) != std::wstring::npos || (thread > 0 && ThreadIdOf(it->params) == thread);
+                if (mine)
+                {
+                    _outboxDropLocked(*it, L"its topic was deleted (" + reason + L")");
+                }
                 it = mine ? _outbox.erase(it) : std::next(it);
             }
+            _heldThreads.erase(thread); // a held thread of a deleted topic waits for nothing any more
             if (_backfill.active && _backfill.threadId == thread)
             {
                 _backfill = BackfillBatch{}; // its answers no longer count (the seq is gone)

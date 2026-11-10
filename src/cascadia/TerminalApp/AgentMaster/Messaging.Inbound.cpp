@@ -6464,6 +6464,10 @@ namespace Agentmaster::Msg
             for (auto o = _outbox.begin(); o != _outbox.end();)
             {
                 const bool mine = o->key == pickerKey || o->key == addKey || NewThreadOutItemThread(o->params) == threadId;
+                if (mine)
+                {
+                    _outboxDropLocked(*o, L"its new thread was aborted"); // §21.50: a journaled reply must not come back after a restart
+                }
                 o = mine ? _outbox.erase(o) : std::next(o);
             }
         }

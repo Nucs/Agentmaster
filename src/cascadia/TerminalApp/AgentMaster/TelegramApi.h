@@ -20,6 +20,7 @@
 #pragma once
 
 #include <cstdint>
+#include <list>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -140,11 +141,24 @@ namespace Agentmaster::Msg
         TgResult DownloadFile(std::wstring_view filePath, size_t maxBytes, std::string& out, uint32_t timeoutMs = 60000) noexcept;
 
         /// <summary>
-        /// Ends the request in flight, if any, from ANOTHER thread: the blocked call returns with a
-        /// transport failure. The long poll (getUpdates with a 50 s timeout) is the one call that needs
-        /// it: Stop() must not wait a minute. Safe to call with nothing in flight. Never throws.
+        /// Ends EVERY request in flight, from ANOTHER thread: each blocked call returns with a transport
+        /// failure ("aborted"). The long poll (getUpdates with a 50 s timeout) is the call that needs it most:
+        /// Stop() must not wait a minute. One client serves the poll, send, tick and voice threads at once,
+        /// so a single slot (before MESSAGING.md §21.50) held only the LAST request to start — an abort while
+        /// the send loop's call was in flight missed the long poll, and a cog Save that stopped the bot froze
+        /// every window for up to ~40 s. Safe to call with nothing in flight; later calls are not refused (see
+        /// Shutdown). Never throws.
         /// </summary>
         void Abort() noexcept;
+
+        /// <summary>
+        /// Abort, and refuse every call that starts afterwards at once (a transport failure "the client is shut
+        /// down", no network): the service's Stop, so a thread that is still finishing a pass cannot start a
+        /// new 40 s long poll or a 20 s topic call after the abort. File downloads (DownloadFile) are not
+        /// tracked and run to their own timeouts. There is no way back: the service makes a new client at its
+        /// next start. Never throws.
+        /// </summary>
+        void Shutdown() noexcept;
 
         /// <summary>Masks a token for a status line: "7221…bZ8" (the first 4 and last 3 characters).</summary>
         /// <param name="token">The token.</param>
@@ -170,9 +184,23 @@ namespace Agentmaster::Msg
         /// transport failure.</returns>
         TgResult _upload(std::wstring_view method, std::string_view field, std::string_view fileContentType, const json::Value& params, std::wstring_view fileName, const std::string& bytes, uint32_t timeoutMs) noexcept;
 
+        /// <summary>One request in flight, as Abort finds it (MESSAGING.md §21.50: one entry per concurrent call).</summary>
+        struct InFlight
+        {
+            /// <summary>The request's HINTERNET (nullptr once Abort closed it).</summary>
+            void* handle{ nullptr };
+            /// <summary>Set by Abort when it closed `handle`: the owner then skips its own close (closing twice is undefined)
+            /// and reports the failure as "aborted".</summary>
+            bool aborted{ false };
+        };
+
         std::wstring _token;
-        std::mutex _mtx; // guards _inflight
-        void* _inflight{ nullptr }; // the HINTERNET of the request in flight (Abort closes it)
-        bool _aborted{ false }; // set by Abort while a request is in flight, so its failure is reported as such
+        std::mutex _mtx; // guards _inflight and _shutdown
+        /// <summary>Every request in flight, one entry per calling thread's call (a list: an entry's iterator stays valid while
+        /// other calls come and go). _request adds its entry before the send and removes it after the read; Abort closes
+        /// every handle it holds.</summary>
+        std::list<InFlight> _inflight;
+        /// <summary>Shutdown ran: every later call fails at once without touching the network.</summary>
+        bool _shutdown{ false };
     };
 }

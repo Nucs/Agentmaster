@@ -16,7 +16,7 @@
 > §21.43's note in a NEW thread; DEV 0.0.1.39 (a Debug build of 64a3a4846 by the build server, since 2026-10-28) holds
 > everything through §21.44, those two included; §21.32–§21.32.3 and §21.36 are
 > research and design — §21.32.4's route home (Cloudflare, the tunnel, the fastrun relay) is LIVE —, §22 design only. A
-> heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than these builds. **Known bugs, not fixed: §21.21.** **The durable outbox that ends the lost sends and the deleted-topic loop: [MESSAGING_OUTBOX.md](MESSAGING_OUTBOX.md) (design only, 2026-11-10).** One bot per install since 2026-10-17: the DEV
+> heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than these builds. **Known bugs, not fixed: §21.21.** **The durable outbox that ends the lost sends and the deleted-topic loop: [MESSAGING_OUTBOX.md](MESSAGING_OUTBOX.md) (designed 2026-11-10), its first part implemented in §21.50 (NOT BUILT).** One bot per install since 2026-10-17: the DEV
 > install polls `@ExampleSessionsDevBot`, the RELEASE install `@ExampleSessionsBot` (the dev bot from 2026-10-16
 > 18:50 until then); each token in `K:\source\telegram\<bot>.env`, stored in Windows Credential Manager per profile by the
 > cog — never in a profile file; the first bot, `@ExampleFirstBot`, never got Threaded Mode on. Teams, webhooks and external connectors
@@ -979,8 +979,8 @@ queued message's status; `disable_notification` on everything but a turn's final
 | 403 (the user blocked the bot) | stop; status "blocked by the user" *(as built: not handled — each send fails on its own, nothing stops, and the cog's status does not say so)* |
 | 409 | §10.2 |
 | 429 | wait `retry_after`; the pacing lowers its rate *(as built: a wait of up to 60 s is slept through and the call made once more; a longer one parks only the refused method, §21.14.3; the history replay pauses 5 min, §21.9)* |
-| "message thread not found" (a deleted topic) | the topic is created again *(as built: only the 🔎 Search topic, at the bot's next start — §5.1, §21.18, dev only; a session's topic is never made again — a known bug, §21.21; designed: [MESSAGING_OUTBOX.md](MESSAGING_OUTBOX.md) §8)* |
-| No answer at all (DNS, network: WinHTTP 12002 / 12007) | *(as built: the send loop does not retry it; a message whose caller does not send it again — a final reply, a prompt line, a remark — is lost: a known bug, §21.21; designed: [MESSAGING_OUTBOX.md](MESSAGING_OUTBOX.md) §7)* |
+| "message thread not found" (a deleted topic) | the topic is created again *(as built: only the 🔎 Search topic, at the bot's next start — §5.1, §21.18, dev only; a session's topic is never made again — a known bug, §21.21; designed: [MESSAGING_OUTBOX.md](MESSAGING_OUTBOX.md) §8; since §21.50 (NOT BUILT): the thread is held and probed, and a session's topic gone for sure is made again with its history, §21.50.4)* |
+| No answer at all (DNS, network: WinHTTP 12002 / 12007) | *(as built: the send loop does not retry it; a message whose caller does not send it again — a final reply, a prompt line, a remark — is lost: a known bug, §21.21; designed: [MESSAGING_OUTBOX.md](MESSAGING_OUTBOX.md) §7; since §21.50 (NOT BUILT): backed off and sent again, a journaled message until Telegram answers, §21.50.3)* |
 | The topic map lost | the old topics are orphans the bot cannot find; new ones are created; the previous copy of `state.json` is tried first — for a LOCKED, torn or unrecognized `state.json` alike, which is also kept aside before the first save replaces it (`LoadMessagingStateFile`, PERSISTENCE.md §16; NOT BUILT) |
 
 ## 11. Microsoft Teams
@@ -3379,7 +3379,7 @@ below, one line each.)", then the lines, silent, every number once; "resume 37" 
 
 ### 21.21 Known bugs, not fixed (found 2026-10-18)
 
-> 2026-11-10: the lost sends (a 502 or no answer drops an item; a restart empties the queue) and the deleted topic whose card is posted again every minute are answered by a design, [MESSAGING_OUTBOX.md](MESSAGING_OUTBOX.md) (a durable JSONL journal; NOT BUILT).
+> 2026-11-10: the lost sends (a 502 or no answer drops an item; a restart empties the queue) and the deleted topic whose card is posted again every minute are answered by a design, [MESSAGING_OUTBOX.md](MESSAGING_OUTBOX.md) (a durable JSONL journal), implemented the same day in §21.50 (NOT BUILT).
 
 Each was read in the code at a8d57066b; the ones marked "seen" also show in a log or a file. None is fixed yet.
 
@@ -7551,6 +7551,131 @@ button (its buttons only; …)`. §21.42's drawing and refusal lines stay.
 7. The cog's switch off: 🖼️ leaves the cards one at a time and each picture goes with its card's next edit; on again: 🖼️ comes
    back the same way.
 8. 🖼️ right after ▶ Reactivate, while claude is starting → "Claude is still starting …"; again a few seconds later → the screen.
+
+### 21.50 The durable outbox: a queued message survives a 502, a timeout, a flood hold, a swap, a quit and a crash (2026-11-10; NOT BUILT — the next build must purge: `Messaging.h`'s `OutItem` and `MessagingService` gained members, `TelegramApi.h` changed)
+
+> The user's ask (2026-11-10): "What design will allow us to never lose a message? can we queue messages while persisting to
+> disk and dequeueing, all efficiently. Even bad gateway, all messages must be durable and queue-wise recovering." The design
+> and the user's four decisions (D-O1 a JSONL journal with the queue in memory, D-O2 at-least-once, D-O3 crash-safe at once and
+> power-safe within 250 ms, D-O4 a deleted topic made again, found by its thread id) are
+> [MESSAGING_OUTBOX.md](MESSAGING_OUTBOX.md); "Implement" built the part below (its §14 lists what differs from the design).
+
+#### 21.50.1 What changed, by the losses the design found (MESSAGING_OUTBOX.md §1)
+
+| Loss | Now |
+|---|---|
+| A 502 or a transport failure dropped the item (only a 429 was retried) | backed off and sent again: a journaled item until Telegram answers, a keyed one until it goes, the rest up to 3 attempts (§21.50.3) |
+| A final reply, a remark, a prompt line had no callback, so nothing sent them again | they are DURABLE: journaled at once, recovered at every start |
+| Every start emptied the queue (`_outbox.clear()`), and the app quits with TerminateProcess | `_start` recovers the journal's undelivered items before any thread runs |
+| An idle topic's delete purged what waited for it | an IDLE delete waits until its queued messages went; a CLOSED tab's topic still goes at once (Telegram deletes a topic with its messages) |
+| A deleted topic's card was posted into the dead thread every 60 s for days | the thread is HELD and probed; a topic gone for sure is made again with its history (§21.50.4) |
+| A restart forgot Telegram's flood hold | the hold is journaled in wall time and restored when it is still ahead |
+| `Stop()` could miss the long poll (one abort slot for four threads): a cog Save froze every window up to ~40 s | `TelegramApi::Abort` ends EVERY request in flight; `Shutdown` (Stop's) also refuses new ones |
+
+Not changed: the mirror's transcript cursor is still saved in `state.json`, apart from the journal (MESSAGING_OUTBOX.md §9.2 is not
+built), so a process killed within `kStateProgressSaveGapMs` after a mirror pass shows that pass's messages a second time —
+at-least-once, as D-O2 accepts; nothing is lost that way.
+
+#### 21.50.2 Which items are journaled
+
+- **Durable** (`OutboxItemIsDurable`, MessagingOutbox.h): a plain post of the conversation — `sendMessage` / `sendRichMessage`
+  with no key, no buttons (`reply_markup`), not a history replay item, not sent as the user (`business_connection_id`), not
+  the secretary bot's, no upload. That is the prompt lines, remarks, final replies, answers, command replies, change and idle
+  notices, voice echoes. `OutItem::durability` overrides the rule (`0` for the chunks and fallbacks of a KEYED message, which
+  carry no key themselves: a card's pieces must not come back without the card).
+- Everything else stays in memory as before §21.50: cards and their edits, reactions, prompt statuses, the directory, question
+  and menu cards, pickers, photos and documents, tap answers, chat actions, a replay batch — each is rebuilt by its own state
+  machine after a restart, or is worth nothing late.
+- A recovered item has NO callback (its closures died with the run). The sender applies its fallback itself: a rich message
+  Telegram refuses goes as the classic HTML the put carried (`fb`, `OutItem::fallbackHtml`), an HTML message whose entities
+  Telegram cannot parse goes as plain text (`OutboxPlainTextOfHtml`, `_queueRecoveredFallback`). A recovered final reply
+  goes without its quote unless its put carried one (the quote's `beforeSend` is gone).
+
+#### 21.50.3 The send loop (`_sendLoop`)
+
+- **The answer table** (`ClassifyOutboxAnswer`): ok / "message is not modified" / `TOPIC_NOT_MODIFIED` → sent; 429 → the
+  parking as before (§21.14.3); 5xx or no answer → transient; "message thread not found" / `TOPIC_ID_INVALID` → the thread
+  may be gone; anything else → refused.
+- **Transient**: the item backs off IN ITS PLACE — 1, 2, 4, 8, 16, 32 s, then every 60 s, each ±20 % (`OutboxBackoffMs`) —
+  and goes again: a durable or keyed item until Telegram answers, a bounded one (deletes, pins, a history item) up to
+  `kOutboxBoundedAttempts` = 3 attempts in all. Never retried, as before: `createForumTopic` (a second topic), a tap's
+  answer, a chat action, a send as the user (its echo guard expires), the secretary bot's sends, uploads. One back-off line per
+  minute in `hooks.log` (`[msg] outbox: sendRichMessage HTTP 502 (attempt 3): it goes again in 4 s`); the census counts them.
+- **Lanes**: inside one thread a POST (`OutboxMethodPostsIntoThread`) never overtakes an earlier post that waits — in its
+  back-off or under its method's flood hold (`OutboxLaneBlocks`) — so a reply never lands above its prompt. Edits, deletes
+  and reactions wait for nothing; across threads the (priority, seq, sub) order is unchanged.
+- **The circuit breaker** (`OutboxBreaker`): 8 transient failures in a row over all items = Telegram unreachable — nothing is
+  sent for 15 s, then one item probes; each failed probe doubles the pause up to 5 minutes; any HTTP answer below 500 closes
+  it (`[msg] outbox: Telegram did not answer 8 calls in a row …` / `… answers again after N s`).
+- **A short 429** (up to 60 s) is waited out and the item is put back in its place — it used to be called once more inline,
+  and a second 429 reached its callback as a failure.
+- **`beforeSend`** (a reply's quote) runs once: an item that goes again keeps the quote it got and never gets a second
+  `reply_parameters` member.
+- **The journal's last word on an item**: `ok` with its message id; or `drop` — "replaced by its fallback" when the refusal has
+  one (`RefusalHasOutboxFallback`), else Telegram's words, and the whole item is kept in `outbox\dead.jsonl` (a DEAD letter:
+  refused in every form; `[msg] outbox: a sendMessage for thread N was refused for good (HTTP 400: …): kept in
+  outbox\dead.jsonl`).
+
+#### 21.50.4 A topic that is gone — found by its thread, never its title
+
+- A POST answered "message thread not found" HOLDS its thread (`_heldThreads`, `HoldThread`): the item keeps its place, every
+  post into the thread waits, edits go on. One log line per hold. Only posts: for a topic call, a delete or a chat action, "not
+  found" stays its answer (a delete of a gone thread is done), which its callback hears as before.
+- The tick PROBES a held thread 10 s later (`_tendHeldThreads`, after the sync; at most two probes a tick, through the call
+  slot): `editForumTopic` with the topic's own name and icon as its record says — "exists" also puts a drifted title back in
+  sync, the user's caution of D-O4 — or with no change at all for a thread no record names. Ok, `TOPIC_NOT_MODIFIED` or a
+  refusal about something else → it exists: released, its posts go. "Not found" → probed again 30 s later; two in a row → GONE.
+  No verdict (no answer, a 5xx, a 429) → probed again after 30 s, doubling to 5 minutes. A thread probes found 3 times within
+  10 minutes while it kept refusing posts counts as gone at its next refusal.
+- **Gone** (`_settleGoneThread`): the session's record is FORGOTTEN (found by the thread: a Rekey keeps it), so the topic sync
+  plans the topic again like a new one — its current name and state, its whole history replayed (§21.9). The queued items that
+  replay sends again — the mirror's (marked by `OutboxMirrorPassScope` around `_onStateEdge`, `_followTranscript` and
+  `_flushWorkLog`) and the replay's own — are dropped; the Search topic's thread is cleared, so `_ensureSearchTopic` makes a
+  new one. Once the new thread exists the old one is REDIRECTED (`_threadRedirects`, journaled `lane`): every item still queued
+  moves there, every item queued later for the old thread too, the topic's own verbose mode carries over, and a silent line
+  opens the new topic first — "♻️ This topic was made again: the old one was deleted in Telegram. Its conversation follows."
+  No new topic within 15 minutes (the session went idle or closed), or a thread no session's topic: its items are given up,
+  each callback hearing "message thread not found".
+
+#### 21.50.5 The journal
+
+- `<profile>\messaging\telegram\outbox\`: `outbox.jsonl` (the journal), `dead.jsonl` (the dead letters, never read back), `.lock`
+  (no sharing, delete-on-close: a second writer is refused, a killed process leaves none). A start whose lock is held runs with
+  the queue in memory only and says so in `hooks.log`.
+- One sealed line per record: UTF-8 JSON, `"op"` first, a CRC-32 last (`SealOutboxRecord`), '\n' at its end; `hdr` (the token's
+  hash and the owner's chat: a journal of another bot or owner is discarded, logged), `put` (the call, its order keys, `fb`,
+  `mir`; the parameters last), `try`, `ok`, `retry`, `drop`, `lane`, `flood`.
+- A put is written by ONE `WriteFile` under `_mtx`, in the same lock as the queue's change — in the OS cache before `_enqueue`
+  returns (a kill loses nothing); its parameters are serialized before the lock. The flusher thread flushes within ~250 ms of
+  an append through a handle of its own (a flush through the appending handle stalls the next append); the app's last-window
+  close flushes at once (`NoteAppClosing`), `Stop` flushes and closes.
+- Compacted (only the live items, their back-off, the redirects and the flood hold; temp file + rename) at every start and,
+  between two items on the send thread, once it passes 16 MB (`_outboxCheckpointIfDue`; a failed one is tried again 10 minutes
+  later). A torn last line and damaged lines are skipped and counted (`[msg] outbox: journal read (…)`).
+
+#### 21.50.6 The census
+
+The 10-minute traffic line ends with `outbox(queued=… journaled=… waiting=… held=… retries=… dead=… [oldest=…m] [holds=…
+remade=…] [recovered=… resent=…] journal=…KB [journal-failures=…] [unreachable=…s])`: what waits, what backs off, which
+threads are held, what died, and the journal.
+
+#### 21.50.7 Checks
+
+- m5 `TestMessagingOutbox` (tests_messaging_outbox.cpp): the encodings, the CRC, sealed lines, the fold over every record, the
+  answer table, the classes, the back-off, the breaker, the lanes, the probe's state machine, the files on a scratch folder (the
+  lock, compaction, a torn tail, dead letters, 4 threads appending at once). Run 2026-11-10: 12,705 checks, the 3 known
+  TestTaskbarBadge failures only.
+- `cl /Zs` with the app's own flags (the release worktree's recorded lines and PCH, a shadow of HEAD + this change): the 12
+  units that include `Messaging.h` and the new `MessagingOutboxJournal.cpp` pass; two negative controls fail as they must.
+
+**Check after the build** (the dev bot; `hooks.log`, the census, `outbox\`):
+1. The start logs `[msg] outbox: journal read (…); nothing waited`; `outbox\outbox.jsonl` holds one `hdr` line and `.lock` exists.
+2. Network off (or a firewall rule on api.telegram.org) during a turn: back-off lines, the breaker opens after 8 failures;
+   network back: `answers again`, and the turn's reply lands in order under its prompt.
+3. Quit the app (or swap it) while messages wait (network off): the next start says how many go now, and they land.
+4. Delete a working session's topic in Telegram: one hold line, a probe 10 s later, `GONE` after the second; the topic comes
+   back with its history and the ♻️ line, the card at its bottom; no card posted into the dead thread.
+5. A cog Save that turns the bot off returns at once (no ~40 s freeze).
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

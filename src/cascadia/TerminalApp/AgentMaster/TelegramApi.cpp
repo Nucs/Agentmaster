@@ -101,20 +101,32 @@ namespace Agentmaster::Msg
         try
         {
             std::lock_guard lk{ _mtx };
-            if (_inflight)
+            for (auto& request : _inflight)
             {
-                // Closing the request handle from another thread makes the blocked WinHttpReceiveResponse /
-                // WinHttpReadData return with ERROR_WINHTTP_OPERATION_CANCELLED; the owner sees _aborted
-                // and skips its own close of this handle (closing twice is undefined).
-                ::WinHttpCloseHandle(static_cast<HINTERNET>(_inflight));
-                _inflight = nullptr;
-                _aborted = true;
+                if (request.handle)
+                {
+                    // Closing the request handle from another thread makes the blocked WinHttpReceiveResponse /
+                    // WinHttpReadData return with ERROR_WINHTTP_OPERATION_CANCELLED; the owner sees its entry's
+                    // `aborted` and skips its own close of this handle (closing twice is undefined).
+                    ::WinHttpCloseHandle(static_cast<HINTERNET>(request.handle));
+                    request.handle = nullptr;
+                    request.aborted = true;
+                }
             }
         }
         catch (...)
         {
             LogSwallowedException(L"TelegramApi::Abort");
         }
+    }
+
+    void TelegramApi::Shutdown() noexcept
+    {
+        {
+            std::lock_guard lk{ _mtx };
+            _shutdown = true; // set first: a call that registers after this point is refused instead of escaping the abort
+        }
+        Abort();
     }
 
     TgResult TelegramApi::Call(std::wstring_view method, const json::Value& params, uint32_t timeoutMs) noexcept
@@ -198,9 +210,21 @@ namespace Agentmaster::Msg
         HINTERNET hSession = nullptr;
         HINTERNET hConnect = nullptr;
         HINTERNET hRequest = nullptr;
-        bool registered = false; // _inflight holds hRequest
+        bool registered = false; // _inflight holds this call's entry (`slot`)
+        std::list<InFlight>::iterator slot;
         try
         {
+            {
+                // §21.50: after Shutdown nothing new goes out — a thread finishing its pass must not start a 40 s long poll
+                // or a 20 s topic call that the stop's abort already passed.
+                std::lock_guard lk{ _mtx };
+                if (_shutdown)
+                {
+                    r.transportFailed = true;
+                    r.description = L"the client is shut down";
+                    return r;
+                }
+            }
             hSession = ::WinHttpOpen(L"Agentmaster-Messaging/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
             if (!hSession)
             {
@@ -234,8 +258,19 @@ namespace Agentmaster::Msg
             }
             {
                 std::lock_guard lk{ _mtx };
-                _inflight = hRequest;
-                _aborted = false;
+                if (_shutdown)
+                {
+                    // A Shutdown that ran between the check above and here aborted every REGISTERED request — not this one, which
+                    // was not registered yet: refused here instead, so nothing escapes the stop.
+                    ::WinHttpCloseHandle(hRequest);
+                    ::WinHttpCloseHandle(hConnect);
+                    ::WinHttpCloseHandle(hSession);
+                    hRequest = hConnect = hSession = nullptr;
+                    r.transportFailed = true;
+                    r.description = L"the client is shut down";
+                    return r;
+                }
+                slot = _inflight.insert(_inflight.end(), InFlight{ hRequest, false });
                 registered = true;
             }
             BOOL ok = ::WinHttpSendRequest(hRequest,
@@ -285,11 +320,8 @@ namespace Agentmaster::Msg
             bool aborted = false;
             {
                 std::lock_guard lk{ _mtx };
-                aborted = _aborted;
-                if (_inflight == hRequest)
-                {
-                    _inflight = nullptr;
-                }
+                aborted = slot->aborted;
+                _inflight.erase(slot);
                 registered = false;
             }
             if (!aborted)
@@ -352,14 +384,11 @@ namespace Agentmaster::Msg
             if (registered)
             {
                 std::lock_guard lk{ _mtx };
-                if (_inflight == hRequest)
-                {
-                    _inflight = nullptr;
-                }
-                if (_aborted)
+                if (slot->aborted)
                 {
                     hRequest = nullptr; // Abort closed it
                 }
+                _inflight.erase(slot);
             }
             if (hRequest)
             {
@@ -382,9 +411,9 @@ namespace Agentmaster::Msg
 
     TgResult TelegramApi::DownloadFile(std::wstring_view filePath, size_t maxBytes, std::string& out, uint32_t timeoutMs) noexcept
     {
-        // §21.43 (VOICE.md §6): a voice note's bytes. Its own small GET, not _request: the answer is binary (never JSON), may be
-        // larger than kMaxBodyBytes, and must not occupy the Abort slot the long poll relies on (a download runs on the voice
-        // thread while the poll waits).
+        // §21.43 (VOICE.md §6): a voice note's bytes. Its own small GET, not _request: the answer is binary (never JSON) and may be
+        // larger than kMaxBodyBytes. It is not tracked by Abort / Shutdown (§21.50: they end every _request in flight; a download
+        // on the voice thread runs to its own timeouts, and the voice stop kills its engine first).
         TgResult r;
         out.clear();
         HINTERNET hSession = nullptr;
