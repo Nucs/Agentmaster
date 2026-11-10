@@ -16,7 +16,7 @@
 > §21.43's note in a NEW thread; DEV 0.0.1.39 (a Debug build of 64a3a4846 by the build server, since 2026-10-28) holds
 > everything through §21.44, those two included; §21.32–§21.32.3 and §21.36 are
 > research and design — §21.32.4's route home (Cloudflare, the tunnel, the fastrun relay) is LIVE —, §22 design only. A
-> heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than these builds. **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
+> heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than these builds. **Known bugs, not fixed: §21.21.** **The durable outbox that ends the lost sends and the deleted-topic loop: [MESSAGING_OUTBOX.md](MESSAGING_OUTBOX.md) (design only, 2026-11-10).** One bot per install since 2026-10-17: the DEV
 > install polls `@ExampleSessionsDevBot`, the RELEASE install `@ExampleSessionsBot` (the dev bot from 2026-10-16
 > 18:50 until then); each token in `K:\source\telegram\<bot>.env`, stored in Windows Credential Manager per profile by the
 > cog — never in a profile file; the first bot, `@ExampleFirstBot`, never got Threaded Mode on. Teams, webhooks and external connectors
@@ -979,8 +979,8 @@ queued message's status; `disable_notification` on everything but a turn's final
 | 403 (the user blocked the bot) | stop; status "blocked by the user" *(as built: not handled — each send fails on its own, nothing stops, and the cog's status does not say so)* |
 | 409 | §10.2 |
 | 429 | wait `retry_after`; the pacing lowers its rate *(as built: a wait of up to 60 s is slept through and the call made once more; a longer one parks only the refused method, §21.14.3; the history replay pauses 5 min, §21.9)* |
-| "message thread not found" (a deleted topic) | the topic is created again *(as built: only the 🔎 Search topic, at the bot's next start — §5.1, §21.18, dev only; a session's topic is never made again — a known bug, §21.21)* |
-| No answer at all (DNS, network: WinHTTP 12002 / 12007) | *(as built: the send loop does not retry it; a message whose caller does not send it again — a final reply, a prompt line, a remark — is lost: a known bug, §21.21)* |
+| "message thread not found" (a deleted topic) | the topic is created again *(as built: only the 🔎 Search topic, at the bot's next start — §5.1, §21.18, dev only; a session's topic is never made again — a known bug, §21.21; designed: [MESSAGING_OUTBOX.md](MESSAGING_OUTBOX.md) §8)* |
+| No answer at all (DNS, network: WinHTTP 12002 / 12007) | *(as built: the send loop does not retry it; a message whose caller does not send it again — a final reply, a prompt line, a remark — is lost: a known bug, §21.21; designed: [MESSAGING_OUTBOX.md](MESSAGING_OUTBOX.md) §7)* |
 | The topic map lost | the old topics are orphans the bot cannot find; new ones are created; the previous copy of `state.json` is tried first — for a LOCKED, torn or unrecognized `state.json` alike, which is also kept aside before the first save replaces it (`LoadMessagingStateFile`, PERSISTENCE.md §16; NOT BUILT) |
 
 ## 11. Microsoft Teams
@@ -3378,6 +3378,8 @@ message for no rows.
 below, one line each.)", then the lines, silent, every number once; "resume 37" opens the 37th.
 
 ### 21.21 Known bugs, not fixed (found 2026-10-18)
+
+> 2026-11-10: the lost sends (a 502 or no answer drops an item; a restart empties the queue) and the deleted topic whose card is posted again every minute are answered by a design, [MESSAGING_OUTBOX.md](MESSAGING_OUTBOX.md) (a durable JSONL journal; NOT BUILT).
 
 Each was read in the code at a8d57066b; the ones marked "seen" also show in a log or a file. None is fixed yet.
 
