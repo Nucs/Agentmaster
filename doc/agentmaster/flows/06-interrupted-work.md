@@ -18,8 +18,10 @@ continues by itself; "interrupted" takes it back too and stops the continuation 
 interrupt replaces the error (INT-09). The same day: every question reads "interrupted / uninterrupted" (the
 first restart question was "Continue the turn / Keep it interrupted"), a fork of a turn the user interrupted asks
 too (INT-10), and Agentmaster ships `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` as a Global env default (INT-11).
-**2026-11-08 (NOT BUILT):** a turn that dies on "API Error: Connection lost mid-response" is restarted by the window that
-hosts its tab as "Restart uninterrupted" — no question, no tab switch — and goes on by itself (INT-12).
+**2026-11-08 (in production 0.8.0.12):** a turn that dies on "API Error: Connection lost mid-response" is restarted by the
+window that hosts its tab as "Restart uninterrupted" — no question, no tab switch — and goes on by itself (INT-12).
+**2026-11-10 (NOT BUILT):** so does every other response Claude Code cut off — "The response stopped arriving", "Server error
+mid-response", the "… before a response was produced. Try again." ones (INT-12 phase 6, E3).
 
 **Test environment rule.** These flows need `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` in the test machine's
 Claude settings (Appendix A of E2E_TESTING.md) unless a flow says otherwise: without it Claude Code only
@@ -34,9 +36,10 @@ env by itself (INT-11), so the settings line is then needed only by a flow that 
  API error after output ("Connection lost")     Claude Code alone: sits at the error
                                                 + rewind line (Agentmaster, after the old claude exits): continues
                                                 → Restart / Fork ask interrupted / uninterrupted (NOT BUILT, INT-09)
-                                                → "Connection lost mid-response": restarted by itself,
-                                                  uninterrupted, no question (NOT BUILT, INT-12)
- API error before any output                    Claude Code alone: continues (nothing to do)
+                                                → a cut-off response ("Connection lost", "stopped arriving",
+                                                  …): restarted by itself, uninterrupted, no question (INT-12)
+ API error before any output                    Claude Code alone: continues on a resume (nothing to take back)
+                                                → a stream cut ("… Try again."): restarted by itself (NOT BUILT, INT-12)
  cut off by a shutdown / crash                  Claude Code alone: continues (interruptedByShutdown)
                                                 → a Restart of it asks interrupted / uninterrupted (NOT BUILT)
  a Restart of a RUNNING turn                    its own shutdown cuts the turn; the new claude continues it
@@ -434,20 +437,21 @@ after a restart without the user's own Claude Code settings; a user who removes 
 
 ---
 
-### INT-12 · A lost connection restarts the session by itself
+### INT-12 · A cut-off response restarts the session by itself
 
-> **NOT BUILT** (2026-11-08) · **P0 when built** · **Needs** mock (`say` + `drop`), a second tab · **Spec** HOOKS.md *Connection lost mid-response — the automatic restart*
+> **Since** production 0.8.0.12 / v0.8.2-prerelease for "Connection lost mid-response"; **NOT BUILT** (2026-11-10) for the rest of the family (phase 6, E3) · **P0** · **Needs** mock (`say` + `drop`; `hold` for phase 6), a second tab · **Spec** HOOKS.md *Connection lost mid-response — the automatic restart*
 
-**Promise.** A turn that dies on "API Error: Connection lost mid-response. The response above may be incomplete." goes on by
-itself: the window that hosts the tab restarts the session as "Restart uninterrupted" — no question, no tab switch — and the
-restarted Claude continues the turn. Nothing in the input box and nothing running in the background is lost to it, and the
-Error toast shows only when the restart does not heal the session.
+**Promise.** A turn that dies on a response Claude Code cut off — "API Error: Connection lost mid-response. The response above
+may be incomplete.", "The response stopped arriving", every other "… The response above may be incomplete." and the "… before a
+response was produced. Try again." ones — goes on by itself: the window that hosts the tab restarts the session as "Restart
+uninterrupted" — no question, no tab switch — and the restarted Claude continues the turn. Nothing in the input box and nothing
+running in the background is lost to it, and the Error toast shows only when the restart does not heal the session.
 
 **Phases**
 1. **The failure in a background tab.** *Do:* F-S in tab A; `fix it [[mock bash "echo step1"; say "I will now"; drop]]`;
    select tab B at once. *Expect:* tab A reads Error for a moment, then restarts in place — Idle → (Error) → Waiting → Running
-   → Waiting; tab B stays selected; no dialog; no Error toast. *Check:* [LOG] `[auto-restart] <sid8> a lost connection: … —
-   reading its transcript to restart it uninterrupted`, `[notify-hold] <sid8> running -> error (a lost connection …)`,
+   → Waiting; tab B stays selected; no dialog; no Error toast. *Check:* [LOG] `[auto-restart] <sid8> a cut-off response: … —
+   reading its transcript to restart it uninterrupted`, `[notify-hold] <sid8> running -> error (a cut-off response …)`,
    `[nav] auto-restart-begin <sid8> (… automatic restart 1 of at most 3 in 30 min)`, `[api-error-rewind] <sid8> restart:
    rewound past "API Error: Connection lost mid-response…"`, `[nav] auto-restart-done <sid8> (restarted in place,
    uninterrupted …)`, `[auto-restart] <sid8> healed: …; its held Error toast is dropped`; [TR] ONE `last-prompt` line
@@ -463,16 +467,23 @@ Error toast shows only when the restart does not heal the session.
 4. **The budget.** *Do:* fail the same session four times within 30 minutes (a new error row each time). *Expect:* three
    restarts; the fourth logs `not restarted (over-budget): 3 automatic restarts of this session in the last 30 minutes — the
    session waits at the error for you`, and its toast shows.
-5. **Off.** *Do:* cog → Sessions → "Restart a session by itself when its connection is lost mid-response" off, Save; fail.
-   *Expect:* `not restarted: the automatic restart is off (Settings > Sessions)`, Error as before, the toast at once.
+5. **Off.** *Do:* cog → Sessions → "Restart a session by itself when its response is cut off (connection lost, stopped
+   arriving, …)" off, Save; fail. *Expect:* `not restarted: the automatic restart is off (Settings > Sessions)`, Error as
+   before, the toast at once.
+6. **The response stopped arriving** (the 2026-11-10 report, session `0c947da9`). *Do:* `fix it [[mock bash "echo step1"; think
+   "…"; hold g]]` and leave the gate shut past Claude Code's stream watchdog (5.5 minutes of silence in the report). *Expect:*
+   the tab shows "API Error: The response stopped arriving. The response above may be incomplete." for a moment, then phase 1's
+   restart and continuation. *Check:* [TR] the error row's `streamCutCause:"watchdog"`; [LOG] phase 1's lines, the
+   `[api-error-rewind]` line naming the stopped-arriving error.
 
 **Edge cases**
 - **E1 A split tab** (tab A split, a shell in the focused pane) → only Claude's pane (its `WT_SESSION`) is restarted; the
   shell keeps running.
 - **E2 Background work** (a `run_in_background` shell still running) → `waiting before the restart: claude still runs
   background work …`; the restart comes when the job ends.
-- **E3 Another error mid-response** (`drop server_error`: "Server error mid-response") → no automatic restart; INT-09's
-  question on a manual Restart.
+- **E3 A server error mid-response** (`drop server_error`: "Server error mid-response") → restarted like phase 1 (the whole
+  cut-off family; INT-09's question stays for a manual Restart). An HTTP error that outlived Claude Code's own retries (`error
+  529 overloaded_error` with retries exhausted) is NOT a cut-off response → no automatic restart, the toast at once.
 - **E4 The take-back skipped** (the same conversation runs in a second tab, OBSERVER.md §20) → one restart; the error stays;
   the re-asserted Error reads `not restarted (already-restarted)`; `NOT healed … 120 s after the automatic restart`, then the
   held toast (`[notify-release]`).

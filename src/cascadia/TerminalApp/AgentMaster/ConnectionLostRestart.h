@@ -19,11 +19,24 @@
 // (RestartTurnChoice::LetTurnContinue — the API-error take-back line plus CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1,
 // ApiErrorRewind.h / InterruptedTurns.h) continues the turn.
 //
+// EVERY CUT-OFF RESPONSE, NOT ONLY THAT ONE (2026-11-10: the user's "● API Error: The response stopped arriving. The response
+// above may be incomplete." — session 0c947da9 — "is now stuck and did not self heal"). The same code path writes one row per
+// way the stream died, and each leaves the claude waiting at the error the same way, healed by the same restart. The
+// feature keeps its first error's name ("ConnectionLost…", the public setting autoRestartOnConnectionLost) and covers them
+// all (IsCutOffResponseError):
+//   * after output began, every text ending "The response above may be incomplete." — Connection lost mid-response, The
+//     response stopped arriving (the stream watchdog: streamCutCause "watchdog"), Server error mid-response, Part of the
+//     response never arrived, The response stream was malformed, Your computer went to sleep mid-response. Claude Code tells
+//     a partial response by that very sentence (its print mode: `result.endsWith("The response above may be incomplete.")`);
+//   * before any output, "… before a response was produced. Try again." / "… and no response was produced. Try again." — no
+//     half-reply to take back, but the claude waits at the error all the same, and the restart's resume sends the turn again.
+// NOT covered: HTTP errors after Claude Code's own retries (500, 529 overloaded, 429 rate limits), usage limits, a refusal.
+//
 // WHAT THIS ADDS. The window hosting such a session's tab does that restart BY ITSELF — no question, no tab switch
 // (TerminalPage.AgentTurns.cpp, "the AUTOMATIC RESTART after a lost connection"). The rules are pure and live here so
 // the m5 harness pins them (TestConnectionLostRestart, tests_rewind.cpp):
 //   * DecideConnectionLostRestart — the REGISTRY gate, run on every change of a session the window hosts (no I/O): is it
-//     this error, on a tab Agentmaster can safely restart, with nothing a restart would destroy (an unsent draft, a
+//     a cut-off response, on a tab Agentmaster can safely restart, with nothing a restart would destroy (an unsent draft, a
 //     delivery in flight, background work)?
 //   * DecideConnectionLostRestartFromPlan — the TRANSCRIPT gate, one tail read per Error episode (off the UI thread):
 //     restart only when the take-back really continues the turn, at most once per error row, and at most
@@ -51,17 +64,26 @@
 
 namespace Agentmaster
 {
-    // The words that identify the error in its row's text ("API Error: Connection lost mid-response. The response above
-    // may be incomplete."). Claude Code prints them for every mid-response cut of the CONNECTION; its other mid-response
-    // cuts ("Server error mid-response", "The response stopped arriving", "Part of the response never arrived", "Your
-    // computer went to sleep mid-response") and the before-any-output variant ("Connection lost before a response was
-    // produced") are deliberately NOT matched: the user asked for this one, and the before-output variant already
-    // continues by itself on any resume.
-    inline constexpr std::wstring_view kConnectionLostMidResponseText = L"Connection lost mid-response";
+    // The sentence Claude Code ends every error row of a response cut off AFTER output began with ("API Error: Connection
+    // lost mid-response. The response above may be incomplete.", "… The response stopped arriving. …", "… Server error
+    // mid-response. …", …) — and the one its own print mode tells a partial result by. Matched without its final period.
+    inline constexpr std::wstring_view kCutOffResponseMidStreamText = L"The response above may be incomplete";
 
-    // At most this many automatic restarts of ONE session inside kConnectionLostRestartWindowMs. A connection that keeps
-    // dropping mid-response would otherwise restart the session forever; past the budget the session stays in Error for
-    // the user, exactly as without this feature. Three covers a flaky stretch without hiding a dead network for long.
+    // The word three of those rows name the cut by ("Connection lost mid-response", "Server error mid-response", "Your computer
+    // went to sleep mid-response") — matched too, so those stay recognized should a later Claude Code drop the sentence above.
+    // Only Claude Code's stream-cut templates use it.
+    inline constexpr std::wstring_view kCutOffResponseMidResponseText = L"mid-response";
+
+    // The words of the error rows of a stream cut off BEFORE any output ("API Error: Connection lost before a response was
+    // produced. Try again.", "… The response stalled before a response was produced. …", "… Your computer went to sleep
+    // before a response was produced. …") and of the malformed / never-arrived variants of it ("… and no response was
+    // produced. Try again.").
+    inline constexpr std::wstring_view kCutOffResponseBeforeOutputText = L"before a response was produced";
+    inline constexpr std::wstring_view kCutOffResponseNoOutputText = L"no response was produced";
+
+    // At most this many automatic restarts of ONE session inside kConnectionLostRestartWindowMs. A stream that keeps
+    // getting cut off would otherwise restart the session forever; past the budget the session stays in Error for the
+    // user, exactly as without this feature. Three covers a flaky stretch without hiding a dead network for long.
     inline constexpr size_t kConnectionLostRestartBudget = 3;
 
     // The rolling window of kConnectionLostRestartBudget (30 minutes). Long enough that a burst of drops is capped,
@@ -75,25 +97,21 @@ namespace Agentmaster
     // still healing; too long only delays the toast of a restart that failed.
     inline constexpr int64_t kConnectionLostRestartConfirmMs = 120LL * 1000;
 
-    // Is this error text Claude Code's "Connection lost mid-response" (kConnectionLostMidResponseText)? An ordinal,
-    // case-insensitive search for the ASCII words anywhere in the text, so a different prefix ("API Error: " today) or a
-    // changed tail still matches. Pure; allocates nothing.
-    //   errorText — the error row's text as the scanner captured it (SessionInfo::errorMessage) or as the take-back
-    //               planner read it (ApiErrorRewindPlan::errorText). Empty never matches.
+    // Does `text` contain the ASCII words `needle`, ignoring ASCII case? Pure; allocates nothing.
+    //   text   — the text searched (any UTF-16; a non-ASCII character can never be part of a match, the needle being ASCII).
+    //   needle — ASCII words (an empty needle matches nothing).
     // Returns true when the words are in the text. Never throws.
-    inline bool IsConnectionLostMidResponseError(std::wstring_view errorText) noexcept
+    inline bool ContainsAsciiWordsNoCase(std::wstring_view text, std::wstring_view needle) noexcept
     {
-        const std::wstring_view needle = kConnectionLostMidResponseText;
-        if (errorText.size() < needle.size())
+        if (needle.empty() || text.size() < needle.size())
         {
             return false;
         }
-        // ASCII-only case fold: the needle is ASCII, so a non-ASCII character of the text can never be part of a match.
         const auto fold = [](wchar_t c) noexcept { return (c >= L'A' && c <= L'Z') ? static_cast<wchar_t>(c - L'A' + L'a') : c; };
-        for (size_t start = 0; start + needle.size() <= errorText.size(); ++start)
+        for (size_t start = 0; start + needle.size() <= text.size(); ++start)
         {
             size_t i = 0;
-            while (i < needle.size() && fold(errorText[start + i]) == fold(needle[i]))
+            while (i < needle.size() && fold(text[start + i]) == fold(needle[i]))
             {
                 ++i;
             }
@@ -105,19 +123,39 @@ namespace Agentmaster
         return false;
     }
 
+    // Is this API error text one of Claude Code's CUT-OFF RESPONSES — the stream died after output began
+    // (kCutOffResponseMidStreamText: "… The response above may be incomplete."; kCutOffResponseMidResponseText: "…
+    // mid-response") or before any output (kCutOffResponseBeforeOutputText / kCutOffResponseNoOutputText: "… Try again.")? A
+    // case-insensitive search for the
+    // words anywhere in the text, so another prefix ("API Error: " today) or an added tail still matches. Only the text of an
+    // API-error row is ever asked (SessionInfo::errorMessage is set from one; so is ApiErrorRewindPlan::errorText), so the
+    // phrases cannot meet Claude Code's unrelated "may be incomplete" messages (a download, IDE detection). Pure; allocates
+    // nothing.
+    //   errorText — the error row's text as the scanner captured it (SessionInfo::errorMessage) or as the take-back planner
+    //               read it (ApiErrorRewindPlan::errorText). Empty never matches.
+    // Returns true for a cut-off response. Never throws.
+    // ⚠ HTTP errors that outlived Claude Code's own retries ("API Error: 500 …", "529 Overloaded", "Rate limited"), usage
+    //   limits and refusals are NOT cut-off responses and must never match: a restart of those repeats a request the server
+    //   refused, or one the user's plan does not allow.
+    inline bool IsCutOffResponseError(std::wstring_view errorText) noexcept
+    {
+        return ContainsAsciiWordsNoCase(errorText, kCutOffResponseMidStreamText) || ContainsAsciiWordsNoCase(errorText, kCutOffResponseMidResponseText) ||
+               ContainsAsciiWordsNoCase(errorText, kCutOffResponseBeforeOutputText) || ContainsAsciiWordsNoCase(errorText, kCutOffResponseNoOutputText);
+    }
+
     // What the registry gate decided for one session at one moment. The order is the order of the checks: a session that
-    // is not this feature's business is Ignore (nothing logged); a lost connection Agentmaster will not restart is Decline
+    // is not this feature's business is Ignore (nothing logged); a cut-off response Agentmaster will not restart is Decline
     // (logged once per Error episode); one it will restart once something ends is Hold; Go starts the transcript gate.
     enum class ConnectionLostRestartGate
     {
         // Not this feature's business: not a live Claude session hosted in this window, not in an unacknowledged Error,
-        // another error than the lost connection, or a dormant tab (its own start takes the error back — the restored
+        // another error than a cut-off response, or a dormant tab (its own start takes the error back — the restored
         // resume and Deactivate's wake do — and the shipped CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 continues it).
         Ignore,
-        // A lost connection this window will not restart: the switch is off, an adopted tab, the take-back switch is off, a
-        // stop intent the user recorded. The session stays in Error for the user, as without the feature.
+        // A cut-off response this window will not restart: the switch is off, an adopted tab, the take-back switch is off,
+        // a stop intent the user recorded. The session stays in Error for the user, as without the feature.
         Decline,
-        // A lost connection this window WILL restart once the reason passes (an unsent draft, a delivery or a draft fill
+        // A cut-off response this window WILL restart once the reason passes (an unsent draft, a delivery or a draft fill
         // owning the input box, background work a restart would end). Re-evaluated on every registry change of the session
         // and on every liveness tick.
         Hold,
@@ -169,9 +207,9 @@ namespace Agentmaster
         {
             return { ConnectionLostRestartGate::Ignore, L"not in an unacknowledged Error" };
         }
-        if (!IsConnectionLostMidResponseError(f.errorMessage))
+        if (!IsCutOffResponseError(f.errorMessage))
         {
-            return { ConnectionLostRestartGate::Ignore, L"another error than a lost connection" };
+            return { ConnectionLostRestartGate::Ignore, L"another error than a cut-off response" };
         }
         if (!f.started)
         {
@@ -226,7 +264,7 @@ namespace Agentmaster
         // The planner left the error alone (a refusal, an unknown shape, a torn last line, a file larger than it reads):
         // a restart would take nothing back and the new claude would wait at the error.
         NotTakenBack,
-        // The transcript's active error is another error than the lost connection (the registry's message was stale).
+        // The transcript's active error is another error than a cut-off response (the registry's message was stale).
         NotThisError,
         // The take-back lands on a row Claude Code does not continue from by itself (a meta row, a compaction summary).
         WouldNotContinue,
@@ -288,9 +326,9 @@ namespace Agentmaster
         {
             return { ConnectionLostPlanVerdict::NotTakenBack, L"the take-back planner leaves this error alone: " + (plan.reason.empty() ? std::wstring{ L"(no reason given)" } : plan.reason) };
         }
-        if (!IsConnectionLostMidResponseError(plan.errorText))
+        if (!IsCutOffResponseError(plan.errorText))
         {
-            return { ConnectionLostPlanVerdict::NotThisError, L"the transcript's error is \"" + plan.errorText + L"\", not a lost connection" };
+            return { ConnectionLostPlanVerdict::NotThisError, L"the transcript's error is \"" + plan.errorText + L"\", not a cut-off response" };
         }
         if (!ApiErrorTakeBackContinues(plan))
         {
@@ -359,7 +397,7 @@ namespace Agentmaster
     }
 
     // Should a session the automatic restart HEALED get back the Prompt Queue Runner mode that the stop-on-error backstop
-    // took away when the lost connection put it in Error? Only when the record of that pause belongs to the very Error
+    // took away when the cut-off response put it in Error? Only when the record of that pause belongs to the very Error
     // episode that was healed, nothing changed the mode since (it is still Off), and the pause took a real mode away (an
     // interrupt hold's Off is not given back). Pure.
     //   a                — the session's runner state now (AutorunnerState::stopOnErrorPausedMode / …EpisodeMs are set by

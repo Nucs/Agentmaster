@@ -42,7 +42,10 @@
 //     third question itself — "Restart uninterrupted", RestartTurnChoice::LetTurnContinue — the moment its session enters
 //     Error on that error: a registry gate (no I/O, every registry change), a transcript gate (one tail read per Error
 //     episode, off the UI thread), the restart of the session's OWN pane, then a watch for the turn to run again. Its pure
-//     rules are AgentMaster/ConnectionLostRestart.h; HOOKS.md "Connection lost mid-response — the automatic restart".
+//     rules are AgentMaster/ConnectionLostRestart.h; HOOKS.md "Connection lost mid-response — the automatic restart". Since the
+//     user's report of 2026-11-10 ("● API Error: The response stopped arriving. The response above may be incomplete." — "is
+//     now stuck and did not self heal") it covers EVERY response Claude Code cut off (IsCutOffResponseError), not only the
+//     lost connection it is named after.
 //
 // Measured on 2.1.291 against the e2e mock (tools/e2e-spike): a fork of a running session went busy ~5 s after launch and
 // sent its first request ~0.4–1.1 s later; one Esc then left Claude Code's "Continue from where you left off." row
@@ -1262,9 +1265,11 @@ namespace winrt::TerminalApp::implementation
 
     // ===== the AUTOMATIC RESTART after a lost connection ========================================================
     // HOOKS.md "Connection lost mid-response — the automatic restart"; the pure rules are AgentMaster/ConnectionLostRestart.h.
-    // A session whose turn dies on "API Error: Connection lost mid-response. The response above may be incomplete." is restarted
-    // by the window hosting its tab as "Restart uninterrupted" — no question, no tab switch — in four steps, all on this
-    // window's UI thread except the transcript read:
+    // A session whose turn dies on a CUT-OFF RESPONSE — "API Error: Connection lost mid-response. The response above may be
+    // incomplete.", "… The response stopped arriving. …", every other "… The response above may be incomplete." and the
+    // "… before a response was produced. Try again." family (IsCutOffResponseError) — is restarted by the window hosting its tab
+    // as "Restart uninterrupted" — no question, no tab switch — in four steps, all on this window's UI thread except the
+    // transcript read:
     //   1. the REGISTRY gate on every change of the session (_EvaluateConnectionLostRestart, from the tab-dot drain and the
     //      liveness sweep): is it this error, on a tab this window can restart safely, with nothing a restart would destroy?
     //   2. the TRANSCRIPT gate (_JudgeConnectionLostRestart → _FinishConnectionLostJudge): one tail read per Error episode, off
@@ -1290,7 +1295,7 @@ namespace winrt::TerminalApp::implementation
         f.state = info.state;
         f.errorDismissed = info.errorDismissed;
         f.errorMessage = info.errorMessage;
-        if (!f.hostedHere || f.state != ::Agentmaster::SessionState::Error || !f.started || !::Agentmaster::IsConnectionLostMidResponseError(f.errorMessage))
+        if (!f.hostedHere || f.state != ::Agentmaster::SessionState::Error || !f.started || !::Agentmaster::IsCutOffResponseError(f.errorMessage))
         {
             // The gate answers Ignore before it reads anything below, so the fleet's other sessions (every window's drain sees
             // every session's change) — and sessions in another error, or dormant — cost no registry lock and no map lookups.
@@ -1412,7 +1417,7 @@ namespace winrt::TerminalApp::implementation
             }
             track.phase = ConnectionLostRestartPhase::Judging;
             track.judgingSinceTickMs = TurnsTickMs();
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[auto-restart] " + ::Agentmaster::ShortId(id) + L" a lost connection: \"" + OneLogLine(info.title, 80) + L"\" stopped on \"" +
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[auto-restart] " + ::Agentmaster::ShortId(id) + L" a cut-off response: \"" + OneLogLine(info.title, 80) + L"\" stopped on \"" +
                                                             OneLogLine(info.errorMessage, 120) + L"\" \x2014 reading its transcript to restart it uninterrupted\n");
             _JudgeConnectionLostRestart(id, track.errorEpisodeMs);
         }
@@ -1618,7 +1623,7 @@ namespace winrt::TerminalApp::implementation
         const size_t before = ledger.Look(sessionId, now).restartsInWindow;
         // Noted BEFORE the restart: nothing that runs inside it can start a second one for this error row.
         ledger.Note(sessionId, plan.errorUuid, now);
-        ::Agentmaster::LogNav(L"auto-restart-begin " + ::Agentmaster::ShortId(sessionId) + L" (a lost connection: error row " + ::Agentmaster::ShortId(plan.errorUuid) + L", taken back to the " +
+        ::Agentmaster::LogNav(L"auto-restart-begin " + ::Agentmaster::ShortId(sessionId) + L" (a cut-off response: error row " + ::Agentmaster::ShortId(plan.errorUuid) + L", taken back to the " +
                               plan.targetKind + L" " + ::Agentmaster::ShortId(plan.targetUuid) + L"; automatic restart " + std::to_wstring(before + 1) + L" of at most " +
                               std::to_wstring(::Agentmaster::kConnectionLostRestartBudget) + L" in " + std::to_wstring(::Agentmaster::kConnectionLostRestartWindowMs / 60000) + L" min)");
         bool handled = false;
@@ -1706,9 +1711,9 @@ namespace winrt::TerminalApp::implementation
                 }
                 if (givenBack != ::Agentmaster::AutorunnerMode::Off)
                 {
-                    line += std::wstring{ L"; the Prompt Queue Runner is back to " } + ::Agentmaster::AutorunnerModeLabel(givenBack) + L" (stop-on-error had paused it for the lost connection)";
+                    line += std::wstring{ L"; the Prompt Queue Runner is back to " } + ::Agentmaster::AutorunnerModeLabel(givenBack) + L" (stop-on-error had paused it for the cut-off response)";
                     ::Agentmaster::AppendStateLog(L"autorunner.log", L"[auto-restart] " + sessionId + L" runner back to " + ::Agentmaster::AutorunnerModeLabel(givenBack) +
-                                                                         L" (the lost connection's stop-on-error pause is given back: the turn runs again after the automatic restart)\n");
+                                                                         L" (the cut-off response's stop-on-error pause is given back: the turn runs again after the automatic restart)\n");
                 }
                 ::Agentmaster::AppendStateLog(L"hooks.log", line + L"\n");
                 return;
@@ -1753,7 +1758,7 @@ namespace winrt::TerminalApp::implementation
         try
         {
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[notify-hold] " + ::Agentmaster::ShortId(sessionId) +
-                                                            L" running -> error (a lost connection that this window restarts by itself: the toast shows only if the restart does not heal it)\n");
+                                                            L" running -> error (a cut-off response that this window restarts by itself: the toast shows only if the restart does not heal it)\n");
         }
         catch (...)
         {

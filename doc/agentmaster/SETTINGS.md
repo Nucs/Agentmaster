@@ -77,7 +77,9 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
   §11).
 - `resumeApiErrorTurns` (true): append the one-line rewind so a resumed session continues a turn that an
   API error ended (HOOKS.md *API-error turns*).
-- `autoRestartOnConnectionLost` (true): a session whose turn dies on "API Error: Connection lost mid-response" is
+- `autoRestartOnConnectionLost` (true): a session whose turn dies on a response Claude Code cut off — "API Error: Connection
+  lost mid-response", "The response stopped arriving", every other "… The response above may be incomplete." and the "…
+  before a response was produced. Try again." ones (the key keeps the first error's name) — is
   restarted by the window that hosts its tab as "Restart uninterrupted", with no question and no tab switch — not while
   its box holds an unsent draft, a delivery owns the box or claude still runs background work; never twice for one
   error row; at most 3 times per session in 30 minutes; the Error toast waits for the outcome; a healed session's Prompt

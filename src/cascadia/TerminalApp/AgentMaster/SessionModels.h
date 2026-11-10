@@ -1405,7 +1405,7 @@ namespace Agentmaster
         int64_t interruptHeldUnixMs{ 0 };
         // Agentmaster (HOOKS.md "Connection lost mid-response — the automatic restart"): the mode the STOP-ON-ERROR
         // backstop (Scheduler::OnObserved) took away when it paused this runner, and the Error episode it paused in (that
-        // episode's SessionInfo::stateChangedAtUnixMs). Read ONLY by the automatic restart after a lost connection, which
+        // episode's SessionInfo::stateChangedAtUnixMs). Read ONLY by the automatic restart after a cut-off response, which
         // gives the mode back once the restarted session runs the turn again (ShouldGiveRunnerBackAfterRestart,
         // ConnectionLostRestart.h): a healed turn must not leave its queue paused for good, which nobody would notice until
         // the queue was found stalled hours later. Off / 0 == nothing to give back. Every explicit mode decision forgets it
@@ -2763,7 +2763,10 @@ namespace Agentmaster
         // Agentmaster (HOOKS.md "Connection lost mid-response — the automatic restart"; the user's request of 2026-11-08:
         // "self healing for error "API Error: Connection lost mid-response …" by restarting session as uninterrupted
         // automatically … without switching to it and without opening a prompt"): when a session whose claude runs in a
-        // tab of this app enters Error on that error, the hosting window restarts it by itself as "Restart uninterrupted"
+        // tab of this app enters Error on that error — since 2026-11-10 on ANY response Claude Code cut off ("The response
+        // stopped arriving", "Server error mid-response", "… before a response was produced. Try again.", …:
+        // IsCutOffResponseError; the key keeps its first error's name, a public setting since v0.8.2-prerelease) — the
+        // hosting window restarts it by itself as "Restart uninterrupted"
         // (RestartTurnChoice::LetTurnContinue: the take-back above plus CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1), so the
         // turn simply goes on. Never while the input box holds an unsent draft, a delivery owns the box or claude still
         // runs background work (it waits for those to end); never twice for one error row; at most 3 times per session in

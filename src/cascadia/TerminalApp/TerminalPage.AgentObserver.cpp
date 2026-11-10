@@ -3894,7 +3894,7 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        // Agentmaster (HOOKS.md "Connection lost mid-response — the automatic restart"): a lost connection this window is
+        // Agentmaster (HOOKS.md "Connection lost mid-response — the automatic restart"): a cut-off response this window is
         // restarting by itself is not the user's to fix — the toast waits on the restart's track and shows only if the restart
         // does not heal the session (_ReleaseConnectionLostRestartToast); a healed session drops it. The edge bookkeeping above
         // (the last state, the consumed Running stamp) stands either way.

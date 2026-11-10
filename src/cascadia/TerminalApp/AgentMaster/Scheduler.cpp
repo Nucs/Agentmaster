@@ -629,7 +629,7 @@ namespace Agentmaster
                 ss.autorunner.mode = AutorunnerMode::Off;
                 ClearInterruptHold(ss.autorunner);
                 // Agentmaster (HOOKS.md "Connection lost mid-response — the automatic restart"): remember what this pause
-                // took away, and in which Error episode, so the automatic restart after a lost connection can give the mode
+                // took away, and in which Error episode, so the automatic restart after a cut-off response can give the mode
                 // back once the healed turn runs again (ShouldGiveRunnerBackAfterRestart). Written AFTER ClearInterruptHold,
                 // which forgets it: every later mode decision goes through that function and cancels the give-back. An
                 // interrupt hold's Off took nothing away, so nothing is recorded (Off / 0) — a hold is never given back by a

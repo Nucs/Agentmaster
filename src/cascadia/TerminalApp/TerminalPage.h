@@ -3071,7 +3071,8 @@ namespace winrt::TerminalApp::implementation
         // ---- the AUTOMATIC RESTART after a lost connection (HOOKS.md "Connection lost mid-response — the automatic restart";
         //      AgentMaster/ConnectionLostRestart.h; TerminalPage.AgentTurns.cpp) ----
         // The user's request of 2026-11-08: a session whose turn dies on "API Error: Connection lost mid-response. The response
-        // above may be incomplete." is restarted by the window that hosts its tab as "Restart uninterrupted"
+        // above may be incomplete." — since 2026-11-10 any response Claude Code cut off ("The response stopped arriving", …:
+        // IsCutOffResponseError) — is restarted by the window that hosts its tab as "Restart uninterrupted"
         // (RestartTurnChoice::LetTurnContinue), with no question and no tab switch, so the turn simply goes on. One TRACK per
         // session this window is dealing with, from the first sight of its Error episode until the episode ends (the session
         // leaves Error) or, after a restart, until the turn runs again or the confirm window passes.

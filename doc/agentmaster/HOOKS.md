@@ -845,7 +845,7 @@ continue them by itself.
 | "Deactivate" (`_DeactivateManagedTab`, resume only, state `Error` or `midTurnAtRestore`) | Plans before the swap, then `_RewindApiErrorAfterExit` waits for the parked claude's exit and appends. A tab woken before that has a live claude, and the append refuses rather than race it. |
 | A restored resume (`_LaunchClaudeSession` with a `restored` record: window restore, Sessions-page "Resume here", a reopened closed session) | `_RewindApiErrorBeforeRestore` appends synchronously before the connection is built, only for a record whose state is `Error` or whose `midTurnAtRestore` is set, so a 600-tab window restore reads no transcript for a healthy tab. |
 | A fork answered "Fork uninterrupted" or "Fork interrupted" (2026-11-06, NOT BUILT: `ForkTurnChoice::TakeBackAndContinue` / `TakeBackAndInterrupt`, `_TakeBackStopForFork`) | Appends to the SOURCE's transcript right before the fork's launch, a live source claude ALLOWED (`RewindApiErrorTailForForkSource`), launches the fork with `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` and starts it in place one Low-priority tick later (`_StartForkSoonAfterTakeBack`); "Fork interrupted" also arms the fork stop watch, whose ONE Esc leaves a regular interrupt where the error was. HOOKS.md *Interrupted turns*, situation B. |
-| The automatic restart after a lost connection (2026-11-08, NOT BUILT: `_RestartAfterConnectionLost`) | A session whose turn died on "Connection lost mid-response" is restarted by its hosting window as "Restart uninterrupted" — the Restart row above with `LetTurnContinue` — with no question and no tab switch, once the transcript gate agrees. *Connection lost mid-response — the automatic restart*, below. |
+| The automatic restart after a cut-off response (2026-11-08, in production 0.8.0.12; the whole family 2026-11-10, NOT BUILT: `_RestartAfterConnectionLost`) | A session whose turn died on a response Claude Code cut off — "Connection lost mid-response", "The response stopped arriving", every "… The response above may be incomplete." and "… Try again." stream cut — is restarted by its hosting window as "Restart uninterrupted" — the Restart row above with `LetTurnContinue` — with no question and no tab switch, once the transcript gate agrees. *Connection lost mid-response — the automatic restart*, below. |
 
 Since 2026-11-06 (NOT BUILT) the restart's rewind is ASKED about when the restart is interactive: the restart question
 (situation B, *Interrupted turns*). BOTH answers take the error back as above and add `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1`
@@ -1167,7 +1167,7 @@ one cut result; the resume wrote `Continue from where you left off.` and finishe
 live source inside `sleep 40` as `ContinuesTurn`, dropped `Bash`. The app's dialogs, the fan-out and the stop watch are
 not yet run live.
 
-### Connection lost mid-response — the automatic restart (2026-11-08, NOT BUILT)
+### Connection lost mid-response — the automatic restart (2026-11-08, in production 0.8.0.12, dev 0.0.1.44 and v0.8.2-prerelease; every cut-off response 2026-11-10, NOT BUILT)
 
 **The request** (the user, 2026-11-08): "Lets add self healing for error "● API Error: Connection lost mid-response. The
 response above may be incomplete." by restarting session as uninterrupted automatically. As soon as this error state is
@@ -1181,10 +1181,29 @@ output began, Claude Code finalizes the half-streamed reply and appends the synt
 "error":"server_error", "truncatedAfterOutput":true, "isApiErrorMessage":true, "streamCutCause":"stale_connection"}`. The
 text is the same for the cut causes `stale_connection`, `network_down`, `stream_truncated` and a `stream_suspended` that was
 not a sleep; 2.1.282 / 2.1.291 wrote it without `streamCutCause`, and `truncatedAfterOutput` is absent when the cut reply held a
-tool call. Its siblings — "Server error mid-response", "The response stopped arriving", "Part of the response never arrived",
-"Your computer went to sleep mid-response" — are other errors and are NOT matched; nor is "Connection lost before a response
-was produced", which any resume continues by itself (*API-error turns*). The match is a case-insensitive search for
-`Connection lost mid-response` (`IsConnectionLostMidResponseError`).
+tool call.
+
+**Every cut-off response, not only that one (2026-11-10).** The user, two days later: "● API Error: The response stopped
+arriving. The response above may be incomplete." — session `0c947da9` ("ai searchcancel and copy prompt", production window 0,
+tab 648) "is now stuck and did not self heal": the first version matched `Connection lost mid-response` only, and the scanner's
+`[recon-error]` at 19:46:28 was ignored without a log line. Its tail: a tool result, a THINKING-ONLY half-response, then the
+stream watchdog's row (`streamCutCause:"watchdog"`, `truncatedAfterOutput:true`) after 5.5 minutes of silence. The same code
+path writes one row per way the stream died, each leaves the claude waiting at the error the same way, and the same restart
+heals each, so the match is now the whole family (`IsCutOffResponseError`; the feature, its setting key
+`autoRestartOnConnectionLost` — public since v0.8.2-prerelease — and this section keep the first error's name). The texts, all
+read from 2.1.310's bundle:
+
+| After output began ("… The response above may be incomplete.") | Before any output ("… Try again.") |
+|---|---|
+| Connection lost mid-response · The response stopped arriving (the watchdog) · Server error mid-response · Part of the response never arrived · The response stream was malformed · Your computer went to sleep mid-response | Connection lost before a response was produced · The response stalled before a response was produced · Part of the response never arrived and no response was produced · The response stream was malformed and no response was produced · Your computer went to sleep before a response was produced |
+
+The match is a case-insensitive search for `The response above may be incomplete` — the very sentence Claude Code's print mode
+tells a partial result by (`result.endsWith("The response above may be incomplete.")`) — or `mid-response` (the three
+mid-response texts, should the sentence ever go), `before a response was produced` or `no response was produced`. Only API-error
+rows are ever asked, so Claude Code's unrelated "may be incomplete" messages (a download, IDE detection) cannot meet it. A cut
+before any output has no half-reply to take back: the take-back lands on the tool result or the prompt with nothing to step
+over, and the resume sends the turn again — the claude waited at that error all the same. NOT matched: HTTP errors that outlived
+Claude Code's own retries ("API Error: 500 …", "529 Overloaded", "Rate limited"), usage limits, refusals.
 
 **What happens now.** The window that hosts the session's tab answers the restart question itself — "Restart uninterrupted",
 `RestartTurnChoice::LetTurnContinue` (situation B of *Interrupted turns*: the take-back line once the old claude exited, plus
@@ -1198,7 +1217,7 @@ window brought forward. The pure rules are `AgentMaster/ConnectionLostRestart.h`
 
    | Verdict | When | What happens |
    |---|---|---|
-   | Ignore | not a live Claude session hosted here; not in an unacknowledged Error; another error; a DORMANT tab (its own start takes the error back: the restore and Deactivate seams do, and the shipped switch continues it) | nothing, nothing logged |
+   | Ignore | not a live Claude session hosted here; not in an unacknowledged Error; another error than a cut-off response; a DORMANT tab (its own start takes the error back: the restore and Deactivate seams do, and the shipped switch continues it) | nothing, nothing logged |
    | Decline | the switch is off (`autoRestartOnConnectionLost`); an ADOPTED session (its ConPTY is the user's shell: a restart would replay the shell); `resumeApiErrorTurns` off (a restart could not take the error back); a recorded stop intent (`SessionInfo::stopForkedTurn` — "Fork interrupted" / "Restart interrupted": "uninterrupted" is the answer the user did not give) | logged once per Error episode; the session waits for the user, as before |
    | Hold | an unsent draft in the box (a restart wipes it — the restart seam's one eager clear); the box owned by a delivery, the draft swap, a draft type-back or the fork stop watch; background work (claude's heartbeat `busy` / `shell`, or its subagent / tool-result side files written within 15 s) that a restart would end | logged once per reason; restarted once the reason passes |
    | Go | anything else | the transcript gate |
@@ -1212,7 +1231,7 @@ window brought forward. The pure rules are `AgentMaster/ConnectionLostRestart.h`
 
    | Verdict | When |
    |---|---|
-   | `restart` | the planner says `Rewind`, the active error is this one, the take-back lands on a tool result or a prompt (`ApiErrorTakeBackContinues`), the error row is new, budget is left |
+   | `restart` | the planner says `Rewind`, the active error is a cut-off response, the take-back lands on a tool result or a prompt (`ApiErrorTakeBackContinues`), the error row is new, budget is left |
    | `nothing-to-take-back` | the active branch no longer ends in an API error (a retry, a rewind, a take-back already written) |
    | `not-taken-back` | the planner leaves the error alone: a refusal, an unknown shape, a torn last line |
    | `not-this-error` | the transcript's active error is another one |
@@ -1237,7 +1256,7 @@ window brought forward. The pure rules are `AgentMaster/ConnectionLostRestart.h`
    (`SessionInfo::turnEndUnixMs` newer than the restart: only a real Stop or a terminal reply line stamps it, and the old
    claude's hooks are dropped once retired — a continuation answered faster than a scan, measured with the e2e mock in
    flows/06 INT-01). **Not healed** = 2 minutes (`kConnectionLostRestartConfirmMs`) without either, or a turn that ended with
-   the session in Error again (the continuation failed; a new lost connection then starts a new track).
+   the session in Error again (the continuation failed; a new cut-off response then starts a new track).
 
 **The Error toast waits for the outcome.** The Running → Error completion toast of a session whose track is judging is HELD
 on the track (`_HoldToastForConnectionLostRestart`, called by `_EvaluateAgentNotification` right before it would fire):
@@ -1246,7 +1265,7 @@ dropped when the restart heals the session, shown — with the session's state a
 the read, when the transcript gate says no, when the restart is refused, or when the watch says not healed. A session held
 from the start (a draft) toasts at once, as before.
 
-**The queue is given back.** The scheduler's stop-on-error backstop paused an Auto runner when the lost connection put the
+**The queue is given back.** The scheduler's stop-on-error backstop paused an Auto runner when the cut-off response put the
 session in Error. It now records what it took and in which Error episode (`AutorunnerState::stopOnErrorPausedMode` /
 `stopOnErrorPausedEpisodeMs`, transient), and a HEALED restart gives that mode back (`ShouldGiveRunnerBackAfterRestart`: the
 same episode, the runner still Off, a real mode taken). `ClearInterruptHold` — called by every mode decision: the user's pick
@@ -1256,9 +1275,9 @@ give-back never undoes a choice made after the pause. An interrupt hold's Off is
 **The setting.** `AppSettings::autoRestartOnConnectionLost` (default ON; the cog's Sessions tab, under "Continue a turn that
 ended in an API error"), read live from each window's settings copy. Off: the session waits at the error, as before.
 
-**Logs** (hooks.log): `[auto-restart] <sid8> a lost connection: "<title>" stopped on "API Error: Connection lost mid-response…"
-— reading its transcript to restart it uninterrupted`; `[notify-hold] <sid8> running -> error (a lost connection that this window
-restarts by itself …)`; `[nav] auto-restart-begin <sid8> (a lost connection: error row <uuid8>, taken back to the tool result
+**Logs** (hooks.log): `[auto-restart] <sid8> a cut-off response: "<title>" stopped on "API Error: Connection lost mid-response…"
+— reading its transcript to restart it uninterrupted`; `[notify-hold] <sid8> running -> error (a cut-off response that this window
+restarts by itself …)`; `[nav] auto-restart-begin <sid8> (a cut-off response: error row <uuid8>, taken back to the tool result
 <target8>; automatic restart 1 of at most 3 in 30 min)`, the restart's own `[restart] claude <id> (resume)` and
 `[api-error-rewind] <sid8> restart: rewound past …`, `[nav] auto-restart-done <sid8> (restarted in place, uninterrupted …)`;
 `[auto-restart] <sid8> healed: the turn runs again (running) N s after the automatic restart; its held Error toast is dropped
@@ -1267,7 +1286,9 @@ Refusals: `[auto-restart] <sid8> not restarted: <why>`, `waiting before the rest
 restarted (<verdict>): <reason> — the session waits at the error for you`, `NOT healed: …`, `let go: the Error episode ended …`,
 and `[notify-release] <sid8> the held running -> error toast is shown as <state> after N s: <why>`.
 
-**Tests.** `TestConnectionLostRestart` (`tests_rewind.cpp`): the text match; every Ignore / Decline / Hold / Go case of the
+**Tests.** `TestConnectionLostRestart` (`tests_rewind.cpp`): the cut-off family's match (every text above, an older wording,
+"mid-response" without the sentence; HTTP errors, usage limits, refusals and unrelated "may be incomplete" messages not
+matched); `0c947da9`'s watchdog shape and a cut before any output through the transcript gate; every Ignore / Decline / Hold / Go case of the
 registry gate and their order; the transcript gate on the 2.1.310 shape of `d42f0aea` (dummy text) and on every refusal; the
 outcome rule (the held start's Error, the fast continuation, a continuation that failed, the confirm window); the give-back rule
 with `ClearInterruptHold`; the ledger's window to the millisecond. `TestInterruptHold` (`tests_spawn_sched.cpp`): the scheduler's

@@ -207,7 +207,8 @@ taking the error back and "interrupted" taking it back too, then one Esc, so a r
 2026-11-06) · every restart and fork question reads "interrupted / uninterrupted", a fork of a turn the user interrupted
 asks too (INT-10), and a fresh profile ships `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` (INT-11; 2026-11-06) · a turn that
 dies on "Connection lost mid-response" is restarted by its window as "Restart uninterrupted", no question, no tab switch
-(INT-12; 2026-11-08) · a Search
+(INT-12; 2026-11-08), and so is every other cut-off response — "The response stopped arriving", "Server error mid-response",
+the "… Try again." ones (INT-12 phase 6, E3; 2026-11-10) · a Search
 pick's menu by the session's state: Activate,
 Wake, Go to topic (TGS-05; 380e86d64) · `agentmaster <verb>` answered by an unpackaged install's own exe, and the
 release CLI on the right profile (CLI-02 phase 3, CLI-K2; 4950ece21) · the installer's edge cases (INS-01 E3–E6;

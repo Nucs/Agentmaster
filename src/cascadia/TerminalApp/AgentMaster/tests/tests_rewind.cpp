@@ -1238,15 +1238,51 @@ namespace
 
     void TestConnectionLostText()
     {
-        CHECK(IsConnectionLostMidResponseError(L"API Error: Connection lost mid-response. The response above may be incomplete."), "conn-lost text: Claude Code's own row text matches");
-        CHECK(IsConnectionLostMidResponseError(L"api error: CONNECTION LOST MID-RESPONSE."), "conn-lost text: the match ignores ASCII case");
-        CHECK(IsConnectionLostMidResponseError(L"\x05E9\x05DC Connection lost mid-response"), "conn-lost text: a non-ASCII prefix does not hide the words");
-        CHECK(IsConnectionLostMidResponseError(L"Connection lost mid-response"), "conn-lost text: the words alone match (at the very start and end of the text)");
-        CHECK(!IsConnectionLostMidResponseError(L"API Error: Server error mid-response. The response above may be incomplete."), "conn-lost text: a server error mid-response is another error");
-        CHECK(!IsConnectionLostMidResponseError(L"API Error: Connection lost before a response was produced. Try again."), "conn-lost text: the before-any-output variant is not matched (any resume continues it)");
-        CHECK(!IsConnectionLostMidResponseError(L"API Error: The response stopped arriving. The response above may be incomplete."), "conn-lost text: a stalled stream is another error");
-        CHECK(!IsConnectionLostMidResponseError(L""), "conn-lost text: an empty message never matches");
-        CHECK(!IsConnectionLostMidResponseError(L"Connection lost mid-respons"), "conn-lost text: a text shorter than the words never matches");
+        // Every text Claude Code 2.1.310's bundle writes for a cut-off response (the stream died after output began: "… The
+        // response above may be incomplete."; before any output: "… Try again.") is matched — the 2026-11-08 request, and the
+        // watchdog's "The response stopped arriving" of the 2026-11-10 report (session 0c947da9).
+        const wchar_t* const cutOff[] = {
+            L"API Error: Connection lost mid-response. The response above may be incomplete.",
+            L"API Error: The response stopped arriving. The response above may be incomplete.",
+            L"API Error: Server error mid-response. The response above may be incomplete.",
+            L"API Error: Part of the response never arrived. The response above may be incomplete.",
+            L"API Error: The response stream was malformed. The response above may be incomplete.",
+            L"API Error: Your computer went to sleep mid-response. The response above may be incomplete.",
+            L"API Error: Connection closed mid-response. The response above may be incomplete.", // an older Claude Code's wording
+            L"API Error: Connection lost before a response was produced. Try again.",
+            L"API Error: The response stalled before a response was produced. Try again.",
+            L"API Error: Part of the response never arrived and no response was produced. Try again.",
+            L"API Error: The response stream was malformed and no response was produced. Try again.",
+            L"API Error: Your computer went to sleep before a response was produced. Try again.",
+        };
+        for (const auto* text : cutOff)
+        {
+            CHECK(IsCutOffResponseError(text), "cut-off text: every stream cut Claude Code writes is matched");
+        }
+        CHECK(IsCutOffResponseError(L"api error: the response STOPPED arriving. THE RESPONSE ABOVE MAY BE INCOMPLETE"), "cut-off text: the match ignores ASCII case and the final period");
+        CHECK(IsCutOffResponseError(L"\x05E9\x05DC The response above may be incomplete."), "cut-off text: a non-ASCII prefix does not hide the words");
+        CHECK(IsCutOffResponseError(L"API Error: Connection lost mid-response.") && IsCutOffResponseError(L"API Error: Server error mid-response"),
+              "cut-off text: a \"mid-response\" cut without the trailing sentence is still matched");
+        // Not cut-off responses: HTTP errors that outlived Claude Code's retries, usage limits, a refusal, the cut-off TURN's
+        // own Error (Agentmaster's text), an older wording without the sentence, unrelated "may be incomplete" messages.
+        const wchar_t* const others[] = {
+            L"API Error: 500 Internal server error. This is a server-side issue, usually temporary \x2014 try again in a moment.",
+            L"API Error: 529 Overloaded. This is a server-side issue, usually temporary \x2014 try again in a moment.",
+            L"API Error: Server is temporarily limiting requests (not your usage limit) \x00B7 Rate limited",
+            L"You've hit your limit \x00B7 resets 2am (Asia/Jerusalem)",
+            L"Prompt is too long",
+            L"API Error: Opus 5.5's safeguards flagged this session",
+            L"API Error: Stream idle timeout - no chunks received",
+            L"The last turn stopped before it finished.",
+            L"Failed to extract executable. The download may be incomplete.",
+            L"",
+        };
+        for (const auto* text : others)
+        {
+            CHECK(!IsCutOffResponseError(text), "cut-off text: an HTTP error, a usage limit, a refusal or an unrelated message is not a cut-off response");
+        }
+        CHECK(!ContainsAsciiWordsNoCase(L"The response above may be incomplet", kCutOffResponseMidStreamText), "cut-off text: a text shorter than the words never matches");
+        CHECK(!ContainsAsciiWordsNoCase(L"anything", L""), "cut-off text: an empty needle matches nothing");
     }
 
     void TestConnectionLostRegistryGate()
@@ -1284,10 +1320,17 @@ namespace
         }
         {
             auto f = GoFacts();
-            f.errorMessage = L"API Error: Server error mid-response. The response above may be incomplete.";
-            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate: another API error is ignored");
+            f.errorMessage = L"API Error: 529 Overloaded. This is a server-side issue, usually temporary.";
+            CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate: another API error (an HTTP error after Claude Code's retries) is ignored");
             f.errorMessage = L"The last turn stopped before it finished.";
             CHECK(DecideConnectionLostRestart(f).gate == G::Ignore, "gate: a cut-off turn's Error is ignored");
+            // The 2026-11-10 report (session 0c947da9): the stream watchdog's cut, and the other members of the family.
+            f.errorMessage = L"API Error: The response stopped arriving. The response above may be incomplete.";
+            CHECK(DecideConnectionLostRestart(f).gate == G::Go, "gate: \"The response stopped arriving\" (the stream watchdog's cut) restarts too");
+            f.errorMessage = L"API Error: Server error mid-response. The response above may be incomplete.";
+            CHECK(DecideConnectionLostRestart(f).gate == G::Go, "gate: \"Server error mid-response\" restarts too");
+            f.errorMessage = L"API Error: Connection lost before a response was produced. Try again.";
+            CHECK(DecideConnectionLostRestart(f).gate == G::Go, "gate: a stream cut before any output restarts too (the claude waits at it all the same)");
         }
         {
             auto f = GoFacts();
@@ -1383,18 +1426,45 @@ namespace
         // Already taken back (the line is in the file): nothing left to heal.
         const auto rewound = PlanApiErrorRewind(ConnectionLostTail310() + plan.markerLine + "\n", true, sid);
         CHECK(DecideConnectionLostRestartFromPlan(rewound, L"", 0).verdict == ConnectionLostPlanVerdict::NothingToTakeBack, "transcript gate: a transcript already taken back has nothing to heal");
-        // Another error at the active leaf.
+        // Another error at the active leaf: an HTTP error that outlived Claude Code's retries (its first response to a prompt).
+        {
+            const auto bytes = Join({
+                UserPrompt("u1", "", "go"),
+                ApiError("e1", "u1", "API Error: 529 Overloaded. This is a server-side issue, usually temporary.", false, "stop_sequence", ",\"apiErrorStatus\":529"),
+                TurnDuration("t1", "e1"),
+            });
+            const auto r = DecideConnectionLostRestartFromPlan(PlanApiErrorRewind(bytes, true, sid), L"", 0);
+            CHECK(r.verdict == ConnectionLostPlanVerdict::NotThisError && r.reason.find(L"529 Overloaded") != std::wstring::npos, "transcript gate: the transcript's error is another one - not restarted, and the log quotes it");
+        }
+        // The 2026-11-10 report's shape (session 0c947da9, 2.1.310, dummy text): a tool result, a THINKING-ONLY half-response, the
+        // stream watchdog's error row ("The response stopped arriving", streamCutCause "watchdog") and its turn_duration.
+        {
+            const auto bytes = Join({
+                UserPrompt("u1", "", "cancel and copy prompt"),
+                ToolUse("a1", "u1", "msg_1", "toolu_1"),
+                ToolResult("r1", "a1", "toolu_1"),
+                LastPrompt("r1", "cancel and copy prompt"),
+                Partial("p1", "r1", "msg_2", true),
+                ApiError("e1", "p1", "API Error: The response stopped arriving. The response above may be incomplete.", true, "stop_sequence", ",\"streamCutCause\":\"watchdog\""),
+                TurnDuration("t1", "e1"),
+            });
+            const auto p = PlanApiErrorRewind(bytes, true, sid);
+            CHECK(p.verdict == ApiErrorRewindVerdict::Rewind && p.targetUuid == L"r1" && p.targetKind == L"tool result" && p.partialRows == 1,
+                  "transcript gate: the watchdog's cut after a thinking-only half-response plans the take-back onto the tool result");
+            CHECK(DecideConnectionLostRestartFromPlan(p, L"", 0).verdict == ConnectionLostPlanVerdict::Restart, "transcript gate: \"The response stopped arriving\" restarts");
+        }
+        // A stream cut before any output: no half-response, the take-back lands on the tool result all the same.
         {
             const auto bytes = Join({
                 UserPrompt("u1", "", "go"),
                 ToolUse("a1", "u1", "msg_1", "toolu_1"),
                 ToolResult("r1", "a1", "toolu_1"),
-                Partial("p1", "r1", "msg_2", false),
-                ApiError("e1", "p1", "API Error: Server error mid-response. The response above may be incomplete.", true, "stop_sequence", ",\"streamCutCause\":\"server_error\""),
+                ApiError("e1", "r1", "API Error: The response stalled before a response was produced. Try again.", false, "stop_sequence", ",\"streamCutCause\":\"watchdog\",\"streamWatchdogGaveUp\":true"),
                 TurnDuration("t1", "e1"),
             });
-            const auto r = DecideConnectionLostRestartFromPlan(PlanApiErrorRewind(bytes, true, sid), L"", 0);
-            CHECK(r.verdict == ConnectionLostPlanVerdict::NotThisError && r.reason.find(L"Server error") != std::wstring::npos, "transcript gate: the transcript's error is another one - not restarted, and the log quotes it");
+            const auto p = PlanApiErrorRewind(bytes, true, sid);
+            CHECK(p.verdict == ApiErrorRewindVerdict::Rewind && p.targetUuid == L"r1" && p.partialRows == 0 && DecideConnectionLostRestartFromPlan(p, L"", 0).verdict == ConnectionLostPlanVerdict::Restart,
+                  "transcript gate: a stream cut before any output restarts (nothing to step over, the tool result is the target)");
         }
         // The planner leaves the error alone: a refusal, a torn last line, two responses above the error.
         {

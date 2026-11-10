@@ -218,6 +218,8 @@
     <ClInclude Include="AgentMaster\BundledModsData.h" />
     <!-- Agentmaster (HOOKS.md "Interrupted turns"): the restart / fork questions' choices and the fork stop watch's pure decision. -->
     <ClInclude Include="AgentMaster\InterruptedTurns.h" />
+    <!-- Agentmaster (HOOKS.md "Connection lost mid-response — the automatic restart"): the automatic restart of a cut-off response, its gates and ledger. -->
+    <ClInclude Include="AgentMaster\ConnectionLostRestart.h" />
     <!-- Agentmaster (SESSIONS_DB.md §4, §7.6): the session database's wire contract, its client and the app's
          refresh tick (D16). The GUI never links DuckDB: the service (agentmaster-sessiondb.exe) owns the file. -->
     <ClInclude Include="AgentMaster\SessionDbProtocol.h" />
