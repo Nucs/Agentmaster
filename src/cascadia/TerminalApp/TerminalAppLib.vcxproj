@@ -296,6 +296,10 @@
     <!-- Agentmaster (SIDE_PANEL.md section 2h): when the side panel's AI view changes its list - only when a request ends or the
          conversation is reset, never for a running request's candidates or shows (pure, header-only; TestSidePanelAiList). -->
     <ClInclude Include="AgentMaster\SidePanelAiList.h" />
+    <!-- Agentmaster (SIDE_PANEL.md section 2h, "the crossed circle and the copy button"): what the AI strip's crossed circle and
+         the copy button under it put back into an empty request box, and the copy's Markdown of the whole conversation and the
+         listed sessions (pure, header-only; TestSidePanelAiCopy). -->
+    <ClInclude Include="AgentMaster\SidePanelAiCopy.h" />
     <!-- Agentmaster (SIDE_PANEL.md section 2j): the side panel's PIN TO TOP - pinned cards first, the newest pin on top, the
          stamp a pin gets, the pin a tab keeps when it switches conversation (pure, header-only; TestSidePanelPins). -->
     <ClInclude Include="AgentMaster\SidePanelPins.h" />

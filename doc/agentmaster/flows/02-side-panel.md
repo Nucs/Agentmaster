@@ -338,7 +338,7 @@ in Settings ▸ Sessions ▸ AI SEARCH (2 hours by default).
 
 **Edge cases**
 - **E1 Esc during a request** → it stops (`sidepanel ai-stop`); Esc with nothing running does nothing.
-- **E2 ⊘** → the conversation resets here and on the Sessions page; the box keeps its text (`ai-reset box=N`).
+- **E2 ⊘** → the conversation resets here and on the Sessions page; the box keeps its text (`ai-reset box=N refill=0`).
 - **E3 A Sessions page shows the AI search** → no side-panel park line after a request (the page's rule holds the process).
 - **E4 A session Agentmaster never opened** → its card's click opens its transcript reading view (no summary record exists).
 - **E5 A restored list of unknown sessions** → their cards read "session <id8> — reading…" and fill in from disk within a
@@ -348,6 +348,15 @@ in Settings ▸ Sessions ▸ AI SEARCH (2 hours by default).
   they come back to full brightness at the answer.
 - **E8 The panel collapsed during a request** → no ring spins inside the collapsed panel; an expand shows the spinner
   again while the request still runs, or the final list when it ended meanwhile.
+- **E9 ⊘ with an EMPTY box** (2026-11-10, NOT BUILT) → during a request and after an answer alike, the conversation resets
+  and the newest request is back in the box on one line, the caret after it (`am.side.filter`'s text; `ai-reset box=0
+  refill=M`); Enter asks it again as the new conversation's first request. A box of spaces counts as empty.
+- **E10 The copy button under ⊘** (2026-11-10, NOT BUILT; `am.side.ai.copy`) → disabled before the first request. After
+  two requests and a list, a click puts Markdown on the clipboard: `## AI search · 2 requests`, each request and Claude's
+  reply (no plan text), `### Listed sessions · N` with each card's title, state, folder, id and why; the chime plays. During
+  a request the running one reads "still running" and the list says it is the answer before it. With the box empty the
+  newest request comes back WITHOUT focus (no `process up` after a park). *Check:* [LOG] `sidepanel ai-copy chars=N
+  requests=2 listed=N refill=M`.
 
 ---
 

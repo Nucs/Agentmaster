@@ -977,7 +977,12 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _sidePanelAiThinkingBtn{ nullptr }; // the flat "thinking <level>" toggle: the agent's level, rotated by a click (the Sessions page's _CycleSessionsAiThinking)
         winrt::Windows::UI::Xaml::Controls::TextBlock _sidePanelAiThinkingText{ nullptr }; // the thinking toggle's text
         winrt::Windows::UI::Xaml::Controls::TextBlock _sidePanelAiUsageText{ nullptr }; // "ctx 18k / 200k" (dim), once the model answered
-        winrt::Windows::UI::Xaml::Controls::Button _sidePanelAiResetBtn{ nullptr }; // ⊘ — throw the conversation away (every window's view of it clears)
+        winrt::Windows::UI::Xaml::Controls::Button _sidePanelAiResetBtn{ nullptr }; // ⊘ — throw the conversation away (every window's view of it clears); an EMPTY request box gets the newest request back (AgentMaster/SidePanelAiCopy.h)
+        // The copy icon UNDER ⊘ (the user's request of 2026-11-10, SIDE_PANEL.md §2h "⊘ and the copy button"): the whole
+        // conversation — every request with the reply to it — and the sessions listed now, as Markdown, to the clipboard
+        // (_SidePanelAiCopyConversation); an EMPTY request box also gets the newest request back. Enabled with ⊘ (nothing to
+        // copy before the first request); built with the AI view.
+        winrt::Windows::UI::Xaml::Controls::Button _sidePanelAiCopyBtn{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ScrollViewer _sidePanelAiResultsScroll{ nullptr }; // the result cards' own scroll
         winrt::Windows::UI::Xaml::Controls::StackPanel _sidePanelAiResults{ nullptr }; // the result cards, in the model's order
         // THE LIST: the sessions the view shows, in the model's order — the pick of the conversation's last show, as it stood
@@ -3947,6 +3952,21 @@ namespace winrt::TerminalApp::implementation
         // (SessionSearchAgent::Prewarm) — the "a click into the box starts it" rule; nothing when claude.exe is missing (the
         // request itself shows the notice). Never throws.
         void _SidePanelAiPrewarm();
+        // The copy button under ⊘, on a clean tick (the user's request of 2026-11-10, SIDE_PANEL.md §2h "⊘ and the copy
+        // button"): put the WHOLE conversation — every request with the reply to it — and the sessions listed now on the
+        // clipboard as Markdown (AgentMaster/SidePanelAiCopy.h: the agent's record folded by SidePanelAiCopyExchanges, the text
+        // written by BuildSidePanelAiCopyText), play the chime every Agentmaster copy plays once it landed, and give an EMPTY
+        // request box the newest request back (_SidePanelAiWriteRefill; no focus: a click into the box is what starts the
+        // search's process, and a copy asks for none). Logs [nav] sidepanel ai-copy with lengths and counts, never the words.
+        // Never throws: a failure is logged (Rule #18) and copies nothing.
+        void _SidePanelAiCopyConversation();
+        // Write `refill` into the request box with the caret after it — ⊘'s and the copy button's "an EMPTY box gets the newest
+        // request back" (SidePanelAiRefillText decided it; "" = the box keeps what it holds and nothing is written). AI mode
+        // only: in filter mode the words would filter the cards. The box's TextChanged ignores the write (AI mode filters
+        // nothing).
+        //   refill - the text to write; "" writes nothing.
+        // Throws what a XAML write throws (hresult_error); the callers' handlers contain it.
+        void _SidePanelAiWriteRefill(const std::wstring& refill);
         // Arm the process's park (SessionSearchAgent::ParkProcessAfter, _SessionsAiParkDelayMs) — unless a Sessions page shows
         // the AI search (its rule holds the process then) or the conversation is answering now (its end arms it again).
         //   why - the cause, for the [ai-search] line ("request ended", "box left").

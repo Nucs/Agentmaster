@@ -99,6 +99,7 @@
 #include "AgentMaster/SessionSearch.h" // ParseSessionQuery / MatchesQueryText / MatchesPathQuery — the Sessions grammar, reused
 #include "AgentMaster/SessionSearchAgent.h" // SharedSessionSearchAgent / SessionSearchEvent / LoadSessionIndexEntryById — the side panel's AI search, a view of the process's one search conversation (SIDE_PANEL.md §2h)
 #include "AgentMaster/SidePanelAiList.h" // SidePanelAiListStepFor / SidePanelAiListDiffers — the AI view's list changes only when a request ends (SIDE_PANEL.md §2h)
+#include "AgentMaster/SidePanelAiCopy.h" // SidePanelAiRefillText / SidePanelAiCopyExchanges / BuildSidePanelAiCopyText — ⊘ and the copy button under it (SIDE_PANEL.md §2h)
 #include "AgentMaster/SidePanelPins.h" // CompareSidePanelPins / NextSidePanelPinStamp / IsSidePanelPinStamp — Pin to Top: pinned cards first, the newest pin on top (SIDE_PANEL.md §2j)
 #include "AgentMaster/SidePanelFilters.h" // the funnel's FILTERS: the facets, the matcher, the chips, the record's edits (SIDE_PANEL.md §2l)
 #include "AgentMaster/SessionFolderFilter.h" // CollectSessionFolders / SortFoldersByUse — the folder card's "folders of the sessions" section (SIDE_PANEL.md §2l)
@@ -110,6 +111,7 @@
 #include <cmath>
 #include <cwctype> // towlower — the fold for the in-process matchers
 #include <limits> // the chips row's wrap panel measures its children with an unbounded height (SIDE_PANEL.md §2l)
+#include <mmsystem.h> // PlaySoundW — the chime every Agentmaster copy plays (the AI strip's copy button, SIDE_PANEL.md §2h)
 #include <map> // the cached tag-color map (folded tag name -> "#AARRGGBB") the cards' ribbons resolve against
 #include <shobjidl.h> // IFileOpenDialog — required BY AgentManagerContent.Internal.h's PickClaudeExe helper (per-TU anonymous-namespace copy)
 #include <string_view> // the list update's duplicate-id belt (a set of views into the snapshot's ids)
@@ -385,6 +387,10 @@ namespace
     constexpr double kSidePanelAiSweepInsetBottom = 1.0;
     // The light's color: the strip's working blue (the busy dot's and the busy status ink's hue).
     constexpr Color kSidePanelAiWorkingColor{ 0xFF, 0x4E, 0xA1, 0xFF };
+    // The copy button under ⊘ (the user's request of 2026-11-10, "a copy icon below the circle icon"): Segoe Fluent Icons'
+    // Copy, two overlapping pages (U+E8C8; the same code point in Segoe MDL2 Assets, which kSidePanelFluentFont names after
+    // it), drawn at the header's icon size (kSidePanelIconFontSize).
+    constexpr const wchar_t* kSidePanelAiCopyGlyph = L"\xE8C8";
 
     // --- The FILTERS (SIDE_PANEL.md §2l) ------------------------------------------------------------------------------------
     // The funnel button's face: Segoe Fluent Icons' Filter (U+E71C; the same code point in Segoe MDL2 Assets, named after it
@@ -725,6 +731,65 @@ namespace
             .Add(tags)
             .Add(impl::kAgentStatusSelected, selected);
         impl::AgentSetItemStatus(view.base.title, status.Text());
+    }
+
+    // The sessions the AI view lists NOW, as the copy button names them (SIDE_PANEL.md §2h "⊘ and the copy button",
+    // AgentMaster/SidePanelAiCopy.h): the list on screen in the model's order, each session's facts by the rules its result
+    // card follows (TerminalPage::_SidePanelAiResultModelFor) — the registry's record when it has one (the managed title, the
+    // effective working dir), else the agent's index entry (the transcript's title and folder) — its state "open · <the card's
+    // state word>" for a session with a live tab and "closed" (the card's gray word) for any other, and the model's why.
+    //   ids      - the view's list (_sidePanelAiShownIds); an empty or repeated id is skipped, as the result list skips it.
+    //   reasons  - the view's whys by id (_sidePanelAiReasons; "" is never stored there).
+    //   entries  - the view's index entries by id (_sidePanelAiEntries).
+    //   registry - the shared registry, or null: every session then reads from its index entry alone.
+    //   mode     - AppSettings::tabColorMode, which decides the effective working dir (the inferred folder while it infers).
+    //   returns  - one row per listed session, in the list's order.
+    //   throws   - std::bad_alloc.
+    std::vector<::Agentmaster::SidePanelAiCopyListRow> SidePanelAiCopyRowsFor(const std::vector<std::wstring>& ids,
+                                                                              const std::unordered_map<std::wstring, std::wstring>& reasons,
+                                                                              const std::unordered_map<std::wstring, ::Agentmaster::SessionIndexEntry>& entries,
+                                                                              const ::Agentmaster::SessionRegistry* registry,
+                                                                              ::Agentmaster::TabColorMode mode)
+    {
+        std::vector<::Agentmaster::SidePanelAiCopyListRow> rows;
+        rows.reserve(ids.size());
+        std::unordered_set<std::wstring> seen; // the result list's own belt (_SidePanelAiRebuildResults): one row per session
+        for (const auto& id : ids)
+        {
+            if (id.empty() || !seen.insert(id).second)
+            {
+                continue;
+            }
+            ::Agentmaster::SidePanelAiCopyListRow row;
+            row.id = id;
+            // Without the prompt queue: the costliest part of a record copy, which the copy never reads (UI_THREAD.md §10a #4).
+            const auto lean = registry ? registry->GetWithoutQueue(id) : std::nullopt;
+            const auto entryIt = entries.find(id);
+            const ::Agentmaster::SessionIndexEntry* const entry = entryIt != entries.end() ? &entryIt->second : nullptr;
+            if (lean)
+            {
+                row.title = lean->title;
+                row.state = lean->live ? (std::wstring{ L"open \x00B7 " } + std::wstring{ StateLabel(lean->state) }) : std::wstring{ L"closed" };
+                row.folder = ::Agentmaster::EffectiveWorkingDir(mode, *lean);
+                row.branch = !lean->branch.empty() ? lean->branch : (entry ? entry->stats.gitBranch : std::wstring{});
+            }
+            else
+            {
+                row.state = L"closed"; // no record: a session Agentmaster never opened — the card's gray word all the same
+                if (entry)
+                {
+                    row.title = ::Agentmaster::SessionSearchTitleOf(*entry);
+                    row.folder = ::Agentmaster::SessionSearchDirOf(*entry);
+                    row.branch = entry->stats.gitBranch;
+                }
+            }
+            if (const auto why = reasons.find(id); why != reasons.end())
+            {
+                row.why = why->second;
+            }
+            rows.push_back(std::move(row));
+        }
+        return rows;
     }
 
     // Case-fold for the in-process matchers (MatchesQueryText expects PRE-FOLDED haystacks; the
@@ -8657,9 +8722,13 @@ namespace winrt::TerminalApp::implementation
     // ======================================================================================
     // WHAT: the filter box's "AI" toggle (inside the box, at its right end — the user's choice of 2026-10-31) turns the box
     // into a REQUEST line and replaces the card list with the AI view: a strip (the request, the model's plan while it works,
-    // then its answer; "thinking <level>" and the context size; ⊘ to start over) over the model's list of sessions, each a side
-    // panel card with the model's evidence (its "why") under it. The summary area stays below and works with it: a result's
-    // click peeks its summary like a card's. Clicking AI again brings the cards back; the conversation is kept.
+    // then its answer; "thinking <level>" and the context size; ⊘ to start over, and the copy button under it) over the model's
+    // list of sessions, each a side panel card with the model's evidence (its "why") under it. The summary area stays below and
+    // works with it: a result's click peeks its summary like a card's. Clicking AI again brings the cards back; the
+    // conversation is kept.
+    // ⊘ AND THE COPY BUTTON (the user's two requests of 2026-11-10, AgentMaster/SidePanelAiCopy.h): ⊘ puts the newest request
+    // back into an EMPTY box (running or answered), so Enter asks it again in the new conversation; the copy button copies the
+    // whole conversation and the listed sessions as Markdown, and refills an empty box by the same rule.
     // WHILE A REQUEST RUNS (the user's two requests of 2026-11-05): a loading icon spins in the strip's dot place
     // (_SidePanelAiShowWorking), and the list does NOT change — not for a search's candidates, not for a show the model may
     // still revise; it changes when the request ends, to the conversation's final list (AgentMaster/SidePanelAiList.h). Until
@@ -9035,8 +9104,9 @@ namespace winrt::TerminalApp::implementation
         _sidePanelAiResetBtn.Background(SolidColorBrush{ Colors::Transparent() });
         _sidePanelAiResetBtn.BorderThickness(ThicknessHelper::FromUniformLength(0));
         _sidePanelAiResetBtn.VerticalAlignment(VerticalAlignment::Top);
+        _sidePanelAiResetBtn.HorizontalAlignment(HorizontalAlignment::Center); // one center line with the copy button under it
         _sidePanelAiResetBtn.IsTabStop(false);
-        AgentSetTitledTip(_sidePanelAiResetBtn, L"New conversation", winrt::hstring{ L"Throw the AI search's conversation away and start a new one: the model forgets what you asked and what it showed. Use it when you start looking for something else \x2014 a follow-up refers to the list before it. What you typed in the box stays: Enter sends it to the new conversation.\nIt clears the conversation everywhere (every window, the Sessions page). Your sessions are not touched." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        AgentSetTitledTip(_sidePanelAiResetBtn, L"New conversation", winrt::hstring{ L"Throw the AI search's conversation away and start a new one: the model forgets what you asked and what it showed. Use it when you start looking for something else \x2014 a follow-up refers to the list before it. What you typed in the box stays: Enter sends it to the new conversation. An empty box gets your newest request back (running or answered), so Enter asks it again, now in the new conversation.\nIt clears the conversation everywhere (every window, the Sessions page). Your sessions are not touched." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
         _sidePanelAiResetBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
             const auto self = weakThis.get();
             if (!self)
@@ -9054,18 +9124,24 @@ namespace winrt::TerminalApp::implementation
                     try
                     {
                         // A reset throws the CONVERSATION away, never the box's text: what is typed there is often the new
-                        // request itself, written before the user saw it would read as a follow-up (the user's rule, the
-                        // Sessions page's ⊘ too). ⚠ So neither this handler nor the Reset event's path writes the box. The nav
-                        // line says how much the box kept — its length only.
-                        const uint32_t boxChars = page->_sidePanelSearchBox ? page->_sidePanelSearchBox.Text().size() : 0u;
-                        ::Agentmaster::LogNav(L"sidepanel ai-reset box=" + std::to_wstring(boxChars));
+                        // request itself, written before the user saw it would read as a follow-up (the user's rule of
+                        // 2026-10-31, the Sessions page's ⊘ too). An EMPTY box gets the conversation's newest request back
+                        // instead, running or answered (the user's request and pick of 2026-11-10, SidePanelAiCopy.h): who
+                        // starts over usually asks the same thing again, in a conversation that no longer reads it as a
+                        // follow-up. ⚠ Read it BEFORE the Reset, which clears it; the Reset event's path never writes the box.
+                        // The nav line says how much the box held and how much came back — lengths only, never the words.
+                        auto& agent = ::Agentmaster::SharedSessionSearchAgent();
+                        const std::wstring boxText = page->_sidePanelSearchBox ? std::wstring{ page->_sidePanelSearchBox.Text() } : std::wstring{};
+                        const std::wstring refill = page->_sidePanelAiMode ? ::Agentmaster::SidePanelAiRefillText(boxText, agent.Snapshot().question) : std::wstring{};
+                        ::Agentmaster::LogNav(L"sidepanel ai-reset box=" + std::to_wstring(boxText.size()) + L" refill=" + std::to_wstring(refill.size()));
                         // The Reset event clears this view (and every other surface's). A reset restarts a process that was up;
                         // with nobody asking afterwards it must still end: the park, as after a request.
-                        ::Agentmaster::SharedSessionSearchAgent().Reset();
+                        agent.Reset();
                         page->_SidePanelAiArmPark(L"the conversation was reset");
+                        page->_SidePanelAiWriteRefill(refill); // "" writes nothing: a box that held text keeps it
                         if (page->_sidePanelSearchBox && page->_sidePanelAiMode)
                         {
-                            page->_sidePanelSearchBox.Focus(FocusState::Programmatic); // the user who resets is about to ask again: Enter sends the kept text to the new conversation
+                            page->_sidePanelSearchBox.Focus(FocusState::Programmatic); // the user who resets is about to ask again: Enter sends the box's text to the new conversation
                         }
                     }
                     catch (...)
@@ -9079,8 +9155,56 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::AgentLogCaughtException(L"side panel AI search: queue the reset");
             }
         });
-        Grid::SetColumn(_sidePanelAiResetBtn, 2);
-        inner.Children().Append(_sidePanelAiResetBtn);
+        // The COPY button, under ⊘ (the user's request of 2026-11-10: "a copy icon below the circle icon that copies to
+        // clipboard the prompt user sent + assistant answers and additionally, if prompt box is empty, copy the prompt sent to
+        // prompt box"; their pick of four layouts: the whole conversation and the listed sessions). Styled as ⊘ — flat at rest
+        // (local values: the stock hover / pressed fills still show), no tab stop (a click must never pull the keyboard out of
+        // the terminal) — and its work runs on a clean tick (the pointer-handler rule). A FontIcon for the same reason as ⊘'s.
+        _sidePanelAiCopyBtn = Button{};
+        {
+            FontIcon icon;
+            icon.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ kSidePanelFluentFont });
+            icon.Glyph(kSidePanelAiCopyGlyph);
+            icon.FontSize(kSidePanelIconFontSize);
+            _sidePanelAiCopyBtn.Content(icon);
+        }
+        _sidePanelAiCopyBtn.Padding(ThicknessHelper::FromLengths(4, 2, 4, 2));
+        _sidePanelAiCopyBtn.MinWidth(0.0);
+        _sidePanelAiCopyBtn.MinHeight(0.0);
+        _sidePanelAiCopyBtn.Background(SolidColorBrush{ Colors::Transparent() });
+        _sidePanelAiCopyBtn.BorderThickness(ThicknessHelper::FromUniformLength(0));
+        _sidePanelAiCopyBtn.HorizontalAlignment(HorizontalAlignment::Center);
+        _sidePanelAiCopyBtn.IsTabStop(false);
+        AgentSetTitledTip(_sidePanelAiCopyBtn, L"Copy the conversation", winrt::hstring{ L"Copy this AI search conversation to the clipboard as Markdown: every request you sent with Claude's reply to it, then the sessions listed now, each with its state, folder, id and why.\nWhen the box is empty, your newest request also goes back into it, so Enter asks it again." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        _sidePanelAiCopyBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+            const auto self = weakThis.get();
+            if (!self)
+            {
+                return;
+            }
+            try
+            {
+                self->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis]() {
+                    if (const auto page = weakThis.get())
+                    {
+                        page->_SidePanelAiCopyConversation(); // never throws: a failure is logged and copies nothing
+                    }
+                });
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"side panel AI search: queue the copy"); // this click copies nothing; the next one tries again
+            }
+        });
+        // The strip's right column: ⊘ over the copy button, top-aligned with the first line as ⊘ alone was.
+        StackPanel actions{};
+        actions.Orientation(Orientation::Vertical);
+        actions.Spacing(2);
+        actions.VerticalAlignment(VerticalAlignment::Top);
+        actions.Children().Append(_sidePanelAiResetBtn);
+        actions.Children().Append(_sidePanelAiCopyBtn);
+        Grid::SetColumn(actions, 2);
+        inner.Children().Append(actions);
         strip.Children().Append(inner); // second: over the back
         // THE SWEEP HOST: a 2 DIP strip on the back's bottom edge, over the lines, that the "agent is running" light draws on
         // (AgentSweepBar: composition visuals of its own, so XAML neither lays out nor hit-tests the moving light). A layer of
@@ -9122,6 +9246,8 @@ namespace winrt::TerminalApp::implementation
         AgentSetAutomationId(_sidePanelAiThinkingBtn, L"am.side.ai.thinking");
         AgentSetAutomationId(_sidePanelAiResetBtn, L"am.side.ai.reset");
         AgentSetAccessibleName(_sidePanelAiResetBtn, L"New conversation");
+        AgentSetAutomationId(_sidePanelAiCopyBtn, L"am.side.ai.copy");
+        AgentSetAccessibleName(_sidePanelAiCopyBtn, L"Copy the conversation");
         // The loading icon: a progress control has no name of its own, and it is in the tree (visible) only while the
         // assistant works — so "is am.side.ai.busy there" is the e2e driver's "is it running".
         AgentSetAutomationId(_sidePanelAiSpinner, L"am.side.ai.busy");
@@ -9255,6 +9381,68 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::AgentLogCaughtException(L"_SidePanelAiPrewarm");
         }
+    }
+
+    void TerminalPage::_SidePanelAiCopyConversation()
+    {
+        try
+        {
+            // The conversation's state and its record, read once each. The record is the truth for every request it holds; the
+            // snapshot adds only whether the newest one still runs, and its words while the harness has not recorded it yet.
+            auto& agent = ::Agentmaster::SharedSessionSearchAgent();
+            const auto snapshot = agent.Snapshot();
+            const auto record = agent.Record();
+            ::Agentmaster::SidePanelAiCopyContent content;
+            content.conversation = ::Agentmaster::SidePanelAiCopyExchanges(record, snapshot.turns, snapshot.question, snapshot.busy);
+            // The LIST ON SCREEN, not the conversation's newest show: while a request runs, the side panel still shows the answer
+            // before it (SidePanelAiList.h), and the copy copies what the user sees — saying so (listIsPrevious).
+            content.hasShown = _sidePanelAiHasShown;
+            content.listed = SidePanelAiCopyRowsFor(_sidePanelAiShownIds, _sidePanelAiReasons, _sidePanelAiEntries, _sessionRegistry.get(), _appSettings.tabColorMode);
+            content.listIsPrevious = snapshot.busy && _sidePanelAiHasShown;
+            const std::wstring text = ::Agentmaster::BuildSidePanelAiCopyText(content, &::Agentmaster::SidePanelAiCopyLocalStamp);
+            // The box: an EMPTY one gets the newest request back (the user's "if prompt box is empty, copy the prompt sent to
+            // prompt box"), whether or not the clipboard takes the text — the click's two halves need nothing from each other.
+            // No focus: a click into the box is what starts the search's process (the "only after a request" rule), and a copy
+            // asks for none.
+            const std::wstring boxText = _sidePanelSearchBox ? std::wstring{ _sidePanelSearchBox.Text() } : std::wstring{};
+            const std::wstring refill = _sidePanelAiMode ? ::Agentmaster::SidePanelAiRefillText(boxText, snapshot.question) : std::wstring{};
+            _SidePanelAiWriteRefill(refill);
+            // [nav]: counts and lengths only — the words stay out of the nav trail (the agent's own [ai-search] lines hold them).
+            const std::wstring counts = L" requests=" + std::to_wstring(content.conversation.exchanges.size()) + L" listed=" + std::to_wstring(content.listed.size()) + L" refill=" + std::to_wstring(refill.size());
+            if (text.empty())
+            {
+                ::Agentmaster::LogNav(L"sidepanel ai-copy (nothing to copy)" + counts);
+                return;
+            }
+            // The retry-looped Win32 writer every Agentmaster copy uses (AgentClipboard.h): the focused terminal holds the OLE
+            // clipboard now and then, and a single attempt would lose the copy without a word.
+            if (RobustCopyTextToClipboard(text))
+            {
+                ::PlaySoundW(L"SystemAsterisk", nullptr, SND_ALIAS | SND_ASYNC); // the chime every Agentmaster copy plays
+                ::Agentmaster::LogNav(L"sidepanel ai-copy chars=" + std::to_wstring(text.size()) + counts);
+            }
+            else
+            {
+                ::Agentmaster::LogNav(L"sidepanel ai-copy (the clipboard could not be opened)" + counts);
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: nothing was copied (the clipboard keeps what it held) and the box keeps what it showed; a click
+            // again tries again.
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelAiCopyConversation");
+        }
+    }
+
+    void TerminalPage::_SidePanelAiWriteRefill(const std::wstring& refill)
+    {
+        if (refill.empty() || !_sidePanelSearchBox || !_sidePanelAiMode)
+        {
+            return; // nothing to put back, no box, or the box filters the cards now (the words would filter them)
+        }
+        _sidePanelSearchBox.Text(winrt::hstring{ refill });
+        // The caret after the request (a programmatic Text leaves it at the start): Enter sends it as it is, or typing goes on.
+        _sidePanelSearchBox.Select(static_cast<int32_t>(refill.size()), 0);
     }
 
     void TerminalPage::_SidePanelAiArmPark(std::wstring_view why) noexcept
@@ -9448,10 +9636,15 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        // Nothing to throw away, nor to copy, in a conversation that has not started.
+        const bool conversationStarted = snapshot.turns > 0 || snapshot.busy || snapshot.hasShown;
         if (_sidePanelAiResetBtn)
         {
-            // Nothing to throw away in a conversation that has not started.
-            _sidePanelAiResetBtn.IsEnabled(snapshot.turns > 0 || snapshot.busy || snapshot.hasShown);
+            _sidePanelAiResetBtn.IsEnabled(conversationStarted);
+        }
+        if (_sidePanelAiCopyBtn)
+        {
+            _sidePanelAiCopyBtn.IsEnabled(conversationStarted);
         }
         if (snapshot.question.empty())
         {

@@ -44,6 +44,17 @@
 // shows, shows again and answers changes the list ONCE, at its end, to the last show; one that answers in words changes
 // nothing; a request that ends in a failure after a show still lands its pick; a reset clears at once.
 //
+// TestSidePanelAiCopy pins the AI strip's crossed circle and the copy button under it (AgentMaster/SidePanelAiCopy.h,
+// SIDE_PANEL.md section 2h; the user's two requests of 2026-11-10): the box refill (an empty or blank box gets the newest
+// request on one line, a box with words keeps them, no request writes nothing); the fold of the conversation's record (the
+// plan before a tool call left out, the text after the last call as the reply, several blocks joined, a failure's notice, a
+// request stopped without a reply, a running newest request whether or not the record holds it yet, items of no turn and
+// compaction notices skipped, a request lost to the record's cap with its orphaned reply, a gap from a replaced request never
+// blamed on the cap); the whole Markdown text of a known conversation, byte for byte; the text's edges (one request, running,
+// a list that fits nothing, no list, the list of the answer before a running request, the cap's note, a missing or two-line
+// title, a two-digit item's indent, a reply of two paragraphs, code spans around backticks, no time, nothing to copy); and the
+// local time stamp's shape.
+//
 // TestSidePanelPins pins the cards' PIN TO TOP (AgentMaster/SidePanelPins.h, SIDE_PANEL.md section 2j): the pins first, the
 // newest on top, the board's order for the rest; a pin again bringing a card back to the top on any clock; the comparator's
 // strict weak ordering; the stamp's edges; the pin a tab keeps when it switches conversation; the sessions.json key (apart
@@ -64,6 +75,7 @@
 #include "../PointerCardPlacement.h" // the "+" launcher card's tooltip-like placement (TestPointerCardPlacement)
 #include "../SessionTimingText.h" // the cards' and rows' "created 4d1h, active 2m4s ago" (TestSessionTimingText)
 #include "../SidePanelAiList.h" // the AI view's list rule: only a request's end or a reset changes it (TestSidePanelAiList)
+#include "../SidePanelAiCopy.h" // the crossed circle's refill and the copy button's Markdown (TestSidePanelAiCopy)
 #include "../SidePanelFilters.h" // the funnel's FILTERS: facets, matcher, edits, chips, the record's JSON (TestSidePanelFilters)
 #include "../SidePanelPins.h" // Pin to Top: pinned cards first, the newest pin on top, the pin stamp, the re-home carry (TestSidePanelPins)
 #include "../StatusIconMotion.h" // the status icon's motion rule, shared by the tab header and the card icon (TestStatusIconMotion)
@@ -1217,6 +1229,305 @@ void TestSidePanelAiList()
         view.Apply(Kind::Asked, AiConversation(true, true, {}, {}));
         view.Apply(Kind::Reset, AiConversation(false, false, {}, {}));
         CHECK(view.replacements == 4 && !view.hasShown && view.ids.empty(), "ai request: a reset clears the list at once");
+    }
+}
+
+namespace
+{
+    // One entry of an AI search conversation's record, as the harness appends it (AgentHarnessCore.h HarnessItem).
+    //   kind    - what the entry is (a request, a text block, a tool call or result, a notice).
+    //   turn    - the request it belongs to (0 = none).
+    //   text    - its text (a request, a text block, a notice, a tool result).
+    //   at      - when the harness saw it (Unix ms).
+    //   isError - a notice that reports a failure.
+    //   returns - the entry.
+    //   throws  - std::bad_alloc only.
+    HarnessItem AiCopyItem(HarnessItemKind kind, uint64_t turn, std::wstring text, int64_t at = 0, bool isError = false)
+    {
+        HarnessItem item;
+        item.kind = kind;
+        item.turn = turn;
+        item.atUnixMs = at;
+        item.text = std::move(text);
+        item.isError = isError;
+        return item;
+    }
+
+    // The fixed time formatter of the copy tests: "T<ms>", so a heading's time is known whatever this machine's time zone.
+    //   ms      - the moment (Unix ms).
+    //   returns - "T" and the number.
+    //   throws  - std::bad_alloc only.
+    std::wstring AiCopyStamp(int64_t ms)
+    {
+        return L"T" + std::to_wstring(ms);
+    }
+
+    // The conversation every copy test starts from: four recorded requests (1, 2, 3, 5 - request 4 was replaced before it
+    // started, so the harness never recorded it), around a process notice of no turn and a compaction notice:
+    //   1 - a plan, a search, then a reply of TWO text blocks;
+    //   2 - a search, then a one-block reply;
+    //   3 - a plan, a search, then an error notice (the turn failed);
+    //   5 - a plan and a search, then nothing (stopped by Esc).
+    //   returns - the record, far below the cap.
+    //   throws  - std::bad_alloc only.
+    HarnessRecord AiCopyRecord()
+    {
+        using K = HarnessItemKind;
+        HarnessRecord r;
+        r.items.push_back(AiCopyItem(K::Notice, 0, L"the process started"));
+        r.items.push_back(AiCopyItem(K::User, 1, L"the session where I fixed the tab drag crash", 1000));
+        r.items.push_back(AiCopyItem(K::Assistant, 1, L"I'll 1. search 2. read the candidates 3. show them"));
+        r.items.push_back(AiCopyItem(K::ToolCall, 1, L""));
+        r.items.push_back(AiCopyItem(K::ToolResult, 1, L"14 sessions"));
+        r.items.push_back(AiCopyItem(K::Assistant, 1, L"Three sessions worked on the tab drag crash."));
+        r.items.push_back(AiCopyItem(K::Assistant, 1, L"The fix is in \"Tab drag: pointer-owned gesture\"."));
+        r.items.push_back(AiCopyItem(K::Notice, 1, L"The context was compacted: 210000 -> 30000 tokens."));
+        r.items.push_back(AiCopyItem(K::User, 2, L"only the open ones", 2000));
+        r.items.push_back(AiCopyItem(K::ToolCall, 2, L""));
+        r.items.push_back(AiCopyItem(K::ToolResult, 2, L"1 session"));
+        r.items.push_back(AiCopyItem(K::Assistant, 2, L"One of them is open."));
+        r.items.push_back(AiCopyItem(K::User, 3, L"and the newest?", 3000));
+        r.items.push_back(AiCopyItem(K::Assistant, 3, L"I'll check the newest first."));
+        r.items.push_back(AiCopyItem(K::ToolCall, 3, L""));
+        r.items.push_back(AiCopyItem(K::Notice, 3, L"Claude Code ended during the turn.", 0, true));
+        r.items.push_back(AiCopyItem(K::User, 5, L"stop me", 5000));
+        r.items.push_back(AiCopyItem(K::Assistant, 5, L"I'll search."));
+        r.items.push_back(AiCopyItem(K::ToolCall, 5, L""));
+        r.turns = 5;
+        return r;
+    }
+}
+
+// TestSidePanelAiCopy pins the AI strip's crossed circle and the copy button under it (AgentMaster/SidePanelAiCopy.h,
+// SIDE_PANEL.md section 2h; the user's two requests of 2026-11-10) - see the file's header for the list.
+void TestSidePanelAiCopy()
+{
+    std::wprintf(L"Side panel AI copy (SidePanelAiCopy.h, SIDE_PANEL.md section 2h):\n");
+
+    // The box refill: what the crossed circle and the copy button write into the request box.
+    {
+        CHECK(SidePanelAiRefillText(L"", L"the tab drag crash") == L"the tab drag crash", "ai refill: an empty box gets the newest request back");
+        CHECK(SidePanelAiRefillText(L"  \t\r\n ", L"the tab drag crash") == L"the tab drag crash", "ai refill: a box of white space counts as empty");
+        CHECK(SidePanelAiRefillText(L"only the open ones", L"the tab drag crash").empty(), "ai refill: a box with words keeps them");
+        CHECK(SidePanelAiRefillText(L" x ", L"the tab drag crash").empty(), "ai refill: one visible character in the box is a prompt the user typed");
+        CHECK(SidePanelAiRefillText(L"", L"").empty() && SidePanelAiRefillText(L"", L" \r\n\t ").empty(), "ai refill: no request (or white space alone) writes nothing");
+        CHECK(SidePanelAiRefillText(L"", L"  the  drag \r\n\r\n  crash\nfix  ") == L"the  drag crash fix", "ai refill: one line - the ends trimmed, a run of line breaks one space, the inner spaces kept");
+        CHECK(SidePanelAiRefillText(L"", L"\n\nfirst\r") == L"first", "ai refill: line breaks at the ends leave no space behind");
+    }
+
+    // The fold of the record into requests and replies.
+    {
+        const HarnessRecord record = AiCopyRecord();
+        const auto folded = SidePanelAiCopyExchanges(record, 5, L"stop me", false);
+        const auto& e = folded.exchanges;
+        CHECK(e.size() == 4 && e[0].turn == 1 && e[1].turn == 2 && e[2].turn == 3 && e[3].turn == 5, "ai copy fold: one exchange per recorded request, in order, the replaced request's gap kept");
+        CHECK(e.size() == 4 && e[0].askedAtUnixMs == 1000 && e[3].askedAtUnixMs == 5000 && e[0].request == L"the session where I fixed the tab drag crash", "ai copy fold: a request keeps its words and its time");
+        CHECK(e.size() == 4 && e[0].reply == L"Three sessions worked on the tab drag crash.\nThe fix is in \"Tab drag: pointer-owned gesture\".", "ai copy fold: the reply is the text after the last tool call, two blocks joined by a line break - the plan before the call is left out");
+        CHECK(e.size() == 4 && e[1].reply == L"One of them is open." && !e[1].failed && !e[1].running, "ai copy fold: a one-block reply");
+        CHECK(e.size() == 4 && e[2].failed && e[2].reply == L"Claude Code ended during the turn.", "ai copy fold: an error notice makes the turn a failure with its text as the reply (the plan is not the reply)");
+        CHECK(e.size() == 4 && e[3].reply.empty() && !e[3].failed && !e[3].running, "ai copy fold: a request stopped after a tool call has no reply");
+        CHECK(!folded.earlierDropped, "ai copy fold: a record below its cap never lost a request, even when it starts past request 1");
+
+        // The newest request still runs, and the record holds it: no reply yet, whatever it wrote after its last call.
+        HarnessRecord running = record;
+        running.items.push_back(AiCopyItem(HarnessItemKind::User, 6, L"the one with the spinner", 6000));
+        running.items.push_back(AiCopyItem(HarnessItemKind::Assistant, 6, L"Searching for the spinner"));
+        const auto live = SidePanelAiCopyExchanges(running, 6, L"the one with the spinner", true);
+        CHECK(live.exchanges.size() == 5 && live.exchanges[4].running && live.exchanges[4].reply.empty() && live.exchanges[4].askedAtUnixMs == 6000, "ai copy fold: a running request the record holds has no reply yet - its text so far may still be its plan");
+        CHECK(live.exchanges.size() == 5 && !live.exchanges[3].running && live.exchanges[0].reply == e[0].reply, "ai copy fold: only the NEWEST request runs");
+        const auto settled = SidePanelAiCopyExchanges(running, 6, L"the one with the spinner", false);
+        CHECK(settled.exchanges.size() == 5 && !settled.exchanges[4].running && settled.exchanges[4].reply == L"Searching for the spinner", "ai copy fold: the same turn at rest has its last text as the reply");
+
+        // The newest request runs, but its turn has not started in the harness yet: the snapshot's words stand in.
+        const auto waiting = SidePanelAiCopyExchanges(record, 6, L"  and the spinner one?  ", true);
+        CHECK(waiting.exchanges.size() == 5 && waiting.exchanges[4].turn == 6 && waiting.exchanges[4].running && waiting.exchanges[4].request == L"and the spinner one?" && waiting.exchanges[4].askedAtUnixMs == 0, "ai copy fold: a running request not recorded yet is added from the snapshot, trimmed, with no time");
+        CHECK(SidePanelAiCopyExchanges(record, 6, L" ", true).exchanges.size() == 4, "ai copy fold: a running request with no words adds nothing");
+        CHECK(SidePanelAiCopyExchanges(record, 6, L"never asked", false).exchanges.size() == 4, "ai copy fold: a newest request that does not run adds nothing the record lacks");
+    }
+
+    // The record's cap: only a record AT its cap can have lost requests.
+    {
+        using K = HarnessItemKind;
+        HarnessRecord full;
+        full.items.push_back(AiCopyItem(K::Assistant, 1, L"the reply of a request the cap dropped"));
+        full.items.push_back(AiCopyItem(K::ToolResult, 1, L"its last tool result"));
+        uint64_t turn = 2;
+        while (full.items.size() < kHarnessMaxItems)
+        {
+            full.items.push_back(AiCopyItem(K::User, turn, L"request " + std::to_wstring(turn), static_cast<int64_t>(turn)));
+            if (full.items.size() < kHarnessMaxItems)
+            {
+                full.items.push_back(AiCopyItem(K::Assistant, turn, L"reply " + std::to_wstring(turn)));
+            }
+            ++turn;
+        }
+        const auto capped = SidePanelAiCopyExchanges(full, turn - 1, L"", false);
+        CHECK(capped.earlierDropped && !capped.exchanges.empty() && capped.exchanges.front().turn == 2, "ai copy cap: a full record that lost a request says so, and its orphaned reply is left out");
+        bool orphanLeftOut = true;
+        for (const auto& x : capped.exchanges)
+        {
+            orphanLeftOut = orphanLeftOut && x.reply != L"the reply of a request the cap dropped";
+        }
+        CHECK(orphanLeftOut, "ai copy cap: no exchange carries the dropped request's reply");
+
+        HarnessRecord fullFromOne = full;
+        fullFromOne.items.front() = AiCopyItem(K::User, 1, L"request 1", 1);
+        fullFromOne.items[1] = AiCopyItem(K::Assistant, 1, L"reply 1");
+        const auto whole = SidePanelAiCopyExchanges(fullFromOne, turn - 1, L"", false);
+        CHECK(!whole.earlierDropped && whole.exchanges.front().turn == 1, "ai copy cap: a full record that still starts at request 1 lost nothing");
+
+        HarnessRecord fromTwo;
+        fromTwo.items.push_back(AiCopyItem(K::User, 2, L"request 2", 2));
+        CHECK(!SidePanelAiCopyExchanges(fromTwo, 2, L"", false).earlierDropped, "ai copy cap: below the cap, starting at request 2 (request 1 replaced) is never blamed on the cap");
+    }
+
+    // The whole text of a known conversation, byte for byte (the user's approved layout of 2026-11-10).
+    {
+        SidePanelAiCopyContent content;
+        content.conversation = SidePanelAiCopyExchanges(AiCopyRecord(), 5, L"stop me", false);
+        content.hasShown = true;
+        SidePanelAiCopyListRow open;
+        open.id = L"7d1f0c2a-5b3e-4c1a-9f0e-2b6d8e4a1c3f";
+        open.title = L"Tab drag: pointer-owned gesture";
+        open.state = L"open \x00B7 waiting-for-you";
+        open.folder = L"K:\\source\\Agentmaster";
+        open.branch = L"agentmaster";
+        open.why = L"replaced CanDragTabs with the pointer-owned drag";
+        SidePanelAiCopyListRow unknown;
+        unknown.id = L"0123abcd-0000-4000-8000-000000000000";
+        unknown.state = L"closed";
+        content.listed = { open, unknown };
+        const std::wstring expected =
+            L"## AI search \x00B7 4 requests\n"
+            L"\n"
+            L"### Request 1 \x00B7 T1000\n"
+            L"\n"
+            L"**\x276F User**\n"
+            L"> the session where I fixed the tab drag crash\n"
+            L"\n"
+            L"**\x25CF Claude**\n"
+            L"> Three sessions worked on the tab drag crash.\n"
+            L"> The fix is in \"Tab drag: pointer-owned gesture\".\n"
+            L"\n"
+            L"### Request 2 \x00B7 T2000\n"
+            L"\n"
+            L"**\x276F User**\n"
+            L"> only the open ones\n"
+            L"\n"
+            L"**\x25CF Claude**\n"
+            L"> One of them is open.\n"
+            L"\n"
+            L"### Request 3 \x00B7 T3000\n"
+            L"\n"
+            L"**\x276F User**\n"
+            L"> and the newest?\n"
+            L"\n"
+            L"**\x25CF Claude** \x00B7 failed\n"
+            L"> Claude Code ended during the turn.\n"
+            L"\n"
+            L"### Request 5 \x00B7 T5000\n"
+            L"\n"
+            L"**\x276F User**\n"
+            L"> stop me\n"
+            L"\n"
+            L"**\x25CF Claude**\n"
+            L"> _(no reply \x2014 the request was stopped before Claude answered)_\n"
+            L"\n"
+            L"### Listed sessions \x00B7 2\n"
+            L"\n"
+            L"1. **Tab drag: pointer-owned gesture** \x00B7 open \x00B7 waiting-for-you\n"
+            L"   `K:\\source\\Agentmaster` \x00B7 `agentmaster`\n"
+            L"   id `7d1f0c2a-5b3e-4c1a-9f0e-2b6d8e4a1c3f`\n"
+            L"   > replaced CanDragTabs with the pointer-owned drag\n"
+            L"2. **session 0123abcd** \x00B7 closed\n"
+            L"   id `0123abcd-0000-4000-8000-000000000000`\n";
+        const std::wstring text = BuildSidePanelAiCopyText(content, AiCopyStamp);
+        CHECK(text == expected, "ai copy text: the whole conversation and the list, byte for byte");
+        if (text != expected)
+        {
+            std::wprintf(L"    got:\n%ls\n    expected:\n%ls\n", text.c_str(), expected.c_str());
+        }
+    }
+
+    // The text's edges.
+    {
+        const auto has = [](const std::wstring& text, const std::wstring& part) { return text.find(part) != std::wstring::npos; };
+        SidePanelAiCopyContent one;
+        SidePanelAiCopyExchange ask;
+        ask.turn = 1;
+        ask.askedAtUnixMs = 42;
+        ask.request = L"the drag crash";
+        ask.running = true;
+        one.conversation.exchanges = { ask };
+        const std::wstring runningText = BuildSidePanelAiCopyText(one, AiCopyStamp);
+        CHECK(runningText.rfind(L"## AI search \x00B7 1 request\n", 0) == 0, "ai copy text: one request reads 'request', not 'requests'");
+        CHECK(has(runningText, L"**\x25CF Claude**\n> _(still running \x2014 no reply yet)_\n"), "ai copy text: a running request says it has no reply yet");
+        CHECK(!has(runningText, L"Listed sessions"), "ai copy text: no list section before the model listed anything");
+        CHECK(has(BuildSidePanelAiCopyText(one, {}), L"### Request 1\n\n"), "ai copy text: without a time formatter the heading names no time");
+
+        SidePanelAiCopyContent nothingFits = one;
+        nothingFits.hasShown = true;
+        CHECK(has(BuildSidePanelAiCopyText(nothingFits, AiCopyStamp), L"### Listed sessions \x00B7 0\n\nNo session fits this request.\n"), "ai copy text: an empty pick reads the view's own 'No session fits this request.'");
+
+        SidePanelAiCopyContent previous = nothingFits;
+        previous.listIsPrevious = true;
+        CHECK(has(BuildSidePanelAiCopyText(previous, AiCopyStamp), L"_(The list of the answer before the running request: it changes when that request ends.)_"), "ai copy text: while a request runs the list says it is the answer before it");
+
+        SidePanelAiCopyContent dropped = one;
+        dropped.conversation.earlierDropped = true;
+        CHECK(has(BuildSidePanelAiCopyText(dropped, AiCopyStamp), L"_(The first requests of this conversation are no longer in its record, which keeps its newest " + std::to_wstring(kHarnessMaxItems) + L" entries.)_"), "ai copy text: the cap's note names the cap");
+
+        SidePanelAiCopyContent paragraphs;
+        SidePanelAiCopyExchange answered;
+        answered.turn = 1;
+        answered.request = L"two lines\r\nof request";
+        answered.reply = L"para one\n\npara two\n";
+        paragraphs.conversation.exchanges = { answered };
+        CHECK(has(BuildSidePanelAiCopyText(paragraphs, AiCopyStamp), L"> two lines\n> of request\n\n**\x25CF Claude**\n> para one\n>\n> para two\n"), "ai copy text: a request keeps its lines, a reply's empty line stays inside the quote, the trailing break adds no line");
+
+        SidePanelAiCopyContent many;
+        many.hasShown = true;
+        for (int i = 1; i <= 10; ++i)
+        {
+            SidePanelAiCopyListRow row;
+            row.id = L"id" + std::to_wstring(i);
+            row.title = (i == 1) ? std::wstring{ L"fix\r\nthe drag" } : (L"t" + std::to_wstring(i));
+            row.state = L"closed";
+            row.why = (i == 10) ? std::wstring{ L"why ten" } : std::wstring{};
+            many.listed.push_back(row);
+        }
+        const std::wstring manyText = BuildSidePanelAiCopyText(many, AiCopyStamp);
+        CHECK(manyText.rfind(L"## AI search \x00B7 0 requests\n", 0) == 0, "ai copy text: a list without a recorded request still copies");
+        CHECK(has(manyText, L"1. **fix the drag** \x00B7 closed\n   id `id1`\n"), "ai copy text: a title on two lines is written on one");
+        CHECK(has(manyText, L"10. **t10** \x00B7 closed\n    id `id10`\n    > why ten\n"), "ai copy text: a two-digit item's lines are indented by its marker's width");
+        CHECK(!has(manyText, L"> \n") && !has(manyText, L"`id2`\n   >"), "ai copy text: a session without a why gets no quote");
+
+        CHECK(BuildSidePanelAiCopyText(SidePanelAiCopyContent{}, AiCopyStamp).empty(), "ai copy text: nothing asked and nothing listed copies nothing");
+    }
+
+    // Code spans: a path's backslashes and a branch's underscores read as they are, whatever backticks they hold.
+    {
+        CHECK(SidePanelAiCodeSpan(L"K:\\source\\a_b") == L"`K:\\source\\a_b`", "ai code span: a plain text gets one backtick");
+        CHECK(SidePanelAiCodeSpan(L"a`b") == L"``a`b``", "ai code span: an inner backtick needs a longer fence");
+        CHECK(SidePanelAiCodeSpan(L"a``b`c") == L"```a``b`c```", "ai code span: the fence is longer than the LONGEST inner run");
+        CHECK(SidePanelAiCodeSpan(L"`edge") == L"`` `edge ``", "ai code span: a text that starts with a backtick is padded");
+    }
+
+    // The local time stamp: "Mon DD HH:MM" from this machine's clock, nothing for an unknown moment.
+    {
+        CHECK(SidePanelAiCopyLocalStamp(0).empty() && SidePanelAiCopyLocalStamp(-5).empty(), "ai copy stamp: no moment, no time");
+        const int64_t ms = 1'762'780'920'000;
+        const time_t seconds = static_cast<time_t>(ms / 1000);
+        std::tm local{};
+        const bool converted = localtime_s(&local, &seconds) == 0;
+        static const wchar_t* const kMonths[] = { L"Jan", L"Feb", L"Mar", L"Apr", L"May", L"Jun", L"Jul", L"Aug", L"Sep", L"Oct", L"Nov", L"Dec" };
+        wchar_t want[32]{};
+        if (converted)
+        {
+            std::swprintf(want, 32, L"%ls %02d %02d:%02d", kMonths[local.tm_mon % 12], local.tm_mday, local.tm_hour, local.tm_min);
+        }
+        const std::wstring stamp = SidePanelAiCopyLocalStamp(ms);
+        CHECK(converted && stamp == want && stamp.size() == 12 && stamp[3] == L' ' && stamp[6] == L' ' && stamp[9] == L':', "ai copy stamp: the month's English name, a two-digit day and a 24-hour time");
     }
 }
 

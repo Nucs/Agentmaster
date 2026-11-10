@@ -284,6 +284,12 @@ void TestStatusIconMotion();
 // whole requests replayed through a model of the view: one change per request, at its end, to the last show
 // (tests_sidepanel.cpp)
 void TestSidePanelAiList();
+// SidePanelAiCopy.h (SIDE_PANEL.md §2h "⊘ and the copy button"): the user's two requests of 2026-11-10 — ⊘ and the copy button
+// put the newest request back into an EMPTY request box (on one line; a box with words keeps them), and the copy button copies
+// the whole conversation and the listed sessions as Markdown: the record's fold (the plan left out, the text after the last
+// call as the reply, failures, stopped and running requests, the cap), the whole text byte for byte, its edges, the code
+// spans and the local time stamp (tests_sidepanel.cpp)
+void TestSidePanelAiCopy();
 // SidePanelPins.h (SIDE_PANEL.md §2j): the cards' PIN TO TOP — the user's "pinning puts on top and repinning will bring a tab
 // to the top again" (2026-11-06): pinned cards first, the newest pin on top, the board's order for the rest; a pin again
 // brings a card back to the top whatever the clock says; the comparator is a strict weak ordering (seeded sweep); the

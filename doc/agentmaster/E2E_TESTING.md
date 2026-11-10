@@ -549,8 +549,10 @@ differs from the plan above, and why:
   `header_buttons`);
   the side panel's AI search (SIDE_PANEL.md §2h; in dev 0.0.1.42 and production 0.8.0.9): `am.side.ai` (the filter box's
   AI toggle, named by its "AI"), `am.side.ai.{status,thinking,reset}` (the strip's text, the thinking toggle, ⊘ — named
-  "New conversation"), `am.side.ai.busy` (2026-11-05, NOT BUILT: the strip's loading icon, named "The AI search is
-  working" — in the tree only while it shows, i.e. while a request runs or the process starts),
+  "New conversation"), `am.side.ai.copy` (2026-11-10, NOT BUILT: the copy button under ⊘, named "Copy the conversation";
+  disabled, like ⊘, until the conversation has a request), `am.side.ai.busy` (2026-11-05, NOT BUILT: the strip's
+  loading icon, named "The AI search is working" — in the tree only while it shows, i.e. while a request runs or the
+  process starts),
   `am.side.ai.result.<key>` (a result card's title; its item status is the state word or "closed", the tags, "selected");
   the side panel's FILTERS (SIDE_PANEL.md §2l, 2026-11-08, NOT BUILT): `am.side.funnel` (the header's fourth button, the
   innermost — named "Filter the cards"; ItemStatus "N filters on" while lit), its panel's rows (an in-window popup, open

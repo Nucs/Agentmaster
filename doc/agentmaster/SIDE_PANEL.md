@@ -63,7 +63,7 @@ model's answer and its list of sessions instead of the session cards; the summar
 │ 3 sessions found              │ ▌│                                  │  ← the count line speaks for the AI view
 │ ╭───────────────────────────╮ │ ▌│                                  │
 │ │● ❯ the tab drag crash  [⊘]│ │ ▌│                                  │  ← the strip: request, plan / answer,
-│ │  Three sessions are about…│ │ ▌│                                  │    "thinking low  ctx 18K / 200K", ⊘ = start over
+│ │  Three sessions are a… [⎘]│ │ ▌│                                  │    "thinking low  ctx 18K / 200K", ⊘ = start over, ⎘ = copy (§2h)
 │ ╰───────────────────────────╯ │ ▌│                                  │
 │ ┌ result card ──────────────┐ │ ▌│                                  │  ← the side panel's own card + the model's
 │ │ ▏You asked: "dragging a…" │ │ ▌│                                  │    "why" under it (closed sessions read "closed")
@@ -990,7 +990,7 @@ controls (an unknown member planted in the glyph and in `_SidePanelRefreshIndica
 - Collapse the panel while cards ring / glow / pulse, expand it: they move again; no `[exc] status glyph …`,
   `[exc] _SidePanelRefreshIndicators` or `[sidepanel] … out of step` line in hooks.log.
 
-### 2h. The AI search — the filter box's "AI" toggle (2026-10-31; the loading icon and the end-of-request list 2026-11-05)
+### 2h. The AI search — the filter box's "AI" toggle (2026-10-31; the loading icon and the end-of-request list 2026-11-05; ⊘'s refill and the copy button 2026-11-10)
 
 The view of 2026-10-31 (commit 7bbb63137, and the box keeping its text, 7d8ed1043) is in dev 0.0.1.42 and production
 0.8.0.9. The user's two requests of 2026-11-05 — "a loading icon while the assistant is running" and "the ai assistant
@@ -998,6 +998,9 @@ should update the list only at the end when the result is final" — are NOT BUI
 changes only at a request's end* below). So are the same day's two more: the AI strips' MOTION (the user's pick from five
 animated options: a light sweeping along the strip's bottom edge, plus a breathing dot — *The strip's motion* below) and
 "the cards in sidemenu with an explanation must not be trimmed and support multiline" (the whole why, *The results*).
+The user's two requests of 2026-11-10 — ⊘ puts the newest request back into an empty box, and a copy button under ⊘
+copies the conversation — are NOT BUILT yet (*⊘ and the copy button* below); the next build must purge (`TerminalPage.h`
+gains a data member, `_sidePanelAiCopyBtn`).
 
 The user's request: "add a 'Search' area similarly how 'Sum' works … the same search agent we have, same lifecycle but
 custom UI matching a sidemenu". Their answers to the four design questions (design-ask, 2026-10-31):
@@ -1017,8 +1020,9 @@ shifts the box's own clear button (the template part `DeleteButton`) left by the
 
 - **The box keeps its text through the switch, both ways, and through ⊘** — the user's rule for the AI search box (the
   Sessions page's 7d8ed1043, same day: "the box is one box: the prompt line with AI on, the search box with AI off"). Only
-  its placeholder and tip follow the mode, and only Enter sends or empties it. The nav lines carry the box's length:
-  `[nav] sidepanel ai on box=N`, `… ai off box=N`, `… ai-reset box=N`.
+  its placeholder and tip follow the mode, and only Enter sends or empties it. An EMPTY box is the one exception: ⊘ and the
+  copy button under it put the newest request back into it (2026-11-10, *⊘ and the copy button* below). The nav lines
+  carry the box's length: `[nav] sidepanel ai on box=N`, `… ai off box=N`, `… ai-reset box=N refill=M`.
 - **On:** the box becomes the REQUEST line (placeholder "describe a session, then press Enter", its own tip; a typed filter
   waits as the request, and the card filter is dropped); the card list's ScrollViewer is collapsed and the AI view
   (`_sidePanelAiRoot`, built on the first AI-on) shows in the same cell of the cards area (`_sidePanelCardsHost`). The view
@@ -1042,7 +1046,8 @@ shifts the box's own clear button (the template part `DeleteButton`) left by the
   failure, or how to start (selectable, wrapping, scrolling inside 150 DIP), and a footer "thinking <level>  ctx 18K / 200K"
   (the thinking toggle is the Sessions page's own rotation, `_CycleSessionsAiThinking`: low → medium → high → xhigh → max →
   low, no off since 2026-11-01, SESSIONS.md 9.1). ⊘ (`am.side.ai.reset`) throws the
-  conversation away everywhere. Its rounded look is a childless back Border behind the content (no composition node).
+  conversation away everywhere; the copy button under it (`am.side.ai.copy`) copies the conversation (*⊘ and the copy
+  button* below). Its rounded look is a childless back Border behind the content (no composition node).
 - **The results** — one card per listed session, in the model's order: the side panel's card skeleton
   (`_SidePanelBuildCardSkeleton`, the same builder as the session cards, so the two can never drift apart) — folder-color
   band with the title and tag ribbons, the status icon and its label, the timing line, the folder / branch line — plus the
@@ -1096,6 +1101,46 @@ shifts the box's own clear button (the template part `DeleteButton`) left by the
 `_sidePanelAiListenerToken`, removed in `~TerminalPage`): a request asked here shows in a Sessions page with its AI search on,
 and the reverse; the thinking level and ⊘ are shared too.
 
+**⊘ and the copy button** (the user's two requests of 2026-11-10, NOT BUILT yet; the pure half is
+`AgentMaster/SidePanelAiCopy.h`, pinned by `TestSidePanelAiCopy`). Their words: "when we click on circle icon that
+cancels/clears the session, unless the prompt box has a prompt - copy the prompt that was sent (and was running) to the
+prompt box", and "add a copy icon below the circle icon that copies to clipboard the prompt user sent + assistant answers and
+additionally, if prompt box is empty, copy the prompt sent to prompt box". Their picks (design-ask, the same day): the
+request comes back **whether it still ran or was already answered**, and the copy holds **the whole conversation and the
+listed sessions** (of four layouts: the whole conversation or the newest exchange, each with or without the list).
+
+- **⊘ refills an empty box.** The click reads the conversation's newest request (`SessionSearchSnapshot::question`)
+  BEFORE `SessionSearchAgent::Reset` clears it. When the box holds nothing but white space (`SidePanelAiRefillText`), the
+  request goes back into it on one line (a run of line breaks becomes one space: the box is a single-line TextBox) with the
+  caret after it, and the box takes the keyboard as before — Enter asks it again in the new conversation, or the user edits
+  it first. A box with words keeps them (the rule of 2026-10-31: what is typed there is often the next request itself). The
+  Reset event's path never writes the box, so a ⊘ in another window or on the Sessions page refills nothing here.
+  `[nav] sidepanel ai-reset box=N refill=M` (lengths only).
+- **The copy button** (`_sidePanelAiCopyBtn`, `am.side.ai.copy`, named "Copy the conversation"): Segoe Fluent Icons' Copy
+  under ⊘, both in the strip's right column (a vertical StackPanel, top-aligned like ⊘ alone was, one center line), flat at
+  rest, no tab stop, its tip after 3 s of rest (`kSidePanelButtonTipDelay`), enabled with ⊘ (once the conversation has a
+  request). A click runs `_SidePanelAiCopyConversation` on a clean tick:
+  - **What it copies** — Markdown in Copy ▸ Transcript's style: `## AI search · N requests`; per request
+    `### Request <id> · <local time>` ("Nov 10 14:02"), `**❯ User**` over the request as a quote, `**● Claude**` over the
+    reply as a quote — `· failed` with the error's text for a failed request, "still running — no reply yet" for the running
+    one, "no reply — the request was stopped before Claude answered" for one Esc stopped; then `### Listed sessions · N` with
+    one numbered item per session on screen: the title in bold (the card's "session <id8>" when unknown), its state
+    ("open · waiting-for-you", or "closed" — the card's words), its folder and branch, its id, and the model's why as a quote.
+    "No session fits this request." for an empty pick; no list section before the model listed anything.
+  - **Where it comes from** — the conversation's RECORD (`SessionSearchAgent::Record`, `SidePanelAiCopyExchanges`): a text
+    block that a tool call follows was the model's plan and is left out, the text after a request's last call is its reply.
+    A running request the harness has not recorded yet comes from the snapshot. The record keeps its newest 400 entries
+    (`kHarnessMaxItems`): when it lost the first requests, the copy says so above the first one it has. The LIST is the one
+    on screen (`_sidePanelAiShownIds`, with each session's facts by its result card's rules, `SidePanelAiCopyRowsFor`):
+    while a request runs, it is the answer before it, and the copy says so under its heading.
+  - **The box** — an empty one gets the newest request back by ⊘'s rule, but WITHOUT the keyboard: a click into the box is
+    what starts the search's process (the lifecycle below), and a copy asks for none.
+  - **Feedback** — the chime every Agentmaster copy plays once the clipboard took the text (the retry-looped
+    `RobustCopyTextToClipboard`). `[nav] sidepanel ai-copy chars=N requests=R listed=L refill=M`, or `(nothing to copy)`,
+    or `(the clipboard could not be opened)` — counts and lengths only, never the words.
+- **Not the Sessions page.** The user asked for the side menu; the Sessions page's ⊘ (beside its search box) keeps its old
+  behavior, and it has no copy button.
+
 **The lifecycle — "only after a request".** A window that shows the AI view starts no process (a window can open in AI mode:
 the mode is persisted). The process starts at the first click into the box (`GotFocus` → `Prewarm`) or at a request. The
 park (`SessionSearchAgent::ParkProcessAfter`, `AppSettings::sessionsAiParkMinutes`, 2 hours by default, 1–1440) is armed
@@ -1104,8 +1149,8 @@ closes, after ⊘, and when the window closes — but never while a Sessions pag
 process then: `_SessionsAiPagesShowingCount`) and never while a request runs (its end arms it). ⚠ Never arm the park right
 after a Prewarm: `ParkAfter` drops a start that has not happened yet. The Sessions page's own park (the last page out) uses
 the same setting since this change (it was a fixed 10 minutes). Logged `[ai-search] side panel (window …): the idle process
-parks in N min (<why>)` and `[nav] sidepanel ai on box=N | ai off box=N | ai-ask turn=N chars=M | ai-stop | ai-reset box=N |
-ai-open <sid8> -> jump | resume here | transcript`.
+parks in N min (<why>)` and `[nav] sidepanel ai on box=N | ai off box=N | ai-ask turn=N chars=M | ai-stop | ai-reset box=N
+refill=M | ai-copy chars=N requests=R listed=L refill=M | ai-open <sid8> -> jump | resume here | transcript`.
 
 **While the view shows, the card list rests like a collapsed one** (`_SidePanelCardsHidden`): its updates are owed
 (`_SidePanelScheduleRebuild` / `_SidePanelRebuildCards` only mark it dirty — a forced one too, since it would write the
@@ -1118,7 +1163,10 @@ new-window default (`AppSettings::sidePanelAiMode`), written outside the cog for
 
 **Tested** (no build): `tests_persistence.cpp` — the record's tri-state (round-trip, a legacy record, a committed false, a
 non-bool value, the unset value omitted), the settings' round-trip and defaults, and `ClampSessionsAiParkMinutes` (0 → 120,
-past a day → 1440, a hand-edited 0, a write of an unclamped value).
+past a day → 1440, a hand-edited 0, a write of an unclamped value). `tests_sidepanel.cpp` `TestSidePanelAiCopy` (2026-11-10):
+the refill (an empty or blank box, a box with words, no request, one line), the record's fold (the plan left out, two text
+blocks joined, a failure, a stopped and a running request, one not recorded yet, the cap and its orphaned reply, a replaced
+request's gap), the whole Markdown text byte for byte, its edges, the code spans and the local time's shape.
 
 **Check after the build:**
 - The AI toggle sits inside the filter box at its right end; the box's text and its clear button end before it.
@@ -1126,7 +1174,16 @@ past a day → 1440, a hand-edited 0, a write of an unclamped value).
   area shows the strip (hint text, a gray or green dot) over the conversation's last list; the count line reads the idle
   hint. hooks.log: `[nav] sidepanel ai on box=N`, then the agent's process start (`[harness] sessions-search: process up …`).
   AI off with text in the box: the text stays and filters the cards at once (`[nav] sidepanel ai off box=N`). ⊘ with text in
-  the box: the conversation resets, the text stays (`ai-reset box=N`).
+  the box: the conversation resets, the text stays (`ai-reset box=N refill=0`).
+- ⊘ with an EMPTY box (2026-11-10): during a request and after an answer, the conversation resets and the newest request is
+  back in the box on one line, the caret after it, the box focused (`ai-reset box=0 refill=M`); Enter asks it again and the
+  strip shows it as the new conversation's first request. A box holding only spaces counts as empty.
+- The copy button (2026-11-10) sits under ⊘ on one center line, disabled before the first request, its tip after 3 s. A
+  click after two requests and a list: the chime, and the clipboard holds `## AI search · 2 requests`, both requests with
+  their replies (no plan text), and `### Listed sessions` with each card's title, state, folder, id and why — paste it into
+  a Markdown viewer to see the quotes and code spans. During a request: the running one reads "still running", and the
+  list says it is the answer before it. With the box empty, the newest request is back in it but the caret stays where it
+  was (no `process up` line after a park). hooks.log: `[nav] sidepanel ai-copy chars=N requests=2 listed=L refill=M`.
 - A request: the loading icon spins where the dot was, the plan and "Searching …" in blue (then "… — N candidates,
   choosing…"), the count line "AI search — searching…", and the last answer's cards stay as they were, dimmed — no
   candidate ever shows. At the end the pick replaces them in one step (a why under each card, the list at its top), the
@@ -1892,7 +1949,12 @@ below).
   the strip's motion and the whole why (2026-11-05): `AgentAmbientAnimation.{h,cpp}` (`AgentSweepBar`,
   `AgentWorkingIndicator`), `TerminalPage.AgentSidePanel.cpp` (the sweep host in `_SidePanelAiEnsureView`, the switch at
   the end of `_SidePanelAiUpdateStrip`, in `_SidePanelSetAiMode` and in `_SidePanelToggleCollapsed`; the why's wrap in
-  `_SidePanelAiApplyResultModel`), `TerminalPage.h` (`_sidePanelAiWorking`).
+  `_SidePanelAiApplyResultModel`), `TerminalPage.h` (`_sidePanelAiWorking`);
+  ⊘'s refill and the copy button (2026-11-10): `AgentMaster/SidePanelAiCopy.h` (the refill, the record's fold, the Markdown,
+  pure; new), `TerminalPage.AgentSidePanel.cpp` (the ⊘ handler and the copy button in `_SidePanelAiEnsureView`, the enabled
+  state in `_SidePanelAiUpdateStrip`, `_SidePanelAiCopyConversation`, `_SidePanelAiWriteRefill`, `SidePanelAiCopyRowsFor`,
+  `kSidePanelAiCopyGlyph`), `TerminalPage.h` (`_sidePanelAiCopyBtn`, the declarations), `TerminalAppLib.vcxproj` (the
+  header), `tests/tests_sidepanel.cpp` (`TestSidePanelAiCopy`), `tests/m5_tests.{h,cpp}`.
   The `⋯` menu (§2i): `TerminalPage.AgentSidePanel.cpp` (the button and its lazily filled menu, `_SidePanelFillMoreMenu`,
   `_SidePanelRunMenuCommand`, `_SidePanelSetScope` in place of the scope toggle, `_SidePanelSetSort`, the menu's symbols
   and `kSidePanelOrderChoices`), `TerminalPage.h` (`_sidePanelMoreBtn` in place of the four button members, the
