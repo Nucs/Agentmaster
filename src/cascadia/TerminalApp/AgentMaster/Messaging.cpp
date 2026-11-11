@@ -98,11 +98,17 @@ namespace Agentmaster::Msg
         // How long a history message sent AS THE USER is remembered by the echo guard: it may wait in the outbox behind the
         // live traffic and the flood budget for a long time, and an old prompt Telegram hands back must never be queued.
         constexpr int64_t kHistoryEchoMs = 90 * 60 * 1000;
-        // The topic list's re-sort (§21.9): at most once a minute, only after half a minute with nothing posted anywhere,
-        // and at most this many cards re-posted (a longer fix waits for a recreation or /recreate).
+        // The topic list's re-sort (§21.9, §21.52): at most once a minute, only after half a minute with nothing posted anywhere,
+        // and only the list's TOP kResortTopTopics are put in MOST RECENT order (PlanTopicResortTop: the fewest re-posts for that,
+        // never more, never skipped — about three screens on a phone). The whole list is re-sorted only after a recreation, when
+        // every card is new and every replaced one can still be deleted.
         constexpr int64_t kResortEveryMs = 60 * 1000;
         constexpr int64_t kResortQuietMs = 30 * 1000;
-        constexpr size_t kResortMaxTopics = 24;
+        constexpr size_t kResortTopTopics = 24;
+        // §21.52: the re-sort's replaced cards are deleted together once its last re-post went out, or this long after the first
+        // one was replaced, whichever comes first — a re-post that never goes (its topic deleted meanwhile) must not hold the
+        // others' delete for good.
+        constexpr int64_t kResortDeleteFlushMaxWaitMs = 5 * 60 * 1000;
         // The replay waits for a RECREATION's new list (the old topics deleted, the new ones made — a minute or two), but not
         // longer than this after the recreation started: a topic Telegram keeps refusing to make must not hold every history.
         constexpr int64_t kRecreateListWaitMs = 5 * 60 * 1000;
@@ -1193,21 +1199,21 @@ namespace Agentmaster::Msg
                 _seenLive.clear();
                 _secretaryEchoes.clear();
                 // The HISTORY replay (§21.9): no batch is in flight at a start (the outbox is empty), so a batch of the last
-                // run that was not committed is read again. A replay found pending is finished — and, when it was a
-                // recreation's (or any replay: the list is in replay order then), the list is re-sorted after it.
+                // run that was not committed is read again. A replay found pending is finished. §21.52: the WHOLE list is
+                // re-sorted after it only when the state says a RECREATION still owes that re-sort (resortWholeList, persisted
+                // with the recreation) — no longer whenever some topic's replay is pending: on 2026-11-04 a restart whose replay
+                // posted nothing re-posted 501 cards that way. Any other drift is the quiet re-sort's, top kResortTopTopics only.
                 _backfill = BackfillBatch{};
-                _backfillAfterRecreation = false;
-                for (const auto& kv : _state.topics)
-                {
-                    _backfillAfterRecreation = _backfillAfterRecreation || TopicBackfillPending(kv.second);
-                }
+                _backfillAfterRecreation = _state.resortWholeList;
                 _backfillPostsBy.clear();
                 _replayPosts = 0;
                 _replayTopics = 0;
                 _resortFull = false;
                 _lastResortMs = 0;
-                _resortTooLongLogged = false;
                 _resortQueue.clear();
+                _resortReplaced.clear(); // §21.52: the last run's replaced cards are lost with it (they stay, buttons working)
+                _resortReplacedSinceMs = 0;
+                _createDelays.clear(); // §21.51: a session's create delay is this run's; the chat-wide pause is in the state file
                 _runningIds.clear();
                 // §21.16.7: a dot's hold and its pending requests are this run's (the order keys are rebuilt by the first sync).
                 _frontHeld.clear();
@@ -1647,6 +1653,11 @@ namespace Agentmaster::Msg
             L"topics[].changeLineFromSquare",
             L"topics[].historyPromptMessageId",
             L"topics[].stateIconId",
+            // §21.51 / §21.52: cleared by the bot once acted on (the pause once creates work again, the whole-list re-sort once
+            // planned) — brought back after an older build ran, a stale pause would hold creates and a stale flag re-post the list.
+            L"topicCreatePauseUntilMs",
+            L"topicCreatePausedSinceMs",
+            L"resortWholeList",
         };
         RepairStateFileWrittenByOlderBuild(profileDir, stateFile, L"messaging\\telegram\\state.json", &MessagingStateRoundTrip, true, &kVolatile);
         MessagingStateFileLoad out;
@@ -3438,7 +3449,8 @@ namespace Agentmaster::Msg
                     {
                         // The PROBE (§8.2): editForumTopic with the topic's OWN name and icon as its record says — "exists" when Telegram
                         // takes it or answers TOPIC_NOT_MODIFIED, and a title that drifted (a rename lost long ago) is put back in sync as
-                        // a side effect. A thread no record names (the Search topic, a wizard's thread) is probed with no change at all.
+                        // a side effect. The Search topic gets its own name and icon (below); a thread no record names (a wizard's
+                        // thread) is probed with no change at all.
                         Probe p;
                         p.thread = it->first;
                         p.params = json::Value::MkObj();
@@ -3456,6 +3468,19 @@ namespace Agentmaster::Msg
                                 }
                                 p.sessionId = sid;
                                 break;
+                            }
+                        }
+                        if (p.sessionId.empty() && (h.searchTopic || _state.searchThreadId == it->first))
+                        {
+                            // §21.51: the 🔎 Search topic is probed with ITS OWN name and icon too. tdlib/telegram-bot-api#944 found that an
+                            // editForumTopic changing nothing answers "ok" even for a dead topic, so a probe with no field would release a
+                            // gone Search topic again and again (only kTopicProbeReleasesMax ended it). A wizard's thread keeps the empty
+                            // probe: its name is the user's, not known here — that cap decides for it.
+                            const bool icon = _state.searchIconThreadId == it->first && !_searchIconRefused;
+                            p.params.Set(L"name", json::Value::MkStr(SearchTopicName(icon)));
+                            if (icon)
+                            {
+                                p.params.Set(L"icon_custom_emoji_id", json::Value::MkStr(SearchTopicIcon().customEmojiId));
                             }
                         }
                         due.push_back(std::move(p));
@@ -3522,6 +3547,7 @@ namespace Agentmaster::Msg
         uint64_t noteSeq = 0;
         bool searchTopic = false;
         bool forgot = false;
+        int64_t goneAfterMs = -1; // §21.51: how long after its creation the forgotten topic was found gone (-1 = not known)
         {
             std::lock_guard lk{ _mtx };
             const auto it = _heldThreads.find(threadId);
@@ -3546,6 +3572,7 @@ namespace Agentmaster::Msg
                         sessionId = rec->first;
                         h.sessionId = rec->first;
                         h.verbose = rec->second.verbose;
+                        goneAfterMs = rec->second.createdMs > 0 ? now - rec->second.createdMs : -1;
                         _mirrors.erase(rec->first);
                         _cards.erase(rec->first);
                         _state.topics.erase(rec);
@@ -3648,6 +3675,13 @@ namespace Agentmaster::Msg
         if (forgot)
         {
             _backfillPostsBy.erase(sessionId); // the tick's map (this runs on the tick thread)
+        }
+        if (forgot && goneAfterMs >= 0 && goneAfterMs < kFreshTopicGoneMs)
+        {
+            // §21.51 (repo-pager #145's "a new topic that takes no message"): a topic the bot made minutes ago is gone already —
+            // what Telegram's outage of 2026-11-09 did to every new topic (tdlib/telegram-bot-api#944). Made again at once, it would
+            // leave one more dead topic and one more "was created" notice each time round, so every create of the chat waits.
+            _pauseTopicCreates(L"a topic made " + TgShortSpan(goneAfterMs) + L" before was gone already");
         }
         const std::wstring who = L"thread " + std::to_wstring(threadId) + (sessionId.empty() ? std::wstring{} : L" (" + ShortId(sessionId) + L")");
         if (forgot || replayDropped > 0)
@@ -4991,7 +5025,9 @@ namespace Agentmaster::Msg
             // chat under a flood verdict: it takes its turn and respects a parked method like the sync's topic calls
             // (_awaitCallSlot, _handleTickFlood), and a refusal is tried again kSearchCreateRetryMs later — not on every 1.5 s
             // tick, which is how a flood verdict grows.
-            if (WallMs() < _searchCreateRetryAtMs || !_awaitCallSlot(L"createForumTopic"))
+            // §21.51: and not while Telegram refuses topics for the whole chat — the Search topic's create would be one more
+            // refusal and one more "topic … was created" notice that no bot can delete.
+            if (WallMs() < _searchCreateRetryAtMs || _topicCreatesPaused(WallMs()) || !_awaitCallSlot(L"createForumTopic"))
             {
                 return;
             }
@@ -5030,9 +5066,17 @@ namespace Agentmaster::Msg
             {
                 _handleTickFlood(L"createForumTopic", r); // a 429: a short verdict waited out here, a long one parks the method
                 _searchCreateRetryAtMs = WallMs() + kSearchCreateRetryMs;
-                _setStatus(L"Connected, but the Search topic could not be created: " + r.description);
+                if (r.TopicHomeRefused())
+                {
+                    _pauseTopicCreates(r.description); // §21.51: every create of the chat waits (it sets the status line itself)
+                }
+                else
+                {
+                    _setStatus(L"Connected, but the Search topic could not be created: " + r.description);
+                }
                 return;
             }
+            _noteTopicCreateWorked(L""); // §21.51: a pause of the chat (this was its probe) ends here
             thread = r.result.I64At(L"message_thread_id", 0);
             {
                 std::lock_guard lk{ _mtx };
@@ -5622,6 +5666,13 @@ namespace Agentmaster::Msg
                     _recreatedCount = 0;
                     _recreateStartedMs = nowMs;
                     _backfillAfterRecreation = true; // the new list's history replay is re-sorted after it, as in the first run
+                    {
+                        // §21.52: owed for the state too (a recreation an older build began has no such key yet), so a stop before
+                        // the replay's end still re-sorts the new list at the next start.
+                        std::lock_guard lk{ _mtx };
+                        _state.resortWholeList = true;
+                        _stateDirty = true;
+                    }
                     _log(L"[msg] recreation resumed: old topics still to delete from the last run");
                 }
                 _deleteOrphanTopics(kTopicOpsPerTick);
@@ -5698,6 +5749,18 @@ namespace Agentmaster::Msg
                 // The plan lists the creates lowest-ranked first (§21.8), so a tick's budget makes the oldest ones and
                 // the next tick goes on from there: the topic that ranks highest is made last and lands on top.
                 createsPlanned = true;
+                // §21.51: no create while Telegram refuses them for the whole chat (BOT_TOPIC_WRONG_HOME: one try per pause), and
+                // none for a session whose last refused create asked it to wait. The sync asked again at every 1.5 s tick before
+                // — 279 refused creates in 7 minutes on 2026-11-09, 371 in 2 hours of 502s on 2026-11-03. The session keeps its
+                // place in the plan: a later tick makes its topic, which then replays the history it missed (§21.9).
+                if (_topicCreatesPaused(nowMs))
+                {
+                    break;
+                }
+                if (const auto delayed = _createDelays.find(op.sessionId); delayed != _createDelays.end() && nowMs < delayed->second.nextAtMs)
+                {
+                    break;
+                }
                 if (apiOps++ < kTopicOpsPerTick)
                 {
                     std::wstring color;
@@ -5809,6 +5872,11 @@ namespace Agentmaster::Msg
             count = oldThreads.size();
             _state.topics.clear();
             _state.topicLayout = kTopicLayoutVersion;
+            // §21.52: the new list owes its WHOLE-LIST re-sort after its history replay; saved with the orphan list just below, so
+            // a stop midway still knows it at the next start (a start no longer guesses it from "some replay is pending").
+            _state.resortWholeList = true;
+            _resortReplaced.clear(); // the old topics' replaced cards go with the topics
+            _resortReplacedSinceMs = 0;
             _mirrors.clear();
             _cards.clear();
             // §21.16.7: the old topics' dot requests and taps (thread ids that are about to be deleted); _frontHeld is cleared
@@ -5969,11 +6037,15 @@ namespace Agentmaster::Msg
         if (!r.ok)
         {
             // A 429 is waited out stop-aware when short and parks createForumTopic when long (the old sleep here ran the whole
-            // retry_after on the tick thread and did not end for Stop); the sync plans the topic again on a later tick.
+            // retry_after on the tick thread and did not end for Stop); the sync plans the topic again on a later tick. §21.51:
+            // any other refusal decides WHEN that later tick may ask — the whole chat pauses on BOT_TOPIC_WRONG_HOME, this session
+            // alone waits on anything else — so a refusal is never asked again on the very next tick.
             _handleTickFlood(L"createForumTopic", r);
-            _log(L"[msg] topic create failed for " + ShortId(sessionId) + L": " + r.description);
+            const std::wstring next = _noteTopicCreateRefused(sessionId, r);
+            _log(L"[msg] topic create failed for " + ShortId(sessionId) + L": " + r.description + (next.empty() ? std::wstring{} : L" \x2014 " + next));
             return;
         }
+        _noteTopicCreateWorked(sessionId); // §21.51: a pause of the chat (this was its probe) and the session's delay end here
         if (!iconRefusal.empty() && !colorDropped && !_stateIconRefused.exchange(true))
         {
             // Leaving the icon out is what made the create go through: Telegram refuses the state icons, so every topic shows the
@@ -6031,6 +6103,105 @@ namespace Agentmaster::Msg
         // The card is the STICKY bottom message of the topic (§21.5): _refreshCard posts the first one (cardMessageId
         // is 0) with the recap rule, the buttons and the text hash, exactly as every later re-post.
         _refreshCard(sessionId, true);
+    }
+
+    bool MessagingService::_topicCreatesPaused(int64_t nowMs, int64_t* untilMs)
+    {
+        std::lock_guard lk{ _mtx };
+        int64_t& until = _state.topicCreatePauseUntilMs;
+        if (until > nowMs + kTopicCreatePauseMs)
+        {
+            // More than one pause ahead of the clock: a damaged file, or the clock was set back since the pause began. One pause
+            // from now instead, so no stamp can stop topic creation for good.
+            until = nowMs + kTopicCreatePauseMs;
+            _stateDirty = true;
+        }
+        if (untilMs)
+        {
+            *untilMs = until > nowMs ? until : 0;
+        }
+        return until > nowMs;
+    }
+
+    void MessagingService::_pauseTopicCreates(const std::wstring& why)
+    {
+        const int64_t now = WallMs();
+        const int64_t until = now + kTopicCreatePauseMs;
+        bool first = false;
+        int64_t since = 0;
+        std::wstring user;
+        {
+            std::lock_guard lk{ _mtx };
+            // The outage's start is kept across its pauses (each refused probe pauses again): the status line says since when.
+            first = _state.topicCreatePausedSinceMs == 0;
+            if (first)
+            {
+                _state.topicCreatePausedSinceMs = now;
+            }
+            since = _state.topicCreatePausedSinceMs;
+            _state.topicCreatePauseUntilMs = until;
+            _stateDirty = true;
+            user = _state.botUsername;
+        }
+        // At once, not within kStateSaveGapMs: a restart in the next seconds must still wait out the pause (each create refused
+        // during an outage may leave a "topic … was created" notice in the chat that no bot can delete — tdlib/telegram-bot-api#944).
+        _saveStateIfDirty(true);
+        _log(L"[msg] topic creates PAUSED until " + TgClockText(until, now) + L" (" + why + L")" +
+             (first ? std::wstring{ L": Telegram refuses new topics for this chat. Sessions that need one wait; each topic made later replays the history it missed" }
+                    : std::wstring{ L": still refused (since " } + TgClockText(since, now) + L")"));
+        _setStatus(L"Connected" + (user.empty() ? std::wstring{} : L" as @" + user) + L". Telegram refuses new topics since " + TgClockText(since, now) + L" (" + why +
+                   L"): sessions that need one wait; the next try at " + TgClockText(until, now) + L".");
+    }
+
+    void MessagingService::_noteTopicCreateWorked(const std::wstring& sessionId)
+    {
+        const int64_t now = WallMs();
+        int64_t since = 0;
+        std::wstring user;
+        {
+            std::lock_guard lk{ _mtx };
+            since = _state.topicCreatePausedSinceMs;
+            if (since != 0 || _state.topicCreatePauseUntilMs != 0)
+            {
+                _state.topicCreatePausedSinceMs = 0;
+                _state.topicCreatePauseUntilMs = 0;
+                _stateDirty = true;
+            }
+            user = _state.botUsername;
+        }
+        if (!sessionId.empty())
+        {
+            _createDelays.erase(sessionId); // a session id comes only from the tick thread (_createTopic), the map's owner
+        }
+        if (since != 0)
+        {
+            _log(L"[msg] topic creates work again (refused since " + TgClockText(since, now) + L", " + TgShortSpan(now - since) + L"): the sessions that waited get their topics now");
+            _setStatus(L"Connected" + (user.empty() ? std::wstring{} : L" as @" + user) + L".");
+        }
+    }
+
+    std::wstring MessagingService::_noteTopicCreateRefused(const std::wstring& sessionId, const TgResult& r)
+    {
+        const int64_t now = WallMs();
+        if (r.TopicHomeRefused())
+        {
+            // Telegram refuses topics for the whole chat (tdlib/telegram-bot-api#944): every create waits, this one included —
+            // its own delay would only hide the pause's end.
+            _createDelays.erase(sessionId);
+            _pauseTopicCreates(r.description);
+            return L"every create of the chat waits until " + TgClockText(now + kTopicCreatePauseMs, now);
+        }
+        if (r.httpStatus == 429)
+        {
+            return {}; // the flood logic waited it out or parked the method (_handleTickFlood): no delay of its own on top
+        }
+        // A passing or a topic-specific refusal (a 5xx, no answer, a name Telegram rejects): this session waits, the others go on
+        // (repo-pager #145: "a passing error, such as a 5xx, costs this one message and no pause").
+        auto& delay = _createDelays[sessionId];
+        ++delay.failures;
+        const int64_t wait = TopicCreateRetryDelayMs(delay.failures);
+        delay.nextAtMs = now + wait;
+        return L"asked again in " + TgShortSpan(wait) + L" (" + std::to_wstring(delay.failures) + L" refused in a row)";
     }
 
     void MessagingService::_adoptBoundThreads(const std::unordered_map<std::wstring, SessionInfo>& byId, TabColorMode colorMode, bool inStartupHold)
@@ -6475,7 +6646,9 @@ namespace Agentmaster::Msg
             // a tapped button waits for this post.
             OutItem del;
             del.prio = prio;
-            del.key = L"card-del:" + sessionId;
+            // Keyed by the MESSAGE (§21.51): with the session alone as the key, a second re-post's delete replaced a first one that
+            // still waited in the outbox (a flood hold), and that older card was never deleted. Still "card…": a recreation drops it.
+            del.key = L"card-del:" + sessionId + L":" + std::to_wstring(deleteFirst);
             del.method = L"deleteMessage";
             del.params = json::Value::MkObj();
             del.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
@@ -7119,7 +7292,9 @@ namespace Agentmaster::Msg
                 {
                     std::lock_guard lk{ _mtx };
                     _noteCallLocked(0);
-                    room = _recentCallsMs.size() + 2 <= kHistoryCallsPerMinute && !_backfill.active;
+                    // §21.52: ONE call per re-post now — its old card is deleted with the re-sort's others in one batch at the end
+                    // (_flushResortDeletes), or not at all when it is past the 48 h a bot may delete in.
+                    room = _recentCallsMs.size() + 1 <= kHistoryCallsPerMinute && !_backfill.active;
                 }
                 if (!room)
                 {
@@ -7137,6 +7312,8 @@ namespace Agentmaster::Msg
                 }
                 return;
             }
+            // §21.52: the re-sort's replaced cards, in one deleteMessages per up to 100, once its last re-post went out.
+            _flushResortDeletes();
             if (!full && (now - _lastResortMs < kResortEveryMs || !_runningIds.empty()))
             {
                 return;
@@ -7202,7 +7379,18 @@ namespace Agentmaster::Msg
                 const auto& kb = _orderKeys.find(b)->second;
                 return TopicRanksAbove(ka.first, ka.second, kb.first, kb.second);
             });
-            const auto plan = PlanTopicResort(current, desired);
+            // §21.52: the WHOLE list only after a recreation's history replay — every card is new then, so every replaced one can
+            // still be deleted; any other time, the fewest re-posts that put the list's TOP kResortTopTopics in order, never more
+            // and never skipped. The whole-list plan re-posts every topic ranked above the lowest one that sits too high, so one
+            // idle topic lifted near the top made it 554 of 572 (2026-11-11) and the capped drift re-sort skipped for three weeks.
+            const auto plan = full ? PlanTopicResort(current, desired) : PlanTopicResortTop(current, desired, kResortTopTopics);
+            if (full)
+            {
+                // Planned: the recreation owes it no longer. A stop before its last re-post leaves the rest to the top re-sort.
+                std::lock_guard lk{ _mtx };
+                _state.resortWholeList = false;
+                _stateDirty = true;
+            }
             if (plan.empty())
             {
                 if (full)
@@ -7214,19 +7402,10 @@ namespace Agentmaster::Msg
                 }
                 return;
             }
-            if (!full && plan.size() > kResortMaxTopics)
-            {
-                if (!_resortTooLongLogged)
-                {
-                    _resortTooLongLogged = true;
-                    _log(L"[msg] re-sort skipped: putting the list back in MOST RECENT order would re-post " + std::to_wstring(plan.size()) + L" card(s) (more than " +
-                         std::to_wstring(kResortMaxTopics) + L"); /recreate in the Search topic makes it again in order");
-                }
-                return;
-            }
             _resortQueue.assign(plan.begin(), plan.end());
-            _log(L"[msg] re-sort " + std::wstring{ full ? L"after the history replay" : L"(the list drifted)" } + L": " + std::to_wstring(plan.size()) + L" of " +
-                 std::to_wstring(current.size()) + L" card(s) to re-post, the lowest-ranked first and one at a time within the flood budget, so the list reads in MOST RECENT order");
+            _log(L"[msg] re-sort " + (full ? std::wstring{ L"of the whole list after the recreation's history replay" } : L"(the top " + std::to_wstring(kResortTopTopics) + L" drifted)") + L": " +
+                 std::to_wstring(plan.size()) + L" of " + std::to_wstring(current.size()) +
+                 L" card(s) to re-post, the lowest-ranked first and one at a time within the flood budget; the cards they replace are deleted together at the end");
             if (full)
             {
                 _appNote(L"\x2705 <b>History added</b> to " + std::to_wstring(_replayTopics) + L" topic(s) (" + std::to_wstring(_replayPosts) + L" message(s)); " +
@@ -7238,6 +7417,90 @@ namespace Agentmaster::Msg
         {
             // Rule #18. Recovery: no re-sort this time; the next quiet minute plans again.
             LogSwallowedException(L"MessagingService::_resortTick");
+        }
+    }
+
+    void MessagingService::_flushResortDeletes() noexcept
+    {
+        try
+        {
+            const int64_t now = WallMs();
+            std::vector<ReplacedCard> cards;
+            std::unordered_set<int64_t> currentCards;
+            {
+                std::lock_guard lk{ _mtx };
+                if (_resortReplaced.empty())
+                {
+                    return; // the common case: no re-sort replaced a card
+                }
+                // A re-sort re-post still to go out (its card's refresh waits for a post in flight, or for its history) adds its old
+                // card to this batch when it goes, so the batch waits for it — but not past kResortDeleteFlushMaxWaitMs after the
+                // first replaced card: a re-post that never goes (its topic deleted meanwhile) must not hold the others' delete.
+                bool repostOwed = false;
+                for (const auto& kv : _cards)
+                {
+                    if (kv.second.repostWanted)
+                    {
+                        repostOwed = true;
+                        break;
+                    }
+                }
+                if (repostOwed && now - _resortReplacedSinceMs < kResortDeleteFlushMaxWaitMs)
+                {
+                    return;
+                }
+                cards.swap(_resortReplaced);
+                _resortReplacedSinceMs = 0;
+                // Never a topic's CURRENT card (a replaced id cannot be one, but a delete of the card the user sees would be the worst
+                // mistake to make here).
+                for (const auto& kv : _state.topics)
+                {
+                    if (kv.second.cardMessageId > 0)
+                    {
+                        currentCards.insert(kv.second.cardMessageId);
+                    }
+                }
+            }
+            size_t leftOut = 0;
+            const auto batches = PlanCardDeleteBatches(cards, currentCards, now, leftOut);
+            size_t deleted = 0;
+            for (const auto& batch : batches)
+            {
+                deleted += batch.size();
+                OutItem del;
+                del.prio = SendPriority::CardEdit; // the re-posts' own priority: queued after the last of them, so sent after it
+                del.method = L"deleteMessages";
+                del.params = json::Value::MkObj();
+                del.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+                auto ids = json::Value::MkArr();
+                for (const int64_t id : batch)
+                {
+                    ids.Push(json::Value::MkNum(static_cast<double>(id)));
+                }
+                del.params.Set(L"message_ids", std::move(ids));
+                const size_t count = batch.size();
+                del.onDone = [self = weak_from_this(), count](const TgResult& r) {
+                    // Telegram refuses the WHOLE call when one id cannot be deleted (PlanCardDeleteBatches leaves the old ones out, so
+                    // this is a clock far off, or the cards were already gone): the cards stay, their buttons working.
+                    const auto me = self.lock();
+                    if (me && !r.ok)
+                    {
+                        me->_log(L"[msg] re-sort: the batched delete of " + std::to_wstring(count) + L" replaced card(s) was refused (" + r.description + L"); they stay, their buttons working");
+                    }
+                };
+                _enqueue(std::move(del));
+            }
+            if (deleted > 0 || leftOut > 0)
+            {
+                _log(L"[msg] re-sort: " + std::to_wstring(deleted) + L" replaced card(s) go in " + std::to_wstring(batches.size()) + L" deleteMessages call(s)" +
+                     (leftOut > 0 ? L"; " + std::to_wstring(leftOut) + L" older than a bot may delete stay where they are" : std::wstring{}));
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the replaced cards not yet queued stay in the chat, their buttons working (like a card too old to
+            // delete); the next re-sort starts a new batch.
+            LogSwallowedException(L"MessagingService::_flushResortDeletes");
         }
     }
 
@@ -8461,7 +8724,30 @@ namespace Agentmaster::Msg
             // that met a missing card) and, with a tap waiting or in scope, go at an answer's priority.
             const TapScope tapScope{ waiting };
             const SendPriority prio = (tapped || !waiting.empty()) ? SendPriority::Final : SendPriority::CardEdit;
-            const int64_t deleteFirst = topic.cardMessageId > 0 ? topic.cardMessageId : 0;
+            int64_t deleteFirst = topic.cardMessageId > 0 ? topic.cardMessageId : 0;
+            if (deleteFirst > 0 && CardTooOldToDelete(topic.cardPostedMs, now))
+            {
+                // §21.51, the user's rule of 2026-11-11: Telegram lets a bot delete its message only within 48 h, so an older card is
+                // not even tried (a refused call each time before: 508 by then, 486 of them in one re-sort). It stays where it is, its
+                // buttons working — they act on the session's CURRENT state, and ⚙️ Session flips that old card's own keyboard — and
+                // the new card goes to the bottom as always.
+                _log(L"[msg] " + ShortId(sessionId) + L" card moved down; the old one stays (posted " + TgShortSpan(now - topic.cardPostedMs) +
+                     L" ago: Telegram lets a bot delete only within 48 h)");
+                deleteFirst = 0;
+            }
+            else if (deleteFirst > 0 && resort)
+            {
+                // §21.52: a RE-SORT's old card goes with the re-sort's others in ONE deleteMessages (_flushResortDeletes) instead of
+                // a deleteMessage of its own — 24 re-posts cost 25 calls, not 48. Until then it shows above the new one. Under `_mtx`:
+                // a tap's refresh can carry a re-sort's re-post on the poll thread.
+                std::lock_guard lk{ _mtx };
+                if (_resortReplaced.empty())
+                {
+                    _resortReplacedSinceMs = now;
+                }
+                _resortReplaced.push_back(ReplacedCard{ deleteFirst, topic.cardPostedMs });
+                deleteFirst = 0;
+            }
             // _postCard marks the card in flight (-1) at once - every refresh meanwhile waits for its answer, so no second post
             // starts - and its answer records the picture the new card shows and settles a tap's picture it carried.
             _postCard(sessionId, topic.threadId, text, std::move(markup), deleteFirst, pingWanted, hash, prio, std::move(carried));

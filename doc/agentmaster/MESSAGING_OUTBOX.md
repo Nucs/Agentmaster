@@ -339,8 +339,11 @@ points: every durable item delivered at least once, each topic in order, nothing
   older than N hours should be folded into one digest per topic is the owner's call.
 - **O2 — a re-sync of every topic's title**: the probe heals a drifted title only when its topic is in doubt. A
   `/resynctitles` (two calls per topic, ~1 hour for 566 topics at the budget) is possible; not decided.
-- **O3 — "can't be deleted for everyone"**: ~500 refusals line up with topic renames (the bot deleting Telegram's "topic
-  edited" notice); if Telegram no longer lets a bot delete them, the renames leave notices in the topics. Unverified.
+- **O3 — "can't be deleted for everyone"** — answered (2026-11-11, [MESSAGING.md](MESSAGING.md) §21.51): not the rename notices
+  (their own refusal line never fired). The ~500 refusals were the old CARD's delete when a card moved down: Telegram lets a
+  bot delete its message only within 48 h (TDLib's `revoke_pm_time_limit` for a bot; a user's is unlimited), and 486 of them
+  came from one whole-list re-sort (2026-11-04, §21.52). A card that old is no longer deleted at all: it stays, its buttons
+  working.
 - **O4 — disk full**: a refused append fails the queuing call; the in-memory item still goes, the census shows `journal
   write failed`, and the next successful append resumes durability. Never a reason to stop sending.
 

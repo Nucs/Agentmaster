@@ -1761,6 +1761,9 @@ the whole session as messages, not a file plus the last 10 turns.
   Running, nothing posted for 30 s), a list that drifted is fixed the same way when that takes at most 24 re-posts; a
   longer fix is logged once and left to `/recreate` (it happens when an old session is resumed and not used: its
   topic sits on top while its MOST RECENT key is old, and only re-posting every topic above its rank can move it down).
+  **Changed by §21.52 (2026-11-11):** the whole list is re-sorted only after a RECREATION's replay (a persisted flag, not
+  "some replay is pending"); every other re-sort puts only the list's top 24 in order (`PlanTopicResortTop`), never skipped,
+  and the cards a re-sort replaces are deleted together in one `deleteMessages`.
 - **Layout 2.** `kTopicLayoutVersion` is 2, so the first start of this build makes the topics again once (§21.8's
   recreation), this time with their history; the notes in the 🔎 Search topic and `/recreate`'s question say so.
 - **Logs:** `[msg] history replay of <sid8> started|goes on: bytes A to B of its transcript into thread N`,
@@ -2805,7 +2808,7 @@ updated 5 minutes ago
   the same dot within 10 s (`kFrontTapGapMs`) answers the same toast and queues nothing: a double tap must not cost four calls
   of the chat's ~20-a-minute budget.
 - **The re-sort leaves the topic first.** Without a hold, the quiet re-sort (§21.9: once a minute, when nothing was posted for
-  30 s) sees the topic out of MOST RECENT order and re-posts every card that ranks above it — up to 24 (`kResortMaxTopics`) —
+  30 s) sees the topic out of MOST RECENT order and re-posts every card that ranks above it — up to 24 (`kResortTopTopics`, §21.52) —
   undoing the move a minute later. `_frontHeld` (tick thread) records the session's order key (`_orderKeys`' MostRecentSortKeyMs)
   at the tap, and `_resortTick` leaves the topic OUT of the list it orders — neither moved down nor counted as "not quiet" by
   its own re-post — while that key is unchanged. The session's next turn changes the key (a turn boundary); from then on the
@@ -7676,6 +7679,140 @@ threads are held, what died, and the journal.
 4. Delete a working session's topic in Telegram: one hold line, a probe 10 s later, `GONE` after the second; the topic comes
    back with its history and the ♻️ line, the card at its bottom; no card posted into the dead thread.
 5. A cog Save that turns the bot off returns at once (no ~40 s freeze).
+
+### 21.51 An old card stays where it is; a refused topic create waits (2026-11-11; NOT BUILT — the next build must purge: `Messaging.h`'s `MessagingService` gained members)
+
+> The user's ask (2026-11-11, session 542b0776): two rows of the flakiness report — "Topic creation retried every second" (279
+> `BOT_TOPIC_WRONG_HOME` in 7 minutes) and "Rename notices probably stay" (504 "can't be deleted for everyone") — "investigate
+> these deeper and suggest a fix". Three rounds of questions; the answers are in §21.51.2.
+
+#### 21.51.1 What the investigation found
+
+- **The 508 "message can't be deleted for everyone" were not rename notices** (their own refusal line, "the “topic renamed”
+  notices cannot be deleted…", never fired). They were the OLD CARD's delete when a card moved down: 486 in one morning — the
+  whole-list re-sort of 2026-11-04 (§21.52) — and about 10 a day as quiet topics wake up. 533 of 571 cards in production were
+  past 48 h on 2026-11-11.
+- **Telegram limits BOTS, not users** (TDLib, `MessagesManager.cpp`): a bot's delete is refused once the message is 2 days old —
+  in a private chat (`can_revoke_message`: `revoke_pm_time_limit` is 2 × 86400 s for a bot and unlimited for a user, so the
+  USER can delete any message of the chat at any age) and in a supergroup too, admin or not (`can_delete_channel_message`:
+  "bots can't delete messages older than 2 days"), so a group would not help. A bot's EDITS of its own messages have no limit
+  (`can_edit_message`). An edit to "nothing" is refused ("Text must be non-empty"): TDLib strips spaces, U+2800, U+3000, the
+  zero-width characters U+200B–U+200F, U+202E, the no-break space and the BOM first. `deleteForumTopic` removes a topic with
+  every message at any age, but a topic is the session's whole history.
+- **`BOT_TOPIC_WRONG_HOME` was Telegram's outage** ([tdlib/telegram-bot-api#944](https://github.com/tdlib/telegram-bot-api/issues/944):
+  from 2026-11-09 ~15:03 UTC until Telegram's fix on 2026-11-10 ~10:40 UTC; closed "completed"). No bot could create a topic
+  meanwhile. For this chat it lasted 7 minutes (17:38–17:45 local); the three topics made at 17:44–17:45 work. Every refused
+  create could still leave a "topic … was created" notice that no bot can delete (#944: twindebank, branko993, rafalpronko;
+  repo-pager #145's screenshot) — the user may find some in All from Nov 9, 17:38–17:45 (only the user can delete them).
+- **The storm was ours:** a refused create was asked again at every 1.5 s tick, whatever the refusal — 279 calls on Nov 9
+  (`BOT_TOPIC_WRONG_HOME`), 371 on Nov 3 (two hours of 502s from `createForumTopic` alone; every other call worked).
+- **What the bots linked to #944 shipped**, all mitigations: pi-telegram-operator pauses failed creates 5 minutes and makes one
+  at a time; hermes #1206 suppresses creates 15 minutes after `BOT_TOPIC_WRONG_HOME`; repo-pager #145 pauses 1 h doubling to
+  4 h (kept a day, ended by the first topic that takes a message, also started by "a new topic that takes no message", never
+  by a 5xx). repo-pager and hermes also put the message in the main view meanwhile — they would lose it otherwise; here a
+  topic made late replays the history it missed (§21.9), so nothing is lost.
+- **#944's probing notes:** `sendChatAction` with a dead thread id answers ok, and so does an `editForumTopic` that changes
+  nothing; setting the topic's own name answers `TOPIC_ID_INVALID` for a dead topic.
+
+#### 21.51.2 The user's decisions
+
+- **Old cards:** "maybe we just leave the msg as it is and when user sends we generate new one. so naturally after 48h we
+  simply accept that we cant delete and rely on new one. Since editting is working we should still allow the buttons on old
+  messages" — and a tap on an old card does not refresh its text either ("Leave it as it is").
+- **The ~480 old cards already in the topics** (their ids are in the state snapshots): left as they are.
+- **While Telegram refuses topics:** the session waits for its topic; nothing goes into the main view.
+- **The pause:** hermes' 15 minutes.
+
+#### 21.51.3 What changed
+
+- **An old card is not deleted** (`CardTooOldToDelete`: 48 h less a 10-minute margin for the clock and for a delete's wait in
+  the outbox): `_refreshCard` skips the delete — no refused call — logs `[msg] <sid8> card moved down; the old one stays
+  (posted 3d4h ago: Telegram lets a bot delete only within 48 h)` and posts the new card at the bottom as always. The old
+  card's buttons keep working: `c:<verb>:<session id>` acts on the session's CURRENT state, ⚙️ Session flips that card's own
+  keyboard in place (`_showCardPage` treats it as a copy), 🖼️ puts the picture on the current card.
+- **A card's delete is keyed by its message** (`card-del:<sid>:<id>`): keyed by the session alone, a second re-post's delete
+  replaced a first one that still waited in the outbox (a flood hold), and that older card was never deleted.
+- **A refused create waits** (`_noteTopicCreateRefused`): `BOT_TOPIC_WRONG_HOME` (`TgResult::TopicHomeRefused`) PAUSES every
+  create of the chat for 15 minutes (`kTopicCreatePauseMs`, `_pauseTopicCreates`) — the session topics, the 🔎 Search topic
+  and a main-view `/newsession` thread, which then answers when the bot tries again instead of asking; then ONE create tries,
+  and a refusal pauses again. A 429 is the flood logic's, as before. Anything else (a 5xx, no answer, a name Telegram rejects)
+  delays that session alone: 15 s, 30 s, 1, 2, 5, then 10 minutes (`TopicCreateRetryDelayMs`, in memory). A create that works
+  ends the pause and the session's delay (`_noteTopicCreateWorked`).
+- **A topic the bot made that Telegram reports gone within 10 minutes** (`kFreshTopicGoneMs`, `_settleGoneThread`) starts the
+  same pause (repo-pager's "a new topic that takes no message"): made again at once it would leave one more dead topic and
+  notice each time round.
+- **The pause survives a restart:** `topicCreatePauseUntilMs` and `topicCreatePausedSinceMs` in `state.json`, saved at once;
+  a stamp more than one pause ahead reads as one pause from now (`_topicCreatesPaused`), and both keys are volatile for the
+  older-writer repair (PERSISTENCE.md §17).
+- **The cog's status line** says it: "Connected as @bot. Telegram refuses new topics since 17:38 (Bad Request:
+  BOT_TOPIC_WRONG_HOME): sessions that need one wait; the next try at 17:53." — and "Connected as @bot." once creates work.
+- **The 🔎 Search topic's probe** (§21.50.4) sets its own name and icon: an `editForumTopic` changing nothing answers ok for a
+  dead topic (#944). A wizard's thread keeps the empty probe (its name is the user's); the release cap decides for it.
+- **Logs:** `[msg] topic create failed for <sid8>: <Telegram's words> — every create of the chat waits until 17:53` or
+  `— asked again in 15s (1 refused in a row)`, `[msg] topic creates PAUSED until 17:53 (…)`, `[msg] topic creates work again
+  (refused since 17:38, 15m): …`, `[msg] a new thread for /newsession in the main view was not asked for: …`.
+- **Replayed on the logs:** Nov 9 → 1 refused create (17:38; the 17:53 try works) instead of 279; Nov 3 → about 85 instead
+  of 371.
+
+#### 21.51.4 Checks
+
+- m5 (tests_messaging.cpp): `CardTooOldToDelete`'s edges, `PlanCardDeleteBatches`, `TopicCreateRetryDelayMs`,
+  `TopicHomeRefused`, the state's new keys (round trip, an older file, a negative stamp). Isolated run on HEAD f03433c9d + this
+  change: 12,722 checks, the 3 known TestTaskbarBadge failures only; a planted failure among the new checks was reported.
+- `cl /Zs` with the app's own flags (the release worktree's recorded lines and PCH, a shadow of HEAD + this change): the 12
+  units that include `Messaging.h`, `MessagingModels.h` or `TelegramApi.h` pass; two negative controls fail as they must.
+
+**Check after the build** (the dev bot; `hooks.log`, `messaging.log`):
+1. A topic quiet for 2+ days gets a turn: `card moved down; the old one stays` and no new "can't be deleted for everyone" in
+   `messaging.log`; ⚙️ Session on the old card flips its own keyboard; Restart on it acts on the session.
+2. `state.json` holds `topicCreatePauseUntilMs: 0` and `resortWholeList: false` after the first save.
+
+### 21.52 The re-sort puts the top 24 in order with the fewest calls (2026-11-11; NOT BUILT — the same build as §21.51)
+
+> The user's pick (2026-11-11): "4 · Top 24 always — BUT IT MUST USE LEAST API OPERATIONS POSSIBLE", then "This design" (the
+> fewest re-posts for the top 24, no delete Telegram would refuse, the re-sort's deletes in one call).
+
+#### 21.52.1 What the investigation found
+
+- `PlanTopicResort` can only move a topic UP (a re-post; Telegram has no call that moves one down), so ONE idle topic lifted
+  near the top makes the fix "re-post every topic ranked above it". On 2026-11-11 seven idle topics (ranks 63–121) sat at
+  positions 18–24 since the Nov 10 07:06 swap, and the plan was 554 of 572.
+- The drift re-sort (capped at 24) re-posted no card in 20 runs since Oct 17: 9 times it found 433–554 needed and skipped.
+  Only the uncapped post-replay re-sorts ran — 501 on Nov 4, after a replay that posted NOTHING (the start guessed "a
+  recreation" from "some topic's replay is pending"), and 489 on Nov 6 — and the order broke again within hours.
+- The top was mostly right: the top 10 all correct, 17 of the top 24. Deletes are 1–9% of all calls on a normal day.
+
+#### 21.52.2 What changed
+
+- **The top 24 only** (`PlanTopicResortTop`, `kResortTopTopics`): every re-sort except a recreation's re-posts the shortest
+  run of the MOST RECENT order that puts the list's first 24 right — never more than 24, never skipped. Today's lift: 24.
+- **The whole list only after a recreation:** `MessagingState::resortWholeList`, persisted, set by `_recreateTopics` (and a
+  resumed recreation), cleared when that re-sort is planned. The start reads it instead of guessing.
+- **One delete for the whole re-sort** (`_flushResortDeletes`, `PlanCardDeleteBatches`): the cards a re-sort replaces wait in
+  `_resortReplaced` (under `_mtx`: a tap's refresh can carry a re-sort's re-post) and go in one `deleteMessages` per up to 100,
+  once the re-sort's last re-post went out (or 5 minutes after the first replaced card). A card past 48 h stays out of it — one
+  id Telegram refuses fails the whole call — and stays where it is (§21.51). A re-post is one call now, so the re-sort releases
+  one per tick while the call window has room for one. Today's lift: 24 posts + 1 delete = 25 calls instead of 48. Until the
+  batch goes (about two minutes), a re-posted topic shows its old card above the new one.
+- **Logs:** `[msg] re-sort (the top 24 drifted): N of M card(s) to re-post …`, `[msg] re-sort of the whole list after the
+  recreation's history replay: …`, `[msg] re-sort: N replaced card(s) go in K deleteMessages call(s)[; L older than a bot may
+  delete stay where they are]`. The old `[msg] re-sort skipped: …` line is gone.
+
+#### 21.52.3 Open
+
+- **What lifts idle topics at a restart** is not found: each of the seven topics' `lastPostedMs` fell to the second on its
+  session's restored "Waiting for you" (the `[Unknown] … state=2` lines after the swap), but no log line names the post.
+  Finding and stopping it would make a restart need no re-sort at all.
+
+#### 21.52.4 Checks
+
+- m5: `PlanTopicResortTop` — in order, a lifted block inside the top and below it, one topic lifted to the very top against
+  the whole-list plan, a swap at the top, a k past the list's size (= `PlanTopicResort`), a missing and an unknown topic, k = 0,
+  and production's shape (24 / 0 / 33 of 40). The run and the `/Zs` checks are §21.51.4's.
+
+**Check after the build:** after a swap that lifts idle topics into the top 24, one `[msg] re-sort (the top 24 drifted)`
+line with at most 24 re-posts, then `[msg] re-sort: … go in 1 deleteMessages call(s)`; no `can't be deleted for everyone` in
+`messaging.log`.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

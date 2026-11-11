@@ -23,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "Json.h"
@@ -1639,6 +1640,192 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
+    /// Agentmaster: the topics to RE-POST so that the FIRST `k` topics of Telegram's list read as the first `k` of the desired
+    /// MOST RECENT order, with the fewest re-posts (MESSAGING.md §21.52) — the plan of every re-sort except the one after a
+    /// recreation (which made the whole list from nothing: PlanTopicResort). A re-post moves its topic to the TOP and Telegram has
+    /// no call that moves one down, so the whole-list plan re-posts every topic ranked above the lowest-ranked one that sits too
+    /// high: ONE idle topic lifted near the top made it 554 of 572 on 2026-11-11, and the drift re-sort, capped at 24, skipped
+    /// in every run for three weeks. This plan re-posts desired[0..b) (lowest-ranked first, so they land on top in order) for the
+    /// smallest `b` after which the topics NOT re-posted, in their current order, read desired[b..k) at the top — never more than
+    /// `k`, whatever the rest of the list looks like. With `k` at least the list's size it is PlanTopicResort's plan.
+    /// </summary>
+    /// <param name="currentTopFirst">The list as it stands, top first (by each topic's last message).</param>
+    /// <param name="desiredTopFirst">The desired order, top first (TopicRanksAbove). Ids missing from `currentTopFirst` are
+    /// ignored; an id of `currentTopFirst` missing from it counts as a topic in the wrong place.</param>
+    /// <param name="k">How many topics at the top must be right (the service's kResortTopTopics); 0 = none.</param>
+    /// <returns>The ids to re-post, in the order to post them (lowest-ranked first); empty when the top `k` are in order.</returns>
+    /// <exception cref="std::bad_alloc">If the result or the lookup tables cannot be allocated.</exception>
+    inline std::vector<std::wstring> PlanTopicResortTop(const std::vector<std::wstring>& currentTopFirst, const std::vector<std::wstring>& desiredTopFirst, size_t k)
+    {
+        const std::unordered_set<std::wstring> present(currentTopFirst.begin(), currentTopFirst.end());
+        std::vector<std::wstring> desired;
+        for (const auto& id : desiredTopFirst)
+        {
+            if (present.count(id))
+            {
+                desired.push_back(id);
+            }
+        }
+        k = (std::min)(k, desired.size()); // (std::min): the <windows.h> macro (the m5 harness has no NOMINMAX)
+        std::unordered_map<std::wstring, size_t> rank;
+        for (size_t r = 0; r < desired.size(); ++r)
+        {
+            rank.emplace(desired[r], r);
+        }
+        size_t b = 0;
+        for (; b < k; ++b)
+        {
+            // Would re-posting desired[0..b) be enough? The topics not re-posted keep their current order below the re-posted
+            // ones, so their first k - b must be exactly desired[b..k). O(k × n) at most: 24 × ~600 comparisons.
+            size_t want = b;
+            bool fits = true;
+            for (const auto& id : currentTopFirst)
+            {
+                if (want == k)
+                {
+                    break;
+                }
+                const auto it = rank.find(id);
+                if (it != rank.end() && it->second < b)
+                {
+                    continue; // re-posted: it goes to the top, out of this walk
+                }
+                if (it == rank.end() || it->second != want)
+                {
+                    fits = false; // a topic that does not belong at this place of the top
+                    break;
+                }
+                ++want;
+            }
+            if (fits)
+            {
+                break;
+            }
+        }
+        std::vector<std::wstring> repost;
+        for (size_t i = b; i > 0; --i)
+        {
+            repost.push_back(desired[i - 1]); // lowest-ranked first: the top one is posted last and lands on top
+        }
+        return repost;
+    }
+
+    /// <summary>
+    /// Agentmaster: how long Telegram lets a BOT delete its own message (MESSAGING.md §21.51): 2 days. TDLib refuses a bot's
+    /// delete past it with "Message can't be deleted for everyone" — in a private chat (can_revoke_message: a bot's
+    /// revoke_pm_time_limit is 2 × 86400 s, a user's is unlimited) and in a supergroup too, admin or not
+    /// (can_delete_channel_message: "bots can't delete messages older than 2 days"). A bot's EDITS of its own messages have no
+    /// limit (can_edit_message: no edit time limit for a bot's outgoing message), so an old card's buttons keep working.
+    /// </summary>
+    inline constexpr int64_t kBotDeleteLimitMs = 2LL * 86400 * 1000;
+
+    /// <summary>
+    /// How much earlier than kBotDeleteLimitMs a card already counts as too old to delete: the PC's clock against Telegram's, and
+    /// the minutes a delete can wait in the outbox behind the live traffic or a flood hold. A card in that last stretch is left
+    /// like an older one — the cost of the margin is at most one card that could still have been deleted.
+    /// </summary>
+    inline constexpr int64_t kBotDeleteMarginMs = 10LL * 60 * 1000;
+
+    /// <summary>
+    /// Agentmaster: whether a card posted at `postedMs` is past what Telegram lets a bot delete (MESSAGING.md §21.51, the user's
+    /// rule of 2026-11-11). The bot then does not even try — every such delete was one refused call (508 by 2026-11-11, 486 of
+    /// them in one re-sort) — and the old card stays where it is with its buttons working: they act on the session's CURRENT state
+    /// (CardCallbackData), and ⚙️ Session flips that old card's own keyboard in place.
+    /// </summary>
+    /// <param name="postedMs">When the card was posted (TopicRecord::cardPostedMs, wall ms); 0 or less = unknown.</param>
+    /// <param name="nowMs">The wall clock, ms.</param>
+    /// <returns>True when Telegram would refuse its delete; false while it can still be deleted, or when its age is unknown (a
+    /// single delete is tried then, as before §21.51).</returns>
+    inline bool CardTooOldToDelete(int64_t postedMs, int64_t nowMs) noexcept
+    {
+        return postedMs > 0 && nowMs - postedMs >= kBotDeleteLimitMs - kBotDeleteMarginMs;
+    }
+
+    /// <summary>The most message ids one deleteMessages call takes (Bot API: "1-100").</summary>
+    inline constexpr size_t kDeleteMessagesMaxIds = 100;
+
+    /// <summary>One old card a re-sort replaced, waiting for the re-sort's batched delete (MESSAGING.md §21.52).</summary>
+    struct ReplacedCard
+    {
+        /// <summary>The old card's message id.</summary>
+        int64_t messageId{ 0 };
+        /// <summary>When it was posted (wall ms; 0 = unknown).</summary>
+        int64_t postedMs{ 0 };
+    };
+
+    /// <summary>
+    /// Agentmaster: splits a re-sort's replaced cards into deleteMessages calls (MESSAGING.md §21.52) — ONE call per up to
+    /// kDeleteMessagesMaxIds cards instead of one deleteMessage each (24 deletes cost 1 call, the whole list's ~570 cost 6). Left
+    /// out: a card past the bot's delete limit, AND a card whose age is unknown — Telegram refuses the WHOLE call when one id in it
+    /// cannot be deleted (TDLib delete_messages stops at the first "Message can't be deleted for everyone"), and an old card stays
+    /// anyway (§21.51); also any id that is some topic's CURRENT card (never deleted here) or that appears twice.
+    /// </summary>
+    /// <param name="cards">The replaced cards, in the order they were replaced.</param>
+    /// <param name="currentCards">Every topic's current card id.</param>
+    /// <param name="nowMs">The wall clock, ms.</param>
+    /// <param name="leftOut">Out: how many cards were left out because they are (or may be) past the delete limit.</param>
+    /// <returns>The batches in order, each 1..kDeleteMessagesMaxIds ids; empty when nothing is to be deleted.</returns>
+    /// <exception cref="std::bad_alloc">If the batches cannot be allocated.</exception>
+    inline std::vector<std::vector<int64_t>> PlanCardDeleteBatches(const std::vector<ReplacedCard>& cards, const std::unordered_set<int64_t>& currentCards, int64_t nowMs, size_t& leftOut)
+    {
+        leftOut = 0;
+        std::vector<std::vector<int64_t>> batches;
+        std::unordered_set<int64_t> seen;
+        for (const auto& c : cards)
+        {
+            if (c.messageId <= 0 || currentCards.count(c.messageId) || !seen.insert(c.messageId).second)
+            {
+                continue;
+            }
+            if (c.postedMs <= 0 || CardTooOldToDelete(c.postedMs, nowMs))
+            {
+                ++leftOut; // one id Telegram refuses would fail every other id of its call
+                continue;
+            }
+            if (batches.empty() || batches.back().size() >= kDeleteMessagesMaxIds)
+            {
+                batches.emplace_back();
+            }
+            batches.back().push_back(c.messageId);
+        }
+        return batches;
+    }
+
+    /// <summary>
+    /// Agentmaster: how long EVERY createForumTopic of the chat waits after a BOT_TOPIC_WRONG_HOME (MESSAGING.md §21.51, the
+    /// user's pick of 2026-11-11: hermes-agent's cooldown, 0xble/hermes-agent #1206). Then one create tries again; a refusal
+    /// waits again. Each refused create may leave a "topic … was created" notice in the chat that no bot can delete
+    /// (tdlib/telegram-bot-api#944), so the pause is what keeps an outage from filling the chat with them.
+    /// </summary>
+    inline constexpr int64_t kTopicCreatePauseMs = 15LL * 60 * 1000;
+
+    /// <summary>
+    /// A topic Telegram reports GONE this soon after the bot made it starts the same pause (repo-pager #145's "a new topic that
+    /// takes no message"): made again at once, it would leave one more dead topic and "was created" notice each time round.
+    /// </summary>
+    inline constexpr int64_t kFreshTopicGoneMs = 10LL * 60 * 1000;
+
+    /// <summary>
+    /// Agentmaster: how long ONE session waits before it asks for its topic again after a refused create that is not a chat-wide
+    /// refusal (MESSAGING.md §21.51: a 5xx, no answer, a name Telegram rejects): 15 s, 30 s, 1, 2, 5, then 10 minutes. Before,
+    /// the sync asked again at every 1.5 s tick — 371 refused creates in 2 h on 2026-11-03 (502s from createForumTopic alone),
+    /// 279 in 7 minutes on 2026-11-09 (BOT_TOPIC_WRONG_HOME). Such a refusal pauses nothing else (repo-pager #145: "a passing
+    /// error, such as a 5xx, costs this one message and no pause"); a 429 is the flood logic's, not this.
+    /// </summary>
+    /// <param name="failures">The refused creates in a row for this session (1 = the first one).</param>
+    /// <returns>The wait in ms; 0 for no failure.</returns>
+    inline int64_t TopicCreateRetryDelayMs(int failures) noexcept
+    {
+        static constexpr int64_t kSteps[] = { 15 * 1000, 30 * 1000, 60 * 1000, 2 * 60 * 1000, 5 * 60 * 1000, 10 * 60 * 1000 };
+        if (failures <= 0)
+        {
+            return 0;
+        }
+        const size_t step = (std::min)(static_cast<size_t>(failures - 1), std::size(kSteps) - 1);
+        return kSteps[step];
+    }
+
+    /// <summary>
     /// One window of a HISTORY replay's reader (§21.9, SplitHistoryWindow): the items of the turns it holds and where the
     /// next window starts.
     /// </summary>
@@ -2178,6 +2365,23 @@ namespace Agentmaster::Msg
         // stop midway leaves no orphan behind: the next start finishes the deletes. While it is not empty, no new topic
         // is made — the new list is built after the old one is gone.
         std::vector<int64_t> orphanThreads;
+        /// <summary>
+        /// Agentmaster §21.51: the chat-wide PAUSE of topic creation, set when Telegram refused a create with
+        /// BOT_TOPIC_WRONG_HOME (or a topic the bot made was gone within kFreshTopicGoneMs). Before `topicCreatePauseUntilMs` no
+        /// session topic, no Search topic and no /newsession thread is asked for; then one create tries again, and a refusal
+        /// pauses again. `topicCreatePausedSinceMs` is when the outage was first seen (the log and the status line say since
+        /// when; kept across the pauses of one outage). Both 0 = no pause. Persisted, so a restart does not ask again at once;
+        /// volatile for the older-writer repair (MessagingService::_loadState's kVolatile): cleared once creates work again.
+        /// </summary>
+        int64_t topicCreatePauseUntilMs{ 0 };
+        int64_t topicCreatePausedSinceMs{ 0 };
+        /// <summary>
+        /// Agentmaster §21.52: a RECREATION's new list owes its WHOLE-LIST re-sort (set with the recreation, cleared when that
+        /// re-sort is planned). Every other re-sort orders only the list's top kResortTopTopics. Persisted, so the start knows it:
+        /// it used to GUESS it from "some topic still has history to replay", which made the restart loop of 2026-11-04 re-post
+        /// 501 cards (486 of them too old to delete) after a replay that posted nothing. Volatile for the older-writer repair.
+        /// </summary>
+        bool resortWholeList{ false };
         std::map<std::wstring, TopicRecord> topics; // session id -> its topic
         /// <summary>
         /// The DIRECTORY (§21.16): the one pinned message in the chat's main view that lists the dedicated topics and the
@@ -2242,6 +2446,10 @@ namespace Agentmaster::Msg
         o.Set(L"directoryHash", json::Value::MkNum(static_cast<double>(s.directoryHash)));
         o.Set(L"directoryRich", json::Value::MkBool(s.directoryRich));
         o.Set(L"directoryPinned", json::Value::MkBool(s.directoryPinned));
+        // §21.51: the chat-wide pause of topic creation (0 = none); §21.52: a recreation's whole-list re-sort still owed.
+        o.Set(L"topicCreatePauseUntilMs", json::Value::MkNum(static_cast<double>(s.topicCreatePauseUntilMs)));
+        o.Set(L"topicCreatePausedSinceMs", json::Value::MkNum(static_cast<double>(s.topicCreatePausedSinceMs)));
+        o.Set(L"resortWholeList", json::Value::MkBool(s.resortWholeList));
         auto orphans = json::Value::MkArr();
         for (const int64_t thread : s.orphanThreads)
         {
@@ -2363,6 +2571,11 @@ namespace Agentmaster::Msg
         s.directoryHash = static_cast<uint32_t>(v.I64At(L"directoryHash", 0));
         s.directoryRich = v.BoolAt(L"directoryRich", false);
         s.directoryPinned = v.BoolAt(L"directoryPinned", false);
+        // §21.51 / §21.52 (absent in an older file: no pause of topic creation, no whole-list re-sort owed). A negative stamp
+        // reads as none: it could only come from a damaged file, and a pause that never ends must not come from one.
+        s.topicCreatePauseUntilMs = (std::max)(int64_t{ 0 }, v.I64At(L"topicCreatePauseUntilMs", 0));
+        s.topicCreatePausedSinceMs = (std::max)(int64_t{ 0 }, v.I64At(L"topicCreatePausedSinceMs", 0));
+        s.resortWholeList = v.BoolAt(L"resortWholeList", false);
         if (const auto* orphans = v.Find(L"orphanThreads"); orphans && orphans->type == json::Value::Type::Arr)
         {
             for (const auto& o : orphans->arr)

@@ -6710,6 +6710,30 @@ namespace Agentmaster::Msg
         const int64_t msgId = msg.I64At(L"message_id", 0);
         const std::wstring name = holdMessage ? NewThreadNameForMessage(msg.StrAt(L"text")) : std::wstring{ kNewSessionThreadName };
         const std::wstring where = fromThread == 0 ? std::wstring{ L"the main view" } : std::wstring{ L"the Search topic" };
+        {
+            // §21.51: while Telegram refuses topics for this chat (BOT_TOPIC_WRONG_HOME), no create is asked for — it would be one
+            // more refusal and one more "topic … was created" notice that no bot can delete. The user hears when it may work again.
+            const int64_t now = WallMs();
+            int64_t until = 0;
+            if (_topicCreatesPaused(now, &until))
+            {
+                int64_t since = 0;
+                {
+                    std::lock_guard lk{ _mtx };
+                    since = _state.topicCreatePausedSinceMs;
+                }
+                _log(L"[msg] a new thread for " + std::wstring{ holdMessage ? L"words written in " : L"/newsession in " } + where + L" was not asked for: topic creates are paused until " +
+                     TgClockText(until, now));
+                LogNav(L"remote telegram new-thread open (" + where + L") -> paused");
+                _reply(fromThread,
+                       L"Telegram refuses new topics for this chat right now" + (since > 0 ? L" (since " + TgClockText(since, now) + L")" : std::wstring{}) +
+                           L", so no thread can be opened. The bot tries again at " + TgClockText(until, now) + L"; send /newsession again after that.",
+                       false,
+                       json::Value{},
+                       msgId);
+                return;
+            }
+        }
         OutItem item;
         item.prio = SendPriority::Final; // the answer to the user's command (or words): their thread comes first
         item.method = L"createForumTopic";
@@ -6729,11 +6753,16 @@ namespace Agentmaster::Msg
             if (thread <= 0)
             {
                 const std::wstring why = r.description.empty() ? std::wstring{ L"no answer from Telegram" } : r.description;
+                if (r.TopicHomeRefused())
+                {
+                    me->_pauseTopicCreates(why); // §21.51: Telegram refuses topics for the whole chat — every create waits
+                }
                 me->_log(L"[msg] a new thread for " + std::wstring{ holdMessage ? L"words written in " : L"/newsession in " } + where + L" was refused (" + why + L")");
                 LogNav(L"remote telegram new-thread open (" + where + L") -> refused");
                 me->_reply(fromThread, L"A new thread for the session could not be opened (" + TgEscapeHtml(why) + L"). Try again, or open a thread yourself.", false, json::Value{}, msgId);
                 return;
             }
+            me->_noteTopicCreateWorked(L""); // §21.51: a pause of the chat ends with any create that works
             {
                 std::lock_guard lk{ me->_mtx };
                 auto& nt = me->_newThreads[thread];

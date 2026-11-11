@@ -1473,6 +1473,108 @@ void TestMessaging()
             CHECK(PlanTopicResort({ L"a" }, { L"a" }).empty(), "one topic: nothing to sort");
         }
 
+        // §21.52: the re-sort of the TOP k only — the fewest re-posts that put the list's first k in MOST RECENT order, never more
+        // than k, whatever lies below (the whole-list plan re-posts everything above one idle topic lifted near the top).
+        {
+            using V = std::vector<std::wstring>;
+            const V desired{ L"a", L"b", L"c", L"d", L"x", L"y" };
+            CHECK(PlanTopicResortTop(desired, desired, 4).empty(), "top k: in order, nothing to re-post");
+            // Two idle topics lifted INTO the top: everything that belongs there is re-posted, the lifted ones sink below it.
+            CHECK((PlanTopicResortTop({ L"a", L"b", L"x", L"y", L"c", L"d" }, desired, 4) == V{ L"d", L"c", L"b", L"a" }),
+                  "top k: a lifted block inside the top re-posts the whole top, lowest-ranked first");
+            CHECK(PlanTopicResortTop({ L"a", L"b", L"x", L"y", L"c", L"d" }, desired, 2).empty(), "top k: a lifted block below the top costs nothing");
+            CHECK((PlanTopicResort({ L"a", L"b", L"x", L"y", L"c", L"d" }, desired) == V{ L"d", L"c", L"b", L"a" }) &&
+                      (PlanTopicResort({ L"x", L"a", L"b", L"c", L"d", L"y" }, desired).size() == 4) && (PlanTopicResortTop({ L"x", L"a", L"b", L"c", L"d", L"y" }, desired, 2) == V{ L"b", L"a" }),
+                  "top k: one topic lifted to the very top costs the whole-list plan everything above its rank (4), the top-2 plan 2");
+            CHECK((PlanTopicResortTop({ L"b", L"a", L"c" }, { L"a", L"b", L"c" }, 2) == V{ L"a" }), "top k: a swap at the top costs one re-post");
+            CHECK((PlanTopicResortTop({ L"d", L"c", L"b", L"a" }, { L"a", L"b", L"c", L"d" }, 24) == PlanTopicResort({ L"d", L"c", L"b", L"a" }, { L"a", L"b", L"c", L"d" })),
+                  "top k: a k past the list's size is the whole-list plan");
+            CHECK((PlanTopicResortTop({ L"b", L"a" }, { L"a", L"z", L"b" }, 24) == V{ L"a" }), "top k: a desired topic missing from the list is ignored");
+            CHECK((PlanTopicResortTop({ L"q", L"a", L"b" }, { L"a", L"b" }, 2) == V{ L"b", L"a" }), "top k: a listed topic the order does not know counts as misplaced");
+            CHECK(PlanTopicResortTop({ L"b", L"a" }, { L"a", L"b" }, 0).empty() && PlanTopicResortTop({}, {}, 24).empty(), "top k: k = 0 and an empty list plan nothing");
+            // The shape of 2026-11-11 in production: 17 in order, 7 idle topics lifted to 18..24, the rest of the top below them.
+            V current;
+            V want;
+            for (int i = 0; i < 40; ++i)
+            {
+                want.push_back(L"t" + std::to_wstring(i));
+            }
+            for (int i = 0; i < 17; ++i)
+            {
+                current.push_back(want[i]);
+            }
+            for (int i = 0; i < 7; ++i)
+            {
+                current.push_back(want[33 + i]); // lifted: ranked 34..40, sitting at 18..24
+            }
+            for (int i = 17; i < 33; ++i)
+            {
+                current.push_back(want[i]);
+            }
+            CHECK(PlanTopicResortTop(current, want, 24).size() == 24 && PlanTopicResortTop(current, want, 17).empty() && PlanTopicResort(current, want).size() == 33,
+                  "top k: production's lift costs 24 re-posts for the top 24, none for the top 17, 33 of 40 for the whole list");
+        }
+
+        // §21.51: a card past the 48 h a bot may delete in is not even tried; §21.52: a re-sort's replaced cards in few calls.
+        {
+            const int64_t now = 10LL * 86400 * 1000;
+            CHECK(!CardTooOldToDelete(now - 47LL * 3600 * 1000, now) && CardTooOldToDelete(now - 48LL * 3600 * 1000, now) &&
+                      CardTooOldToDelete(now - kBotDeleteLimitMs + kBotDeleteMarginMs, now) && !CardTooOldToDelete(now - kBotDeleteLimitMs + kBotDeleteMarginMs + 1, now),
+                  "delete limit: 47 h deletable, 48 h not, the margin's edge is too old");
+            CHECK(!CardTooOldToDelete(0, now) && !CardTooOldToDelete(-5, now) && !CardTooOldToDelete(now, now), "delete limit: an unknown age is tried, a new card deletable");
+            const int64_t young = now - 3600 * 1000;
+            const int64_t old = now - 3LL * 86400 * 1000;
+            size_t leftOut = 99;
+            auto batches = PlanCardDeleteBatches({ { 11, young }, { 12, old }, { 13, young }, { 13, young }, { 14, 0 }, { 15, young }, { 0, young } }, { 15 }, now, leftOut);
+            CHECK(batches.size() == 1 && (batches[0] == std::vector<int64_t>{ 11, 13 }) && leftOut == 2,
+                  "batched delete: young cards in one call; an old or unknown-age one left out (it would fail the whole call); a current card, a repeat and a 0 skipped");
+            std::vector<ReplacedCard> many;
+            for (int64_t id = 1; id <= 230; ++id)
+            {
+                many.push_back({ id, young });
+            }
+            batches = PlanCardDeleteBatches(many, {}, now, leftOut);
+            CHECK(batches.size() == 3 && batches[0].size() == kDeleteMessagesMaxIds && batches[1].size() == kDeleteMessagesMaxIds && batches[2].size() == 30 && leftOut == 0 &&
+                      batches[2].back() == 230,
+                  "batched delete: at most 100 ids a call, in order");
+            CHECK(PlanCardDeleteBatches({}, {}, now, leftOut).empty() && leftOut == 0, "batched delete: nothing replaced, no call");
+        }
+
+        // §21.51: refused topic creates — the chat-wide refusal is recognized, a session's own refusals back off 15 s .. 10 min.
+        {
+            TgResult home;
+            home.httpStatus = 400;
+            home.description = L"Bad Request: BOT_TOPIC_WRONG_HOME";
+            TgResult gateway;
+            gateway.httpStatus = 502;
+            gateway.description = L"Bad Gateway";
+            TgResult fine;
+            fine.ok = true;
+            CHECK(home.TopicHomeRefused() && !gateway.TopicHomeRefused() && !fine.TopicHomeRefused() && !home.ThreadNotFound(), "BOT_TOPIC_WRONG_HOME: a chat-wide refusal, not a missing thread");
+            CHECK(TopicCreateRetryDelayMs(0) == 0 && TopicCreateRetryDelayMs(1) == 15000 && TopicCreateRetryDelayMs(2) == 30000 && TopicCreateRetryDelayMs(3) == 60000 &&
+                      TopicCreateRetryDelayMs(4) == 120000 && TopicCreateRetryDelayMs(5) == 300000 && TopicCreateRetryDelayMs(6) == 600000 && TopicCreateRetryDelayMs(50) == 600000 &&
+                      TopicCreateRetryDelayMs(-3) == 0,
+                  "create back-off: 15 s, 30 s, 1, 2, 5, then 10 min");
+            CHECK(kTopicCreatePauseMs == 15LL * 60 * 1000 && kFreshTopicGoneMs == 10LL * 60 * 1000, "create pause: hermes' 15 minutes; a topic gone within 10 minutes counts");
+        }
+
+        // §21.51 / §21.52: the pause and the owed whole-list re-sort round-trip; an older file reads neither; a damaged stamp none.
+        {
+            MessagingState s;
+            s.topicCreatePauseUntilMs = 1762790000000;
+            s.topicCreatePausedSinceMs = 1762789100000;
+            s.resortWholeList = true;
+            const auto back = StateFromJson(StateToJson(s));
+            CHECK(back.has_value() && back->topicCreatePauseUntilMs == 1762790000000 && back->topicCreatePausedSinceMs == 1762789100000 && back->resortWholeList,
+                  "state: the create pause and the owed whole-list re-sort round-trip");
+            const auto legacy = StateFromJson(json::Value::MkObj());
+            CHECK(legacy.has_value() && legacy->topicCreatePauseUntilMs == 0 && legacy->topicCreatePausedSinceMs == 0 && !legacy->resortWholeList, "state: an older file reads no pause and no re-sort owed");
+            auto damaged = json::Value::MkObj();
+            damaged.Set(L"topicCreatePauseUntilMs", json::Value::MkNum(-5));
+            const auto dm = StateFromJson(damaged);
+            CHECK(dm.has_value() && dm->topicCreatePauseUntilMs == 0, "state: a negative pause stamp reads as none");
+        }
+
         // The record: the replay's range round-trips; a file without the keys owes no replay; the card says it.
         {
             MessagingState st;

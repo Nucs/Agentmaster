@@ -59,6 +59,18 @@ namespace Agentmaster::Msg
         {
             return !ok && httpStatus == 400 && (description.find(L"thread not found") != std::wstring::npos || description.find(L"TOPIC_ID_INVALID") != std::wstring::npos);
         }
+        /// <summary>
+        /// Agentmaster: Telegram's "BOT_TOPIC_WRONG_HOME" — a createForumTopic refused for the WHOLE private chat, not for this
+        /// topic (MESSAGING.md §21.51). It is what Telegram's server answered every bot from 2026-11-09 ~15:00 UTC until its fix
+        /// on 2026-11-10 ~10:40 UTC (tdlib/telegram-bot-api#944); no request of the bot's could change it, and each refused
+        /// create could still leave a "topic … was created" notice in the chat that no bot can delete. So the caller pauses
+        /// every create of the chat (MessagingService::_pauseTopicCreates) instead of trying again at once.
+        /// </summary>
+        /// <returns>True for that refusal only; false for every other answer, a success included.</returns>
+        bool TopicHomeRefused() const noexcept
+        {
+            return !ok && description.find(L"BOT_TOPIC_WRONG_HOME") != std::wstring::npos;
+        }
     };
 
     class TelegramApi

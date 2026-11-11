@@ -1314,7 +1314,48 @@ namespace Agentmaster::Msg
         /// <param name="colorHex">Its tab color (ResolveSessionColorHex; "" = none: no icon color, no square).</param>
         /// <param name="state">Its state (the icon, or the name's glyph in the glyph form).</param>
         /// <param name="verbose">The topic's own verbose mode.</param>
+        /// <remarks>
+        /// §21.51: a refused create is never asked again on the next tick. BOT_TOPIC_WRONG_HOME pauses EVERY create of the chat
+        /// (_pauseTopicCreates); any other refusal but a 429 delays only this session (_noteTopicCreateRefused,
+        /// TopicCreateRetryDelayMs); a success ends a pause and the session's delay (_noteTopicCreateWorked). The caller (the
+        /// sync) skips a session whose delay or the chat's pause has not run out.
+        /// </remarks>
         void _createTopic(const std::wstring& sessionId, const std::wstring& title, const std::wstring& colorHex, SessionState state, int verbose = -1);
+        /// <summary>
+        /// Agentmaster §21.51: whether topic creation is PAUSED for the whole chat at `nowMs` (the state's
+        /// topicCreatePauseUntilMs). A stamp more than one pause ahead of the clock (a damaged file, a clock set back) is pulled in
+        /// to one pause from now, so no file can pause creation for good. Any thread; takes `_mtx`.
+        /// </summary>
+        /// <param name="nowMs">The wall clock, ms.</param>
+        /// <param name="untilMs">Out (optional): when the pause ends (0 when not paused).</param>
+        /// <returns>True while every createForumTopic of the chat must wait.</returns>
+        bool _topicCreatesPaused(int64_t nowMs, int64_t* untilMs = nullptr);
+        /// <summary>
+        /// Agentmaster §21.51: PAUSES every createForumTopic of the chat for kTopicCreatePauseMs — the session topics, the Search
+        /// topic and a main-view /newsession thread — after Telegram refused one with BOT_TOPIC_WRONG_HOME (`why`), or after a
+        /// topic the bot made was gone within kFreshTopicGoneMs. Persisted at once (a restart keeps the pause); the first pause
+        /// of an outage is logged and shown in the cog's status line, a later one (the probe refused again) logged once more.
+        /// Any thread; takes `_mtx`, then saves the state file outside it.
+        /// </summary>
+        /// <param name="why">Telegram's words or the reason, for the log and the status line.</param>
+        void _pauseTopicCreates(const std::wstring& why);
+        /// <summary>
+        /// Agentmaster §21.51: a create went through — the chat's pause ends (logged with how long it lasted, the status line
+        /// back to "Connected") and the session's own delay is forgotten. Any thread; takes `_mtx`.
+        /// </summary>
+        /// <param name="sessionId">The session whose topic was made ("" for the Search topic or a /newsession thread).</param>
+        void _noteTopicCreateWorked(const std::wstring& sessionId);
+        /// <summary>
+        /// Agentmaster §21.51: books a REFUSED create of a session's topic: BOT_TOPIC_WRONG_HOME pauses the whole chat
+        /// (_pauseTopicCreates); a 429 is the flood logic's (_handleTickFlood) and books nothing here; anything else delays only
+        /// this session by TopicCreateRetryDelayMs of its refusals in a row (a 5xx, no answer, a name Telegram rejects). Tick
+        /// thread (the session delays are the tick thread's).
+        /// </summary>
+        /// <param name="sessionId">The session whose topic was refused.</param>
+        /// <param name="r">Telegram's answer.</param>
+        /// <returns>What happens next, for the caller's one log line ("every create waits until 17:53", "asked again in 15 s",
+        /// or "" for a 429).</returns>
+        std::wstring _noteTopicCreateRefused(const std::wstring& sessionId, const TgResult& r);
         /// <summary>
         /// Deletes a session's topic with deleteForumTopic and forgets it: the record, the mirror, the card state, the outbox items
         /// queued for it and its history batch. A refusal of Telegram's flood control keeps the record (the sync plans the delete
@@ -1510,15 +1551,23 @@ namespace Agentmaster::Msg
         /// </summary>
         void _pumpBackfill() noexcept;
         /// <summary>
-        /// Keeps Telegram's topic list in the side panel's MOST RECENT order (§21.9): after a recreation's history replay, all
-        /// cards are re-posted lowest-ranked first (the list was in replay order); otherwise, at most once a minute and only
-        /// when everything is quiet (nothing queued, no replay, no session running, no topic posted in the last half
-        /// minute), the shortest set of cards that puts the list back in order is re-posted (PlanTopicResort, at most
-        /// kResortMaxTopics; a longer fix is left to the next replay or /recreate). Never during the start-up hold or a
-        /// recreation (the order keys are incomplete then). The re-posts themselves run in the next tick's per-topic pass,
-        /// which goes lowest-ranked first. Tick thread; never throws (Rule #18 inside).
+        /// Keeps Telegram's topic list in the side panel's MOST RECENT order (§21.9, §21.52): after a RECREATION's history
+        /// replay (MessagingState::resortWholeList), the whole list (PlanTopicResort — every card is new then, so every delete
+        /// works); otherwise, at most once a minute and only when everything is quiet (nothing queued, no replay, no session
+        /// running, no topic posted in the last half minute), the fewest re-posts that put the list's TOP kResortTopTopics in
+        /// order (PlanTopicResortTop: never more than that, never skipped). The old cards a re-sort replaces are deleted together
+        /// at its end (_flushResortDeletes). Never during the start-up hold or a recreation (the order keys are incomplete then).
+        /// The re-posts themselves run in the next tick's per-topic pass, one per tick. Tick thread; never throws (Rule #18 inside).
         /// </summary>
         void _resortTick() noexcept;
+        /// <summary>
+        /// Agentmaster §21.52: deletes the old cards the re-sort replaced (`_resortReplaced`) in as few deleteMessages calls as
+        /// possible (PlanCardDeleteBatches: up to kDeleteMessagesMaxIds each; 24 cards = 1 call) — once the re-sort's last re-post
+        /// went out (no card waits for its re-post any more), or 5 minutes after the first replaced card, whichever comes first. A
+        /// card too old to delete is left (§21.51). Tick thread; never throws (Rule #18 inside: a failed flush leaves the old cards,
+        /// whose buttons still work).
+        /// </summary>
+        void _flushResortDeletes() noexcept;
         /// <summary>
         /// Takes the per-chat pacing slot that the send thread's outbox uses (kSendGapMs), waiting for it, before a
         /// DIRECT call of the tick thread (createForumTopic, deleteForumTopic, editForumTopic) — such calls counted
@@ -3046,12 +3095,33 @@ namespace Agentmaster::Msg
         int64_t _recreateStartedMs{ 0 };
         /// <summary>
         /// Tick thread: a recreation's history replay is under way — when the last topic's history is in, the whole list is
-        /// re-sorted (`_resortFull`). Also set at a start that finds a replay pending (the recreation of the last run).
+        /// re-sorted (`_resortFull`). §21.52: set at a start only when the state says a recreation still owes that re-sort
+        /// (MessagingState::resortWholeList) — no longer whenever some topic's replay is pending, which re-sorted the whole list
+        /// after a restart whose replay posted nothing (2026-11-04: 501 cards).
         /// </summary>
         bool _backfillAfterRecreation{ false };
         bool _resortFull{ false };
         int64_t _lastResortMs{ 0 };
-        bool _resortTooLongLogged{ false };
+        /// <summary>
+        /// §21.52, guarded by `_mtx` (a re-post can run in a tap's card refresh on the poll thread): the old cards this re-sort
+        /// replaced, deleted together by _flushResortDeletes (one deleteMessages per up to 100) instead of one deleteMessage each;
+        /// `_resortReplacedSinceMs` is when the first one was added (0 = none waits). Cleared at a start and a recreation; lost
+        /// with a quit (those cards stay, their buttons working, like a card too old to delete).
+        /// </summary>
+        std::vector<ReplacedCard> _resortReplaced;
+        int64_t _resortReplacedSinceMs{ 0 };
+        /// <summary>
+        /// §21.51, tick thread only: one session's DELAY after refused creates of its topic (not a chat-wide refusal): how many in
+        /// a row, and when the sync may ask again (TopicCreateRetryDelayMs). In memory only: a restart asks once more at once.
+        /// </summary>
+        struct TopicCreateDelay
+        {
+            /// <summary>Refused creates in a row.</summary>
+            int failures{ 0 };
+            /// <summary>The wall clock (ms) before which the sync does not ask for this session's topic.</summary>
+            int64_t nextAtMs{ 0 };
+        };
+        std::unordered_map<std::wstring, TopicCreateDelay> _createDelays;
         /// <summary>
         /// Tick thread: the re-sort's re-posts still to make, lowest-ranked first. `_resortTick` releases ONE per tick, and
         /// only while the call window has room for its two calls (the old card's delete and the new card's send): a full
@@ -3063,7 +3133,7 @@ namespace Agentmaster::Msg
         /// <summary>
         /// §21.16.7, tick thread only: the topics the user put FIRST with a directory dot — session id -> the session's order key
         /// (`_orderKeys`' MostRecentSortKeyMs) at the tap. The quiet re-sort leaves such a topic out of the list it puts in MOST
-        /// RECENT order while that key is unchanged, so it does not re-post up to kResortMaxTopics other cards a minute later to
+        /// RECENT order while that key is unchanged, so it does not re-post up to kResortTopTopics other cards a minute later to
         /// push the topic back to its rank — which would undo the user's move. The session's next turn changes the key (a turn
         /// boundary), and from then on the topic is ordered like any other. Cleared with the re-sort's state (a start, a bot
         /// change, a recreation); a session whose topic is gone drops out at the next re-sort pass.
