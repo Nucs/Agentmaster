@@ -8,11 +8,15 @@ DESIGN.md §3.2 keep the owner's PC usable while it installs) and its steps are 
     python buildserver/image/images.py e2e    [--base am-base] [--name am-e2e]      # the e2e layer (Python + provision)
     python buildserver/image/images.py build-image [--base am-base] [--name am-build]   # the build layer (Build Tools)
     python buildserver/image/images.py check  [--image am-e2e]                      # boot it and check what it holds
+    python buildserver/image/images.py retask --base X --name Y                     # an image's bootstrap task re-registered
     python buildserver/image/images.py list                                         # the images in the site
     python buildserver/image/images.py --site worker base                           # the same on the worker machine
 
-The base holds only the guest agent's bootstrap (image/oem/: install.bat → setup.ps1 → bootstrap.ps1 at every logon);
-layers add what their slot kind needs (E4). The coordinator is started when it does not answer (it exits by itself after
+The base holds only the guest agent's bootstrap (image/oem/: install.bat → setup.ps1 → register-bootstrap.ps1 →
+bootstrap.ps1 at every logon, and again every minute while it does not run); layers add what their slot kind needs (E4).
+`retask` gives an image made before 2026-11-12, whose task started the bootstrap at logon only, that repetition: a
+2-vCPU slot over it runs register-bootstrap.ps1, and its overlay becomes the new image (the old one stays as its backing
+file: never delete it). The coordinator is started when it does not answer (it exits by itself after
 10 idle minutes), as `amb` does; its admin token is read from the site and never printed.
 
 `--site worker` makes the image on the worker machine's site (CT 803, buildserver/site/worker.py): that coordinator
@@ -289,6 +293,19 @@ def build_layer_steps() -> list[dict]:
     ]
 
 
+def retask_steps() -> list[dict]:
+    """The step of `retask`: register-bootstrap.ps1 (staged from image/oem) re-registers AmbBootstrap so that it starts
+    at logon and again every minute while it does not run, and prints the definition Task Scheduler then holds (so the
+    request's events show the trigger's repetition and the IgnoreNew policy).
+
+    Returns:
+        The guest steps.
+    """
+    return [{"id": "retask", "kind": "run", "command": "powershell.exe", "timeoutS": 300,
+             "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "Z:\\image\\oem\\register-bootstrap.ps1",
+                      "-Note", "C:\\amb\\retask.txt"]}]
+
+
 def build_check_steps() -> list[dict]:
     """The checks of the build layer: every tool a build runs answers from where the build looks for it, Build Tools
     is found the way tools\\OpenConsole.psm1 finds it (VSSetup), and Windows' servicing stays idle after a boot (a busy
@@ -353,6 +370,11 @@ def main(argv: list[str]) -> int:
     build.add_argument("--name", default="am-build")
     check = sub.add_parser("check", help="boot an image and check what it holds (a layer's tools; else `ver`)")
     check.add_argument("--image", default="am-e2e")
+    retask = sub.add_parser("retask", help="re-register an image's bootstrap task (at logon and again every minute "
+                                           "while it does not run) as a new image over it; for images made before "
+                                           "2026-11-12")
+    retask.add_argument("--base", required=True, help="the image whose task is re-registered")
+    retask.add_argument("--name", required=True, help="the new image (an overlay over --base)")
     sub.add_parser("list", help="list the images in the site")
     args = parser.parse_args(argv)
     site = args.site
@@ -408,6 +430,14 @@ def request_body(args: argparse.Namespace, site: str) -> dict:
             inputs["steps"] = build_check_steps()
             inputs["stage"] = [{"source": kit_path(site, HERE / "steps", "image-steps"), "target": "image/steps"}]
         body = {"kind": "Smoke", "inputs": inputs}
+    elif args.command == "retask":
+        # The old task's logon run is what must say hello in this slot: 2 vCPUs, the size whose logon run worked on the
+        # worker machine (its boots with 4 or more vCPUs died at logon, register-bootstrap.ps1 says how).
+        size = {"memoryMiB": 4 * GIB, "vcpus": 2, "diskMiB": 2 * GIB}
+        body = {"kind": "Layer",
+                "inputs": {"image": args.base, "newImage": args.name, "steps": retask_steps(),
+                           "stage": [{"source": kit_path(site, HERE / "oem", "oem"), "target": "image/oem"}]},
+                "resources": {"min": size, "preferred": size}}
     elif args.command == "build-image":
         stage = [{"source": kit_path(site, HERE / "steps", "image-steps"), "target": "image/steps"},
                  {"source": kit_path(site, REPO / ".PowershellModules" / "VSSetup", "vssetup"),

@@ -292,6 +292,12 @@ week's median): 6.3 − 2 = **4.3 GB**. vCPUs had room on both.
 - **A slot boots a copy-on-write overlay over its image:** `qemu-img create -b <image>/data.qcow2` takes under a
   second; the slot gets its own `windows.vars`. An e2e overlay is deleted with its slot; a build VM keeps its overlay
   and its data disk until its image changes.
+- **The guest agent's start must survive a bad logon** (2026-11-12, the worker machine): the base is kept right after
+  the install's first logon, so a boot of the bare base redoes Windows' unfinished first-logon work, and on a slow host
+  with 4 or more vCPUs that killed the `AmbBootstrap` task's logon run (STATUS_CONTROL_C_EXIT) every time; nothing ran
+  it again, and the slot never said hello. The task therefore starts the bootstrap at logon and again every minute while
+  it does not run (`register-bootstrap.ps1`; IgnoreNew skips a repetition while it runs). A layer's boot finishes that
+  work, so layers boot clean; `images.py retask` gives an older image the repetition as a layer over it.
 - **dock makes its own copies** with the same script (12½ minutes for the base, measured on homepc), rather than
   receiving 10+ GB over the LAN.
 

@@ -196,9 +196,12 @@ python buildserver/image/images.py check [--image am-e2e]                      #
 python buildserver/image/images.py list
 ```
 
-- **`am-base`:** Tiny11 Core 25H2 installed by dockur with `image/oem/` (install.bat → setup.ps1, which registers the
-  `AmbBootstrap` logon task → bootstrap.ps1 at every logon: Z: = the slot's share, amb-guest copied from it and run).
-  A new guest agent therefore needs no new image: each slot gets the coordinator's copy.
+- **`am-base`:** Tiny11 Core 25H2 installed by dockur with `image/oem/` (install.bat → setup.ps1 →
+  register-bootstrap.ps1, which registers the `AmbBootstrap` task → bootstrap.ps1 at every logon, and again every minute
+  while it does not run: Z: = the slot's share, amb-guest copied from it and run). A new guest agent therefore needs no
+  new image: each slot gets the coordinator's copy. `images.py retask --base X --name Y` gives an image made before
+  2026-11-12 (logon only) the repetition, as a new image over it (the worker site's own `am-base` is that, over
+  `am-base-0`: never delete a base another image is made over).
 - **`am-e2e`:** a qcow2 layer over `am-base`: CPython 3.13.9, then `e2e/guest/provision.ps1 -Pwsh -Cache C:\e2e\cache`
   (Claude Code, PortableGit, PowerShell 7, the venv, the hosts guard, the mock's environment, crash dumps), then
   `image/steps/trims.ps1`. An e2e run calls provision.ps1 again with the same cache, so only the build under test is
@@ -315,6 +318,19 @@ python buildserver/image/images.py --site worker base | e2e | build-image | chec
   (`PodmanSlotDriver.BootWaitScript`; it refuses to start when a different dockur lacks the exact line). A slot that
   stops by itself is given up with its own last output lines in the request's message, so dockur's reason shows in
   `amb show` (`ISlotDriver.ReadLastOutputAsync`).
+- **Its first base image could not start the agent in a VM of 4 or more vCPUs** (2026-11-12): the `AmbBootstrap`
+  task's logon run died at once (STATUS_CONTROL_C_EXIT, 0xC000013A) before bootstrap.ps1 wrote a line, and nothing ran
+  it again, so the slot never said hello (three Lost requests, "no hello from its guest agent within 600 s"); 2-vCPU
+  smokes worked after 128-262 s, and a run started by hand in a dead slot worked at once. The image had been kept right
+  after the install's first logon, so every boot from it redid Windows' unfinished first-logon work (`Get-AppxPackage`
+  hung for minutes in such a boot). The fix, in the recipe and in the worker's image: the task starts the bootstrap
+  again every minute while it does not run (`register-bootstrap.ps1`), and `images.py --site worker retask --base
+  am-base-0 --name am-base` made the worker's `am-base` over the first one (`am-base-0`) in 3.4 min. Its boot finished
+  that first-logon work as well: a 6 GB / 4 vCPU smoke of it was ready in 30 s, and both layers' guests in 29 s.
+- **Looking inside a silent guest:** QEMU's monitor answers in the slot container (`podman exec -i <slot> python3 -
+  "<command>" < /srv/buildserver/bin/hmp.py`): `screendump /tmp/s.png -f png` shows its screen, and `sendkey` types
+  (meta_l-r opens Run). A command typed into Run that writes into `\\host.lan\Data\amb\` lands in the slot's exchange
+  folder; a script run from that share first asks "Open File - Security Warning" (`sendkey alt-r` answers Run).
 - **cgroup v2 in a container** (`worker/files/amb-cgroups.start`, at every boot): the namespace root may hold no process
   when it delegates controllers, so its processes move to `/init` first; without it podman fails with "controller pids
   is not available". Alpine's LXC configuration drops `mknod`, which crun needs for a slot's `/dev/kvm`: CT 803 keeps it
