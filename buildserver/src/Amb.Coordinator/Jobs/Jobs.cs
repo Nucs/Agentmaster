@@ -556,7 +556,7 @@ public sealed class E2eJob : VmJob
         var step = new GuestStep("suite", StepKinds.Run, Command: @"C:\e2e\venv\Scripts\python.exe", Args: args,
             Cwd: @"C:\e2e", TimeoutS: timeoutS, ProgressFile: $@"Z:\e2e\out\{run}.progress.jsonl");
         context.Event("step", $"step suite: {step.Command} {string.Join(' ', args)}");
-        StepResult result = await lease.Session.RunStepAsync(step, Silence, cancel).ConfigureAwait(false);
+        StepResult result = await lease.Session.RunStepAsync(step, SilenceOf(context), cancel).ConfigureAwait(false);
         context.Event("step", FormattableString.Invariant($"step suite: {result.Outcome} ({result.DurationSeconds / 60:0.0} min)"));
         LogTails(context, result);
         return result;

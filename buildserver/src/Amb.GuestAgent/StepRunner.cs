@@ -212,7 +212,7 @@ internal sealed class StepRunner
             {
                 // Progress is a convenience: a failed read or send is logged and the tail goes on; the result still
                 // carries the step's outcome.
-                _log.Write($"progress {path}: {ex.Message}");
+                _log.Write($"progress {path}: {AgentLog.Describe(ex)}");
             }
             if (last)
             {

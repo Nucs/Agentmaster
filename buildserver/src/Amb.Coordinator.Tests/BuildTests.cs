@@ -244,6 +244,42 @@ public sealed class BuildTests : IDisposable
         Assert.False(BuildJob.RecordCommits(afterDebug, "debug-dev", Commit, sdkCommit: null).ContainsKey(BuildJob.SdkKey("debug-dev")));
     }
 
+    /// <summary>A worktree whose last build step never ended (a lost or cancelled slot) is purged by its next build,
+    /// whatever that build asked; only that worktree; and it comes off the list as soon as a step ends. An older record
+    /// (no list) purges nothing, and the list round-trips through the record's JSON.</summary>
+    [Fact]
+    public void InterruptedWorktreeIsPurgedByItsNextBuild()
+    {
+        var fresh = new VmRecord
+        {
+            Name = "build-1",
+            Image = "am-build",
+            ImageStamp = "1:2",
+            DataDiskGiB = 256,
+            CreatedAt = DateTimeOffset.Parse("2026-11-12T22:41:13Z"),
+        };
+        Assert.Equal("none", BuildJob.EffectivePurge(fresh, "release-dev", "none"));
+        IReadOnlyList<string> started = BuildJob.WithInterrupted(fresh.Interrupted, "release-dev", on: true);
+        VmRecord lost = fresh with { Interrupted = BuildJob.WithInterrupted(started, "debug-dev", on: true) };
+        Assert.Equal(new[] { "release-dev", "debug-dev" }, lost.Interrupted);
+        Assert.Equal("force", BuildJob.EffectivePurge(lost, "release-dev", "none"));
+        Assert.Equal("force", BuildJob.EffectivePurge(lost, "release-dev", "force"));
+        Assert.Equal("none", BuildJob.EffectivePurge(lost, "release-release", "none"));
+        // Listed twice stays once; a finished step takes only its own worktree off.
+        Assert.Equal(new[] { "release-dev", "debug-dev" }, BuildJob.WithInterrupted(lost.Interrupted, "debug-dev", on: true));
+        Assert.Equal(new[] { "debug-dev" }, BuildJob.WithInterrupted(lost.Interrupted, "release-dev", on: false));
+        // The record keeps the list through its JSON; a record written before the list existed reads as none.
+        string json = System.Text.Json.JsonSerializer.Serialize(lost, AmbJson.Default.VmRecord);
+        VmRecord read = System.Text.Json.JsonSerializer.Deserialize(json, AmbJson.Default.VmRecord)!;
+        Assert.Equal(lost.Interrupted, read.Interrupted);
+        // The same record as a build before 2026-11-13 wrote it: no "interrupted" member at all.
+        System.Text.Json.Nodes.JsonObject node = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+        Assert.True(node.Remove("interrupted"));
+        string older = node.ToJsonString();
+        Assert.DoesNotContain("interrupted", older, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(System.Text.Json.JsonSerializer.Deserialize(older, AmbJson.Default.VmRecord)!.Interrupted);
+    }
+
     /// <summary>The build's parallelism grows with the VM's memory and never exceeds its vCPUs.</summary>
     [Fact]
     public void ParallelityFollowsTheMemory()

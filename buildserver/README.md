@@ -218,7 +218,7 @@ python buildserver/image/images.py list
 ## Build and test
 
 ```text
-dotnet test buildserver/src/Buildserver.slnx            # build everything + 114 unit tests (output in Q:\tmp\buildserver-build)
+dotnet test buildserver/src/Buildserver.slnx            # build everything + 115 unit tests (output in Q:\tmp\buildserver-build)
 python buildserver/tests/local_chain.py                 # the chain without a VM (Q:\tmp\buildserver-test, removed after)
 python buildserver/tests/site_outcomes.py               # Phase 1's done-when on the real site: e2e passed, failed, cancelled, lost VM
 python buildserver/tests/site_build.py                  # the build MVP's done-when on the real site (it builds: ask first)
@@ -327,6 +327,16 @@ python buildserver/image/images.py --site worker base | e2e | build-image | chec
   again every minute while it does not run (`register-bootstrap.ps1`), and `images.py --site worker retask --base
   am-base-0 --name am-base` made the worker's `am-base` over the first one (`am-base-0`) in 3.4 min. Its boot finished
   that first-logon work as well: a 6 GB / 4 vCPU smoke of it was ready in 30 s, and both layers' guests in 29 s.
+- **Its first cold build was lost after 32 minutes** (2026-11-12, r20261112-224112-a60ce6): the guest agent's calls to
+  the coordinator failed on and off from 23:04 to 23:13 (connection errors and 60-s timeouts in C:\amb\agent.log, read
+  out of the kept VM afterwards) while the VM went on compiling, and the 3-minute silence limit ended it. The host was
+  busy: the build VM (16 vCPUs) shared drive 2 and the host's 20 threads with three Windows desktop VMs of another
+  session, and the host's I/O stall share stayed near 50 %. The coordinator answered in under a millisecond whenever
+  probed, and drive 2's fsyncs took 0 ms (its controller caches writes), so neither was the cause; the stall is
+  somewhere in the guest's user-mode network (passt, then slirp4netns) under that load, not pinned down. Since then:
+  the site's silence limit is 10 minutes (`AMB_GUEST_SILENCE_MINUTES`), the agent retries a failed heartbeat after 2 s
+  and logs each failure's inner exceptions (the next one names the broken link), and a build cut off mid-step purges
+  its worktree next time (its truncated precompiled header failed the next build with C1852).
 - **Looking inside a silent guest:** QEMU's monitor answers in the slot container (`podman exec -i <slot> python3 -
   "<command>" < /srv/buildserver/bin/hmp.py`): `screendump /tmp/s.png -f png` shows its screen, and `sendkey` types
   (meta_l-r opens Run). A command typed into Run that writes into `\\host.lan\Data\amb\` lands in the slot's exchange
@@ -352,7 +362,7 @@ python buildserver/image/images.py --site worker base | e2e | build-image | chec
 | [`steps/install/`](steps/install) | `install-build.ps1`: the Windows side of `amb install` (stage into the free slot, check, wait for the requesting session, the mutex, the swap, the watch), run by the coordinator through WSL's interop | in use (2026-10-29) |
 | [`measure/`](measure/README.md) | the measurements and proofs behind DESIGN.md §16, with their raw results | P0.1 (§16.9), P0.5's comparison (§16.11) and P0.4's native half (§16.12) |
 | [`src/Amb.Core`](src/Amb.Core) | the shared core: the allocation rule (§3, homepc's and a Linux site's), the request / build / slot / VM model (build ids by site letter), the guest and API protocol, the atomic record store (§6) | 31 unit tests (`src/Amb.Core.Tests`) |
-| [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API (artifacts streamed by name; the source mirrors' tips and pushed bundles), the scheduler (admission by priority × availability, wait and run timeouts, cancel, one build at a time, existing builds answered without a slot), the guest broker, the jobs (import, a pulled build too; smoke, install, layer, e2e, a suite out of the mirror too; build, deploy), the source mirror (fetching K:, or taking pushes; snapshots too) and its bundles, the slot manager and its drivers (podman + dockur, kept VMs with a data disk, capped slots with the site's swap file, a site's longer firmware wait, a stopped slot's last output; cgroup v1 and v2 memory figures; local, for tests); its settings say which site it serves (homepc's or a Linux one) | runs in both sites; 68 unit tests (`src/Amb.Coordinator.Tests`) |
+| [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API (artifacts streamed by name; the source mirrors' tips and pushed bundles), the scheduler (admission by priority × availability, wait and run timeouts, cancel, one build at a time, existing builds answered without a slot), the guest broker, the jobs (import, a pulled build too; smoke, install, layer, e2e, a suite out of the mirror too; build, deploy), the source mirror (fetching K:, or taking pushes; snapshots too) and its bundles, the slot manager and its drivers (podman + dockur, kept VMs with a data disk, capped slots with the site's swap file, a site's longer firmware wait, a stopped slot's last output; cgroup v1 and v2 memory figures; local, for tests); its settings say which site it serves (homepc's or a Linux one) | runs in both sites; 69 unit tests (`src/Amb.Coordinator.Tests`) |
 | [`src/Amb.GuestAgent`](src/Amb.GuestAgent) | `amb-guest.exe` (Native AOT, 7 MB): the agent in every VM; hello, heartbeat with the guest's memory, one step at a time by long poll (run, fetch, expand, put, shutdown) | in every slot |
 | [`src/Amb.HostFacts`](src/Amb.HostFacts) | `amb-hostfacts.exe` (Native AOT): Windows' available memory, free commit, Q: free space and a full-screen game, as one line of JSON; the coordinator runs it every 10 s through WSL's interop | in use |
 | [`src/Amb.Cli`](src/Amb.Cli) | `amb.exe`: the command line above; `Sites.cs` (the two sites, a build id's site by its letter), `SourcePush.cs` (a commit pushed to the worker as a bundle of what it lacks), `WorkingTreeSnapshot.cs` (`--snapshot`), `ProcessAncestry.cs` (the requesting claude.exe of `amb install`: the process chain, else `CLAUDE_PID`) | in use; 15 unit tests (`src/Amb.Cli.Tests`) |

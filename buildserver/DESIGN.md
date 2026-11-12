@@ -590,10 +590,15 @@ On dock, also fastrund's pod memory limit and the LXC changes of §5.3 (E3).
 
 - **A request's states:** `pending → starting → running → collecting → succeeded | failed | cancelled | no-capacity |
   lost`, each change an event line.
-- **Heartbeats:** the guest agent every 10 s; a slot silent for 3 minutes is stopped and its request marked `lost`; a
+- **Heartbeats:** the guest agent every 10 s (2 s after a failed one); a slot silent for 3 minutes is stopped and its
+  request marked `lost` (a site may set another limit: `AMB_GUEST_SILENCE_MINUTES`, the worker machine 10, §5.5); a
   build is retried once. A slot whose VM stops by itself is given up sooner: the slot manager asks its driver every
   15 s whether it runs, and two "not running" answers in a row end the request `lost` (29 s after a killed QEMU,
-  measured).
+  measured), with the slot's last output lines in the reason.
+- **A build cut off mid-step** (its slot lost or cancelled) leaves truncated outputs on the kept VM's data disk (a
+  precompiled header, 2026-11-12: C1852 at the next build). The VM's record lists the worktree while its build step
+  runs and takes it off when the step ends (`VmRecord.Interrupted`); a worktree still listed is purged by its next
+  build, whatever that build asked.
 - **Restarts:** the coordinator reads its records and fastrund's runs (F5) and carries on.
 - **The homelab is not needed** for homepc work once the dockur image is in the distro.
 - **Coexistence:** hand builds of the stock tree keep working; the allocator sees their memory as load it does not own.

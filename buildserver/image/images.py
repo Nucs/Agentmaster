@@ -281,8 +281,9 @@ def build_layer_steps() -> list[dict]:
                 "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", f"Z:\\image\\steps\\{name}"]}
 
     return [
-        # The install took 28 min with its 4.8 GB download (measured); 90 min covers a slow download.
-        script("buildtools", "install-buildtools.ps1", 5400),
+        # The install took 28 min on homepc with its 4.8 GB download (measured), and more than 77 min on the worker
+        # machine, whose single-threaded Windows Installer runs ~3x slower on its 2013 Xeon (2026-11-12): 3 h.
+        script("buildtools", "install-buildtools.ps1", 10800),
         script("tools", "install-tools.ps1", 1200),
         script("trims", "trims.ps1", 600),
         # The seal waits up to 20 min for servicing to go idle, in 30-s samples.
@@ -450,8 +451,8 @@ def request_body(args: argparse.Namespace, site: str) -> dict:
                 # The layer grows ~18.5 GB (measured), plus the downloads while it installs; the install likes vCPUs.
                 "resources": {"min": {"memoryMiB": 4 * GIB, "vcpus": 2, "diskMiB": 24 * GIB},
                               "preferred": {"memoryMiB": 8 * GIB, "vcpus": 8, "diskMiB": 28 * GIB}},
-                # Build Tools (up to 90 min with a slow download) + the tools + a seal of up to 30 min.
-                "runTimeoutMinutes": 180}
+                # Build Tools (up to 3 h on a slow host) + the tools + a seal of up to 30 min.
+                "runTimeoutMinutes": 300}
     else:
         body = {"kind": "Layer", "inputs": {
             "image": args.base, "newImage": args.name, "steps": e2e_layer_steps(),

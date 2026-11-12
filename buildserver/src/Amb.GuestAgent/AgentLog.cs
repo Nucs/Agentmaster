@@ -35,6 +35,26 @@ internal sealed class AgentLog
         }
     }
 
+    /// <summary>An exception and every exception inside it, as one line ("HttpRequestException: An error occurred while
+    /// sending the request. &lt;- IOException: … &lt;- SocketException: Connection reset by peer").</summary>
+    /// <param name="ex">The exception.</param>
+    /// <returns>Each level's type name and message, outermost first, joined by " &lt;- ".</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="ex"/> is null.</exception>
+    /// <remarks>HttpClient's own message ("An error occurred while sending the request") names no cause; the inner
+    /// exceptions do (a reset, a refused connection, a closed stream). On 2026-11-12 a worker machine build's agent
+    /// logged only the outer message for every failed call, so the log could not say which part of the network failed.
+    /// At most 5 levels: an exception chain is short, and a cycle must not loop.</remarks>
+    internal static string Describe(Exception ex)
+    {
+        ArgumentNullException.ThrowIfNull(ex);
+        var parts = new List<string>();
+        for (Exception? level = ex; level is not null && parts.Count < 5; level = level.InnerException)
+        {
+            parts.Add($"{level.GetType().Name}: {level.Message}");
+        }
+        return string.Join(" <- ", parts);
+    }
+
     /// <summary>Writes one line, stamped with the UTC time.</summary>
     /// <param name="message">The line (line breaks are replaced by " | ").</param>
     internal void Write(string message)

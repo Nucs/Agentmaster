@@ -21,6 +21,11 @@ namespace Amb.GuestAgent;
 internal sealed class GuestAgent : IDisposable
 {
     private static readonly TimeSpan HeartbeatEvery = TimeSpan.FromSeconds(10);
+
+    /// <summary>How soon a heartbeat is tried again after one failed: a path that drops calls now and then (the worker
+    /// machine's slots under a heavy build, 2026-11-12) then still gets one through well within the coordinator's
+    /// silence limit, while a working path keeps the 10-s rhythm.</summary>
+    private static readonly TimeSpan HeartbeatRetry = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RetryEvery = TimeSpan.FromSeconds(2);
 
     private readonly SlotConfig _config;
@@ -141,7 +146,7 @@ internal sealed class GuestAgent : IDisposable
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException && !stop.IsCancellationRequested)
         {
             // Expected while the coordinator restarts or the network comes up: try again shortly.
-            _log.Write($"next: {ex.GetType().Name}: {ex.Message}");
+            _log.Write($"next: {AgentLog.Describe(ex)}");
             await Task.Delay(RetryEvery, stop).ConfigureAwait(false);
             return null;
         }
@@ -183,6 +188,8 @@ internal sealed class GuestAgent : IDisposable
     {
         while (!stop.IsCancellationRequested)
         {
+            // Set when this round's call fails: the next one then comes after HeartbeatRetry instead of HeartbeatEvery.
+            bool failed = false;
             try
             {
                 GuestMemory.Snapshot memory = GuestMemory.Read();
@@ -204,12 +211,13 @@ internal sealed class GuestAgent : IDisposable
             catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or InvalidOperationException
                 && !stop.IsCancellationRequested)
             {
-                // A missed heartbeat is not fatal: the coordinator gives a slot 3 minutes of silence.
-                _log.Write($"heartbeat: {ex.GetType().Name}: {ex.Message}");
+                // A missed heartbeat is not fatal: the coordinator gives a slot minutes of silence (its GuestSilence).
+                _log.Write($"heartbeat: {AgentLog.Describe(ex)}");
+                failed = true;
             }
             try
             {
-                await Task.Delay(HeartbeatEvery, stop).ConfigureAwait(false);
+                await Task.Delay(failed ? HeartbeatRetry : HeartbeatEvery, stop).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -267,7 +275,7 @@ internal sealed class GuestAgent : IDisposable
             {
                 if (attempt == 1 || attempt % 30 == 0)
                 {
-                    _log.Write($"{what}: attempt {attempt} failed: {ex.GetType().Name}: {ex.Message}");
+                    _log.Write($"{what}: attempt {attempt} failed: {AgentLog.Describe(ex)}");
                 }
                 await Task.Delay(RetryEvery, stop).ConfigureAwait(false);
             }

@@ -130,8 +130,16 @@ public abstract class VmJob : IJob
     /// takes 12-17 minutes, see <see cref="InstallJob"/>).</summary>
     protected virtual TimeSpan HelloTimeout => TimeSpan.FromMinutes(10);
 
-    /// <summary>How long a guest may go without any call before the slot counts as lost (DESIGN.md §12).</summary>
-    protected static readonly TimeSpan Silence = TimeSpan.FromMinutes(3);
+    /// <summary>How long a guest may go without any call before its slot counts as lost (DESIGN.md §12): the site's
+    /// <see cref="CoordinatorOptions.GuestSilence"/> (3 min unless the site sets another).</summary>
+    /// <param name="context">The job's context.</param>
+    /// <returns>The silence limit.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="context"/> is null.</exception>
+    protected static TimeSpan SilenceOf(JobContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return context.Options.GuestSilence;
+    }
 
     /// <inheritdoc/>
     public abstract Task<JobOutcome> RunAsync(JobContext context, CancellationToken cancel);
@@ -228,7 +236,7 @@ public abstract class VmJob : IJob
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(lease);
         context.Event("step", $"step {step.Id}: {step.Kind} {Describe(step)}");
-        StepResult result = await lease.Session.RunStepAsync(step, Silence, cancel).ConfigureAwait(false);
+        StepResult result = await lease.Session.RunStepAsync(step, SilenceOf(context), cancel).ConfigureAwait(false);
         context.Event("step", FormattableString.Invariant(
             $"step {step.Id}: {result.Outcome} ({result.DurationSeconds:0.0} s)"));
         LogTails(context, result);

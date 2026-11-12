@@ -33,4 +33,22 @@ public sealed record VmRecord
     /// <summary>The commit each worktree holds after its last build, by worktree key ("release-dev"; "sdk" for the
     /// submodule's repository): the basis of the next incremental bundle.</summary>
     public IReadOnlyDictionary<string, string> Commits { get; init; } = new Dictionary<string, string>(StringComparer.Ordinal);
+
+    /// <summary>The worktrees (by key) whose last build step did not end: its slot was lost or cancelled mid-build, or
+    /// the coordinator stopped. Their next build purges them.</summary>
+    /// <remarks>A build killed mid-write leaves truncated outputs that an incremental build trusts: on 2026-11-12 the
+    /// worker machine's slot was lost while it compiled, and the next build of that worktree failed with C1852 ("pch.pch
+    /// is not a valid precompiled header file"). A worktree is listed just before its build step starts and taken off
+    /// as soon as the step ends, whatever its exit code (a failed compile leaves consistent outputs).
+    /// ⚠ Never null: a record written before this member existed has no "interrupted", and the source-generated reader
+    /// then assigns null through the init accessor (it skips the initializer), so the accessor turns null into empty.
+    /// </remarks>
+    public IReadOnlyList<string> Interrupted
+    {
+        get => _interrupted;
+        init => _interrupted = value ?? [];
+    }
+
+    /// <summary>The backing field of <see cref="Interrupted"/> (never null).</summary>
+    private readonly IReadOnlyList<string> _interrupted = [];
 }

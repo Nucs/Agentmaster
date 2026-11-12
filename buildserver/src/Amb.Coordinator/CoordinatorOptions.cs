@@ -47,6 +47,16 @@ public sealed record CoordinatorOptions
     /// <see cref="DockurImage"/>): <see cref="Slots.PodmanSlotDriver.BootWaitScript"/>.</remarks>
     public int? DockurBootWaitSeconds { get; init; }
 
+    /// <summary>How long a slot's guest agent may make no call before its slot counts as lost
+    /// (<c>AMB_GUEST_SILENCE_MINUTES</c>, 1-60; default 3, homepc's).</summary>
+    /// <remarks>The agent calls every 10 s (its heartbeat), so 3 minutes is many missed calls on a site whose slots reach
+    /// the coordinator reliably. On the worker machine, during a cold build that shared drive 2 with other guests, the
+    /// agent's calls failed on and off from 23:04 to 23:13 (connection errors and 60-s timeouts in its own log) while the
+    /// VM went on compiling, and the 3-minute limit killed the build at 23:15 (2026-11-12); its site sets 10. A longer
+    /// limit only delays the verdict on a slot that really died: the liveness watch still ends a stopped VM within two
+    /// checks (SlotManager.WatchInterval).</remarks>
+    public TimeSpan GuestSilence { get; init; } = TimeSpan.FromMinutes(3);
+
     /// <summary>Minutes with no active request and no slot after which the coordinator exits
     /// (<c>AMB_IDLE_EXIT_MINUTES</c>; default 10, 0 = never): the site is lazy, and the distro stops when its last process
     /// ends (DESIGN.md §5.2).</summary>
@@ -185,7 +195,8 @@ public sealed record CoordinatorOptions
     /// <returns>The settings.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="env"/> is null.</exception>
     /// <exception cref="FormatException">A numeric variable is not a number, a "least:most" pair is malformed,
-    /// <c>AMB_BUILD_LETTER</c> is not a build-id letter, or <c>AMB_DOCKUR_BOOT_WAIT</c> is not 30-1800 seconds.</exception>
+    /// <c>AMB_BUILD_LETTER</c> is not a build-id letter, <c>AMB_DOCKUR_BOOT_WAIT</c> is not 30-1800 seconds, or
+    /// <c>AMB_GUEST_SILENCE_MINUTES</c> is not 1-60 minutes.</exception>
     /// <remarks>Three variables tell UNSET from EMPTY: <c>AMB_SOURCE_REPO</c>, <c>AMB_E2E_SOURCE</c> and
     /// <c>AMB_WINDOWS_PWSH</c> (and <c>AMB_HOSTFACTS</c>, as before). Unset keeps homepc's default; set to "" turns the
     /// feature off, which is how the worker machine's site says it cannot read K: or reach Windows.</remarks>
@@ -209,6 +220,7 @@ public sealed record CoordinatorOptions
             GuestAgentPath = env("AMB_GUEST_AGENT") is { Length: > 0 } a ? a : Path.Combine(root, "bin", "amb-guest.exe"),
             DockurImage = env("AMB_DOCKUR_IMAGE") is { Length: > 0 } i ? i : "docker.io/dockurr/windows:6.05",
             DockurBootWaitSeconds = BootWait(env("AMB_DOCKUR_BOOT_WAIT")),
+            GuestSilence = Silence(env("AMB_GUEST_SILENCE_MINUTES")),
             // Set but empty is "no default suite" (the worker machine's site): e2e suites then come from the mirror.
             E2eSourceDir = env("AMB_E2E_SOURCE") is { } e ? e : "/mnt/k/source/Agentmaster/e2e",
             IdleExitMinutes = env("AMB_IDLE_EXIT_MINUTES") is { Length: > 0 } m
@@ -254,6 +266,23 @@ public sealed record CoordinatorOptions
     /// <exception cref="FormatException">The value is not a whole non-negative number.</exception>
     private static long Number(string? value, long fallback) =>
         string.IsNullOrWhiteSpace(value) ? fallback : long.Parse(value.Trim(), NumberStyles.None, CultureInfo.InvariantCulture);
+
+    /// <summary>Reads <c>AMB_GUEST_SILENCE_MINUTES</c> (<see cref="GuestSilence"/>).</summary>
+    /// <param name="value">The variable's value.</param>
+    /// <returns>3 minutes when it is unset or empty; else its minutes.</returns>
+    /// <exception cref="FormatException">It is not a whole number from 1 to 60: under a minute a few missed heartbeats
+    /// would end a healthy slot, and past an hour a dead guest would hold its slot as long.</exception>
+    private static TimeSpan Silence(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return TimeSpan.FromMinutes(3);
+        }
+        return int.TryParse(value.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out int minutes)
+            && minutes is >= 1 and <= 60
+            ? TimeSpan.FromMinutes(minutes)
+            : throw new FormatException($"AMB_GUEST_SILENCE_MINUTES must be whole minutes from 1 to 60, not '{value}'");
+    }
 
     /// <summary>Reads <c>AMB_DOCKUR_BOOT_WAIT</c> (<see cref="DockurBootWaitSeconds"/>).</summary>
     /// <param name="value">The variable's value.</param>

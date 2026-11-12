@@ -94,18 +94,28 @@ public sealed class BuildJob : VmJob
 
             (int maxCpu, int clMpCount) = Parallelism(context.Grant);
             int buildTimeout = (int)Math.Max(600, request.RunTimeout.TotalSeconds - 1800);
+            // A worktree whose last build step never ended may hold truncated outputs: this build purges it.
+            string stepPurge = EffectivePurge(vm, key, purge);
+            if (stepPurge != purge)
+            {
+                context.Event("step", $"the last build of {key} was cut off mid-build (its slot was lost or cancelled): purging it first");
+            }
             // -BinLog: msbuild's binary log beside the log (<log>.binlog), kept as the build's build.binlog, and in the
             // request's store folder when the build fails (KeepFailedLogs copies <log>*): a failed build's binlog is the
             // one most worth reading.
             GuestStep buildStep = Script("build", "build.ps1", buildTimeout,
-                ["-Worktree", worktree, "-Configuration", configuration, "-Identity", identity, "-Purge", purge,
+                ["-Worktree", worktree, "-Configuration", configuration, "-Identity", identity, "-Purge", stepPurge,
                  "-MaxCpu", maxCpu.ToString(CultureInfo.InvariantCulture),
                  "-ClMpCount", clMpCount.ToString(CultureInfo.InvariantCulture), "-Layout", layout, "-Log", log, "-BinLog"],
                 progressFile: log);
             context.Event("step", FormattableString.Invariant(
-                $"step build: {configuration}, {identity}, purge {purge}, /m:{maxCpu}, CL_MPCount {clMpCount}, in {context.Grant}"));
+                $"step build: {configuration}, {identity}, purge {stepPurge}, /m:{maxCpu}, CL_MPCount {clMpCount}, in {context.Grant}"));
+            // Listed before the step, taken off after it: a step that never returns (a lost slot, a cancel) leaves the
+            // worktree listed, and its next build purges it (VmRecord.Interrupted).
+            vm = MarkInterrupted(context, vm, key, on: true);
             // A failing build is a result (its log is kept), not an error of the job: the step is run directly.
-            StepResult built = await lease.Session.RunStepAsync(buildStep, Silence, cancel).ConfigureAwait(false);
+            StepResult built = await lease.Session.RunStepAsync(buildStep, SilenceOf(context), cancel).ConfigureAwait(false);
+            vm = MarkInterrupted(context, vm, key, on: false);
             context.Event("step", FormattableString.Invariant(
                 $"step build: {built.Outcome} ({built.DurationSeconds / 60:0.0} min)"));
             LogTails(context, built);
@@ -333,6 +343,51 @@ public sealed class BuildJob : VmJob
             return fresh;
         }
         return vm!;
+    }
+
+    /// <summary>The purge a build step runs with: the requested one, or "force" when the worktree's last build step did
+    /// not end (<see cref="VmRecord.Interrupted"/>), because a build killed mid-write leaves truncated outputs.</summary>
+    /// <param name="vm">The VM's record.</param>
+    /// <param name="key">The worktree's key.</param>
+    /// <param name="requested">The request's purge ("none" or "force").</param>
+    /// <returns>The purge to pass to build.ps1.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="vm"/> is null.</exception>
+    /// <remarks>The build's record keeps the REQUESTED purge: an identical later request must find this build.</remarks>
+    internal static string EffectivePurge(VmRecord vm, string key, string requested)
+    {
+        ArgumentNullException.ThrowIfNull(vm);
+        return vm.Interrupted.Contains(key, StringComparer.Ordinal) ? "force" : requested;
+    }
+
+    /// <summary>The VM record's interrupted worktrees with one worktree put on or taken off.</summary>
+    /// <param name="interrupted">The list before.</param>
+    /// <param name="key">The worktree's key.</param>
+    /// <param name="on">True as its build step starts; false as soon as the step ends.</param>
+    /// <returns>A new list (each key at most once, in the order first listed).</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="interrupted"/> is null.</exception>
+    internal static IReadOnlyList<string> WithInterrupted(IReadOnlyList<string> interrupted, string key, bool on)
+    {
+        ArgumentNullException.ThrowIfNull(interrupted);
+        List<string> next = [.. interrupted.Where(k => !string.Equals(k, key, StringComparison.Ordinal))];
+        if (on)
+        {
+            next.Add(key);
+        }
+        return next;
+    }
+
+    /// <summary>Puts a worktree on the VM record's interrupted list, or takes it off (<see cref="VmRecord.Interrupted"/>).</summary>
+    /// <param name="context">The job's context.</param>
+    /// <param name="vm">The VM's record.</param>
+    /// <param name="key">The worktree's key.</param>
+    /// <param name="on">True just before its build step; false as soon as the step ended.</param>
+    /// <returns>The updated record.</returns>
+    /// <exception cref="IOException">The record could not be written.</exception>
+    private static VmRecord MarkInterrupted(JobContext context, VmRecord vm, string key, bool on)
+    {
+        VmRecord next = vm with { Interrupted = WithInterrupted(vm.Interrupted, key, on) };
+        context.Store.Update<VmRecord>("vms", vm.Name, _ => next, AmbJson.Default.EnvelopeVmRecord);
+        return next;
     }
 
     /// <summary>Records what a worktree holds after a checkout.</summary>
