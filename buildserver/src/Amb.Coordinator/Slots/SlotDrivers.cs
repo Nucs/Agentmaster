@@ -89,6 +89,19 @@ public interface ISlotDriver
     /// <returns>The figures, or null when the driver cannot tell (no cgroup: a local slot, a test driver) or the read
     /// failed: they are a report, never a reason to fail the slot.</returns>
     Task<SlotMemoryStats?> ReadMemoryAsync(string handle, CancellationToken cancel) => Task.FromResult<SlotMemoryStats?>(null);
+
+    /// <summary>The last lines a slot printed (dockur's own messages, QEMU's), read when the slot stopped by itself: the
+    /// slot is removed right after, and with it the only record of why it stopped.</summary>
+    /// <param name="handle">The slot's handle.</param>
+    /// <param name="lines">How many lines at most.</param>
+    /// <param name="cancel">Cancels the read.</param>
+    /// <returns>The lines, oldest first (terminal escape sequences removed, blank lines left out), or null when the driver
+    /// keeps no output (a local slot, a test driver) or the read failed: they are a report, never a reason to fail
+    /// anything.</returns>
+    /// <remarks>On 2026-11-12 the worker machine's first slots over a new image died a minute in, "stopped by itself", and
+    /// only a reproduction showed dockur's own words (its firmware wait ran out): the reason now carries them.</remarks>
+    Task<IReadOnlyList<string>?> ReadLastOutputAsync(string handle, int lines, CancellationToken cancel) =>
+        Task.FromResult<IReadOnlyList<string>?>(null);
 }
 
 /// <summary>A program run by a slot driver, with its output.</summary>
@@ -259,6 +272,96 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
         + ",id=ambdata0,format=raw,cache=none,aio=native,discard=unmap,if=none"
         + " -device scsi-hd,drive=ambdata0,bus=ambdata.0,rotation_rate=1";
 
+    /// <summary>The line of dockur 6.05's /run/entry.sh that gives the firmware 30 s to start booting Windows (it kills
+    /// QEMU after that): <see cref="BootWaitScript"/> rewrites it on a site that sets
+    /// <see cref="CoordinatorOptions.DockurBootWaitSeconds"/>.</summary>
+    internal const string DockurBootWaitLine = "waitForBoot \"$pid\" 30 &";
+
+    /// <summary>dockur's entry script, which <see cref="BootWaitScript"/> patches inside the container.</summary>
+    internal const string DockurEntryScript = "/run/entry.sh";
+
+    /// <summary>The image's own entrypoint (<c>["/usr/bin/tini","-s","/run/entry.sh"]</c> in dockur 6.05), which
+    /// <see cref="BootWaitScript"/> runs after its patch, so dockur starts exactly as without it.</summary>
+    internal const string DockurEntrypoint = "exec /usr/bin/tini -s /run/entry.sh";
+
+    /// <summary>The exit code of <see cref="BootWaitScript"/> when it cannot set the wait (its "amb:" line says why).</summary>
+    internal const int BootWaitRefused = 64;
+
+    /// <summary>The shell script a slot container runs instead of dockur's entrypoint on a site that sets
+    /// <see cref="CoordinatorOptions.DockurBootWaitSeconds"/>: it rewrites dockur's 30-s firmware wait to the given
+    /// seconds, then starts dockur exactly as its image does.</summary>
+    /// <param name="seconds">The wait in seconds (30-1800, as the setting allows).</param>
+    /// <param name="entry">dockur's entry script (<see cref="DockurEntryScript"/>; a test passes a copy).</param>
+    /// <param name="start">The command that starts dockur afterwards (<see cref="DockurEntrypoint"/>; a test passes
+    /// another).</param>
+    /// <returns>The script, for <c>/bin/sh -c</c>.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="seconds"/> is not 30-1800.</exception>
+    /// <exception cref="ArgumentException"><paramref name="entry"/> or <paramref name="start"/> is empty.</exception>
+    /// <remarks>
+    /// <para>Why: the worker machine's UEFI firmware needed 20 s to reach Windows' boot manager on a busy host, and more
+    /// than 30 s twice on 2026-11-12, so dockur killed QEMU and the slot "stopped by itself" a minute in.</para>
+    /// <para>The rewrite takes only the exact line (<see cref="DockurBootWaitLine"/>); without it (another dockur version
+    /// under <see cref="CoordinatorOptions.DockurImage"/>), or when the rewrite did not take, the script prints an "amb:"
+    /// line and exits <see cref="BootWaitRefused"/> before anything starts: a silent fall back to 30 s would bring back
+    /// slots that die a minute in. The slot then stops at once, and the reason it is given quotes that line
+    /// (<see cref="ISlotDriver.ReadLastOutputAsync"/>).</para>
+    /// <para>The container's own copy of entry.sh changes (its writable layer); the image stays as it is.</para>
+    /// </remarks>
+    internal static string BootWaitScript(int seconds, string entry = DockurEntryScript, string start = DockurEntrypoint)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(seconds, 30);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(seconds, 1800);
+        ArgumentException.ThrowIfNullOrWhiteSpace(entry);
+        ArgumentException.ThrowIfNullOrWhiteSpace(start);
+        string wait = seconds.ToString(CultureInfo.InvariantCulture);
+        string newLine = "waitForBoot \"$pid\" " + wait + " &";
+        // Every literal is single-quoted, so the shell expands nothing in it ("$pid" stays the text dockur's line holds).
+        // In sed's pattern \$ is a literal '$' and the last '$' anchors the line end; in its replacement \& is a literal '&'.
+        return string.Join('\n',
+            "f=" + ShQuote(entry),
+            "old=" + ShQuote(DockurBootWaitLine),
+            "new=" + ShQuote(newLine),
+            "if ! grep -qxF \"$old\" \"$f\"; then",
+            "  echo \"amb: dockur's firmware wait ($old) is not in $f: this dockur image is not the one AMB_DOCKUR_BOOT_WAIT knows; unset it, or teach PodmanSlotDriver.BootWaitScript the new line\" >&2",
+            "  exit " + BootWaitRefused.ToString(CultureInfo.InvariantCulture),
+            "fi",
+            "sed -i " + ShQuote("s/^waitForBoot \"\\$pid\" 30 &$/waitForBoot \"$pid\" " + wait + " \\&/") + " \"$f\"",
+            "if ! grep -qxF \"$new\" \"$f\"; then",
+            "  echo \"amb: dockur's firmware wait in $f could not be set to " + wait + " s\" >&2",
+            "  exit " + BootWaitRefused.ToString(CultureInfo.InvariantCulture),
+            "fi",
+            "echo \"amb: dockur's firmware wait set to " + wait + " s\"",
+            start);
+    }
+
+    /// <summary>Quotes a text for a POSIX shell: inside single quotes nothing is expanded; a single quote itself is
+    /// closed, escaped and reopened.</summary>
+    /// <param name="text">The text.</param>
+    /// <returns>The quoted text.</returns>
+    internal static string ShQuote(string text) => "'" + text.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
+
+    /// <summary>Terminal escape sequences in a slot's output (dockur colors its lines; the firmware draws its screen with
+    /// cursor moves and mode switches): CSI sequences, the rest of the two-character escapes, and OSC titles.</summary>
+    private static readonly System.Text.RegularExpressions.Regex Escapes = new(
+        @"\x1B\[[0-9;?=]*[ -/]*[@-~]|\x1B\][^\x07\x1B]*(\x07|\x1B\\)|\x1B[@-Z\\-_]",
+        System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>A slot's output as readable lines: escapes removed, carriage returns taken as line breaks (the firmware
+    /// redraws lines with them), blank lines left out, the last <paramref name="lines"/> kept.</summary>
+    /// <param name="text">The output.</param>
+    /// <param name="lines">How many lines to keep at most.</param>
+    /// <returns>The lines, oldest first.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="text"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="lines"/> is negative.</exception>
+    internal static IReadOnlyList<string> CleanOutputLines(string text, int lines)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        ArgumentOutOfRangeException.ThrowIfNegative(lines);
+        string[] all = [.. Escapes.Replace(text, "")
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)];
+        return all.Length <= lines ? all : all[^lines..];
+    }
+
     /// <inheritdoc/>
     public string Name => "podman";
 
@@ -321,7 +424,16 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
             string imagesRoot = Path.GetDirectoryName(spec.ImageDir)!;
             args.AddRange(["-e", "VERSION=" + version, "-v", imagesRoot + ":" + imagesRoot + ":ro"]);
         }
-        args.Add(options.DockurImage);
+        if (options.DockurBootWaitSeconds is int bootWait)
+        {
+            // A slow host's firmware misses dockur's hard-coded 30-s wait (BootWaitScript): a shell patches that one line,
+            // then starts dockur's own entrypoint. The script's arguments follow the image's name.
+            args.AddRange(["--entrypoint", "/bin/sh", options.DockurImage, "-c", BootWaitScript(bootWait)]);
+        }
+        else
+        {
+            args.Add(options.DockurImage);
+        }
         CommandResult run = await Commands.RunAsync("podman", args, TimeSpan.FromMinutes(2), cancel, env: Env)
             .ConfigureAwait(false);
         if (run.ExitCode != 0)
@@ -495,6 +607,49 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
         {
             // A report only: a slot whose figures cannot be read is stopped all the same.
             log.LogInformation("slot {Handle}: its memory figures could not be read: {Error}", handle, ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>A name this driver gives its containers (<see cref="ContainerPrefix"/> and a slot id): only such a name
+    /// goes into <see cref="ReadLastOutputAsync"/>'s shell command.</summary>
+    private static readonly System.Text.RegularExpressions.Regex ContainerName = new(
+        "^" + ContainerPrefix + "[A-Za-z0-9-]+$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <inheritdoc/>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="lines"/> is not positive.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> was cancelled.</exception>
+    /// <remarks>Through <c>podman logs</c> run by a shell that joins the container's two streams in the order they were
+    /// written (dockur prints its errors to stderr, QEMU's console to stdout); the container is still there, because
+    /// nothing removes a slot's container before its stop. A handle that is not one of this driver's names, a podman that
+    /// fails, or a read that times out answers null and is logged.</remarks>
+    public async Task<IReadOnlyList<string>?> ReadLastOutputAsync(string handle, int lines, CancellationToken cancel)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(lines);
+        if (!ContainerName.IsMatch(handle))
+        {
+            log.LogInformation("slot {Handle}: not a slot container's name; its output is not read", handle);
+            return null;
+        }
+        try
+        {
+            // Four times the lines asked for: escape-only and blank lines are dropped afterwards.
+            string tail = (lines * 4).ToString(CultureInfo.InvariantCulture);
+            CommandResult result = await Commands.RunAsync("sh",
+                ["-c", "podman logs --tail " + tail + " " + ShQuote(handle) + " 2>&1"], TimeSpan.FromSeconds(30), cancel,
+                env: Env).ConfigureAwait(false);
+            if (result.ExitCode != 0)
+            {
+                log.LogInformation("slot {Handle}: its output could not be read: {Error}", handle,
+                    (result.Output + result.Error).Trim());
+                return null;
+            }
+            return CleanOutputLines(result.Output, lines);
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or TimeoutException or IOException)
+        {
+            // A report only: the slot is given up all the same.
+            log.LogInformation("slot {Handle}: its output could not be read: {Error}", handle, ex.Message);
             return null;
         }
     }

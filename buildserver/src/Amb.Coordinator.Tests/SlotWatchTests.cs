@@ -75,6 +75,41 @@ public sealed class SlotWatchTests : IDisposable
         Assert.Empty(_slots.Active);
     }
 
+    /// <summary>A slot that stops by itself is given up with its own last output in the reason (dockur's error, read
+    /// before the stop removes it with the slot); the test above, whose driver keeps no output, gets the plain reason.</summary>
+    /// <returns>A task.</returns>
+    [Fact]
+    public async Task VmThatStopsIsGivenUpWithItsLastOutput()
+    {
+        _driver.LastOutput =
+        [
+            "Booting Windows using QEMU v11.1.0...",
+            "ERROR: Timeout while waiting for QEMU to boot the machine, terminating...",
+        ];
+        SlotLease lease = await _slots.StartAsync(Request(), "am-e2e", Grant, CancellationToken.None);
+        Task<GuestHello> hello = lease.Session.WaitHelloAsync(TimeSpan.FromMinutes(10), CancellationToken.None);
+        _driver.Alive = false;
+        Assert.True(await AdvanceUntilAsync(() => hello.IsCompleted));
+        SlotLostException lost = await Assert.ThrowsAsync<SlotLostException>(() => hello);
+        Assert.Contains("its VM stopped by itself (the fake slot is not running); its last output: Booting Windows using "
+            + "QEMU v11.1.0... | ERROR: Timeout while waiting for QEMU to boot the machine, terminating...", lost.Message,
+            StringComparison.Ordinal);
+        Assert.Equal(SlotManager.LastOutputLines, _driver.LinesAsked);
+        await _slots.StopAsync(lease, graceful: false);
+    }
+
+    /// <summary>A long output is cut at the front, so the reason keeps the newest line (the one that says why), and stays
+    /// within <see cref="SlotManager.LastOutputChars"/>.</summary>
+    [Fact]
+    public void LastOutputKeepsTheNewestLines()
+    {
+        Assert.Equal("one | two", SlotManager.LastOutput(["one", "two"]));
+        string text = SlotManager.LastOutput([new string('x', 1000), "ERROR: the reason"]);
+        Assert.Equal(SlotManager.LastOutputChars, text.Length);
+        Assert.StartsWith("...", text, StringComparison.Ordinal);
+        Assert.EndsWith("x | ERROR: the reason", text, StringComparison.Ordinal);
+    }
+
     /// <summary>An outstanding step fails as lost as soon as the slot is abandoned, not after the silence limit.</summary>
     /// <returns>A task.</returns>
     [Fact]
@@ -249,5 +284,18 @@ public sealed class SlotWatchTests : IDisposable
 
         /// <inheritdoc/>
         public Task<bool> SetBalloonAsync(string handle, long targetMiB, CancellationToken cancel) => Task.FromResult(false);
+
+        /// <summary>What <see cref="ReadLastOutputAsync"/> answers: null (the default) is a driver that keeps no output.</summary>
+        public IReadOnlyList<string>? LastOutput { get; set; }
+
+        /// <summary>The line count the last <see cref="ReadLastOutputAsync"/> call asked for (0 before any).</summary>
+        public int LinesAsked { get; private set; }
+
+        /// <inheritdoc/>
+        public Task<IReadOnlyList<string>?> ReadLastOutputAsync(string handle, int lines, CancellationToken cancel)
+        {
+            LinesAsked = lines;
+            return Task.FromResult(LastOutput);
+        }
     }
 }

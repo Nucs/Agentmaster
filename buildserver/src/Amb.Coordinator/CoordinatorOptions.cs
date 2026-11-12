@@ -38,6 +38,15 @@ public sealed record CoordinatorOptions
     /// the version every measurement used).</summary>
     public required string DockurImage { get; init; }
 
+    /// <summary>How long dockur may wait for a slot's firmware to start booting Windows before it kills QEMU, in seconds
+    /// (<c>AMB_DOCKUR_BOOT_WAIT</c>, 30-1800; unset or empty = dockur's own 30 s, which homepc's site keeps).</summary>
+    /// <remarks>dockur 6.05 hard-codes the 30 s (<c>waitForBoot "$pid" 30 &amp;</c> in its /run/entry.sh). The worker
+    /// machine's UEFI firmware needed 20 s to reach Windows' boot manager on a busy host, and more than 30 s twice on
+    /// 2026-11-12, so those slots "stopped by themselves" a minute in; its site sets 180. When set, every slot container
+    /// patches that one line before dockur starts, and refuses to start when the line is not there (a changed
+    /// <see cref="DockurImage"/>): <see cref="Slots.PodmanSlotDriver.BootWaitScript"/>.</remarks>
+    public int? DockurBootWaitSeconds { get; init; }
+
     /// <summary>Minutes with no active request and no slot after which the coordinator exits
     /// (<c>AMB_IDLE_EXIT_MINUTES</c>; default 10, 0 = never): the site is lazy, and the distro stops when its last process
     /// ends (DESIGN.md §5.2).</summary>
@@ -175,8 +184,8 @@ public sealed record CoordinatorOptions
     /// <param name="env">Reads one variable (Environment.GetEnvironmentVariable in production; a dictionary in tests).</param>
     /// <returns>The settings.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="env"/> is null.</exception>
-    /// <exception cref="FormatException">A numeric variable is not a number, a "least:most" pair is malformed, or
-    /// <c>AMB_BUILD_LETTER</c> is not a build-id letter.</exception>
+    /// <exception cref="FormatException">A numeric variable is not a number, a "least:most" pair is malformed,
+    /// <c>AMB_BUILD_LETTER</c> is not a build-id letter, or <c>AMB_DOCKUR_BOOT_WAIT</c> is not 30-1800 seconds.</exception>
     /// <remarks>Three variables tell UNSET from EMPTY: <c>AMB_SOURCE_REPO</c>, <c>AMB_E2E_SOURCE</c> and
     /// <c>AMB_WINDOWS_PWSH</c> (and <c>AMB_HOSTFACTS</c>, as before). Unset keeps homepc's default; set to "" turns the
     /// feature off, which is how the worker machine's site says it cannot read K: or reach Windows.</remarks>
@@ -199,6 +208,7 @@ public sealed record CoordinatorOptions
             HostFactsCommand = env("AMB_HOSTFACTS") ?? "/mnt/q/buildserver/bin/amb-hostfacts.exe",
             GuestAgentPath = env("AMB_GUEST_AGENT") is { Length: > 0 } a ? a : Path.Combine(root, "bin", "amb-guest.exe"),
             DockurImage = env("AMB_DOCKUR_IMAGE") is { Length: > 0 } i ? i : "docker.io/dockurr/windows:6.05",
+            DockurBootWaitSeconds = BootWait(env("AMB_DOCKUR_BOOT_WAIT")),
             // Set but empty is "no default suite" (the worker machine's site): e2e suites then come from the mirror.
             E2eSourceDir = env("AMB_E2E_SOURCE") is { } e ? e : "/mnt/k/source/Agentmaster/e2e",
             IdleExitMinutes = env("AMB_IDLE_EXIT_MINUTES") is { Length: > 0 } m
@@ -244,6 +254,23 @@ public sealed record CoordinatorOptions
     /// <exception cref="FormatException">The value is not a whole non-negative number.</exception>
     private static long Number(string? value, long fallback) =>
         string.IsNullOrWhiteSpace(value) ? fallback : long.Parse(value.Trim(), NumberStyles.None, CultureInfo.InvariantCulture);
+
+    /// <summary>Reads <c>AMB_DOCKUR_BOOT_WAIT</c> (<see cref="DockurBootWaitSeconds"/>).</summary>
+    /// <param name="value">The variable's value.</param>
+    /// <returns>Null when it is unset or empty (dockur's own 30 s); else the seconds.</returns>
+    /// <exception cref="FormatException">It is not a whole number from 30 to 1800: a wait below dockur's own would make
+    /// slow boots fail sooner, and one past half an hour would only hide a firmware that hangs.</exception>
+    private static int? BootWait(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+        return int.TryParse(value.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out int seconds)
+            && seconds is >= 30 and <= 1800
+            ? seconds
+            : throw new FormatException($"AMB_DOCKUR_BOOT_WAIT must be whole seconds from 30 to 1800, not '{value}'");
+    }
 
     /// <summary>A kind's slot with its memory and vCPUs replaced by "least:most" variables (a single number is both).</summary>
     /// <param name="basis">The kind's homepc default (its disk is kept).</param>

@@ -59,6 +59,7 @@ public sealed class WorkerSiteTests : IDisposable
         ["AMB_E2E_VCPUS"] = "4:6",
         ["AMB_E2E_GUEST_MEMORY_MIB"] = "0",
         ["AMB_CAPPED_SLOTS"] = "0",
+        ["AMB_DOCKUR_BOOT_WAIT"] = "180",
         ["AMB_RESERVE_HOST_MEMORY_MIB"] = "8192",
         ["AMB_USABLE_VCPUS"] = "20",
         ["AMB_RESERVE_DISK_MIB"] = "51200",
@@ -83,6 +84,7 @@ public sealed class WorkerSiteTests : IDisposable
         Assert.Equal(new Resources(6144, 4, Resources.Gib(1)), worker.Sizing.E2e!.Min);
         Assert.Equal(new Resources(6144, 6, Resources.Gib(3)), worker.Sizing.E2e!.Preferred);
         Assert.Equal(0, worker.Sizing.E2eGuestMemoryMiB);
+        Assert.Equal(180, worker.DockurBootWaitSeconds);
         Assert.Equal(Path.Combine(_root, "tmp"), worker.TmpDir);
 
         CoordinatorOptions homepc = CoordinatorOptions.FromEnvironment(name => name == "AMB_ROOT" ? _root : null);
@@ -94,6 +96,8 @@ public sealed class WorkerSiteTests : IDisposable
         Assert.Null(homepc.Sizing.Build);
         Assert.Null(homepc.Sizing.E2e);
         Assert.Null(homepc.Sizing.E2eGuestMemoryMiB);
+        // homepc keeps dockur's own 30-s firmware wait: its slots boot in seconds.
+        Assert.Null(homepc.DockurBootWaitSeconds);
     }
 
     /// <summary>A malformed size, a zero, a least above the most, or a letter that request or slot ids use is refused at
@@ -111,12 +115,131 @@ public sealed class WorkerSiteTests : IDisposable
             ("AMB_BUILD_LETTER", "W"),
             ("AMB_BUILD_LETTER", "wk"),
             ("AMB_USABLE_VCPUS", "-1"),
+            ("AMB_DOCKUR_BOOT_WAIT", "29"),
+            ("AMB_DOCKUR_BOOT_WAIT", "1801"),
+            ("AMB_DOCKUR_BOOT_WAIT", "3m"),
         })
         {
             Dictionary<string, string> env = WorkerEnvironment(_root);
             env[name] = value;
             Assert.Throws<FormatException>(() => CoordinatorOptions.FromEnvironment(key => env.GetValueOrDefault(key)));
         }
+    }
+
+    /// <summary>The firmware-wait patch, run by a real POSIX shell over a copy of dockur 6.05's line: only that exact line
+    /// changes (a comment that mentions it stays), the script says what it set, and then starts what it was given.</summary>
+    [Fact]
+    public void BootWaitScriptRewritesDockursWaitAndStartsDockur()
+    {
+        string entry = Path.Combine(_root, "entry.sh");
+        const string Comment = "# waitForBoot \"$pid\" 30 & gives the firmware 30 s";
+        File.WriteAllText(entry, "pid=$!\n" + Comment + "\n" + PodmanSlotDriver.DockurBootWaitLine + "\n\nrc=0\n");
+        // The test's "dockur" prints the patched file: what the real entrypoint would run.
+        string script = PodmanSlotDriver.BootWaitScript(180, ShellPath(entry), "cat \"$f\"");
+        (int exit, string output, string error) = RunPosixShell(script);
+        Assert.True(exit == 0, $"exit {exit}: {error}");
+        Assert.Contains("amb: dockur's firmware wait set to 180 s", output, StringComparison.Ordinal);
+        Assert.Equal("pid=$!\n" + Comment + "\nwaitForBoot \"$pid\" 180 &\n\nrc=0\n",
+            File.ReadAllText(entry).Replace("\r\n", "\n", StringComparison.Ordinal));
+    }
+
+    /// <summary>A dockur whose entry script lacks the exact line (another version) is refused before anything starts:
+    /// exit 64, an "amb:" line naming the setting, and the file untouched.</summary>
+    [Fact]
+    public void BootWaitScriptRefusesAnotherDockur()
+    {
+        string entry = Path.Combine(_root, "entry.sh");
+        const string Other = "pid=$!\nwaitForBoot \"$pid\" 45 &\n";
+        File.WriteAllText(entry, Other);
+        (int exit, string output, string error) = RunPosixShell(
+            PodmanSlotDriver.BootWaitScript(180, ShellPath(entry), "echo dockur-started"));
+        Assert.Equal(PodmanSlotDriver.BootWaitRefused, exit);
+        Assert.Contains("is not in", error, StringComparison.Ordinal);
+        Assert.Contains("AMB_DOCKUR_BOOT_WAIT", error, StringComparison.Ordinal);
+        Assert.DoesNotContain("dockur-started", output, StringComparison.Ordinal);
+        Assert.Equal(Other, File.ReadAllText(entry));
+    }
+
+    /// <summary>The script's wait stays in the setting's range, and quoting survives a single quote in a path.</summary>
+    [Fact]
+    public void BootWaitScriptChecksItsArguments()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => PodmanSlotDriver.BootWaitScript(29));
+        Assert.Throws<ArgumentOutOfRangeException>(() => PodmanSlotDriver.BootWaitScript(1801));
+        Assert.Throws<ArgumentException>(() => PodmanSlotDriver.BootWaitScript(180, " "));
+        Assert.Equal("'it'\\''s'", PodmanSlotDriver.ShQuote("it's"));
+        string script = PodmanSlotDriver.BootWaitScript(180);
+        Assert.StartsWith("f='/run/entry.sh'\n", script, StringComparison.Ordinal);
+        Assert.EndsWith("\nexec /usr/bin/tini -s /run/entry.sh", script, StringComparison.Ordinal);
+    }
+
+    /// <summary>A slot's output as dockur prints it (colors, the firmware's screen codes, carriage returns) comes out as
+    /// plain lines, the last ones kept.</summary>
+    [Fact]
+    public void SlotOutputIsCleaned()
+    {
+        const string Raw = "\u001b[1;34m❯ \u001b[1;36mBooting Windows using QEMU v11.1.0...\u001b[0m\n\n"
+            + "\u001b[2J\u001b[001;001H\u001b[=3h\u001b[8;042;160t\r\n"
+            + "\u001b[1;31m❯ ERROR: Timeout while waiting for QEMU to boot the machine, terminating...\u001b[0m\n"
+            + "qemu-system-x86_64: terminating on signal 15 from pid 694 (bash)\r❯ Shutdown completed!\n";
+        Assert.Equal(new[]
+        {
+            "❯ ERROR: Timeout while waiting for QEMU to boot the machine, terminating...",
+            "qemu-system-x86_64: terminating on signal 15 from pid 694 (bash)",
+            "❯ Shutdown completed!",
+        }, PodmanSlotDriver.CleanOutputLines(Raw, 3));
+        Assert.Equal(4, PodmanSlotDriver.CleanOutputLines(Raw, 10).Count);
+        Assert.Empty(PodmanSlotDriver.CleanOutputLines("\u001b[2J\r\n\n", 4));
+    }
+
+    /// <summary>A path as the POSIX shell of <see cref="RunPosixShell"/> reads it: forward slashes (Git for Windows' sh
+    /// takes C:/... as it is).</summary>
+    /// <param name="path">The path.</param>
+    /// <returns>The path with forward slashes.</returns>
+    private static string ShellPath(string path) => path.Replace('\\', '/');
+
+    /// <summary>Runs a script with a POSIX shell: /bin/sh on Linux; on Windows the sh of Git for Windows (found beside the
+    /// git these tests already need), its folder first on PATH so that its own grep and sed run.</summary>
+    /// <param name="script">The script.</param>
+    /// <returns>The exit code and both outputs.</returns>
+    /// <exception cref="Xunit.Sdk.XunitException">No POSIX shell was found: the script cannot be proved without one.</exception>
+    private static (int Exit, string Output, string Error) RunPosixShell(string script)
+    {
+        string shell = "/bin/sh";
+        string path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        if (OperatingSystem.IsWindows())
+        {
+            // git --exec-path is <git>/mingw64/libexec/git-core; the shell is <git>/usr/bin/sh.exe.
+            var probe = new System.Diagnostics.ProcessStartInfo("git", "--exec-path")
+            {
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+            };
+            using (System.Diagnostics.Process git = System.Diagnostics.Process.Start(probe)!)
+            {
+                string exec = git.StandardOutput.ReadToEnd().Trim();
+                git.WaitForExit();
+                string bin = Path.GetFullPath(Path.Combine(exec, "..", "..", "..", "usr", "bin"));
+                shell = Path.Combine(bin, "sh.exe");
+                path = bin + Path.PathSeparator + path;
+            }
+            Assert.True(File.Exists(shell), $"no POSIX sh at {shell}: install Git for Windows to run this test");
+        }
+        var info = new System.Diagnostics.ProcessStartInfo(shell)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        info.ArgumentList.Add("-c");
+        info.ArgumentList.Add(script);
+        info.Environment["PATH"] = path;
+        using System.Diagnostics.Process process = System.Diagnostics.Process.Start(info)!;
+        // Both streams drained at once: a full pipe would block the shell while the test waits on the other one.
+        Task<string> error = process.StandardError.ReadToEndAsync();
+        string output = process.StandardOutput.ReadToEnd();
+        process.WaitForExit();
+        return (process.ExitCode, output, error.GetAwaiter().GetResult());
     }
 
     /// <summary>The worker's request book gives builds its own sizes and e2e VMs uncapped; homepc's keeps the tuned

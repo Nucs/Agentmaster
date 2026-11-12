@@ -215,7 +215,7 @@ python buildserver/image/images.py list
 ## Build and test
 
 ```text
-dotnet test buildserver/src/Buildserver.slnx            # build everything + 108 unit tests (output in Q:\tmp\buildserver-build)
+dotnet test buildserver/src/Buildserver.slnx            # build everything + 114 unit tests (output in Q:\tmp\buildserver-build)
 python buildserver/tests/local_chain.py                 # the chain without a VM (Q:\tmp\buildserver-test, removed after)
 python buildserver/tests/site_outcomes.py               # Phase 1's done-when on the real site: e2e passed, failed, cancelled, lost VM
 python buildserver/tests/site_build.py                  # the build MVP's done-when on the real site (it builds: ask first)
@@ -304,7 +304,17 @@ python buildserver/image/images.py --site worker base | e2e | build-image | chec
   /srv/buildserver/bin/coordinator-up.sh` only when it does not answer.
 - **Images are made there** (the owner's choice): `images.py --site worker` uploads the kit a request stages
   (`image/oem`, `image/steps`, VSSetup, `e2e/`) into `/srv/buildserver/kit/` first, SHA-256 checked; the ISO and the
-  pinned downloads come from the worker's own internet connection.
+  pinned downloads come from the worker's own internet connection. ⚠ Two `images.py` runs share one kit folder (each
+  upload replaces `kit/image-steps` whole): start the second after the first one's slot shows its "staged" lines.
+- **It is slower than this PC where a VM starts** (measured 2026-11-12, with TraderLab's workers and two desktop VMs
+  busy on the host): the base install took 88.1 min (archive.org's ISO alone 20-25 min, then 61 min of Windows setup on
+  4 vCPUs of the 2013 Xeon; this PC: 16.5 min), so an install may wait 120 min for its guest's hello; a smoke boot of
+  `am-base` was ready in 128-262 s (this PC: 30-75 s). The VM's UEFI firmware needed 20 s, and more than 30 s twice, to
+  start Windows' boot manager, and dockur kills QEMU after 30 s: those slots "stopped by themselves" a minute in. The
+  site therefore sets `AMB_DOCKUR_BOOT_WAIT=180`, and every slot container rewrites dockur's wait before dockur starts
+  (`PodmanSlotDriver.BootWaitScript`; it refuses to start when a different dockur lacks the exact line). A slot that
+  stops by itself is given up with its own last output lines in the request's message, so dockur's reason shows in
+  `amb show` (`ISlotDriver.ReadLastOutputAsync`).
 - **cgroup v2 in a container** (`worker/files/amb-cgroups.start`, at every boot): the namespace root may hold no process
   when it delegates controllers, so its processes move to `/init` first; without it podman fails with "controller pids
   is not available". Alpine's LXC configuration drops `mknod`, which crun needs for a slot's `/dev/kvm`: CT 803 keeps it
@@ -326,7 +336,7 @@ python buildserver/image/images.py --site worker base | e2e | build-image | chec
 | [`steps/install/`](steps/install) | `install-build.ps1`: the Windows side of `amb install` (stage into the free slot, check, wait for the requesting session, the mutex, the swap, the watch), run by the coordinator through WSL's interop | in use (2026-10-29) |
 | [`measure/`](measure/README.md) | the measurements and proofs behind DESIGN.md §16, with their raw results | P0.1 (§16.9), P0.5's comparison (§16.11) and P0.4's native half (§16.12) |
 | [`src/Amb.Core`](src/Amb.Core) | the shared core: the allocation rule (§3, homepc's and a Linux site's), the request / build / slot / VM model (build ids by site letter), the guest and API protocol, the atomic record store (§6) | 31 unit tests (`src/Amb.Core.Tests`) |
-| [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API (artifacts streamed by name; the source mirrors' tips and pushed bundles), the scheduler (admission by priority × availability, wait and run timeouts, cancel, one build at a time, existing builds answered without a slot), the guest broker, the jobs (import, a pulled build too; smoke, install, layer, e2e, a suite out of the mirror too; build, deploy), the source mirror (fetching K:, or taking pushes; snapshots too) and its bundles, the slot manager and its drivers (podman + dockur, kept VMs with a data disk, capped slots with the site's swap file; cgroup v1 and v2 memory figures; local, for tests); its settings say which site it serves (homepc's or a Linux one) | runs in both sites; 62 unit tests (`src/Amb.Coordinator.Tests`) |
+| [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API (artifacts streamed by name; the source mirrors' tips and pushed bundles), the scheduler (admission by priority × availability, wait and run timeouts, cancel, one build at a time, existing builds answered without a slot), the guest broker, the jobs (import, a pulled build too; smoke, install, layer, e2e, a suite out of the mirror too; build, deploy), the source mirror (fetching K:, or taking pushes; snapshots too) and its bundles, the slot manager and its drivers (podman + dockur, kept VMs with a data disk, capped slots with the site's swap file, a site's longer firmware wait, a stopped slot's last output; cgroup v1 and v2 memory figures; local, for tests); its settings say which site it serves (homepc's or a Linux one) | runs in both sites; 68 unit tests (`src/Amb.Coordinator.Tests`) |
 | [`src/Amb.GuestAgent`](src/Amb.GuestAgent) | `amb-guest.exe` (Native AOT, 7 MB): the agent in every VM; hello, heartbeat with the guest's memory, one step at a time by long poll (run, fetch, expand, put, shutdown) | in every slot |
 | [`src/Amb.HostFacts`](src/Amb.HostFacts) | `amb-hostfacts.exe` (Native AOT): Windows' available memory, free commit, Q: free space and a full-screen game, as one line of JSON; the coordinator runs it every 10 s through WSL's interop | in use |
 | [`src/Amb.Cli`](src/Amb.Cli) | `amb.exe`: the command line above; `Sites.cs` (the two sites, a build id's site by its letter), `SourcePush.cs` (a commit pushed to the worker as a bundle of what it lacks), `WorkingTreeSnapshot.cs` (`--snapshot`), `ProcessAncestry.cs` (the requesting claude.exe of `amb install`: the process chain, else `CLAUDE_PID`) | in use; 15 unit tests (`src/Amb.Cli.Tests`) |

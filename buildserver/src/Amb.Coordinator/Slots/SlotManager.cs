@@ -43,6 +43,27 @@ public sealed class SlotManager
     /// <summary>How often the liveness watch asks the driver whether a slot still runs.</summary>
     public static readonly TimeSpan WatchInterval = TimeSpan.FromSeconds(15);
 
+    /// <summary>How many of a slot's last output lines the reason of a slot that stopped by itself quotes (dockur's
+    /// error is the last or second-to-last line; the lines before it say what it was doing).</summary>
+    internal const int LastOutputLines = 4;
+
+    /// <summary>The most characters of a stopped slot's output the reason quotes: it becomes the request's message, shown
+    /// in `amb show` and `amb list`.</summary>
+    internal const int LastOutputChars = 600;
+
+    /// <summary>A stopped slot's last output lines as one part of a reason: joined by " | ", the oldest characters cut when
+    /// the whole is longer than <see cref="LastOutputChars"/> (the newest line says most).</summary>
+    /// <param name="lines">The lines, oldest first.</param>
+    /// <returns>The text.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="lines"/> is null.</exception>
+    internal static string LastOutput(IReadOnlyList<string> lines)
+    {
+        ArgumentNullException.ThrowIfNull(lines);
+        string text = string.Join(" | ", lines);
+        // "..." in ASCII: the worker's service log is written in the locale OpenRC gives it.
+        return text.Length <= LastOutputChars ? text : "..." + text[^(LastOutputChars - 3)..];
+    }
+
     /// <summary>How long a slot whose disks are thrown away may take to stop by itself after its guest's shutdown step,
     /// before it is removed by force (see <see cref="StopAsync"/>).</summary>
     public static readonly TimeSpan SelfStopGrace = TimeSpan.FromSeconds(20);
@@ -338,6 +359,13 @@ public sealed class SlotManager
                 if (deadAnswers >= 2)
                 {
                     string reason = $"slot {slotId}: its VM stopped by itself (the {_driver.Name} slot is not running)";
+                    // Its own last words (dockur's), before the stop removes the slot and them: without them the cause
+                    // took a reproduction to find (2026-11-12, ISlotDriver.ReadLastOutputAsync).
+                    if (await _driver.ReadLastOutputAsync(lease.Handle, LastOutputLines, stop.Token).ConfigureAwait(false)
+                        is { Count: > 0 } last)
+                    {
+                        reason += "; its last output: " + LastOutput(last);
+                    }
                     _log.LogWarning("{Reason}", reason);
                     lease.Session.Abandon(reason);
                     return;

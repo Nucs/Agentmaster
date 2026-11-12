@@ -422,6 +422,15 @@ the shape:
   `Imported`, so homepc's "the build exists" never answers a build request with a pull that lacks the portable zip).
 - **Always up:** an OpenRC service under supervise-daemon, restarted 5 s after any exit; no idle exit (§5.2's lazy
   site is for the owner's own PC).
+- **A slower start, a longer firmware wait:** the 2013 Xeon, shared with TraderLab's workers and desktop VMs, starts a
+  VM more slowly than homepc (measured 2026-11-12: the base install 88.1 min against 16.5; a smoke ready in 128-262 s
+  against 30-75). dockur gives the firmware 30 s to start Windows' boot manager and then kills QEMU; the worker's took
+  20 s, and over 30 s twice, so two slots "stopped by themselves" a minute in. dockur has no setting for that wait, so a
+  site may set one (`AMB_DOCKUR_BOOT_WAIT`, the worker 180 s): each slot container then runs a shell that rewrites
+  that one line of dockur's entry script and starts dockur's own entrypoint (`PodmanSlotDriver.BootWaitScript`), and
+  refuses to start when the line is not there, so a new dockur image never falls back to 30 s unseen. A slot that stops
+  by itself is given up with its last output lines in the reason (`ISlotDriver.ReadLastOutputAsync`): the first two
+  such failures needed a reproduction to see dockur's message, because the container went with the slot.
 - **Risks:** the link home is the only way in (when it is down, `--site home` builds here as before); drive 2 is not
   backed up and may be lost (every image can be made again, every build id built again); the machine is rented, and its
   provider's own console is the way back when it does not boot (`workermachine/provider.md`).
