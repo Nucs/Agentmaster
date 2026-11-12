@@ -4058,8 +4058,15 @@ namespace Agentmaster
         // boundary (FolderKeyCovers: K:\src covers K:\src\app, never K:\srcfoo); false: exactly that folder — the user's
         // "some way to get Exactly that folder", the folder card's "Include subfolders" unchecked for this pick.
         bool includeSubfolders{ true };
+        // true: this folder's chip is SWITCHED OFF (SIDE_PANEL.md §2l "Pause filter, Resume filter and a chip's click" — the
+        // user's "clicking each filter item with x toggle it", 2026-11-12): the folder stays picked and keeps its chip,
+        // dimmed, but keeps no session until the chip is clicked again. With every folder off, By Folder constrains nothing.
+        // ⚠ Only a WINDOW'S RECORD carries it. By Folder's pick history reuses this type and must never store it: every
+        // history entry is rebuilt from the path and the choice alone (NormalizeSidePanelFolderHistory), so a folder
+        // switched off in one window can never come back off from the list every window shares.
+        bool off{ false };
 
-        // Equal when both the spelling and the choice are (the edits compare folders by NormDirKey on their own).
+        // Equal when the spelling, the choice and the switch are (the edits compare folders by NormDirKey on their own).
         bool operator==(const SidePanelFolderFilter&) const = default;
     };
 
@@ -4069,6 +4076,10 @@ namespace Agentmaster
     // Persisted per window only (WindowRecord::sidePanelFilters — never an AppSettings default: a new window starts unfiltered,
     // so one window's narrowed list can never hide another window's cards). The typed text in the filter box is NOT part of it
     // (the box starts empty at every open, as before). Every writer keeps it normalized (NormalizeSidePanelFilters).
+    // ⚠ PICKED IS NOT APPLIED (SIDE_PANEL.md §2l "Pause filter, Resume filter and a chip's click"): a pick can be switched
+    // off without being dropped — one chip at a time (`offFacets`, SidePanelFolderFilter::off) or the whole row (`paused`).
+    // Whoever narrows a list reads the record through SidePanelFiltersInEffect (SidePanelFilters.h; SidePanelFilterMatcher
+    // does so itself); the members below say what is PICKED: what the chips row and the funnel's panel show.
     struct SidePanelFilters
     {
         std::vector<SidePanelFolderFilter> folders; // By Folder: OR between them; empty = no folder constraint
@@ -4080,6 +4091,21 @@ namespace Agentmaster
         bool pinned{ false }; // the flag "Pinned to top": only cards pinned with Pin to Top (SIDE_PANEL.md §2j)
         bool favorite{ false }; // the flag "Favorite": only ★ favorites (FAVORITES.md)
         uint32_t activeWithinMinutes{ 0 }; // Active within: 0 = any time; else only sessions active in the last N minutes
+        // The chips SWITCHED OFF one by one (a click on a chip — the user's "clicking each filter item with x toggle it",
+        // 2026-11-12): SidePanelFacetBit bits (SidePanelFilters.h) of State, Tag, Draft, Unread, Pinned, Favorite and Active
+        // (kSidePanelOffFacetBits). A facet whose bit is set keeps its picks and its chip, dimmed, and constrains nothing.
+        // By Folder has a chip per folder (SidePanelFolderFilter::off); the typed text's switch is the panel's own
+        // (TerminalPage::_sidePanelFilterTextOff: the text is not part of this record). Normalizing clears the bit of a
+        // facet that holds no pick, so a pick made later in that facet starts on.
+        uint32_t offFacets{ 0 };
+        // "Pause filter" (the user's request of 2026-11-12, the link beside Clear): the WHOLE ROW is off — every chip, the
+        // typed text too (their pick "Everything in the row") — and the list shows every session of the scope. The picks
+        // and the per-chip switches above are kept as they are, so "Resume filter" brings back exactly what applied
+        // before. Cleared by Resume filter, by a click on one chip (that chip alone comes back), by a pick that adds a
+        // filter (their "A pick resumes") and by typing in the filter box. ⚠ It may be true on a record that holds no pick:
+        // the pause then covers the typed text alone. Such a record is never written (the window record omits an empty
+        // filter object) and loads as not paused (SidePanelFiltersFromJson: no text survives a restart).
+        bool paused{ false };
 
         // Field by field: the panel compares the record before and after an edit, and persists / rebuilds only on a change.
         bool operator==(const SidePanelFilters&) const = default;
@@ -4162,7 +4188,10 @@ namespace Agentmaster
         //     starts unfiltered; no AppSettings default exists). Written as the "sidePanelFilters" object only while a filter
         //     is set (an empty record is omitted, so an untouched window's file stays byte-identical); read back normalized
         //     (SidePanelFiltersFromJson), so a hand-edited value can only ever filter less, never hide cards for a reason the
-        //     chips row cannot show. Captured by _CaptureWindowRecord once the panel built.
+        //     chips row cannot show. Captured by _CaptureWindowRecord once the panel built. The object also carries which
+        //     picks are switched OFF — "paused" (the whole row), "off" (the tokens of the facets whose chip is off) and a
+        //     folder's "off" — each only while set, so a window that paused a filter comes back with it paused; a malformed
+        //     switch reads as on. A pause that covers only the typed text is not saved (the text is not).
         SidePanelFilters sidePanelFilters;
     };
 }

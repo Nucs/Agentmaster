@@ -77,6 +77,7 @@ namespace Agentmaster
     // SessionFolderFilter.h chain out of every TU that includes TerminalPage.h.
     enum class SidePanelFacet : uint8_t;
     struct SidePanelFilterFacts; // Agentmaster (SIDE_PANEL.md §2l): SidePanelFilters.h — what the filters read of one session (the return type of _SidePanelFilterFactsOf; complete in TerminalPage.AgentSidePanel.cpp)
+    struct SidePanelFilterChip; // Agentmaster (SIDE_PANEL.md §2l): SidePanelFilters.h — one chip of the chips row (the parameter of _SidePanelToggleFilterChip; complete in TerminalPage.AgentSidePanel.cpp)
 }
 
 namespace winrt::TerminalApp::implementation
@@ -962,12 +963,34 @@ namespace winrt::TerminalApp::implementation
         // and whether its key-up picks (true) or closes (false) — the KEY-UP rule again.
         winrt::Windows::System::VirtualKey _sidePanelFolderArmedKey{ winrt::Windows::System::VirtualKey::None };
         bool _sidePanelFolderArmedPick{ false };
-        // The CHIPS ROW: row 1 of the expanded root, in the count line's place — shown in card mode only while a filter narrows
-        // the list (the typed text counts), and then holding "N of M", one chip per filter (its ✕ drops it) and Clear. The
-        // count line itself (_sidePanelCountText) now speaks for the AI view alone.
+        // The CHIPS ROW: row 1 of the expanded root, in the count line's place — shown in card mode only while a filter is
+        // picked or text is typed (a PAUSED row still shows: its chips are dimmed, and it holds the way back), and then
+        // holding "N of M", one chip per filter (a click on it switches that filter off and on, its ✕ drops it), the
+        // "Pause filter" / "Resume filter" link and Clear. The count line itself (_sidePanelCountText) now speaks for the
+        // AI view alone.
         winrt::Windows::UI::Xaml::Controls::Grid _sidePanelFilterRow{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::Panel _sidePanelFilterChips{ nullptr }; // the row's wrapping panel (a code-only wrap layout): [N of M][chips…][Clear]
-        std::wstring _sidePanelFilterRowSig; // the row's content as last built (count, chips, scope) — rebuilt only when it changes
+        winrt::Windows::UI::Xaml::Controls::Panel _sidePanelFilterChips{ nullptr }; // the row's wrapping panel (a code-only wrap layout): [N of M][chips…][Pause filter | Resume filter][Clear]
+        std::wstring _sidePanelFilterRowSig; // the row's content as last built (count, chips and which are dimmed, the link's words, scope) — rebuilt only when it changes
+        // --- Pause filter / Resume filter and a chip's click (SIDE_PANEL.md §2l "Pause filter, Resume filter and a chip's click") ---
+        // The user's request of 2026-11-12: "Next to the clear button add clickable 'pause filter' and 'resume filter' which
+        // disables toggles the filter", and "clicking each filter item with x toggle it". The pause and each menu chip's
+        // switch are part of the record (_sidePanelFilters: paused, offFacets, a folder's off), so they are saved with it.
+        // The typed text's chip is SWITCHED OFF (a click on the text chip): the box keeps its text, the chip shows dimmed and
+        // the list is not narrowed by it. Beside the record, never in it: the typed text is not part of SidePanelFilters and
+        // is not saved, so neither is its switch. Cleared whenever the box's text changes or is emptied (a changed text is a
+        // new filter, on). Read only while the box holds a query. ⚠ The record's pause covers the text as well: ask
+        // SidePanelTextInEffect, never this flag alone.
+        bool _sidePanelFilterTextOff{ false };
+        // When the last TOGGLE click of the chips row landed (GetTickCount64; 0 = none yet): a chip's body, or Pause filter /
+        // Resume filter. A toggle redraws the row under the pointer — the count's digits change, chips may wrap onto another
+        // line — so the second click of a double-click can land on ANOTHER control, a ✕ or Clear included. Every click of the
+        // row within the system's double-click time of a toggle is therefore ignored (_SidePanelFilterRowClickAllowed), which
+        // also makes a double-click on a toggle switch once, not off and on again.
+        uint64_t _sidePanelFilterToggleTick{ 0 };
+        // When the last REMOVING click of the row landed (a chip's ✕, Clear; GetTickCount64, 0 = none yet): the removed
+        // chip's neighbor slides under the pointer, so a TOGGLE click within the double-click time of it is ignored. A second
+        // ✕ is not: dropping chip after chip with quick clicks worked before the toggles existed, and still does.
+        uint64_t _sidePanelFilterRemoveTick{ 0 };
         // The ★ of each session the filters judged, read once per SessionFactsEpoch (a favorite set anywhere in this process
         // moves the epoch): the Favorite flag and the panel's counts need it for every session of the scope, and a read is a
         // session-store stat. UINT64_MAX = never read.
@@ -3731,17 +3754,26 @@ namespace winrt::TerminalApp::implementation
         // True while the card's Popup is open. Never throws (a failed read answers false).
         bool _SidePanelLaunchCardOpen() const noexcept;
         // --- The side panel's FILTERS (SIDE_PANEL.md §2l) ---
-        // THE ONE WRITER of this window's filters: normalize `next` (NormalizeSidePanelFilters), and when it differs from the
-        // record, take it, persist it (the window-record autosave), re-pin the funnel's accent, rebuild the card list at once
-        // (a user's action: past the throttle — the rebuild redraws the chips row) and rewrite an open panel's checks and
-        // counts. One [nav] sidepanel filter <what> line (the facet and the action, never a folder path or a tag name).
-        //   next - the record wanted.
-        //   what - what the user did, for the [nav] line ("state", "folder+", "chip x", "clear", ...).
+        // THE ONE WRITER of this window's filters: apply the "a pick resumes" rule to `next` (SidePanelFiltersAfterPick: a
+        // change that ADDS a filter switches its chip on and resumes a paused row), normalize it (NormalizeSidePanelFilters),
+        // drop a pause with nothing left to cover (SidePanelSettlePause), and when the result differs from the record, take
+        // it, persist it (the window-record autosave), re-pin the funnel's accent, rebuild the card list at once (a user's
+        // action: past the throttle — the rebuild redraws the chips row) and rewrite an open panel's checks and counts. One
+        // [nav] sidepanel filter <what> line (the facet and the action, never a folder path or a tag name).
+        // ⚠ Every edit of the record goes through here, the pause and a chip's click included: a second writer would skip
+        // the resume rule and the save.
+        //   next          - the record wanted.
+        //   what          - what the user did, for the [nav] line ("state", "folder+", "chip x", "clear", "pause", ...).
+        //   textChipMoved - the TEXT chip's switch (_sidePanelFilterTextOff) was just changed by the caller: the list and
+        //                   the row are refreshed (and the line logged) even when the record itself is unchanged — the
+        //                   switch is not part of the record, so comparing records would miss it. Nothing is saved for it.
         //   returns - nothing; a no-op before the panel is built.
         //   throws  - nothing: a failure is logged (Rule #18) and the record keeps whatever was assigned before it.
-        void _SidePanelSetFilters(::Agentmaster::SidePanelFilters next, std::wstring_view what) noexcept;
-        // Pin the funnel's IsChecked (its accent fill) to "a menu filter narrows the list". The member is the truth: the
-        // ToggleButton's own self-flip at a click is undone here. Never throws (logged).
+        void _SidePanelSetFilters(::Agentmaster::SidePanelFilters next, std::wstring_view what, bool textChipMoved = false) noexcept;
+        // Pin the funnel's IsChecked (its accent fill) to "a menu filter narrows the list NOW" (SidePanelFiltersNarrow: unlit
+        // while the row is paused or every menu chip is switched off) and write its ItemStatus ("N filters on", "N filters
+        // paused", "N filters on, M paused"). The member is the truth: the ToggleButton's own self-flip at a click is undone
+        // here. Never throws (logged).
         void _SidePanelUpdateFilterButton() noexcept;
         // The funnel's Click: close the open panel, else open it at the recorded press (or under the funnel). Consumes the
         // recorded press. Never throws.
@@ -3832,20 +3864,57 @@ namespace winrt::TerminalApp::implementation
         // window, AI mode turning on. Never throws.
         //   reason - why, for both [nav] lines.
         void _SidePanelCloseFilterSurfaces(std::wstring_view reason);
-        // Bring the CHIPS ROW up to date (card mode): hidden while nothing narrows the list; else "N of M", one chip per
-        // filter (SidePanelFilterChips), Clear. Rebuilt only when its content changed (_sidePanelFilterRowSig). The count
-        // words of the old count line ("2 sessions in this window", "1 of 3 sessions across all windows") are kept as the
-        // filter box's UI Automation ItemStatus in every case, so a screen reader and the e2e driver still read them.
+        // Bring the CHIPS ROW up to date (card mode): hidden while nothing is picked and nothing is typed; else "N of M", one
+        // chip per filter (SidePanelFilterChips; a chip whose filter is off — switched off by a click, or the whole row
+        // paused — is dimmed and stays in the row), then "Pause filter" / "Resume filter" and Clear. A chip's body is a
+        // button that switches that filter off and on (_SidePanelToggleFilterChip); its ✕ drops it. Rebuilt only when its
+        // content changed (_sidePanelFilterRowSig). The count words of the old count line ("2 sessions in this window",
+        // "1 of 3 sessions across all windows") are kept as the filter box's UI Automation ItemStatus in every case, so a
+        // screen reader and the e2e driver still read them; they say "N of M" only while something NARROWS the list (a
+        // paused row lists every session, so it reads "M sessions").
         //   shown      - the cards listed.
         //   total      - the sessions of the scope.
-        //   textActive - the filter box holds a query.
+        //   textActive - the filter box holds a query (its chip shows; whether it narrows is SidePanelTextInEffect's).
         //   returns    - nothing. Throws what building XAML throws (the list update contains it).
         void _SidePanelUpdateFilterRow(size_t shown, size_t total, bool textActive);
         // Show the row 1 element of the mode in effect: the AI view's count line in AI mode, else the chips row (whose own
         // update decides whether it shows). Never throws (logged).
         void _SidePanelShowRowForMode() noexcept;
-        // Empty the filter box (a Text chip's ✕, Clear): the box's own TextChanged then filters the cards again. Never throws.
+        // Empty the filter box (a Text chip's ✕, Clear): the box's own TextChanged then filters the cards again. The text
+        // chip's switch (_sidePanelFilterTextOff) is cleared with the text. Never throws.
         void _SidePanelClearFilterText() noexcept;
+        // --- Pause filter / Resume filter and a chip's click (SIDE_PANEL.md §2l "Pause filter, Resume filter and a chip's click") ---
+        // The link beside Clear. While something in the row applies ("Pause filter"): switch the WHOLE row off — every chip,
+        // the typed text too — keeping every pick and every chip's own switch (SidePanelPauseAll). While nothing applies
+        // ("Resume filter"): lift the pause, bringing back what applied before it; when that would still apply nothing
+        // (every chip was switched off one by one), switch every chip on (SidePanelResumeAll). Through _SidePanelSetFilters,
+        // so the record is saved, the cards re-filter and the row, the funnel and an open panel follow. Runs on a clean tick
+        // (the row is rebuilt by it, and the clicked button must not leave the tree inside its own Click). Never throws
+        // (a failure is logged and nothing changes).
+        void _SidePanelToggleFilterPause() noexcept;
+        // A click on a chip's body (the user's "clicking each filter item with x toggle it"): switch that one filter off, or
+        // on again (SidePanelToggleChip). While the row is paused the click lifts the pause and the clicked chip ALONE comes
+        // back. A chip the row no longer holds (the record changed between the draw and the click) changes nothing. Through
+        // _SidePanelSetFilters, on a clean tick, like the link. Never throws (logged).
+        //   chip - the chip as the row drew it (its kind; a Folder chip's index and words, checked against the record again).
+        void _SidePanelToggleFilterChip(const ::Agentmaster::SidePanelFilterChip& chip) noexcept;
+        // The chips row's DOUBLE-CLICK GUARD, asked by every click handler of the row before it acts, and stamped by the
+        // click it lets through. A toggle (a chip's body, the link) redraws the row under the pointer, so the second click
+        // of a double-click may land on another control; a ✕ slides the next chip under the pointer.
+        //   - a click within the system's double-click time (GetDoubleClickTime) of the last TOGGLE is refused, whatever it
+        //     is — so a double-click on a toggle switches once, and its echo never drops a filter through a ✕ or Clear;
+        //   - a TOGGLE within that time of the last ✕ / Clear is refused too; a second ✕ is allowed (as before the toggles).
+        // A refused click logs one [nav] line. Tradeoff: two deliberate clicks on the row less than a double-click apart
+        // lose the second one.
+        //   toggle  - the click is a toggle (a chip's body, Pause filter / Resume filter); false for a ✕ or Clear.
+        //   returns - true when the click may act (and it is stamped as the latest of its kind).
+        //   throws  - nothing.
+        bool _SidePanelFilterRowClickAllowed(bool toggle) noexcept;
+        // The filter box's text changed in card mode (after _sidePanelSearchText took it): the text chip is on again (a
+        // changed text is a new filter), TYPING RESUMES a paused row (the user's pick: the pause covers the typed text, and
+        // typing in the box again resumes the filter), and an emptied box drops a pause that has nothing left to cover
+        // (SidePanelFiltersAfterTextChange). Never throws (logged).
+        void _SidePanelNoteFilterTextChanged() noexcept;
         // --- By Folder's hover SUBMENU (SIDE_PANEL.md §2l "The By Folder submenu") ---
         // Build the submenu ONCE (the panel's dark card and Button brushes, its rows host, its key and pointer handlers, the
         // Root()-parented Popup). Returns true when it exists, false when the build failed (logged; the next hover retries).

@@ -1503,7 +1503,7 @@ same, in the window that hosts the card's tab.
     strip of the window they were used in.
   - No `[exc] _SidePanelLaunchNextToTab` line in hooks.log.
 
-### 2l. The filters — the funnel, its panel, By Folder and the chips row (2026-11-08; in dev 0.0.1.44 and production 0.8.0.12) — By Folder's hover submenu (2026-11-10, NOT BUILT yet)
+### 2l. The filters — the funnel, its panel, By Folder and the chips row (2026-11-08; in dev 0.0.1.44 and production 0.8.0.12) — By Folder's hover submenu (2026-11-10, NOT BUILT yet) — Pause filter, Resume filter and a chip's click (2026-11-12, NOT BUILT yet)
 
 The user's request: "In sidemenu, we need to introduce ability to filter, Filter by folder and even have like the +, but a
 button for FILTER and in it have menu appear on click and then By Folder -> <the picker of +>. The row below the filter with
@@ -1608,7 +1608,9 @@ Docked left (docked right the line mirrors: `+ ⏷ Sum ⋯`; the funnel was the 
   its tip and a **✕** that drops it (the text chip's ✕ empties the box), and **Clear** (every filter and the typed text).
   The chips wrap onto more lines on a narrow panel (`AgentSidePanelWrapPanel`, a code-only wrap layout — UWP has no
   WrapPanel). Each chip's rounded back is a CHILDLESS Border behind its content (§2f's composition-node rule). The row is
-  rebuilt only when its content changed (`_sidePanelFilterRowSig`).
+  rebuilt only when its content changed (`_sidePanelFilterRowSig`). Since 2026-11-12 a chip's body is a switch, a
+  **Pause filter / Resume filter** link stands before Clear, and the row shows while a filter is PICKED, applied or not
+  (*Pause filter, Resume filter and a chip's click* below).
 - **The count line is gone from the card mode's screen** (the user's "shall be replaced"). Its words — "2 sessions in this
   window", "1 of 3 sessions across all windows" — live on as the filter box's UI Automation ItemStatus, kept in step by every
   list update, so a screen reader still hears how many cards the box left and the e2e driver still reads the scope from them
@@ -1813,6 +1815,147 @@ The user's two requests the same evening: "1. the filter icon is not same size a
   - Docked left the line reads `⋯ Sum ⏷ +`, docked right `+ ⏷ Sum ⋯`; each card still opens at the click.
   - At a larger Windows text size both grow alike.
 
+#### Pause filter, Resume filter and a chip's click (2026-11-12, NOT BUILT yet)
+
+The user's request: "In sidemenu we have filter and below the filter prompt box we have the tags and a Clear button. Next
+to the clear button add clickable 'pause filter' and 'resume filter' which disables toggles the filter". Their answers the
+same day to the three design questions (asked with mockups):
+
+| Question | Answer |
+|---|---|
+| What Pause filter switches off | **Everything in the row** — the typed text too (over "the funnel's filters only") — with the note "and clicking each filter item with x toggle it": every chip is a switch of its own |
+| How the row looks while paused | **Dimmed chips** — the chips fade and the link reads Resume filter in Clear's blue (over an amber Resume filter, and over struck-through chips) |
+| A pick while the filter is paused | **A pick resumes** — adding a filter applies the filter again at once; removing one leaves it paused (over "stays paused until Resume filter") |
+
+```
+  3 of 12 [📁 Agentmaster ✕] [● Running ✕] [“login” ✕]  Pause filter   Clear    ← every chip applies
+  5 of 12 [📁 Agentmaster ✕] [● Running ✕] [“login” ✕]  Pause filter   Clear    ← a click on the Running chip: it is DIM, off
+ 12 of 12 [📁 Agentmaster ✕] [● Running ✕] [“login” ✕]  Resume filter  Clear    ← Pause filter: every chip DIM, every card listed
+  5 of 12 [📁 Agentmaster ✕] [● Running ✕] [“login” ✕]  Pause filter   Clear    ← Resume filter: back as it was (Running still off)
+```
+
+- **Picked is not applied.** A pick has three states: not picked · picked and applied · picked and OFF. A pick that is off
+  keeps its chip, dimmed, in its place, with its ✕; it constrains nothing. Two things switch a pick off, and they are
+  kept apart on purpose: its own chip (a click on it), and the whole row's pause. Pause filter leaves every chip's own
+  switch as it is, so Resume filter brings back exactly what applied before the pause.
+- **A chip's click** (its body: the glyph and the words) switches that one filter off, or on again. Its ✕ still drops it.
+  A folder chip switches its own folder alone (By Folder has a chip per folder; with every folder off, By Folder
+  constrains nothing); the states chip, the tags chip, each flag's chip and the Active chip switch their whole facet; the
+  text chip switches the typed text (the box keeps its words).
+- **The link** sits right before Clear, in Clear's blue, and its words say what a click does. **Pause filter** while
+  something in the row applies (a menu filter that is on, or the typed text): the click switches the WHOLE ROW off —
+  every chip, the typed text too — and the list shows every session of the scope. **Resume filter** while nothing
+  applies: the click lifts the pause, and the chips that were on before it apply again. When that would still apply
+  nothing (every chip was switched off one by one, with or without a pause on top), Resume filter switches every chip on:
+  its click always leaves something applied, never a row that still reads Resume filter.
+- **A chip's click in a paused row** means "this one": the pause is lifted and the clicked chip ALONE applies. Every
+  other chip is switched off (still picked, still in the row, a click away).
+- **A pick resumes; a removal does not.** Whatever ADDS a filter — a state, a tag or Untagged checked, a flag turned on,
+  an Active window set or moved, a folder picked (in the folder card or turned on in the submenu), a folder picked again
+  with another Include-subfolders choice — switches that filter's chip on and resumes a paused row, so a pick always
+  shows its effect. A folder picked again as it was while its chip is dim, or while the row is paused, counts too.
+  Whatever only REMOVES — a row unchecked in the panel, a line turned off in the submenu, a chip's ✕, Active within set
+  to Any time — leaves the switches and the pause as they are. Clear drops everything, the pause with it. A chip switched
+  off by hand stays off when a pick in ANOTHER filter resumes the row.
+- **Typing resumes.** The pause covers the typed text, so text typed into the box of a paused row lifts the pause: what is
+  typed always filters. A changed text is a new filter: its chip is on, whatever the old text's chip was. Emptying the
+  box (with the keyboard, the text chip's ✕ or the box's own ✕) resumes nothing; it only drops a pause that has nothing
+  left to cover (no pick and no text).
+- **What follows what APPLIES** (`SidePanelFiltersNarrow`, `SidePanelFacetInEffect`, `SidePanelTextInEffect`; the matcher
+  compiles the record reduced by `SidePanelFiltersInEffect`): the card list; "N of M" (M of M while paused); the filter
+  box's count words, which read like an unfiltered list's while nothing applies ("12 sessions in this window"); the
+  funnel, lit only while a MENU filter narrows the list now; the Unread census hop and the Favorite epoch check
+  (*Freshness* above), which re-filter only while their flag applies. A window whose picks are all off builds no matcher:
+  it updates like an unfiltered one.
+- **What follows the PICKS** (`SidePanelFiltersActive`): the chips row, which shows while a filter is picked or text is
+  typed — a paused row stays on screen, with the way back in it; the funnel panel's checks and its section headers ("2
+  on"); the submenu's ✓, which marks a folder picked for this window, on or off (a click on a ✓ line drops the folder,
+  as before); the Clear row and Clear; what the window record saves.
+- **The funnel's counts say what a pick would list** (`SidePanelFiltersForCounts`): the panel's row counts, the folder
+  card's "N sessions" and the submenu's line counts ignore the pause (a pick resumes it) and leave out every chip
+  switched off by hand, the text chip too (it stays off after a pick). A count never promises cards a pick would not
+  show.
+- **The double-click guard** (`_SidePanelFilterRowClickAllowed`). A toggle redraws the row under the pointer — the
+  count's digits change, chips may wrap onto another line — and a ✕ slides the next chip under it, so the second click
+  of a double-click can land on another control. Any click of the row within the system's double-click time
+  (`GetDoubleClickTime`, 500 ms by default) of a toggle (a chip's body, the link) is ignored, a ✕ and Clear included: a
+  double-click on a toggle switches once, and its echo never drops a filter. A toggle within that time of a ✕ or Clear is
+  ignored too; a second ✕ is not (dropping chip after chip with quick clicks is as before). The link is always as wide as
+  its longer wording (both are laid out in one cell, the one not in effect invisible), so Clear does not move when the
+  words flip.
+- **The look.** A chip that is off has its cell at 42 % opacity (`kSidePanelChipOffOpacity`): back, glyph, words and ✕
+  fade as one. The chip's body is a flat, borderless, square Button over the chip's childless rounded back (§2f's
+  composition-node rule: no rounded element with children); its padding is the chip's air, so the chip looks as before
+  and all of it left of the ✕ takes the click. The Button's own hover and press fills are off (a square fill would stick
+  out of the round ends): the pointer over a chip lifts the fill of its back instead (`kSidePanelChipHoverFill`, the
+  cell's pointer handlers, which reach the back through `sender` and capture no element). The chip's tip adds what a
+  click does now. No button of the row is a tab stop: a click never takes the keyboard from the terminal.
+- **The record** (`SidePanelFilters`, SessionModels.h): `paused` (the whole row), `offFacets` (the `SidePanelFacetBit`
+  bits of State, Tag, Draft, Unread, Pinned, Favorite and Active: `kSidePanelOffFacetBits`) and each folder's `off`.
+  Normalizing drops the switch of a facet that holds no pick, so a pick made later in that facet starts on. Saved with
+  the window's filters: a folder object's `"off": true`, the record's `"off": ["state", "favorite"]` (the facets' tokens,
+  the chips' own id words) and `"paused": true`, each written only while set, so a window that never paused anything
+  writes the object as before. Read back tolerantly: a non-bool value, an unknown token and a switch for a facet with no
+  pick read as ON. A build that predates the switches ignores all three and applies every pick. The typed text's switch
+  is `_sidePanelFilterTextOff`, beside the record and never saved, like the text; a pause that covers only the typed
+  text is not saved either, and a pause with no pick is dropped at the load. By Folder's pick history never stores a
+  switch: a folder switched off in one window enters the list every window shares ON.
+- **One writer.** Every change goes through `_SidePanelSetFilters`, the pause and a chip's click included. It applies the
+  resume rule to the picks (`SidePanelFiltersAfterPick`: judged on what the change adds, never on which button was
+  used, so the panel's rows — which edit the record member by member — need no code of their own), normalizes, drops a
+  pause with nothing left to cover (`SidePanelSettlePause`), saves the window record when the record moved, re-pins the
+  funnel, re-filters the cards and refreshes an open panel. A change of the text chip's switch alone (not part of the
+  record) refreshes the same way and saves nothing.
+- **Logs:** `[nav] sidepanel filter pause -> 2 filters paused`, `... resume -> 2 filters on`, `... chip off -> 1 filter on,
+  1 paused`, `... chip on -> ...`, `... chip on (alone, from a paused row) -> ...`, `... resume (typed in the filter box)
+  -> ...`, `... resume (nothing left to pause) -> ...`. The tail of EVERY `[nav] sidepanel filter <what> -> ...` line is
+  now `SidePanelFiltersStatusText`: "N filter(s) on", "N filter(s) paused" or "N filter(s) on, M paused" (counted per
+  filter kind, as before: several folders are one filter, on while any of them is). A click the guard refused: `[nav]
+  sidepanel filter toggle click ignored (...)` / `... remove click ignored (...)`. A failure is an `[exc]
+  _SidePanelToggleFilterPause` / `_SidePanelToggleFilterChip` / `_SidePanelNoteFilterTextChanged` / `side panel filter
+  chip: ...` / `side panel filter row: queue the pause` line.
+- **UI Automation** (E2E_TESTING.md §6.3): the link `am.side.filterRow.pause` — ONE id for both states; its name is
+  "Pause filter" or "Resume filter", its ItemStatus "paused" while nothing in the row applies. A chip's body
+  `am.side.chip.<kind>.toggle`, named "Pause the filter <words>" or "Resume the filter <words>", ItemStatus "paused"
+  while its filter is off. The chip's words keep `am.side.chip.<kind>` (now inside the body button) and the ✕
+  `<that id>.remove`. The funnel's ItemStatus reads "N filters on", "N filters paused" or "N filters on, M paused".
+- **Tested** (no build): `TestSidePanelFilters` (`tests_sidepanel.cpp`) gained the pause rules — what applies of a paused
+  record and of one with chips off (the record, each facet, the folders, the typed text, the counts' view), the matcher
+  compiling only what applies, the chips' dimming, Pause filter and Resume filter (the switches kept, restored; every chip
+  switched on when nothing would apply), a chip's click (each kind, a chip the row no longer holds, the paused row's
+  "this one alone"), the resume rule (each way to add, each way to remove, the pause itself passing through), typing and
+  the emptied box, the status words, normalizing, the JSON (round trip, tokens, tolerance, a pause with no pick), the
+  window record, and the pick history and the submenu's lines staying free of switches. The whole m5 harness on `git
+  archive` of 9bb1cc9a9 with only this change laid over it (another session's unfinished work was in the tree), on a
+  scratch profile: 12,804 checks, the 3 known taskbar-badge failures only. `cl /Zs` in a shadow of 9bb1cc9a9 against the
+  Release worktree build of ad89700e3 (§2j's recipe; no `.idl`, `.xaml` or `pch.h` changed since) of
+  `TerminalPage.AgentSidePanel.cpp`, `AgentMaster/Persistence.cpp`, `TerminalPage.AgentWindowRecord.cpp`,
+  `TerminalPage.AgentEngine.cpp`, `TerminalPage.AgentSessions.cpp`, `TerminalPage.AgentObserver.cpp`, `TerminalPage.cpp`
+  and `AgentManagerContent.cpp` (units of the changed `TerminalPage.h` / `SessionModels.h` / `SidePanelFilters.h`) and all
+  18 agentmaster-cli units at their `/W4 /WX` (they compile `Persistence.cpp`; the new inline code calls nothing they do
+  not link already) — all pass; two controls planted in `_SidePanelToggleFilterPause` failed as they must (an undeclared
+  name: C2065 at its line; a probe on the new `SidePanelFolderFilter::off`: C2338, so the new header is the one read). The
+  bytes checked are the bytes committed (compared file by file). Not seen on screen; the e2e suite not run (no SP-15
+  test yet; the driver has its helpers: `pause_link`, `filter_paused`, `chip_toggle`, `paused_chips`).
+- **Check after the build** (purged — §2l's submenu above needs it anyway; `SessionModels.h` and `TerminalPage.h`
+  changed):
+  - With a filter on, the row reads `N of M [chips] Pause filter Clear`; the pointer over a chip lifts its fill.
+  - A click on a chip dims it and the list widens; a click again lights it; its ✕ still drops it.
+  - Pause filter: every chip dims, the text chip too, every card of the scope is listed, the count reads M of M, the
+    link reads Resume filter, the funnel is unlit. Resume filter: exactly the chips that were lit before are lit again.
+  - In a paused row a click on one chip lights that chip alone, and the link reads Pause filter.
+  - Paused, then funnel ▸ By State ▸ check a state: the row resumes with the new pick. Paused, then uncheck a row or
+    click a chip's ✕: still paused.
+  - Paused, then type in the box: the row resumes. Paused with only typed text, then empty the box: the row is gone, and
+    the next text typed filters at once.
+  - A double-click on Pause filter pauses (once); a double-click on a chip dims it (once); neither ever drops a filter.
+  - Clear does not move when the link's words flip.
+  - A restart keeps a paused row paused and a dimmed chip dimmed (`windows/<id>.json`: `"paused"`, `"off"`); a new
+    window starts unfiltered.
+  - AI on, then off: the row is back as it was left.
+  - No `[exc] _SidePanelToggleFilter…` / `_SidePanelNoteFilterTextChanged` / `side panel filter chip: …` /
+    `side panel filter row: queue the pause` line in hooks.log.
+
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 
 The bottom area hosts a REAL `AgentTabOverlay` whose summary panel is switched into the new
@@ -1945,7 +2088,7 @@ below).
 | `⌖` scroll to the selected tab (§2a) | — | `AppSettings::sidePanelScrollToSelectedTab` (true = **ON, the default**; absent key = ON) — a GLOBAL preference, broadcast live to every open window |
 | the filter box's **AI** toggle (§2h) | `WindowRecord::sidePanelAiMode` (-1 = unset; written only when set; a non-bool value reads unset) | `AppSettings::sidePanelAiMode` (false = **the session cards, the default**) |
 | a card's **Pin to Top** (§2j) | — | — **per SESSION instead**: sessions.json's `SessionInfo::sidePanelPinnedAtUnixMs` (absent / 0 = not pinned), so the pin follows the session into every window's list and through a restart |
-| the card list's **filters** (the funnel, §2l) | `WindowRecord::sidePanelFilters` (the `"sidePanelFilters"` object; absent = no filter; written only while a filter is set; read back normalized — a malformed part reads as "not set") | — **none by design**, like the scope: every new window starts unfiltered. The typed text of the filter box is not kept (the box starts empty, as before) |
+| the card list's **filters** (the funnel, §2l) | `WindowRecord::sidePanelFilters` (the `"sidePanelFilters"` object; absent = no filter; written only while a filter is set; read back normalized — a malformed part reads as "not set"). The pause and the chips switched off (§2l *Pause filter, Resume filter and a chip's click*) ride in the same object — `"paused"`, `"off"` (facet tokens), a folder's `"off"` — each only while set; a malformed switch reads as ON | — **none by design**, like the scope: every new window starts unfiltered. The typed text of the filter box is not kept (the box starts empty, as before), and neither is its chip's switch |
 
 - **The card scope is the one field with NO last-one-wins export**: `_SidePanelSetScope`
   persists it through the window-record autosave alone — never `_SidePanelPersistDefaults`, and
@@ -2150,3 +2293,16 @@ below).
   header), `tests/tests_sidepanel.cpp` (`TestSidePanelFilters`), `tests/m5_tests.{h,cpp}`,
   `e2e/amdriver/ui/sidepanel.py` (`FUNNEL_ID`, `HEADER_ORDER`, `count_line` from the box's ItemStatus, `funnel`,
   `filter_chips`), `e2e/suites/test_side_panel.py` (the header line with the funnel; SP-K3's outside click).
+  Pause filter, Resume filter and a chip's click (§2l): `AgentMaster/SessionModels.h` (`SidePanelFilters::paused` /
+  `offFacets`, `SidePanelFolderFilter::off`), `AgentMaster/SidePanelFilters.h` (picked vs applied:
+  `SidePanelFacetInEffect`, `SidePanelFiltersNarrow`, `SidePanelTextInEffect`, `SidePanelAnyChipOn`,
+  `SidePanelFiltersInEffect`, `SidePanelFiltersForCounts`, `SidePanelFiltersStatusText`; the edits `SidePanelPauseAll`,
+  `SidePanelResumeAll`, `SidePanelToggleChip`, `SidePanelFiltersAfterPick`, `SidePanelSettlePause`,
+  `SidePanelFiltersAfterTextChange`; `SidePanelFilterChip::off`; the matcher compiling only what applies; the switches in
+  the record's JSON), `TerminalPage.AgentSidePanel.cpp` (the row's chip buttons, the link and its guard,
+  `_SidePanelToggleFilterPause`, `_SidePanelToggleFilterChip`, `_SidePanelFilterRowClickAllowed`,
+  `_SidePanelNoteFilterTextChanged`; `_SidePanelSetFilters`' resume rule; what applies in `_SidePanelRebuildCards`, the
+  funnel and the two belts; the counts' view in the census, the folder card and the submenu), `TerminalPage.h` (the
+  members, the declarations, a forward declaration), `tests/tests_sidepanel.cpp` (`TestSidePanelFilters`),
+  `e2e/amdriver/ui/sidepanel.py` (`filter_chips` without the new ids, `pause_link`, `filter_paused`, `chip_toggle`,
+  `paused_chips`), `e2e/README.md` (the driver's table).

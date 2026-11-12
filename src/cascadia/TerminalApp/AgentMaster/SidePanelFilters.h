@@ -24,11 +24,23 @@
 //   - The typed text in the filter box is a facet too (Text): its matching stays the box's own (ParseSessionQuery over
 //     title / folder / branch / id, SidePanelSessionMatches); the matcher only takes its verdict.
 //
+// PICKED IS NOT APPLIED (the user's request of 2026-11-12: "Next to the clear button add clickable 'pause filter' and
+// 'resume filter' which disables toggles the filter", and their picks the same day: the pause covers "Everything in the
+// row" — the typed text too —, "and clicking each filter item with x toggle it", "Dimmed chips", "A pick resumes"):
+//   - a CHIP's click switches that one filter off and on again (SidePanelFilters::offFacets, SidePanelFolderFilter::off,
+//     the caller's flag for the typed text); its ✕ still drops it;
+//   - "Pause filter" switches the WHOLE ROW off (SidePanelFilters::paused) and keeps every pick and every chip's own
+//     switch, so "Resume filter" brings back exactly what applied before;
+//   - whatever is off keeps its chip (dimmed) and constrains nothing: the list reads the record through
+//     SidePanelFiltersInEffect, and the matcher does so itself;
+//   - a pick that ADDS a filter, and typing in the filter box, resume a paused row; removing a pick never does.
+//
 // WHAT lives here (no WinRT, no XAML, no file IO): the facets and their bits, the six states and the four "active within"
 // windows the panel offers, the filter record and its edits, the per-session facts the predicate reads, the compiled
 // matcher (folder keys and tag names folded once per list update), the chips the row shows and what each chip's ✕ leaves,
 // and the record's JSON (normalized on load: a hand-edited file can never make a filter that hides cards for a reason the
-// row cannot show), and By Folder's PICK HISTORY with the rules of its hover submenu (the user's request of 2026-11-10: the
+// row cannot show), the rules of the pause and of a chip's click (what applies, what each click leaves, what a pick and a
+// typed text resume), and By Folder's PICK HISTORY with the rules of its hover submenu (the user's request of 2026-11-10: the
 // folders picked, the last on top, one list for the app; each line toggles that folder in this window's record). The app
 // applies it (TerminalPage::_SidePanelRebuildCards, the funnel's panel and its By Folder submenu, the chips row; the history
 // file is Persistence.h's RememberFilterFolderPicks); the m5 harness pins it (TestSidePanelFilters, tests_sidepanel.cpp).
@@ -192,11 +204,14 @@ namespace Agentmaster
     // The record itself — SidePanelFolderFilter and SidePanelFilters — is plain data in SessionModels.h, beside the
     // WindowRecord that persists it (WindowRecord::sidePanelFilters); this header holds its rules. The record is kept
     // normalized by every edit below and by the loader: folders absolute and unique by NormDirKey, tags normalized and unique
-    // by FoldTagName, states cut to kSidePanelAllStateBits, the window either 0 or in (0, kSidePanelActiveMaxMinutes].
+    // by FoldTagName, states cut to kSidePanelAllStateBits, the window either 0 or in (0, kSidePanelActiveMaxMinutes], the
+    // chips' off bits cut to the facets that hold a pick (kSidePanelOffFacetBits).
 
-    // Does any MENU filter narrow the list? (The typed text is the caller's to add: it is not part of the record.)
+    // Does the record hold any MENU pick? (The typed text is the caller's to add: it is not part of the record.)
+    // ⚠ PICKED, not applied: a paused record, or one whose every chip is switched off, still answers true (its chips row
+    // shows, its picks are saved). Ask SidePanelFiltersNarrow for "does a menu filter narrow the list now".
     //   filters - the record.
-    //   returns - true when at least one facet other than Text is active.
+    //   returns - true when at least one facet other than Text holds a pick.
     //   throws  - nothing.
     [[nodiscard]] inline bool SidePanelFiltersActive(const SidePanelFilters& filters) noexcept
     {
@@ -204,7 +219,8 @@ namespace Agentmaster
                filters.unread || filters.pinned || filters.favorite || filters.activeWithinMinutes != 0;
     }
 
-    // The mask of the facets that constrain the list (an inactive facet is left out).
+    // The mask of the facets that hold a pick (a facet with none is left out). ⚠ PICKED, not applied — see
+    // SidePanelFiltersActive; SidePanelFacetsInEffect is the mask of what narrows the list now.
     //   filters    - the record.
     //   textActive - the filter box holds a query (the caller's ParseSessionQuery found at least one term).
     //   returns    - the facet bits.
@@ -224,16 +240,220 @@ namespace Agentmaster
         return mask;
     }
 
+    // ===== Picked vs applied (SIDE_PANEL.md §2l "Pause filter, Resume filter and a chip's click") ========================
+    // The user's request of 2026-11-12: "Next to the clear button add clickable 'pause filter' and 'resume filter' which
+    // disables toggles the filter"; their picks the same day (design-ask with mockups): the pause covers "Everything in the
+    // row" (the typed text too), "and clicking each filter item with x toggle it", "Dimmed chips", "A pick resumes".
+    // So a pick has three states: not picked · picked and APPLIED · picked and OFF (its chip dimmed). A pick is off when
+    // the whole row is paused (SidePanelFilters::paused) or when its own chip was switched off by a click
+    // (SidePanelFilters::offFacets; SidePanelFolderFilter::off for a folder). The two are kept apart on purpose: "Pause
+    // filter" leaves every chip's own switch as it is, so "Resume filter" brings back exactly what applied before.
+
+    // The facets whose ONE chip a click switches off through SidePanelFilters::offFacets. By Folder is not among them: it
+    // has a chip per folder (SidePanelFolderFilter::off). Nor is Text: the typed text is not part of the record (its switch
+    // is the caller's). A stored mask is cut to these bits, and to the facets that hold a pick, on normalizing.
+    inline constexpr uint32_t kSidePanelOffFacetBits = SidePanelFacetBit(SidePanelFacet::State) | SidePanelFacetBit(SidePanelFacet::Tag) |
+                                                       SidePanelFacetBit(SidePanelFacet::Draft) | SidePanelFacetBit(SidePanelFacet::Unread) |
+                                                       SidePanelFacetBit(SidePanelFacet::Pinned) | SidePanelFacetBit(SidePanelFacet::Favorite) |
+                                                       SidePanelFacetBit(SidePanelFacet::Active);
+
+    // One facet of kSidePanelOffFacetBits and the token the window record stores for it in "off" (never a bit number: the
+    // enum may grow, a saved switch must keep its meaning). The tokens are the chips' own id words (am.side.chip.<token>).
+    struct SidePanelOffFacetToken
+    {
+        SidePanelFacet facet; // the facet whose chip is switched off
+        const wchar_t* token; // the window record's stable token ("state")
+    };
+    // Every facet of kSidePanelOffFacetBits, in the chips row's order.
+    inline constexpr SidePanelOffFacetToken kSidePanelOffFacetTokens[] = {
+        { SidePanelFacet::State, L"state" },
+        { SidePanelFacet::Tag, L"tag" },
+        { SidePanelFacet::Draft, L"draft" },
+        { SidePanelFacet::Unread, L"unread" },
+        { SidePanelFacet::Pinned, L"pinned" },
+        { SidePanelFacet::Favorite, L"favorite" },
+        { SidePanelFacet::Active, L"active" },
+    };
+
+    // Does the record hold a pick in one facet? (Picked, whether or not it applies.)
+    //   filters - the record.
+    //   facet   - the facet asked about; Text is never part of the record and answers false.
+    //   returns - true when the facet holds at least one pick.
+    //   throws  - nothing.
+    [[nodiscard]] inline bool SidePanelFacetPicked(const SidePanelFilters& filters, SidePanelFacet facet) noexcept
+    {
+        return (SidePanelActiveFacets(filters, false) & SidePanelFacetBit(facet)) != 0;
+    }
+
+    // Does one facet NARROW THE LIST NOW: it holds a pick, the row is not paused, and its chip is on — for By Folder, at
+    // least one of its folders' chips. What decides a live belt that follows one facet (the Unread census hop, the
+    // Favorite epoch check): a facet that is off must not re-filter the list for facts it does not read.
+    //   filters - the record.
+    //   facet   - the facet asked about; Text answers false (SidePanelTextInEffect is the typed text's).
+    //   returns - true when the facet constrains the list.
+    //   throws  - nothing.
+    [[nodiscard]] inline bool SidePanelFacetInEffect(const SidePanelFilters& filters, SidePanelFacet facet) noexcept
+    {
+        if (filters.paused || !SidePanelFacetPicked(filters, facet))
+        {
+            return false;
+        }
+        if (facet == SidePanelFacet::Folder)
+        {
+            // One chip per folder: the facet applies while any of them is on (the folders combine with OR).
+            for (const auto& folder : filters.folders)
+            {
+                if (!folder.off)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return (filters.offFacets & SidePanelFacetBit(facet)) == 0;
+    }
+
+    // The mask of the menu facets that narrow the list now (SidePanelFacetInEffect for each). Never the Text bit.
+    //   filters - the record.
+    //   returns - the facet bits; 0 while the row is paused or every chip is off.
+    //   throws  - nothing.
+    [[nodiscard]] inline uint32_t SidePanelFacetsInEffect(const SidePanelFilters& filters) noexcept
+    {
+        uint32_t mask = 0;
+        for (uint32_t i = 0; i < kSidePanelFacetCount; ++i)
+        {
+            const auto facet = static_cast<SidePanelFacet>(i);
+            mask |= SidePanelFacetInEffect(filters, facet) ? SidePanelFacetBit(facet) : 0u;
+        }
+        return mask;
+    }
+
+    // Does any MENU filter narrow the list now? What lights the funnel, and what decides whether a list update builds a
+    // matcher at all (a paused window updates like an unfiltered one).
+    //   filters - the record.
+    //   returns - true when at least one facet is in effect.
+    //   throws  - nothing.
+    [[nodiscard]] inline bool SidePanelFiltersNarrow(const SidePanelFilters& filters) noexcept
+    {
+        return SidePanelFacetsInEffect(filters) != 0;
+    }
+
+    // Does the typed text narrow the list now: the box holds a query, the row is not paused, and the text's own chip is on.
+    //   filters    - the record (its pause covers the typed text: the user's "Everything in the row").
+    //   textActive - the filter box holds a query.
+    //   textOff    - the text chip was switched off by a click (the caller's flag).
+    //   returns    - true when the list must be narrowed by the text.
+    //   throws     - nothing.
+    [[nodiscard]] inline bool SidePanelTextInEffect(const SidePanelFilters& filters, bool textActive, bool textOff) noexcept
+    {
+        return textActive && !filters.paused && !textOff;
+    }
+
+    // Is at least one chip of the row on — a menu filter or the typed text? What the link beside Clear reads from: "Pause
+    // filter" while this is true (something narrows the list, or would with sessions to hide), "Resume filter" while not.
+    //   filters, textActive, textOff - as for SidePanelTextInEffect.
+    //   returns - true when something in the row applies.
+    //   throws  - nothing.
+    [[nodiscard]] inline bool SidePanelAnyChipOn(const SidePanelFilters& filters, bool textActive, bool textOff) noexcept
+    {
+        return SidePanelTextInEffect(filters, textActive, textOff) || SidePanelFiltersNarrow(filters);
+    }
+
+    // The record REDUCED TO WHAT APPLIES: every pick that is off — its chip switched off, or the whole row paused — left out.
+    // The result carries no switch of its own (paused false, offFacets 0, every folder on), so it can be judged like a
+    // record that was never paused. What the card list is narrowed by; SidePanelFilterMatcher takes any record through it.
+    //   filters - the record.
+    //   returns - the applied picks; an empty record while the row is paused.
+    //   throws  - std::bad_alloc.
+    [[nodiscard]] inline SidePanelFilters SidePanelFiltersInEffect(const SidePanelFilters& filters)
+    {
+        SidePanelFilters out;
+        if (filters.paused)
+        {
+            return out; // "Pause filter": nothing in the row applies
+        }
+        for (const auto& folder : filters.folders)
+        {
+            if (!folder.off)
+            {
+                out.folders.push_back(SidePanelFolderFilter{ folder.path, folder.includeSubfolders });
+            }
+        }
+        const auto on = [&](SidePanelFacet facet) { return (filters.offFacets & SidePanelFacetBit(facet)) == 0; };
+        out.states = on(SidePanelFacet::State) ? filters.states : 0u;
+        if (on(SidePanelFacet::Tag))
+        {
+            out.tags = filters.tags;
+            out.untagged = filters.untagged;
+        }
+        out.draft = filters.draft && on(SidePanelFacet::Draft);
+        out.unread = filters.unread && on(SidePanelFacet::Unread);
+        out.pinned = filters.pinned && on(SidePanelFacet::Pinned);
+        out.favorite = filters.favorite && on(SidePanelFacet::Favorite);
+        out.activeWithinMinutes = on(SidePanelFacet::Active) ? filters.activeWithinMinutes : 0u;
+        return out;
+    }
+
+    // The record as the funnel's COUNTS judge it: what would apply right after a pick. A pick that adds a filter resumes a
+    // paused row (the user's "A pick resumes"), so the pause is ignored here; a chip switched off by a click stays off
+    // after a pick in another facet, so it is left out. The counts beside the panel's rows, the folder card's "N sessions"
+    // and the submenu's line counts all say what a pick would list — never what a paused row lists (everything).
+    //   filters - the record.
+    //   returns - SidePanelFiltersInEffect of the record with its pause lifted.
+    //   throws  - std::bad_alloc.
+    [[nodiscard]] inline SidePanelFilters SidePanelFiltersForCounts(SidePanelFilters filters)
+    {
+        filters.paused = false;
+        return SidePanelFiltersInEffect(filters);
+    }
+
+    // How many filters are on and how many are paused, in words: the funnel's UI Automation ItemStatus (its accent is
+    // pixels only) and the tail of every "[nav] sidepanel filter ..." line. Counted per FACET, as before the pause: several
+    // folders are one filter, which is "on" while any of them is.
+    //   filters - the record.
+    //   returns - "" with no pick; "N filter(s) on"; "N filter(s) paused" when none applies; "N filter(s) on, M paused".
+    //   throws  - std::bad_alloc.
+    [[nodiscard]] inline std::wstring SidePanelFiltersStatusText(const SidePanelFilters& filters)
+    {
+        const auto count = [](uint32_t mask) {
+            uint32_t n = 0;
+            for (; mask != 0; mask &= mask - 1) // clears the lowest set bit: one pass per facet set
+            {
+                ++n;
+            }
+            return n;
+        };
+        const auto words = [](uint32_t n, const wchar_t* tail) { return std::to_wstring(n) + (n == 1 ? L" filter " : L" filters ") + tail; };
+        const uint32_t picked = count(SidePanelActiveFacets(filters, false));
+        const uint32_t on = count(SidePanelFacetsInEffect(filters));
+        if (picked == 0)
+        {
+            return {};
+        }
+        if (on == picked)
+        {
+            return words(on, L"on");
+        }
+        if (on == 0)
+        {
+            return words(picked, L"paused");
+        }
+        return words(on, L"on") + L", " + std::to_wstring(picked - on) + L" paused";
+    }
+
     // ===== Edits (each keeps the record normalized; each returns whether it changed anything) ==========================
 
     // Add a folder to By Folder — the folder card's Filter. A folder already picked (the same NormDirKey, whatever its
     // spelling or case) keeps its place and takes the new Include-subfolders choice, so picking it again with the box
     // unchecked turns it into "exactly".
+    // A PICK APPLIES (the user's "A pick resumes", 2026-11-12): the folder picked — new, or picked again — is switched ON,
+    // and a paused row is resumed, so the pick always shows its effect. Picking again a folder whose chip was dimmed, or
+    // any folder while the row is paused, therefore changes the record even when the folder and its choice are the same.
     //   filters           - the record to edit.
     //   rawPath           - the folder as typed or picked; trimmed here (TrimFolderPath).
     //   includeSubfolders - the card's check box.
     //   returns           - true when the record changed; false for a path that is not an absolute folder (nothing added)
-    //                       or a pick identical to one already there.
+    //                       or a pick identical to one already there and applied.
     //   throws            - std::bad_alloc.
     inline bool SidePanelAddFolderFilter(SidePanelFilters& filters, std::wstring_view rawPath, bool includeSubfolders)
     {
@@ -247,15 +467,18 @@ namespace Agentmaster
         {
             if (NormDirKey(existing.path) == key)
             {
-                if (existing.includeSubfolders == includeSubfolders)
+                if (existing.includeSubfolders == includeSubfolders && !existing.off && !filters.paused)
                 {
                     return false;
                 }
                 existing.includeSubfolders = includeSubfolders;
+                existing.off = false; // picked again: its chip is on
+                filters.paused = false; // ...and the row applies (a pick resumes)
                 return true;
             }
         }
         filters.folders.push_back(SidePanelFolderFilter{ std::move(path), includeSubfolders });
+        filters.paused = false; // a pick resumes a paused row
         return true;
     }
 
@@ -335,51 +558,37 @@ namespace Agentmaster
 
     // A filter record COMPILED for one list update: the picked folders' keys and the picked tags' folded names computed once,
     // so judging a session costs a few comparisons per facet. Build one per update (it holds the clock of that update).
+    // ONLY WHAT APPLIES IS COMPILED: the record goes through SidePanelFiltersInEffect first, so a paused row and a chip
+    // switched off constrain nothing — a matcher built from the window's record can never hide a card for a filter the
+    // chips row shows dimmed. To judge "what a pick would list" (the funnel's counts) pass SidePanelFiltersForCounts(record).
     class SidePanelFilterMatcher
     {
+        // Picks the private constructor that takes a record ALREADY reduced to what applies (the public one reduces it).
+        struct AppliedRecord
+        {
+        };
+
     public:
-        // Compile `filters`.
-        //   filters - the window's record (normalized or not: a folder that is not absolute and an empty tag are skipped).
+        // Compile what applies of `filters`.
+        //   filters - the window's record (normalized or not: a folder that is not absolute and an empty tag are skipped);
+        //             its paused row and its switched-off chips are left out (SidePanelFiltersInEffect).
         //   nowMs   - the clock the Active facet judges against (Unix ms).
         //   throws  - std::bad_alloc.
         SidePanelFilterMatcher(const SidePanelFilters& filters, int64_t nowMs) :
-            _states{ filters.states & kSidePanelAllStateBits },
-            _untagged{ filters.untagged },
-            _draft{ filters.draft },
-            _unread{ filters.unread },
-            _pinned{ filters.pinned },
-            _favorite{ filters.favorite },
-            _activeMinutes{ filters.activeWithinMinutes > kSidePanelActiveMaxMinutes ? 0u : filters.activeWithinMinutes },
-            _nowMs{ nowMs }
+            SidePanelFilterMatcher{ AppliedRecord{}, SidePanelFiltersInEffect(filters), nowMs }
         {
-            for (const auto& folder : filters.folders)
-            {
-                const std::wstring path = TrimFolderPath(folder.path);
-                if (!path.empty() && IsAbsoluteFolderPath(path))
-                {
-                    _folders.push_back(Folder{ NormDirKey(path), folder.includeSubfolders });
-                }
-            }
-            for (const auto& tag : filters.tags)
-            {
-                const std::wstring name = NormalizeTagName(tag);
-                if (!name.empty())
-                {
-                    _tags.push_back(FoldTagName(name));
-                }
-            }
         }
 
         // Does the Tag facet read the session's tags? (The caller then reads them for every session it judges.)
-        //   returns - true while By Tag has a pick (a tag or Untagged).
+        //   returns - true while By Tag has a pick that applies (a tag or Untagged; false while its chip is off).
         //   throws  - nothing.
         [[nodiscard]] bool NeedsTags() const noexcept { return !_tags.empty() || _untagged; }
         // Does the Favorite flag read the session's ★? (The caller then reads it for every session it judges.)
-        //   returns - true while the flag is checked.
+        //   returns - true while the flag is checked and applies.
         //   throws  - nothing.
         [[nodiscard]] bool NeedsFavorite() const noexcept { return _favorite; }
         // Does the Unread flag read the unread census?
-        //   returns - true while the flag is checked.
+        //   returns - true while the flag is checked and applies.
         //   throws  - nothing.
         [[nodiscard]] bool NeedsUnread() const noexcept { return _unread; }
 
@@ -433,6 +642,40 @@ namespace Agentmaster
             std::wstring key; // NormDirKey of the picked folder
             bool includeSubfolders{ true }; // the pick's own choice
         };
+
+        // Compile a record that holds ONLY what applies (SidePanelFiltersInEffect's result: no pause, no switched-off
+        // chip) — every pick in it constrains. Private, so no caller can compile a raw record past the reduction.
+        //   (tag)   - AppliedRecord: selects this constructor.
+        //   filters - the applied picks (a folder that is not absolute and an empty tag are skipped).
+        //   nowMs   - the clock the Active facet judges against (Unix ms).
+        //   throws  - std::bad_alloc.
+        SidePanelFilterMatcher(AppliedRecord, const SidePanelFilters& filters, int64_t nowMs) :
+            _states{ filters.states & kSidePanelAllStateBits },
+            _untagged{ filters.untagged },
+            _draft{ filters.draft },
+            _unread{ filters.unread },
+            _pinned{ filters.pinned },
+            _favorite{ filters.favorite },
+            _activeMinutes{ filters.activeWithinMinutes > kSidePanelActiveMaxMinutes ? 0u : filters.activeWithinMinutes },
+            _nowMs{ nowMs }
+        {
+            for (const auto& folder : filters.folders)
+            {
+                const std::wstring path = TrimFolderPath(folder.path);
+                if (!path.empty() && IsAbsoluteFolderPath(path))
+                {
+                    _folders.push_back(Folder{ NormDirKey(path), folder.includeSubfolders });
+                }
+            }
+            for (const auto& tag : filters.tags)
+            {
+                const std::wstring name = NormalizeTagName(tag);
+                if (!name.empty())
+                {
+                    _tags.push_back(FoldTagName(name));
+                }
+            }
+        }
 
         // By Folder: no pick passes; else ANY pick covers the session's working or inferred folder (OR).
         bool _FolderOk(const SidePanelFilterFacts& facts) const noexcept
@@ -489,15 +732,49 @@ namespace Agentmaster
         Text, // the typed text (its ✕ empties the filter box — the caller's)
     };
 
-    // One chip of the row: its kind, the folder it stands for, its words and its tooltip. The glyph and the color are the
-    // UI's (a folder icon, the first picked state's dot, the first picked tag's ribbon…).
+    // One chip of the row: its kind, the folder it stands for, its words, its tooltip and whether it applies. The glyph and
+    // the color are the UI's (a folder icon, the first picked state's dot, the first picked tag's ribbon…).
     struct SidePanelFilterChip
     {
         SidePanelChipKind kind{ SidePanelChipKind::Text };
         size_t folderIndex{ 0 }; // Folder chips: the index in SidePanelFilters::folders (0 for every other kind)
         std::wstring text; // the chip's words ("Agentmaster", "Running or Waiting for you", "“login”")
         std::wstring tip; // the full words, for the chip's tooltip ("Folder K:\x and every folder under it")
+        // true: the chip is drawn DIMMED (the user's pick "Dimmed chips") — its filter is picked but does not apply, because
+        // the chip was switched off by a click or the whole row is paused. The two read alike on purpose: what is dim is off.
+        bool off{ false };
     };
+
+    // The facet a chip stands for (a Folder chip: By Folder, of which it is one folder). The two enums list the same nine
+    // things in the same order; this spells the pairing out, so a reorder of either cannot silently cross them.
+    //   kind    - the chip's kind.
+    //   returns - its facet.
+    //   throws  - nothing.
+    [[nodiscard]] constexpr SidePanelFacet SidePanelChipFacet(SidePanelChipKind kind) noexcept
+    {
+        switch (kind)
+        {
+        case SidePanelChipKind::Folder:
+            return SidePanelFacet::Folder;
+        case SidePanelChipKind::State:
+            return SidePanelFacet::State;
+        case SidePanelChipKind::Tag:
+            return SidePanelFacet::Tag;
+        case SidePanelChipKind::Draft:
+            return SidePanelFacet::Draft;
+        case SidePanelChipKind::Unread:
+            return SidePanelFacet::Unread;
+        case SidePanelChipKind::Pinned:
+            return SidePanelFacet::Pinned;
+        case SidePanelChipKind::Favorite:
+            return SidePanelFacet::Favorite;
+        case SidePanelChipKind::Active:
+            return SidePanelFacet::Active;
+        case SidePanelChipKind::Text:
+        default:
+            return SidePanelFacet::Text;
+        }
+    }
 
     // The last component of a folder path, for a folder chip (a drive root names itself: "K:\").
     //   path    - a display spelling (TrimFolderPath's form).
@@ -519,12 +796,14 @@ namespace Agentmaster
     }
 
     // The chips the row shows, in the facets' order: one per folder, one for the states, one for the tags, one per flag, one
-    // for the window, one for the typed text.
+    // for the window, one for the typed text. A pick that is OFF keeps its chip (SidePanelFilterChip::off): the row shows
+    // what is picked, dimmed where it does not apply — so a paused row is still the row, and never hides.
     //   filters   - the window's record.
     //   typedText - the filter box's text, trimmed by the caller ("" = no text chip).
+    //   textOff   - the text chip was switched off by a click (the caller's flag; the record's pause dims it as well).
     //   returns   - the chips (empty = the row hides).
     //   throws    - std::bad_alloc.
-    [[nodiscard]] inline std::vector<SidePanelFilterChip> SidePanelFilterChips(const SidePanelFilters& filters, std::wstring_view typedText)
+    [[nodiscard]] inline std::vector<SidePanelFilterChip> SidePanelFilterChips(const SidePanelFilters& filters, std::wstring_view typedText, bool textOff = false)
     {
         std::vector<SidePanelFilterChip> chips;
         for (size_t i = 0; i < filters.folders.size(); ++i)
@@ -593,6 +872,26 @@ namespace Agentmaster
             chip.tip = L"The text typed in the filter box. \x2715 empties the box.";
             chips.push_back(std::move(chip));
         }
+        // Which chips are off (dimmed): all of them while the row is paused; else each by its own switch.
+        for (auto& chip : chips)
+        {
+            if (filters.paused)
+            {
+                chip.off = true;
+            }
+            else if (chip.kind == SidePanelChipKind::Folder)
+            {
+                chip.off = chip.folderIndex < filters.folders.size() && filters.folders[chip.folderIndex].off;
+            }
+            else if (chip.kind == SidePanelChipKind::Text)
+            {
+                chip.off = textOff;
+            }
+            else
+            {
+                chip.off = (filters.offFacets & SidePanelFacetBit(SidePanelChipFacet(chip.kind))) != 0;
+            }
+        }
         return chips;
     }
 
@@ -641,12 +940,223 @@ namespace Agentmaster
         return filters;
     }
 
+    // ===== Pause filter, Resume filter and a chip's click: the edits ====================================================
+    // (SIDE_PANEL.md §2l "Pause filter, Resume filter and a chip's click"; the states are "Picked vs applied" above.)
+    // Each takes the typed text's two facts beside the record, because the text is a chip of the row but no part of the
+    // record: `textActive` (the box holds a query) and `textOff` (its chip was switched off — the caller's flag, in / out).
+
+    // "Pause filter": switch the whole row off. Every pick and every chip's own switch stay as they are, so
+    // SidePanelResumeAll brings back exactly what applied before.
+    //   filters - the record to edit.
+    //   returns - true when the record changed (false when it was paused already).
+    //   throws  - nothing.
+    inline bool SidePanelPauseAll(SidePanelFilters& filters) noexcept
+    {
+        if (filters.paused)
+        {
+            return false;
+        }
+        filters.paused = true;
+        return true;
+    }
+
+    // "Resume filter": lift the pause, so the chips that were on before it apply again. When NOTHING would apply then —
+    // every chip was switched off one by one, with or without a pause on top — every chip is switched on instead: a click
+    // on Resume filter always leaves something applied, never a row that still reads "Resume filter".
+    //   filters    - the record to edit.
+    //   textActive - the filter box holds a query.
+    //   textOff    - the text chip's switch; cleared when every chip is switched on.
+    //   returns    - true when anything changed (the record or the text chip's switch).
+    //   throws     - nothing.
+    inline bool SidePanelResumeAll(SidePanelFilters& filters, bool textActive, bool& textOff) noexcept
+    {
+        bool changed = filters.paused;
+        filters.paused = false;
+        if (!SidePanelAnyChipOn(filters, textActive, textOff))
+        {
+            for (auto& folder : filters.folders)
+            {
+                changed = changed || folder.off;
+                folder.off = false;
+            }
+            changed = changed || filters.offFacets != 0 || (textActive && textOff);
+            filters.offFacets = 0;
+            textOff = false;
+        }
+        return changed;
+    }
+
+    // A click on a CHIP (the user's "clicking each filter item with x toggle it"): switch that one filter off, or on again.
+    // While the row is PAUSED every chip is dim, and the click means "this one": the pause is lifted and the clicked chip
+    // ALONE applies — every other chip is switched off (still picked, still in the row, a click away).
+    //   filters    - the record to edit.
+    //   chip       - the chip clicked (its kind; a Folder chip's index). A chip the row no longer holds — a folder index
+    //                past the record, a facet with no pick, the text chip with an empty box — changes nothing.
+    //   textActive - the filter box holds a query.
+    //   textOff    - the text chip's switch (in / out).
+    //   returns    - true when anything changed.
+    //   throws     - nothing.
+    inline bool SidePanelToggleChip(SidePanelFilters& filters, const SidePanelFilterChip& chip, bool textActive, bool& textOff) noexcept
+    {
+        const SidePanelFacet facet = SidePanelChipFacet(chip.kind);
+        const bool inRow = chip.kind == SidePanelChipKind::Text   ? textActive :
+                           chip.kind == SidePanelChipKind::Folder ? chip.folderIndex < filters.folders.size() :
+                                                                    SidePanelFacetPicked(filters, facet);
+        if (!inRow)
+        {
+            return false;
+        }
+        if (filters.paused)
+        {
+            // Everything is off: the clicked chip alone comes back. The other chips keep their picks, switched off.
+            filters.paused = false;
+            for (size_t i = 0; i < filters.folders.size(); ++i)
+            {
+                filters.folders[i].off = !(chip.kind == SidePanelChipKind::Folder && i == chip.folderIndex);
+            }
+            // Folder and Text have no bit in kSidePanelOffFacetBits, so clearing "the clicked facet's bit" is a no-op for them.
+            filters.offFacets = SidePanelActiveFacets(filters, false) & kSidePanelOffFacetBits & ~SidePanelFacetBit(facet);
+            textOff = textActive && chip.kind != SidePanelChipKind::Text;
+            return true;
+        }
+        switch (chip.kind)
+        {
+        case SidePanelChipKind::Folder:
+            filters.folders[chip.folderIndex].off = !filters.folders[chip.folderIndex].off;
+            break;
+        case SidePanelChipKind::Text:
+            textOff = !textOff;
+            break;
+        default:
+            filters.offFacets ^= SidePanelFacetBit(facet);
+            break;
+        }
+        return true;
+    }
+
+    // THE "A PICK RESUMES" RULE (the user's pick of 2026-11-12), applied to every change of the record: where `after` ADDS
+    // a filter to `before` — a folder picked (or picked again with another choice), a state, a tag or Untagged, a flag
+    // turned on, an Active window set or moved — that facet's chip is switched on and a paused row is resumed, so a pick
+    // always shows its effect. Whatever only REMOVES (an unchecked row, a chip's ✕, a window set back to "Any time") leaves
+    // the switches and the pause as they are. A change that touches only the switches themselves (Pause, Resume, a chip's
+    // click) adds nothing, so it passes through unchanged. Judged on the picks, never on which button was used: every
+    // caller that edits the record gets it by going through the one writer (TerminalPage::_SidePanelSetFilters).
+    //   before  - the record as it is.
+    //   after   - the record wanted.
+    //   returns - `after`, with the switches the rule moved (not normalized: the caller normalizes).
+    //   throws  - std::bad_alloc.
+    [[nodiscard]] inline SidePanelFilters SidePanelFiltersAfterPick(const SidePanelFilters& before, SidePanelFilters after)
+    {
+        bool added = false;
+        const auto switchOn = [&](SidePanelFacet facet) {
+            after.offFacets &= ~SidePanelFacetBit(facet);
+            added = true;
+        };
+        for (auto& folder : after.folders)
+        {
+            const std::wstring path = TrimFolderPath(folder.path);
+            if (path.empty())
+            {
+                continue;
+            }
+            const std::wstring key = NormDirKey(path);
+            const auto was = std::find_if(before.folders.begin(), before.folders.end(), [&](const SidePanelFolderFilter& held) {
+                const std::wstring own = TrimFolderPath(held.path);
+                return !own.empty() && NormDirKey(own) == key;
+            });
+            if (was == before.folders.end() || was->includeSubfolders != folder.includeSubfolders)
+            {
+                folder.off = false; // picked now, or picked again with another choice: its chip is on
+                added = true;
+            }
+            else if (was->off && !folder.off)
+            {
+                added = true; // a dimmed folder switched back on (picked again as it was): the row applies with it
+            }
+        }
+        if ((after.states & ~before.states & kSidePanelAllStateBits) != 0)
+        {
+            switchOn(SidePanelFacet::State);
+        }
+        const auto heldTag = [&](const std::wstring& tag) {
+            const std::wstring folded = FoldTagName(tag);
+            return std::any_of(before.tags.begin(), before.tags.end(), [&](const std::wstring& t) { return FoldTagName(t) == folded; });
+        };
+        if ((after.untagged && !before.untagged) || std::any_of(after.tags.begin(), after.tags.end(), [&](const std::wstring& t) { return !heldTag(t); }))
+        {
+            switchOn(SidePanelFacet::Tag);
+        }
+        if (after.draft && !before.draft)
+        {
+            switchOn(SidePanelFacet::Draft);
+        }
+        if (after.unread && !before.unread)
+        {
+            switchOn(SidePanelFacet::Unread);
+        }
+        if (after.pinned && !before.pinned)
+        {
+            switchOn(SidePanelFacet::Pinned);
+        }
+        if (after.favorite && !before.favorite)
+        {
+            switchOn(SidePanelFacet::Favorite);
+        }
+        if (after.activeWithinMinutes != 0 && after.activeWithinMinutes != before.activeWithinMinutes)
+        {
+            switchOn(SidePanelFacet::Active);
+        }
+        if (added)
+        {
+            after.paused = false;
+        }
+        return after;
+    }
+
+    // Drop a pause that has nothing left to cover: no pick in the record and no text in the box (the last chip was dropped
+    // while the row was paused). Otherwise the NEXT chip would be born dimmed for a pause the user can no longer see.
+    //   filters    - the record to edit.
+    //   textActive - the filter box holds a query.
+    //   returns    - true when the pause was dropped.
+    //   throws     - nothing.
+    inline bool SidePanelSettlePause(SidePanelFilters& filters, bool textActive) noexcept
+    {
+        if (!filters.paused || textActive || SidePanelFiltersActive(filters))
+        {
+            return false;
+        }
+        filters.paused = false;
+        return true;
+    }
+
+    // The record after the text in the filter box changed. TYPING RESUMES (the user's pick "Everything in the row": the
+    // pause covers the typed text, "typing in the box again resumes the filter"): a box that now holds a query lifts the
+    // pause, so what is typed always filters. A box that was EMPTIED resumes nothing — that is a removal, like a chip's ✕ —
+    // but drops a pause with nothing left to cover (SidePanelSettlePause). The text chip's own switch is the caller's: a
+    // changed text is a new filter, on.
+    //   filters    - the record as it is.
+    //   textActive - the filter box holds a query now.
+    //   returns    - the record to take (equal to `filters` when the pause stays as it is).
+    //   throws     - nothing (the copy was made by the caller).
+    [[nodiscard]] inline SidePanelFilters SidePanelFiltersAfterTextChange(SidePanelFilters filters, bool textActive) noexcept
+    {
+        if (textActive)
+        {
+            filters.paused = false;
+        }
+        (void)SidePanelSettlePause(filters, textActive);
+        return filters;
+    }
+
     // ===== The window record's JSON =====================================================================================
 
-    // The record normalized: folders trimmed, absolute only and unique by NormDirKey (the first spelling and its choice kept);
-    // tags normalized and unique by FoldTagName (the first spelling kept); states cut to kSidePanelAllStateBits; a window past
-    // kSidePanelActiveMaxMinutes read as 0. What the loader returns, so a hand-edited record can never carry a filter the row
-    // cannot show or the panel cannot uncheck.
+    // The record normalized: folders trimmed, absolute only and unique by NormDirKey (the first spelling, its choice and its
+    // switch kept); tags normalized and unique by FoldTagName (the first spelling kept); states cut to kSidePanelAllStateBits;
+    // a window past kSidePanelActiveMaxMinutes read as 0; the chips' off bits cut to kSidePanelOffFacetBits AND to the facets
+    // that hold a pick (a switch with no chip is dropped, so a pick made later in that facet starts on). What the loader
+    // returns, so a hand-edited record can never carry a filter the row cannot show or the panel cannot uncheck.
+    // The PAUSE is kept as given, on an empty record too: at run time it may cover the typed text alone, which this
+    // function cannot see (SidePanelSettlePause drops it once nothing is left; the loader drops it — no text is saved).
     //   filters - the record as read or edited.
     //   returns - the normalized copy.
     //   throws  - std::bad_alloc.
@@ -667,7 +1177,7 @@ namespace Agentmaster
                 continue;
             }
             keys.push_back(std::move(key));
-            out.folders.push_back(SidePanelFolderFilter{ std::move(path), folder.includeSubfolders });
+            out.folders.push_back(SidePanelFolderFilter{ std::move(path), folder.includeSubfolders, folder.off });
         }
         std::vector<std::wstring> folded;
         for (const auto& tag : filters.tags)
@@ -692,13 +1202,20 @@ namespace Agentmaster
         out.pinned = filters.pinned;
         out.favorite = filters.favorite;
         out.activeWithinMinutes = filters.activeWithinMinutes > kSidePanelActiveMaxMinutes ? 0u : filters.activeWithinMinutes;
+        // After the picks: only a facet that holds one can have its chip switched off.
+        out.offFacets = filters.offFacets & kSidePanelOffFacetBits & SidePanelActiveFacets(out, false);
+        out.paused = filters.paused;
         return out;
     }
 
     // The record as the window record's "sidePanelFilters" object. Only what is set is written (an absent member reads as
-    // unset), so a window with one filter writes one member.
+    // unset), so a window with one filter writes one member. The switches ride with the picks: a folder object's "off",
+    // the record's "off" (the tokens of the facets whose chip is switched off, kSidePanelOffFacetTokens) and "paused" —
+    // each written only while true, and only on a record that holds a pick, so a window that never paused anything writes
+    // the object exactly as before the feature. A build that predates them ignores all three and applies every pick.
     //   filters - the record (written as given: normalize first when it may be raw).
-    //   returns - the object; with no filter active, an empty object (the caller then omits the key altogether).
+    //   returns - the object; with no filter picked, an empty object (the caller then omits the key altogether) — a pause
+    //             that covers only the typed text is not saved.
     //   throws  - std::bad_alloc.
     [[nodiscard]] inline json::Value SidePanelFiltersToJson(const SidePanelFilters& filters)
     {
@@ -711,6 +1228,10 @@ namespace Agentmaster
                 json::Value f = json::Value::MkObj();
                 f.Set(L"path", json::Value::MkStr(folder.path));
                 f.Set(L"subfolders", json::Value::MkBool(folder.includeSubfolders));
+                if (folder.off)
+                {
+                    f.Set(L"off", json::Value::MkBool(true)); // this folder's chip is switched off (absent = on)
+                }
                 arr.Push(std::move(f));
             }
             o.Set(L"folders", std::move(arr));
@@ -751,12 +1272,37 @@ namespace Agentmaster
         {
             o.Set(L"activeWithinMinutes", json::Value::MkNum(static_cast<double>(filters.activeWithinMinutes)));
         }
+        // The switches, only beside a pick (see the contract above: no pick = an empty object).
+        if (SidePanelFiltersActive(filters))
+        {
+            // Cut to the facets that hold a pick, as normalizing does: a raw record never writes a switch with no chip.
+            const uint32_t off = filters.offFacets & kSidePanelOffFacetBits & SidePanelActiveFacets(filters, false);
+            if (off != 0)
+            {
+                json::Value arr = json::Value::MkArr();
+                for (const auto& entry : kSidePanelOffFacetTokens)
+                {
+                    if ((off & SidePanelFacetBit(entry.facet)) != 0)
+                    {
+                        arr.Push(json::Value::MkStr(entry.token)); // tokens, never bit numbers: the enum may grow
+                    }
+                }
+                o.Set(L"off", std::move(arr));
+            }
+            if (filters.paused)
+            {
+                o.Set(L"paused", json::Value::MkBool(true));
+            }
+        }
         return o;
     }
 
     // The record from the window record's "sidePanelFilters" object, normalized. Tolerant: a value of the wrong type, an
     // unknown state token, a folder that is not absolute, a negative or fractional window — each reads as "not set" for that
-    // one part, never as a filter the panel cannot show.
+    // one part, never as a filter the panel cannot show. The switches read the same way: a non-bool "off" / "paused", an
+    // unknown facet token and a switch for a facet with no pick read as ON (a corrupt value can only apply more of what the
+    // row shows, never dim a chip that is not there), and a pause on a record with no pick is dropped — the typed text it
+    // could have covered is not saved.
     //   v       - the object (anything else — absent, null, an array — reads as no filter).
     //   returns - the record.
     //   throws  - std::bad_alloc.
@@ -779,6 +1325,7 @@ namespace Agentmaster
                 folder.path = f.StrAt(L"path");
                 // Absent or not a bool = the default (subfolders included): the user's pick for every folder.
                 folder.includeSubfolders = f.BoolAt(L"subfolders", true);
+                folder.off = f.BoolAt(L"off", false); // absent or not a bool = on
                 raw.folders.push_back(std::move(folder));
             }
         }
@@ -818,7 +1365,26 @@ namespace Agentmaster
                                           static_cast<uint32_t>(minutes) :
                                           0u;
         }
-        return NormalizeSidePanelFilters(raw);
+        // The chips switched off one by one: the tokens of their facets (normalizing drops a switch whose facet has no pick).
+        if (const auto* off = v.Find(L"off"); off && off->type == json::Value::Type::Arr)
+        {
+            for (const auto& s : off->arr)
+            {
+                const std::wstring token = s.AsStr();
+                for (const auto& entry : kSidePanelOffFacetTokens)
+                {
+                    if (token == entry.token)
+                    {
+                        raw.offFacets |= SidePanelFacetBit(entry.facet);
+                    }
+                }
+            }
+        }
+        raw.paused = v.BoolAt(L"paused", false);
+        SidePanelFilters out = NormalizeSidePanelFilters(raw);
+        // A pause with no pick could only have covered the typed text, which is not saved: nothing is left to pause.
+        (void)SidePanelSettlePause(out, /*textActive*/ false);
+        return out;
     }
 
     // ===== By Folder's PICK HISTORY and its hover SUBMENU (SIDE_PANEL.md §2l "The By Folder submenu") =====================

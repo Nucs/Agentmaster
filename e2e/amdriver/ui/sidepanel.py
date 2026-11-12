@@ -52,6 +52,15 @@ there first. While a filter (or typed text) narrows the list, a row of chips sho
 am.side.filterRow.count 'N of M'; a chip's words am.side.chip.<folder.N | state | tag | draft | unread | pinned |
 favorite | active | text>, its ✕ <chip id>.remove, am.side.filterRow.clear). In AI mode the count line still shows the
 AI view's words.
+
+PAUSE FILTER / RESUME FILTER and a chip's click (SIDE_PANEL.md §2l; a build of 2026-11-12 or later — NOT BUILT on that
+day): a filter can be OFF without being dropped. Each chip's body is a button, <chip id>.toggle (named 'Pause the filter
+<words>' / 'Resume the filter <words>'; ItemStatus 'paused' while that filter is off), and a link stands before Clear,
+am.side.filterRow.pause (PAUSE_LINK_ID: named 'Pause filter' while something in the row applies, 'Resume filter' —
+ItemStatus 'paused' — while nothing does). The row stays on screen while paused; the count words then read like an
+unfiltered list's ('2 sessions in this window'), and the funnel's ItemStatus reads 'N filters paused'. A click on the row
+within the system's double-click time of a toggle is ignored by the app: leave more than that (500 ms by default) between
+two clicks on the row.
 """
 from __future__ import annotations
 
@@ -87,6 +96,15 @@ FUNNEL_ID = "am.side.funnel"
 """The header's filter button (the funnel, SIDE_PANEL.md §2l; a build of 2026-11-08 or later) by AutomationId."""
 FILTER_BOX_ID = "am.side.filter"
 """The filter box by AutomationId: since the filters (SIDE_PANEL.md §2l) its ItemStatus holds the old count line's words."""
+PAUSE_LINK_ID = "am.side.filterRow.pause"
+"""The chips row's link before Clear (SIDE_PANEL.md §2l "Pause filter, Resume filter and a chip's click"; a build of
+2026-11-12 or later). ONE id for both states: its name is 'Pause filter' or 'Resume filter', its ItemStatus 'paused' while
+nothing in the row applies."""
+CHIP_ID_PREFIX = "am.side.chip."
+"""A chip's ids all start with this: `<prefix><kind>` its words, `...<kind>.toggle` its body (a button whose click
+switches the filter off and on; ItemStatus 'paused' while off), `...<kind>.remove` its ✕."""
+CHIP_PART_SUFFIXES = (".remove", ".toggle")
+"""The id endings of a chip's BUTTONS: an id that starts with CHIP_ID_PREFIX and ends in none of these is a chip's words."""
 HEADER_ORDER = {"right": ["am.side.launch", FUNNEL_ID, "am.side.sum", MORE_ID],
                 "left": [MORE_ID, "am.side.sum", FUNNEL_ID, "am.side.launch"]}
 """The header line's buttons LEFT TO RIGHT on screen, per dock side -> their AutomationIds: the line mirrors with the dock,
@@ -502,8 +520,52 @@ class SidePanel:
         Returns:
             The chips' words ([] while no filter narrows the list, and on a build before the filters).
         """
-        chips = [k for k in self.controls() if k.automation_id.startswith("am.side.chip.") and not k.automation_id.endswith(".remove")]
+        chips = [k for k in self.controls() if k.automation_id.startswith(CHIP_ID_PREFIX) and not k.automation_id.endswith(CHIP_PART_SUFFIXES)]
         return [k.name for k in sorted(chips, key=lambda k: (k.rect[1], k.rect[0]))]
+
+    def pause_link(self) -> Optional[uia.Element]:
+        """The chips row's 'Pause filter' / 'Resume filter' link (SIDE_PANEL.md §2l).
+
+        Returns:
+            The link (its name says which click it is), or None while the row is hidden and on a build before 2026-11-12.
+        """
+        return next((k for k in self.controls() if k.automation_id == PAUSE_LINK_ID), None)
+
+    def filter_paused(self) -> bool:
+        """Whether NOTHING in the chips row applies: the row is paused, or every chip was switched off one by one.
+
+        Returns:
+            True while the link reads 'Resume filter' (its ItemStatus is 'paused'); False while it reads 'Pause filter',
+            while the row is hidden, and on a build before 2026-11-12.
+        """
+        link = self.pause_link()
+        return link is not None and link.item_status == "paused"
+
+    def chip_toggle(self, kind: str) -> uia.Element:
+        """The body of one chip: the button whose click switches that filter off and on again.
+
+        Args:
+            kind: The chip's id word: 'folder.0' (the first folder chip), 'state', 'tag', 'draft', 'unread', 'pinned',
+                'favorite', 'active' or 'text'.
+        Returns:
+            The button; its ItemStatus is 'paused' while that filter is off.
+        Raises:
+            LookupError: When the row holds no such chip (or the build predates the chips' toggles).
+        """
+        wanted = f"{CHIP_ID_PREFIX}{kind}.toggle"
+        for k in self.controls():
+            if k.automation_id == wanted:
+                return k
+        raise LookupError(f"no chip toggle {wanted}")
+
+    def paused_chips(self) -> list[str]:
+        """The id words of the chips whose filter is OFF (dimmed), left to right: e.g. ['state', 'text'].
+
+        Returns:
+            The kinds ([] when every chip applies, while the row is hidden, and on a build before 2026-11-12).
+        """
+        toggles = [k for k in self.controls() if k.automation_id.startswith(CHIP_ID_PREFIX) and k.automation_id.endswith(".toggle") and k.item_status == "paused"]
+        return [k.automation_id[len(CHIP_ID_PREFIX):-len(".toggle")] for k in sorted(toggles, key=lambda k: (k.rect[1], k.rect[0]))]
 
     def filter_box(self) -> uia.Element:
         """The filter box.

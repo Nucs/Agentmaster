@@ -233,7 +233,10 @@ card's tab, in the window that hosts it (SP-12; SIDE_PANEL.md §2k) · the side 
 through the `+` card's folder picker, By State, By Tag, Active within, four flags — from a panel that stays open while you
 pick, with a chips row under the filter box only while a filter is on (SP-13; SIDE_PANEL.md §2l; no test written yet) · By
 Folder… keeps its click and opens a submenu on hover: Pick…, then the folders picked before (the last on top, one list for
-every window), each line turning its folder on or off for that window (SP-14; SIDE_PANEL.md §2l; no test written yet).
+every window), each line turning its folder on or off for that window (SP-14; SIDE_PANEL.md §2l; no test written yet) · a
+filter can be switched off without being dropped: a click on a chip pauses that one filter, Pause filter / Resume filter
+before Clear pauses the whole row (the typed text too) and brings back what applied, dimmed chips stay in the row, and a
+pick or typing resumes (SP-15; SIDE_PANEL.md §2l; no test written yet).
 
 **The regression base** — older behaviors the recent releases build on, covered because every new feature leans on
 them: the /handover family (HND-01, HND-03, HND-04, HND-05, HND-07, HND-08), the Sessions browser (SES-01, SES-02,

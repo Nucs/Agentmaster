@@ -419,8 +419,21 @@ namespace
     constexpr double kSidePanelChipGapX = 4.0;
     constexpr double kSidePanelChipGapY = 3.0;
     constexpr double kSidePanelChipCornerRadius = 9.0;
-    // The "Clear" link's color: the AI strip's working blue family, the panel's one link-like text.
+    // The "Clear" link's color: the AI strip's working blue family, the panel's one link-like text. "Pause filter" and
+    // "Resume filter" wear it too (the user's pick "Dimmed chips": Resume filter in the same blue as Clear).
     constexpr Color kSidePanelLinkColor{ 0xFF, 0x7F, 0xB5, 0xFF };
+    // A chip's fill at rest and under the pointer. The hover fill is written to the chip's childless back Border by the
+    // cell's pointer handlers — never a Button's own hover brush, whose square fill would stick out of the chip's round
+    // ends — and says the chip is clickable (its body switches the filter off and on).
+    constexpr Color kSidePanelChipFill{ 0xFF, 0x3B, 0x3B, 0x3B };
+    constexpr Color kSidePanelChipHoverFill{ 0xFF, 0x4C, 0x4C, 0x4C };
+    // The opacity of a chip whose filter is OFF — switched off by a click on it, or the whole row paused (SIDE_PANEL.md §2l
+    // "Pause filter, Resume filter and a chip's click"; the user's pick "Dimmed chips"). On the chip's cell, so its back,
+    // glyph, words and ✕ fade as one. Low enough to read as "off" beside a lit chip, high enough to read the words.
+    constexpr double kSidePanelChipOffOpacity = 0.42;
+    // The link beside Clear, in its two states (the user's words of 2026-11-12: 'pause filter' and 'resume filter').
+    constexpr const wchar_t* kSidePanelPauseWords = L"Pause filter";
+    constexpr const wchar_t* kSidePanelResumeWords = L"Resume filter";
     // By Folder's hover SUBMENU (SIDE_PANEL.md §2l "The By Folder submenu"): its width (DIPs). A folder line holds the leaf,
     // "(exactly)", the dim whole path and a count; a longer path ends in "…" (the line's tooltip has it whole). Fixed, so a
     // click that changes a count never resizes the card under the pointer.
@@ -650,6 +663,19 @@ namespace
     const wchar_t* SidePanelScopeWords(bool global) noexcept
     {
         return global ? L" across all windows" : L" in this window";
+    }
+
+    // The typed text as the funnel's COUNTS judge it (SIDE_PANEL.md §2l "Pause filter, Resume filter and a chip's click"): the
+    // counts beside the panel's rows, the folder card's "N sessions" and the submenu's line counts say what a PICK would
+    // list. A pick resumes a paused row, so the row's pause is ignored there (SidePanelFiltersForCounts does the same for
+    // the record) — but a text chip switched off by a click stays off after a pick, so its text must not narrow the counts.
+    //   text    - the filter box's text (TerminalPage::_sidePanelSearchText).
+    //   textOff - the text chip is switched off (TerminalPage::_sidePanelFilterTextOff).
+    //   returns - the text to parse into terms: empty while the chip is off. A view of `text`: use it before `text` changes.
+    //   throws  - nothing.
+    std::wstring_view SidePanelTextForCounts(const std::wstring& text, bool textOff) noexcept
+    {
+        return textOff ? std::wstring_view{} : std::wstring_view{ text };
     }
 
     // Is a facet bit set in a mask? (The panel's expanded sections are kept as SidePanelFacetBit bits.)
@@ -1764,6 +1790,9 @@ namespace winrt::TerminalApp::implementation
             {
                 self->_sidePanelSearchText = std::wstring{ box.Text() };
             }
+            // The text is a chip of the filters' row (SIDE_PANEL.md §2l "Pause filter, Resume filter and a chip's click"): a
+            // changed text is a new filter, on, and typing resumes a paused row — so what is typed always filters. Noexcept.
+            self->_SidePanelNoteFilterTextChanged();
             // User-driven — rebuild NOW (forced past the min-gap throttle) so typing filters live.
             self->_SidePanelScheduleRebuild(/*force*/ true);
         });
@@ -3569,7 +3598,8 @@ namespace winrt::TerminalApp::implementation
         // With the Unread flag on (SIDE_PANEL.md §2l) the census decides which cards are LISTED, not only which ring: a session
         // that turned unread must appear, one just visited must leave. The in-place patch above never adds or drops a row, so
         // the list update runs too — the throttled one (an unread flip is no user action), which the next tick catches up.
-        if (_sidePanelFilters.unread)
+        // Only while the flag APPLIES: paused, or its chip switched off, it lists nothing differently (SidePanelFacetInEffect).
+        if (::Agentmaster::SidePanelFacetInEffect(_sidePanelFilters, ::Agentmaster::SidePanelFacet::Unread))
         {
             _SidePanelScheduleRebuild(/*force*/ false);
         }
@@ -3738,8 +3768,9 @@ namespace winrt::TerminalApp::implementation
         }
         // Favorites belt (SIDE_PANEL.md §2l): with the Favorite flag on, a ★ set or cleared anywhere in this process (the
         // Sessions page, a tab's menu, another window) moves the facts epoch the ★ cache was read at — and decides which
-        // cards are listed. One atomic load per tick, only while the flag is on.
-        if (!_sidePanelDirty && _sidePanelFilters.favorite && ::Agentmaster::SessionFactsEpoch() != _sidePanelFavoritesEpoch)
+        // cards are listed. One atomic load per tick, only while the flag is on AND applies (a paused row, or the flag's chip
+        // switched off, lists the same cards whatever the ★ says).
+        if (!_sidePanelDirty && ::Agentmaster::SidePanelFacetInEffect(_sidePanelFilters, ::Agentmaster::SidePanelFacet::Favorite) && ::Agentmaster::SessionFactsEpoch() != _sidePanelFavoritesEpoch)
         {
             _sidePanelDirty = true;
         }
@@ -3873,11 +3904,18 @@ namespace winrt::TerminalApp::implementation
             const SidePanelIndicatorInputs indicators = SidePanelReadIndicatorInputs(_appSettings);
             // The FILTERS (SIDE_PANEL.md §2l): compiled once per update (folder keys, folded tag names, this update's clock). An
             // unfiltered window builds no matcher and judges nothing beyond the typed text — the list as before the feature.
+            // ONLY WHAT APPLIES narrows ("Pause filter, Resume filter and a chip's click"): the matcher compiles the record
+            // reduced to its applied picks (it leaves out a paused row and every chip switched off), and a window whose
+            // picks are all off builds none — it updates like an unfiltered one.
             std::optional<::Agentmaster::SidePanelFilterMatcher> matcher;
-            if (::Agentmaster::SidePanelFiltersActive(_sidePanelFilters))
+            if (::Agentmaster::SidePanelFiltersNarrow(_sidePanelFilters))
             {
                 matcher.emplace(_sidePanelFilters, indicators.nowMs);
             }
+            // The typed text narrows only while it applies too: the row's pause covers it (the user's "Everything in the
+            // row"), and its own chip can be switched off. `terms` stays the box's query either way: the chips row shows
+            // the text chip, dimmed, for a text that does not apply.
+            const bool textNarrows = ::Agentmaster::SidePanelTextInEffect(_sidePanelFilters, !terms.empty(), _sidePanelFilterTextOff);
 
             // The rows, each with its sort key built ONCE: a comparator that built both keys per comparison
             // (a title copy each) cost O(n log n) string copies per update.
@@ -3905,7 +3943,7 @@ namespace winrt::TerminalApp::implementation
                     continue; // hosted by another window (or a live session with no tab here) — not "here"
                 }
                 ++liveTotal;
-                if (!SidePanelSessionMatches(s, terms, mode))
+                if (textNarrows && !SidePanelSessionMatches(s, terms, mode))
                 {
                     continue; // the typed text hides it (and the filters need not look)
                 }
@@ -6850,13 +6888,19 @@ namespace winrt::TerminalApp::implementation
     //     the "+" card's outside-press close and the KEY-UP Escape, because a MenuFlyout closes at every click and a
     //     light-dismiss Flyout eats the press that closes it and closes on Escape's key-down (its ESC would reach claude);
     //   - the FOLDER CARD (_sidePanelFolderPopup): the "+" card's own launch row, AgentLaunchBar in folder-pick mode;
-    //   - the CHIPS ROW (_sidePanelFilterRow): in the count line's place, shown only while something narrows the list.
+    //   - the CHIPS ROW (_sidePanelFilterRow): in the count line's place, shown only while a filter is picked or text is typed;
+    //   - PAUSE FILTER / RESUME FILTER and a chip's click (the user's request of 2026-11-12, its own block further down): a
+    //     pick can be OFF without being dropped — its chip dimmed —, one chip at a time or the whole row.
     // THE ONE RECORD (_sidePanelFilters, AgentMaster/SidePanelFilters.h's rules): every surface reads it, _SidePanelSetFilters
     // alone writes it; it is persisted per window (WindowRecord::sidePanelFilters) and never becomes a global default.
+    // ⚠ PICKED IS NOT APPLIED: the record says what is picked (the chips, the panel's checks). What narrows the LIST is the
+    // record reduced to what applies (SidePanelFiltersNarrow / SidePanelFacetInEffect; the matcher reduces it itself), and
+    // what the funnel's COUNTS judge is what a pick would list (SidePanelFiltersForCounts). A new reader picks one of the
+    // three on purpose.
     // COST: the panel and the card are built on first use; the panel's rows are rebuilt at every open (about twenty); the
     // filters add one compiled matcher per list update and read tags / ★ only while a filter needs them (cached per epoch).
 
-    void TerminalPage::_SidePanelSetFilters(::Agentmaster::SidePanelFilters next, std::wstring_view what) noexcept
+    void TerminalPage::_SidePanelSetFilters(::Agentmaster::SidePanelFilters next, std::wstring_view what, bool textChipMoved) noexcept
     {
         if (!_sidePanelBuilt)
         {
@@ -6864,20 +6908,34 @@ namespace winrt::TerminalApp::implementation
         }
         try
         {
-            // Normalized first, so "no change" is judged on the record as it would be stored (a re-pick of a folder in another
+            // A PICK RESUMES (SIDE_PANEL.md §2l "Pause filter, Resume filter and a chip's click"; the user's pick): where
+            // `next` adds a filter to the record, that filter's chip is switched on and a paused row is resumed, so a pick
+            // always shows its effect. Judged here, on the picks, for every caller — the panel's rows edit the record member
+            // by member and know nothing of the switches. A change that only removes, or only moves the switches themselves
+            // (Pause, Resume, a chip's click), passes through unchanged.
+            next = ::Agentmaster::SidePanelFiltersAfterPick(_sidePanelFilters, std::move(next));
+            // Normalized next, so "no change" is judged on the record as it would be stored (a re-pick of a folder in another
             // spelling, a tag in another case) and nothing un-normalized ever reaches the rebuild or the window record.
             next = ::Agentmaster::NormalizeSidePanelFilters(next);
-            if (next == _sidePanelFilters)
+            // A pause with nothing left to cover (the last chip dropped while the row was paused, no text in the box) goes
+            // with it: the next chip must not be born dimmed for a pause nobody can see. The box's text as it is NOW: Clear
+            // and the text chip's ✕ empty the mirror before they come here.
+            (void)::Agentmaster::SidePanelSettlePause(next, !::Agentmaster::ParseSessionQuery(_sidePanelSearchText).empty());
+            const bool recordMoved = !(next == _sidePanelFilters);
+            if (!recordMoved && !textChipMoved)
             {
                 _SidePanelUpdateFilterButton(); // a pick that changed nothing: keep the funnel honest anyway
                 return;
             }
             _sidePanelFilters = std::move(next);
-            // The nav line names the facet and the action and how many filters are on now — never a folder path or a tag
-            // name (the nav trail keeps the user's words out, like the AI search box's length-only lines).
-            const int facets = std::popcount(::Agentmaster::SidePanelActiveFacets(_sidePanelFilters, false));
-            ::Agentmaster::LogNav(L"sidepanel filter " + std::wstring{ what } + L" -> " + std::to_wstring(facets) + (facets == 1 ? L" filter on" : L" filters on"));
-            _ScheduleWindowRecordSave(); // per window only (no AppSettings default exists for the filters)
+            // The nav line names the facet and the action and how many filters are on and paused now — never a folder path or
+            // a tag name (the nav trail keeps the user's words out, like the AI search box's length-only lines).
+            const std::wstring status = ::Agentmaster::SidePanelFiltersStatusText(_sidePanelFilters);
+            ::Agentmaster::LogNav(L"sidepanel filter " + std::wstring{ what } + L" -> " + (status.empty() ? std::wstring{ L"0 filters on" } : status));
+            if (recordMoved)
+            {
+                _ScheduleWindowRecordSave(); // per window only (no AppSettings default exists for the filters)
+            }
             _SidePanelUpdateFilterButton();
             // A user's action: past the min-gap throttle. The update re-filters the cards and redraws the chips row; in AI mode
             // it is owed until the cards come back (_SidePanelScheduleRebuild's rule).
@@ -6900,12 +6958,15 @@ namespace winrt::TerminalApp::implementation
             {
                 return;
             }
-            const bool on = ::Agentmaster::SidePanelFiltersActive(_sidePanelFilters);
+            // Lit while a menu filter narrows the list NOW: a paused row, or one whose every menu chip is switched off, lists
+            // every session, so the funnel is unlit (SIDE_PANEL.md §2l "Pause filter, Resume filter and a chip's click") —
+            // the chips row right under it shows the dimmed picks and the way back.
+            const bool on = ::Agentmaster::SidePanelFiltersNarrow(_sidePanelFilters);
             // A programmatic IsChecked raises no Click, so re-pinning can never loop back into the toggle or persist anything.
             _sidePanelFilterBtn.IsChecked(on);
-            // In words for UI Automation (the accent is pixels only): how many filters narrow the list.
-            const int facets = std::popcount(::Agentmaster::SidePanelActiveFacets(_sidePanelFilters, false));
-            AgentSetItemStatus(_sidePanelFilterBtn, on ? (std::to_wstring(facets) + (facets == 1 ? L" filter on" : L" filters on")) : std::wstring{});
+            // In words for UI Automation (the accent is pixels only): how many filters narrow the list, and how many are picked
+            // but paused ("2 filters on", "2 filters paused", "1 filter on, 1 paused"; nothing with no pick).
+            AgentSetItemStatus(_sidePanelFilterBtn, ::Agentmaster::SidePanelFiltersStatusText(_sidePanelFilters));
         }
         catch (...)
         {
@@ -7002,7 +7063,10 @@ namespace winrt::TerminalApp::implementation
         _SidePanelSyncFactCaches();
         const auto mode = _appSettings.tabColorMode;
         const auto snap = _sessionRegistry->SnapshotLiveForCards();
-        const auto terms = ::Agentmaster::ParseSessionQuery(_sidePanelSearchText);
+        // What a PICK would list (SIDE_PANEL.md §2l "Pause filter, Resume filter and a chip's click"): a pick resumes a paused
+        // row, so the counts ignore the pause; a chip switched off by a click — the text chip too — stays off after a pick,
+        // so it is left out. A count never promises cards that a pick would not show.
+        const auto terms = ::Agentmaster::ParseSessionQuery(SidePanelTextForCounts(_sidePanelSearchText, _sidePanelFilterTextOff));
         const bool local = !_sidePanelGlobal;
         std::unordered_set<std::wstring> hosted;
         if (local)
@@ -7011,7 +7075,7 @@ namespace winrt::TerminalApp::implementation
         }
         const auto unread = ::Agentmaster::CurrentUnreadSessionIds();
         const int64_t now = NowMs();
-        const ::Agentmaster::SidePanelFilterMatcher matcher{ _sidePanelFilters, now };
+        const ::Agentmaster::SidePanelFilterMatcher matcher{ ::Agentmaster::SidePanelFiltersForCounts(_sidePanelFilters), now };
         // folded tag -> (display spelling, sessions): the first spelling seen is shown (every carrier folds to one tag).
         std::map<std::wstring, std::pair<std::wstring, size_t>> tagCounts;
         for (const auto& s : snap)
@@ -8010,11 +8074,134 @@ namespace winrt::TerminalApp::implementation
                 // The filter's mirror of the box, emptied NOW: the box's TextChanged (which would set it and rebuild) comes
                 // later, asynchronously, and the caller's own update or panel refresh must already see "no text" (Clear grays).
                 _sidePanelSearchText.clear();
+                // ...and the text chip's switch goes with the text: a text typed later is a new filter, on.
+                _sidePanelFilterTextOff = false;
             }
         }
         catch (...)
         {
             ::Agentmaster::AgentLogCaughtException(L"_SidePanelClearFilterText"); // the text stays; the box's own ✕ empties it
+        }
+    }
+
+    // ======================================================================================
+    // Pause filter / Resume filter and a chip's click (SIDE_PANEL.md §2l)
+    // ======================================================================================
+    // WHAT (the user's request of 2026-11-12): "In sidemenu we have filter and below the filter prompt box we have the tags
+    // and a Clear button. Next to the clear button add clickable 'pause filter' and 'resume filter' which disables toggles
+    // the filter." Their picks the same day (design-ask with mockups): the pause covers "Everything in the row" — the typed
+    // text too —, "and clicking each filter item with x toggle it", "Dimmed chips", "A pick resumes".
+    // HOW: a pick can be OFF without being dropped. The whole row's pause and each menu chip's switch are part of the
+    // window's record (SidePanelFilters::paused / offFacets, SidePanelFolderFilter::off — saved with it); the typed text's
+    // switch is _sidePanelFilterTextOff (the text is no part of the record). Every rule is pure (AgentMaster/SidePanelFilters.h:
+    // what applies, what each click leaves, what a pick and a typed text resume); the methods below only read the box, call a
+    // rule and hand the result to the one writer, _SidePanelSetFilters. The list is narrowed by what APPLIES
+    // (_SidePanelRebuildCards), the funnel's counts by what a pick would list (SidePanelFiltersForCounts).
+
+    bool TerminalPage::_SidePanelFilterRowClickAllowed(bool toggle) noexcept
+    {
+        const uint64_t now = ::GetTickCount64();
+        const uint64_t window = static_cast<uint64_t>(::GetDoubleClickTime()); // the user's own setting (500 ms by default)
+        const auto within = [&](uint64_t tick) { return tick != 0 && now - tick < window; };
+        // After a toggle the row is redrawn under the pointer: whatever this click hit, it may be the second half of a
+        // double-click on that toggle. After a ✕ the next chip slid under the pointer: only a TOGGLE is suspect then (a
+        // second ✕ is how chips were dropped one after another before the toggles existed).
+        if (within(_sidePanelFilterToggleTick) || (toggle && within(_sidePanelFilterRemoveTick)))
+        {
+            ::Agentmaster::LogNav(toggle ? L"sidepanel filter toggle click ignored (within the double-click time of the last row click)" :
+                                           L"sidepanel filter remove click ignored (within the double-click time of the last toggle)");
+            return false;
+        }
+        (toggle ? _sidePanelFilterToggleTick : _sidePanelFilterRemoveTick) = now;
+        return true;
+    }
+
+    void TerminalPage::_SidePanelToggleFilterPause() noexcept
+    {
+        try
+        {
+            const bool textActive = !::Agentmaster::ParseSessionQuery(_sidePanelSearchText).empty();
+            auto next = _sidePanelFilters;
+            bool textOff = _sidePanelFilterTextOff;
+            // Judged against the row AS IT IS NOW, never against the words the link showed when it was drawn: something
+            // applies -> pause all of it; nothing applies -> bring it back.
+            const bool pausing = ::Agentmaster::SidePanelAnyChipOn(next, textActive, textOff);
+            const bool changed = pausing ? ::Agentmaster::SidePanelPauseAll(next) : ::Agentmaster::SidePanelResumeAll(next, textActive, textOff);
+            if (!changed)
+            {
+                return; // a row with nothing in it (the chips went away before the tick ran)
+            }
+            const bool textChipMoved = textOff != _sidePanelFilterTextOff;
+            _sidePanelFilterTextOff = textOff;
+            _SidePanelSetFilters(std::move(next), pausing ? L"pause" : L"resume", textChipMoved);
+        }
+        catch (...)
+        {
+            // Nothing was switched; the row shows the state as it is. Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelToggleFilterPause");
+        }
+    }
+
+    void TerminalPage::_SidePanelToggleFilterChip(const ::Agentmaster::SidePanelFilterChip& chip) noexcept
+    {
+        try
+        {
+            // A Folder chip whose index no longer names its folder (the record changed since the row was drawn — never
+            // between a draw and a click on one thread, but cheap to check) switches nothing: the ✕'s own rule.
+            if (chip.kind == ::Agentmaster::SidePanelChipKind::Folder &&
+                (chip.folderIndex >= _sidePanelFilters.folders.size() ||
+                 ::Agentmaster::SidePanelFolderLineName(_sidePanelFilters.folders[chip.folderIndex].path, _sidePanelFilters.folders[chip.folderIndex].includeSubfolders) != chip.text))
+            {
+                return;
+            }
+            const bool textActive = !::Agentmaster::ParseSessionQuery(_sidePanelSearchText).empty();
+            auto next = _sidePanelFilters;
+            bool textOff = _sidePanelFilterTextOff;
+            const bool wasPaused = next.paused;
+            if (!::Agentmaster::SidePanelToggleChip(next, chip, textActive, textOff))
+            {
+                return; // the row no longer holds this chip
+            }
+            const bool textChipMoved = textOff != _sidePanelFilterTextOff;
+            _sidePanelFilterTextOff = textOff;
+            // The nav line says which way the chip went — never its words (a folder, a tag, typed text). The toggle succeeded,
+            // so a Folder chip's index is inside `next.folders`.
+            const bool nowOff = chip.kind == ::Agentmaster::SidePanelChipKind::Text   ? textOff :
+                                chip.kind == ::Agentmaster::SidePanelChipKind::Folder ? next.folders[chip.folderIndex].off :
+                                                                                        (next.offFacets & ::Agentmaster::SidePanelFacetBit(::Agentmaster::SidePanelChipFacet(chip.kind))) != 0;
+            _SidePanelSetFilters(std::move(next), wasPaused ? L"chip on (alone, from a paused row)" : (nowOff ? L"chip off" : L"chip on"), textChipMoved);
+        }
+        catch (...)
+        {
+            // Nothing was switched; the row shows the state as it is. Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelToggleFilterChip");
+        }
+    }
+
+    void TerminalPage::_SidePanelNoteFilterTextChanged() noexcept
+    {
+        try
+        {
+            // A changed text is a new filter: its chip is on (the switch belonged to the text that was there).
+            _sidePanelFilterTextOff = false;
+            if (!_sidePanelBuilt)
+            {
+                return;
+            }
+            const bool textActive = !::Agentmaster::ParseSessionQuery(_sidePanelSearchText).empty();
+            auto next = ::Agentmaster::SidePanelFiltersAfterTextChange(_sidePanelFilters, textActive);
+            if (!(next == _sidePanelFilters))
+            {
+                // Typing resumed a paused row, or the emptied box left a pause with nothing to cover. The writer updates the
+                // list at once; the box's handler then runs its own forced update — one list update more, and only on the
+                // keystroke that lifted the pause.
+                _SidePanelSetFilters(std::move(next), textActive ? L"resume (typed in the filter box)" : L"resume (nothing left to pause)");
+            }
+        }
+        catch (...)
+        {
+            // The pause stays as it was: Resume filter still brings the row back. Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelNoteFilterTextChanged");
         }
     }
 
@@ -8439,7 +8626,8 @@ namespace winrt::TerminalApp::implementation
             _SidePanelSyncFactCaches();
             const auto mode = _appSettings.tabColorMode;
             const auto snap = _sessionRegistry->SnapshotLiveForCards();
-            const auto terms = ::Agentmaster::ParseSessionQuery(_sidePanelSearchText);
+            // What a pick would list, as the panel's counts judge it (the pause ignored, a switched-off chip left out).
+            const auto terms = ::Agentmaster::ParseSessionQuery(SidePanelTextForCounts(_sidePanelSearchText, _sidePanelFilterTextOff));
             const bool local = !_sidePanelGlobal;
             std::unordered_set<std::wstring> hosted;
             if (local)
@@ -8447,7 +8635,7 @@ namespace winrt::TerminalApp::implementation
                 hosted = _HostedSessionIds();
             }
             const auto unread = ::Agentmaster::CurrentUnreadSessionIds();
-            const ::Agentmaster::SidePanelFilterMatcher matcher{ _sidePanelFilters, NowMs() };
+            const ::Agentmaster::SidePanelFilterMatcher matcher{ ::Agentmaster::SidePanelFiltersForCounts(_sidePanelFilters), NowMs() };
             const auto dirColors = ::Agentmaster::LoadDirColorIndex();
             std::vector<::Agentmaster::SessionFolderFacts> facts;
             std::unordered_map<std::wstring, uint32_t> colorByKey; // folder key -> the dot's color (the first session's band)
@@ -9274,7 +9462,8 @@ namespace winrt::TerminalApp::implementation
         _SidePanelSyncFactCaches();
         const auto mode = _appSettings.tabColorMode;
         const auto snap = _sessionRegistry->SnapshotLiveForCards();
-        const auto terms = ::Agentmaster::ParseSessionQuery(_sidePanelSearchText);
+        // What turning a line on would list, as the panel's counts judge it (the pause ignored, a switched-off chip left out).
+        const auto terms = ::Agentmaster::ParseSessionQuery(SidePanelTextForCounts(_sidePanelSearchText, _sidePanelFilterTextOff));
         const bool local = !_sidePanelGlobal;
         std::unordered_set<std::wstring> hosted;
         if (local)
@@ -9282,7 +9471,7 @@ namespace winrt::TerminalApp::implementation
             hosted = _HostedSessionIds();
         }
         const auto unread = ::Agentmaster::CurrentUnreadSessionIds();
-        const ::Agentmaster::SidePanelFilterMatcher matcher{ _sidePanelFilters, NowMs() };
+        const ::Agentmaster::SidePanelFilterMatcher matcher{ ::Agentmaster::SidePanelFiltersForCounts(_sidePanelFilters), NowMs() };
         for (const auto& s : snap)
         {
             if (!s.live || (local && hosted.find(s.id) == hosted.end()) || !SidePanelSessionMatches(s, terms, mode))
@@ -9548,15 +9737,19 @@ namespace winrt::TerminalApp::implementation
         // filter box's ItemStatus: a screen reader still hears how many cards the box's filtering left, and the e2e driver
         // reads the scope from them (count_line). Change-gated inside AgentSetItemStatus.
         const std::wstring where = SidePanelScopeWords(_sidePanelGlobal);
-        const bool narrowed = textActive || ::Agentmaster::SidePanelFiltersActive(_sidePanelFilters);
+        // Does anything in the row APPLY — a menu filter that is on, or the typed text? A paused row, and one whose every
+        // chip is switched off, lists every session of the scope (SIDE_PANEL.md §2l "Pause filter, Resume filter and a
+        // chip's click"): the count words then read like an unfiltered list's, and the link reads "Resume filter".
+        const bool narrowed = ::Agentmaster::SidePanelAnyChipOn(_sidePanelFilters, textActive, _sidePanelFilterTextOff);
         const std::wstring countWords = narrowed ? (std::to_wstring(shown) + L" of " + std::to_wstring(total) + L" sessions" + where) :
                                                    (std::to_wstring(total) + (total == 1 ? L" session" : L" sessions") + where);
         if (_sidePanelSearchBox)
         {
             AgentSetItemStatus(_sidePanelSearchBox, countWords);
         }
-        // The row shows only while something narrows the list (the user's "a row only shown when filter is on").
-        const auto chips = ::Agentmaster::SidePanelFilterChips(_sidePanelFilters, textActive ? SidePanelAiTrim(_sidePanelSearchText) : std::wstring{});
+        // The row shows while a filter is PICKED or text is typed (the user's "a row only shown when filter is on") — applied
+        // or not: a pick that is off keeps its chip, dimmed, so a paused row stays on screen with the way back in it.
+        const auto chips = ::Agentmaster::SidePanelFilterChips(_sidePanelFilters, textActive ? SidePanelAiTrim(_sidePanelSearchText) : std::wstring{}, _sidePanelFilterTextOff);
         if (chips.empty())
         {
             if (_sidePanelFilterRow.Visibility() != Visibility::Collapsed)
@@ -9570,12 +9763,12 @@ namespace winrt::TerminalApp::implementation
             }
             return;
         }
-        // The row's content as one string: the count, the scope and every chip's words. Equal to the last build = nothing to
-        // write (the list updates up to twice a second, and the chips change only with a pick).
-        std::wstring sig = std::to_wstring(shown) + L"/" + std::to_wstring(total) + where;
+        // The row's content as one string: the count, the scope, the link's state and every chip's words and switch. Equal to
+        // the last build = nothing to write (the list updates up to twice a second, and the chips change only with a pick).
+        std::wstring sig = std::to_wstring(shown) + L"/" + std::to_wstring(total) + where + (narrowed ? L"|pause" : L"|resume");
         for (const auto& chip : chips)
         {
-            sig += L"\x1F" + std::to_wstring(static_cast<int>(chip.kind)) + L":" + chip.text;
+            sig += L"\x1F" + std::to_wstring(static_cast<int>(chip.kind)) + (chip.off ? L"-:" : L"+:") + chip.text;
         }
         if (sig != _sidePanelFilterRowSig)
         {
@@ -9592,23 +9785,61 @@ namespace winrt::TerminalApp::implementation
                 AgentSetAutomationId(count, L"am.side.filterRow.count");
                 children.Append(count);
             }
-            // One chip per filter: [glyph][words][✕]. Its rounded background is a CHILDLESS Border behind the content in the same
-            // Grid cell (a rounded element with children is a composition node every frame walks — UI_THREAD.md §10h).
+            // One chip per filter: [ [glyph][words] ][✕]. Its rounded background is a CHILDLESS Border behind the content in the
+            // same Grid cell (a rounded element with children is a composition node every frame walks — UI_THREAD.md §10h).
+            // The glyph and the words are the face of ONE BUTTON, the chip's body (the user's "clicking each filter item with
+            // x toggle it"): a click switches that filter off and on again; the ✕ beside it drops it.
             size_t folderOrdinal = 0;
             for (const auto& chip : chips)
             {
                 Grid cell{};
                 Border back{};
-                back.Background(Fill(0xFF, 0x3B, 0x3B, 0x3B));
+                back.Background(SolidColorBrush{ kSidePanelChipFill });
                 back.BorderBrush(Fill(0xFF, 0x56, 0x56, 0x56));
                 back.BorderThickness(ThicknessHelper::FromUniformLength(1));
                 back.CornerRadius(CornerRadiusHelper::FromUniformRadius(kSidePanelChipCornerRadius));
                 cell.Children().Append(back);
+                // A chip whose filter is off is DIMMED as a whole (the user's pick "Dimmed chips"): its back, glyph, words and
+                // ✕ fade together, and it stays in the row, one click from on. A handful of chips at most, and only while
+                // something is off, so the group opacity's composition node is no per-row cost of a long list.
+                if (chip.off)
+                {
+                    cell.Opacity(kSidePanelChipOffOpacity);
+                }
+                // The pointer over the chip lifts its fill — the cue that the chip is clickable. Written to the childless back
+                // Border (the cell's first child), reached through `sender`: no element is captured, so the cell owns no
+                // cycle. The body Button's own hover fill is switched off below: a square fill would stick out of the
+                // chip's round ends.
+                const auto paintBack = [](const IInspectable& sender, const Color& color) {
+                    try
+                    {
+                        if (const auto grid = sender.try_as<Grid>(); grid && grid.Children().Size() > 0)
+                        {
+                            if (const auto border = grid.Children().GetAt(0).try_as<Border>())
+                            {
+                                border.Background(SolidColorBrush{ color });
+                            }
+                        }
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"side panel filter chip: hover fill"); // the fill stays as it was
+                    }
+                };
+                cell.PointerEntered([paintBack](const IInspectable& sender, const PointerRoutedEventArgs&) { paintBack(sender, kSidePanelChipHoverFill); });
+                cell.PointerExited([paintBack](const IInspectable& sender, const PointerRoutedEventArgs&) { paintBack(sender, kSidePanelChipFill); });
+                cell.PointerCanceled([paintBack](const IInspectable& sender, const PointerRoutedEventArgs&) { paintBack(sender, kSidePanelChipFill); });
                 StackPanel content{};
                 content.Orientation(Orientation::Horizontal);
-                content.Spacing(4);
-                content.Margin(ThicknessHelper::FromLengths(7, 1, 1, 1));
+                // No left margin and no spacing of its own: the chip's 7 DIPs of air before the glyph and its 4 DIPs before the
+                // ✕ are the body button's PADDING, so the whole chip left of the ✕ takes the click.
+                content.Margin(ThicknessHelper::FromLengths(0, 1, 1, 1));
                 content.VerticalAlignment(VerticalAlignment::Center);
+                // The body's face: [glyph][words], 4 DIPs apart (the chip's spacing).
+                StackPanel face{};
+                face.Orientation(Orientation::Horizontal);
+                face.Spacing(4);
+                face.VerticalAlignment(VerticalAlignment::Center);
                 // The glyph of the facet (the state's dot, the first tag's ribbon, the icon font for the rest).
                 UIElement glyph{ nullptr };
                 switch (chip.kind)
@@ -9666,12 +9897,58 @@ namespace winrt::TerminalApp::implementation
                 {
                     fe.VerticalAlignment(VerticalAlignment::Center);
                 }
-                content.Children().Append(glyph);
+                face.Children().Append(glyph);
                 auto words = Text(winrt::hstring{ chip.text }, kSidePanelChipFontSize, false, 0.95);
                 words.VerticalAlignment(VerticalAlignment::Center);
                 words.TextTrimming(TextTrimming::CharacterEllipsis);
                 words.MaxWidth(180); // a long folder or tag list ends in "…"; the chip's tooltip has it whole
-                content.Children().Append(words);
+                face.Children().Append(words);
+                // THE BODY: a click switches this one filter off, or on again (the user's "clicking each filter item with x
+                // toggle it"). A flat, borderless, square Button over the chip's own back — never a rounded one (a
+                // composition node). Its padding is the chip's air (7 DIPs before the glyph, 4 before the ✕), so the chip
+                // looks as it did while all of it left of the ✕ takes the click. The chip is captured BY VALUE (its kind,
+                // its folder's index, its words), never an element; the page weakly.
+                Button toggle{};
+                toggle.Content(face);
+                toggle.Padding(ThicknessHelper::FromLengths(7, 0, 4, 0));
+                toggle.MinWidth(0);
+                toggle.MinHeight(0);
+                toggle.VerticalAlignment(VerticalAlignment::Center);
+                toggle.Background(SolidColorBrush{ Colors::Transparent() });
+                toggle.BorderThickness(ThicknessHelper::FromUniformLength(0));
+                toggle.CornerRadius(CornerRadiusHelper::FromUniformRadius(0));
+                // The words keep the white they had outside a Button (a Button's content otherwise takes the row's seeded
+                // ButtonForeground, a shade dimmer): the chips' look at rest is unchanged by becoming clickable.
+                toggle.Foreground(SolidColorBrush{ Colors::White() });
+                toggle.IsTabStop(false); // like the header's buttons: a click must not pull the keyboard out of the terminal
+                // No hover or press fill of the Button's own: its square would stick out of the chip's round ends. The cell's
+                // pointer handlers above lift the back Border instead. In the button's OWN resources, before it enters the
+                // tree: the template's ThemeResource lookup finds them first (lightweight styling).
+                toggle.Resources().Insert(winrt::box_value(L"ButtonBackgroundPointerOver"), SolidColorBrush{ Colors::Transparent() });
+                toggle.Resources().Insert(winrt::box_value(L"ButtonBackgroundPressed"), SolidColorBrush{ Colors::Transparent() });
+                toggle.Click([weakThis, chip](const IInspectable&, const RoutedEventArgs&) {
+                    const auto self = weakThis.get();
+                    if (!self || !self->_SidePanelFilterRowClickAllowed(/*toggle*/ true))
+                    {
+                        return; // the page is gone, or this is the echo of a double-click (logged by the guard)
+                    }
+                    try
+                    {
+                        // On a clean tick: the row is rebuilt by the list update this triggers, and the clicked chip must not
+                        // leave the tree inside its own Click.
+                        self->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, chip]() {
+                            if (const auto page = weakThis.get())
+                            {
+                                page->_SidePanelToggleFilterChip(chip); // noexcept
+                            }
+                        });
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"side panel filter chip: queue the toggle"); // the click is lost
+                    }
+                });
+                content.Children().Append(toggle);
                 // ✕: drops what this chip stands for — the chip is captured BY VALUE (its kind, its folder's index, its words),
                 // never an element; the page weakly.
                 Button remove{};
@@ -9688,6 +9965,12 @@ namespace winrt::TerminalApp::implementation
                 remove.Click([weakThis, chip](const IInspectable&, const RoutedEventArgs&) {
                     const auto self = weakThis.get();
                     if (!self)
+                    {
+                        return;
+                    }
+                    // The echo of a double-click on a toggle (a chip's body, Pause filter / Resume filter): the row was redrawn
+                    // under the pointer, and this ✕ only happens to sit where the toggle was. Never drop a filter for it.
+                    if (!self->_SidePanelFilterRowClickAllowed(/*toggle*/ false))
                     {
                         return;
                     }
@@ -9726,9 +10009,16 @@ namespace winrt::TerminalApp::implementation
                 AgentSetTip(remove, winrt::hstring{ chip.kind == ::Agentmaster::SidePanelChipKind::Text ? std::wstring{ L"Empty the filter box." } : L"Drop this filter." }, kSidePanelButtonTipDelay);
                 content.Children().Append(remove);
                 cell.Children().Append(content);
-                // The chip's whole meaning in its tooltip (on the cell: the ✕ keeps its own).
-                AgentSetTip(cell, winrt::hstring{ chip.tip }, kSidePanelButtonTipDelay);
-                // Ids: am.side.chip.<kind>[.<n>] — n counts the folder chips from 0 — and the ✕ beside it, ".remove".
+                // The chip's whole meaning in its tooltip, then what a click on it does NOW (on the cell and on the body
+                // button, whose help text it also becomes; the ✕ keeps its own).
+                const std::wstring chipTip = chip.off ? (_sidePanelFilters.paused ?
+                                                             L"Paused with the whole row: " + chip.tip + L" Click the chip to apply this filter alone, or Resume filter for all of them." :
+                                                             L"Paused: " + chip.tip + L" Click the chip to apply it again.") :
+                                                        chip.tip + L" Click the chip to pause this filter without dropping it.";
+                AgentSetTip(cell, winrt::hstring{ chipTip }, kSidePanelButtonTipDelay);
+                AgentSetTip(toggle, winrt::hstring{ chipTip }, kSidePanelButtonTipDelay);
+                // Ids: am.side.chip.<kind>[.<n>] — n counts the folder chips from 0 — on the chip's WORDS (as before the body was
+                // a button: a reader of the chips' words finds them unchanged), ".toggle" on the body and ".remove" on the ✕.
                 std::wstring id = L"am.side.chip.";
                 switch (chip.kind)
                 {
@@ -9762,9 +10052,81 @@ namespace winrt::TerminalApp::implementation
                     break;
                 }
                 AgentSetAutomationId(words, id);
+                AgentSetAutomationId(toggle, id + L".toggle");
+                // Named by what a click does (its content is a glyph and words, which name nothing by themselves), and its
+                // state in words: "paused" while the filter does not apply (the dimming is pixels only).
+                AgentSetAccessibleName(toggle, (chip.off ? L"Resume the filter " : L"Pause the filter ") + chip.text);
+                AgentSetItemStatus(toggle, chip.off ? L"paused" : L"");
                 AgentSetAutomationId(remove, id + L".remove");
                 AgentSetAccessibleName(remove, L"Remove the filter " + chip.text);
                 children.Append(cell);
+            }
+            // Pause filter / Resume filter (the user's request of 2026-11-12: "Next to the clear button add clickable 'pause
+            // filter' and 'resume filter' which disables toggles the filter"): ONE link, right before Clear, whose words say
+            // what its click does — "Pause filter" while something in the row applies (the click switches the whole row off:
+            // every chip, the typed text too), "Resume filter" while nothing does (the click brings back what applied before).
+            {
+                Button pause{};
+                // Both wordings share one cell: the one in effect is shown, the other is laid out invisible, so the link is
+                // always as wide as the longer one and Clear never moves when the words flip under the pointer.
+                Grid face{};
+                const auto wording = [&](const wchar_t* text, bool shown) {
+                    auto label = Text(text, kSidePanelChipFontSize, false, 1.0);
+                    label.Foreground(SolidColorBrush{ kSidePanelLinkColor });
+                    label.HorizontalAlignment(HorizontalAlignment::Center);
+                    if (!shown)
+                    {
+                        // The sizer: Opacity 0 keeps its layout box (Collapsed would drop it); it never takes a press, and it
+                        // is out of UI Automation's views, so a reader never hears the words that are not in effect.
+                        label.Opacity(0.0);
+                        label.IsHitTestVisible(false);
+                        winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetAccessibilityView(label, winrt::Windows::UI::Xaml::Automation::Peers::AccessibilityView::Raw);
+                    }
+                    face.Children().Append(label);
+                };
+                wording(kSidePanelPauseWords, narrowed);
+                wording(kSidePanelResumeWords, !narrowed);
+                pause.Content(face);
+                pause.Padding(ThicknessHelper::FromLengths(4, 0, 4, 0));
+                pause.MinWidth(0);
+                pause.MinHeight(0);
+                pause.VerticalAlignment(VerticalAlignment::Center);
+                pause.Background(SolidColorBrush{ Colors::Transparent() });
+                pause.BorderThickness(ThicknessHelper::FromUniformLength(0));
+                pause.CornerRadius(CornerRadiusHelper::FromUniformRadius(0));
+                pause.IsTabStop(false);
+                pause.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+                    const auto self = weakThis.get();
+                    if (!self || !self->_SidePanelFilterRowClickAllowed(/*toggle*/ true))
+                    {
+                        return; // the page is gone, or this is the echo of a double-click (logged by the guard)
+                    }
+                    try
+                    {
+                        // On a clean tick: the row is rebuilt by the list update this triggers, and the clicked link must not
+                        // leave the tree inside its own Click.
+                        self->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis]() {
+                            if (const auto page = weakThis.get())
+                            {
+                                page->_SidePanelToggleFilterPause(); // noexcept
+                            }
+                        });
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"side panel filter row: queue the pause"); // the click is lost
+                    }
+                });
+                AgentSetTip(pause,
+                            winrt::hstring{ narrowed ? L"Switch every filter of this row off without dropping it: the list shows every session, and the typed text stops filtering too. Resume filter brings them back as they were." :
+                                                       L"Apply the filters again, as they were before the pause (every filter, when each was switched off by itself)." },
+                            kSidePanelButtonTipDelay);
+                // ONE id for both states (ids are added, never renamed): the name says which click it is, the ItemStatus that
+                // the row is paused. Named explicitly: its content is a Grid of two wordings, which names nothing.
+                AgentSetAutomationId(pause, L"am.side.filterRow.pause");
+                AgentSetAccessibleName(pause, narrowed ? kSidePanelPauseWords : kSidePanelResumeWords);
+                AgentSetItemStatus(pause, narrowed ? L"" : L"paused");
+                children.Append(pause);
             }
             // Clear: every filter and the typed text (the panel's "Clear all filters").
             {
@@ -9786,12 +10148,19 @@ namespace winrt::TerminalApp::implementation
                     {
                         return;
                     }
+                    // The echo of a double-click on a toggle beside it (Pause filter / Resume filter, a chip's body) must
+                    // never drop every filter: Clear is the one click of the row that cannot be taken back.
+                    if (!self->_SidePanelFilterRowClickAllowed(/*toggle*/ false))
+                    {
+                        return;
+                    }
                     try
                     {
                         self->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis]() {
                             if (const auto page = weakThis.get())
                             {
                                 page->_SidePanelClearFilterText();
+                                // An empty record: every pick, every chip's switch and the pause go together.
                                 page->_SidePanelSetFilters(::Agentmaster::SidePanelFilters{}, L"clear");
                             }
                         });

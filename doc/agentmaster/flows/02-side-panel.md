@@ -550,6 +550,53 @@ the next open. The list is one for the app (every window shows the same folders)
 - **E3 Touch** → a finger never opens the submenu by itself (no hover); a tap on By Folder… opens the folder card.
 - **E4 A narrow window** → the submenu opens on the side with room, or clamped inside the window when neither side holds it.
 
+### SP-15 · Pause filter, Resume filter and a chip's click
+
+> **Since** 2026-11-12 (NOT BUILT) · **P1** · **Needs** F-S2 (two sessions in two folders A and B, in different states) ·
+> **Spec** SIDE_PANEL.md §2l *Pause filter, Resume filter and a chip's click*
+
+**Promise.** A filter can be switched OFF without being dropped. A click on a chip switches that one filter off and on
+again (its ✕ still drops it). **Pause filter**, right before Clear, switches the whole row off — every chip, the typed text
+too — and the list shows every session; **Resume filter** brings back exactly the chips that applied before. Whatever is
+off keeps its chip, dimmed. A pick that adds a filter, and typing in the filter box, resume a paused row; removing a pick
+does not. The window keeps a paused row and a switched-off chip across a restart.
+
+**Phases**
+1. **The link.** *Do:* funnel ▸ By State ▸ Running (the state of A alone). *Expect:* the chips row ends in a link named
+   "Pause filter" (`am.side.filterRow.pause`, ItemStatus empty) and Clear; only A's card is listed.
+2. **Pause.** *Do:* click Pause filter. *Expect:* both cards listed; the count reads "2 of 2" and the filter box's count
+   words "2 sessions in this window"; the link is named "Resume filter" (ItemStatus "paused"); the state chip's body
+   (`am.side.chip.state.toggle`) has ItemStatus "paused"; the funnel is unlit, its ItemStatus "1 filter paused".
+3. **Resume.** *Do:* click Resume filter. *Expect:* only A's card again; the link "Pause filter"; the funnel lit, "1 filter on".
+4. **A chip's click.** *Do:* add By Folder = A's folder (two chips); click the state chip's body. *Expect:* that chip
+   reads "paused", the folder chip does not; the list is A's folder's sessions in any state; the funnel "1 filter on, 1
+   paused". *Do:* click the body again. *Expect:* both chips apply.
+5. **Resume restores.** *Do:* switch the state chip off, click Pause filter, then Resume filter. *Expect:* the folder
+   chip applies and the state chip is still "paused" — the row as it was before the pause.
+6. **This one alone.** *Do:* Pause filter, then click the state chip's body. *Expect:* the state chip applies, the
+   folder chip is "paused", the link reads "Pause filter".
+7. **A pick resumes.** *Do:* Pause filter; funnel ▸ By State ▸ check a second state. *Expect:* the panel stays open, the
+   row resumes: no chip "paused", the list filtered. *Do:* Pause filter; uncheck that state. *Expect:* still paused.
+   *Do:* ✕ on the folder chip. *Expect:* the chip is gone, the row still paused.
+8. **Typing.** *Do:* with the row paused, type a word in the filter box. *Expect:* the row resumes and the text chip
+   applies. *Do:* Pause filter. *Expect:* the text chip (`am.side.chip.text.toggle`) "paused", every card listed, the box
+   still holding the word.
+9. **Restart.** *Do:* leave one chip switched off and the row paused; close and reopen the window. *Expect:* the same
+   chips, the row paused; after Resume filter the same chip is still off. `windows/<id>.json`'s `sidePanelFilters` has
+   `"paused": true` and `"off"`.
+
+**Edge cases**
+- **E1 Every chip off by hand** → the link reads "Resume filter"; its click switches every chip on.
+- **E2 A double-click** → a double-click on Pause filter pauses once (the second click is ignored: `[nav] sidepanel filter
+  toggle click ignored`); a double-click on a chip's body switches it once; neither ever drops a filter through a ✕ or Clear.
+- **E3 Only typed text** → the row shows the text chip, Pause filter and Clear; paused, emptying the box removes the row,
+  and the next text typed filters at once (no pause left behind).
+- **E4 The counts** → with the row paused, the panel's row counts still say what a pick would list (a pick resumes).
+- **E5 Clear** → drops every filter, every switch and the pause; the row is gone.
+- **E6 A folder picked again** → a dimmed folder picked again in the folder card comes back on (and resumes a paused
+  row). The submenu's ✓ marks a folder that is PICKED, on or off: a click on it drops the folder. The pick history never
+  lists a folder as off.
+
 ---
 
 ## Known defects (expected failures until fixed)

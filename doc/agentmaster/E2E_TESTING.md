@@ -564,7 +564,12 @@ differs from the plan above, and why:
   words and whole path; ItemStatus "checked" while that folder filters the window), the
   folder card's `am.side.folderCard.{box,subfolders,filter}`, and the chips row's `am.side.filterRow.{count,clear}` with per
   chip `am.side.chip.<folder.N|state|tag|draft|unread|pinned|favorite|active|text>` (its words) + `<that id>.remove` (its ✕)
-  — the containers (a Border, a Grid) have no automation peer and no id. From that build the card mode shows NO count line: its words
+  — the containers (a Border, a Grid) have no automation peer and no id. Pause filter, Resume filter and a chip's click
+  (2026-11-12, NOT BUILT): the link before Clear `am.side.filterRow.pause` (ONE id for both states: named "Pause filter" or
+  "Resume filter"; ItemStatus "paused" while nothing in the row applies) and each chip's body `<chip id>.toggle` (a button
+  named "Pause the filter <words>" / "Resume the filter <words>"; ItemStatus "paused" while that filter is off); the chip's
+  words keep their id, now inside that button, and the funnel's ItemStatus reads "N filters on", "N filters paused" or "N
+  filters on, M paused". From the filters' build the card mode shows NO count line: its words
   ("2 sessions in this window", "1 of 3 sessions across all windows") are the filter box's (`am.side.filter`) ItemStatus.
   Home keeps its XAML id `ManagerHomeButton` (an x:Name is never overridden).
 - **Item status built:** the tab — the state word, then not started, unread, unsent draft, favorite, cache warm,

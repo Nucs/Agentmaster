@@ -2128,6 +2128,312 @@ void TestSidePanelFilters()
         CHECK(SidePanelFolderLeaf(L"K:\\") == L"K:\\" && SidePanelFolderLeaf(L"\\\\server\\share") == L"share" && SidePanelFolderLeaf(L"K:\\a\\b\\") == L"b", "filters chips: a folder's leaf (a drive root names itself)");
     }
 
+    // PICKED VS APPLIED (SIDE_PANEL.md section 2l "Pause filter, Resume filter and a chip's click"; the user's request of
+    // 2026-11-12): what applies of a record whose row is paused or whose chips are switched off, what each click leaves,
+    // and what a pick and a typed text resume.
+    {
+        // The record every case starts from: two folders, two states, a tag, a flag and a window - five facets picked.
+        SidePanelFilters f;
+        SidePanelAddFolderFilter(f, L"K:\\source\\Agentmaster", true);
+        SidePanelAddFolderFilter(f, L"K:\\work\\webapp", false);
+        SidePanelToggleState(f, SidePanelStateBit(SessionState::Running));
+        SidePanelToggleState(f, SidePanelStateBit(SessionState::WaitingForInput));
+        SidePanelToggleTag(f, L"release");
+        f.favorite = true;
+        f.activeWithinMinutes = 60;
+        const uint32_t picked = SidePanelActiveFacets(f, false);
+        const uint32_t stateBit = SidePanelFacetBit(SidePanelFacet::State);
+        const uint32_t favoriteBit = SidePanelFacetBit(SidePanelFacet::Favorite);
+
+        // What applies.
+        {
+            CHECK(SidePanelFiltersInEffect(f) == f && SidePanelFacetsInEffect(f) == picked && SidePanelFiltersNarrow(f), "pause in effect: a record with nothing off applies whole");
+            CHECK(!SidePanelFiltersNarrow(SidePanelFilters{}) && SidePanelFacetsInEffect(SidePanelFilters{}) == 0, "pause in effect: the empty record narrows nothing");
+            auto paused = f;
+            paused.paused = true;
+            CHECK(SidePanelFiltersActive(paused) && SidePanelActiveFacets(paused, false) == picked, "pause in effect: a paused record still HOLDS its picks (the row shows, the picks are saved)");
+            CHECK(SidePanelFiltersInEffect(paused) == SidePanelFilters{} && !SidePanelFiltersNarrow(paused) && SidePanelFacetsInEffect(paused) == 0, "pause in effect: a paused record applies nothing");
+            CHECK(!SidePanelTextInEffect(paused, true, false) && !SidePanelAnyChipOn(paused, true, false), "pause in effect: the pause covers the typed text too (everything in the row)");
+            CHECK(SidePanelTextInEffect(f, true, false) && !SidePanelTextInEffect(f, true, true) && !SidePanelTextInEffect(f, false, false), "pause in effect: the text applies while typed, not paused and its chip on");
+            auto stateOff = f;
+            stateOff.offFacets = stateBit;
+            const auto applied = SidePanelFiltersInEffect(stateOff);
+            CHECK(applied.states == 0 && applied.folders.size() == 2 && applied.tags.size() == 1 && applied.favorite && applied.activeWithinMinutes == 60 && applied.offFacets == 0,
+                  "pause in effect: a chip switched off leaves its facet out and every other pick in");
+            CHECK(!SidePanelFacetInEffect(stateOff, SidePanelFacet::State) && SidePanelFacetInEffect(stateOff, SidePanelFacet::Favorite) && SidePanelFacetPicked(stateOff, SidePanelFacet::State),
+                  "pause in effect: the facet is picked but not in effect; the others are");
+            CHECK(!SidePanelFacetInEffect(f, SidePanelFacet::Unread) && !SidePanelFacetInEffect(f, SidePanelFacet::Text), "pause in effect: a facet with no pick, and Text, are never in effect");
+            auto oneFolderOff = f;
+            oneFolderOff.folders[0].off = true;
+            const auto oneFolder = SidePanelFiltersInEffect(oneFolderOff);
+            CHECK(oneFolder.folders.size() == 1 && oneFolder.folders[0].path == L"K:\\work\\webapp" && !oneFolder.folders[0].off && SidePanelFacetInEffect(oneFolderOff, SidePanelFacet::Folder),
+                  "pause in effect: one folder chip off - the other folder still applies, By Folder still narrows");
+            auto bothFoldersOff = oneFolderOff;
+            bothFoldersOff.folders[1].off = true;
+            CHECK(SidePanelFiltersInEffect(bothFoldersOff).folders.empty() && !SidePanelFacetInEffect(bothFoldersOff, SidePanelFacet::Folder) && SidePanelFiltersNarrow(bothFoldersOff),
+                  "pause in effect: every folder chip off - By Folder constrains nothing, the other facets still narrow");
+            // The counts' view: the pause lifted, a switched-off chip still left out.
+            auto pausedStateOff = stateOff;
+            pausedStateOff.paused = true;
+            const auto counts = SidePanelFiltersForCounts(pausedStateOff);
+            CHECK(counts.states == 0 && counts.folders.size() == 2 && counts.favorite && !counts.paused, "pause counts: the funnel's counts ignore the pause (a pick resumes) and keep a switched-off chip out");
+        }
+
+        // The matcher compiles only what applies.
+        {
+            const auto idleElsewhere = FilterFacts(L"C:\\other", L"", SessionState::Idle);
+            CHECK(!SidePanelFilterMatcher(f, kNow).Matches(idleElsewhere, true), "pause matcher: the record hides a session outside every pick");
+            auto paused = f;
+            paused.paused = true;
+            const SidePanelFilterMatcher pm{ paused, kNow };
+            CHECK(pm.Matches(idleElsewhere, true) && !pm.NeedsTags() && !pm.NeedsFavorite(), "pause matcher: a paused record lists every session and reads no tags and no star");
+            SidePanelFilters stateOnly;
+            SidePanelToggleState(stateOnly, SidePanelStateBit(SessionState::Running));
+            SidePanelToggleTag(stateOnly, L"release");
+            stateOnly.offFacets = SidePanelFacetBit(SidePanelFacet::Tag);
+            const SidePanelFilterMatcher sm{ stateOnly, kNow };
+            CHECK(sm.Matches(FilterFacts(L"", L"", SessionState::Running), true) && !sm.Matches(FilterFacts(L"", L"", SessionState::Idle), true) && !sm.NeedsTags(),
+                  "pause matcher: a switched-off tag chip constrains nothing and reads no tags; the state chip still filters");
+            auto folderOff = SidePanelFilters{};
+            SidePanelAddFolderFilter(folderOff, L"K:\\src", true);
+            SidePanelAddFolderFilter(folderOff, L"Q:\\wt", true);
+            folderOff.folders[0].off = true;
+            const SidePanelFilterMatcher fm{ folderOff, kNow };
+            CHECK(!fm.Matches(FilterFacts(L"K:\\src\\app", L""), true) && fm.Matches(FilterFacts(L"Q:\\wt\\x", L""), true), "pause matcher: a switched-off folder keeps no session; the other folder does");
+        }
+
+        // The chips: what is off is dimmed, and still in the row.
+        {
+            auto paused = f;
+            paused.paused = true;
+            const auto chips = SidePanelFilterChips(paused, L"login");
+            bool allOff = chips.size() == 7;
+            for (const auto& c : chips)
+            {
+                allOff = allOff && c.off;
+            }
+            CHECK(allOff, "pause chips: a paused row keeps all seven chips - two folders, states, tags, favorite, window, text - every one dimmed");
+            auto mixed = f;
+            mixed.folders[1].off = true;
+            mixed.offFacets = favoriteBit;
+            const auto some = SidePanelFilterChips(mixed, L"login", /*textOff*/ true);
+            CHECK(some.size() == 7 && !some[0].off && some[1].off && !some[2].off && !some[3].off && some[4].off && !some[5].off && some[6].off,
+                  "pause chips: each chip follows its own switch - the second folder, Favorite and the text are dimmed, the rest are lit");
+            const auto plain = SidePanelFilterChips(f, L"login");
+            CHECK(plain.size() == 7 && !plain[0].off && !plain[6].off, "pause chips: nothing off - no chip is dimmed");
+            CHECK(SidePanelChipFacet(SidePanelChipKind::Folder) == SidePanelFacet::Folder && SidePanelChipFacet(SidePanelChipKind::Active) == SidePanelFacet::Active && SidePanelChipFacet(SidePanelChipKind::Text) == SidePanelFacet::Text,
+                  "pause chips: a chip's kind maps to its facet");
+        }
+
+        // Pause filter / Resume filter.
+        {
+            auto r = f;
+            r.offFacets = stateBit;
+            bool textOff = false;
+            CHECK(SidePanelAnyChipOn(r, false, false), "pause link: with a chip on, the link reads Pause filter");
+            CHECK(SidePanelPauseAll(r) && r.paused && r.offFacets == stateBit && !SidePanelPauseAll(r), "pause link: Pause filter pauses once and keeps every chip's own switch");
+            CHECK(!SidePanelAnyChipOn(r, true, false), "pause link: paused - nothing is on, the link reads Resume filter");
+            CHECK(SidePanelResumeAll(r, true, textOff) && !r.paused && r.offFacets == stateBit && !textOff, "pause link: Resume filter brings back exactly what applied before (the state chip stays off)");
+            // Every chip switched off one by one: Resume filter switches them all on.
+            auto none = f;
+            none.folders[0].off = true;
+            none.folders[1].off = true;
+            none.offFacets = SidePanelActiveFacets(none, false) & kSidePanelOffFacetBits;
+            bool typedOff = true;
+            CHECK(!SidePanelAnyChipOn(none, true, typedOff), "pause link: every chip switched off one by one reads Resume filter too");
+            CHECK(SidePanelResumeAll(none, true, typedOff) && none.offFacets == 0 && !none.folders[0].off && !none.folders[1].off && !typedOff && SidePanelFiltersInEffect(none) == f,
+                  "pause link: Resume filter with nothing on switches every chip on, the text chip too");
+            // A pause over a row whose chips were all off: Resume filter must still leave something applied.
+            auto pausedNone = f;
+            pausedNone.paused = true;
+            pausedNone.folders[0].off = true;
+            pausedNone.folders[1].off = true;
+            pausedNone.offFacets = SidePanelActiveFacets(pausedNone, false) & kSidePanelOffFacetBits;
+            bool noText = false;
+            CHECK(SidePanelResumeAll(pausedNone, false, noText) && !pausedNone.paused && SidePanelFiltersNarrow(pausedNone) && pausedNone.offFacets == 0,
+                  "pause link: Resume filter never leaves a row that applies nothing");
+            auto idle = f;
+            bool idleText = false;
+            CHECK(!SidePanelResumeAll(idle, false, idleText) && idle == f, "pause link: Resume filter on a row that applies changes nothing");
+        }
+
+        // A chip's click.
+        {
+            auto r = f;
+            bool textOff = false;
+            const auto chips = SidePanelFilterChips(r, L"login");
+            CHECK(chips.size() == 7 && SidePanelToggleChip(r, chips[2], true, textOff) && r.offFacets == stateBit && !r.paused, "chip click: the states chip switches By State off");
+            CHECK(SidePanelToggleChip(r, chips[2], true, textOff) && r.offFacets == 0, "chip click: and on again");
+            CHECK(SidePanelToggleChip(r, chips[1], true, textOff) && r.folders[1].off && !r.folders[0].off, "chip click: a folder chip switches its own folder alone");
+            CHECK(SidePanelToggleChip(r, chips[6], true, textOff) && textOff && r.offFacets == 0, "chip click: the text chip switches the text off (the record keeps its switches)");
+            CHECK(!SidePanelToggleChip(r, chips[6], false, textOff), "chip click: the text chip with an empty box changes nothing");
+            SidePanelFilterChip staleFolder;
+            staleFolder.kind = SidePanelChipKind::Folder;
+            staleFolder.folderIndex = 9;
+            SidePanelFilterChip noPick;
+            noPick.kind = SidePanelChipKind::Unread;
+            const auto untouched = r;
+            CHECK(!SidePanelToggleChip(r, staleFolder, true, textOff) && !SidePanelToggleChip(r, noPick, true, textOff) && r == untouched, "chip click: a folder past the record and a facet with no pick change nothing");
+            // While the row is paused, the clicked chip ALONE comes back.
+            auto paused = f;
+            paused.paused = true;
+            bool pausedText = false;
+            CHECK(SidePanelToggleChip(paused, chips[4], true, pausedText) && !paused.paused, "chip click paused: the click lifts the pause");
+            CHECK(SidePanelFacetsInEffect(paused) == favoriteBit && pausedText && paused.folders[0].off && paused.folders[1].off,
+                  "chip click paused: the clicked chip (Favorite) alone applies - every folder, every other facet and the text are switched off");
+            CHECK(SidePanelActiveFacets(paused, false) == picked, "chip click paused: every pick is still in the row");
+            auto pausedFolder = f;
+            pausedFolder.paused = true;
+            bool folderText = false;
+            CHECK(SidePanelToggleChip(pausedFolder, chips[0], false, folderText) && !pausedFolder.folders[0].off && pausedFolder.folders[1].off && SidePanelFacetsInEffect(pausedFolder) == SidePanelFacetBit(SidePanelFacet::Folder) && !folderText,
+                  "chip click paused: a folder chip brings back that folder alone (no text typed: its switch stays clear)");
+            auto pausedTextRow = f;
+            pausedTextRow.paused = true;
+            bool onlyText = true;
+            CHECK(SidePanelToggleChip(pausedTextRow, chips[6], true, onlyText) && !onlyText && !SidePanelFiltersNarrow(pausedTextRow) && SidePanelTextInEffect(pausedTextRow, true, onlyText),
+                  "chip click paused: the text chip brings back the typed text alone");
+        }
+
+        // A pick resumes; a removal does not.
+        {
+            auto paused = f;
+            paused.paused = true;
+            paused.offFacets = favoriteBit;
+            auto pick = paused;
+            SidePanelToggleState(pick, SidePanelStateBit(SessionState::Idle));
+            const auto afterPick = SidePanelFiltersAfterPick(paused, pick);
+            CHECK(!afterPick.paused && afterPick.offFacets == favoriteBit, "pick resumes: a state added to a paused row resumes it; a chip switched off by hand stays off");
+            auto unpick = paused;
+            SidePanelToggleState(unpick, SidePanelStateBit(SessionState::Running));
+            CHECK(SidePanelFiltersAfterPick(paused, unpick).paused, "pick resumes: a state REMOVED leaves the row paused");
+            const auto chips = SidePanelFilterChips(paused, L"");
+            CHECK(chips.size() == 6 && SidePanelFiltersAfterPick(paused, SidePanelFiltersWithoutChip(paused, chips[2])).paused, "pick resumes: a chip's x leaves the row paused");
+            auto pauseOnly = f;
+            SidePanelPauseAll(pauseOnly);
+            CHECK(SidePanelFiltersAfterPick(f, pauseOnly) == pauseOnly, "pick resumes: Pause filter itself adds nothing - it passes through unchanged");
+            // A pick in a facet whose chip is switched off switches that chip on.
+            auto stateOff = f;
+            stateOff.offFacets = stateBit | favoriteBit;
+            auto moreState = stateOff;
+            SidePanelToggleState(moreState, SidePanelStateBit(SessionState::Error));
+            CHECK(SidePanelFiltersAfterPick(stateOff, moreState).offFacets == favoriteBit, "pick resumes: a state added while the states chip is off switches that chip on, and no other");
+            auto tagOff = f;
+            tagOff.offFacets = SidePanelFacetBit(SidePanelFacet::Tag);
+            auto untagged = tagOff;
+            untagged.untagged = true;
+            auto moreTag = tagOff;
+            SidePanelToggleTag(moreTag, L"bug");
+            auto sameTag = tagOff;
+            sameTag.tags[0] = L"RELEASE"; // the tag it already holds, in another case
+            CHECK(SidePanelFiltersAfterPick(tagOff, untagged).offFacets == 0 && SidePanelFiltersAfterPick(tagOff, moreTag).offFacets == 0, "pick resumes: Untagged or a new tag switches the tags chip on");
+            CHECK(SidePanelFiltersAfterPick(tagOff, sameTag).offFacets == SidePanelFacetBit(SidePanelFacet::Tag), "pick resumes: the same tag in another case is no new pick");
+            auto activeOff = f;
+            activeOff.offFacets = SidePanelFacetBit(SidePanelFacet::Active);
+            auto moved = activeOff;
+            SidePanelSetActiveWithin(moved, 1440);
+            auto anyTime = activeOff;
+            SidePanelSetActiveWithin(anyTime, 0);
+            CHECK(SidePanelFiltersAfterPick(activeOff, moved).offFacets == 0, "pick resumes: a moved window switches its chip on");
+            CHECK(NormalizeSidePanelFilters(SidePanelFiltersAfterPick(activeOff, anyTime)).offFacets == 0 && !SidePanelFacetPicked(anyTime, SidePanelFacet::Active),
+                  "pick resumes: 'Any time' drops the window, and normalizing drops the switch of a chip that is gone");
+            auto flagOn = paused;
+            flagOn.unread = true;
+            CHECK(!SidePanelFiltersAfterPick(paused, flagOn).paused, "pick resumes: a flag turned on resumes a paused row");
+            // Folders: a new one, the same one with another choice, a dimmed one picked again.
+            auto folderOff = f;
+            folderOff.folders[0].off = true;
+            folderOff.paused = true;
+            auto repick = folderOff;
+            CHECK(SidePanelAddFolderFilter(repick, L"k:\\SOURCE\\agentmaster", true) && !repick.folders[0].off && !repick.paused, "pick resumes: picking a dimmed folder again switches it on and resumes the row");
+            auto same = f;
+            same.paused = true;
+            CHECK(SidePanelAddFolderFilter(same, L"K:\\work\\webapp", false) && !same.paused && same.folders == f.folders, "pick resumes: picking a folder again while paused resumes the row, the folders as they were");
+            auto choice = folderOff;
+            choice.folders[0].includeSubfolders = false; // an edit made past SidePanelAddFolderFilter: the rule still sees the pick
+            const auto afterChoice = SidePanelFiltersAfterPick(folderOff, choice);
+            CHECK(!afterChoice.paused && !afterChoice.folders[0].off, "pick resumes: a folder's other choice is a pick - its chip on, the row resumed");
+            auto fresh = folderOff;
+            fresh.folders.push_back(SidePanelFolderFilter{ L"Q:\\new", true });
+            const auto afterFresh = SidePanelFiltersAfterPick(folderOff, fresh);
+            CHECK(!afterFresh.paused && afterFresh.folders[0].off && !afterFresh.folders[2].off, "pick resumes: a new folder resumes the row and leaves a dimmed folder dimmed");
+            auto dropped = folderOff;
+            dropped.folders.erase(dropped.folders.begin() + 1);
+            CHECK(SidePanelFiltersAfterPick(folderOff, dropped).paused, "pick resumes: a folder dropped leaves the row paused");
+        }
+
+        // Typing resumes; an emptied box does not; a pause with nothing left is dropped.
+        {
+            auto paused = f;
+            paused.paused = true;
+            CHECK(!SidePanelFiltersAfterTextChange(paused, true).paused, "pause text: typing in the box resumes a paused row");
+            CHECK(SidePanelFiltersAfterTextChange(paused, false).paused, "pause text: emptying the box leaves a row with picks paused");
+            SidePanelFilters onlyText;
+            onlyText.paused = true; // the pause covers the typed text alone
+            CHECK(SidePanelFiltersAfterTextChange(onlyText, false) == SidePanelFilters{}, "pause text: the box emptied with no pick left - the pause is dropped");
+            auto keeps = onlyText;
+            CHECK(!SidePanelSettlePause(keeps, true) && keeps.paused, "pause settle: a pause over the typed text alone stays while the text is there");
+            CHECK(SidePanelSettlePause(keeps, false) && !keeps.paused && !SidePanelSettlePause(keeps, false), "pause settle: no pick and no text - the pause is dropped, once");
+            auto withPicks = paused;
+            CHECK(!SidePanelSettlePause(withPicks, false) && withPicks.paused, "pause settle: a pause over picks stays");
+        }
+
+        // The funnel's words.
+        {
+            CHECK(SidePanelFiltersStatusText(SidePanelFilters{}).empty(), "pause status: no pick - no words");
+            CHECK(SidePanelFiltersStatusText(f) == L"5 filters on", "pause status: five facets on (two folders are one filter)");
+            SidePanelFilters one;
+            one.draft = true;
+            CHECK(SidePanelFiltersStatusText(one) == L"1 filter on", "pause status: one filter, singular");
+            auto paused = f;
+            paused.paused = true;
+            CHECK(SidePanelFiltersStatusText(paused) == L"5 filters paused", "pause status: a paused row");
+            auto mixed = f;
+            mixed.offFacets = stateBit;
+            mixed.folders[0].off = true;
+            CHECK(SidePanelFiltersStatusText(mixed) == L"4 filters on, 1 paused", "pause status: one chip off; By Folder still counts as on while one folder is");
+            one.offFacets = SidePanelFacetBit(SidePanelFacet::Draft);
+            CHECK(SidePanelFiltersStatusText(one) == L"1 filter paused", "pause status: the only filter switched off");
+        }
+
+        // Normalizing: a switch with no chip is dropped; the pause is kept.
+        {
+            SidePanelFilters raw;
+            raw.draft = true;
+            raw.offFacets = 0xFFFFFFFFu;
+            raw.paused = true;
+            const auto n = NormalizeSidePanelFilters(raw);
+            CHECK(n.offFacets == SidePanelFacetBit(SidePanelFacet::Draft) && n.paused, "pause normalize: off bits are cut to the facets that hold a pick; the pause is kept");
+            SidePanelFilters empty;
+            empty.offFacets = stateBit;
+            empty.paused = true;
+            const auto e = NormalizeSidePanelFilters(empty);
+            CHECK(e.offFacets == 0 && e.paused, "pause normalize: an empty record keeps no switch, and keeps a pause that may cover the typed text");
+            SidePanelFilters dup;
+            dup.folders.push_back(SidePanelFolderFilter{ L"K:\\a", true, true });
+            dup.folders.push_back(SidePanelFolderFilter{ L"k:\\A", false, false });
+            const auto d = NormalizeSidePanelFilters(dup);
+            CHECK(d.folders.size() == 1 && d.folders[0].off && d.folders[0].includeSubfolders, "pause normalize: a duplicate folder keeps the first entry's switch with its spelling and choice");
+        }
+
+        // By Folder's pick history and its submenu never carry a switch.
+        {
+            auto record = f;
+            record.folders[0].off = true;
+            const auto history = SidePanelFolderHistoryAfterPicks(std::vector<SidePanelFolderFilter>{}, record.folders, false);
+            CHECK(history.size() == 2 && !history[0].off && !history[1].off, "pause history: a folder switched off in a window enters the shared pick history ON");
+            const auto lines = SidePanelFolderMenuLines(history, record);
+            CHECK(lines.size() == 2 && lines[0].checked && lines[1].checked, "pause history: a submenu line is checked while its folder is PICKED, switched off or not");
+            bool turnedOn = true;
+            auto rec = record;
+            CHECK(lines.size() == 2 && SidePanelToggleFolderLine(rec, lines[0], turnedOn) && !turnedOn && rec.folders.size() == 1, "pause history: a click on the checked line of a switched-off folder drops the folder");
+            auto pausedRec = SidePanelFilters{};
+            pausedRec.draft = true;
+            pausedRec.paused = true;
+            CHECK(lines.size() == 2 && SidePanelToggleFolderLine(pausedRec, lines[0], turnedOn) && turnedOn && !pausedRec.paused && !pausedRec.folders[0].off,
+                  "pause history: a line turned on while the row is paused resumes it (a pick resumes)");
+        }
+    }
+
     // The record's JSON.
     {
         // json::Parse answers an optional (empty for text that does not parse): a null Value then, which the loader reads as
@@ -2166,6 +2472,25 @@ void TestSidePanelFilters()
         SidePanelFilters masked;
         masked.states = 0xFFFFFFFFu;
         CHECK(NormalizeSidePanelFilters(masked).states == kSidePanelAllStateBits, "filters json: bits no state owns are cut on normalizing");
+        // The switches (SIDE_PANEL.md section 2l "Pause filter, Resume filter and a chip's click"): a folder's "off", the
+        // record's "off" tokens and "paused" - written only while set, read back tolerantly.
+        auto switched = f;
+        switched.folders[1].off = true;
+        switched.offFacets = SidePanelFacetBit(SidePanelFacet::State) | SidePanelFacetBit(SidePanelFacet::Favorite);
+        switched.paused = true;
+        const auto switchedText = json::Dump(SidePanelFiltersToJson(switched));
+        CHECK(SidePanelFiltersFromJson(ParseJsonOrNull(switchedText)) == switched, "filters json: a folder switched off, two chips switched off and the pause round-trip");
+        CHECK(switchedText.find(L"\"off\":[\"state\",\"favorite\"]") != std::wstring::npos && switchedText.find(L"\"paused\":true") != std::wstring::npos,
+              "filters json: the switched-off chips are stored as their facets' tokens, the pause as a flag");
+        CHECK(text.find(L"\"off\"") == std::wstring::npos && text.find(L"\"paused\"") == std::wstring::npos, "filters json: a record with nothing off writes no switch (the object is as before the feature)");
+        SidePanelFilters pausedOnly;
+        pausedOnly.paused = true;
+        CHECK(json::Dump(SidePanelFiltersToJson(pausedOnly)) == L"{}", "filters json: a pause that covers only the typed text is not saved");
+        const auto odd = SidePanelFiltersFromJson(ParseJsonOrNull(LR"({"draft":true,"folders":[{"path":"K:\\a","off":"yes"},{"path":"K:\\b","off":true}],"off":["draft","teleport",3,"state"],"paused":"yes"})"));
+        CHECK(odd.folders.size() == 2 && !odd.folders[0].off && odd.folders[1].off, "filters json: a non-bool folder switch reads as on; a true one as off");
+        CHECK(odd.offFacets == SidePanelFacetBit(SidePanelFacet::Draft) && !odd.paused, "filters json: an unknown token, a non-string and a switch for a facet with no pick are dropped; a non-bool pause is no pause");
+        CHECK(!SidePanelFiltersFromJson(ParseJsonOrNull(L"{\"paused\":true}")).paused && SidePanelFiltersFromJson(ParseJsonOrNull(L"{\"paused\":true,\"draft\":true}")).paused,
+              "filters json: a pause with no pick is dropped on load (no typed text is saved); beside a pick it is kept");
     }
 
     // The window record: the key only while a filter is set, and a round trip through the whole record.
@@ -2182,6 +2507,16 @@ void TestSidePanelFilters()
         CHECK(back.sidePanelFilters == filtered.sidePanelFilters, "filters record: the filters round-trip through the window record");
         CHECK(!SidePanelFiltersActive(DeserializeWindowRecord(L"{\"version\":1,\"window\":{\"windowId\":\"w\",\"sidePanelFilters\":\"nope\"}}").sidePanelFilters),
               "filters record: a sidePanelFilters of the wrong type reads as no filter");
+        // The pause and the chips switched off are part of the window's filters: kept across a restart.
+        WindowRecord pausedWindow = filtered;
+        pausedWindow.sidePanelFilters.paused = true;
+        pausedWindow.sidePanelFilters.folders[0].off = true;
+        pausedWindow.sidePanelFilters.offFacets = SidePanelFacetBit(SidePanelFacet::Pinned);
+        CHECK(DeserializeWindowRecord(SerializeWindowRecord(pausedWindow)).sidePanelFilters == pausedWindow.sidePanelFilters,
+              "filters record: the pause and the switched-off chips round-trip through the window record");
+        WindowRecord textPause = plain;
+        textPause.sidePanelFilters.paused = true; // a pause over the typed text alone
+        CHECK(SerializeWindowRecord(textPause).find(L"sidePanelFilters") == std::wstring::npos, "filters record: a pause with no pick writes no sidePanelFilters key");
     }
 
     // By Folder's PICK HISTORY (its hover submenu, SIDE_PANEL.md section 2l "The By Folder submenu"; the user's request of
