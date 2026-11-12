@@ -28,7 +28,8 @@ public sealed record ArtifactRef(string Name, string Kind, long Bytes, string Sh
 /// </summary>
 public sealed record BuildRecord
 {
-    /// <summary>The build id, <c>b&lt;yyyyMMdd&gt;-&lt;n&gt;</c> (<see cref="Ids.NextBuildId"/>).</summary>
+    /// <summary>The build id, <c>&lt;letter&gt;&lt;yyyyMMdd&gt;-&lt;n&gt;</c> (<see cref="Ids.NextBuildId"/>): "b" for homepc's
+    /// site, "w" for the worker machine's. A build pulled from one site into the other keeps its id.</summary>
     public required string Id { get; init; }
 
     /// <summary>Built by the service, or imported.</summary>
@@ -59,7 +60,10 @@ public sealed record BuildRecord
     /// <summary>The version the artifact carries (a portable zip's <c>.am-version</c>), when it has one.</summary>
     public string? Version { get; init; }
 
-    /// <summary>Import: where the artifact came from (the path or URL it was read from).</summary>
+    /// <summary>Where the build came from. An import: the path or URL it was read from. A build: the repository the
+    /// site's mirror fetched the commit from, or the site's name when the commit was pushed to it (the worker machine's).
+    /// A build pulled from another site (for an install through homepc's site): "pulled from …", with the other site's
+    /// own origin.</summary>
     public string? Origin { get; init; }
 
     /// <summary>A build of a SNAPSHOT (uncommitted work, `amb build --snapshot`): the commit the snapshot was made on,

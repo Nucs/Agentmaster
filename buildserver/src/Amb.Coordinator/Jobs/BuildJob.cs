@@ -53,7 +53,10 @@ public sealed class BuildJob : VmJob
         }
 
         DateTimeOffset fetchStart = context.Clock.GetUtcNow();
-        context.MarkRunning($"fetching {context.Options.SourceRepo} into the site's mirror");
+        // A pushing site (the worker machine's) fetches nothing: `amb` pushed the commit before it asked.
+        context.MarkRunning(context.Options.PushesSource
+            ? "checking the site's mirror for the pushed commit"
+            : $"fetching {context.Options.SourceRepo} into the site's mirror");
         var mirror = new SourceMirror(context.Options, context.Log);
         string? sdkCommit = await mirror.FetchAsync(commit, cancel).ConfigureAwait(false);
         context.Event("source", FormattableString.Invariant(
@@ -212,15 +215,18 @@ public sealed class BuildJob : VmJob
     /// <returns>/m (projects at once) and CL_MPCount (compilers per project).</returns>
     /// <remarks>Native, a Debug build at 3 compilers took 8.7 GB of commit, a Release 7.8 GB, and each compiler that loads
     /// TerminalApp's precompiled header takes 1.8-2.3 GB (DESIGN.md §3.1); Windows itself keeps ~1.5 GB. Up to 4
-    /// compilers (2 × 2) below 10 GB, 6 below 14 GB, 9 above; the e2e hand-builds ran /m:2 CL_MPCount 2 on a busy PC.
-    /// P0.4 measures how long that takes.</remarks>
+    /// compilers (2 × 2) below 10 GB, 6 below 14 GB, 9 below 24 GB (homepc's builds, 8-16 GB, stop here); the worker
+    /// machine's 16-32 GB build VMs get 12 below 36 GB and 15 above, about 2.3 GB per compiler with Windows' own
+    /// share kept. The e2e hand-builds ran /m:2 CL_MPCount 2 on a busy PC. P0.4 measures how long that takes.</remarks>
     internal static (int MaxCpu, int ClMpCount) Parallelism(Resources grant)
     {
         (int maxCpu, int clMp) = grant.MemoryMiB switch
         {
             < 10 * 1024 => (2, 2),
             < 14 * 1024 => (2, 3),
-            _ => (3, 3),
+            < 24 * 1024 => (3, 3),
+            < 36 * 1024 => (4, 3),
+            _ => (5, 3),
         };
         return (Math.Max(1, Math.Min(maxCpu, grant.Vcpus)), clMp);
     }
@@ -417,7 +423,9 @@ public sealed class BuildJob : VmJob
         for (int attempt = 0; ; attempt++)
         {
             DateTimeOffset now = context.Clock.GetUtcNow();
-            string buildId = Ids.NextBuildId(DateOnly.FromDateTime(now.UtcDateTime), context.Store.List("builds"));
+            // The site's own letter: a worker build is w<date>-<n>, so it keeps its id when pulled into homepc's store.
+            string buildId = Ids.NextBuildId(DateOnly.FromDateTime(now.UtcDateTime), context.Store.List("builds"),
+                context.Options.BuildLetter);
             string target = Path.Combine(context.Options.StoreDir, "builds", buildId);
             Directory.CreateDirectory(target);
             var artifacts = new List<ArtifactRef>();
@@ -440,7 +448,7 @@ public sealed class BuildJob : VmJob
                 Purge = purge,
                 Version = version,
                 BuildSeconds = Math.Round(buildSeconds, 1),
-                Origin = context.Options.SourceRepo,
+                Origin = context.Options.PushesSource ? context.Options.SiteName : context.Options.SourceRepo,
                 SnapshotOf = context.Request.Inputs.SnapshotOf,
                 Artifacts = artifacts,
             };

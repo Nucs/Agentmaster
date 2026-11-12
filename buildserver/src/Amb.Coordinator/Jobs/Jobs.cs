@@ -3,6 +3,7 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Amb.Coordinator.Slots;
+using Amb.Coordinator.Sources;
 using Amb.Core.Json;
 using Amb.Core.Model;
 using Amb.Core.Protocol;
@@ -15,13 +16,23 @@ namespace Amb.Coordinator.Jobs;
 /// release as a build id, so e2e works before builds exist"). No slot: the coordinator copies the file into the store,
 /// hashing it on the way, reads its version, and writes the build's manifest.
 /// </summary>
+/// <remarks>A FOLDER holding <see cref="PulledManifest"/> is a build pulled from another site (`amb install` of a worker
+/// build through homepc's site, since 2026-11-12): it keeps its id and its files' SHA-256 (<see cref="PullAsync"/>).</remarks>
 public sealed class ImportJob : IJob
 {
+    /// <summary>The file that makes a folder a build pulled from another site: that site's build record, which `amb` saves
+    /// beside the files it fetched from there.</summary>
+    internal const string PulledManifest = "amb-build.json";
+
     /// <inheritdoc/>
     public async Task<JobOutcome> RunAsync(JobContext context, CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(context);
         string source = JobContext.LocalPath(context.Request.Inputs.Source!);
+        if (Directory.Exists(source) && File.Exists(Path.Combine(source, PulledManifest)))
+        {
+            return await PullAsync(context, source, cancel).ConfigureAwait(false);
+        }
         if (!File.Exists(source))
         {
             return new JobOutcome(false, $"no such file: {context.Request.Inputs.Source}");
@@ -37,7 +48,8 @@ public sealed class ImportJob : IJob
         for (int attempt = 0; ; attempt++)
         {
             DateTimeOffset now = context.Clock.GetUtcNow();
-            string buildId = Ids.NextBuildId(DateOnly.FromDateTime(now.UtcDateTime), context.Store.List("builds"));
+            string buildId = Ids.NextBuildId(DateOnly.FromDateTime(now.UtcDateTime), context.Store.List("builds"),
+                context.Options.BuildLetter);
             string relative = $"builds/{buildId}/{name}";
             string target = Path.Combine(context.Options.StoreDir, "builds", buildId, name);
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
@@ -68,6 +80,126 @@ public sealed class ImportJob : IJob
                 $"imported as {buildId}: {name}, {bytes / 1048576.0:0.0} MB, version {version ?? "unknown"}, sha256 {sha256[..12]}"),
                 BuildId: buildId);
         }
+    }
+
+    /// <summary>Takes a build pulled from another site into this site's store, under the same id.</summary>
+    /// <param name="context">The job's context.</param>
+    /// <param name="folder">The folder `amb` fetched the build's files into, with <see cref="PulledManifest"/>.</param>
+    /// <param name="cancel">Cancels the copies.</param>
+    /// <returns>Succeeded with the build id (also when the build is here already); failed when the manifest is not a
+    /// build of another site, a file's SHA-256 differs from its manifest's, or no file came.</returns>
+    /// <exception cref="IOException">A copy failed (the half-made store folder is removed first).</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> was cancelled.</exception>
+    /// <remarks>
+    /// <para>Only the files in the folder are taken, and the record here lists only those (`amb install` fetches the layout
+    /// zip and build.json, not the 1 GB of symbols). Each one's SHA-256 must be its manifest's: the bytes installed are
+    /// the bytes the other site built.</para>
+    /// <para>The record says <see cref="BuildSource.Imported"/>, so this site's "the build exists" check (which takes only
+    /// its own builds) never answers a build request with a pulled build that lacks the portable zip; its origin names
+    /// the site and request it came from.</para>
+    /// </remarks>
+    internal static async Task<JobOutcome> PullAsync(JobContext context, string folder, CancellationToken cancel)
+    {
+        BuildRecord? pulled;
+        try
+        {
+            pulled = JsonSerializer.Deserialize(await File.ReadAllBytesAsync(Path.Combine(folder, PulledManifest), cancel)
+                .ConfigureAwait(false), AmbJson.Default.BuildRecord);
+        }
+        catch (JsonException ex)
+        {
+            return new JobOutcome(false, $"{PulledManifest} is not a build record: {ex.Message}");
+        }
+        if (pulled is null || !Ids.IsSafe(pulled.Id) || Ids.BuildLetterOf(pulled.Id) is not { } letter)
+        {
+            return new JobOutcome(false, $"{PulledManifest} names no build id");
+        }
+        if (letter == context.Options.BuildLetter)
+        {
+            // This site's own letter: the id is (or will be) one of its own builds, never another site's.
+            return new JobOutcome(false, $"{pulled.Id} is an id of this site: only another site's build is pulled");
+        }
+        context.MarkRunning($"taking build {pulled.Id} from {folder}");
+        if (context.Store.Read("builds", pulled.Id, AmbJson.Default.EnvelopeBuildRecord)?.Value is { } here)
+        {
+            return here.Commit == pulled.Commit
+                ? new JobOutcome(true, $"build {pulled.Id} is here already", BuildId: pulled.Id)
+                : new JobOutcome(false, $"this site has another build {pulled.Id} (commit {here.Commit ?? "none"})");
+        }
+        string target = Path.Combine(context.Options.StoreDir, "builds", pulled.Id);
+        if (Directory.Exists(target))
+        {
+            // A folder without a record: an earlier pull that failed half-way. Nothing names it.
+            Directory.Delete(target, recursive: true);
+        }
+        Directory.CreateDirectory(target);
+        var kept = new List<ArtifactRef>();
+        try
+        {
+            foreach (ArtifactRef artifact in pulled.Artifacts)
+            {
+                // A name becomes a path in the store: a plain file name only, as an import's.
+                if (Path.GetFileName(artifact.Name) != artifact.Name
+                    || !Ids.IsSafe(Path.GetFileNameWithoutExtension(artifact.Name).Replace('.', '-')))
+                {
+                    return Discard(target, new JobOutcome(false, $"the manifest names an unsafe file: {artifact.Name}"));
+                }
+                string file = Path.Combine(folder, artifact.Name);
+                if (!File.Exists(file))
+                {
+                    continue;
+                }
+                (string sha256, long bytes) = await CopyHashedAsync(file, Path.Combine(target, artifact.Name), cancel)
+                    .ConfigureAwait(false);
+                if (sha256 != artifact.Sha256)
+                {
+                    return Discard(target, new JobOutcome(false,
+                        $"{artifact.Name} hashes to {sha256[..12]}, not its manifest's {artifact.Sha256[..Math.Min(12, artifact.Sha256.Length)]}"));
+                }
+                kept.Add(artifact with { Bytes = bytes, StorePath = $"builds/{pulled.Id}/{artifact.Name}" });
+            }
+            if (kept.Count == 0)
+            {
+                return Discard(target, new JobOutcome(false, $"none of build {pulled.Id}'s files are in {folder}"));
+            }
+            BuildRecord record = pulled with
+            {
+                Source = BuildSource.Imported,
+                RequestId = context.Request.Id,
+                Origin = $"pulled from {pulled.Origin ?? "another site"} (its request {pulled.RequestId})",
+                Artifacts = kept,
+            };
+            try
+            {
+                context.Store.Write("builds", pulled.Id, record, 0, AmbJson.Default.EnvelopeBuildRecord);
+            }
+            catch (RecordConflictException)
+            {
+                // Expected control flow: another pull of the same build wrote the record first; its files are the same
+                // bytes (checked against the same manifest), so this one's copies stay where that one put them.
+                return new JobOutcome(true, $"build {pulled.Id} was pulled by another request meanwhile", BuildId: pulled.Id);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or OperationCanceledException)
+        {
+            // Cleanup-on-failure: a store folder without a record is never used, and would hold up to a GB.
+            Directory.Delete(target, recursive: true);
+            throw;
+        }
+        return new JobOutcome(true, FormattableString.Invariant(
+            $"pulled {pulled.Id} ({pulled.Configuration} {pulled.Identity}, {pulled.Commit?[..9] ?? "no commit"}): {string.Join(", ", kept.Select(a => a.Kind))}, {kept.Sum(a => a.Bytes) / 1048576.0:0.0} MB, SHA-256 checked"),
+            BuildId: pulled.Id);
+    }
+
+    /// <summary>Removes a half-made store folder and passes an outcome through (the pull's early refusals).</summary>
+    /// <param name="target">The folder.</param>
+    /// <param name="outcome">The outcome to return.</param>
+    /// <returns><paramref name="outcome"/>.</returns>
+    /// <exception cref="IOException">The folder could not be removed.</exception>
+    private static JobOutcome Discard(string target, JobOutcome outcome)
+    {
+        Directory.Delete(target, recursive: true);
+        return outcome;
     }
 
     /// <summary>Copies a file, hashing it on the way.</summary>
@@ -274,6 +406,10 @@ public sealed class LayerJob : VmJob
 public sealed class E2eJob : VmJob
 {
     /// <inheritdoc/>
+    /// <remarks>The suite is a folder the coordinator reads (the request's <see cref="RequestInputs.SuiteSource"/>, else
+    /// the site's <see cref="CoordinatorOptions.E2eSourceDir"/>), or the <c>e2e/</c> folder of
+    /// <see cref="RequestInputs.SuiteCommit"/> written out of the site's mirror for this run (the worker machine's site,
+    /// which cannot read K:) and removed when it ends.</remarks>
     public override async Task<JobOutcome> RunAsync(JobContext context, CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -284,11 +420,72 @@ public sealed class E2eJob : VmJob
         {
             return new JobOutcome(false, $"build {request.Inputs.BuildId} has no portable zip");
         }
-        string suite = JobContext.LocalPath(request.Inputs.SuiteSource ?? context.Options.E2eSourceDir);
-        if (!File.Exists(Path.Combine(suite, "guest", "run_suite.py")))
+        string? exported = null;
+        try
         {
-            return new JobOutcome(false, $"no e2e suite at {suite} (guest/run_suite.py is missing)");
+            string suite;
+            if (request.Inputs.SuiteCommit is { } suiteCommit)
+            {
+                var mirror = new SourceMirror(context.Options, context.Log);
+                await mirror.EnsureCommitAsync(suiteCommit, cancel).ConfigureAwait(false);
+                exported = Path.Combine(context.Options.TmpDir, "suites", request.Id);
+                if (Directory.Exists(exported))
+                {
+                    Directory.Delete(exported, recursive: true);
+                }
+                int files = await mirror.ExportTreeAsync(suiteCommit, "e2e", exported, cancel).ConfigureAwait(false);
+                context.Event("source", $"the e2e suite of {suiteCommit[..9]}: {files} files out of the site's mirror");
+                suite = exported;
+            }
+            else if ((request.Inputs.SuiteSource ?? (context.Options.E2eSourceDir is { Length: > 0 } d ? d : null)) is { } folder)
+            {
+                suite = JobContext.LocalPath(folder);
+            }
+            else
+            {
+                return new JobOutcome(false,
+                    "this site has no e2e suite folder (it cannot read K:): the request must name inputs.suiteCommit, as `amb e2e` does");
+            }
+            if (!File.Exists(Path.Combine(suite, "guest", "run_suite.py")))
+            {
+                return new JobOutcome(false, $"no e2e suite at {suite} (guest/run_suite.py is missing)");
+            }
+            return await RunSuiteInSlotAsync(context, build, zip, suite, cancel).ConfigureAwait(false);
         }
+        finally
+        {
+            if (exported is not null)
+            {
+                // Cleanup in every outcome: the slot's share holds its own copy, and the next run of the same commit
+                // writes a fresh one.
+                try
+                {
+                    Directory.Delete(exported, recursive: true);
+                }
+                catch (IOException ex)
+                {
+                    context.Log.LogWarning("could not remove {Folder}: {Error}", exported, ex.Message);
+                }
+            }
+        }
+    }
+
+    /// <summary>Boots the e2e VM, stages the build and the suite, provisions, runs the suite, and keeps its results.</summary>
+    /// <param name="context">The job's context.</param>
+    /// <param name="build">The build under test.</param>
+    /// <param name="zip">Its portable zip.</param>
+    /// <param name="suite">The suite's folder on the site (guest/run_suite.py checked).</param>
+    /// <param name="cancel">Cancels the run.</param>
+    /// <returns>Succeeded when every test passed; the summary, pytest's exit code and the results' folder.</returns>
+    /// <exception cref="StepFailedException">The provisioning failed.</exception>
+    /// <exception cref="SlotLostException">The guest went silent.</exception>
+    /// <exception cref="InvalidOperationException">The slot could not be started.</exception>
+    /// <exception cref="IOException">A copy into the share or the store failed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> was cancelled.</exception>
+    private async Task<JobOutcome> RunSuiteInSlotAsync(JobContext context, BuildRecord build, ArtifactRef zip, string suite,
+        CancellationToken cancel)
+    {
+        RequestRecord request = context.Request;
         string run = request.Id;
         SlotLease lease = await StartAndWaitAsync(context, request.Inputs.Image ?? "am-e2e", cancel).ConfigureAwait(false);
         bool graceful = false;

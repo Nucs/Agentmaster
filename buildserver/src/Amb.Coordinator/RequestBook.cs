@@ -54,14 +54,17 @@ public static class RequestDefaults
     /// memory nor its guest's RAM becomes the tuned capped VM.</summary>
     /// <param name="kind">The request's kind.</param>
     /// <param name="inputs">The inputs as asked.</param>
-    /// <returns>The inputs, with <see cref="RequestInputs.GuestMemoryMiB"/> set to <see cref="E2eGuestMemoryMiB"/> for
+    /// <param name="guestMemoryMiB">The guest RAM to fill in (<see cref="E2eGuestMemoryMiB"/> unless a site sizes its
+    /// e2e VMs otherwise, <see cref="RequestSizing.E2eGuestMemoryMiB"/>).</param>
+    /// <returns>The inputs, with <see cref="RequestInputs.GuestMemoryMiB"/> set to <paramref name="guestMemoryMiB"/> for
     /// such an e2e request; unchanged otherwise.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="inputs"/> is null.</exception>
-    public static RequestInputs WithDefaultGuestMemory(RequestKind kind, RequestInputs inputs)
+    public static RequestInputs WithDefaultGuestMemory(RequestKind kind, RequestInputs inputs,
+        long guestMemoryMiB = E2eGuestMemoryMiB)
     {
         ArgumentNullException.ThrowIfNull(inputs);
         return kind == RequestKind.E2e && inputs.MemoryMiB is null && inputs.GuestMemoryMiB is null
-            ? inputs with { GuestMemoryMiB = E2eGuestMemoryMiB }
+            ? inputs with { GuestMemoryMiB = guestMemoryMiB }
             : inputs;
     }
 
@@ -100,6 +103,57 @@ public static class RequestDefaults
 }
 
 /// <summary>
+/// A site's own slot sizes for the kinds whose size depends on the machine (DESIGN.md §3.1): a build VM and an e2e VM.
+/// homepc's are <see cref="RequestDefaults"/> (measured on a 64 GB PC that the owner works on); the worker machine has
+/// 128 GB and nobody at its screen, so its builds get twice the memory and vCPUs and its e2e VMs are uncapped.
+/// </summary>
+/// <remarks>Only the defaults change: a request that names its own size (`--ram`, `--vcpus`) still gets exactly that, and
+/// the kinds not named here keep <see cref="RequestDefaults.ResourcesOf"/>.</remarks>
+public sealed record RequestSizing
+{
+    /// <summary>A build VM's least and most, or null for <see cref="RequestDefaults.ResourcesOf"/>'s (8-16 GB, 4-8 vCPUs).
+    /// BuildJob.Parallelism picks msbuild's parallelism from the memory granted.</summary>
+    public ResourceRequest? Build { get; init; }
+
+    /// <summary>An e2e VM's least and most, or null for the default (a 2 GB cap, 4 vCPUs).</summary>
+    public ResourceRequest? E2e { get; init; }
+
+    /// <summary>The RAM an e2e VM's guest sees when the request names no size: null for
+    /// <see cref="RequestDefaults.E2eGuestMemoryMiB"/> (3 GB over a 2 GB cap: a capped slot); 0 for none, so the VM is
+    /// uncapped and its guest sees its whole grant (the worker machine's, which has memory to spare and no swap file).</summary>
+    public long? E2eGuestMemoryMiB { get; init; }
+
+    /// <summary>Whether the site can run a capped slot (a guest RAM above the slot's memory, the rest in a swap file):
+    /// homepc's can (its site's swap file on Q:, DESIGN.md §16.14); the worker machine's cannot (CT 803 has no swap, so
+    /// the guest would be killed when it touched more than its cap), and refuses such a request when it is made.</summary>
+    public bool CappedSlots { get; init; } = true;
+
+    /// <summary>The least and most resources of a kind on this site.</summary>
+    /// <param name="kind">The kind.</param>
+    /// <returns>This site's size for a build or an e2e run when it sets one, else the kind's default (null for a kind
+    /// with no slot).</returns>
+    public ResourceRequest? ResourcesOf(RequestKind kind) => kind switch
+    {
+        RequestKind.Build when Build is not null => Build,
+        RequestKind.E2e when E2e is not null => E2e,
+        _ => RequestDefaults.ResourcesOf(kind),
+    };
+
+    /// <summary>A request's inputs with this site's default guest RAM filled in (see
+    /// <see cref="RequestDefaults.WithDefaultGuestMemory"/>).</summary>
+    /// <param name="kind">The request's kind.</param>
+    /// <param name="inputs">The inputs as asked.</param>
+    /// <returns>The inputs, unchanged when this site's e2e VMs are uncapped (<see cref="E2eGuestMemoryMiB"/> 0).</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="inputs"/> is null.</exception>
+    public RequestInputs WithDefaultGuestMemory(RequestKind kind, RequestInputs inputs)
+    {
+        ArgumentNullException.ThrowIfNull(inputs);
+        long guest = E2eGuestMemoryMiB ?? RequestDefaults.E2eGuestMemoryMiB;
+        return guest > 0 ? RequestDefaults.WithDefaultGuestMemory(kind, inputs, guest) : inputs;
+    }
+}
+
+/// <summary>
 /// Every request the coordinator knows: their records (in the record store, the truth), their event logs, and the
 /// signals that wake whoever waits on them. The one place a request's state changes, so every change is checked against
 /// the life of DESIGN.md §12 and logged as an event.
@@ -108,21 +162,25 @@ public sealed class RequestBook
 {
     private readonly RecordStore _store;
     private readonly TimeProvider _clock;
+    private readonly RequestSizing _sizing;
     private readonly ConcurrentDictionary<string, RequestRecord> _active = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, AsyncSignal> _signals = new(StringComparer.Ordinal);
 
     /// <summary>Opens the book over a record store, loading every request that has not ended.</summary>
     /// <param name="store">The record store.</param>
     /// <param name="clock">The clock (TimeProvider.System in production).</param>
-    /// <exception cref="ArgumentNullException">An argument is null.</exception>
+    /// <param name="sizing">The site's own slot sizes (the coordinator's <see cref="CoordinatorOptions.Sizing"/>), or null
+    /// for homepc's defaults (the tests').</param>
+    /// <exception cref="ArgumentNullException"><paramref name="store"/> or <paramref name="clock"/> is null.</exception>
     /// <exception cref="IOException">The records could not be read.</exception>
     /// <exception cref="JsonException">A record is damaged.</exception>
-    public RequestBook(RecordStore store, TimeProvider clock)
+    public RequestBook(RecordStore store, TimeProvider clock, RequestSizing? sizing = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(clock);
         _store = store;
         _clock = clock;
+        _sizing = sizing ?? new RequestSizing();
         foreach (string id in store.List("requests"))
         {
             RequestRecord? record = store.Read("requests", id, AmbJson.Default.EnvelopeRequestRecord)?.Value;
@@ -143,7 +201,8 @@ public sealed class RequestBook
     /// <param name="ask">What the caller asked for.</param>
     /// <returns>The new record.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="ask"/> is null.</exception>
-    /// <exception cref="RequestRejectedException">The kind is not served yet, or an input is missing or unsafe.</exception>
+    /// <exception cref="RequestRejectedException">The kind is not served yet, an input is missing or unsafe, or the request
+    /// asks for a capped slot on a site that has none (<see cref="RequestSizing.CappedSlots"/>).</exception>
     /// <exception cref="IOException">The record could not be written.</exception>
     public RequestRecord Create(CreateRequest ask)
     {
@@ -155,6 +214,19 @@ public sealed class RequestBook
                 throw new RequestRejectedException("an import needs inputs.source (a path this PC can read)");
             case RequestKind.E2e when !Ids.IsSafe(inputs.BuildId):
                 throw new RequestRejectedException("an e2e request needs inputs.buildId (an existing build id)");
+            case RequestKind.E2e when inputs.SuiteCommit is not null:
+                // A full SHA only, like a build's commit: the job exports the suite of exactly that commit from the mirror.
+                string suiteCommit = inputs.SuiteCommit.Trim().ToLowerInvariant();
+                if (suiteCommit.Length != 40 || !suiteCommit.All(char.IsAsciiHexDigitLower))
+                {
+                    throw new RequestRejectedException("inputs.suiteCommit must be a full 40-character commit SHA");
+                }
+                if (inputs.SuiteSource is not null)
+                {
+                    throw new RequestRejectedException("inputs.suiteSource and inputs.suiteCommit name two suites: give one");
+                }
+                inputs = inputs with { SuiteCommit = suiteCommit };
+                break;
             case RequestKind.Test:
                 throw new RequestRejectedException("Test is not served yet (DESIGN.md §13: `amb test` comes after the build MVP)");
             case RequestKind.Build:
@@ -182,8 +254,16 @@ public sealed class RequestBook
         {
             throw new RequestRejectedException($"not a safe image name: {inputs.Image}");
         }
-        // An e2e request that names no size gets the tuned capped VM; the record says so (its guest RAM).
-        inputs = RequestDefaults.WithDefaultGuestMemory(ask.Kind, inputs);
+        // An e2e request that names no size gets the site's default VM (homepc's tuned capped one; the worker machine's
+        // uncapped one); the record says so (its guest RAM, when capped).
+        inputs = _sizing.WithDefaultGuestMemory(ask.Kind, inputs);
+        ResourceRequest? resources = SizeSlot(ask.Kind, ask.Resources ?? _sizing.ResourcesOf(ask.Kind), inputs);
+        if (!_sizing.CappedSlots && inputs.GuestMemoryMiB is long guest && resources is not null
+            && guest > resources.Preferred.MemoryMiB)
+        {
+            throw new RequestRejectedException(
+                "this site has no swap for a capped slot: give the VM as much memory as its guest RAM (--ram, without a larger --guest-ram)");
+        }
         DateTimeOffset now = _clock.GetUtcNow();
         var record = new RequestRecord
         {
@@ -191,7 +271,7 @@ public sealed class RequestBook
             Kind = ask.Kind,
             State = RequestState.Pending,
             Inputs = inputs,
-            Resources = SizeSlot(ask.Kind, ask.Resources ?? RequestDefaults.ResourcesOf(ask.Kind), inputs),
+            Resources = resources,
             CreatedAt = now,
             UpdatedAt = now,
             WaitTimeout = ask.WaitTimeoutMinutes is int w ? TimeSpan.FromMinutes(w) : RequestDefaults.WaitOf(ask.Kind),

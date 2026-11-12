@@ -139,8 +139,10 @@ export AMB_GUEST_URL=http://10.0.2.2:2207
 export AMB_HOSTFACTS=/mnt/q/buildserver/bin/amb-hostfacts.exe
 export DOTNET_gcServer=0
 (setsid /srv/buildserver/bin/coordinator/amb-coordinator >> "$dir/coordinator.log" 2>&1 < /dev/null & echo $! > "$pidfile")
+# 90 s: a woken coordinator took ~16 s to its first log line from the site's disk, and the first start of a freshly
+# deployed 100 MB binary just over 30 s (2026-11-12), which the old 30-s wait reported as "did not start".
 i=0
-while [ $i -lt 60 ]; do
+while [ $i -lt 180 ]; do
   if curl -sf -o /dev/null http://127.0.0.1:2207/healthz; then
     echo "started $(cat "$pidfile")"
     exit 0
@@ -148,7 +150,7 @@ while [ $i -lt 60 ]; do
   i=$((i + 1))
   sleep 0.5
 done
-echo "amb-coordinator did not answer within 30 s; see $dir/coordinator.log" >&2
+echo "amb-coordinator did not answer within 90 s; see $dir/coordinator.log" >&2
 exit 1
 """
 """The site's start script for the coordinator (installed as /srv/buildserver/bin/coordinator-up.sh)."""
@@ -458,23 +460,51 @@ def status(root: Path) -> dict[str, object]:
     return report
 
 
-def _dotnet_publish(project: str, out: Path, extra: list[str]) -> None:
+PORTABLE_DOTNET = Path(r"Q:\tools\dotnet-10.0.404\dotnet.exe")
+"""The .NET SDK the build server's projects are published with when present (10.0.404, unpacked on 2026-11-12): the
+machine's own SDK restores the runtime packs of a self-contained publish with an advisory that the warnings-as-errors
+posture turns into a failure (NU1903); the advisory is fixed from runtime 10.0.14. AMB_DOTNET names another dotnet."""
+
+
+def dotnet_command() -> tuple[str, dict[str, str]]:
+    """Picks the dotnet that publishes the build server's projects, with the environment it needs.
+
+    Returns:
+        The dotnet executable (AMB_DOTNET, else `PORTABLE_DOTNET` when it exists, else `dotnet` on PATH) and the
+        environment to run it with: an unpacked SDK needs DOTNET_ROOT set to its own folder, and multilevel lookup off,
+        or it would run the machine's installed runtimes.
+    """
+    env = dict(os.environ)
+    # Native AOT's link step looks for vswhere.exe on PATH; Git Bash's PATH lacks the Visual Studio Installer folder.
+    env["PATH"] = r"C:\Program Files (x86)\Microsoft Visual Studio\Installer" + os.pathsep + env.get("PATH", "")
+    chosen = env.get("AMB_DOTNET") or (str(PORTABLE_DOTNET) if PORTABLE_DOTNET.is_file() else "dotnet")
+    if chosen != "dotnet":
+        env["DOTNET_ROOT"] = str(Path(chosen).parent)
+        env["DOTNET_MULTILEVEL_LOOKUP"] = "0"
+    env["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1"
+    return chosen, env
+
+
+def _dotnet_publish(project: str, out: Path, extra: list[str], build_root: Path | None = None) -> None:
     """Publishes one of the build server's projects (Release) into a folder on Q:.
 
     Args:
         project: the project's folder name under buildserver/src (e.g. "Amb.Coordinator").
         out: the output folder (emptied first, so no stale file of an older publish is deployed).
         extra: more `dotnet publish` arguments (the runtime, self-contained, single-file).
+        build_root: where the projects' obj\\ and bin\\ go (AmbBuildRoot), or None for Directory.Build.props's own
+            (Q:\\tmp\\buildserver-build, where the live amb.exe is built): the worker's deploy uses a root of its own, so
+            publishing for it never touches what the home site or the CLI runs.
 
     Raises:
         SiteError: the publish failed (its last lines are in the message).
     """
     shutil.rmtree(out, ignore_errors=True)
-    env = dict(os.environ)
-    # Native AOT's link step looks for vswhere.exe on PATH; Git Bash's PATH lacks the Visual Studio Installer folder.
-    env["PATH"] = r"C:\Program Files (x86)\Microsoft Visual Studio\Installer" + os.pathsep + env.get("PATH", "")
-    done = subprocess.run(["dotnet", "publish", str(REPO / "buildserver" / "src" / project), "-c", "Release", "-nologo",
-                           "-v", "q", "-o", str(out), *extra], capture_output=True, timeout=1800, env=env, check=False)
+    dotnet, env = dotnet_command()
+    root_args = [f"-p:AmbBuildRoot={build_root}\\"] if build_root is not None else []
+    done = subprocess.run([dotnet, "publish", str(REPO / "buildserver" / "src" / project), "-c", "Release", "-nologo",
+                           "-v", "q", "-o", str(out), *root_args, *extra], capture_output=True, timeout=1800, env=env,
+                          check=False)
     if done.returncode != 0:
         tail = (done.stdout + done.stderr).decode("utf-8", "replace").strip().splitlines()[-15:]
         raise SiteError(f"dotnet publish {project} failed:\n" + "\n".join(tail))

@@ -1,0 +1,9 @@
+#!/bin/sh
+# Runs amb-coordinator with the worker site's settings (installed by buildserver/site/worker.py `provision` as
+# /usr/local/bin/amb-coordinator-run; OpenRC's amb-coordinator service runs it under supervise-daemon).
+# The settings file is sourced with every variable exported, so an empty one ("AMB_SOURCE_REPO=") reaches the
+# coordinator as set-but-empty, which is how it turns a feature off (CoordinatorOptions.FromEnvironment).
+set -a
+. /etc/amb-coordinator.env
+set +a
+exec /srv/buildserver/bin/coordinator/amb-coordinator

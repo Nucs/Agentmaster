@@ -10,8 +10,10 @@ using Amb.Core.Protocol;
 namespace Amb.Coordinator;
 
 /// <summary>
-/// What homepc has free right now (DESIGN.md §3.2): Windows' side from the host-facts helper (run every 10 s through
-/// WSL's interop), the WSL VM's MemAvailable from /proc/meminfo, and the site's own slots from the slot manager.
+/// What the site has free right now (DESIGN.md §3.2). homepc's: Windows' side from the host-facts helper (run every 10 s
+/// through WSL's interop), the WSL VM's MemAvailable from /proc/meminfo, and the site's own slots from the slot manager.
+/// A Linux site's (the worker machine's CT 803, <see cref="CoordinatorOptions.IsLinuxSite"/>): the host's and the
+/// container's meminfo and the site disk's free space, read every 10 s (<see cref="LinuxFree"/>).
 /// </summary>
 /// <remarks>
 /// A slot just started has not taken its memory yet (a Windows guest touches all of RAM_SIZE within 1-2 minutes of
@@ -32,6 +34,7 @@ public sealed class HostCapacity : BackgroundService
     private readonly TimeProvider _clock;
     private readonly ILogger<HostCapacity> _log;
     private HostFactsReport? _last;
+    private LinuxHostFacts? _lastLinux;
     private string? _lastError;
 
     /// <summary>Creates the capacity source.</summary>
@@ -59,6 +62,57 @@ public sealed class HostCapacity : BackgroundService
     {
         _last = report;
         Changed.Pulse();
+    }
+
+    /// <summary>A Linux site's last facts (the worker machine's), or null before the first read or on homepc's site.</summary>
+    public LinuxHostFacts? LastLinux => _lastLinux;
+
+    /// <summary>Linux facts to use instead of the files' (tests; the next 10-s read replaces them on a real site).</summary>
+    /// <param name="facts">The facts.</param>
+    public void OverrideLinux(LinuxHostFacts facts)
+    {
+        _lastLinux = facts;
+        Changed.Pulse();
+    }
+
+    /// <summary>The site's free amounts for one request, whichever site this coordinator serves: homepc's
+    /// (<see cref="HomepcFree"/>) or a Linux one (<see cref="LinuxFree"/>, when <see cref="CoordinatorOptions.IsLinuxSite"/>).</summary>
+    /// <param name="tolerant">homepc only: admit on commit alone (DESIGN.md §3.2); a Linux site has no such term.</param>
+    /// <param name="capped">homepc only: the capped commit margin; a Linux site has no commit term.</param>
+    /// <param name="idle">Answer what the site would have free with none of its slots running (the scheduler's
+    /// first-in-line check, <see cref="HomepcFree"/>).</param>
+    /// <returns>The site's free amounts and holds.</returns>
+    public SiteFree SiteFree(bool tolerant = false, bool capped = false, bool idle = false) =>
+        _options.IsLinuxSite ? LinuxFree(idle) : HomepcFree(tolerant, capped, idle);
+
+    /// <summary>A Linux site's free amounts for one request (<see cref="SiteCapacity.LinuxFree"/>).</summary>
+    /// <param name="idle">Answer what it would have free if none of its slots ran.</param>
+    /// <returns>The site's free amounts; "no host facts" holds it while there is no fresh read.</returns>
+    /// <remarks>The same warm-up rule as homepc's: a VM's memory shows in the host's and the container's numbers only once
+    /// its guest has touched it (a Windows guest zeroes its RAM within 1-2 minutes of boot), so a slot younger than
+    /// <see cref="WarmUp"/> is subtracted in full, or two requests a few seconds apart would be granted the same memory.</remarks>
+    public SiteFree LinuxFree(bool idle = false)
+    {
+        LinuxHostFacts? facts = _lastLinux;
+        DateTimeOffset now = _clock.GetUtcNow();
+        if (facts is null || now - facts.At > Stale)
+        {
+            return new SiteFree(_options.SiteName, _options.HomepcPriority, default,
+                [$"no host facts{(_lastError is null ? "" : ": " + _lastError)}"]);
+        }
+        IReadOnlyList<SlotRecord> active = _slots.Active;
+        long warming = active.Where(s => now - s.CreatedAt < WarmUp).Sum(s => s.Grant.MemoryMiB);
+        long settled = active.Where(s => now - s.CreatedAt >= WarmUp).Sum(s => s.Grant.MemoryMiB);
+        // Idle gives back what the settled slots hold (the numbers show it as used); otherwise the young slots, which
+        // the numbers do not show yet, are taken off.
+        long adjust = idle ? settled : -warming;
+        LinuxHostFacts adjusted = facts with
+        {
+            HostMemAvailableMiB = facts.HostMemAvailableMiB + adjust,
+            SiteMemAvailableMiB = facts.SiteMemAvailableMiB + adjust,
+        };
+        return SiteCapacity.LinuxFree(adjusted, _options.LinuxReserves, idle ? 0 : active.Sum(s => s.Grant.Vcpus),
+            _options.SiteName, _options.HomepcPriority);
     }
 
     /// <summary>homepc's free amounts for one request.</summary>
@@ -97,11 +151,17 @@ public sealed class HostCapacity : BackgroundService
         return SiteCapacity.HomepcFree(facts, _options.Reserves, _options.HomepcPriority, tolerant, capped);
     }
 
-    /// <summary>Runs the helper every 10 s for the coordinator's whole life.</summary>
+    /// <summary>Runs the helper every 10 s for the coordinator's whole life (a Linux site reads its files instead,
+    /// <see cref="ReadLinuxLoopAsync"/>).</summary>
     /// <param name="stoppingToken">Cancelled at shutdown.</param>
     /// <returns>A task that ends at shutdown.</returns>
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (_options.IsLinuxSite)
+        {
+            await ReadLinuxLoopAsync(stoppingToken).ConfigureAwait(false);
+            return;
+        }
         if (string.IsNullOrEmpty(_options.HostFactsCommand))
         {
             return;
@@ -178,6 +238,94 @@ public sealed class HostCapacity : BackgroundService
         }
         return JsonSerializer.Deserialize(text, AmbJsonLine.Default.HostFactsReport)
             ?? throw new InvalidOperationException($"{_options.HostFactsCommand} printed null");
+    }
+
+    /// <summary>Reads a Linux site's facts every 10 s until shutdown: the host's meminfo, the container's own (lxcfs), and
+    /// the free space where the site lives.</summary>
+    /// <param name="stoppingToken">Cancelled at shutdown.</param>
+    /// <returns>A task that ends at shutdown.</returns>
+    /// <remarks>A failed read leaves the last facts in place; after a minute they are stale and the site holds new
+    /// slots ("no host facts: …"), so a broken bind mount stops admissions instead of admitting blind.</remarks>
+    private async Task ReadLinuxLoopAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                _lastLinux = ReadLinuxFacts(_options.HostMemInfoPath, "/proc/meminfo", _options.Root, _clock.GetUtcNow());
+                _lastError = null;
+                Changed.Pulse();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FormatException
+                or InvalidOperationException or ArgumentException)
+            {
+                if (_lastError != ex.Message)
+                {
+                    _log.LogWarning("host facts: {Error}", ex.Message);
+                }
+                _lastError = ex.Message;
+            }
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(10), _clock, stoppingToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+        }
+    }
+
+    /// <summary>Reads a Linux site's facts once.</summary>
+    /// <param name="hostMemInfo">The host's /proc/meminfo as bind-mounted into the container.</param>
+    /// <param name="siteMemInfo">The container's own /proc/meminfo (lxcfs: its memory ceiling and use).</param>
+    /// <param name="root">A folder on the site's disk (its root): its file system's free space is the site's.</param>
+    /// <param name="now">The time to stamp them with.</param>
+    /// <returns>The facts.</returns>
+    /// <exception cref="IOException">A file could not be read.</exception>
+    /// <exception cref="UnauthorizedAccessException">A file may not be read.</exception>
+    /// <exception cref="FormatException">A file has no MemAvailable or MemTotal line, or a value is not a number.</exception>
+    /// <exception cref="ArgumentException"><paramref name="root"/> names no file system.</exception>
+    internal static LinuxHostFacts ReadLinuxFacts(string hostMemInfo, string siteMemInfo, string root, DateTimeOffset now)
+    {
+        IReadOnlyDictionary<string, long> host = ReadMemInfoMiB(hostMemInfo);
+        IReadOnlyDictionary<string, long> site = ReadMemInfoMiB(siteMemInfo);
+        long Need(IReadOnlyDictionary<string, long> values, string key, string file) =>
+            values.TryGetValue(key, out long v) ? v : throw new FormatException($"{file} has no {key} line");
+        // On Linux any path names its file system (statvfs); Windows (the tests) takes only a drive's root.
+        string full = Path.GetFullPath(root);
+        var drive = new DriveInfo(OperatingSystem.IsWindows() ? Path.GetPathRoot(full)! : full);
+        return new LinuxHostFacts(now,
+            Need(host, "MemAvailable", hostMemInfo),
+            Need(host, "MemTotal", hostMemInfo),
+            Need(site, "MemAvailable", siteMemInfo),
+            drive.AvailableFreeSpace / (1024 * 1024));
+    }
+
+    /// <summary>Reads a meminfo file's "Key: N kB" lines as MiB.</summary>
+    /// <param name="path">The file.</param>
+    /// <returns>Each key with its value in MiB (lines that are not "N kB" are skipped).</returns>
+    /// <exception cref="IOException">The file could not be read.</exception>
+    /// <exception cref="UnauthorizedAccessException">It may not be read.</exception>
+    internal static IReadOnlyDictionary<string, long> ReadMemInfoMiB(string path)
+    {
+        var values = new Dictionary<string, long>(StringComparer.Ordinal);
+        foreach (string line in File.ReadLines(path))
+        {
+            int colon = line.IndexOf(':', StringComparison.Ordinal);
+            if (colon <= 0)
+            {
+                continue;
+            }
+            string[] parts = line[(colon + 1)..].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            // Only "N kB" lines are amounts (HugePages_Total and its kin are page counts, without a unit).
+            if (parts.Length == 2 && parts[1] == "kB"
+                && long.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out long kb))
+            {
+                values[line[..colon]] = kb / 1024;
+            }
+        }
+        return values;
     }
 
     /// <summary>MemAvailable of the Linux the coordinator runs in (the WSL VM), MiB.</summary>

@@ -144,7 +144,8 @@ public sealed class SlotManager
         {
             Id = slotId,
             RequestId = request.Id,
-            Site = SiteCapacity.Homepc,
+            // The site this coordinator serves ("homepc", or "worker" on the worker machine).
+            Site = _options.SiteName,
             Image = image,
             Grant = grant,
             State = SlotState.Starting,

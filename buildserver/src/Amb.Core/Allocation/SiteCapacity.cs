@@ -1,3 +1,5 @@
+using Amb.Core.Protocol;
+
 namespace Amb.Core.Allocation;
 
 /// <summary>
@@ -60,9 +62,57 @@ public sealed record DockFacts(long MemAvailableMiB, int RunningSlotVcpus, long 
 /// <param name="DiskMiB">Disk kept (5 GB; the thin pool's alert is at 80 %).</param>
 public sealed record DockReserves(long MemoryMiB = 2 * 1024, int UsableVcpus = 12, long DiskMiB = 5 * 1024);
 
+/// <summary>
+/// The amounts a Linux site keeps for everything else (the worker machine's site, since 2026-11-12): the host's other
+/// guests (TraderLab's worker, the planned Windows Server and k3s VMs) and the site container's own processes.
+/// </summary>
+/// <param name="HostMemoryMiB">The host's available memory kept for everything else (8 GB by default): the other
+/// guests grow on their own (TraderLab's worker takes jobs only while the host has room, so it never fills this).</param>
+/// <param name="SiteMemoryMiB">What the site's container keeps below its own ceiling (2 GB): podman, conmon, QEMU's
+/// own memory beyond each guest's RAM (~0.4 GB a VM, DESIGN.md §7), the coordinator.</param>
+/// <param name="UsableVcpus">vCPUs the site may hand out in total (20: the host's 20 threads; a VM computes at a
+/// fraction of a thread when the host is busy, and the build VM's 16 plus one e2e VM's 4 are the expected peak).</param>
+/// <param name="DiskMiB">Free space kept where the site lives (50 GB of drive 2, which other guests' temporary data
+/// shares).</param>
+public sealed record LinuxReserves(
+    long HostMemoryMiB = 8 * 1024,
+    long SiteMemoryMiB = 2 * 1024,
+    int UsableVcpus = 20,
+    long DiskMiB = 50 * 1024);
+
 /// <summary>Turns what a site measures into what it has free for new slots: the measured value minus its reserve.</summary>
 public static class SiteCapacity
 {
+    /// <summary>The name the worker machine's site goes by in records and placements.</summary>
+    public const string Worker = "worker";
+
+    /// <summary>A Linux site's free amounts for one request (the worker machine's site).</summary>
+    /// <param name="facts">What the site measured (adjusted by the caller for slots whose memory the numbers do not show
+    /// yet, as <see cref="HomepcFree"/>'s caller does).</param>
+    /// <param name="reserves">What it keeps.</param>
+    /// <param name="runningSlotVcpus">The vCPUs granted to the site's running slots.</param>
+    /// <param name="site">The site's name ("worker").</param>
+    /// <param name="priority">The site's priority (1.0 by default).</param>
+    /// <returns>The site's free amounts; no holds (a Linux site has no full-screen game to yield to).</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="facts"/>, <paramref name="reserves"/> or
+    /// <paramref name="site"/> is null.</exception>
+    /// <remarks>
+    /// Memory = min(host available − 8 GB, the site container's available − 2 GB): both must hold at once, since a VM's
+    /// memory is taken from the host (shared with the other guests) and counted against the container's ceiling. There is
+    /// no commit term: Linux overcommits by design, and nothing on the host is a page file the guests could fill.
+    /// </remarks>
+    public static SiteFree LinuxFree(LinuxHostFacts facts, LinuxReserves reserves, int runningSlotVcpus, string site,
+        double priority = 1.0)
+    {
+        ArgumentNullException.ThrowIfNull(facts);
+        ArgumentNullException.ThrowIfNull(reserves);
+        ArgumentNullException.ThrowIfNull(site);
+        long memory = Math.Min(facts.HostMemAvailableMiB - reserves.HostMemoryMiB,
+            facts.SiteMemAvailableMiB - reserves.SiteMemoryMiB);
+        var free = new Resources(memory, reserves.UsableVcpus - runningSlotVcpus, facts.DiskFreeMiB - reserves.DiskMiB);
+        return new SiteFree(site, priority, free, []);
+    }
+
     /// <summary>The name homepc's site goes by in records and placements.</summary>
     public const string Homepc = "homepc";
 

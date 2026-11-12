@@ -1,5 +1,6 @@
 using System.Globalization;
 using Amb.Core.Allocation;
+using Amb.Core.Model;
 
 namespace Amb.Coordinator;
 
@@ -43,13 +44,55 @@ public sealed record CoordinatorOptions
     public required int IdleExitMinutes { get; init; }
 
     /// <summary>The e2e suite an e2e request runs when it names none (<c>AMB_E2E_SOURCE</c>; default
-    /// /mnt/k/source/Agentmaster/e2e: the repository's own e2e folder, as WSL's automount shows it).</summary>
+    /// /mnt/k/source/Agentmaster/e2e: the repository's own e2e folder, as WSL's automount shows it). Set EMPTY on a site
+    /// that cannot read K: (the worker machine's): an e2e request must then name <see cref="RequestInputs.SuiteCommit"/>,
+    /// whose e2e folder comes out of the site's mirror (`amb` pushes that commit first).</summary>
     public required string E2eSourceDir { get; init; }
 
     /// <summary>The repository builds are made from (<c>AMB_SOURCE_REPO</c>; default /mnt/k/source/Agentmaster, the
     /// owner's checkout as WSL's automount shows it). Only read: the site's bare mirror fetches its branches and tags from
-    /// it, so a build never sees uncommitted work and nothing is ever written to K: (DESIGN.md §11).</summary>
+    /// it, so a build never sees uncommitted work and nothing is ever written to K: (DESIGN.md §11). Set EMPTY on a site
+    /// that cannot read K: (the worker machine's): its mirror then takes commits only by push
+    /// (<see cref="PushesSource"/>).</summary>
     public string SourceRepo { get; init; } = "/mnt/k/source/Agentmaster";
+
+    /// <summary>Whether the site's mirror takes commits only by push (<c>POST /api/v1/source/bundle</c>): true when
+    /// <see cref="SourceRepo"/> is empty. Then a build or an e2e suite of a commit the mirror lacks fails with "push it
+    /// first"; `amb` pushes before it asks, so only an older amb (or a failed push) meets that.</summary>
+    public bool PushesSource => string.IsNullOrEmpty(SourceRepo);
+
+    /// <summary>The site's name (<c>AMB_SITE_NAME</c>; default "homepc"): placements and slot records carry it, and
+    /// `amb status` prints it. "worker" on the worker machine.</summary>
+    public string SiteName { get; init; } = SiteCapacity.Homepc;
+
+    /// <summary>The letter this site's build ids start with (<c>AMB_BUILD_LETTER</c>; default "b"; "w" on the worker
+    /// machine). Two sites never share a letter: a build pulled from one site into the other's store keeps its id, and
+    /// the CLI tells by the letter which site holds a build (<see cref="Ids.BuildLetterOf"/>).</summary>
+    public string BuildLetter { get; init; } = "b";
+
+    /// <summary>The HOST's /proc/meminfo as a Linux site's container sees it, bind-mounted read-only
+    /// (<c>AMB_HOST_MEMINFO</c>; default empty). Empty: the site is homepc's, sized by Windows' facts
+    /// (<see cref="HostFactsCommand"/>). Set: the site is a Linux one (the worker machine's CT 803), sized by
+    /// <see cref="SiteCapacity.LinuxFree"/> from this file, the container's own /proc/meminfo (lxcfs: its memory ceiling)
+    /// and the free space under <see cref="Root"/>.</summary>
+    public string HostMemInfoPath { get; init; } = "";
+
+    /// <summary>Whether the site is a Linux one (<see cref="HostMemInfoPath"/> is set).</summary>
+    public bool IsLinuxSite => !string.IsNullOrEmpty(HostMemInfoPath);
+
+    /// <summary>A Linux site's reserves (<c>AMB_RESERVE_HOST_MEMORY_MIB</c>, <c>AMB_RESERVE_SITE_MEMORY_MIB</c>,
+    /// <c>AMB_USABLE_VCPUS</c>, <c>AMB_RESERVE_DISK_MIB</c>; each defaults to <see cref="LinuxReserves"/>'s own).</summary>
+    public LinuxReserves LinuxReserves { get; init; } = new();
+
+    /// <summary>The site's own slot sizes for builds and e2e runs (<c>AMB_BUILD_MEMORY_MIB</c>, <c>AMB_BUILD_VCPUS</c>,
+    /// <c>AMB_E2E_MEMORY_MIB</c>, <c>AMB_E2E_VCPUS</c> as "least:most", and <c>AMB_E2E_GUEST_MEMORY_MIB</c>); unset ones
+    /// keep <see cref="RequestDefaults"/>, which homepc's measurements set. <c>AMB_CAPPED_SLOTS=0</c> says the site has no
+    /// swap file for capped slots (<see cref="RequestSizing.CappedSlots"/>).</summary>
+    public RequestSizing Sizing { get; init; } = new();
+
+    /// <summary>The site's scratch folder (bundles being received, e2e suites exported from the mirror): on the site's own
+    /// disk, emptied of a request's files when it ends.</summary>
+    public string TmpDir => Path.Combine(Root, "tmp");
 
     /// <summary>The image build VMs boot (<c>AMB_BUILD_IMAGE</c>; default am-build).</summary>
     public string BuildImage { get; init; } = "am-build";
@@ -78,7 +121,9 @@ public sealed record CoordinatorOptions
 
     /// <summary>PowerShell 7 on Windows as the site sees it (<c>AMB_WINDOWS_PWSH</c>; default
     /// /mnt/c/Program Files/PowerShell/7/pwsh.exe): the deploy job runs its Windows side with it through WSL's interop
-    /// (Swap-AgentmasterLayout.ps1 requires PowerShell 7).</summary>
+    /// (Swap-AgentmasterLayout.ps1 requires PowerShell 7). Set EMPTY on a site with no Windows beside it (the worker
+    /// machine's): a deploy request there fails at once, and installs go through the home site, which pulls the build
+    /// first.</summary>
     public string WindowsPwsh { get; init; } = "/mnt/c/Program Files/PowerShell/7/pwsh.exe";
 
     /// <summary>Where a deploy stages its files on Windows (<c>AMB_INSTALL_STAGE</c>; default Q:\buildserver\install): one
@@ -103,7 +148,9 @@ public sealed record CoordinatorOptions
     /// <summary>homepc's reserves (DESIGN.md §3.2).</summary>
     public HomepcReserves Reserves { get; init; } = new();
 
-    /// <summary>homepc's priority (E1; dock's 2.0 is set where dock is added).</summary>
+    /// <summary>homepc's priority (E1; dock's 2.0 is set where dock is added). A Linux site (the worker machine's) scores
+    /// its one site with the same value: a coordinator serves one site, so the number only scales the score in the
+    /// placement events.</summary>
     public double HomepcPriority { get; init; } = 1.0;
 
     /// <summary>The records' folder.</summary>
@@ -128,11 +175,21 @@ public sealed record CoordinatorOptions
     /// <param name="env">Reads one variable (Environment.GetEnvironmentVariable in production; a dictionary in tests).</param>
     /// <returns>The settings.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="env"/> is null.</exception>
-    /// <exception cref="FormatException">A numeric variable is not a number.</exception>
+    /// <exception cref="FormatException">A numeric variable is not a number, a "least:most" pair is malformed, or
+    /// <c>AMB_BUILD_LETTER</c> is not a build-id letter.</exception>
+    /// <remarks>Three variables tell UNSET from EMPTY: <c>AMB_SOURCE_REPO</c>, <c>AMB_E2E_SOURCE</c> and
+    /// <c>AMB_WINDOWS_PWSH</c> (and <c>AMB_HOSTFACTS</c>, as before). Unset keeps homepc's default; set to "" turns the
+    /// feature off, which is how the worker machine's site says it cannot read K: or reach Windows.</remarks>
     public static CoordinatorOptions FromEnvironment(Func<string, string?> env)
     {
         ArgumentNullException.ThrowIfNull(env);
         string root = env("AMB_ROOT") is { Length: > 0 } r ? r : "/srv/buildserver";
+        string letter = env("AMB_BUILD_LETTER") is { Length: > 0 } bl ? bl : "b";
+        if (!Ids.IsBuildLetter(letter))
+        {
+            throw new FormatException($"AMB_BUILD_LETTER must be one lowercase letter other than r and s, not '{letter}'");
+        }
+        var defaults = new LinuxReserves();
         return new CoordinatorOptions
         {
             Root = root,
@@ -142,21 +199,95 @@ public sealed record CoordinatorOptions
             HostFactsCommand = env("AMB_HOSTFACTS") ?? "/mnt/q/buildserver/bin/amb-hostfacts.exe",
             GuestAgentPath = env("AMB_GUEST_AGENT") is { Length: > 0 } a ? a : Path.Combine(root, "bin", "amb-guest.exe"),
             DockurImage = env("AMB_DOCKUR_IMAGE") is { Length: > 0 } i ? i : "docker.io/dockurr/windows:6.05",
-            E2eSourceDir = env("AMB_E2E_SOURCE") is { Length: > 0 } e ? e : "/mnt/k/source/Agentmaster/e2e",
+            // Set but empty is "no default suite" (the worker machine's site): e2e suites then come from the mirror.
+            E2eSourceDir = env("AMB_E2E_SOURCE") is { } e ? e : "/mnt/k/source/Agentmaster/e2e",
             IdleExitMinutes = env("AMB_IDLE_EXIT_MINUTES") is { Length: > 0 } m
                 ? int.Parse(m, NumberStyles.None, CultureInfo.InvariantCulture)
                 : 10,
-            SourceRepo = env("AMB_SOURCE_REPO") is { Length: > 0 } s ? s : "/mnt/k/source/Agentmaster",
+            // Set but empty is push mode (PushesSource): the site has no repository to fetch from.
+            SourceRepo = env("AMB_SOURCE_REPO") is { } s ? s : "/mnt/k/source/Agentmaster",
             BuildImage = env("AMB_BUILD_IMAGE") is { Length: > 0 } b ? b : "am-build",
             BuildDataDiskGiB = env("AMB_BUILD_DATA_DISK_GIB") is { Length: > 0 } dd
                 ? int.Parse(dd, NumberStyles.None, CultureInfo.InvariantCulture)
                 : 128,
-            WindowsPwsh = env("AMB_WINDOWS_PWSH") is { Length: > 0 } wp ? wp : "/mnt/c/Program Files/PowerShell/7/pwsh.exe",
+            // Set but empty is "no Windows here": deploys are refused (installs go through the home site).
+            WindowsPwsh = env("AMB_WINDOWS_PWSH") is { } wp ? wp : "/mnt/c/Program Files/PowerShell/7/pwsh.exe",
             InstallStage = env("AMB_INSTALL_STAGE") is { Length: > 0 } st ? st : @"Q:\buildserver\install",
             DevSlots = SlotPair(env("AMB_DEV_SLOTS"), @"Q:\agentmaster-layouts\Debug", @"Q:\agentmaster-layouts\Debug-B"),
             ProductionSlots = SlotPair(env("AMB_PRODUCTION_SLOTS"), @"Q:\agentmaster-layouts\Release", @"Q:\agentmaster-layouts\Release-B"),
             InstallScriptsRef = env("AMB_INSTALL_SCRIPTS_REF") is { Length: > 0 } sr ? sr : "refs/heads/agentmaster",
+            SiteName = env("AMB_SITE_NAME") is { Length: > 0 } sn ? sn : SiteCapacity.Homepc,
+            BuildLetter = letter,
+            HostMemInfoPath = env("AMB_HOST_MEMINFO") ?? "",
+            LinuxReserves = new LinuxReserves(
+                Number(env("AMB_RESERVE_HOST_MEMORY_MIB"), defaults.HostMemoryMiB),
+                Number(env("AMB_RESERVE_SITE_MEMORY_MIB"), defaults.SiteMemoryMiB),
+                (int)Number(env("AMB_USABLE_VCPUS"), defaults.UsableVcpus),
+                Number(env("AMB_RESERVE_DISK_MIB"), defaults.DiskMiB)),
+            Sizing = new RequestSizing
+            {
+                Build = Sized(RequestDefaults.ResourcesOf(RequestKind.Build)!, env("AMB_BUILD_MEMORY_MIB"), env("AMB_BUILD_VCPUS")),
+                E2e = Sized(RequestDefaults.ResourcesOf(RequestKind.E2e)!, env("AMB_E2E_MEMORY_MIB"), env("AMB_E2E_VCPUS")),
+                E2eGuestMemoryMiB = env("AMB_E2E_GUEST_MEMORY_MIB") is { Length: > 0 } gm
+                    ? long.Parse(gm, NumberStyles.None, CultureInfo.InvariantCulture)
+                    : null,
+                // "0" on a site without a swap file for its slots (the worker machine's): capped requests are refused.
+                CappedSlots = env("AMB_CAPPED_SLOTS") is not "0",
+            },
         };
+    }
+
+    /// <summary>Reads a whole non-negative number from a variable, or gives the default when it is unset or empty.</summary>
+    /// <param name="value">The variable's value.</param>
+    /// <param name="fallback">The default.</param>
+    /// <returns>The number.</returns>
+    /// <exception cref="FormatException">The value is not a whole non-negative number.</exception>
+    private static long Number(string? value, long fallback) =>
+        string.IsNullOrWhiteSpace(value) ? fallback : long.Parse(value.Trim(), NumberStyles.None, CultureInfo.InvariantCulture);
+
+    /// <summary>A kind's slot with its memory and vCPUs replaced by "least:most" variables (a single number is both).</summary>
+    /// <param name="basis">The kind's homepc default (its disk is kept).</param>
+    /// <param name="memory">The memory pair in MiB, or null / empty to keep the default's.</param>
+    /// <param name="vcpus">The vCPU pair, or null / empty to keep the default's.</param>
+    /// <returns>Null when neither variable is set (the default stands, and the record never holds a copy of it); else the
+    /// sized request.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="basis"/> is null.</exception>
+    /// <exception cref="FormatException">A pair is not one or two whole numbers, or its least is above its most.</exception>
+    internal static ResourceRequest? Sized(ResourceRequest basis, string? memory, string? vcpus)
+    {
+        ArgumentNullException.ThrowIfNull(basis);
+        if (string.IsNullOrWhiteSpace(memory) && string.IsNullOrWhiteSpace(vcpus))
+        {
+            return null;
+        }
+        (long leastMemory, long mostMemory) = Pair(memory, basis.Min.MemoryMiB, basis.Preferred.MemoryMiB);
+        (long leastVcpus, long mostVcpus) = Pair(vcpus, basis.Min.Vcpus, basis.Preferred.Vcpus);
+        return new ResourceRequest(
+            basis.Min with { MemoryMiB = leastMemory, Vcpus = (int)leastVcpus },
+            basis.Preferred with { MemoryMiB = mostMemory, Vcpus = (int)mostVcpus });
+    }
+
+    /// <summary>Reads "least:most" (or one number for both).</summary>
+    /// <param name="value">The text, or null / empty for the defaults.</param>
+    /// <param name="least">The default least.</param>
+    /// <param name="most">The default most.</param>
+    /// <returns>The pair.</returns>
+    /// <exception cref="FormatException">The text is malformed, a number is 0, or least is above most.</exception>
+    private static (long Least, long Most) Pair(string? value, long least, long most)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return (least, most);
+        }
+        string[] parts = value.Split(':', StringSplitOptions.TrimEntries);
+        if (parts.Length is < 1 or > 2)
+        {
+            throw new FormatException($"expected 'least:most' or one number, not '{value}'");
+        }
+        long a = long.Parse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture);
+        long b = parts.Length == 2 ? long.Parse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture) : a;
+        // A zero would admit a slot with no memory or no vCPU, and a least above the most could never be granted.
+        return a > 0 && a <= b ? (a, b) : throw new FormatException($"'{value}' needs 0 < least <= most");
     }
 
     /// <summary>Reads an instance's two layout folders from a ';'-separated variable.</summary>

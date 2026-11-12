@@ -11,30 +11,104 @@ namespace Amb.Cli;
 internal sealed class SiteUnavailableException(string message) : Exception(message);
 
 /// <summary>
-/// The CLI's way to the coordinator: HTTP to 127.0.0.1:2207, the admin token read from the site (and cached in the
-/// user's own folder), and the site woken when the coordinator does not answer (the site is lazy: it stops after 10 idle
-/// minutes, DESIGN.md §5.2).
+/// The CLI's way to one site's coordinator: HTTP to its URL, the admin token read from the site (and cached in the
+/// user's own folder), and the site woken when the coordinator does not answer. Home's site is lazy (it stops after 10
+/// idle minutes, DESIGN.md §5.2) and is woken through wsl.exe; the worker machine's runs as a service in CT 803 and is
+/// (re)started through `ssh worker` (the workstation's own SSH alias, key ~/.ssh/worker_ed25519).
 /// </summary>
 internal sealed class SiteClient : IDisposable
 {
     /// <summary>The site distro's name.</summary>
     private const string Distro = "buildserver";
 
+    /// <summary>The coordinator's admin token inside either site (the same path in the distro and in CT 803).</summary>
+    private const string TokenPath = "/srv/buildserver/coordinator/admin.token";
+
     private readonly HttpClient _http;
+    private readonly HttpClient _upload;
     private readonly string _tokenCache;
     private string? _token;
 
     /// <summary>Creates a client.</summary>
-    /// <param name="baseUrl">The coordinator's URL (AMB_URL, default http://127.0.0.1:2207).</param>
-    internal SiteClient(string baseUrl)
+    /// <param name="site"><see cref="Sites.Home"/> or <see cref="Sites.Worker"/>: decides how the token is read and how the
+    /// coordinator is woken.</param>
+    /// <param name="baseUrl">The coordinator's URL (<see cref="Sites.UrlOf"/>).</param>
+    internal SiteClient(string site, string baseUrl)
     {
+        Site = site;
         _http = new HttpClient { BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(60) };
+        // A bundle upload (the whole history is ~150 MB, 12 s over the link) outlives the 60-s limit of every other call;
+        // its own deadline is a cancellation (UploadAsync).
+        _upload = new HttpClient { BaseAddress = _http.BaseAddress, Timeout = Timeout.InfiniteTimeSpan };
+        // Each site has its own token, cached apart: home's under its old name, so a cached token stays valid.
         _tokenCache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "amb",
-            "token");
+            site == Sites.Home ? "token" : "token-" + site);
     }
 
-    /// <summary>Releases the HTTP client.</summary>
-    public void Dispose() => _http.Dispose();
+    /// <summary>The site this client talks to.</summary>
+    internal string Site { get; }
+
+    /// <summary>Releases the HTTP clients.</summary>
+    public void Dispose()
+    {
+        _http.Dispose();
+        _upload.Dispose();
+    }
+
+    /// <summary>POSTs a file as the body (a git bundle to <c>source/bundle</c>) and parses the answer.</summary>
+    /// <typeparam name="T">The answer's type.</typeparam>
+    /// <param name="path">The path under /api/v1/.</param>
+    /// <param name="file">The file to send.</param>
+    /// <param name="type">The answer's metadata.</param>
+    /// <param name="timeout">The longest the upload and the site's taking of it may last.</param>
+    /// <param name="cancel">Cancels the call.</param>
+    /// <returns>The status code, the parsed answer (default when not 2xx) and the answer's text.</returns>
+    /// <exception cref="SiteUnavailableException">The coordinator could not be reached, or the upload took longer than
+    /// <paramref name="timeout"/>.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> was cancelled.</exception>
+    /// <remarks>Called after a GET of the same site (which woke it and checked the token), so it neither wakes nor
+    /// retries: a 401 refreshes the token once.</remarks>
+    internal async Task<(HttpStatusCode Status, T? Value, string Text)> UploadAsync<T>(string path, string file,
+        JsonTypeInfo<T> type, TimeSpan timeout, CancellationToken cancel)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        deadline.CancelAfter(timeout);
+        for (bool refreshed = false; ; refreshed = true)
+        {
+            await using var body = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20, true);
+            using var request = new HttpRequestMessage(HttpMethod.Post, "api/v1/" + path)
+            {
+                Content = new StreamContent(body, 1 << 20),
+            };
+            request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Token(refresh: refreshed));
+            HttpResponseMessage response;
+            try
+            {
+                response = await _upload.SendAsync(request, deadline.Token).ConfigureAwait(false);
+            }
+            catch (HttpRequestException ex)
+            {
+                throw new SiteUnavailableException($"the {Site} site's coordinator does not answer: {ex.Message}");
+            }
+            catch (OperationCanceledException) when (!cancel.IsCancellationRequested)
+            {
+                throw new SiteUnavailableException($"the upload to the {Site} site took longer than {timeout.TotalMinutes:0} min");
+            }
+            using (response)
+            {
+                if (response.StatusCode == HttpStatusCode.Unauthorized && !refreshed)
+                {
+                    continue;
+                }
+                string text = await response.Content.ReadAsStringAsync(cancel).ConfigureAwait(false);
+                T? value = response.IsSuccessStatusCode && text.Length > 0
+                    ? System.Text.Json.JsonSerializer.Deserialize(text, type)
+                    : default;
+                return (response.StatusCode, value, text);
+            }
+        }
+    }
 
     /// <summary>Sends a GET and parses the answer.</summary>
     /// <typeparam name="T">The answer's type.</typeparam>
@@ -86,7 +160,7 @@ internal sealed class SiteClient : IDisposable
         }
         catch (HttpRequestException ex)
         {
-            throw new SiteUnavailableException($"the coordinator does not answer: {ex.Message}");
+            throw new SiteUnavailableException($"the {Site} site's coordinator does not answer: {ex.Message}");
         }
         using (response)
         {
@@ -156,7 +230,7 @@ internal sealed class SiteClient : IDisposable
             }
             catch (HttpRequestException ex)
             {
-                throw new SiteUnavailableException($"the coordinator does not answer: {ex.Message}");
+                throw new SiteUnavailableException($"the {Site} site's coordinator does not answer: {ex.Message}");
             }
             using (response)
             {
@@ -180,7 +254,9 @@ internal sealed class SiteClient : IDisposable
     /// default ACL is the user's own).</summary>
     /// <param name="refresh">Read it from the site even when cached.</param>
     /// <returns>The token.</returns>
-    /// <exception cref="SiteUnavailableException">The site has no token (the coordinator never started).</exception>
+    /// <exception cref="SiteUnavailableException">The site has no token (the coordinator never started), or it could not
+    /// be reached to read one.</exception>
+    /// <remarks>The token never reaches the console: the read's output goes only into this process and the cache.</remarks>
     private string Token(bool refresh)
     {
         if (!refresh && _token is not null)
@@ -195,11 +271,15 @@ internal sealed class SiteClient : IDisposable
                 return _token;
             }
         }
-        (int code, string output) = Wsl("cat", "/srv/buildserver/coordinator/admin.token");
+        (int code, string output) = Site == Sites.Home
+            ? Wsl("cat", TokenPath)
+            : Ssh($"pct exec {WorkerCt} -- cat {TokenPath}");
         string token = output.Trim();
         if (code != 0 || token.Length < 32)
         {
-            throw new SiteUnavailableException("the site has no admin token yet (start it: python buildserver/site/sitectl.py up)");
+            throw new SiteUnavailableException(Site == Sites.Home
+                ? "the site has no admin token yet (start it: python buildserver/site/sitectl.py up)"
+                : $"the worker site's admin token could not be read through `ssh {WorkerSsh}` (exit {code}; deploy it: python buildserver/site/worker.py deploy)");
         }
         Directory.CreateDirectory(Path.GetDirectoryName(_tokenCache)!);
         File.WriteAllText(_tokenCache, token);
@@ -209,13 +289,64 @@ internal sealed class SiteClient : IDisposable
 
     /// <summary>Starts the coordinator in the site (coordinator-up.sh waits until it answers).</summary>
     /// <exception cref="SiteUnavailableException">It did not start.</exception>
-    private static void Wake()
+    /// <remarks>The worker site's coordinator is a supervised service that never idles out, so it is woken only after a
+    /// crash loop, a stopped CT 803 or a host reboot: the CT is started when it is not running, then the service.</remarks>
+    private void Wake()
     {
-        Console.Error.WriteLine("amb: the coordinator does not answer; starting it in the site...");
-        (int code, string output) = Wsl("/srv/buildserver/bin/coordinator-up.sh");
+        Console.Error.WriteLine($"amb: the {Site} site's coordinator does not answer; starting it...");
+        (int code, string output) = Site == Sites.Home
+            ? Wsl("/srv/buildserver/bin/coordinator-up.sh")
+            : Ssh($"pct status {WorkerCt} | grep -q running || pct start {WorkerCt}; pct exec {WorkerCt} -- /srv/buildserver/bin/coordinator-up.sh");
         if (code != 0)
         {
-            throw new SiteUnavailableException($"the coordinator did not start: {output.Trim()}");
+            throw new SiteUnavailableException(Site == Sites.Home
+                ? $"the coordinator did not start: {output.Trim()}"
+                : $"the worker site's coordinator did not start (is the link home up? `amb ... --site home` uses this PC's site): {output.Trim()}");
+        }
+    }
+
+    /// <summary>The SSH alias of the worker machine (AMB_WORKER_SSH, default "worker": the workstation's ~/.ssh/config).</summary>
+    private static string WorkerSsh => Environment.GetEnvironmentVariable("AMB_WORKER_SSH") is { Length: > 0 } s ? s : "worker";
+
+    /// <summary>The site's container on the worker machine (AMB_WORKER_CT, default 803).</summary>
+    private static string WorkerCt => Environment.GetEnvironmentVariable("AMB_WORKER_CT") is { Length: > 0 } c ? c : "803";
+
+    /// <summary>Runs one command on the worker machine's host through ssh.</summary>
+    /// <param name="command">The remote command (its shell parses it).</param>
+    /// <returns>The exit code and the output (stdout and stderr).</returns>
+    /// <exception cref="SiteUnavailableException">ssh could not be started or did not finish within 3 minutes.</exception>
+    /// <remarks>BatchMode: a missing key or an unknown host key fails at once instead of waiting for a prompt nobody
+    /// sees; the host key is the one ~/.ssh/config pins.</remarks>
+    private static (int Code, string Output) Ssh(string command)
+    {
+        var info = new ProcessStartInfo("ssh")
+        {
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        foreach (string arg in (string[])["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", WorkerSsh, command])
+        {
+            info.ArgumentList.Add(arg);
+        }
+        try
+        {
+            using Process process = Process.Start(info) ?? throw new SiteUnavailableException("ssh did not start");
+            process.StandardInput.Close();
+            Task<string> error = process.StandardError.ReadToEndAsync();
+            string output = process.StandardOutput.ReadToEnd();
+            if (!process.WaitForExit(180_000))
+            {
+                process.Kill(entireProcessTree: true);
+                throw new SiteUnavailableException("ssh did not finish within 3 minutes");
+            }
+            return (process.ExitCode, output + error.GetAwaiter().GetResult());
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            throw new SiteUnavailableException($"ssh: {ex.Message}");
         }
     }
 

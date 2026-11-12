@@ -381,6 +381,51 @@ claude-desktops' Windows desktops and other sessions' dockur VMs run in Docker D
 (8.2 + 5.3 GB of them during the tests). The allocator sees them only as less free memory (the WSL VM's MemAvailable
 and Windows' available memory) and never starts or stops them.
 
+### 5.5 The worker machine: a second site (2026-11-12)
+
+The owner's request: "We have new worker machine, i want buildserver running there, there are two devices (one has the
+proxmox is the one getting backed up and other is the one you will work on building and holding artifacts)". The
+worker machine is our Proxmox VE node in Stuttgart (an HPE DL360p Gen8: 20 threads, 128 GB, two 1 TB SSDs as separate
+drives; `K:\source\proxmox\workermachine`), on the home LAN through the link home. The owner's three answers decided
+the shape:
+
+| Question | The owner's answer | What it means |
+|---|---|---|
+| How does the site reach the LAN? | "We run a worker lxc on the proxmox on worker machine and that worker gets assigned an ip" | CT 803 at 192.168.50.21 on the host's LAN bridge, carried by the link like the host's own .18; reached directly, no tunnel of its own |
+| What runs there? | "Builds + e2e there" | the worker builds and runs e2e, and keeps the store on drive 2; installs stay on homepc's site, which must reach this PC's instances |
+| Where are its images made? | "Make them there" | dockur's install and the layers run on the worker (images.py `--site worker`); nothing is copied from homepc |
+
+- **One coordinator per site, not one coordinator for both:** each site keeps its own records, store and slots, and
+  the CLI picks the site (`Sites.cs`). A build id says where it lives (`b…` homepc, `w…` the worker:
+  `Ids.NextBuildId`'s letter), so build ids never collide and a build pulled into the other site keeps its id. Joining
+  both under one scheduler (§3.3's choice across sites) would need the remote slots to reach one coordinator over the
+  link; two independent sites need nothing new from either, and losing the link costs only the worker.
+- **A privileged LXC, its VMs plain KVM guests:** podman runs rootful inside CT 803 with `/dev/kvm` passed in, so a
+  slot's QEMU is a guest of the host's own kernel. homepc's VMs run nested in WSL's VM (~2,000 IOPS on their disks,
+  §16.6); the worker's write to drive 2's SSD through one layer. The container's cgroup v2 needs its root's processes
+  moved into a leaf before podman can delegate controllers (`amb-cgroups.start`), and crun needs `mknod`, which
+  Alpine's LXC configuration drops (`create-ct803.sh` keeps it).
+- **Capacity:** `SiteCapacity.LinuxFree`, the smaller of the host's MemAvailable minus 8 GB (the host's other guests:
+  TraderLab's worker today, a Windows Server and k3s VMs planned) and the container's own (lxcfs) minus 2 GB, 20 vCPUs,
+  drive 2's free space minus 50 GB. No commit term (Linux overcommits; nothing is a page file the guests could fill),
+  no swap (a VM's pages never go to drive 1), so capped slots are refused (`RequestSizing.CappedSlots`).
+- **Its own slot sizes** (`RequestSizing`): builds 16-32 GB and 8-16 vCPUs (`BuildJob.Parallelism` gained 4 × 3 and
+  5 × 3 above 24 and 36 GB), e2e VMs 6 GB uncapped with 4-6 vCPUs, a 256 GB sparse data disk for the build VM.
+- **The source by push:** the site cannot read K:, and §11's rule stays (builds come from commits, never a working
+  tree). `amb` pushes the commit as a bundle of what the site's mirror lacks (`GET /api/v1/source/tips` names the
+  mirror's tips and whether it holds the commit; `POST /api/v1/source/bundle` verifies the bundle against the mirror and
+  fetches only `refs/push/<commit>` refs into `refs/amb/pushed/`). The e2e suite is a commit's `e2e/` folder, exported
+  from the mirror (`RequestInputs.SuiteCommit`), so a run on the worker names exactly the suite it ran.
+- **Installs through homepc:** a deploy needs Windows' PowerShell beside the coordinator (§13 Phase 4), which only
+  homepc's site has. `amb install w…` fetches the layout zip and build.json from the worker and has homepc's site import
+  the folder under the same id (`ImportJob.PullAsync`: every file's SHA-256 against the worker's record; recorded as
+  `Imported`, so homepc's "the build exists" never answers a build request with a pull that lacks the portable zip).
+- **Always up:** an OpenRC service under supervise-daemon, restarted 5 s after any exit; no idle exit (§5.2's lazy
+  site is for the owner's own PC).
+- **Risks:** the link home is the only way in (when it is down, `--site home` builds here as before); drive 2 is not
+  backed up and may be lost (every image can be made again, every build id built again); the machine is rented, and its
+  provider's own console is the way back when it does not boot (`workermachine/provider.md`).
+
 ## 6. Records: small JSON files, written atomically (D1)
 
 - **Where:** `/srv/buildserver/records` on the distro's ext4 (in `Q:\buildserver\wsl\ext4.vhdx`), mounted into the

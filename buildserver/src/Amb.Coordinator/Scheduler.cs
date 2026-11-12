@@ -52,7 +52,7 @@ public sealed class Scheduler : BackgroundService
 
     /// <summary>Creates the scheduler.</summary>
     /// <param name="book">The request book.</param>
-    /// <param name="capacity">homepc's capacity.</param>
+    /// <param name="capacity">The site's capacity (homepc's, or a Linux site's).</param>
     /// <param name="slots">The slot manager.</param>
     /// <param name="store">The record store.</param>
     /// <param name="options">The settings.</param>
@@ -144,7 +144,7 @@ public sealed class Scheduler : BackgroundService
     /// starts, and a held one still ends no-capacity at its own wait timeout. Until 2026-10-29 the pass stopped at that
     /// request, so an import, which only copies a file into the store, waited behind a build that waited hours for memory,
     /// and passed its own 5-minute wait timeout without ever being looked at. The older request holds younger ones only
-    /// when it would fit on an idle site (<see cref="HostCapacity.HomepcFree"/> with idle): stopping slots cannot free
+    /// when it would fit on an idle site (<see cref="HostCapacity.SiteFree"/> with idle): stopping slots cannot free
     /// memory the owner's own programs hold. A capped request (<see cref="IsCapped"/>) is scored with the capped commit
     /// margin. Internal for the scheduler's tests, which run one pass at a time.
     /// </remarks>
@@ -192,11 +192,12 @@ public sealed class Scheduler : BackgroundService
             }
             ResourceRequest resources = EffectiveResources(request);
             bool capped = IsCapped(request);
-            SiteFree homepc = _capacity.HomepcFree(capped: capped);
-            Placement? placement = Allocator.Choose(resources, [homepc]);
+            // The site this coordinator serves: homepc's (Windows' facts) or a Linux one (the worker machine's).
+            SiteFree site = _capacity.SiteFree(capped: capped);
+            Placement? placement = Allocator.Choose(resources, [site]);
             if (placement is null)
             {
-                string shortage = Allocator.ExplainShortage(resources, [homepc]);
+                string shortage = Allocator.ExplainShortage(resources, [site]);
                 if (now - request.CreatedAt > request.WaitTimeout)
                 {
                     _book.Move(request.Id, RequestState.NoCapacity, $"no-capacity after {request.WaitTimeout.TotalMinutes:0} min: {shortage}",
@@ -210,7 +211,7 @@ public sealed class Scheduler : BackgroundService
                     _book.Event(request.Id, "placement", waiting);
                 }
                 if (now - request.CreatedAt > PassLimit
-                    && Allocator.Choose(resources, [_capacity.HomepcFree(capped: capped, idle: true)]) is not null)
+                    && Allocator.Choose(resources, [_capacity.SiteFree(capped: capped, idle: true)]) is not null)
                 {
                     // It has waited long enough, and it is the site's own slots it lacks: nothing younger that needs
                     // capacity passes it, so the next free capacity is its own. The pass goes on for the requests that

@@ -194,19 +194,23 @@ internal static class WorkingTreeSnapshot
     /// <param name="args">git's arguments.</param>
     /// <param name="env">Variables to set for this call, or null.</param>
     /// <param name="check">Throw when git fails.</param>
+    /// <param name="stdin">Text for git's standard input (UTF-8 without a byte-order mark, which git would read as part
+    /// of the first revision), or null for none (git then reads an empty input).</param>
     /// <returns>git's exit code, standard output and standard error (UTF-8).</returns>
     /// <exception cref="InvalidOperationException">git failed and <paramref name="check"/> is set, or git is not on PATH.</exception>
     internal static (int ExitCode, string Output, string Error) Git(string repo, IReadOnlyList<string> args,
-        IReadOnlyDictionary<string, string>? env = null, bool check = true)
+        IReadOnlyDictionary<string, string>? env = null, bool check = true, string? stdin = null)
     {
         var info = new ProcessStartInfo("git")
         {
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            RedirectStandardInput = stdin is not null,
             CreateNoWindow = true,
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
+            StandardInputEncoding = stdin is null ? null : new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
         };
         foreach (string arg in (string[])["-C", repo, "-c", "core.quotepath=off", .. args])
         {
@@ -220,7 +224,20 @@ internal static class WorkingTreeSnapshot
         {
             using Process git = Process.Start(info) ?? throw new InvalidOperationException("git did not start");
             Task<string> error = git.StandardError.ReadToEndAsync();
-            string output = git.StandardOutput.ReadToEnd();
+            string output;
+            if (stdin is null)
+            {
+                output = git.StandardOutput.ReadToEnd();
+            }
+            else
+            {
+                // The output is read while the input is written: `cat-file --batch-check` answers line by line, and a
+                // full output pipe would stop git reading its input, and this write with it.
+                Task<string> reading = git.StandardOutput.ReadToEndAsync();
+                git.StandardInput.Write(stdin);
+                git.StandardInput.Close();
+                output = reading.GetAwaiter().GetResult();
+            }
             git.WaitForExit();
             string errorText = error.GetAwaiter().GetResult();
             if (check && git.ExitCode != 0)

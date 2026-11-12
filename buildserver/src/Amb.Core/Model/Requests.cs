@@ -177,6 +177,13 @@ public sealed record RequestInputs
     /// configured copy of the repository's e2e folder.</summary>
     public string? SuiteSource { get; init; }
 
+    /// <summary>E2e: the commit (a full SHA) whose <c>e2e/</c> folder the run takes from the site's own mirror, instead of
+    /// a folder (<see cref="SuiteSource"/>). The worker machine's site has no K: to read a suite from: `amb e2e` pushes
+    /// HEAD there and names it here.</summary>
+    /// <remarks>Taken from the commit, never a working tree: an e2e run names exactly the suite it ran, and another
+    /// session's half-done edit of a suite never runs there. Since 2026-11-12.</remarks>
+    public string? SuiteCommit { get; init; }
+
     /// <summary>Build: the commit <see cref="Commit"/> is a SNAPSHOT of uncommitted work made on (its parent), or null
     /// for a real commit. Recorded as the build's <see cref="BuildRecord.SnapshotOf"/>; the build job checks that the
     /// commit's parent is this one.</summary>

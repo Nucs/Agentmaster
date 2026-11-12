@@ -37,10 +37,16 @@ using Amb.Core.Protocol;
 //   again (nothing is stopped; the request succeeds) unless --reinstall says so.
 //   --json on any command prints the coordinator's JSON instead of the text form; AMB_URL overrides the address.
 //
+// Two sites (since 2026-11-12, Sites.cs): "worker", the container on the worker machine (build ids w…; the default,
+// AMB_SITE overrides it), and "home", the WSL distro on this PC (build ids b…). --site home|worker picks one. A build id
+// goes to the site its letter names; a request id to the chosen site, else the other one. The worker cannot read K:, so
+// `amb build` and `amb e2e` push the commit there first (SourcePush.cs: only what its mirror lacks), and an e2e run there
+// takes its suite from a commit (--suite-rev, default HEAD), never a working tree. `amb install` always runs through the
+// home site; a worker build is pulled into it first (its layout zip and build.json, SHA-256 checked, same id).
+//
 // Exit codes: 0 succeeded (or accepted, without --wait); 1 the request ended otherwise; 2 usage; 97 still running when
 // --wait-max ran out (attach again with `amb logs <id> -f`); 98 the coordinator could not be reached or woken.
 
-string url = Environment.GetEnvironmentVariable("AMB_URL") is { Length: > 0 } u ? u : "http://127.0.0.1:2207";
 var options = Options.Parse(args);
 if (options.Help)
 {
@@ -59,7 +65,15 @@ if (options.Command is null)
     Console.Error.WriteLine("usage: amb status|list|show|logs|cancel|builds|import|smoke|e2e|build|artifacts|fetch|install ... (amb --help)");
     return 2;
 }
-using var client = new SiteClient(url);
+// The site: --site, else AMB_SITE, else the worker machine's. An unknown name is refused before anything is sent.
+string chosenSite = Sites.Default();
+bool siteGiven = options.Values.TryGetValue("--site", out string? siteText);
+if (siteGiven && !Sites.TryParse(siteText, out chosenSite!))
+{
+    Console.Error.WriteLine($"amb: --site takes home or worker, not {siteText}: nothing was done");
+    return 2;
+}
+using var sites = new SiteSet(chosenSite, siteGiven);
 using var stop = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
 {
@@ -71,21 +85,27 @@ try
 {
     return options.Command switch
     {
-        "status" => await Commands.StatusAsync(client, options, stop.Token),
-        "list" => await Commands.ListAsync(client, options, stop.Token),
-        "show" => await Commands.ShowAsync(client, options, stop.Token),
-        "builds" => await Commands.BuildsAsync(client, options, stop.Token),
-        "cancel" => await Commands.CancelAsync(client, options, stop.Token),
-        "logs" => await Commands.FollowAsync(client, options.Positional.FirstOrDefault(), options, stop.Token),
-        "import" or "smoke" or "e2e" or "build" or "install" or "deploy" => await Commands.SubmitAsync(client, options, stop.Token),
-        "artifacts" => await Commands.ArtifactsAsync(client, options, stop.Token),
-        "fetch" => await Commands.FetchAsync(client, options, stop.Token),
+        "status" => await Commands.StatusAsync(sites.Chosen, options, stop.Token),
+        "list" => await Commands.ListAsync(sites.Chosen, options, stop.Token),
+        "show" => await Commands.ShowAsync(await sites.ForRequestAsync(options.Positional.FirstOrDefault(), stop.Token), options, stop.Token),
+        "builds" => await Commands.BuildsAsync(sites.Chosen, options, stop.Token),
+        "cancel" => await Commands.CancelAsync(await sites.ForRequestAsync(options.Positional.FirstOrDefault(), stop.Token), options, stop.Token),
+        "logs" => await Commands.FollowAsync(await sites.ForRequestAsync(options.Positional.FirstOrDefault(), stop.Token),
+            options.Positional.FirstOrDefault(), options, stop.Token),
+        "import" or "smoke" or "e2e" or "build" or "install" or "deploy" => await Commands.SubmitAsync(sites, options, stop.Token),
+        "artifacts" => await Commands.ArtifactsAsync(sites.ForBuild(options.Positional.FirstOrDefault()), options, stop.Token),
+        "fetch" => await Commands.FetchAsync(sites.ForBuild(options.Positional.FirstOrDefault()), options, stop.Token),
         _ => Usage($"unknown command {options.Command}"),
     };
 }
 catch (SiteUnavailableException ex)
 {
     Console.Error.WriteLine("amb: " + ex.Message);
+    if (!siteGiven && chosenSite == Sites.Worker)
+    {
+        // The worker is the default: say how to use this PC's site while it (or the link home) is down.
+        Console.Error.WriteLine("amb: the worker site is the default; --site home (or AMB_SITE=home) uses this PC's site");
+    }
     return 98;
 }
 catch (OperationCanceledException)
@@ -121,7 +141,8 @@ internal sealed class Options
     /// <summary>The options that take a value; every other "-x" is a flag.</summary>
     private static readonly HashSet<string> WithValue =
         ["--image", "--suite", "--commit", "--limit", "--wait-max", "--run-timeout", "--wait-timeout", "--config", "--identity",
-         "--purge", "--kind", "--to", "--instance", "--wait-others", "--inject-failure", "--ram", "--guest-ram", "--vcpus"];
+         "--purge", "--kind", "--to", "--instance", "--wait-others", "--inject-failure", "--ram", "--guest-ram", "--vcpus",
+         "--site", "--suite-rev"];
 
     /// <summary>The flags amb knows (options without a value). Any other "-x" is refused, and so is a value option given
     /// without its value (it lands among the flags).</summary>
@@ -139,13 +160,20 @@ internal sealed class Options
           amb fetch <build id> [--kind portable-zip|layout-zip|symbols-zip|build-log|build-binlog|build-json|all] [--to DIR]
           amb install <build id> --instance dev|production [--dry-run] [--reinstall] [--wait-others MIN] [--wait]   (alias: deploy)
           amb import <portable zip> [--commit SHA] [--wait]
-          amb e2e <build id> [--image am-e2e] [--suite PATH] [--ram GB] [--guest-ram GB] [--vcpus N] [--wait] [-- pytest arguments]
+          amb e2e <build id> [--image am-e2e] [--suite PATH | --suite-rev REV] [--ram GB] [--guest-ram GB] [--vcpus N] [--wait] [-- pytest arguments]
           amb smoke [--image am-base] [--ram GB] [--guest-ram GB] [--vcpus N] [--wait]
 
+          Sites: --site worker|home on any command (default AMB_SITE, else worker: the worker machine in Stuttgart, build
+          ids w...; home is this PC's WSL site, build ids b...). A build id goes to the site its letter names. The worker
+          cannot read K:: build and e2e push the commit to it first (only what it lacks), and its e2e suite is a commit's
+          e2e folder (--suite-rev REV, default HEAD; --suite PATH works at home only). install always runs at home and
+          pulls a worker build there first; import reads a file on this PC, so it runs at home.
+
           e2e and smoke VMs: --ram GB is the most the VM keeps in the PC's memory; a larger --guest-ram GB is the RAM
-          Windows in it sees, the rest in the site's swap file on Q: (slower, admitted with a 6 GB commit margin
-          instead of 16); --vcpus N fixes its vCPUs. An e2e VM is by default a 2 GB cap on a 3 GB guest with 4 vCPUs
-          (tuned: 1.15x the time of 8 GB uncapped); --ram 8 asks for the old uncapped 8 GB VM.
+          Windows in it sees, the rest in the site's swap file on Q: (home only: slower, admitted with a 6 GB commit
+          margin instead of 16); --vcpus N fixes its vCPUs. At home an e2e VM is by default a 2 GB cap on a 3 GB guest
+          with 4 vCPUs (tuned: 1.15x the time of 8 GB uncapped; --ram 8 asks for the old uncapped 8 GB VM); on the
+          worker it is 6 GB uncapped with 4-6 vCPUs (it has no swap file: no --guest-ram there).
           Requests also take --run-timeout MIN and --wait-timeout MIN (1-1440); --wait-max S stops watching after S
           seconds (exit 97); --json prints the coordinator's JSON. build and install are a build and a deploy: ask the
           owner first. install leaves an instance that already runs the build alone (nothing is stopped) unless
@@ -305,6 +333,12 @@ internal static class Commands
             return 0;
         }
         Console.WriteLine($"amb-coordinator {value.Version}, up since {value.StartedAt:yyyy-MM-dd HH:mm:ss}Z");
+        Console.WriteLine($"site {client.Site}{(value.Site is null ? "" : " (" + value.Site + ")")}: build ids {value.BuildLetter ?? "b"}..., source {(value.PushesSource ? "pushed by amb" : "fetched from K:")}");
+        if (value.LinuxFacts is { } linux)
+        {
+            Console.WriteLine(FormattableString.Invariant(
+                $"host: {linux.HostMemAvailableMiB / 1024.0:0.0} of {linux.HostMemTotalMiB / 1024.0:0.0} GB available; site container: {linux.SiteMemAvailableMiB / 1024.0:0.0} GB available; disk {linux.DiskFreeMiB / 1024.0:0.0} GB free ({linux.At:HH:mm:ss}Z)"));
+        }
         if (value.HostFacts is { } facts)
         {
             Console.WriteLine(FormattableString.Invariant(
@@ -430,15 +464,19 @@ internal static class Commands
     }
 
     /// <summary>Submits an import, smoke, e2e or build request, and follows it with --wait.</summary>
-    /// <param name="client">The client.</param>
+    /// <param name="sites">The sites (the chosen one, and the others a build id or an install routes to).</param>
     /// <param name="options">The command line.</param>
     /// <param name="cancel">Cancels the watch.</param>
-    /// <returns>0 succeeded (or accepted without --wait), 1 ended otherwise, 2 usage (or a rev that names no commit),
-    /// 97 still running at --wait-max.</returns>
+    /// <returns>0 succeeded (or accepted without --wait), 1 ended otherwise (or a push or pull failed), 2 usage (or a rev
+    /// that names no commit), 97 still running at --wait-max.</returns>
     /// <exception cref="SiteUnavailableException">The coordinator could not be reached or woken.</exception>
-    public static async Task<int> SubmitAsync(SiteClient client, Options options, CancellationToken cancel)
+    /// <remarks>Where each kind goes: build and smoke to the chosen site; e2e to its build's site; install and import to
+    /// home. A site that takes commits only by push (the worker's) gets the build's commit, or the e2e suite's, pushed
+    /// first; an install of a worker build pulls it into home first.</remarks>
+    public static async Task<int> SubmitAsync(SiteSet sites, Options options, CancellationToken cancel)
     {
         CreateRequest body;
+        SiteClient client = sites.Chosen;
         Func<RequestEvent, string?>? stopAt = null;
         // The VM's size (e2e and smoke only): checked before anything is sent, like every other option.
         if (!options.TrySlotSize(out long? memoryMiB, out long? guestMemoryMiB, out int? vcpus, out string? sizeError))
@@ -459,6 +497,11 @@ internal static class Commands
                 {
                     return code;
                 }
+                if (await PushIfNeededAsync(client, snapshot.Commit!, cancel) is { } snapshotPushError)
+                {
+                    Console.Error.WriteLine($"amb: the snapshot could not be pushed to the {client.Site} site: {snapshotPushError}");
+                    return 1;
+                }
                 body = new CreateRequest(RequestKind.Build, snapshot);
                 break;
             case "build" when !options.Flags.Contains("--snapshot") && options.Positional.Count <= 1:
@@ -471,6 +514,11 @@ internal static class Commands
                     return 2;
                 }
                 Console.WriteLine($"{rev} = {commit}");
+                if (await PushIfNeededAsync(client, commit, cancel) is { } pushError)
+                {
+                    Console.Error.WriteLine($"amb: {commit[..9]} could not be pushed to the {client.Site} site: {pushError}");
+                    return 1;
+                }
                 body = new CreateRequest(RequestKind.Build, BuildInputs(options, commit));
                 break;
             case "install" or "deploy" when options.Positional.Count == 1 && options.Values.ContainsKey("--instance"):
@@ -478,6 +526,21 @@ internal static class Commands
                 {
                     Console.Error.WriteLine("amb: --wait-others takes whole minutes, 0 to 240");
                     return 2;
+                }
+                if (sites.Explicit && sites.ChosenName != Sites.Home)
+                {
+                    Console.Error.WriteLine("amb: installs run through the home site (it reaches this PC's instances); leave --site out");
+                    return 2;
+                }
+                // The install runs at home; a build of another site is pulled into home's store first, under its own id.
+                client = sites.Get(Sites.Home);
+                if (Sites.OfBuild(options.Positional[0]) is { } owner && owner != Sites.Home)
+                {
+                    int pulled = await PullAsync(sites.Get(owner), client, options.Positional[0], options, cancel);
+                    if (pulled != 0)
+                    {
+                        return pulled;
+                    }
                 }
                 // The claude.exe this CLI runs under (a Claude session's tool call): when it is one of the instance's
                 // sessions, the install waits for its turn to end, because the swap ends its claude. The process chain
@@ -510,6 +573,13 @@ internal static class Commands
                 }
                 break;
             case "import" when options.Positional.Count == 1:
+                // An import reads a file on this PC: only the home site can (the worker cannot read Q: or K:).
+                if (sites.Explicit && sites.ChosenName != Sites.Home)
+                {
+                    Console.Error.WriteLine("amb: an import reads a file on this PC, so it runs at the home site; leave --site out");
+                    return 2;
+                }
+                client = sites.Get(Sites.Home);
                 body = new CreateRequest(RequestKind.Import, new RequestInputs
                 {
                     Source = Path.GetFullPath(options.Positional[0]),
@@ -526,11 +596,19 @@ internal static class Commands
                 });
                 break;
             case "e2e" when options.Positional.Count == 1:
+                // The run goes where its build is (the letter), unless --site names the site.
+                client = sites.ForBuild(options.Positional[0]);
+                (int suiteCode, string? suiteCommit) = await SuiteCommitAsync(client, options, cancel);
+                if (suiteCode != 0)
+                {
+                    return suiteCode;
+                }
                 body = new CreateRequest(RequestKind.E2e, new RequestInputs
                 {
                     BuildId = options.Positional[0],
                     Image = options.Values.GetValueOrDefault("--image", "am-e2e"),
                     SuiteSource = options.Values.TryGetValue("--suite", out string? suite) ? Path.GetFullPath(suite) : null,
+                    SuiteCommit = suiteCommit,
                     SuiteArgs = options.Rest.Count > 0 ? options.Rest : null,
                     MemoryMiB = memoryMiB,
                     GuestMemoryMiB = guestMemoryMiB,
@@ -555,7 +633,7 @@ internal static class Commands
         {
             return Fail(status, text);
         }
-        Console.WriteLine($"{created.Id} accepted ({created.Kind})");
+        Console.WriteLine($"{created.Id} accepted ({created.Kind}) by the {client.Site} site");
         return options.Flags.Contains("--wait") || options.WaitMax is not null
             ? await FollowAsync(client, created.Id, options, cancel, stopAt)
             : 0;
@@ -564,6 +642,137 @@ internal static class Commands
     /// <summary>The repository `amb build` works in: AMB_REPO, else <see cref="DefaultRepo"/>.</summary>
     /// <returns>Its folder.</returns>
     private static string Repo() => Environment.GetEnvironmentVariable("AMB_REPO") is { Length: > 0 } r ? r : DefaultRepo;
+
+    /// <summary>Whether a site takes commits only by push (its status says so: the worker machine's).</summary>
+    /// <param name="client">The site's client.</param>
+    /// <param name="cancel">Cancels the call.</param>
+    /// <returns>True for a pushing site; false for one that fetches K: itself (or an older coordinator that does not
+    /// say, which fetches).</returns>
+    /// <exception cref="SiteUnavailableException">The coordinator could not be reached or woken.</exception>
+    private static async Task<bool> PushesAsync(SiteClient client, CancellationToken cancel)
+    {
+        (_, CoordinatorStatus? status, _) = await client.GetAsync("status", AmbJsonLine.Default.CoordinatorStatus, cancel);
+        return status?.PushesSource == true;
+    }
+
+    /// <summary>Pushes a commit to a site that takes commits only by push; a site that fetches K: needs nothing.</summary>
+    /// <param name="client">The site's client.</param>
+    /// <param name="commit">The commit (a full SHA in <see cref="Repo"/>).</param>
+    /// <param name="cancel">Cancels the call.</param>
+    /// <returns>Null when the site holds the commit (and its submodule's) now; else what failed.</returns>
+    /// <exception cref="SiteUnavailableException">The coordinator could not be reached or woken.</exception>
+    private static async Task<string?> PushIfNeededAsync(SiteClient client, string commit, CancellationToken cancel) =>
+        await PushesAsync(client, cancel) ? await SourcePush.PushAsync(client, Repo(), commit, cancel) : null;
+
+    /// <summary>The commit whose e2e folder an e2e run takes as its suite, pushed to the site when it takes pushes.</summary>
+    /// <param name="client">The run's site.</param>
+    /// <param name="options">The command line (--suite, --suite-rev).</param>
+    /// <param name="cancel">Cancels the calls.</param>
+    /// <returns>0 and the commit (null: the run takes a folder, --suite or the site's own); 2 for a usage error or a rev
+    /// that names no commit; 1 when the push failed.</returns>
+    /// <exception cref="SiteUnavailableException">The coordinator could not be reached or woken.</exception>
+    /// <remarks>A site that cannot read K: (the worker's) always gets a commit: --suite-rev, default HEAD, so the suite is
+    /// the committed one, never another session's half-done edit. At home, --suite-rev asks for the same; without it the
+    /// suite stays the K: folder, as before.</remarks>
+    private static async Task<(int Code, string? Commit)> SuiteCommitAsync(SiteClient client, Options options,
+        CancellationToken cancel)
+    {
+        bool pushes = await PushesAsync(client, cancel);
+        bool folder = options.Values.ContainsKey("--suite");
+        bool rev = options.Values.ContainsKey("--suite-rev");
+        if (folder && (rev || pushes))
+        {
+            Console.Error.WriteLine(pushes
+                ? $"amb: the {client.Site} site cannot read a folder on this PC: its suite comes from a commit (--suite-rev, default HEAD)"
+                : "amb: --suite and --suite-rev name two suites: give one");
+            return (2, null);
+        }
+        if (!rev && !pushes)
+        {
+            return (0, null);
+        }
+        string name = options.Values.GetValueOrDefault("--suite-rev", "HEAD");
+        string? commit = ResolveCommit(Repo(), name);
+        if (commit is null)
+        {
+            Console.Error.WriteLine($"amb: {name} names no commit in {Repo()}");
+            return (2, null);
+        }
+        Console.WriteLine($"suite: e2e/ of {name} = {commit}");
+        if (pushes && await SourcePush.PushAsync(client, Repo(), commit, cancel) is { } error)
+        {
+            Console.Error.WriteLine($"amb: {commit[..9]} could not be pushed to the {client.Site} site: {error}");
+            return (1, null);
+        }
+        return (0, commit);
+    }
+
+    /// <summary>The artifact kinds an install needs from a build that is pulled into the home site.</summary>
+    private static readonly string[] PulledKinds = ["layout-zip", "build-json"];
+
+    /// <summary>Pulls a build of another site into a site's store under its own id (an install of a worker build runs at
+    /// home): fetches its layout zip and build.json, SHA-256 checked, with its record, then has the site import that folder.</summary>
+    /// <param name="from">The site that made the build.</param>
+    /// <param name="into">The site that takes it.</param>
+    /// <param name="buildId">The build id.</param>
+    /// <param name="options">The command line (--wait-max bounds the import's watch).</param>
+    /// <param name="cancel">Cancels the copies and the watch.</param>
+    /// <returns>0 when the site has the build (already, or now); 1 when the build or a file is missing, a SHA-256 differs,
+    /// or the import failed; 97 when --wait-max ran out.</returns>
+    /// <exception cref="SiteUnavailableException">A coordinator could not be reached or woken.</exception>
+    /// <remarks>The files go to Q:\buildserver\out\&lt;build id&gt; (where `amb fetch` puts them too); the site reads them
+    /// there through WSL's automount. The import keeps the build's id and checks every file against its record
+    /// (ImportJob.PullAsync), so the bytes installed are the bytes the other site built.</remarks>
+    private static async Task<int> PullAsync(SiteClient from, SiteClient into, string buildId, Options options,
+        CancellationToken cancel)
+    {
+        (HttpStatusCode hereStatus, BuildRecord? here, _) = await into.GetAsync(
+            $"builds/{Uri.EscapeDataString(buildId)}", AmbJsonLine.Default.BuildRecord, cancel);
+        if (here is not null && here.Artifacts.Any(a => a.Kind == "layout-zip"))
+        {
+            Console.WriteLine($"the {into.Site} site has {buildId} already");
+            return 0;
+        }
+        _ = hereStatus;
+        (HttpStatusCode status, BuildRecord? build, string text) = await from.GetAsync(
+            $"builds/{Uri.EscapeDataString(buildId)}", AmbJsonLine.Default.BuildRecord, cancel);
+        if (build is null)
+        {
+            return Fail(status, text);
+        }
+        if (!build.Artifacts.Any(a => a.Kind == "layout-zip"))
+        {
+            Console.Error.WriteLine($"amb: build {buildId} has no layout zip to install");
+            return 1;
+        }
+        string folder = Path.Combine(@"Q:\buildserver\out", buildId);
+        Directory.CreateDirectory(folder);
+        Console.WriteLine($"pulling {buildId} from the {from.Site} site into the {into.Site} site (through {folder})");
+        foreach (ArtifactRef a in build.Artifacts.Where(a => PulledKinds.Contains(a.Kind)))
+        {
+            string target = Path.Combine(folder, a.Name);
+            string? error = await from.DownloadAsync(
+                $"builds/{Uri.EscapeDataString(buildId)}/artifacts/{Uri.EscapeDataString(a.Name)}", target, a.Sha256, cancel);
+            if (error is not null)
+            {
+                Console.Error.WriteLine($"amb: {a.Name}: {error}");
+                return 1;
+            }
+            Console.WriteLine(FormattableString.Invariant($"  {a.Name}  ({a.Bytes / 1048576.0:0.0} MB, sha256 {a.Sha256[..12]} checked)"));
+        }
+        // The record beside the files: the import takes the id and the hashes from it (ImportJob.PulledManifest).
+        await File.WriteAllTextAsync(Path.Combine(folder, "amb-build.json"),
+            JsonSerializer.Serialize(build, AmbJson.Default.BuildRecord), cancel);
+        (HttpStatusCode importStatus, RequestRecord? import, string importText) = await into.PostAsync("requests",
+            new CreateRequest(RequestKind.Import, new RequestInputs { Source = folder }),
+            AmbJsonLine.Default.CreateRequest, AmbJsonLine.Default.RequestRecord, cancel);
+        if (import is null)
+        {
+            return Fail(importStatus, importText);
+        }
+        Console.WriteLine($"{import.Id} accepted (the pull's import) by the {into.Site} site");
+        return await FollowAsync(into, import.Id, options, cancel);
+    }
 
     /// <summary>A build request's inputs from the command line.</summary>
     /// <param name="options">The command line (--config, --identity, --purge).</param>
@@ -834,5 +1043,92 @@ internal static class Commands
     {
         Console.Error.WriteLine($"amb: {(int)status} {text}");
         return 1;
+    }
+}
+
+/// <summary>
+/// The sites one `amb` call may talk to: the chosen one (--site, AMB_SITE, else the worker), and the others a build id or
+/// an install sends it to. Each site's client is made on first use, so a call that needs one site never wakes the other.
+/// </summary>
+internal sealed class SiteSet : IDisposable
+{
+    private readonly Dictionary<string, SiteClient> _clients = new(StringComparer.Ordinal);
+
+    /// <summary>Creates the set.</summary>
+    /// <param name="chosen">The chosen site (<see cref="Sites.Home"/> or <see cref="Sites.Worker"/>).</param>
+    /// <param name="isExplicit">Whether --site named it: then build ids and request ids never move a call elsewhere.</param>
+    internal SiteSet(string chosen, bool isExplicit)
+    {
+        ChosenName = chosen;
+        Explicit = isExplicit;
+    }
+
+    /// <summary>The chosen site's name.</summary>
+    internal string ChosenName { get; }
+
+    /// <summary>Whether --site named the chosen site.</summary>
+    internal bool Explicit { get; }
+
+    /// <summary>The chosen site's client.</summary>
+    internal SiteClient Chosen => Get(ChosenName);
+
+    /// <summary>A site's client (made on first use).</summary>
+    /// <param name="site">The site.</param>
+    /// <returns>Its client.</returns>
+    internal SiteClient Get(string site)
+    {
+        if (!_clients.TryGetValue(site, out SiteClient? client))
+        {
+            client = new SiteClient(site, Sites.UrlOf(site));
+            _clients[site] = client;
+        }
+        return client;
+    }
+
+    /// <summary>The client of the site that holds a build: the one its id's letter names, unless --site named one.</summary>
+    /// <param name="buildId">The build id (null or a malformed one: the chosen site).</param>
+    /// <returns>The client.</returns>
+    internal SiteClient ForBuild(string? buildId) => Explicit ? Chosen : Get(Sites.OfBuild(buildId) ?? ChosenName);
+
+    /// <summary>The client of the site that holds a request: the chosen one, or the other when only that one has it
+    /// (a request id names no site).</summary>
+    /// <param name="requestId">The request id (null: the chosen site, which then reports the usage error).</param>
+    /// <param name="cancel">Cancels the lookups.</param>
+    /// <returns>The client.</returns>
+    /// <exception cref="SiteUnavailableException">The chosen site could not be reached or woken.</exception>
+    /// <remarks>The other site is asked only when the chosen one answers "no such request", and an other site that cannot
+    /// be reached is skipped (the chosen site's 404 then stands).</remarks>
+    internal async Task<SiteClient> ForRequestAsync(string? requestId, CancellationToken cancel)
+    {
+        if (Explicit || requestId is null)
+        {
+            return Chosen;
+        }
+        string path = $"requests/{Uri.EscapeDataString(requestId)}";
+        (HttpStatusCode status, _, _) = await Chosen.GetAsync(path, AmbJsonLine.Default.RequestRecord, cancel);
+        if (status != HttpStatusCode.NotFound)
+        {
+            return Chosen;
+        }
+        SiteClient other = Get(Sites.Other(ChosenName));
+        try
+        {
+            (HttpStatusCode otherStatus, _, _) = await other.GetAsync(path, AmbJsonLine.Default.RequestRecord, cancel);
+            return otherStatus == HttpStatusCode.NotFound ? Chosen : other;
+        }
+        catch (SiteUnavailableException)
+        {
+            // Expected when the other site is down: the request is reported missing on the chosen site.
+            return Chosen;
+        }
+    }
+
+    /// <summary>Releases every client made.</summary>
+    public void Dispose()
+    {
+        foreach (SiteClient client in _clients.Values)
+        {
+            client.Dispose();
+        }
     }
 }

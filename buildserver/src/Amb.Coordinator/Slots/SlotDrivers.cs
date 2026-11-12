@@ -457,8 +457,9 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
     /// <inheritdoc/>
     /// <exception cref="OperationCanceledException"><paramref name="cancel"/> was cancelled.</exception>
     /// <remarks>The container's cgroup comes from podman (<c>{{.State.CgroupPath}}</c>, e.g. /libpod_parent/libpod-&lt;id&gt;);
-    /// the coordinator runs as root in the site, so it reads cgroup v1's files under /sys/fs/cgroup/memory itself. Any
-    /// other failure (the container gone, a file missing or unreadable) answers null and is logged.</remarks>
+    /// the coordinator runs as root in the site, so it reads cgroup v1's files under /sys/fs/cgroup/memory itself, or, on
+    /// cgroup v2 (the worker machine's CT 803), <see cref="ReadMemoryV2"/>'s. Any other failure (the container gone, a file
+    /// missing or unreadable) answers null and is logged.</remarks>
     public async Task<SlotMemoryStats?> ReadMemoryAsync(string handle, CancellationToken cancel)
     {
         try
@@ -472,6 +473,11 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
                 return null;
             }
             string dir = "/sys/fs/cgroup/memory" + path;
+            if (!Directory.Exists("/sys/fs/cgroup/memory") && File.Exists("/sys/fs/cgroup" + path + "/memory.peak"))
+            {
+                // cgroup v2: one hierarchy, other file names.
+                return ReadMemoryV2("/sys/fs/cgroup" + path);
+            }
             long swapped = 0;
             foreach (string line in File.ReadLines(Path.Combine(dir, "memory.stat")))
             {
@@ -503,6 +509,35 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
     /// <exception cref="OverflowException">Its number does not fit a long.</exception>
     private static long ReadCount(string dir, string file) =>
         long.Parse(File.ReadAllText(Path.Combine(dir, file)).Trim(), NumberStyles.None, CultureInfo.InvariantCulture);
+
+    /// <summary>A container's memory figures from cgroup v2's files (the worker machine's site; homepc's WSL distro runs
+    /// cgroup v1).</summary>
+    /// <param name="dir">The container's cgroup folder under /sys/fs/cgroup.</param>
+    /// <returns>The peak (<c>memory.peak</c>); the peak with swap as the memory peak plus the swap peak
+    /// (<c>memory.swap.peak</c>: v2 keeps no combined peak, so this is an upper bound); the swap in use
+    /// (<c>memory.swap.current</c>); and the times the limit was hit (<c>memory.events</c>' "max").</returns>
+    /// <exception cref="IOException">A file could not be read.</exception>
+    /// <exception cref="UnauthorizedAccessException">A file may not be read.</exception>
+    /// <exception cref="FormatException">A file does not hold a plain number.</exception>
+    /// <exception cref="OverflowException">A number does not fit a long.</exception>
+    /// <remarks>The swap files exist only where the kernel accounts swap: without them both swap figures are 0.</remarks>
+    internal static SlotMemoryStats ReadMemoryV2(string dir)
+    {
+        const long MiB = 1024 * 1024;
+        long peak = ReadCount(dir, "memory.peak");
+        long swapPeak = File.Exists(Path.Combine(dir, "memory.swap.peak")) ? ReadCount(dir, "memory.swap.peak") : 0;
+        long swapNow = File.Exists(Path.Combine(dir, "memory.swap.current")) ? ReadCount(dir, "memory.swap.current") : 0;
+        long hits = 0;
+        foreach (string line in File.ReadLines(Path.Combine(dir, "memory.events")))
+        {
+            // "max N": how often the cgroup reached memory.max and the kernel reclaimed (v1's failcnt).
+            if (line.StartsWith("max ", StringComparison.Ordinal))
+            {
+                hits = long.Parse(line["max ".Length..], NumberStyles.None, CultureInfo.InvariantCulture);
+            }
+        }
+        return new SlotMemoryStats(peak / MiB, (peak + swapPeak) / MiB, swapNow / MiB, hits);
+    }
 }
 
 /// <summary>

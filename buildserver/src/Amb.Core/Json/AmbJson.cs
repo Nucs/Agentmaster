@@ -55,6 +55,8 @@ public sealed partial class AmbJson : JsonSerializerContext;
 [JsonSerializable(typeof(EventPage))]
 [JsonSerializable(typeof(CoordinatorStatus))]
 [JsonSerializable(typeof(HostFactsReport))]
+[JsonSerializable(typeof(LinuxHostFacts))]
+[JsonSerializable(typeof(SourceTips))]
 [JsonSerializable(typeof(List<RequestRecord>))]
 [JsonSerializable(typeof(List<BuildRecord>))]
 public sealed partial class AmbJsonLine : JsonSerializerContext;

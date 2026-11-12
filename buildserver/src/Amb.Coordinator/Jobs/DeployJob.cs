@@ -54,6 +54,13 @@ public sealed class DeployJob : IJob
         ArgumentNullException.ThrowIfNull(context);
         RequestInputs inputs = context.Request.Inputs;
         string buildId = inputs.BuildId!;
+        if (string.IsNullOrEmpty(context.Options.WindowsPwsh))
+        {
+            // A site with no Windows beside it (the worker machine's): nothing here can reach an instance. `amb install`
+            // sends an install to homepc's site, which pulls the build from here first.
+            return new JobOutcome(false,
+                $"site {context.Options.SiteName} cannot install builds (no Windows here): install through the home site, `amb install {buildId} --instance …`");
+        }
         BuildRecord? build = context.Store.Read("builds", buildId, AmbJson.Default.EnvelopeBuildRecord)?.Value;
         if (build is null)
         {

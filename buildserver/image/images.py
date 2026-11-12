@@ -9,10 +9,16 @@ DESIGN.md §3.2 keep the owner's PC usable while it installs) and its steps are 
     python buildserver/image/images.py build-image [--base am-base] [--name am-build]   # the build layer (Build Tools)
     python buildserver/image/images.py check  [--image am-e2e]                      # boot it and check what it holds
     python buildserver/image/images.py list                                         # the images in the site
+    python buildserver/image/images.py --site worker base                           # the same on the worker machine
 
 The base holds only the guest agent's bootstrap (image/oem/: install.bat → setup.ps1 → bootstrap.ps1 at every logon);
 layers add what their slot kind needs (E4). The coordinator is started when it does not answer (it exits by itself after
 10 idle minutes), as `amb` does; its admin token is read from the site and never printed.
+
+`--site worker` makes the image on the worker machine's site (CT 803, buildserver/site/worker.py): that coordinator
+cannot read this PC's folders, so the kit a request stages (image/oem, image/steps, VSSetup, the e2e folder) is first
+uploaded into the site's kit folder, SHA-256 checked, and staged from there. The pinned downloads of
+Q:\\buildserver\\cache\\dl stay here: the worker's steps download them themselves (their SHA-256 is checked either way).
 
 Exit codes: 0 the request succeeded; 1 it ended otherwise (its outcome is printed); 2 usage or no coordinator.
 """
@@ -30,9 +36,13 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 sys.path.insert(0, str(REPO / "buildserver" / "site"))
 import sitectl  # noqa: E402  (the site's helpers: the admin token, commands in the distro)
+import worker  # noqa: E402  (the worker machine's site: the same helpers over ssh)
 
 BASE_URL = "http://127.0.0.1:2207"
 """The coordinator as Windows reaches it (it listens on IPv4, which WSL's localhost forwarding passes)."""
+
+KIT = "/srv/buildserver/kit"
+"""The worker site's folder of uploaded image kits (worker.py's HOST_DATA/kit on the host), one subfolder each."""
 
 PYTHON_URL = "https://www.python.org/ftp/python/3.13.9/python-3.13.9-amd64.exe"
 """The CPython the e2e layer installs (provision.ps1 expects 3.13 at C:\\Program Files\\Python313)."""
@@ -48,34 +58,79 @@ GIB = 1024
 """MiB per GiB (the coordinator's resources are in MiB)."""
 
 
-def ensure_coordinator() -> None:
+def ensure_coordinator(site: str = "home") -> None:
     """Starts the coordinator in the site unless it answers, as `amb` does.
 
     The coordinator exits by itself after 10 minutes with nothing to do (the site is lazy, DESIGN.md §5.2), so a
-    script that runs after a pause would otherwise meet "connection refused".
+    script that runs after a pause would otherwise meet "connection refused". The worker's runs as a service and is
+    started only when someone stopped it.
+
+    Args:
+        site: "home" or "worker".
 
     Raises:
         sitectl.SiteError: it did not start (its log's last lines are in the message).
     """
     try:
-        with urllib.request.urlopen(BASE_URL + "/healthz", timeout=5) as response:
+        with urllib.request.urlopen(base_url(site) + "/healthz", timeout=5) as response:
             if response.status == 200:
                 return
     except OSError:
         pass  # Expected when it idled out: start it below.
-    sitectl.up()
+    if site == "worker":
+        worker.in_ct(f"{worker.SITE_ROOT}/bin/coordinator-up.sh\n", timeout=120)
+    else:
+        sitectl.up()
+
+
+def base_url(site: str) -> str:
+    """The coordinator's URL as this PC reaches it.
+
+    Args:
+        site: "home" or "worker".
+
+    Returns:
+        homepc's site through WSL's localhost forwarding, or the worker's through the link home.
+    """
+    return worker.URL if site == "worker" else BASE_URL
+
+
+def kit_path(site: str, local: Path, name: str) -> str:
+    """The path a request stages a local folder from: the folder itself at home; on the worker, the copy just uploaded
+    into the site's kit folder (replaced whole, SHA-256 checked).
+
+    Args:
+        site: "home" or "worker".
+        local: the folder on this PC.
+        name: its name in the kit folder.
+
+    Returns:
+        A path the site's coordinator can read.
+
+    Raises:
+        sitectl.SiteError: the upload failed.
+    """
+    if site != "worker":
+        return str(local)
+    worker.upload([(name, local)], f"{worker.HOST_DATA}/kit/{name}.new")
+    # The kit's folder holds the upload under <name>/ (upload packs the folder by its name): moved into place whole.
+    worker.ssh(f"rm -rf '{worker.HOST_DATA}/kit/{name}' && mv '{worker.HOST_DATA}/kit/{name}.new/{name}' "
+               f"'{worker.HOST_DATA}/kit/{name}' && rmdir '{worker.HOST_DATA}/kit/{name}.new'", timeout=120)
+    return f"{KIT}/{name}"
 
 
 class Coordinator:
     """A minimal client of the coordinator's API (`amb` is the full one; this keeps the Python tools standalone)."""
 
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, base: str = BASE_URL) -> None:
         """Creates a client.
 
         Args:
             token: the admin token.
+            base: the coordinator's URL (`base_url`).
         """
         self._token = token
+        self._base = base
 
     def call(self, method: str, path: str, body: object | None = None, timeout: float = 60) -> tuple[int, object]:
         """Sends one call.
@@ -90,7 +145,7 @@ class Coordinator:
             (status, parsed JSON or text).
         """
         data = None if body is None else json.dumps(body).encode()
-        request = urllib.request.Request(BASE_URL + path, data=data, method=method)
+        request = urllib.request.Request(self._base + path, data=data, method=method)
         request.add_header("Authorization", "Bearer " + self._token)
         if data is not None:
             request.add_header("Content-Type", "application/json")
@@ -282,6 +337,8 @@ def main(argv: list[str]) -> int:
         The exit code.
     """
     parser = argparse.ArgumentParser(description="The build server's Windows images.")
+    parser.add_argument("--site", choices=["home", "worker"], default="home",
+                        help="the site the image is made in (default home: this PC's WSL site)")
     sub = parser.add_subparsers(dest="command", required=True)
     base = sub.add_parser("base", help="install a base image (dockur's unattended install + the bootstrap)")
     base.add_argument("--name", default="am-base")
@@ -298,22 +355,47 @@ def main(argv: list[str]) -> int:
     check.add_argument("--image", default="am-e2e")
     sub.add_parser("list", help="list the images in the site")
     args = parser.parse_args(argv)
+    site = args.site
     if args.command == "list":
-        out = sitectl.in_distro("for d in /srv/buildserver/images/*/; do [ -d \"$d\" ] || continue; "
-                                "printf '%s %s\\n' \"$(basename \"$d\")\" \"$(du -sh \"$d\" | cut -f1)\"; "
-                                "qemu-img info \"$d/data.qcow2\" 2>/dev/null | grep -E 'backing file:|disk size:' | sed 's/^/    /'; "
-                                "done\n", timeout=60).stdout.decode()
+        listing = ("for d in /srv/buildserver/images/*/; do [ -d \"$d\" ] || continue; "
+                   "printf '%s %s\\n' \"$(basename \"$d\")\" \"$(du -sh \"$d\" | cut -f1)\"; "
+                   "qemu-img info \"$d/data.qcow2\" 2>/dev/null | grep -E 'backing file:|disk size:' | sed 's/^/    /'; "
+                   "done\n")
+        out = (worker.in_ct(listing, timeout=60) if site == "worker" else sitectl.in_distro(listing, timeout=60)).stdout.decode()
         print(out or "no images")
         return 0
     try:
-        ensure_coordinator()
-        client = Coordinator(sitectl.admin_token())
+        ensure_coordinator(site)
+        client = Coordinator(worker.admin_token() if site == "worker" else sitectl.admin_token(), base_url(site))
     except sitectl.SiteError as exc:
         print(f"images: {exc}", file=sys.stderr)
         return 2
+    try:
+        body = request_body(args, site)
+    except sitectl.SiteError as exc:
+        print(f"images: the kit could not be uploaded to the {site} site: {exc}", file=sys.stderr)
+        return 1
+    final = client.submit_and_follow(body)
+    print(f"{final['state']}: {final.get('outcome')}")
+    return 0 if final["state"] == "Succeeded" else 1
+
+
+def request_body(args: argparse.Namespace, site: str) -> dict:
+    """The request a command sends, with every folder it stages as the site can read it (`kit_path`).
+
+    Args:
+        args: the parsed command line.
+        site: "home" or "worker".
+
+    Returns:
+        The CreateRequest body.
+
+    Raises:
+        sitectl.SiteError: a kit folder could not be uploaded to the worker.
+    """
     if args.command == "base":
         body = {"kind": "Install", "inputs": {"newImage": args.name, "version": args.version,
-                                              "oemDir": str(HERE / "oem")}}
+                                              "oemDir": kit_path(site, HERE / "oem", "oem")}}
     elif args.command == "smoke":
         body = {"kind": "Smoke", "inputs": {"image": args.image}}
     elif args.command == "check":
@@ -324,12 +406,14 @@ def main(argv: list[str]) -> int:
         elif args.image.startswith("am-build"):
             # The servicing check runs the layer's own seal script, so the steps folder goes into the share too.
             inputs["steps"] = build_check_steps()
-            inputs["stage"] = [{"source": str(HERE / "steps"), "target": "image/steps"}]
+            inputs["stage"] = [{"source": kit_path(site, HERE / "steps", "image-steps"), "target": "image/steps"}]
         body = {"kind": "Smoke", "inputs": inputs}
     elif args.command == "build-image":
-        stage = [{"source": str(HERE / "steps"), "target": "image/steps"},
-                 {"source": str(REPO / ".PowershellModules" / "VSSetup"), "target": "image/psmodules/VSSetup"}]
-        if DOWNLOAD_CACHE.is_dir():
+        stage = [{"source": kit_path(site, HERE / "steps", "image-steps"), "target": "image/steps"},
+                 {"source": kit_path(site, REPO / ".PowershellModules" / "VSSetup", "vssetup"),
+                  "target": "image/psmodules/VSSetup"}]
+        # The pinned downloads stay on this PC: the worker's steps fetch them themselves.
+        if DOWNLOAD_CACHE.is_dir() and site != "worker":
             stage.append({"source": str(DOWNLOAD_CACHE), "target": "image/dl"})
         body = {"kind": "Layer",
                 "inputs": {"image": args.base, "newImage": args.name, "steps": build_layer_steps(), "stage": stage},
@@ -341,11 +425,9 @@ def main(argv: list[str]) -> int:
     else:
         body = {"kind": "Layer", "inputs": {
             "image": args.base, "newImage": args.name, "steps": e2e_layer_steps(),
-            "stage": [{"source": str(REPO / "e2e"), "target": "e2e/src"},
-                      {"source": str(HERE / "steps"), "target": "image/steps"}]}}
-    final = client.submit_and_follow(body)
-    print(f"{final['state']}: {final.get('outcome')}")
-    return 0 if final["state"] == "Succeeded" else 1
+            "stage": [{"source": kit_path(site, REPO / "e2e", "e2e"), "target": "e2e/src"},
+                      {"source": kit_path(site, HERE / "steps", "image-steps"), "target": "image/steps"}]}}
+    return body
 
 
 if __name__ == "__main__":

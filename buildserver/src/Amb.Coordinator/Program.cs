@@ -1,15 +1,18 @@
 using System.Reflection;
 using Amb.Coordinator;
 using Amb.Coordinator.Slots;
+using Amb.Coordinator.Sources;
 using Amb.Core.Json;
 using Amb.Core.Model;
 using Amb.Core.Protocol;
 using Amb.Core.Records;
+using Microsoft.AspNetCore.Http.Features;
 
 // amb-coordinator: the build server's one writer (buildserver/DESIGN.md §6, §10, §12).
 //
 // Settings come from environment variables only (CoordinatorOptions). Two API groups:
-//   /api/v1/...    the CLI's: requests, events, builds, status; every call carries the admin token
+//   /api/v1/...    the CLI's: requests, events, builds, status, and the source mirrors' push (a site that cannot read K:,
+//                  the worker machine's, takes commits as bundles); every call carries the admin token
 //   /guest/v1/...  the guest agents': hello, next, result, heartbeat, log; every call carries its slot's token
 // plus /healthz, open. Exits by itself after IdleExitMinutes with nothing to do (the site is lazy).
 
@@ -33,6 +36,8 @@ builder.Logging.AddSimpleConsole(o =>
 builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.TypeInfoResolverChain.Insert(0, AmbJsonLine.Default));
 builder.Services.AddSingleton(options);
+// The site's own slot sizes, for the request book (homepc's are the defaults; the worker machine sets its own).
+builder.Services.AddSingleton(options.Sizing);
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(_ => new RecordStore(options.RecordsDir));
 builder.Services.AddSingleton<RequestBook>();
@@ -56,6 +61,9 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<IdleWatch>());
 WebApplication app = builder.Build();
 app.Logger.LogInformation("amb-coordinator {Version} on {Listen}; root {Root}; slot driver {Driver}; guests reach it at {Guest}",
     version, options.Listen, options.Root, options.SlotDriver, options.GuestUrl);
+app.Logger.LogInformation("site {Site}: build ids {Letter}...; {Capacity}; source {Source}", options.SiteName,
+    options.BuildLetter, options.IsLinuxSite ? "Linux capacity from " + options.HostMemInfoPath : "homepc's capacity",
+    options.PushesSource ? "by push only" : "fetched from " + options.SourceRepo);
 
 app.MapGet("/healthz", () => Results.Text("ok"));
 
@@ -128,8 +136,71 @@ api.MapGet("/builds/{id}/artifacts/{name}", (string id, string name, RecordStore
     }
     return Results.File(path, "application/octet-stream", artifact!.Name, enableRangeProcessing: true);
 });
-api.MapGet("/status", (RequestBook book, SlotManager slots, HostCapacity capacity) =>
-    Results.Ok(new CoordinatorStatus(version, startedAt, [capacity.HomepcFree()], book.Active, slots.Active, capacity.Last)));
+api.MapGet("/status", (RequestBook book, SlotManager slots, HostCapacity capacity, CoordinatorOptions settings) =>
+    Results.Ok(new CoordinatorStatus(version, startedAt, [capacity.SiteFree()], book.Active, slots.Active, capacity.Last,
+        settings.SiteName, settings.PushesSource, capacity.LastLinux, settings.BuildLetter)));
+// The source mirrors' push (a site that cannot read K:, PushesSource): `amb` asks what a mirror holds (and whether it
+// holds the commit it is about to use), then pushes a bundle of only what the mirror lacks. A fetching site answers too
+// (its tips are its branches), but `amb` never pushes there.
+api.MapGet("/source/tips", async (string? repo, string? want, CoordinatorOptions settings, ILoggerFactory logs,
+    CancellationToken cancel) =>
+{
+    var mirror = new SourceMirror(settings, logs.CreateLogger<SourceMirror>());
+    try
+    {
+        return Results.Ok(await mirror.TipsAsync(repo ?? SourceMirror.RepoName, want, cancel).ConfigureAwait(false));
+    }
+    catch (ArgumentException ex)
+    {
+        return Results.Text(ex.Message, statusCode: 400);
+    }
+});
+api.MapPost("/source/bundle", async (HttpContext http, string? repo, CoordinatorOptions settings, ILoggerFactory logs,
+    CancellationToken cancel) =>
+{
+    // A bundle of the whole history is ~150 MB (measured 2026-10-26); Kestrel's default body limit of 30 MB would refuse
+    // it. Set before the body is read (the handler reads it itself, nothing was bound from it).
+    if (http.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } limit)
+    {
+        limit.MaxRequestBodySize = 4L * 1024 * 1024 * 1024;
+    }
+    Directory.CreateDirectory(settings.TmpDir);
+    string file = Path.Combine(settings.TmpDir, $"push-{Guid.NewGuid():N}.bundle");
+    string name = repo ?? SourceMirror.RepoName;
+    try
+    {
+        await using (var output = new FileStream(file, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 20, true))
+        {
+            await http.Request.Body.CopyToAsync(output, cancel).ConfigureAwait(false);
+        }
+        var mirror = new SourceMirror(settings, logs.CreateLogger<SourceMirror>());
+        IReadOnlyList<string> commits = await mirror.ReceiveBundleAsync(name, file, cancel).ConfigureAwait(false);
+        return Results.Ok(new SourceTips(name, commits));
+    }
+    catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+    {
+        // A bundle that does not apply (its prerequisites are not in the mirror), names another ref, or an unknown repo:
+        // the CLI shows the text, and pushes the whole history after a "does not apply".
+        return Results.Text(ex.Message, statusCode: 400);
+    }
+    catch (BadHttpRequestException ex)
+    {
+        // A body over the limit, or a client that stopped sending.
+        return Results.Text(ex.Message, statusCode: ex.StatusCode);
+    }
+    finally
+    {
+        // The mirror keeps the objects; the bundle file is only the way they came. Cleanup in every outcome.
+        try
+        {
+            File.Delete(file);
+        }
+        catch (IOException ex)
+        {
+            app.Logger.LogWarning("could not delete {File}: {Error}", file, ex.Message);
+        }
+    }
+});
 api.MapPost("/capacity/homepc", (HostFactsReport report, HostCapacity capacity) =>
 {
     // For a site without the helper (or tests): the caller reports Windows' numbers itself.

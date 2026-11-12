@@ -1,0 +1,28 @@
+#!/sbin/openrc-run
+# amb-coordinator on the worker machine (CT 803), installed by buildserver/site/worker.py `provision` as
+# /etc/init.d/amb-coordinator. Unlike homepc's lazy site, this one always runs: supervise-daemon starts it at boot and
+# starts it again 5 s after it ends, whatever its exit code (a crash of its background work once ended homepc's catalog
+# service with code 0, and nothing restarted it).
+#
+# Stop waits up to 5 minutes after SIGTERM: the coordinator cancels its jobs, and each job stops its slot's VM (a
+# Windows guest takes 8-15 s to shut down, measured). Only then is it killed.
+
+name="amb-coordinator"
+description="The build server's coordinator: requests, slots (dockur VMs through podman), the store of build ids"
+supervisor="supervise-daemon"
+command="/usr/local/bin/amb-coordinator-run"
+directory="/srv/buildserver/coordinator"
+output_log="/srv/buildserver/coordinator/coordinator.log"
+error_log="/srv/buildserver/coordinator/coordinator.log"
+respawn_delay=5
+respawn_max=0
+retry="TERM/300/KILL/10"
+
+depend() {
+	need net
+	after local
+}
+
+start_pre() {
+	checkpath -d -m 0755 /srv/buildserver/coordinator
+}

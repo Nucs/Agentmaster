@@ -11,7 +11,9 @@ to Q:; a cold Release build takes 38 min of build, an incremental one 6–8 min,
 builds stay in VMs (DESIGN.md §13 "Phase 3's MVP as built", §16.12). Since 2026-10-29: `amb install` installs a build
 on dev or production through the swap script (a failure after the stop brings the old version back: tested), `amb build
 --snapshot` builds uncommitted work, and every build keeps msbuild's binary log (DESIGN.md §13 "Phase 4's install as
-built", §16.13).**
+built", §16.13). Since 2026-11-12 there is a second site, on the worker machine in Stuttgart (CT 803, see "The worker
+site" below): builds and e2e runs go there by default (build ids `w…`), and `amb install` still runs through this PC's
+site, which pulls a worker build first.**
 
 **As built, it differs from DESIGN.md §10 in one way:** there is no always-on host agent yet. The coordinator reads
 Windows' numbers itself (it runs `amb-hostfacts.exe` through WSL's interop, which works from a daemon after the call that
@@ -39,11 +41,19 @@ amb e2e <build id> --run-timeout 480 -- -v                 # the whole suite (ho
 amb e2e|smoke ... [--ram GB] [--guest-ram GB] [--vcpus N]  # the VM's size: a cap on a larger guest RAM, its vCPUs
 amb logs <request id> [-f]                   # its events: placement, slot, steps, each step's output, progress
 amb list | show <id> | cancel <id>
+amb ... --site home|worker                   # any command: the site (default AMB_SITE, else worker)
+amb e2e <build id> --suite-rev REV           # the suite is REV's committed e2e/ (the worker's only way; default HEAD there)
 ```
 
-- `amb` is `src/Amb.Cli` (built into `Q:\tmp\buildserver-build\Amb.Cli\bin\…\amb.exe`). It talks to
-  `http://127.0.0.1:2207` (`AMB_URL` overrides) with the admin token it reads from the site once and keeps in
-  `%LOCALAPPDATA%\amb\token`; nothing prints it.
+- `amb` is `src/Amb.Cli` (built into `Q:\tmp\buildserver-build\Amb.Cli\bin\…\amb.exe`). It talks to the worker site at
+  `http://192.168.50.21:2207` (`AMB_WORKER_URL` overrides) or this PC's at `http://127.0.0.1:2207` (`AMB_URL`), with
+  the admin token it reads from each site once (the worker's through `ssh worker`) and keeps in
+  `%LOCALAPPDATA%\amb\token-worker` / `token`; nothing prints them.
+- **Which site** (`src/Amb.Cli/Sites.cs`): `--site`, else `AMB_SITE`, else the worker. A build id goes to the site its
+  letter names (`w…` the worker, `b…` this PC), so `amb fetch`, `amb artifacts` and `amb e2e` of a build need no
+  `--site`; a request id names no site, so `amb logs` / `show` / `cancel` ask the chosen site, then the other one.
+  `amb install` always runs at this PC's site (it reaches the instances) and `amb import` too (it reads a file here).
+  When the worker (or the link home) is down, `--site home` (or `AMB_SITE=home`) uses this PC's site as before.
 - Exit codes: 0 succeeded (or accepted, without `--wait`); 1 ended otherwise; 2 usage; 97 still running at `--wait-max`;
   98 the coordinator could not be reached or woken.
 - `amb --help` (or `-h`) prints every command and option. An option amb does not know - a typo such as `--dryrun`, or
@@ -205,12 +215,16 @@ python buildserver/image/images.py list
 ## Build and test
 
 ```text
-dotnet test buildserver/src/Buildserver.slnx            # build everything + 87 unit tests (output in Q:\tmp\buildserver-build)
+dotnet test buildserver/src/Buildserver.slnx            # build everything + 108 unit tests (output in Q:\tmp\buildserver-build)
 python buildserver/tests/local_chain.py                 # the chain without a VM (Q:\tmp\buildserver-test, removed after)
 python buildserver/tests/site_outcomes.py               # Phase 1's done-when on the real site: e2e passed, failed, cancelled, lost VM
 python buildserver/tests/site_build.py                  # the build MVP's done-when on the real site (it builds: ask first)
 ```
 
+- **The SDK:** this PC's installed .NET SDK fails the restore since the runtime advisory fixed in 10.0.14 (NU1903, an
+  error under the warnings-as-errors posture). Use the unpacked SDK: `DOTNET_ROOT=Q:\tools\dotnet-10.0.404
+  DOTNET_MULTILEVEL_LOOKUP=0 Q:\tools\dotnet-10.0.404\dotnet.exe test …` (sitectl.py and worker.py do that by
+  themselves). `-p:AmbBuildRoot=Q:\tmp\buildserver-build-wk\` builds apart from the live `amb.exe`.
 - `site_build.py` builds `--rev` (default HEAD) with `amb build --wait`, then checks the manifest, an identical
   request (same id, no second build), `amb e2e` on the build, `amb fetch`, that no slot is left and that K: was only
   read; 7 checks, exit 0 when all pass. `--config`, `--identity` and `--purge` pass through.
@@ -248,21 +262,74 @@ python buildserver/site/sitectl.py run -- podman ps
 - **The registry credentials** fastrund pulls with live in `/srv/buildserver/fastrun/regcreds` (root only), copied from
   Docker Desktop's credential store by `measure/p01_fastrund.py`; nothing prints them.
 
+## The worker site
+
+Since 2026-11-12 (the owner: "We have new worker machine, i want buildserver running there"; DESIGN.md §5.5). The worker
+machine is our Proxmox node in Stuttgart (`K:\source\proxmox\workermachine`), on the home LAN through the link home.
+
+```text
+python buildserver/site/worker.py provision   # packages, podman's configuration, the coordinator's OpenRC service (idempotent)
+python buildserver/site/worker.py deploy      # publish the coordinator + guest agent, swap them in, restart (refused while requests run)
+python buildserver/site/worker.py restart     # after a settings change (worker/files/amb-coordinator.env, then provision)
+python buildserver/site/worker.py status      # JSON: the container, the service, the coordinator, drive 2, the images
+python buildserver/site/worker.py logs [-n N] | run -- podman ps
+python buildserver/image/images.py --site worker base | e2e | build-image | check | list
+```
+
+- **Where:** CT 803 `buildserver`, a privileged Alpine container at `192.168.50.21` (`buildserver.local`) on the host's
+  LAN bridge, made by `site/worker/create-ct803.sh` (its header says why each choice). Its root file system is on drive
+  1 and backed up; everything the site holds (images, the build VM's disks, slots, the store, the git mirrors, the
+  records, podman's storage) is on drive 2 (`/mnt/drive2/data/buildserver` = the container's `/srv/buildserver`), the
+  owner's drive for "building and holding artifacts": data that may be lost (every build can be made again).
+- **Why it is faster:** its VMs are plain KVM guests of the host (no nested virtualization, no WSL VM in between), on
+  drive 2's SSD, with 128 GB of RAM and nobody at its screen. A build VM gets 16-32 GB and 8-16 vCPUs (4 projects × 3
+  compilers at 32 GB), an e2e VM 6 GB uncapped with 4-6 vCPUs (`worker/files/amb-coordinator.env`).
+- **Its capacity** (`SiteCapacity.LinuxFree`): the smaller of the HOST's available memory (its own `/proc/meminfo`,
+  bind-mounted read-only into the container) minus 8 GB for the host's other guests, and the container's own (lxcfs:
+  its 100 GB ceiling) minus 2 GB; 20 vCPUs; drive 2's free space minus 50 GB. No swap: a capped slot (`--guest-ram`
+  above `--ram`) is refused when asked.
+- **Its source:** it cannot read K:, so its mirror takes commits by push (`src/Amb.Cli/SourcePush.cs`): before a
+  build or an e2e run, `amb` asks the site which commits it holds and sends a git bundle of only what it lacks (the
+  whole history once, 174 MB in 50 s on 2026-11-12; then kilobytes), the submodule's commit likewise. The bundle is
+  made in a scratch repository on Q: that borrows the repository's objects (git's alternates): nothing in K: changes.
+  The site takes only `refs/push/<commit>` refs, verified before they are fetched. An e2e run's suite is a commit's
+  `e2e/` folder written out of the mirror (`--suite-rev`, default HEAD), never a working tree.
+- **Installs:** the site has no Windows beside it, so a deploy there fails at once. `amb install w…` runs at this PC's
+  site: it fetches the build's layout zip and build.json from the worker into `Q:\buildserver\out\<id>` (SHA-256
+  checked), has this PC's site import that folder under the SAME id (every file checked against the worker's record;
+  `Imported`, its origin "pulled from worker"), then installs as before.
+- **The service:** OpenRC's `amb-coordinator` under supervise-daemon (`worker/files/amb-coordinator.initd`): it starts at
+  boot and again 5 s after any exit; a stop gives it 5 minutes to stop its slots. Its settings are
+  `/etc/amb-coordinator.env`; it never idles out. `amb` wakes it through `ssh worker pct exec 803 --
+  /srv/buildserver/bin/coordinator-up.sh` only when it does not answer.
+- **Images are made there** (the owner's choice): `images.py --site worker` uploads the kit a request stages
+  (`image/oem`, `image/steps`, VSSetup, `e2e/`) into `/srv/buildserver/kit/` first, SHA-256 checked; the ISO and the
+  pinned downloads come from the worker's own internet connection.
+- **cgroup v2 in a container** (`worker/files/amb-cgroups.start`, at every boot): the namespace root may hold no process
+  when it delegates controllers, so its processes move to `/init` first; without it podman fails with "controller pids
+  is not available". Alpine's LXC configuration drops `mknod`, which crun needs for a slot's `/dev/kvm`: CT 803 keeps it
+  (`create-ct803.sh`).
+- **Drive 2's controller cache** was found off on 2026-11-12 (the Smart Array's SSD Smart Path on drive 2's array
+  bypasses the flash-backed write cache): podman's first writes ran at ~3 MB/s. With Smart Path off and the controller's
+  cache on, drive 2 writes 222 MB/s and reads 395 MB/s (the drives' own write caches stay off, for power safety).
+
 ## What exists
 
 | Path | What it is | State |
 |---|---|---|
-| [`site/sitectl.py`](site/sitectl.py) | makes, deploys into and inspects this PC's site: the WSL distro `buildserver`, its disk in `Q:\buildserver\wsl` (E2) | in use |
+| [`site/sitectl.py`](site/sitectl.py) | makes, deploys into and inspects this PC's site: the WSL distro `buildserver`, its disk in `Q:\buildserver\wsl` (E2); publishes with the unpacked .NET SDK 10.0.404 in `Q:\tools` when present (`AMB_DOTNET` names another) | in use |
 | [`site/files/`](site/files) | the configuration it installs (`/etc/wsl.conf`, podman's `containers.conf`), each file documented | in use |
+| [`site/worker.py`](site/worker.py) | provisions, deploys into and inspects the worker machine's site (CT 803) over `ssh worker` | in use (2026-11-12) |
+| [`site/worker/`](site/worker) | `create-ct803.sh` (makes CT 803 on the worker host) and `files/` (podman's configuration, the cgroup delegation, the OpenRC service, its settings and start script), each file documented | in use (2026-11-12) |
 | [`image/`](image) | the image kit: `images.py`, the OEM bootstrap (`oem/`), the layer steps (`steps/`) | `am-base`, `am-e2e` and `am-build` made with it |
 | [`steps/build/`](steps/build) | the build VM's steps, run with the image's PowerShell 7: `prepare-disk.ps1` (D:), `checkout.ps1` (the worktree from git bundles), `build.ps1` (the commit's own `tools\Build-Agentmaster.ps1`, with msbuild's binary log), `package.ps1` (the portable zip, the layout zip, the symbols, the logs, `build.json`); `sitectl.py deploy` copies them into the site, and each build stages them into its share | in use |
 | [`steps/install/`](steps/install) | `install-build.ps1`: the Windows side of `amb install` (stage into the free slot, check, wait for the requesting session, the mutex, the swap, the watch), run by the coordinator through WSL's interop | in use (2026-10-29) |
 | [`measure/`](measure/README.md) | the measurements and proofs behind DESIGN.md §16, with their raw results | P0.1 (§16.9), P0.5's comparison (§16.11) and P0.4's native half (§16.12) |
-| [`src/Amb.Core`](src/Amb.Core) | the shared core: the allocation rule (§3), the request / build / slot / VM model, the guest and API protocol, the atomic record store (§6) | 28 unit tests (`src/Amb.Core.Tests`) |
-| [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API (artifacts streamed by name), the scheduler (admission by priority × availability, wait and run timeouts, cancel, one build at a time, existing builds answered without a slot), the guest broker, the jobs (import, smoke, install, layer, e2e, build, deploy), the source mirror (snapshots too) and its bundles, the slot manager and its drivers (podman + dockur, kept VMs with a data disk, capped slots with the site's swap file; local, for tests) | runs in the site; 51 unit tests (`src/Amb.Coordinator.Tests`) |
+| [`src/Amb.Core`](src/Amb.Core) | the shared core: the allocation rule (§3, homepc's and a Linux site's), the request / build / slot / VM model (build ids by site letter), the guest and API protocol, the atomic record store (§6) | 31 unit tests (`src/Amb.Core.Tests`) |
+| [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API (artifacts streamed by name; the source mirrors' tips and pushed bundles), the scheduler (admission by priority × availability, wait and run timeouts, cancel, one build at a time, existing builds answered without a slot), the guest broker, the jobs (import, a pulled build too; smoke, install, layer, e2e, a suite out of the mirror too; build, deploy), the source mirror (fetching K:, or taking pushes; snapshots too) and its bundles, the slot manager and its drivers (podman + dockur, kept VMs with a data disk, capped slots with the site's swap file; cgroup v1 and v2 memory figures; local, for tests); its settings say which site it serves (homepc's or a Linux one) | runs in both sites; 62 unit tests (`src/Amb.Coordinator.Tests`) |
 | [`src/Amb.GuestAgent`](src/Amb.GuestAgent) | `amb-guest.exe` (Native AOT, 7 MB): the agent in every VM; hello, heartbeat with the guest's memory, one step at a time by long poll (run, fetch, expand, put, shutdown) | in every slot |
 | [`src/Amb.HostFacts`](src/Amb.HostFacts) | `amb-hostfacts.exe` (Native AOT): Windows' available memory, free commit, Q: free space and a full-screen game, as one line of JSON; the coordinator runs it every 10 s through WSL's interop | in use |
-| [`src/Amb.Cli`](src/Amb.Cli) | `amb.exe`: the command line above; `WorkingTreeSnapshot.cs` (`--snapshot`), `ProcessAncestry.cs` (the requesting claude.exe of `amb install`: the process chain, else `CLAUDE_PID`) | in use; 11 unit tests (`src/Amb.Cli.Tests`) |
+| [`src/Amb.Cli`](src/Amb.Cli) | `amb.exe`: the command line above; `Sites.cs` (the two sites, a build id's site by its letter), `SourcePush.cs` (a commit pushed to the worker as a bundle of what it lacks), `WorkingTreeSnapshot.cs` (`--snapshot`), `ProcessAncestry.cs` (the requesting claude.exe of `amb install`: the process chain, else `CLAUDE_PID`) | in use; 15 unit tests (`src/Amb.Cli.Tests`) |
 | [`tests/local_chain.py`](tests/local_chain.py) | the whole chain on this PC without a VM: the coordinator with the local slot driver, the real guest agent, the real API | 15 checks pass |
 | [`tests/site_outcomes.py`](tests/site_outcomes.py) | Phase 1's done-when on the real site: e2e runs that pass, fail, are cancelled and lose their VM, each leaving nothing behind | 14 checks passed (2026-10-25) |
 | [`tests/site_build.py`](tests/site_build.py) | the build MVP's done-when on the real site: a build of HEAD, its manifest, an identical request, e2e on the build, fetch, no slot left, K: only read | 7 checks passed (2026-10-26, `b20261026-3`) |

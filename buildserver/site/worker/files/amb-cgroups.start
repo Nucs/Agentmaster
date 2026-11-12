@@ -1,0 +1,9 @@
+#!/bin/sh
+# cgroup v2 delegation for rootful podman in CT 803 (installed by buildserver/site/worker.py `provision` as
+# /etc/local.d/amb-cgroups.start). The namespace root may hold no processes when it delegates controllers to the cgroups
+# podman makes ("controller pids is not available" otherwise, measured 2026-11-12), so everything that runs in it moves
+# into the leaf /init first. Runs at every boot (OpenRC's local service, last in the default runlevel, before
+# amb-coordinator, which starts after it).
+mkdir -p /sys/fs/cgroup/init
+for p in $(cat /sys/fs/cgroup/cgroup.procs); do echo "$p" > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null; done
+echo "+cpuset +cpu +io +memory +pids" > /sys/fs/cgroup/cgroup.subtree_control
