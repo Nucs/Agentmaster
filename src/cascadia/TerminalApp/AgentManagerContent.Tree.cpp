@@ -1746,6 +1746,22 @@ namespace winrt::TerminalApp::implementation
         });
         menu.Items().Append(tagsItem);
 
+        // Agentmaster (SIDE_PANEL.md §2l "The card's Filter menu"): the HOST's own items right under Tags — the side panel
+        // card's "Filter ▸" submenu, the user's place for it ("Under Tags"). No Agent Manager surface passes any.
+        // Contained like the items under Jump to Tab: a host item that fails to build costs only the host's items —
+        // logged with the throw site (Rule #18) — and the rest of the menu below is still built.
+        if (host.afterTags)
+        {
+            try
+            {
+                host.afterTags(menu);
+            }
+            catch (...)
+            {
+                AgentLogCaughtException(L"session menu: the host's items under Tags");
+            }
+        }
+
         // Copy — a submenu mirroring the per-tab link badge's copy button (DESIGN §9.7 / TAB_OVERLAY.md).
         // Placed directly below Rename (at the user's request). It routes through the SAME shared
         // CopySessionField action the overlay's copy menu uses, so the two menus can never drift: Session

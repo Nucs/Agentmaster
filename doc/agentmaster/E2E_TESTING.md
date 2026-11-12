@@ -569,7 +569,12 @@ differs from the plan above, and why:
   "Resume filter"; ItemStatus "paused" while nothing in the row applies) and each chip's body `<chip id>.toggle` (a button
   named "Pause the filter <words>" / "Resume the filter <words>"; ItemStatus "paused" while that filter is off); the chip's
   words keep their id, now inside that button, and the funnel's ItemStatus reads "N filters on", "N filters paused" or "N
-  filters on, M paused". From the filters' build the card mode shows NO count line: its words
+  filters on, M paused". The card's Filter menu (2026-11-12, NOT BUILT; a side panel session card's right-click menu, under
+  Tags): the line `am.side.cardFilter` and, in its submenus (open only while pointed at), `am.side.cardFilter.{folder,
+  folder.<N>, folder.exact, state, tag.<folded name>, untagged, branch, family, pause, clear}` (N = the folder's level, 0 =
+  the card's own folder; a pick line's ItemStatus is "checked" while it is the whole filter, and its words then start
+  with ✓), with the two chips it adds, `am.side.chip.branch` and `am.side.chip.family`. From the filters' build the card mode
+  shows NO count line: its words
   ("2 sessions in this window", "1 of 3 sessions across all windows") are the filter box's (`am.side.filter`) ItemStatus.
   Home keeps its XAML id `ManagerHomeButton` (an x:Name is never overridden).
 - **Item status built:** the tab — the state word, then not started, unread, unsent draft, favorite, cache warm,

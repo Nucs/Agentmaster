@@ -4091,9 +4091,22 @@ namespace Agentmaster
         bool pinned{ false }; // the flag "Pinned to top": only cards pinned with Pin to Top (SIDE_PANEL.md §2j)
         bool favorite{ false }; // the flag "Favorite": only ★ favorites (FAVORITES.md)
         uint32_t activeWithinMinutes{ 0 }; // Active within: 0 = any time; else only sessions active in the last N minutes
+        // By Branch (SIDE_PANEL.md §2l "The card's Filter menu" — the user's pick of 2026-11-12, "Branch and fork family"):
+        // only sessions on this git branch (SessionInfo::branch, compared EXACTLY: git refs are case-sensitive, as the
+        // Sessions page's "By Same Branch" compares them). Empty = no branch constraint. ONE branch, set from a card's
+        // right-click menu alone — the funnel's panel has no row for it (a branch only makes sense "like this card's").
+        // ⚠ The branch NAME alone: "main" lists the sessions on main of EVERY repository; narrow it with By Folder.
+        std::wstring branch;
+        // Fork family (the same pick): the id of the session whose FORK FAMILY is listed — that session, the session it
+        // was forked from and their forks: the connected component of the fork links (SidePanelForkFamily). Empty = no
+        // constraint. ⚠ The ANCHOR's id, never the member list: the family is worked out again whenever the list updates
+        // (the panel reads the links from the process's session index and the registry), so a fork made later joins it and
+        // a restart needs nothing but this id. Set from a card's right-click menu alone, like `branch`.
+        std::wstring forkFamilyOf;
         // The chips SWITCHED OFF one by one (a click on a chip — the user's "clicking each filter item with x toggle it",
-        // 2026-11-12): SidePanelFacetBit bits (SidePanelFilters.h) of State, Tag, Draft, Unread, Pinned, Favorite and Active
-        // (kSidePanelOffFacetBits). A facet whose bit is set keeps its picks and its chip, dimmed, and constrains nothing.
+        // 2026-11-12): SidePanelFacetBit bits (SidePanelFilters.h) of State, Tag, Draft, Unread, Pinned, Favorite, Active,
+        // Branch and ForkFamily (kSidePanelOffFacetBits). A facet whose bit is set keeps its picks and its chip, dimmed,
+        // and constrains nothing.
         // By Folder has a chip per folder (SidePanelFolderFilter::off); the typed text's switch is the panel's own
         // (TerminalPage::_sidePanelFilterTextOff: the text is not part of this record). Normalizing clears the bit of a
         // facet that holds no pick, so a pick made later in that facet starts on.

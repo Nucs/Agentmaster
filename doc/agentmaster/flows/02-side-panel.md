@@ -640,6 +640,65 @@ pointer has left and come back. The chevron's ItemStatus reads `hidden` while th
 - **E6 A finger** → a tap near the edge shows the strip; a tap beside the chevron hides it; a tap on the chevron expands.
 - **E7 A dock flip from another window** → a collapsed window's strip moves to the other edge, hidden.
 
+### SP-17 · The card's Filter menu: this card's folder, state, tags, branch and fork family
+
+> **Since** 2026-11-12 (NOT BUILT) · **P1** · **Needs** F-S2 (two sessions in two folders A and B, in different states;
+> one of them tagged), a third session forked from one of them for phase 6 · **Spec** SIDE_PANEL.md §2l *The card's
+> Filter menu*
+
+**Promise.** A right-click on a side panel card offers **Filter ›** under Tags: the card's own folder and the folders
+above it, its state, each of its tags (or Untagged), its git branch and its fork family, then Pause filter / Resume
+filter and Clear all filters while a filter is set. A pick STARTS THE FILTER OVER: the filter becomes exactly that one
+thing, every other chip dropped and the filter box emptied. The line that is the whole filter shows ✓, and a click on
+it drops the filter. Branch and fork family are filters of their own, with a chip each.
+
+**Phases**
+1. **Where it is.** *Do:* right-click A's card. *Expect:* a "Filter" line (`am.side.cardFilter`) right under Tags; its
+   submenu holds Folder ›, "State: `<A's state>`" (`am.side.cardFilter.state`), a line per tag of A
+   (`am.side.cardFilter.tag.<folded name>`) or Untagged, "Fork family" (`am.side.cardFilter.family`), and — when A's
+   folder is a git checkout — "Branch: `<name>`" (`am.side.cardFilter.branch`). No Pause filter and no Clear all filters
+   while nothing filters. The board card's and the tree row's menus have no Filter line.
+2. **A pick.** *Do:* Filter › State. *Expect:* the menu closes; the chips row shows one chip, A's state
+   (`am.side.chip.state`); only the sessions in that state are listed; `[nav] sidepanel filter card menu: start over with
+   state -> 1 filter on`.
+3. **Start over.** *Do:* type a word in the filter box; add a flag in the funnel; right-click A's card ▸ Filter ›
+   Folder › the first line (`am.side.cardFilter.folder.0`). *Expect:* exactly one chip, A's folder; the state chip, the
+   flag chip and the typed text are gone (the box is empty); A's card is listed.
+4. **The folder's levels.** *Do:* open Folder › again. *Expect:* A's folder first (ItemStatus "checked", its words
+   starting with ✓), then each folder above it with its path at the line's right end (a path past 32 characters is cut
+   in the middle around "…"; the folder's name at the left is whole), no drive root, then "`<leaf>` (exactly)"
+   (`am.side.cardFilter.folder.exact`). *Do:* pick a parent. *Expect:* one chip with the parent's leaf; every session
+   under it is listed.
+5. **✓ drops.** *Do:* right-click A's card ▸ Filter › Folder › the checked line. *Expect:* no filter; every card back;
+   `... card menu: drop folder (with subfolders) -> 0 filters on`.
+6. **Fork family.** *Do:* fork A (Fork session); right-click the fork's card ▸ Filter. *Expect:* "Fork family" with "2
+   sessions" at its right. *Do:* pick it. *Expect:* one chip "fork family: `<the fork's title>`" (`am.side.chip.family`);
+   A and its fork are listed, B is not. *Do:* fork A again. *Expect:* the new fork's card joins the list by itself.
+   *Do:* right-click A's card ▸ Filter. *Expect:* Fork family is checked (the filter is A's family too, whoever named it).
+7. **Branch.** *Do:* on a card whose folder is a git checkout, Filter › Branch. *Expect:* one chip with the ⎇ symbol and
+   the branch's name (`am.side.chip.branch`); the sessions on that branch are listed.
+8. **The two links.** *Do:* with a filter set, right-click a card ▸ Filter › Pause filter. *Expect:* the row is paused
+   (SP-15 phase 2), and the line now reads Resume filter. *Do:* Filter › Clear all filters. *Expect:* no filter, the row
+   gone.
+9. **Restart.** *Do:* set Fork family; close and reopen the window. *Expect:* the family chip and the same cards (at the
+   latest a few seconds after the start, once the session index is read); `windows/<id>.json`'s `sidePanelFilters` has
+   `"forkFamilyOf"`.
+
+**Edge cases**
+- **E1 A paused row** → a pick from the card's menu applies at once (the pause is lifted with everything else).
+- **E2 A dimmed chip picked again** → a card pick of the thing a dimmed chip stands for sets it applied (no ✓ was shown).
+- **E3 The folder history** → a folder picked from a card is on top of By Folder's submenu at its next open (SP-14).
+- **E4 A card with no tag** → "Untagged" instead of the tag lines.
+- **E5 After the forks' first turns** → the family still lists them (their link is in the session index, no longer on
+  the registry), also after a restart.
+- **E6 The two new chips** → a click on the branch or the family chip dims it (SP-15); its ✕ drops it.
+- **E7 The AI view** → an AI search result card's menu has no Filter line.
+- **E8 The pick that is already set, plus typed text** → with the state chip set and a word typed, Filter › State (no ✓:
+  the text is a chip too) empties the box and keeps the chip; hooks.log has the `start over with state` line.
+- **E9 A fork made by hand** → a fork started in a "+" tab (`claude --resume <id> --fork-session`) joins a listed
+  family within five minutes (the index is asked that often), or at the next Fork family pick.
+- **E10 A title with a line break** → the family chip shows the title on one line.
+
 ---
 
 ## Known defects (expected failures until fixed)

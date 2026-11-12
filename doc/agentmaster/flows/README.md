@@ -238,7 +238,10 @@ filter can be switched off without being dropped: a click on a chip pauses that 
 before Clear pauses the whole row (the typed text too) and brings back what applied, dimmed chips stay in the row, and a
 pick or typing resumes (SP-15; SIDE_PANEL.md §2l; no test written yet) · a collapsed side panel takes no column: its strip
 floats over the terminal's edge and hides itself, showing while the pointer is within 40 DIPs of it, and a press beside
-its chevron goes to the terminal (SP-16; SIDE_PANEL.md §2m).
+its chevron goes to the terminal (SP-16; SIDE_PANEL.md §2m) · a side-panel card's right-click menu has Filter › under
+Tags — the card's folder and the folders above it, its state, its tags, its branch and its fork family (two new kinds of
+filter), plus Pause filter / Resume filter and Clear — and a pick starts the filter over with that one thing (SP-17;
+SIDE_PANEL.md §2l; no test written yet).
 
 **The regression base** — older behaviors the recent releases build on, covered because every new feature leans on
 them: the /handover family (HND-01, HND-03, HND-04, HND-05, HND-07, HND-08), the Sessions browser (SES-01, SES-02,

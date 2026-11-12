@@ -62,6 +62,14 @@ unfiltered list's ('2 sessions in this window'), and the funnel's ItemStatus rea
 within the system's double-click time of a toggle is ignored by the app: leave more than that (500 ms by default) between
 two clicks on the row.
 
+THE CARD'S FILTER MENU (SIDE_PANEL.md §2l; a build of 2026-11-12 or later — NOT BUILT on that day): a session card's
+right-click menu has 'Filter' under Tags (CARD_FILTER_ID), a submenu of the card's own values: Folder (a submenu: the
+card's folder, each folder above it, then '<leaf> (exactly)'), 'State: <state>', 'Tag: <tag>' per tag or 'Untagged',
+'Branch: <branch>', 'Fork family', and — while the row holds a chip — 'Pause filter' / 'Resume filter' and 'Clear all
+filters'. A pick STARTS THE FILTER OVER: exactly that one chip is left, and the filter box is emptied. The line that is
+the whole filter has ItemStatus 'checked' and its words start with '✓ '; a click on it drops the filter. Branch and fork
+family are chips of their own (am.side.chip.branch, am.side.chip.family). An AI search result card's menu has no Filter.
+
 THE COLLAPSED STRIP HIDES ITSELF (SIDE_PANEL.md §2m; a build of 2026-11-12 or later — NOT BUILT on that day): a collapsed
 panel takes no column. Its 20 px strip floats over the content's docked edge, hidden, and shows while the pointer is
 within 40 px of it (60 px from the edge, at any height); it lingers ~1.5 s after a collapse. The chevron (STRIP_ID) stays
@@ -117,6 +125,11 @@ CHIP_ID_PREFIX = "am.side.chip."
 switches the filter off and on; ItemStatus 'paused' while off), `...<kind>.remove` its ✕."""
 CHIP_PART_SUFFIXES = (".remove", ".toggle")
 """The id endings of a chip's BUTTONS: an id that starts with CHIP_ID_PREFIX and ends in none of these is a chip's words."""
+CARD_FILTER_ID = "am.side.cardFilter"
+"""A session card's right-click menu ▸ Filter, under Tags (SIDE_PANEL.md §2l "The card's Filter menu"; a build of
+2026-11-12 or later). Its lines' ids are this plus: '.folder' (the Folder submenu), '.folder.<N>' (N = the level, 0 = the
+card's own folder), '.folder.exact', '.state', '.tag.<folded name>', '.untagged', '.branch', '.family', '.pause', '.clear'.
+A pick line's ItemStatus is 'checked' while it is the whole filter (its words then start with '✓ ')."""
 HEADER_ORDER = {"right": ["am.side.launch", FUNNEL_ID, "am.side.sum", MORE_ID],
                 "left": [MORE_ID, "am.side.sum", FUNNEL_ID, "am.side.launch"]}
 """The header line's buttons LEFT TO RIGHT on screen, per dock side -> their AutomationIds: the line mirrors with the dock,

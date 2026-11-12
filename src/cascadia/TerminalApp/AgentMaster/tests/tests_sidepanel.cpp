@@ -79,7 +79,14 @@
 // file for a seeding that adds nothing, the freshest-file read-modify-write, the writer stamp); the submenu's lines (the
 // record's unlisted folders first and checked, the history's order, the record's spelling and choice on a checked line), the
 // toggle judged against the record as it is, a line turned off turning back on as it was, the removal by any spelling, the
-// line's words, and a line's coverage equal to the matcher's By Folder verdict for that folder alone.
+// line's words, and a line's coverage equal to the matcher's By Folder verdict for that folder alone. And THE CARD'S FILTER
+// MENU (the user's request of 2026-11-12): the two facets only a card sets, Branch and ForkFamily (the record, what applies,
+// the matcher - a branch exactly, a family by membership -, their chips after the folders', their x and click, a pick
+// resuming, their JSON and what normalizing keeps); the fork family as the connected component of the fork links, ids in
+// any case; the Folder submenu's levels (nearest first, no drive or share root, any spelling, the cap) and a line's dim hint
+// (a short path whole, a deep one cut in the middle around an ellipsis, never longer than its cap); and a card pick - the
+// record of each line, the filter started over whatever it held, the check on the line that is the whole filter (by
+// identity, only while it applies and no text is typed), the drop on its second click, a line that names nothing.
 //
 // TestSidePanelStripReveal pins WHEN the collapsed panel's strip shows (AgentMaster/SidePanelStripReveal.h, SIDE_PANEL.md
 // section 2m; the user's request of 2026-11-12): near = within 40 DIPs of the strip (60 from the docked edge of the content,
@@ -1938,7 +1945,9 @@ void TestSidePanelFilters()
         {
             all |= SidePanelFacetBit(static_cast<SidePanelFacet>(i));
         }
-        CHECK(all == kSidePanelAllFacets, "filters facets: the nine facet bits are distinct and make the all-pass mask");
+        CHECK(all == kSidePanelAllFacets && kSidePanelFacetCount == 11, "filters facets: the eleven facet bits are distinct and make the all-pass mask");
+        CHECK(static_cast<int>(SidePanelFacet::Text) == 8 && static_cast<int>(SidePanelFacet::Branch) == 9 && static_cast<int>(SidePanelFacet::ForkFamily) == 10,
+              "filters facets: Branch and ForkFamily were added at the enum's end - no earlier facet's value moved");
         const uint32_t allButState = kSidePanelAllFacets & ~SidePanelFacetBit(SidePanelFacet::State);
         CHECK(SidePanelPassesAllBut(allButState, SidePanelFacet::State), "filters facets: failing only By State passes 'every facet but State'");
         CHECK(!SidePanelPassesAllBut(allButState, SidePanelFacet::Tag), "filters facets: failing By State does not pass 'every facet but Tag'");
@@ -2525,6 +2534,238 @@ void TestSidePanelFilters()
         WindowRecord textPause = plain;
         textPause.sidePanelFilters.paused = true; // a pause over the typed text alone
         CHECK(SerializeWindowRecord(textPause).find(L"sidePanelFilters") == std::wstring::npos, "filters record: a pause with no pick writes no sidePanelFilters key");
+    }
+
+    // THE CARD'S FILTER MENU (SIDE_PANEL.md section 2l "The card's Filter menu"; the user's request of 2026-11-12): the two
+    // facets only a card sets (Branch, ForkFamily), the fork family itself, the Folder submenu's levels and a line's dim
+    // hint, and a pick that starts the filter over.
+    {
+        // Branch and ForkFamily as facets of the record.
+        {
+            SidePanelFilters f;
+            f.branch = L"agentmaster";
+            CHECK(SidePanelFiltersActive(f) && SidePanelActiveFacets(f, false) == SidePanelFacetBit(SidePanelFacet::Branch) && SidePanelFacetPicked(f, SidePanelFacet::Branch),
+                  "card facets: a branch alone is the Branch facet");
+            f.forkFamilyOf = L"11111111-aaaa-bbbb-cccc-000000000001";
+            CHECK(SidePanelActiveFacets(f, false) == (SidePanelFacetBit(SidePanelFacet::Branch) | SidePanelFacetBit(SidePanelFacet::ForkFamily)) && SidePanelFiltersStatusText(f) == L"2 filters on",
+                  "card facets: a fork family is a facet of its own (two filters on)");
+            CHECK(SidePanelFiltersInEffect(f) == f, "card facets: both apply while nothing is off");
+            auto off = f;
+            off.offFacets = SidePanelFacetBit(SidePanelFacet::Branch);
+            const auto applied = SidePanelFiltersInEffect(off);
+            CHECK(applied.branch.empty() && applied.forkFamilyOf == f.forkFamilyOf && !SidePanelFacetInEffect(off, SidePanelFacet::Branch) && SidePanelFacetInEffect(off, SidePanelFacet::ForkFamily),
+                  "card facets: the branch chip switched off leaves the branch out and the fork family in");
+            CHECK((kSidePanelOffFacetBits & SidePanelFacetBit(SidePanelFacet::Branch)) != 0 && (kSidePanelOffFacetBits & SidePanelFacetBit(SidePanelFacet::ForkFamily)) != 0,
+                  "card facets: both chips can be switched off by a click");
+            // The matcher.
+            auto here = FilterFacts(L"", L"");
+            here.branch = L"agentmaster";
+            auto elsewhere = FilterFacts(L"", L"");
+            elsewhere.branch = L"Agentmaster";
+            SidePanelFilters onlyBranch;
+            onlyBranch.branch = L"agentmaster";
+            const SidePanelFilterMatcher bm{ onlyBranch, kNow };
+            CHECK(bm.NeedsBranch() && !bm.NeedsForkFamily() && bm.Matches(here, true) && !bm.Matches(elsewhere, true) && !bm.Matches(FilterFacts(L"", L""), true),
+                  "card facets matcher: a branch matches exactly - another case and an unknown branch do not");
+            SidePanelFilters onlyFamily;
+            onlyFamily.forkFamilyOf = L"anchor";
+            const SidePanelFilterMatcher fm{ onlyFamily, kNow };
+            auto member = FilterFacts(L"", L"");
+            member.inForkFamily = true;
+            const uint32_t outsider = fm.Passed(FilterFacts(L"", L""), true);
+            CHECK(fm.NeedsForkFamily() && !fm.NeedsBranch() && fm.Matches(member, true) && !fm.Matches(FilterFacts(L"", L""), true) && SidePanelPassesAllBut(outsider, SidePanelFacet::ForkFamily),
+                  "card facets matcher: a fork family lists its members alone, and an outsider fails only that facet");
+            auto pausedFamily = onlyFamily;
+            pausedFamily.paused = true;
+            CHECK(!SidePanelFilterMatcher(pausedFamily, kNow).NeedsForkFamily() && SidePanelFilterMatcher(pausedFamily, kNow).Matches(FilterFacts(L"", L""), true),
+                  "card facets matcher: a paused fork family constrains nothing and asks for no membership");
+            // The chips: after the folders, before the states.
+            SidePanelFilters row;
+            SidePanelAddFolderFilter(row, L"K:\\source\\Agentmaster", true);
+            row.branch = L"agentmaster";
+            row.forkFamilyOf = L"anchor";
+            SidePanelToggleState(row, SidePanelStateBit(SessionState::Running));
+            const auto chips = SidePanelFilterChips(row, L"login", false, L"login page e2e");
+            std::wstring kinds;
+            for (const auto& c : chips)
+            {
+                kinds += std::to_wstring(static_cast<int>(c.kind)) + L" ";
+            }
+            CHECK(chips.size() == 5 && kinds == L"0 9 10 1 8 ", "card chips: the row reads folder, branch, fork family, states, text");
+            CHECK(chips.size() == 5 && chips[1].text == L"agentmaster" && chips[2].text == L"fork family: login page e2e" && chips[2].tip.find(L"login page e2e") != std::wstring::npos,
+                  "card chips: the branch chip shows the branch, the family chip the session it is the family of");
+            CHECK(SidePanelFilterChips(row, L"").size() == 4 && SidePanelFilterChips(row, L"")[2].text == L"fork family", "card chips: with no name known the family chip reads 'fork family'");
+            CHECK(chips.size() == 5 && SidePanelFiltersWithoutChip(row, chips[1]).branch.empty() && SidePanelFiltersWithoutChip(row, chips[1]).forkFamilyOf == L"anchor" && SidePanelFiltersWithoutChip(row, chips[2]).forkFamilyOf.empty() && SidePanelFiltersWithoutChip(row, chips[2]).branch == L"agentmaster",
+                  "card chips x: each of the two chips drops its own pick alone");
+            bool textOff = false;
+            auto toggled = row;
+            CHECK(chips.size() == 5 && SidePanelToggleChip(toggled, chips[2], true, textOff) && toggled.offFacets == SidePanelFacetBit(SidePanelFacet::ForkFamily) && SidePanelFilterChips(toggled, L"")[2].off && !SidePanelFilterChips(toggled, L"")[1].off,
+                  "card chips: a click on the family chip switches it off alone");
+            CHECK(SidePanelChipFacet(SidePanelChipKind::Branch) == SidePanelFacet::Branch && SidePanelChipFacet(SidePanelChipKind::ForkFamily) == SidePanelFacet::ForkFamily, "card chips: the new kinds map to their facets");
+            // A pick resumes.
+            auto pausedRow = row;
+            pausedRow.paused = true;
+            pausedRow.offFacets = SidePanelFacetBit(SidePanelFacet::Branch);
+            auto otherBranch = pausedRow;
+            otherBranch.branch = L"main";
+            const auto resumed = SidePanelFiltersAfterPick(pausedRow, otherBranch);
+            CHECK(!resumed.paused && resumed.offFacets == 0, "card facets resume: another branch picked switches the branch chip on and resumes the row");
+            auto noBranch = pausedRow;
+            noBranch.branch.clear();
+            CHECK(SidePanelFiltersAfterPick(pausedRow, noBranch).paused, "card facets resume: the branch dropped leaves the row paused");
+        }
+
+        // The JSON of the two facets, and what normalizing accepts.
+        {
+            const auto parse = [](std::wstring_view text) {
+                auto v = json::Parse(text);
+                return v ? *v : json::Value{};
+            };
+            SidePanelFilters f;
+            f.branch = L"feature/side-panel";
+            f.forkFamilyOf = L"11111111-aaaa-bbbb-cccc-000000000001";
+            f.offFacets = SidePanelFacetBit(SidePanelFacet::Branch) | SidePanelFacetBit(SidePanelFacet::ForkFamily);
+            const auto text = json::Dump(SidePanelFiltersToJson(f));
+            CHECK(SidePanelFiltersFromJson(parse(text)) == f, "card facets json: the branch, the family's session and both switches round-trip");
+            CHECK(text.find(L"\"branch\":\"feature/side-panel\"") != std::wstring::npos && text.find(L"\"forkFamilyOf\":\"11111111-aaaa-bbbb-cccc-000000000001\"") != std::wstring::npos && text.find(L"\"off\":[\"branch\",\"family\"]") != std::wstring::npos,
+                  "card facets json: stored as the branch's name, the session's id and the two facets' tokens");
+            const auto odd = SidePanelFiltersFromJson(parse(LR"({"branch":7,"forkFamilyOf":["x"],"draft":true})"));
+            CHECK(odd.branch.empty() && odd.forkFamilyOf.empty() && odd.draft, "card facets json: a branch or an id that is not a string reads as not set");
+            SidePanelFilters raw;
+            raw.branch = L"  main \t";
+            raw.forkFamilyOf = L"abc\ndef";
+            const auto n = NormalizeSidePanelFilters(raw);
+            CHECK(n.branch == L"main" && n.forkFamilyOf.empty(), "card facets normalize: blanks are cut; a value with a line break is not kept");
+            CHECK(SidePanelOneLineOrEmpty(std::wstring(300, L'x'), kSidePanelBranchMaxChars).empty() && SidePanelOneLineOrEmpty(L"   ", 10).empty() && SidePanelOneLineOrEmpty(L"a b", 10) == L"a b",
+                  "card facets normalize: a value past the length cap or all blanks is not kept; an inner space is");
+        }
+
+        // The fork family: the connected component of the fork links.
+        {
+            using Links = std::vector<SidePanelForkLink>;
+            // root <- a <- a1 ; root <- b ; other <- c ; lone has no link.
+            const Links links{ { L"a", L"root" }, { L"a1", L"a" }, { L"b", L"root" }, { L"c", L"other" } };
+            const auto family = SidePanelForkFamily(L"a1", links);
+            CHECK(family.size() == 4 && family.count(L"a1") && family.count(L"a") && family.count(L"root") && family.count(L"b"), "fork family: a fork, its parent, the root and the root's other fork are one family");
+            CHECK(!family.count(L"c") && !family.count(L"other"), "fork family: an unrelated fork pair stays out");
+            CHECK(SidePanelForkFamily(L"root", links) == family && SidePanelForkFamily(L"b", links) == family, "fork family: every member's family is the same set");
+            const auto alone = SidePanelForkFamily(L"lone", links);
+            CHECK(alone.size() == 1 && alone.count(L"lone"), "fork family: a session in no link is a family of one");
+            const Links messy{ { L"A", L"Root" }, { L"a", L"ROOT" }, { L"x", L"x" }, { L"", L"root" }, { L"y", L"" } };
+            const auto folded = SidePanelForkFamily(L"ROOT", messy);
+            CHECK(folded.size() == 2 && folded.count(L"a") && folded.count(L"root"), "fork family: ids compare whatever their case; a duplicate, a self link and a half link are harmless");
+            CHECK(SidePanelFoldId(L"11AA-bbCC") == L"11aa-bbcc", "fork family: an id folds its ASCII letters to lower case");
+        }
+
+        // The Folder submenu's levels: the card's folder and each folder above it, the root left out.
+        {
+            using Levels = std::vector<std::wstring>;
+            CHECK(SidePanelFolderLevels(L"K:\\source\\Agentmaster\\e2e") == Levels({ L"K:\\source\\Agentmaster\\e2e", L"K:\\source\\Agentmaster", L"K:\\source" }),
+                  "folder levels: the folder, then each parent, nearest first; the drive's root is left out");
+            CHECK(SidePanelFolderLevels(L" \"K:/source/Agentmaster/\" ") == Levels({ L"K:\\source\\Agentmaster", L"K:\\source" }), "folder levels: any spelling is trimmed first");
+            CHECK(SidePanelFolderLevels(L"K:\\source") == Levels({ L"K:\\source" }), "folder levels: a folder right under the root lists itself alone");
+            CHECK(SidePanelFolderLevels(L"K:\\") == Levels({ L"K:\\" }), "folder levels: a card whose folder IS the root still gets that one line");
+            CHECK(SidePanelFolderLevels(L"\\\\server\\share\\a\\b") == Levels({ L"\\\\server\\share\\a\\b", L"\\\\server\\share\\a" }), "folder levels: a share's root is left out too");
+            CHECK(SidePanelFolderLevels(L"\\\\server\\share") == Levels({ L"\\\\server\\share" }), "folder levels: a share's root itself lists alone");
+            CHECK(SidePanelFolderLevels(L"relative\\dir").empty() && SidePanelFolderLevels(L"").empty() && SidePanelFolderLevels(L"K:\\a\\b", 0).empty(), "folder levels: a relative path, nothing, or no room lists nothing");
+            CHECK(SidePanelFolderLevels(L"K:\\1\\2\\3\\4\\5\\6\\7\\8\\9\\10").size() == kSidePanelFolderLevelsMax && SidePanelFolderLevels(L"K:\\1\\2\\3\\4", 2) == Levels({ L"K:\\1\\2\\3\\4", L"K:\\1\\2\\3" }),
+                  "folder levels: the list is cut at the most levels");
+        }
+
+        // A Folder line's dim hint: the whole path while it is short, else its two ends around an ellipsis.
+        {
+            const std::wstring deep = L"K:\\source\\Agentmaster\\src\\cascadia\\TerminalApp\\AgentMaster\\tests"; // 64 characters
+            CHECK(SidePanelFolderHint(L"K:\\source\\Agentmaster") == L"K:\\source\\Agentmaster" && SidePanelFolderHint(std::wstring(kSidePanelFolderHintMaxChars, L'a')).size() == kSidePanelFolderHintMaxChars,
+                  "folder hint: a path that fits is shown whole, up to the cap exactly");
+            CHECK(SidePanelFolderHint(deep) == L"K:\\source\\\x2026\\AgentMaster\\tests", "folder hint: a deep path keeps the root with its first folder, then as many whole trailing folders as fit");
+            CHECK(SidePanelFolderHint(deep).size() <= kSidePanelFolderHintMaxChars && SidePanelFolderHint(deep, 40) == SidePanelFolderHint(deep) &&
+                      SidePanelFolderHint(deep, 41) == L"K:\\source\\\x2026\\TerminalApp\\AgentMaster\\tests" && SidePanelFolderHint(deep, 41).size() == 41,
+                  "folder hint: never longer than the cap; one more folder shows only once the cap has room for the whole of it");
+            // A first folder that would take more than half the room is left out: the hint is the tail alone.
+            CHECK(SidePanelFolderHint(L"K:\\a-very-long-first-folder-name\\projects\\webapp\\src") == L"\x2026\\projects\\webapp\\src", "folder hint: a long first folder gives its room to the path's end");
+            // The folder's own name longer than the room: cut inside the name, the END kept (it tells the lines apart).
+            const std::wstring longLeaf = L"K:\\w\\" + std::wstring(60, L'x') + L"END";
+            const std::wstring leafHint = SidePanelFolderHint(longLeaf);
+            CHECK(leafHint.size() == kSidePanelFolderHintMaxChars && leafHint.rfind(L"K:\\w\\\x2026", 0) == 0 && leafHint.size() >= 3 && leafHint.compare(leafHint.size() - 3, 3, L"END") == 0,
+                  "folder hint: a name longer than the room is cut inside the name, keeping its end");
+            CHECK(SidePanelFolderHint(L"\\\\server\\share\\projects\\agentmaster\\worktrees\\feature") == L"\\\\server\\\x2026\\worktrees\\feature", "folder hint: a share keeps its server as the head");
+            CHECK(SidePanelFolderHint(deep, 7) == deep && SidePanelFolderHint(L"").empty(), "folder hint: no room for two ends, or nothing, is returned as it is");
+            // Every hint is shorter than its path, and ends as the path ends.
+            bool shorter = true;
+            for (size_t cap = 8; cap < deep.size(); ++cap)
+            {
+                const std::wstring hint = SidePanelFolderHint(deep, cap);
+                shorter = shorter && hint.size() <= cap && hint.size() < deep.size() && hint.back() == deep.back() && hint.find(L'\x2026') != std::wstring::npos;
+            }
+            CHECK(shorter, "folder hint: at every cap the hint fits, is shorter than the path, holds the ellipsis and ends as the path ends");
+        }
+
+        // A pick starts the filter over.
+        {
+            const auto pickOf = [](SidePanelCardPickKind kind, std::wstring value, bool subfolders = true, uint32_t stateBit = 0) {
+                SidePanelCardPick p;
+                p.kind = kind;
+                p.value = std::move(value);
+                p.includeSubfolders = subfolders;
+                p.stateBit = stateBit;
+                return p;
+            };
+            const uint32_t waiting = SidePanelStateBit(SessionState::WaitingForInput);
+            const auto folderPick = pickOf(SidePanelCardPickKind::Folder, L"K:\\source\\Agentmaster\\e2e");
+            const auto exactPick = pickOf(SidePanelCardPickKind::Folder, L"K:\\source\\Agentmaster\\e2e", false);
+            const auto statePick = pickOf(SidePanelCardPickKind::State, L"", true, waiting);
+            const auto tagPick = pickOf(SidePanelCardPickKind::Tag, L"Release");
+            const auto untaggedPick = pickOf(SidePanelCardPickKind::Untagged, L"");
+            const auto branchPick = pickOf(SidePanelCardPickKind::Branch, L"agentmaster");
+            const auto familyPick = pickOf(SidePanelCardPickKind::ForkFamily, L"11111111-AAAA-bbbb-cccc-000000000001");
+            // The record of each line: exactly that one thing.
+            const auto folderOnly = SidePanelFiltersForCardPick(folderPick);
+            CHECK(folderOnly.folders.size() == 1 && folderOnly.folders[0].includeSubfolders && SidePanelActiveFacets(folderOnly, false) == SidePanelFacetBit(SidePanelFacet::Folder), "card pick: a folder line is that folder with its subfolders, alone");
+            CHECK(!SidePanelFiltersForCardPick(exactPick).folders[0].includeSubfolders, "card pick: the 'exactly' line is that folder without its subfolders");
+            CHECK(SidePanelFiltersForCardPick(statePick).states == waiting && SidePanelFiltersForCardPick(tagPick).tags == std::vector<std::wstring>({ L"Release" }) && SidePanelFiltersForCardPick(untaggedPick).untagged,
+                  "card pick: a state, a tag and Untagged each make their one pick");
+            CHECK(SidePanelFiltersForCardPick(branchPick).branch == L"agentmaster" && SidePanelFiltersForCardPick(familyPick).forkFamilyOf == L"11111111-AAAA-bbbb-cccc-000000000001", "card pick: a branch and a fork family each make their one pick");
+            CHECK(!SidePanelFiltersActive(SidePanelFiltersForCardPick(pickOf(SidePanelCardPickKind::Folder, L"relative"))) && !SidePanelFiltersActive(SidePanelFiltersForCardPick(pickOf(SidePanelCardPickKind::Tag, L"  "))) &&
+                      !SidePanelFiltersActive(SidePanelFiltersForCardPick(pickOf(SidePanelCardPickKind::Branch, L""))) && !SidePanelFiltersActive(SidePanelFiltersForCardPick(pickOf(SidePanelCardPickKind::State, L"", true, 1u << 20))),
+                  "card pick: a line that names nothing a filter can hold makes no filter");
+            // Start over: whatever the filter held, it becomes exactly the pick.
+            SidePanelFilters busy;
+            SidePanelAddFolderFilter(busy, L"K:\\work\\webapp", true);
+            SidePanelToggleState(busy, SidePanelStateBit(SessionState::Running));
+            SidePanelToggleState(busy, waiting);
+            busy.unread = true;
+            busy.branch = L"main";
+            busy.offFacets = SidePanelFacetBit(SidePanelFacet::State);
+            busy.paused = true;
+            auto record = busy;
+            CHECK(SidePanelApplyCardPick(record, true, statePick) == SidePanelCardPickOutcome::StartedOver && record == SidePanelFiltersForCardPick(statePick),
+                  "card pick start over: every other pick, every chip's switch and the pause are dropped - the filter is exactly the pick");
+            CHECK(SidePanelFiltersNarrow(record) && SidePanelFiltersStatusText(record) == L"1 filter on", "card pick start over: the one pick applies");
+            // The line that IS the whole filter shows a check, and its click drops the filter.
+            CHECK(SidePanelCardPickIsWholeFilter(record, false, statePick) && !SidePanelCardPickIsWholeFilter(record, true, statePick), "card pick check: the line that is the whole filter is checked - never while text is typed (a chip too)");
+            CHECK(!SidePanelCardPickIsWholeFilter(record, false, tagPick) && !SidePanelCardPickIsWholeFilter(busy, false, statePick), "card pick check: another line, or a filter that holds more, is not checked");
+            auto dimmed = record;
+            dimmed.offFacets = SidePanelFacetBit(SidePanelFacet::State);
+            auto held = record;
+            held.paused = true;
+            CHECK(!SidePanelCardPickIsWholeFilter(dimmed, false, statePick) && !SidePanelCardPickIsWholeFilter(held, false, statePick), "card pick check: a pick that is switched off or paused is not checked (it must apply)");
+            CHECK(SidePanelApplyCardPick(dimmed, false, statePick) == SidePanelCardPickOutcome::StartedOver && dimmed.offFacets == 0 && SidePanelFiltersNarrow(dimmed), "card pick start over: picking a dimmed pick again applies it");
+            auto drop = record;
+            CHECK(SidePanelApplyCardPick(drop, false, statePick) == SidePanelCardPickOutcome::Dropped && drop == SidePanelFilters{}, "card pick drop: a click on the checked line drops the filter");
+            // Identity, not spelling.
+            SidePanelFilters spelled;
+            SidePanelAddFolderFilter(spelled, L"k:/SOURCE/agentmaster/E2E/", true);
+            CHECK(SidePanelCardPickIsWholeFilter(spelled, false, folderPick) && !SidePanelCardPickIsWholeFilter(spelled, false, exactPick), "card pick check: a folder is the same in any spelling; its 'exactly' twin is another pick");
+            SidePanelFilters tagged;
+            SidePanelToggleTag(tagged, L"release");
+            CHECK(SidePanelCardPickIsWholeFilter(tagged, false, tagPick), "card pick check: a tag is the same in any case");
+            SidePanelFilters family;
+            family.forkFamilyOf = L"11111111-aaaa-BBBB-cccc-000000000001";
+            CHECK(SidePanelCardPickIsWholeFilter(family, false, familyPick), "card pick check: a session id is the same in any case");
+            // A line that names nothing leaves the record alone.
+            auto untouched = busy;
+            CHECK(SidePanelApplyCardPick(untouched, false, pickOf(SidePanelCardPickKind::Folder, L"not a path")) == SidePanelCardPickOutcome::Nothing && untouched == busy, "card pick: a line that names nothing changes nothing");
+        }
     }
 
     // By Folder's PICK HISTORY (its hover submenu, SIDE_PANEL.md section 2l "The By Folder submenu"; the user's request of

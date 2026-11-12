@@ -425,6 +425,25 @@ namespace
     constexpr const wchar_t* kSidePanelClockGlyph = L"\xE823"; // Recent (a clock) — Active within
     constexpr const wchar_t* kSidePanelSearchGlyph = L"\xE721"; // Search — the typed text's chip
     constexpr const wchar_t* kSidePanelClearGlyph = L"\xE894"; // Clear — "Clear all filters"
+    // The card's Filter menu and the two chips it adds (SIDE_PANEL.md §2l "The card's Filter menu"). Checked against this
+    // PC's font files (their cmap tables, 2026-11-12): U+F5ED, U+E769 and U+E768 are in BOTH icon fonts; NO branch glyph
+    // is (U+F1D3, U+F291 and U+F292 are in neither), so the branch wears a text symbol from Segoe UI Symbol instead.
+    constexpr const wchar_t* kSidePanelForkGlyph = L"\xF5ED"; // Duplicate — the session menu's own "Fork session" icon: the fork family
+    constexpr const wchar_t* kSidePanelPauseGlyph = L"\xE769"; // Pause — the card menu's "Pause filter"
+    constexpr const wchar_t* kSidePanelResumeGlyph = L"\xE768"; // Play — the card menu's "Resume filter"
+    constexpr const wchar_t* kSidePanelBranchSymbol = L"\x2387"; // U+2387 ALTERNATIVE KEY SYMBOL: the usual mark of a git branch
+    // The font that holds the branch symbol and the state's dot as plain (never color-emoji) glyphs. Named explicitly: left
+    // to font fallback, a symbol that the emoji font also has could be drawn as an emoji.
+    constexpr const wchar_t* kSidePanelSymbolFont = L"Segoe UI Symbol";
+    // How long the session index may go unasked while a fork family filters the list (ms): a fork made in a "+" tab, or
+    // one whose registry link the panel never saw (it was collapsed, or behind the AI view), is known to the index alone,
+    // and the index refreshes only when asked. FIVE MINUTES, not seconds: a refresh is not free — it lists every transcript
+    // on disk and COPIES the whole index (tens of megabytes for a few thousand sessions: SessionCatalogGatherOptions::
+    // previous), and the index goes stale after 10 s, so every ask starts one. The usual fork — made here, seen by the
+    // list while it still carries its parent — never waits for this (_SidePanelNoteForkLinks); a pick asks at once.
+    constexpr uint64_t kSidePanelForkIndexRefreshMs = 5 * 60'000;
+    // The most fork links remembered from the registry (TerminalPage::_sidePanelForkLinksSeen): past it the map starts over.
+    constexpr size_t kSidePanelForkLinksSeenMax = 4096;
     // The panel's width (DIPs): its longest row ("Waiting for you" / a long tag name with a count) fits at the panel's font;
     // a longer tag name ends in "…". Fixed, so a pick that changes a count never resizes the card under the pointer.
     constexpr double kSidePanelFilterPanelWidth = 248.0;
@@ -1543,6 +1562,42 @@ namespace
             ::Agentmaster::AgentLogCaughtException(L"sidepanel focus origin text");
             return {}; // a default-constructed string cannot throw
         }
+    }
+
+    // The members of ONE session's fork family (SIDE_PANEL.md §2l "The card's Filter menu"), ids FOLDED, worked out from
+    // every fork link known NOW: the session index's (a transcript that is a fork copy names the session it was copied
+    // from — every session on disk) and the links the panel saw on the registry (a fork with no transcript of its own
+    // yet, and the bridge until the index reads the fork's first transcript). Work over what it is given, and nothing
+    // else: no cache and no page state are read or written — so the LIST's cached family (TerminalPage::
+    // _SidePanelForkFamilyIds) and the card menu's count, which may be of another family, each ask for their own anchor
+    // and never disturb each other.
+    //   anchorFolded - the session the family is of, folded (SidePanelFoldId).
+    //   index        - the session index as published (SessionCatalogKeeper::Current); null = none was built yet.
+    //   linksSeen    - the registry's links: child (folded) -> parent (folded).
+    //   returns      - the family; it always holds the anchor.
+    //   throws       - std::bad_alloc.
+    std::unordered_set<std::wstring> SidePanelWorkOutForkFamily(const std::wstring& anchorFolded,
+                                                                const ::Agentmaster::SessionCatalog* index,
+                                                                const std::unordered_map<std::wstring, std::wstring>& linksSeen)
+    {
+        std::vector<::Agentmaster::SidePanelForkLink> links;
+        links.reserve(linksSeen.size() + 64);
+        if (index)
+        {
+            // One pass over the index's entries (a few thousand): only the fork copies carry a parent.
+            for (const auto& entry : index->entries)
+            {
+                if (!entry.stats.forkedFromId.empty())
+                {
+                    links.push_back(::Agentmaster::SidePanelForkLink{ entry.sessionId, entry.stats.forkedFromId });
+                }
+            }
+        }
+        for (const auto& [child, parent] : linksSeen)
+        {
+            links.push_back(::Agentmaster::SidePanelForkLink{ child, parent });
+        }
+        return ::Agentmaster::SidePanelForkFamily(anchorFolded, links);
     }
 }
 
@@ -4092,6 +4147,39 @@ namespace winrt::TerminalApp::implementation
         {
             _sidePanelDirty = true;
         }
+        // Fork family belt (SIDE_PANEL.md §2l "The card's Filter menu"): while a fork family applies, WHO is in it comes from
+        // the process's session index, which is read in the background and announces nothing — a newer index (a fork whose
+        // transcript was read since, or the first index of a window that opened with the filter saved) can add a member.
+        // One Current() per tick, only while the facet applies. The stamps it is compared with are the LIST's own
+        // (_sidePanelForkFamilyListBuiltMs / Size): only a list update moves them — the funnel panel's counts and the card
+        // menu bring a family up to date without touching them — so a newer index is never missed. The index is asked to
+        // refresh at once when this window never asked (a window that opened with the filter saved, in a process where
+        // no search built the index), then at most once in five minutes: it refreshes only when asked, and a refresh
+        // copies the whole index (kSidePanelForkIndexRefreshMs).
+        if (::Agentmaster::SidePanelFacetInEffect(_sidePanelFilters, ::Agentmaster::SidePanelFacet::ForkFamily))
+        {
+            _SidePanelEnsureForkIndex(/*force*/ false); // noexcept; returns at once
+            if (!_sidePanelDirty)
+            {
+                try
+                {
+                    std::shared_ptr<const ::Agentmaster::SessionCatalog> index;
+                    if (const auto keeper = ::Agentmaster::SharedSessionCatalogKeeper())
+                    {
+                        index = keeper->Current(); // the newest published index: reads nothing, waits for nothing
+                    }
+                    if ((index ? index->gatheredUnixMs : 0) != _sidePanelForkFamilyListBuiltMs || (index ? index->entries.size() : 0) != _sidePanelForkFamilyListSize)
+                    {
+                        _sidePanelDirty = true; // the update works the family out again from the newer index
+                    }
+                }
+                catch (...)
+                {
+                    // The list keeps the family it has; the next tick asks again. Recorded (Rule #18).
+                    ::Agentmaster::AgentLogCaughtException(L"side panel fork family: the index belt");
+                }
+            }
+        }
         if (_sidePanelDirty)
         {
             _SidePanelRebuildCards(); // the update refreshes the timing texts too — no separate timing pass
@@ -4198,6 +4286,10 @@ namespace winrt::TerminalApp::implementation
         {
             const auto mode = _appSettings.tabColorMode;
             const auto snap = _sessionRegistry->SnapshotLiveForCards();
+            // The fork links this snapshot shows (a fork that still carries its parent): remembered BEFORE the caches are
+            // synced below, so a fork family worked out in this update already has them (SIDE_PANEL.md §2l "The card's
+            // Filter menu"). One empty() per session; noexcept.
+            _SidePanelNoteForkLinks(snap);
             const auto terms = ::Agentmaster::ParseSessionQuery(_sidePanelSearchText);
             // LOCAL scope (the default): only the sessions whose tab lives in THIS window — the hosted
             // set, snapshotted ONCE per update and remembered so the periodic tick can detect a hosting
@@ -4217,6 +4309,12 @@ namespace winrt::TerminalApp::implementation
             // reads its tags once (GetSessionTags: SessionStore's (size,mtime)-validated record cache — one file stat); a card
             // that stays reads nothing. Rows the filters hid are never read — unless a filter needs them (By Tag, Favorite).
             _SidePanelSyncFactCaches();
+            // The session index THIS update's fork family came from (SIDE_PANEL.md §2l "The card's Filter menu"): what the
+            // periodic tick compares the newest published index with. The list's own copy of the stamps, taken here and
+            // nowhere else — the cache's stamps also move when the funnel panel's counts bring the family up to date, and
+            // a newer index consumed there would otherwise never re-filter the list.
+            _sidePanelForkFamilyListBuiltMs = _sidePanelForkFamilyIndexBuiltMs;
+            _sidePanelForkFamilyListSize = _sidePanelForkFamilyIndexSize;
             // The status icon's per-update inputs (SIDE_PANEL.md §2g) — read here, before the rows, because the Unread filter
             // (SIDE_PANEL.md §2l) judges membership by the same census the rings show.
             const SidePanelIndicatorInputs indicators = SidePanelReadIndicatorInputs(_appSettings);
@@ -4977,6 +5075,16 @@ namespace winrt::TerminalApp::implementation
                             if (const auto page = weakThis.get())
                             {
                                 page->_SidePanelAppendPinItems(m, id, /*fromAiView*/ false);
+                            }
+                        };
+                        // Under Tags, the card's "Filter ▸" submenu (SIDE_PANEL.md §2l "The card's Filter menu"; the user's
+                        // place for it): this card's folder and the folders above it, its state, its tags, its branch
+                        // and its fork family — filled at every open from the session as it is then. Only a SESSION
+                        // card has it: an AI search result card's menu does not (the list it would filter is covered).
+                        host.afterTags = [weakThis, id](MenuFlyout& m) {
+                            if (const auto page = weakThis.get())
+                            {
+                                page->_SidePanelAppendFilterItems(m, id);
                             }
                         };
                         // SIDE_PANEL.md §2k: "Open New Session Here" and "Fork session" open the new tab right next to THIS
@@ -7311,6 +7419,27 @@ namespace winrt::TerminalApp::implementation
             _sidePanelFavoriteById.clear();
             _sidePanelFavoritesEpoch = factsEpoch;
         }
+        // The fork family (SIDE_PANEL.md §2l "The card's Filter menu"): while the record names one, its members are brought
+        // up to date HERE — once per update or census, before any session is judged (_SidePanelFilterFactsOf only looks a
+        // session up in the set). With no family picked the set is dropped: a window that filters by none keeps no ids.
+        // Contained: a failure (out of memory) leaves the set as it was — a member may be missing until the next update —
+        // and is recorded (Rule #18).
+        try
+        {
+            if (_sidePanelFilters.forkFamilyOf.empty())
+            {
+                _sidePanelForkFamilyIds.clear();
+                _sidePanelForkFamilyAnchor.clear();
+            }
+            else
+            {
+                (void)_SidePanelForkFamilyIds(_sidePanelFilters.forkFamilyOf);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelSyncFactCaches: the fork family");
+        }
     }
 
     const std::vector<std::wstring>& TerminalPage::_SidePanelTagsOf(const std::wstring& id)
@@ -7367,6 +7496,19 @@ namespace winrt::TerminalApp::implementation
         f.favorite = needFavorite && _SidePanelFavoriteOf(s.id);
         // The card's "active … ago" source (SidePanelCardModelFor): the transcript's last activity, else the hook anchor.
         f.lastActivityMs = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
+        // The two facets a card's Filter menu sets (SIDE_PANEL.md §2l "The card's Filter menu"), each read only while the
+        // record holds a pick for it — like the folder keys above: a branch copy and a set lookup per session per update
+        // are for the windows that filter by them.
+        if (!_sidePanelFilters.branch.empty())
+        {
+            f.branch = s.branch; // the registry's branch: live from the transcript, saved for a tab not started yet
+        }
+        if (!_sidePanelFilters.forkFamilyOf.empty())
+        {
+            // The family's members were brought up to date for this record's anchor by _SidePanelSyncFactCaches, which every
+            // caller runs before it judges a session — once per update, never per session. Here: one set lookup.
+            f.inForkFamily = _sidePanelForkFamilyIds.count(::Agentmaster::SidePanelFoldId(s.id)) != 0;
+        }
         return f;
     }
 
@@ -8521,6 +8663,419 @@ namespace winrt::TerminalApp::implementation
             // The pause stays as it was: Resume filter still brings the row back. Recorded (Rule #18).
             ::Agentmaster::AgentLogCaughtException(L"_SidePanelNoteFilterTextChanged");
         }
+    }
+
+    // ======================================================================================
+    // The card's Filter menu (SIDE_PANEL.md §2l)
+    // ======================================================================================
+    // WHAT (the user's request of 2026-11-12): "Now add filters to right-click menu on cards. You need to suggest me what we
+    // can put there." Their picks from six suggestions (design-ask with mockups): "Folder, state, tags", "Parent folders
+    // too", "Pause / Resume and Clear" and "Branch and fork family" — not the card's flags, not "hide sessions like this";
+    // a pick does "Start over" (it replaces the whole filter with that one thing); the line sits "Under Tags".
+    // HOW: the shared session menu calls the card's host hook right under Tags (SessionMenuHost::afterTags), which appends
+    // ONE "Filter" line whose submenu is filled from the session as it is at the open. Each line is a plain value
+    // (SidePanelCardPick); its click, one tick later, hands it to SidePanelApplyCardPick and the result to the one writer.
+    // BRANCH and FORK FAMILY are facets of the record like the others (a chip each, its click and ✕, saved per window), set
+    // from here alone. A branch is on the registry record (live from the transcript, saved for a tab not started). A fork's
+    // PARENT is not, once the fork has a transcript of its own — so the family's links come from the process's session
+    // index (SharedSessionCatalogKeeper, read in the background by whoever asks first) plus the registry's link of a fork
+    // with no transcript yet; the list follows the index through a belt in the periodic tick.
+
+    void TerminalPage::_SidePanelNoteForkLinks(const std::vector<::Agentmaster::SessionInfo>& snap) noexcept
+    {
+        try
+        {
+            for (const auto& s : snap)
+            {
+                if (s.forkParentId.empty())
+                {
+                    continue; // no fork, or a fork with a transcript of its own (the session index has its parent)
+                }
+                if (_sidePanelForkLinksSeen.size() >= kSidePanelForkLinksSeenMax)
+                {
+                    // Bounded: start over. Whatever was seen long ago has a transcript by now, so the index holds it.
+                    _sidePanelForkLinksSeen.clear();
+                    // The map's size is the links' version only while links are ADDED; after a start-over it could grow
+                    // back to the very size the list's family was worked out at, over other links. A size no map has
+                    // makes the next list update work the family out again, whatever the map then holds.
+                    _sidePanelForkFamilyLinksSeenSize = SIZE_MAX;
+                }
+                // try_emplace: a link already seen is left as it is (a fork's parent never changes), so the map's size —
+                // the links' version (_sidePanelForkFamilyLinksSeenSize) — moves only for a link that is new.
+                _sidePanelForkLinksSeen.try_emplace(::Agentmaster::SidePanelFoldId(s.id), ::Agentmaster::SidePanelFoldId(s.forkParentId));
+            }
+        }
+        catch (...)
+        {
+            // A link is missed until the session index holds it (the fork's first turn). Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelNoteForkLinks");
+        }
+    }
+
+    const std::unordered_set<std::wstring>& TerminalPage::_SidePanelForkFamilyIds(const std::wstring& anchorId)
+    {
+        const std::wstring anchor = ::Agentmaster::SidePanelFoldId(anchorId);
+        // The session index as it is PUBLISHED NOW — never waited for (Current reads nothing). Null until some search, or a
+        // fork family pick, asked for its first build; a build publishes what it has after each step, newest sessions first.
+        std::shared_ptr<const ::Agentmaster::SessionCatalog> index;
+        if (const auto keeper = ::Agentmaster::SharedSessionCatalogKeeper())
+        {
+            index = keeper->Current();
+        }
+        const int64_t builtMs = index ? index->gatheredUnixMs : 0;
+        const size_t indexSize = index ? index->entries.size() : 0;
+        if (anchor == _sidePanelForkFamilyAnchor && builtMs == _sidePanelForkFamilyIndexBuiltMs && indexSize == _sidePanelForkFamilyIndexSize &&
+            _sidePanelForkLinksSeen.size() == _sidePanelForkFamilyLinksSeenSize)
+        {
+            return _sidePanelForkFamilyIds; // the same anchor over the same links: the set stands
+        }
+        // Every link known — the index's, then the ones seen on the registry (SidePanelWorkOutForkFamily).
+        // Assigned whole, then stamped: a throw leaves the old set with its old stamps (it is still the set they name).
+        _sidePanelForkFamilyIds = SidePanelWorkOutForkFamily(anchor, index.get(), _sidePanelForkLinksSeen);
+        _sidePanelForkFamilyAnchor = anchor;
+        _sidePanelForkFamilyIndexBuiltMs = builtMs;
+        _sidePanelForkFamilyIndexSize = indexSize;
+        _sidePanelForkFamilyLinksSeenSize = _sidePanelForkLinksSeen.size();
+        return _sidePanelForkFamilyIds;
+    }
+
+    void TerminalPage::_SidePanelEnsureForkIndex(bool force) noexcept
+    {
+        try
+        {
+            const uint64_t now = ::GetTickCount64();
+            if (!force && _sidePanelForkFamilyEnsureTick != 0 && now - _sidePanelForkFamilyEnsureTick < kSidePanelForkIndexRefreshMs)
+            {
+                return; // asked within the last five minutes (kSidePanelForkIndexRefreshMs says why not sooner)
+            }
+            _sidePanelForkFamilyEnsureTick = now;
+            if (const auto keeper = ::Agentmaster::SharedSessionCatalogKeeper())
+            {
+                // Every session (0): a fork's parent may be of any age — the period the AI search asks for by default, so
+                // this never widens what the keeper reads. Returns at once: the read runs on the keeper's own thread, and
+                // starts only when none runs and the index is missing or older than the keeper's freshness window (10 s).
+                // A first build that is still running goes on by itself; this ask is then a no-op.
+                static_assert(::Agentmaster::kSessionSearchDefaultDays == 0, "the fork family asks for the period the AI search asks for by default: every session");
+                keeper->Ensure(0);
+            }
+        }
+        catch (...)
+        {
+            // The family is worked out from the index there is (and the links seen). Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelEnsureForkIndex");
+        }
+    }
+
+    void TerminalPage::_SidePanelClearAllFilters() noexcept
+    {
+        try
+        {
+            // The chips row's Clear, in the same order: the box first (its mirror is emptied at once, so the writer already
+            // sees "no text"), then an empty record — every pick, every chip's switch and the pause go together.
+            const bool hadText = !::Agentmaster::ParseSessionQuery(_sidePanelSearchText).empty();
+            _SidePanelClearFilterText();
+            // The text chip went with the box's text (told to the writer: a row of typed text alone holds no record to
+            // change, and the Clear must still write its nav line and re-filter at once).
+            const bool textDropped = hadText && ::Agentmaster::ParseSessionQuery(_sidePanelSearchText).empty();
+            _SidePanelSetFilters(::Agentmaster::SidePanelFilters{}, L"clear (card menu)", textDropped);
+        }
+        catch (...)
+        {
+            // Only reading the box's text can throw (out of memory); the two calls that change anything are noexcept. Then
+            // nothing was cleared, or the box alone (its own TextChanged re-filters). Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelClearAllFilters");
+        }
+    }
+
+    void TerminalPage::_SidePanelApplyCardFilterPick(const ::Agentmaster::SidePanelCardPick& pick) noexcept
+    {
+        using ::Agentmaster::SidePanelCardPickKind;
+        using ::Agentmaster::SidePanelCardPickOutcome;
+        try
+        {
+            if (!_sidePanelBuilt)
+            {
+                return;
+            }
+            const bool textActive = !::Agentmaster::ParseSessionQuery(_sidePanelSearchText).empty();
+            auto next = _sidePanelFilters;
+            const SidePanelCardPickOutcome outcome = ::Agentmaster::SidePanelApplyCardPick(next, textActive, pick);
+            if (outcome == SidePanelCardPickOutcome::Nothing)
+            {
+                return; // the line names nothing a filter can hold (the session's facts changed since the menu was filled)
+            }
+            // START OVER (the user's pick): every other chip goes — the typed text is a chip too, so the box is emptied
+            // (its mirror at once; a no-op when the box is empty, as it is whenever the line was the whole filter).
+            _SidePanelClearFilterText();
+            // Did the text chip go? Told to the writer: a pick that leaves the RECORD as it was (the filter was this very
+            // pick plus typed text) must still write its nav line and re-filter at once, not when the box's own
+            // TextChanged arrives (it is asynchronous).
+            const bool textDropped = textActive && ::Agentmaster::ParseSessionQuery(_sidePanelSearchText).empty();
+            // What the line did, by its kind alone (never a folder, a tag or a branch name: the nav trail keeps them out).
+            const wchar_t* kind = L"state";
+            switch (pick.kind)
+            {
+            case SidePanelCardPickKind::Folder:
+                kind = pick.includeSubfolders ? L"folder (with subfolders)" : L"folder (exactly)";
+                break;
+            case SidePanelCardPickKind::Tag:
+                kind = L"tag";
+                break;
+            case SidePanelCardPickKind::Untagged:
+                kind = L"untagged";
+                break;
+            case SidePanelCardPickKind::Branch:
+                kind = L"branch";
+                break;
+            case SidePanelCardPickKind::ForkFamily:
+                kind = L"fork family";
+                break;
+            case SidePanelCardPickKind::State:
+            default:
+                break;
+            }
+            const bool startedOver = outcome == SidePanelCardPickOutcome::StartedOver;
+            _SidePanelSetFilters(std::move(next), std::wstring{ startedOver ? L"card menu: start over with " : L"card menu: drop " } + kind, textDropped);
+            if (!startedOver)
+            {
+                return;
+            }
+            if (pick.kind == SidePanelCardPickKind::Folder)
+            {
+                // By Folder's pick history (SIDE_PANEL.md §2l "The By Folder submenu"), the user's "repicking moves to
+                // top": a folder picked from a card is a pick like one made in the folder card. Never throws.
+                _SidePanelRememberFolderPick(pick.value, pick.includeSubfolders);
+            }
+            else if (pick.kind == SidePanelCardPickKind::ForkFamily)
+            {
+                // The family is only as complete as the session index: ask for a fresh one now (and for its first build
+                // in a process where no search ever read it). The periodic tick's belt re-filters when it is published.
+                _SidePanelEnsureForkIndex(/*force*/ true);
+            }
+        }
+        catch (...)
+        {
+            // The record was not set by this call (the writer contains its own failures); the box may already be emptied,
+            // and its own TextChanged then re-filters. The row shows the filter as it is. Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelApplyCardFilterPick");
+        }
+    }
+
+    void TerminalPage::_SidePanelAppendFilterItems(MenuFlyout& menu, const std::wstring& id)
+    {
+        using ::Agentmaster::SidePanelCardPick;
+        using ::Agentmaster::SidePanelCardPickKind;
+        if (!_sidePanelBuilt || !_sessionRegistry)
+        {
+            return;
+        }
+        // The session as it is NOW (the menu is being filled at its open): a lean read — no line needs the queue.
+        const auto lean = _sessionRegistry->GetWithoutQueue(id);
+        if (!lean || !lean->live)
+        {
+            return; // unknown, or closed since its card was drawn: no card of the list to be "like"
+        }
+        const bool textActive = !::Agentmaster::ParseSessionQuery(_sidePanelSearchText).empty();
+        const auto weakThis = get_weak();
+        // An item's icon from an icon font or the symbol font (a FontIcon per item — a menu element cannot be shared).
+        const auto fontIcon = [](const wchar_t* family, const wchar_t* glyph) {
+            FontIcon icon{};
+            icon.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ family });
+            icon.Glyph(glyph);
+            return icon;
+        };
+        // One PICK line: its words (checked when the line is the whole filter), its icon, a dim hint at its right end, its
+        // tip, its id — and its click, which runs one tick later through the ⋯ menu's command helper (inside the Click the
+        // menu is still closing and hands focus back as it closes). The pick is captured BY VALUE; the page weakly.
+        const auto addPick = [&](const winrt::Windows::Foundation::Collections::IVector<MenuFlyoutItemBase>& items,
+                                 const std::wstring& words,
+                                 const FontIcon& icon,
+                                 const std::wstring& hint,
+                                 const SidePanelCardPick& pick,
+                                 const std::wstring& what,
+                                 std::wstring_view automationId) {
+            const bool whole = ::Agentmaster::SidePanelCardPickIsWholeFilter(_sidePanelFilters, textActive, pick);
+            MenuFlyoutItem item;
+            item.Text(winrt::hstring{ (whole ? L"\x2713 " : L"") + words });
+            if (icon)
+            {
+                item.Icon(icon);
+            }
+            if (!hint.empty())
+            {
+                // The dim, right-aligned column a menu keeps for accelerator words: here where the folder is (its path, a
+                // deep one cut in the middle), or how many sessions a fork family holds. No key is bound to it.
+                item.KeyboardAcceleratorTextOverride(winrt::hstring{ hint });
+            }
+            AgentSetTip(item, winrt::hstring{ whole ? L"This is the whole filter now. Click to drop it: the list shows every session again." :
+                                                       L"Start the filter over with " + what + L". Every other filter is dropped, and the filter box is emptied." });
+            AgentSetAutomationId(item, automationId);
+            AgentSetItemStatus(item, whole ? L"checked" : L"");
+            item.Click([weakThis, pick](const IInspectable&, const RoutedEventArgs&) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelRunMenuCommand(L"card menu: Filter", [pick](TerminalPage& page) { page._SidePanelApplyCardFilterPick(pick); });
+                }
+            });
+            items.Append(item);
+        };
+
+        MenuFlyoutSubItem filterSub;
+        filterSub.Text(L"Filter");
+        filterSub.Icon(fontIcon(kSidePanelFluentFont, kSidePanelFilterGlyph));
+        AgentSetTip(filterSub, L"Filter the cards to sessions like this one: its folder, its state, a tag, its branch or its fork family. A pick starts the filter over \x2014 it replaces whatever was filtering.");
+        AgentSetAutomationId(filterSub, L"am.side.cardFilter");
+        const auto lines = filterSub.Items();
+
+        // 1. Folder ▸ : the card's folder — the EFFECTIVE one, which the card's own folder line shows — and each folder
+        //    above it (the user's "Parent folders too"), then that folder "exactly". The drive's root is not offered.
+        const auto levels = ::Agentmaster::SidePanelFolderLevels(::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, *lean));
+        if (!levels.empty())
+        {
+            MenuFlyoutSubItem folderSub;
+            folderSub.Text(L"Folder");
+            folderSub.Icon(fontIcon(kSidePanelFluentFont, kSidePanelFolderGlyph));
+            AgentSetTip(folderSub, L"Sessions that work in this card's folder, or in a folder above it: choose how wide.");
+            AgentSetAutomationId(folderSub, L"am.side.cardFilter.folder");
+            for (size_t level = 0; level < levels.size(); ++level)
+            {
+                SidePanelCardPick pick;
+                pick.kind = SidePanelCardPickKind::Folder;
+                pick.value = levels[level];
+                pick.includeSubfolders = true;
+                // The hint says WHERE the folder is: its path, a deep one cut in the middle (SidePanelFolderHint) so the hint
+                // never takes the line's room from the folder's own name. The tooltip carries the whole path.
+                addPick(folderSub.Items(), ::Agentmaster::SidePanelFolderLeaf(levels[level]), fontIcon(kSidePanelFluentFont, kSidePanelFolderGlyph), ::Agentmaster::SidePanelFolderHint(levels[level]), pick,
+                        L"the folder " + levels[level] + L" and every folder under it", L"am.side.cardFilter.folder." + std::to_wstring(level));
+            }
+            folderSub.Items().Append(MenuFlyoutSeparator{});
+            SidePanelCardPick exact;
+            exact.kind = SidePanelCardPickKind::Folder;
+            exact.value = levels.front();
+            exact.includeSubfolders = false;
+            addPick(folderSub.Items(), ::Agentmaster::SidePanelFolderLineName(levels.front(), false), fontIcon(kSidePanelFluentFont, kSidePanelFolderGlyph), L"without its subfolders", exact,
+                    L"exactly the folder " + levels.front() + L" (its subfolders are not included)", L"am.side.cardFilter.folder.exact");
+            lines.Append(folderSub);
+        }
+
+        // 2. State: the card's state, in the state's color.
+        for (const auto& choice : ::Agentmaster::kSidePanelStateChoices)
+        {
+            if (choice.state != lean->state)
+            {
+                continue;
+            }
+            SidePanelCardPick pick;
+            pick.kind = SidePanelCardPickKind::State;
+            pick.stateBit = choice.bit;
+            auto dot = fontIcon(kSidePanelSymbolFont, L"\x25CF");
+            dot.Foreground(SolidColorBrush{ StateColor(choice.state) });
+            addPick(lines, std::wstring{ L"State: " } + choice.label, dot, std::wstring{}, pick, std::wstring{ L"the sessions that are " } + choice.label + L" now", L"am.side.cardFilter.state");
+            break;
+        }
+
+        // 3. Tags: one line per tag the card carries; a card with none offers "Untagged". A copy of the tags: the cache
+        //    entry the reference names may be dropped by a list update before the menu is done with it.
+        const std::vector<std::wstring> tags = _SidePanelTagsOf(id);
+        for (const auto& tag : tags)
+        {
+            SidePanelCardPick pick;
+            pick.kind = SidePanelCardPickKind::Tag;
+            pick.value = tag;
+            addPick(lines, L"Tag: " + tag, fontIcon(kSidePanelFluentFont, kSidePanelTagGlyph), std::wstring{}, pick, L"the sessions tagged " + tag, L"am.side.cardFilter.tag." + ::Agentmaster::FoldTagName(tag));
+        }
+        if (tags.empty())
+        {
+            SidePanelCardPick pick;
+            pick.kind = SidePanelCardPickKind::Untagged;
+            addPick(lines, L"Untagged", fontIcon(kSidePanelFluentFont, kSidePanelTagGlyph), std::wstring{}, pick, L"the sessions that carry no tag", L"am.side.cardFilter.untagged");
+        }
+
+        // 4. Branch: the card's git branch, when it has one (the name as the record would keep it: one line).
+        if (const std::wstring branch = ::Agentmaster::SidePanelOneLineOrEmpty(lean->branch, ::Agentmaster::kSidePanelBranchMaxChars); !branch.empty())
+        {
+            SidePanelCardPick pick;
+            pick.kind = SidePanelCardPickKind::Branch;
+            pick.value = branch;
+            addPick(lines, L"Branch: " + branch, fontIcon(kSidePanelSymbolFont, kSidePanelBranchSymbol), std::wstring{}, pick, L"the sessions on the git branch " + branch + L" (in any repository)", L"am.side.cardFilter.branch");
+        }
+
+        // 5. Fork family: this session, the session it was forked from and their forks. Who is in it comes from the
+        //    session index and the registry's links (see the block comment above). One lean snapshot per right-click (a
+        //    user's action, never a per-update cost): its fresh fork links are remembered, and the hint counts the family's
+        //    cards as the list would show them — in the panel's scope.
+        //    ⚠ Worked out HERE, into a set of this menu's own — never through _SidePanelForkFamilyIds: that is the LIST's
+        //    cache, stamped with the index it was worked out from, and the periodic tick re-filters the list when a newer
+        //    index differs from those stamps. A menu that refreshed the cache (for this card's family, or for the
+        //    filter's own with a newer index) would move the stamps without the list having been judged again, and the
+        //    tick would never see the newer index.
+        {
+            const auto snap = _sessionRegistry->SnapshotLiveForCards();
+            _SidePanelNoteForkLinks(snap); // noexcept
+            std::shared_ptr<const ::Agentmaster::SessionCatalog> index;
+            if (const auto keeper = ::Agentmaster::SharedSessionCatalogKeeper())
+            {
+                index = keeper->Current(); // the newest published index: reads nothing, waits for nothing; null = none yet
+            }
+            const std::unordered_set<std::wstring> family = SidePanelWorkOutForkFamily(::Agentmaster::SidePanelFoldId(id), index.get(), _sidePanelForkLinksSeen);
+            const bool local = !_sidePanelGlobal;
+            std::unordered_set<std::wstring> hosted;
+            if (local)
+            {
+                hosted = _HostedSessionIds();
+            }
+            size_t members = 0;
+            for (const auto& s : snap)
+            {
+                if (s.live && (!local || hosted.find(s.id) != hosted.end()) && family.count(::Agentmaster::SidePanelFoldId(s.id)) != 0)
+                {
+                    ++members;
+                }
+            }
+            SidePanelCardPick pick;
+            pick.kind = SidePanelCardPickKind::ForkFamily;
+            // The family is one whoever of it names it: when the filter already is this card's family — named by another
+            // member — the line stands for THAT pick, so it reads checked and its click drops the filter.
+            const std::wstring& current = _sidePanelFilters.forkFamilyOf;
+            pick.value = (!current.empty() && family.count(::Agentmaster::SidePanelFoldId(current)) != 0) ? current : id;
+            addPick(lines, L"Fork family", fontIcon(kSidePanelFluentFont, kSidePanelForkGlyph), members <= 1 ? std::wstring{ L"this session alone" } : std::to_wstring(members) + L" sessions", pick,
+                    L"this session's fork family: the session, the one it was forked from, and their forks", L"am.side.cardFilter.family");
+        }
+
+        // 6. Pause filter / Resume filter and Clear all filters (the user's "Pause / Resume and Clear"): the chips row's two
+        //    links, here while the row holds a chip — a pick or typed text.
+        if (::Agentmaster::SidePanelFiltersActive(_sidePanelFilters) || textActive)
+        {
+            lines.Append(MenuFlyoutSeparator{});
+            const bool applies = ::Agentmaster::SidePanelAnyChipOn(_sidePanelFilters, textActive, _sidePanelFilterTextOff);
+            MenuFlyoutItem pause;
+            pause.Text(applies ? kSidePanelPauseWords : kSidePanelResumeWords);
+            pause.Icon(fontIcon(kSidePanelFluentFont, applies ? kSidePanelPauseGlyph : kSidePanelResumeGlyph));
+            AgentSetTip(pause, winrt::hstring{ applies ? L"Switch every filter off without dropping it: the list shows every session. Resume filter brings them back as they were." :
+                                                         L"Apply the filters again, as they were before the pause." });
+            AgentSetAutomationId(pause, L"am.side.cardFilter.pause");
+            pause.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelRunMenuCommand(L"card menu: Pause filter", [](TerminalPage& page) { page._SidePanelToggleFilterPause(); });
+                }
+            });
+            lines.Append(pause);
+            MenuFlyoutItem clear;
+            clear.Text(L"Clear all filters");
+            clear.Icon(fontIcon(kSidePanelFluentFont, kSidePanelClearGlyph));
+            AgentSetTip(clear, L"Drop every filter, and empty the filter box: the cards list every session again.");
+            AgentSetAutomationId(clear, L"am.side.cardFilter.clear");
+            clear.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelRunMenuCommand(L"card menu: Clear all filters", [](TerminalPage& page) { page._SidePanelClearAllFilters(); });
+                }
+            });
+            lines.Append(clear);
+        }
+
+        menu.Items().Append(filterSub);
     }
 
     bool TerminalPage::_SidePanelEnsureFolderCard() noexcept
@@ -10067,7 +10622,20 @@ namespace winrt::TerminalApp::implementation
         }
         // The row shows while a filter is PICKED or text is typed (the user's "a row only shown when filter is on") — applied
         // or not: a pick that is off keeps its chip, dimmed, so a paused row stays on screen with the way back in it.
-        const auto chips = ::Agentmaster::SidePanelFilterChips(_sidePanelFilters, textActive ? SidePanelAiTrim(_sidePanelSearchText) : std::wstring{}, _sidePanelFilterTextOff);
+        // The fork family chip names the session the family is OF by its title AS IT IS NOW (a rename shows at the next
+        // update; the words are part of the row's signature below): one lean registry read, only while a family is picked.
+        // A session the registry does not know (its record gone) leaves the chip reading "fork family".
+        // On ONE line (OneLine): a title may hold line breaks (the rename boxes accept Return), and a chip is one line —
+        // the board's cards and the tree's rows present a title the same way.
+        std::wstring familyName;
+        if (!_sidePanelFilters.forkFamilyOf.empty() && _sessionRegistry)
+        {
+            if (const auto anchor = _sessionRegistry->GetWithoutQueue(_sidePanelFilters.forkFamilyOf))
+            {
+                familyName = std::wstring{ OneLine(anchor->title) };
+            }
+        }
+        const auto chips = ::Agentmaster::SidePanelFilterChips(_sidePanelFilters, textActive ? SidePanelAiTrim(_sidePanelSearchText) : std::wstring{}, _sidePanelFilterTextOff, familyName);
         if (chips.empty())
         {
             if (_sidePanelFilterRow.Visibility() != Visibility::Collapsed)
@@ -10205,6 +10773,18 @@ namespace winrt::TerminalApp::implementation
                 }
                 case ::Agentmaster::SidePanelChipKind::Active:
                     glyph = SidePanelFluentGlyph(kSidePanelClockGlyph, 9, 0.85);
+                    break;
+                case ::Agentmaster::SidePanelChipKind::Branch:
+                {
+                    // No icon font on this PC has a branch glyph (see kSidePanelBranchSymbol): the text symbol, from the
+                    // symbol font by name so it is never drawn as an emoji.
+                    auto branch = Text(kSidePanelBranchSymbol, 10, false, 0.9);
+                    branch.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ kSidePanelSymbolFont });
+                    glyph = branch;
+                    break;
+                }
+                case ::Agentmaster::SidePanelChipKind::ForkFamily:
+                    glyph = SidePanelFluentGlyph(kSidePanelForkGlyph, 9, 0.9); // the session menu's "Fork session" icon
                     break;
                 case ::Agentmaster::SidePanelChipKind::Text:
                 default:
@@ -10363,6 +10943,12 @@ namespace winrt::TerminalApp::implementation
                     break;
                 case ::Agentmaster::SidePanelChipKind::Active:
                     id += L"active";
+                    break;
+                case ::Agentmaster::SidePanelChipKind::Branch:
+                    id += L"branch";
+                    break;
+                case ::Agentmaster::SidePanelChipKind::ForkFamily:
+                    id += L"family";
                     break;
                 case ::Agentmaster::SidePanelChipKind::Text:
                 default:

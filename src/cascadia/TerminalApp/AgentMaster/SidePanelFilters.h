@@ -35,6 +35,13 @@
 //     SidePanelFiltersInEffect, and the matcher does so itself;
 //   - a pick that ADDS a filter, and typing in the filter box, resume a paused row; removing a pick never does.
 //
+// THE CARD'S FILTER MENU (the user's request of 2026-11-12: "Now add filters to right-click menu on cards. You need to
+// suggest me what we can put there", and their picks the same day from six suggestions): the menu offers THIS card's
+// folder and each folder above it, its state, its tags, its git branch and its fork family ("Folder, state, tags",
+// "Parent folders too", "Branch and fork family" — two NEW facets, set from a card alone), plus Pause filter / Resume
+// filter and Clear ("Pause / Resume and Clear"); a pick STARTS THE FILTER OVER — it replaces the whole filter with that
+// one thing, every other chip dropped ("Start over"); the line sits under Tags ("Under Tags").
+//
 // WHAT lives here (no WinRT, no XAML, no file IO): the facets and their bits, the six states and the four "active within"
 // windows the panel offers, the filter record and its edits, the per-session facts the predicate reads, the compiled
 // matcher (folder keys and tag names folded once per list update), the chips the row shows and what each chip's ✕ leaves,
@@ -52,6 +59,8 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <unordered_map> // the fork links' adjacency (SidePanelForkFamily)
+#include <unordered_set> // a fork family's member ids
 #include <vector>
 
 #include "Json.h" // json::Value — the window record's "sidePanelFilters" object
@@ -65,7 +74,9 @@ namespace Agentmaster
 
     // One kind of filter. Each facet is one bit of a facet mask (SidePanelFacetBit): the matcher answers with the mask of the
     // facets a session passes, so the funnel's panel can count "how many would be listed if this were picked" for one facet
-    // with every OTHER facet applied (SidePanelPassesAllBut). The order is the chips row's order.
+    // with every OTHER facet applied (SidePanelPassesAllBut). The first nine are in the chips row's order; Branch and
+    // ForkFamily were added after them and keep the END of the enum, so no value moved — in the ROW their chips stand right
+    // after the folders' (SidePanelFilterChips decides the row's order, never the enum's).
     enum class SidePanelFacet : uint8_t
     {
         Folder, // By Folder (the "+" card in pick mode): the session works in a picked folder (or under it)
@@ -77,9 +88,11 @@ namespace Agentmaster
         Favorite, // the flag "Favorite": the session carries the ★ (FAVORITES.md)
         Active, // Active within: the session's last activity is younger than the picked window
         Text, // the typed text in the filter box (its verdict is the caller's: SidePanelSessionMatches)
+        Branch, // By Branch (a card's Filter menu): the session is on the picked git branch
+        ForkFamily, // Fork family (a card's Filter menu): the session belongs to the fork family of the picked session
     };
     // How many facets there are (the enum's size); the all-pass mask has this many bits.
-    inline constexpr uint32_t kSidePanelFacetCount = 9;
+    inline constexpr uint32_t kSidePanelFacetCount = 11;
 
     // The bit of one facet in a facet mask.
     //   facet   - the facet.
@@ -200,6 +213,115 @@ namespace Agentmaster
         return L"active in " + std::to_wstring(minutes) + L" min";
     }
 
+    // ===== Branch and fork family (the two facets only a card's Filter menu sets) =======================================
+    // (SIDE_PANEL.md §2l "The card's Filter menu"; the user's pick "Branch and fork family", 2026-11-12.)
+
+    // The longest branch name and session id a record may hold. A git ref component is at most 255 bytes and a session id
+    // is a 36-character GUID; anything longer in a stored record is not one of them, and reads as "not set".
+    inline constexpr size_t kSidePanelBranchMaxChars = 255;
+    inline constexpr size_t kSidePanelSessionIdMaxChars = 128;
+
+    // A stored single-line value made safe to keep and to show: blanks cut at both ends; a value that is empty, holds a
+    // control character (a line break above all) or is longer than `maxChars` reads as "" — "not set", never a chip the row
+    // cannot draw on one line.
+    //   text     - the value as picked or as read from a record.
+    //   maxChars - the longest value accepted.
+    //   returns  - the trimmed value, or "".
+    //   throws   - std::bad_alloc.
+    [[nodiscard]] inline std::wstring SidePanelOneLineOrEmpty(std::wstring_view text, size_t maxChars)
+    {
+        const auto blank = [](wchar_t c) { return c == L' ' || c == L'\t'; };
+        while (!text.empty() && blank(text.front()))
+        {
+            text.remove_prefix(1);
+        }
+        while (!text.empty() && blank(text.back()))
+        {
+            text.remove_suffix(1);
+        }
+        if (text.empty() || text.size() > maxChars)
+        {
+            return {};
+        }
+        for (const wchar_t c : text)
+        {
+            if (c < 0x20 || c == 0x7F)
+            {
+                return {};
+            }
+        }
+        return std::wstring{ text };
+    }
+
+    // A session id folded for comparing: ASCII letters lowered, nothing else touched. Session ids are GUIDs, which Claude
+    // Code and Agentmaster write in lower case — but a fork link read from a transcript and an id read from the registry
+    // must compare equal whatever case a tool wrote them in, or a family silently loses a member.
+    //   id      - the id.
+    //   returns - the folded id.
+    //   throws  - std::bad_alloc.
+    [[nodiscard]] inline std::wstring SidePanelFoldId(std::wstring_view id)
+    {
+        std::wstring folded{ id };
+        for (auto& c : folded)
+        {
+            if (c >= L'A' && c <= L'Z')
+            {
+                c = static_cast<wchar_t>(c - L'A' + L'a');
+            }
+        }
+        return folded;
+    }
+
+    // One fork link: `child` was forked from `parent`. Gathered by the caller from wherever it knows them — the session
+    // index's transcript facts (TranscriptStats::forkedFromId, every session on disk) and the registry's link of a fork
+    // that has no transcript yet (SessionInfo::forkParentId).
+    struct SidePanelForkLink
+    {
+        std::wstring child; // the fork's session id
+        std::wstring parent; // the session it was forked from
+    };
+
+    // THE FORK FAMILY of one session: that session, the session it was forked from, and their forks — every session
+    // reachable from `anchor` over the fork links in EITHER direction (the connected component, as the Sessions page's "By
+    // Fork Family" computes it), so two forks of one parent are in one family even when the parent is closed.
+    //   anchor  - the session the family is of.
+    //   links   - every fork link known (an empty id on either side is skipped; a duplicate or a self-link is harmless).
+    //   returns - the members' ids, FOLDED (SidePanelFoldId); always holds the anchor, also when it is in no link.
+    //   throws  - std::bad_alloc.
+    [[nodiscard]] inline std::unordered_set<std::wstring> SidePanelForkFamily(std::wstring_view anchor, const std::vector<SidePanelForkLink>& links)
+    {
+        std::unordered_multimap<std::wstring, std::wstring> neighbors;
+        neighbors.reserve(links.size() * 2);
+        for (const auto& link : links)
+        {
+            if (link.child.empty() || link.parent.empty())
+            {
+                continue;
+            }
+            std::wstring child = SidePanelFoldId(link.child);
+            std::wstring parent = SidePanelFoldId(link.parent);
+            neighbors.emplace(child, parent);
+            neighbors.emplace(std::move(parent), std::move(child));
+        }
+        std::unordered_set<std::wstring> family;
+        std::vector<std::wstring> pending{ SidePanelFoldId(anchor) };
+        family.insert(pending.back());
+        while (!pending.empty())
+        {
+            const std::wstring id = std::move(pending.back());
+            pending.pop_back();
+            const auto range = neighbors.equal_range(id);
+            for (auto it = range.first; it != range.second; ++it)
+            {
+                if (family.insert(it->second).second)
+                {
+                    pending.push_back(it->second);
+                }
+            }
+        }
+        return family;
+    }
+
     // ===== The filter record ============================================================================================
     // The record itself — SidePanelFolderFilter and SidePanelFilters — is plain data in SessionModels.h, beside the
     // WindowRecord that persists it (WindowRecord::sidePanelFilters); this header holds its rules. The record is kept
@@ -216,7 +338,8 @@ namespace Agentmaster
     [[nodiscard]] inline bool SidePanelFiltersActive(const SidePanelFilters& filters) noexcept
     {
         return !filters.folders.empty() || filters.states != 0 || !filters.tags.empty() || filters.untagged || filters.draft ||
-               filters.unread || filters.pinned || filters.favorite || filters.activeWithinMinutes != 0;
+               filters.unread || filters.pinned || filters.favorite || filters.activeWithinMinutes != 0 || !filters.branch.empty() ||
+               !filters.forkFamilyOf.empty();
     }
 
     // The mask of the facets that hold a pick (a facet with none is left out). ⚠ PICKED, not applied — see
@@ -237,6 +360,8 @@ namespace Agentmaster
         mask |= filters.favorite ? SidePanelFacetBit(SidePanelFacet::Favorite) : 0u;
         mask |= filters.activeWithinMinutes == 0 ? 0u : SidePanelFacetBit(SidePanelFacet::Active);
         mask |= textActive ? SidePanelFacetBit(SidePanelFacet::Text) : 0u;
+        mask |= filters.branch.empty() ? 0u : SidePanelFacetBit(SidePanelFacet::Branch);
+        mask |= filters.forkFamilyOf.empty() ? 0u : SidePanelFacetBit(SidePanelFacet::ForkFamily);
         return mask;
     }
 
@@ -255,7 +380,8 @@ namespace Agentmaster
     inline constexpr uint32_t kSidePanelOffFacetBits = SidePanelFacetBit(SidePanelFacet::State) | SidePanelFacetBit(SidePanelFacet::Tag) |
                                                        SidePanelFacetBit(SidePanelFacet::Draft) | SidePanelFacetBit(SidePanelFacet::Unread) |
                                                        SidePanelFacetBit(SidePanelFacet::Pinned) | SidePanelFacetBit(SidePanelFacet::Favorite) |
-                                                       SidePanelFacetBit(SidePanelFacet::Active);
+                                                       SidePanelFacetBit(SidePanelFacet::Active) | SidePanelFacetBit(SidePanelFacet::Branch) |
+                                                       SidePanelFacetBit(SidePanelFacet::ForkFamily);
 
     // One facet of kSidePanelOffFacetBits and the token the window record stores for it in "off" (never a bit number: the
     // enum may grow, a saved switch must keep its meaning). The tokens are the chips' own id words (am.side.chip.<token>).
@@ -264,7 +390,7 @@ namespace Agentmaster
         SidePanelFacet facet; // the facet whose chip is switched off
         const wchar_t* token; // the window record's stable token ("state")
     };
-    // Every facet of kSidePanelOffFacetBits, in the chips row's order.
+    // Every facet of kSidePanelOffFacetBits, in the enum's order (the order the "off" array is written in).
     inline constexpr SidePanelOffFacetToken kSidePanelOffFacetTokens[] = {
         { SidePanelFacet::State, L"state" },
         { SidePanelFacet::Tag, L"tag" },
@@ -273,6 +399,8 @@ namespace Agentmaster
         { SidePanelFacet::Pinned, L"pinned" },
         { SidePanelFacet::Favorite, L"favorite" },
         { SidePanelFacet::Active, L"active" },
+        { SidePanelFacet::Branch, L"branch" },
+        { SidePanelFacet::ForkFamily, L"family" },
     };
 
     // Does the record hold a pick in one facet? (Picked, whether or not it applies.)
@@ -391,6 +519,14 @@ namespace Agentmaster
         out.pinned = filters.pinned && on(SidePanelFacet::Pinned);
         out.favorite = filters.favorite && on(SidePanelFacet::Favorite);
         out.activeWithinMinutes = on(SidePanelFacet::Active) ? filters.activeWithinMinutes : 0u;
+        if (on(SidePanelFacet::Branch))
+        {
+            out.branch = filters.branch;
+        }
+        if (on(SidePanelFacet::ForkFamily))
+        {
+            out.forkFamilyOf = filters.forkFamilyOf;
+        }
         return out;
     }
 
@@ -554,6 +690,10 @@ namespace Agentmaster
         bool pinned{ false }; // the card is pinned to the top (IsSidePanelPinStamp)
         bool favorite{ false }; // the session carries the ★ (IsSessionFavorite)
         int64_t lastActivityMs{ 0 }; // the card's "active … ago" source (Unix ms; 0 = unknown)
+        std::wstring branch; // the session's git branch (SessionInfo::branch); "" = unknown, which matches no picked branch; read only by the Branch facet
+        // The session belongs to the fork family the record names (SidePanelFilters::forkFamilyOf): the caller looks its id
+        // up in SidePanelForkFamily's set (the links are the caller's to gather). Read only by the ForkFamily facet.
+        bool inForkFamily{ false };
     };
 
     // A filter record COMPILED for one list update: the picked folders' keys and the picked tags' folded names computed once,
@@ -591,6 +731,15 @@ namespace Agentmaster
         //   returns - true while the flag is checked and applies.
         //   throws  - nothing.
         [[nodiscard]] bool NeedsUnread() const noexcept { return _unread; }
+        // Does the Branch facet read the session's branch? (The caller then copies it into the facts.)
+        //   returns - true while a branch is picked and applies.
+        //   throws  - nothing.
+        [[nodiscard]] bool NeedsBranch() const noexcept { return !_branch.empty(); }
+        // Does the ForkFamily facet read the session's membership? (The caller then looks every judged session up in the
+        // family's set — which it must have gathered the fork links for.)
+        //   returns - true while a fork family is picked and applies.
+        //   throws  - nothing.
+        [[nodiscard]] bool NeedsForkFamily() const noexcept { return _family; }
 
         // The mask of the facets a session passes (an inactive facet always passes).
         //   facts  - the session's facts (see SidePanelFilterFacts for what each facet reads).
@@ -609,6 +758,9 @@ namespace Agentmaster
             passed |= (!_favorite || facts.favorite) ? SidePanelFacetBit(SidePanelFacet::Favorite) : 0u;
             passed |= SidePanelActiveWithin(facts.lastActivityMs, _nowMs, _activeMinutes) ? SidePanelFacetBit(SidePanelFacet::Active) : 0u;
             passed |= textOk ? SidePanelFacetBit(SidePanelFacet::Text) : 0u;
+            // Branch: exact (git refs are case-sensitive); a session whose branch is unknown ("") matches no picked branch.
+            passed |= (_branch.empty() || facts.branch == _branch) ? SidePanelFacetBit(SidePanelFacet::Branch) : 0u;
+            passed |= (!_family || facts.inForkFamily) ? SidePanelFacetBit(SidePanelFacet::ForkFamily) : 0u;
             return passed;
         }
 
@@ -657,7 +809,9 @@ namespace Agentmaster
             _pinned{ filters.pinned },
             _favorite{ filters.favorite },
             _activeMinutes{ filters.activeWithinMinutes > kSidePanelActiveMaxMinutes ? 0u : filters.activeWithinMinutes },
-            _nowMs{ nowMs }
+            _nowMs{ nowMs },
+            _branch{ filters.branch },
+            _family{ !filters.forkFamilyOf.empty() }
         {
             for (const auto& folder : filters.folders)
             {
@@ -714,6 +868,8 @@ namespace Agentmaster
         bool _favorite{ false };
         uint32_t _activeMinutes{ 0 }; // Active within (0 = any time)
         int64_t _nowMs{ 0 }; // the update's clock
+        std::wstring _branch; // By Branch's pick ("" = no constraint)
+        bool _family{ false }; // a fork family is picked: only its members pass (the facts say who is one)
     };
 
     // ===== The chips row ================================================================================================
@@ -730,6 +886,8 @@ namespace Agentmaster
         Favorite, // the Favorite flag
         Active, // the Active within window
         Text, // the typed text (its ✕ empties the filter box — the caller's)
+        Branch, // the picked git branch (after the folders in the row; at the enum's end so no value moved)
+        ForkFamily, // the picked fork family (after the branch in the row)
     };
 
     // One chip of the row: its kind, the folder it stands for, its words, its tooltip and whether it applies. The glyph and
@@ -745,7 +903,7 @@ namespace Agentmaster
         bool off{ false };
     };
 
-    // The facet a chip stands for (a Folder chip: By Folder, of which it is one folder). The two enums list the same nine
+    // The facet a chip stands for (a Folder chip: By Folder, of which it is one folder). The two enums list the same eleven
     // things in the same order; this spells the pairing out, so a reorder of either cannot silently cross them.
     //   kind    - the chip's kind.
     //   returns - its facet.
@@ -770,6 +928,10 @@ namespace Agentmaster
             return SidePanelFacet::Favorite;
         case SidePanelChipKind::Active:
             return SidePanelFacet::Active;
+        case SidePanelChipKind::Branch:
+            return SidePanelFacet::Branch;
+        case SidePanelChipKind::ForkFamily:
+            return SidePanelFacet::ForkFamily;
         case SidePanelChipKind::Text:
         default:
             return SidePanelFacet::Text;
@@ -795,15 +957,21 @@ namespace Agentmaster
         return trimmed.substr(sep + 1);
     }
 
-    // The chips the row shows, in the facets' order: one per folder, one for the states, one for the tags, one per flag, one
-    // for the window, one for the typed text. A pick that is OFF keeps its chip (SidePanelFilterChip::off): the row shows
-    // what is picked, dimmed where it does not apply — so a paused row is still the row, and never hides.
-    //   filters   - the window's record.
-    //   typedText - the filter box's text, trimmed by the caller ("" = no text chip).
-    //   textOff   - the text chip was switched off by a click (the caller's flag; the record's pause dims it as well).
-    //   returns   - the chips (empty = the row hides).
-    //   throws    - std::bad_alloc.
-    [[nodiscard]] inline std::vector<SidePanelFilterChip> SidePanelFilterChips(const SidePanelFilters& filters, std::wstring_view typedText, bool textOff = false)
+    // The chips the row shows, in the row's order: one per folder, the branch, the fork family, one for the states, one for
+    // the tags, one per flag, one for the window, one for the typed text. A pick that is OFF keeps its chip
+    // (SidePanelFilterChip::off): the row shows what is picked, dimmed where it does not apply — so a paused row is still
+    // the row, and never hides.
+    //   filters    - the window's record.
+    //   typedText  - the filter box's text, trimmed by the caller ("" = no text chip).
+    //   textOff    - the text chip was switched off by a click (the caller's flag; the record's pause dims it as well).
+    //   familyName - the fork family chip's name: the title of the session the family is OF (SidePanelFilters::forkFamilyOf),
+    //                looked up by the caller at draw time so a rename shows; "" = unknown (the chip reads "fork family").
+    //   returns    - the chips (empty = the row hides).
+    //   throws     - std::bad_alloc.
+    [[nodiscard]] inline std::vector<SidePanelFilterChip> SidePanelFilterChips(const SidePanelFilters& filters,
+                                                                              std::wstring_view typedText,
+                                                                              bool textOff = false,
+                                                                              std::wstring_view familyName = {})
     {
         std::vector<SidePanelFilterChip> chips;
         for (size_t i = 0; i < filters.folders.size(); ++i)
@@ -815,6 +983,25 @@ namespace Agentmaster
             chip.text = SidePanelFolderLeaf(folder.path) + (folder.includeSubfolders ? L"" : L" (exactly)");
             chip.tip = folder.includeSubfolders ? (L"Folder " + folder.path + L" and every folder under it.") :
                                                   (L"Exactly the folder " + folder.path + L" (its subfolders are not included).");
+            chips.push_back(std::move(chip));
+        }
+        // The two facets a card's Filter menu sets (SIDE_PANEL.md §2l "The card's Filter menu"): right after the folders,
+        // the other "where the session works" picks.
+        if (!filters.branch.empty())
+        {
+            SidePanelFilterChip chip;
+            chip.kind = SidePanelChipKind::Branch;
+            chip.text = filters.branch;
+            chip.tip = L"Sessions on the git branch " + filters.branch + L" (in any repository).";
+            chips.push_back(std::move(chip));
+        }
+        if (!filters.forkFamilyOf.empty())
+        {
+            SidePanelFilterChip chip;
+            chip.kind = SidePanelChipKind::ForkFamily;
+            chip.text = familyName.empty() ? std::wstring{ L"fork family" } : L"fork family: " + std::wstring{ familyName };
+            chip.tip = familyName.empty() ? std::wstring{ L"One session, the session it was forked from, and their forks." } :
+                                            L"The session \x201C" + std::wstring{ familyName } + L"\x201D, the session it was forked from, and their forks.";
             chips.push_back(std::move(chip));
         }
         if ((filters.states & kSidePanelAllStateBits) != 0)
@@ -932,6 +1119,12 @@ namespace Agentmaster
             break;
         case SidePanelChipKind::Active:
             filters.activeWithinMinutes = 0;
+            break;
+        case SidePanelChipKind::Branch:
+            filters.branch.clear();
+            break;
+        case SidePanelChipKind::ForkFamily:
+            filters.forkFamilyOf.clear();
             break;
         case SidePanelChipKind::Text:
         default:
@@ -1106,6 +1299,14 @@ namespace Agentmaster
         {
             switchOn(SidePanelFacet::Active);
         }
+        if (!after.branch.empty() && after.branch != before.branch)
+        {
+            switchOn(SidePanelFacet::Branch);
+        }
+        if (!after.forkFamilyOf.empty() && after.forkFamilyOf != before.forkFamilyOf)
+        {
+            switchOn(SidePanelFacet::ForkFamily);
+        }
         if (added)
         {
             after.paused = false;
@@ -1152,7 +1353,8 @@ namespace Agentmaster
 
     // The record normalized: folders trimmed, absolute only and unique by NormDirKey (the first spelling, its choice and its
     // switch kept); tags normalized and unique by FoldTagName (the first spelling kept); states cut to kSidePanelAllStateBits;
-    // a window past kSidePanelActiveMaxMinutes read as 0; the chips' off bits cut to kSidePanelOffFacetBits AND to the facets
+    // a window past kSidePanelActiveMaxMinutes read as 0; the branch and the fork family's anchor id each one trimmed line
+    // (SidePanelOneLineOrEmpty); the chips' off bits cut to kSidePanelOffFacetBits AND to the facets
     // that hold a pick (a switch with no chip is dropped, so a pick made later in that facet starts on). What the loader
     // returns, so a hand-edited record can never carry a filter the row cannot show or the panel cannot uncheck.
     // The PAUSE is kept as given, on an empty record too: at run time it may cover the typed text alone, which this
@@ -1202,6 +1404,10 @@ namespace Agentmaster
         out.pinned = filters.pinned;
         out.favorite = filters.favorite;
         out.activeWithinMinutes = filters.activeWithinMinutes > kSidePanelActiveMaxMinutes ? 0u : filters.activeWithinMinutes;
+        // A branch and a fork family's anchor id are single lines of text: surrounding blanks cut, and a value with a line
+        // break or past a sane length (a corrupt record) read as "not set" — the row could not show it.
+        out.branch = SidePanelOneLineOrEmpty(filters.branch, kSidePanelBranchMaxChars);
+        out.forkFamilyOf = SidePanelOneLineOrEmpty(filters.forkFamilyOf, kSidePanelSessionIdMaxChars);
         // After the picks: only a facet that holds one can have its chip switched off.
         out.offFacets = filters.offFacets & kSidePanelOffFacetBits & SidePanelActiveFacets(out, false);
         out.paused = filters.paused;
@@ -1271,6 +1477,15 @@ namespace Agentmaster
         if (filters.activeWithinMinutes != 0)
         {
             o.Set(L"activeWithinMinutes", json::Value::MkNum(static_cast<double>(filters.activeWithinMinutes)));
+        }
+        // The two facets a card's Filter menu sets: the branch's name, and the id of the session the fork family is of.
+        if (!filters.branch.empty())
+        {
+            o.Set(L"branch", json::Value::MkStr(filters.branch));
+        }
+        if (!filters.forkFamilyOf.empty())
+        {
+            o.Set(L"forkFamilyOf", json::Value::MkStr(filters.forkFamilyOf));
         }
         // The switches, only beside a pick (see the contract above: no pick = an empty object).
         if (SidePanelFiltersActive(filters))
@@ -1365,6 +1580,10 @@ namespace Agentmaster
                                           static_cast<uint32_t>(minutes) :
                                           0u;
         }
+        // The two facets a card's Filter menu sets (a non-string reads as "" = not set; normalizing cuts blanks and drops a
+        // value that is not one line).
+        raw.branch = v.StrAt(L"branch");
+        raw.forkFamilyOf = v.StrAt(L"forkFamilyOf");
         // The chips switched off one by one: the tokens of their facets (normalizing drops a switch whose facet has no pick).
         if (const auto* off = v.Find(L"off"); off && off->type == json::Value::Type::Arr)
         {
@@ -1385,6 +1604,261 @@ namespace Agentmaster
         // A pause with no pick could only have covered the typed text, which is not saved: nothing is left to pause.
         (void)SidePanelSettlePause(out, /*textActive*/ false);
         return out;
+    }
+
+    // ===== The card's Filter menu (SIDE_PANEL.md §2l "The card's Filter menu") ==========================================
+    // The user's request of 2026-11-12: "Now add filters to right-click menu on cards. You need to suggest me what we can
+    // put there". Their picks the same day (design-ask with mockups, six suggestions):
+    //   - what goes in: "Folder, state, tags" (the funnel's three "By ..." filters with THIS card's own values), "Parent
+    //     folders too" (the card's folder and each folder above it, and "exactly"), "Branch and fork family" (the two new
+    //     facets above) and "Pause / Resume and Clear" — not the card's flags, not "hide sessions like this";
+    //   - a pick: "Start over" — it replaces the WHOLE filter with that one thing; every other chip is dropped, the typed
+    //     text's too (over "narrow that kind to this card's value" and over "add, like the funnel");
+    //   - where: "Under Tags" — one "Filter" line with a submenu in the menu's second group.
+    // So a line of the menu stands for ONE thing (SidePanelCardPick), and a click makes the filter exactly that thing — or,
+    // when the filter already is exactly that thing, drops it (the line then shows a check: the app's other filter menus
+    // toggle the same way, and a pick that changed nothing would read as a dead line).
+
+    // How many levels the menu's Folder submenu lists at most: the card's folder and up to seven folders above it. A
+    // deeper path is rare, and a menu taller than this hides the "exactly" line under it.
+    inline constexpr size_t kSidePanelFolderLevelsMax = 8;
+
+    // The folder a card works in and each folder above it, NEAREST FIRST — the Folder submenu's lines (the user's "Parent
+    // folders too": choose how wide). The drive's or the share's ROOT is left out: a filter on "K:\" lists nearly every
+    // session, so the line would only be a way to see everything by mistake. A card whose own folder IS a root still gets
+    // that one line (its folder is always offered).
+    //   folder    - the card's folder, in any spelling (trimmed here: TrimFolderPath).
+    //   maxLevels - the most levels listed (kSidePanelFolderLevelsMax by default; 0 lists none).
+    //   returns   - the folders in their display spelling: [the folder, its parent, its grandparent, ...]; empty for a path
+    //               that is not an absolute folder.
+    //   throws    - std::bad_alloc.
+    [[nodiscard]] inline std::vector<std::wstring> SidePanelFolderLevels(std::wstring_view folder, size_t maxLevels = kSidePanelFolderLevelsMax)
+    {
+        std::vector<std::wstring> levels;
+        std::wstring path = TrimFolderPath(folder);
+        if (maxLevels == 0 || path.empty() || !IsAbsoluteFolderPath(path))
+        {
+            return levels;
+        }
+        // "\\server" or "\\server\share": the top of a UNC path (TrimFolderPath turned every '/' into '\').
+        const auto isShareRoot = [](const std::wstring& p) {
+            if (p.rfind(L"\\\\", 0) != 0)
+            {
+                return false;
+            }
+            const auto afterServer = p.find(L'\\', 2);
+            return afterServer == std::wstring::npos || p.find(L'\\', afterServer + 1) == std::wstring::npos;
+        };
+        levels.push_back(path);
+        while (levels.size() < maxLevels)
+        {
+            const auto sep = path.find_last_of(L'\\');
+            if (sep == std::wstring::npos)
+            {
+                break;
+            }
+            std::wstring parent = path.substr(0, sep);
+            // "K:\x" -> "K:": the parent is the drive's root ("K:\" keeps its separator, so cutting at it leaves the bare
+            // drive). "\\server\share\x" -> "\\server\share": the share's root. Neither is listed.
+            if ((parent.size() == 2 && parent[1] == L':') || isShareRoot(parent) || !IsAbsoluteFolderPath(parent))
+            {
+                break;
+            }
+            levels.push_back(parent);
+            path = std::move(parent);
+        }
+        return levels;
+    }
+
+    // The longest hint a Folder line of the card's Filter menu shows (characters). A menu is at most 456 DIPs wide, and a
+    // menu line gives its hint column the width of the hint's text FIRST: what is left over is the folder's own name,
+    // which is then what gets cut. 32 characters of the hint's 12-DIP text are about 200 DIPs, which leaves a name of
+    // some 24 characters whole. ⚠ Reckoned from the menu's template, not measured on a build.
+    inline constexpr size_t kSidePanelFolderHintMaxChars = 32;
+
+    // The dim hint beside a Folder line of the card's Filter menu: WHERE that folder is. The whole path while it is short;
+    // a longer one keeps its two ends around an ellipsis — the root with the first folder under it ("K:\source\"), then
+    // as many whole trailing folders as fit ("\cascadia\TerminalApp") — so a deep path never takes the line's room from
+    // the folder's name. Display only: the line's pick and its tooltip carry the whole path.
+    //   path     - the folder in its display spelling (a line of SidePanelFolderLevels: '\' separators, no trailing one).
+    //   maxChars - the longest hint returned (kSidePanelFolderHintMaxChars by default). Under 8 there is no room for two
+    //              ends, and the path is returned whole.
+    //   returns  - the path, or "<head>…<tail>" of at most maxChars characters, always shorter than the path.
+    //   throws   - std::bad_alloc.
+    [[nodiscard]] inline std::wstring SidePanelFolderHint(std::wstring_view path, size_t maxChars = kSidePanelFolderHintMaxChars)
+    {
+        if (path.size() <= maxChars || maxChars < 8)
+        {
+            return std::wstring{ path };
+        }
+        const size_t room = maxChars - 1; // one character is the ellipsis
+        // THE HEAD: the root and the first folder under it, with the separator after it ("K:\source\"; of a share, its
+        // server: "\\server\"). Kept only while it leaves the tail at least half the room — a long first folder would
+        // otherwise push the folder's own end, the part that tells the lines apart, out of the hint.
+        size_t headEnd = 0;
+        {
+            size_t from = 0;
+            if (path.size() >= 3 && path[1] == L':' && path[2] == L'\\')
+            {
+                from = 3; // past "K:\"
+            }
+            else if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\')
+            {
+                from = 2; // past the "\\" of a share
+            }
+            const auto sep = path.find(L'\\', from);
+            headEnd = sep == std::wstring_view::npos ? 0 : sep + 1;
+            if (headEnd > room / 2)
+            {
+                headEnd = 0;
+            }
+        }
+        // THE TAIL: the path's end. Its earliest start is the point from which the rest fills the room exactly; the first
+        // separator at or after that point makes it start at a whole folder. With none (the folder's own name is longer
+        // than the room) the tail is cut inside the name. path.size() > room + 1, so the tail starts at least two
+        // characters after the head ends: something is always left out, and the hint is shorter than the path.
+        const size_t tailRoom = room - headEnd;
+        size_t tailStart = path.size() - tailRoom;
+        if (const auto sep = path.find(L'\\', tailStart); sep != std::wstring_view::npos && sep + 1 < path.size())
+        {
+            tailStart = sep;
+        }
+        std::wstring hint{ path.substr(0, headEnd) };
+        hint.push_back(L'\x2026');
+        hint.append(path.substr(tailStart));
+        return hint;
+    }
+
+    // What ONE line of the card's Filter menu filters by.
+    enum class SidePanelCardPickKind : uint8_t
+    {
+        Folder, // a folder (the card's own, or one above it), with or without its subfolders
+        State, // the card's state
+        Tag, // one of the card's tags
+        Untagged, // "Untagged": offered by a card that carries no tag
+        Branch, // the card's git branch
+        ForkFamily, // the card's fork family
+    };
+
+    // One line of the card's Filter menu: the one thing its click makes the filter. Plain values, so the menu item can
+    // capture it and act a tick later without holding anything of the card.
+    struct SidePanelCardPick
+    {
+        SidePanelCardPickKind kind{ SidePanelCardPickKind::State };
+        // Folder: the folder's path. Tag: the tag's name. Branch: the branch's name. ForkFamily: the id of the session the
+        // family is of. Unused by State and Untagged.
+        std::wstring value;
+        bool includeSubfolders{ true }; // Folder only: the folder and everything under it (false = exactly that folder)
+        uint32_t stateBit{ 0 }; // State only: the state's SidePanelStateChoice::bit
+    };
+
+    // The record that holds EXACTLY one pick: what the filter becomes when a line of the card's menu starts it over.
+    //   pick    - the line.
+    //   returns - the normalized record; EMPTY when the pick names nothing a filter can hold (a folder that is not an
+    //             absolute path, a blank tag, branch or id, a state bit no state owns) — the caller must not apply that.
+    //   throws  - std::bad_alloc.
+    [[nodiscard]] inline SidePanelFilters SidePanelFiltersForCardPick(const SidePanelCardPick& pick)
+    {
+        SidePanelFilters only;
+        switch (pick.kind)
+        {
+        case SidePanelCardPickKind::Folder:
+            (void)SidePanelAddFolderFilter(only, pick.value, pick.includeSubfolders);
+            break;
+        case SidePanelCardPickKind::State:
+            (void)SidePanelToggleState(only, pick.stateBit); // from no state: the bit is switched on
+            break;
+        case SidePanelCardPickKind::Tag:
+            (void)SidePanelToggleTag(only, pick.value); // from no tag: the tag is added
+            break;
+        case SidePanelCardPickKind::Untagged:
+            only.untagged = true;
+            break;
+        case SidePanelCardPickKind::Branch:
+            only.branch = pick.value;
+            break;
+        case SidePanelCardPickKind::ForkFamily:
+            only.forkFamilyOf = pick.value;
+            break;
+        default:
+            break;
+        }
+        return NormalizeSidePanelFilters(only);
+    }
+
+    // Is the filter EXACTLY this pick, and applied: one chip, lit, and no text typed? What puts the check on a line of the
+    // card's menu — and makes its click drop the filter instead of setting it again. Judged by identity, never by spelling:
+    // a folder by its key, a tag by its folded name, a session id folded.
+    //   filters    - the window's record.
+    //   textActive - the filter box holds a query (the text is a chip too: with it, no line is the whole filter).
+    //   pick       - the line.
+    //   returns    - true when the row shows that one chip, on, and nothing else.
+    //   throws     - std::bad_alloc.
+    [[nodiscard]] inline bool SidePanelCardPickIsWholeFilter(const SidePanelFilters& filters, bool textActive, const SidePanelCardPick& pick)
+    {
+        if (textActive)
+        {
+            return false;
+        }
+        const SidePanelFilters only = SidePanelFiltersForCardPick(pick);
+        if (!SidePanelFiltersActive(only))
+        {
+            return false; // the line names nothing: it can be no filter
+        }
+        const SidePanelFilters now = NormalizeSidePanelFilters(filters);
+        if (now.paused || now.offFacets != 0 || now.folders.size() != only.folders.size() || now.tags.size() != only.tags.size())
+        {
+            return false; // paused or a chip off (it must APPLY), or another number of picks
+        }
+        for (size_t i = 0; i < now.folders.size(); ++i)
+        {
+            if (now.folders[i].off || now.folders[i].includeSubfolders != only.folders[i].includeSubfolders || NormDirKey(now.folders[i].path) != NormDirKey(only.folders[i].path))
+            {
+                return false;
+            }
+        }
+        for (size_t i = 0; i < now.tags.size(); ++i)
+        {
+            if (FoldTagName(now.tags[i]) != FoldTagName(only.tags[i]))
+            {
+                return false;
+            }
+        }
+        return now.states == only.states && now.untagged == only.untagged && now.draft == only.draft && now.unread == only.unread &&
+               now.pinned == only.pinned && now.favorite == only.favorite && now.activeWithinMinutes == only.activeWithinMinutes &&
+               now.branch == only.branch && SidePanelFoldId(now.forkFamilyOf) == SidePanelFoldId(only.forkFamilyOf);
+    }
+
+    // What a click on a line of the card's menu did to the record.
+    enum class SidePanelCardPickOutcome : uint8_t
+    {
+        Nothing, // the line names nothing a filter can hold: the record is untouched
+        StartedOver, // the filter is now exactly this pick (the user's "Start over": every other chip dropped)
+        Dropped, // the filter WAS exactly this pick: it is dropped, and nothing filters
+    };
+
+    // A click on a line of the card's Filter menu — the user's "Start over": the filter becomes EXACTLY that pick, whatever
+    // it held (every other pick, every chip's switch and the pause go; the caller empties the filter box, whose text is a
+    // chip too). When the filter already is exactly that pick, the click drops it instead.
+    //   filters    - the record to edit.
+    //   textActive - the filter box holds a query.
+    //   pick       - the line clicked.
+    //   returns    - what happened; on Nothing the record is untouched.
+    //   throws     - std::bad_alloc.
+    [[nodiscard]] inline SidePanelCardPickOutcome SidePanelApplyCardPick(SidePanelFilters& filters, bool textActive, const SidePanelCardPick& pick)
+    {
+        SidePanelFilters only = SidePanelFiltersForCardPick(pick);
+        if (!SidePanelFiltersActive(only))
+        {
+            return SidePanelCardPickOutcome::Nothing;
+        }
+        if (SidePanelCardPickIsWholeFilter(filters, textActive, pick))
+        {
+            filters = SidePanelFilters{};
+            return SidePanelCardPickOutcome::Dropped;
+        }
+        filters = std::move(only);
+        return SidePanelCardPickOutcome::StartedOver;
     }
 
     // ===== By Folder's PICK HISTORY and its hover SUBMENU (SIDE_PANEL.md §2l "The By Folder submenu") =====================

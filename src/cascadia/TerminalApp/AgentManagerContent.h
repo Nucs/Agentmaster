@@ -363,6 +363,12 @@ namespace winrt::TerminalApp::implementation
         {
             // §2j: the host's own items right under "Jump to Tab" (Pin to Top / Unpin) — see SessionMenuHostItems.
             SessionMenuHostItems afterJumpToTab;
+            // §2l "The card's Filter menu": the host's own items right under "Tags" — the side panel card's "Filter ▸"
+            // submenu (the user's place for it, 2026-11-12: "Under Tags"). Called on the same terms as afterJumpToTab (at
+            // every fill of the menu, appending only; a throw costs the host's items alone), with the menu whose last item
+            // is Tags. Only the side panel's SESSION cards pass it: its AI search result cards do not (the card list their
+            // filter would narrow is covered by the AI view), nor does any Agent Manager surface.
+            SessionMenuHostItems afterTags;
             // §2k: "Open New Session Here ▸ <model>" (a Claude session) and "Open New Codex Session Here" (a Codex one, which
             // passes ""). When set, the item calls THIS instead of the content's spawn handlers (_spawnHandler /
             // _codexLaunchHandler), so the host decides where the new tab opens: the side panel opens it right next to the

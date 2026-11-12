@@ -78,6 +78,7 @@ namespace Agentmaster
     enum class SidePanelFacet : uint8_t;
     struct SidePanelFilterFacts; // Agentmaster (SIDE_PANEL.md §2l): SidePanelFilters.h — what the filters read of one session (the return type of _SidePanelFilterFactsOf; complete in TerminalPage.AgentSidePanel.cpp)
     struct SidePanelFilterChip; // Agentmaster (SIDE_PANEL.md §2l): SidePanelFilters.h — one chip of the chips row (the parameter of _SidePanelToggleFilterChip; complete in TerminalPage.AgentSidePanel.cpp)
+    struct SidePanelCardPick; // Agentmaster (SIDE_PANEL.md §2l "The card's Filter menu"): SidePanelFilters.h — one line of a card's Filter menu (the parameter of _SidePanelApplyCardFilterPick; complete in TerminalPage.AgentSidePanel.cpp)
 }
 
 namespace winrt::TerminalApp::implementation
@@ -1016,6 +1017,41 @@ namespace winrt::TerminalApp::implementation
         // chip's neighbor slides under the pointer, so a TOGGLE click within the double-click time of it is ignored. A second
         // ✕ is not: dropping chip after chip with quick clicks worked before the toggles existed, and still does.
         uint64_t _sidePanelFilterRemoveTick{ 0 };
+        // --- The card's Filter menu: the FORK FAMILY (SIDE_PANEL.md §2l "The card's Filter menu") ---
+        // The user's pick of 2026-11-12 ("Branch and fork family"). The record names the session a family is OF
+        // (SidePanelFilters::forkFamilyOf); WHO is in it is worked out here, from the fork links: a session's fork parent is
+        // not kept on its registry record once the fork has a transcript of its own (SessionInfo::forkParentId is cleared at
+        // its first turn), so the links come from the process's session index (SharedSessionCatalogKeeper: every session on
+        // disk, TranscriptStats::forkedFromId) plus the registry's link of a fork with no transcript yet.
+        // The members of the family the FILTER names, as last worked out (ids FOLDED, SidePanelFoldId): what a list update
+        // and the funnel panel's counts look every session up in while a family is picked. Valid for the anchor and the
+        // links named by the three stamps below; worked out again when any of them moved (_SidePanelForkFamilyIds).
+        // ⚠ The filter's family only: the card menu's "Fork family" line, which may be of another family, works its own
+        // set out and never touches this one.
+        std::unordered_set<std::wstring> _sidePanelForkFamilyIds;
+        std::wstring _sidePanelForkFamilyAnchor; // the folded id the set was worked out for ("" = none yet)
+        // Which session index the set's links came from, by its build time and its size — never by its address: a freed
+        // index's address can be given to the next one, and holding the index itself would keep 40-60 MB alive per window.
+        int64_t _sidePanelForkFamilyIndexBuiltMs{ 0 };
+        size_t _sidePanelForkFamilyIndexSize{ 0 };
+        // The session index the card LIST was last judged with (the two stamps above, copied by every list update right
+        // after it brought the family up to date; 0 / 0 = none). What the periodic tick compares the newest published
+        // index with to re-filter the list. ⚠ Not the cache's own stamps: those also move when the funnel panel's counts
+        // bring the family up to date, and a newer index consumed there would otherwise never reach the list.
+        int64_t _sidePanelForkFamilyListBuiltMs{ 0 };
+        size_t _sidePanelForkFamilyListSize{ 0 };
+        // The fork links SEEN on the registry: child (folded) -> parent (folded), taken from every list update's snapshot
+        // while a fork still carries its parent, and KEPT after the registry clears it — the bridge until the session index
+        // is read again and holds the fork's own transcript. Bounded (_SidePanelNoteForkLinks). Its size is the links'
+        // version while links are added; a start-over at the bound voids the stamp below instead.
+        std::unordered_map<std::wstring, std::wstring> _sidePanelForkLinksSeen;
+        // _sidePanelForkLinksSeen.size() when the set was worked out; SIZE_MAX = the map started over since (no size it can
+        // have equals that, so the next update works the family out again).
+        size_t _sidePanelForkFamilyLinksSeenSize{ 0 };
+        // When the session index was last asked to refresh for the fork family (GetTickCount64; 0 = never): at a pick, and
+        // at most once in five minutes while the facet applies — a fork made in a "+" tab is known to the index alone, and
+        // a refresh copies the whole index (kSidePanelForkIndexRefreshMs in TerminalPage.AgentSidePanel.cpp).
+        uint64_t _sidePanelForkFamilyEnsureTick{ 0 };
         // The ★ of each session the filters judged, read once per SessionFactsEpoch (a favorite set anywhere in this process
         // moves the epoch): the Favorite flag and the panel's counts need it for every session of the scope, and a read is a
         // session-store stat. UINT64_MAX = never read.
@@ -3828,9 +3864,10 @@ namespace winrt::TerminalApp::implementation
         // the resume rule and the save.
         //   next          - the record wanted.
         //   what          - what the user did, for the [nav] line ("state", "folder+", "chip x", "clear", "pause", ...).
-        //   textChipMoved - the TEXT chip's switch (_sidePanelFilterTextOff) was just changed by the caller: the list and
-        //                   the row are refreshed (and the line logged) even when the record itself is unchanged — the
-        //                   switch is not part of the record, so comparing records would miss it. Nothing is saved for it.
+        //   textChipMoved - the TEXT chip was just changed by the caller — its switch (_sidePanelFilterTextOff), or the chip
+        //                   itself, dropped with the box's text by a card menu's pick or Clear: the list and the row are
+        //                   refreshed (and the line logged) even when the record itself is unchanged — the text is not
+        //                   part of the record, so comparing records would miss it. Nothing is saved for it.
         //   returns - nothing; a no-op before the panel is built.
         //   throws  - nothing: a failure is logged (Rule #18) and the record keeps whatever was assigned before it.
         void _SidePanelSetFilters(::Agentmaster::SidePanelFilters next, std::wstring_view what, bool textChipMoved = false) noexcept;
@@ -3979,6 +4016,50 @@ namespace winrt::TerminalApp::implementation
         // typing in the box again resumes the filter), and an emptied box drops a pause that has nothing left to cover
         // (SidePanelFiltersAfterTextChange). Never throws (logged).
         void _SidePanelNoteFilterTextChanged() noexcept;
+        // --- The card's Filter menu (SIDE_PANEL.md §2l "The card's Filter menu") ---
+        // The user's request of 2026-11-12: "Now add filters to right-click menu on cards"; their picks: this card's folder
+        // and each folder above it, its state, its tags, its branch and its fork family, plus Pause filter / Resume filter
+        // and Clear; a pick STARTS THE FILTER OVER; the line sits under Tags.
+        // Append the card menu's "Filter ▸" submenu to `menu` (the session menu's afterTags hook; the menu's last item is
+        // Tags): Folder ▸ (the card's folder and each folder above it, then "<folder> (exactly)"), State, one line per tag
+        // (or Untagged), Branch, Fork family — each read from the session AS IT IS NOW (the menu is filled at its open) —
+        // then, while the row holds a chip, Pause filter / Resume filter and Clear all filters. The line that is the whole
+        // filter is checked. Every click runs one tick later (_SidePanelRunMenuCommand). Appends nothing for a session
+        // that is unknown or closed since its card was drawn.
+        //   menu - the session menu being filled.
+        //   id   - the card's session.
+        //   throws - what building XAML or the registry read throws (the session menu contains it and builds the rest).
+        void _SidePanelAppendFilterItems(winrt::Windows::UI::Xaml::Controls::MenuFlyout& menu, const std::wstring& id);
+        // A click on a line of the card's Filter menu — the user's "Start over": the filter becomes EXACTLY that pick
+        // (every other chip dropped, the typed text emptied, the pause lifted), or, when it already was exactly that
+        // pick, is dropped (SidePanelApplyCardPick). A folder picked this way joins By Folder's pick history, like a
+        // folder picked in the folder card; a fork family asks the session index to refresh. Through
+        // _SidePanelSetFilters. Never throws (a failure is logged and nothing changes).
+        //   pick - the line (plain values captured when the menu was filled).
+        void _SidePanelApplyCardFilterPick(const ::Agentmaster::SidePanelCardPick& pick) noexcept;
+        // Drop every filter and empty the filter box — what the chips row's Clear does — from the card menu's "Clear all
+        // filters". Never throws (logged).
+        void _SidePanelClearAllFilters() noexcept;
+        // Remember the fork links a list update's snapshot shows (a fork that still carries its parent on the registry),
+        // so they outlive the registry clearing them at the fork's first turn. Bounded: past 4,096 links the map starts
+        // over (the session index holds every link by then). Never throws (a failure is logged; a link is missed until the
+        // index has it).
+        //   snap - the live sessions of this update (SnapshotLiveForCards).
+        void _SidePanelNoteForkLinks(const std::vector<::Agentmaster::SessionInfo>& snap) noexcept;
+        // The members of the fork family the FILTER names (ids FOLDED), cached: worked out from the process's session
+        // index as it is published now (never waited for; null = not built yet) and the links seen on the registry, and
+        // kept until the anchor, the index or the seen links change. Called once per list update or count walk
+        // (_SidePanelSyncFactCaches), never per session. ⚠ For the filter's anchor only: asking for another session's
+        // family would replace the cached set under the list (the card menu works its own out instead).
+        //   anchorId - the session the family is of (SidePanelFilters::forkFamilyOf).
+        //   returns  - the cached set; the reference stays valid until the next call.
+        //   throws   - std::bad_alloc (the caller contains it; the old set and its stamps then stand).
+        const std::unordered_set<std::wstring>& _SidePanelForkFamilyIds(const std::wstring& anchorId);
+        // Ask the process's session index to refresh, in the background, for the fork family: at a pick, at once when
+        // this window never asked, then at most once in five minutes while the facet applies (a refresh copies the
+        // whole index). Returns at once; starts the index's first build when no search ever did. Never throws (logged).
+        //   force - true at a pick (whatever the last ask's age).
+        void _SidePanelEnsureForkIndex(bool force) noexcept;
         // --- By Folder's hover SUBMENU (SIDE_PANEL.md §2l "The By Folder submenu") ---
         // Build the submenu ONCE (the panel's dark card and Button brushes, its rows host, its key and pointer handlers, the
         // Root()-parented Popup). Returns true when it exists, false when the build failed (logged; the next hover retries).

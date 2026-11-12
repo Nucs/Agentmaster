@@ -1504,7 +1504,7 @@ same, in the window that hosts the card's tab.
     strip of the window they were used in.
   - No `[exc] _SidePanelLaunchNextToTab` line in hooks.log.
 
-### 2l. The filters — the funnel, its panel, By Folder and the chips row (2026-11-08; in dev 0.0.1.44 and production 0.8.0.12) — By Folder's hover submenu (2026-11-10, NOT BUILT yet) — Pause filter, Resume filter and a chip's click (2026-11-12, NOT BUILT yet)
+### 2l. The filters — the funnel, its panel, By Folder and the chips row (2026-11-08; in dev 0.0.1.44 and production 0.8.0.12) — By Folder's hover submenu (2026-11-10, NOT BUILT yet) — Pause filter, Resume filter and a chip's click (2026-11-12, NOT BUILT yet) — the card's Filter menu (2026-11-12, NOT BUILT yet)
 
 The user's request: "In sidemenu, we need to introduce ability to filter, Filter by folder and even have like the +, but a
 button for FILTER and in it have menu appear on click and then By Folder -> <the picker of +>. The row below the filter with
@@ -1957,6 +1957,171 @@ same day to the three design questions (asked with mockups):
   - No `[exc] _SidePanelToggleFilter…` / `_SidePanelNoteFilterTextChanged` / `side panel filter chip: …` /
     `side panel filter row: queue the pause` line in hooks.log.
 
+#### The card's Filter menu (2026-11-12, NOT BUILT yet)
+
+The user's request: "Now add filters to right-click menu on cards. You need to suggest me what we can put there". Six
+suggestions were shown as mockups; their answers the same day:
+
+| Question | Answer |
+|---|---|
+| What the menu offers (several could be picked) | **Folder, state, tags** (the funnel's three "By …" filters with THIS card's values) · **Parent folders too** (the card's folder and each folder above it, and "exactly") · **Pause / Resume and Clear** · **Branch and fork family** (two NEW kinds of filter). Not picked: the card's flags (Unsent draft, Unread, Pinned, Favorite), and "Hide sessions like this" (exclusions) |
+| What a pick does to a filter already set | **Start over** — the pick replaces the WHOLE filter with that one thing; every other chip is dropped (over "narrow that kind to this card's value", and over "add, like a row of the funnel") |
+| Where the lines sit | **Under Tags** — one "Filter" line with a submenu in the menu's second group (over "under Pin to Top", and over lines directly in the menu) |
+
+```
+ Jump to Tab
+ Pin to Top
+ ─────────────
+ Rename (F2)
+ Tags
+ Filter                    ›  ┌─────────────────────────────┐
+ Copy                      ›  │ 📁 Folder                  › │──┌──────────────────────────────────────────┐
+ Show Transcript              │ ●  State: Waiting for you    │  │ 📁 e2e           K:\source\Agentmaster\e2e │
+ ─────────────                │ 🏷 Tag: release              │  │ 📁 Agentmaster   K:\source\Agentmaster     │
+ Open New Session Here     ›  │ 🏷 Tag: ui                   │  │ 📁 source        K:\source                 │
+ …                            │ ⎇  Branch: agentmaster       │  │ ──────────────────────────────────────── │
+                              │ ⧉  Fork family    3 sessions │  │ 📁 e2e (exactly)   without its subfolders  │
+                              │ ─────────────────────────── │  └──────────────────────────────────────────┘
+                              │ ⏸  Pause filter              │
+                              │ ✕  Clear all filters         │
+                              └─────────────────────────────┘
+```
+
+- **Whose menu.** The side panel's SESSION cards only. The shared session menu calls the card's host hook right under
+  Tags (`SessionMenuHost::afterTags`, the twin of §2j's hook under Jump to Tab), which appends the one **Filter** line
+  (`_SidePanelAppendFilterItems`). The board card, the tree row and the AI search's result cards pass no such hook (the
+  list a result card's pick would filter is covered by the AI view). The submenu is filled at the menu's open, from the
+  session as it is then.
+- **The lines** — each stands for ONE thing (`SidePanelCardPick`):
+  - **Folder ▸** — the card's folder and each folder above it, nearest first (`SidePanelFolderLevels`), each with
+    WHERE it is, dim, at the line's end, then **`<folder> (exactly)`** for the card's folder without its subfolders. The
+    folder is the card's EFFECTIVE one (the one its own folder line shows: the inferred folder while it infers, else the
+    working folder). The drive's or the share's root is not offered — a filter on `K:\` lists nearly everything — unless
+    it is the card's own folder; at most eight levels. A card with no absolute folder has no Folder line.
+    The dim hint is the folder's path, a deep one cut in the middle (`SidePanelFolderHint`, at most 32 characters: the
+    root with the first folder under it, an ellipsis, then as many whole trailing folders as fit —
+    `K:\source\…\AgentMaster\tests`). ⚠ Why a cap: a menu is at most 456 DIPs wide and a menu line gives its hint
+    column the width of the hint FIRST, so a long path would cut the folder's own name, the part the line is read by.
+    The line's tooltip carries the whole path. (The 32 is reckoned from the menu's template, not measured on a build.)
+  - **State: `<state>`** — the card's state now, with the state's dot.
+  - **Tag: `<tag>`** — one line per tag the card carries; a card with none offers **Untagged**.
+  - **Branch: `<branch>`** — the card's git branch, when it has one.
+  - **Fork family** — the session, the session it was forked from, and their forks; its hint counts the family's cards
+    as the list would show them ("3 sessions", "this session alone").
+  - then, while the row holds a chip (a pick or typed text): **Pause filter** / **Resume filter** and **Clear all
+    filters** — the chips row's two links (`_SidePanelToggleFilterPause`, `_SidePanelClearAllFilters`).
+- **A pick starts the filter over** (`SidePanelApplyCardPick` → `_SidePanelApplyCardFilterPick`): the filter becomes
+  EXACTLY that one thing — every other pick, every chip's switch and the pause go, and the filter box is emptied (its text
+  is a chip too). The line that IS the whole filter (one chip, applied, no text typed) shows **✓**, and a click on it drops
+  the filter: the app's other filter menus toggle the same way, and a pick that changed nothing would read as a dead
+  line. Judged by identity, not spelling: a folder by its key, a tag by its folded name, a session id folded. To AND a
+  second filter onto a card pick, add it in the funnel afterwards (a funnel pick adds, as before).
+- **A card's menu closes at a pick.** It is a regular right-click menu (a MenuFlyout), and with "start over" each pick
+  is the whole filter anyway — unlike the funnel's panel, whose picks add up and which therefore stays open.
+- **A folder picked here is a pick**: it goes on top of By Folder's pick history (the submenu above), like one made in
+  the folder card.
+- **Branch — a new facet** (`SidePanelFacet::Branch`, `SidePanelFilters::branch`): only sessions on that git branch,
+  compared exactly (git refs are case-sensitive, as the Sessions page's "By Same Branch" compares them). A session's
+  branch is on its registry record — live from the transcript, saved in sessions.json for a tab not started yet; a
+  session whose branch is unknown matches no branch. ⚠ The NAME alone: "main" lists the sessions on main of every
+  repository; AND a folder in the funnel to narrow it.
+- **Fork family — a new facet** (`SidePanelFacet::ForkFamily`, `SidePanelFilters::forkFamilyOf`). The record keeps the
+  id of the session the family is OF, never the members: who is in it is worked out whenever the list updates
+  (`SidePanelForkFamily`: every session reachable over the fork links in either direction — the Sessions page's "By Fork
+  Family" rule — so two forks of one parent are one family even when the parent is closed), so a fork made later joins
+  it and a restart needs only the id.
+  - **Where the links come from.** ⚠ A fork's parent is NOT kept on its registry record: `SessionInfo::forkParentId` is
+    cleared at the fork's first turn (it exists to re-fork a fork that has no transcript yet). The durable link is in the
+    fork's transcript, which the process's session index holds for every session on disk
+    (`SharedSessionCatalogKeeper` → `TranscriptStats::forkedFromId`, the index the AI search reads). So the family is
+    worked out from the index AS IT IS PUBLISHED (`Current()`: reads nothing, waits for nothing) plus the links seen on
+    the registry — a fork with no transcript yet, remembered from every list update's snapshot
+    (`_SidePanelNoteForkLinks`) so the link outlives the registry clearing it, until the index has read the fork's
+    transcript.
+  - **Freshness.** A pick asks the index to refresh (`_SidePanelEnsureForkIndex`; in a process where no search ever
+    ran, this starts the index's first build — the 40–60 MB it costs once, SESSIONS.md §9.13). While the facet applies
+    and the cards are on screen, the periodic tick (the *Fork family belt*, beside the Favorites belt) does two things.
+    It re-filters the list when a newer index is published — the index is read in the background and announces
+    nothing — by comparing the newest index with the one the LIST was last judged with (the list's own stamps,
+    `_sidePanelForkFamilyListBuiltMs` / `Size`, taken by every list update; ⚠ not the cache's stamps, which the
+    funnel panel's counts also move, so a newer index consumed there would never reach the list). And it asks the
+    index to refresh: at once when this window never asked (a window that opened with the filter saved), then at most
+    once in FIVE MINUTES. ⚠ Not more often: a refresh lists every transcript on disk and copies the whole index (tens
+    of megabytes), and an index is stale after 10 s, so every ask starts one. The usual fork never waits for that:
+    a fork made in Agentmaster is seen by the list while it still carries its parent, and joins at once. The five
+    minutes are for the forks only the index knows — one made by hand in a "+" tab, or made and first prompted while
+    the panel was collapsed or behind the AI view. Until the first index is there, the family is the card and the
+    fresh forks seen on the registry; members join as the index's steps are published (newest sessions first).
+  - **Cost.** The filter's family is worked out once per change of the anchor, the index or the seen links
+    (`_SidePanelForkFamilyIds`, called by `_SidePanelSyncFactCaches` before any session is judged): one pass over the
+    index's entries and a walk of the links (`SidePanelWorkOutForkFamily`), about a millisecond for 4,500 sessions; a
+    session then costs one set lookup. A window that filters by no family keeps no ids. The card menu's **Fork
+    family** line works ITS card's family out by the same function into a set of its own, once per right-click, and
+    never touches the filter's cached one (the card may be of another family).
+- **The two chips** stand right after the folders' in the row: the branch (the ⎇ symbol and the name) and the fork
+  family ("fork family: `<title>`" — the title of the session the family is of, read at each update so a rename shows,
+  put on one line as the board's cards put it (`OneLine`: a title may hold line breaks); "fork family" when the
+  registry no longer knows it). Each is a chip like the others: a click switches it off and on,
+  its ✕ drops it, Pause filter covers it, the funnel's counts honor it. The funnel's panel has no row for either: both
+  only make sense "like this card's".
+- **The glyphs** were checked against this PC's font files (their cmap tables): the Filter, Folder, Tag, Pause, Play,
+  Clear and Duplicate glyphs are in both icon fonts (Segoe Fluent Icons, Segoe MDL2 Assets). ⚠ NO branch glyph is
+  (U+F1D3, U+F291, U+F292 are in neither), so the branch wears the text symbol ⎇ (U+2387) from Segoe UI Symbol, named
+  explicitly so it is never drawn as an emoji; the fork family wears the session menu's own "Fork session" icon.
+- **The record** (`SidePanelFilters`): `branch` and `forkFamilyOf`, each one trimmed line (`SidePanelOneLineOrEmpty`: a
+  value with a line break, or past 255 / 128 characters, reads as "not set"). Saved with the window's filters as
+  `"branch": "<name>"` and `"forkFamilyOf": "<session id>"`, each only while set; their chips' switches are the tokens
+  `"branch"` and `"family"` in `"off"`. The two facets were added at the END of `SidePanelFacet` / `SidePanelChipKind`, so
+  no earlier value moved (the row's order is `SidePanelFilterChips`' own, never the enum's).
+- **Logs:** `[nav] sidepanel filter card menu: start over with <folder (with subfolders) | folder (exactly) | state | tag |
+  untagged | branch | fork family> -> 1 filter on`, `... card menu: drop <kind> -> 0 filters on`, `... clear (card menu)
+  -> 0 filters on`, and the pause's own lines (never a path, a tag or a branch name). The line is written also when
+  the record itself did not change — the filter was that very pick plus typed text, or typed text alone was cleared:
+  the caller tells the writer that the text chip went (`textChipMoved`). A failure is an `[exc]
+  _SidePanelApplyCardFilterPick` / `_SidePanelClearAllFilters` / `_SidePanelNoteForkLinks` / `_SidePanelEnsureForkIndex` /
+  `_SidePanelSyncFactCaches: the fork family` / `side panel fork family: the index belt` / `session menu: the host's items
+  under Tags` line.
+- **UI Automation** (E2E_TESTING.md §6.3): the line `am.side.cardFilter`; its lines `am.side.cardFilter.{folder,
+  folder.<N>, folder.exact, state, tag.<folded name>, untagged, branch, family, pause, clear}` (N = the level, 0 = the
+  card's own folder; a pick line's ItemStatus is "checked" while it is the whole filter); the two chips
+  `am.side.chip.branch` and `am.side.chip.family` (with `.toggle` and `.remove`, like every chip).
+- **Tested** (no build): the m5 harness on an isolated copy of HEAD's engine folder plus the three changed engine
+  files — 12,942 checks, 3 failures, the three known `TestTaskbarBadge` ones; `TestSidePanelFilters` gained 60 CHECK
+  statements (the two facets through every rule, the fork family, the folder levels and hints, the card picks). `cl /Zs`
+  with each unit's recorded command line against the clean Release worktree's PCH (`ad89700e3`; no `.idl` / `.xaml` /
+  `pch.h` changed since), from a shadow of HEAD plus the seven changed sources: the 26 hand-written `TerminalAppLib`
+  units that include `TerminalPage.h`, `AgentManagerContent.h` or `SidePanelFilters.h`, directly or through
+  `TerminalWindow.h` / `AppLogic.h` (`TerminalPage.AgentSidePanel.cpp` and `AgentManagerContent.Tree.cpp` among them),
+  and the 18 `agentmaster-cli` units (/W4 /WX) all pass — the generated `XamlTypeInfo.g.cpp` cannot be pointed at the
+  shadow and was not checked; three planted errors fail where planted (an undeclared name inside
+  `SidePanelWorkOutForkFamily`; two `static_assert` probes that only the NEW `SidePanelFilters.h` and the NEW
+  `TerminalPage.h` can reach). The glyphs were checked against the font files. ⚠ NOT tested: anything on screen — the
+  menu's look (the hint column's width, the state dot keeping its color, the ✓ before a line's words), the two chips,
+  the list following the index. No e2e test is written (flows/02 SP-17 is the spec).
+- **Check after the build** (purged: `SessionModels.h` and `TerminalPage.h` changed again):
+  - A right-click on a side panel card shows **Filter ›** under Tags; the board card's, the tree row's and an AI result
+    card's menus do not.
+  - Folder › lists the card's folder, then its parents with their paths at the right, then `<folder> (exactly)`; no
+    drive root. On a card deep in a tree (a path past 32 characters) the hint is cut in the middle and the folder's
+    name at the left is whole — if the name is still cut, lower `kSidePanelFolderHintMaxChars`.
+  - A pick sets exactly one chip, whatever was filtering before; text typed in the box is emptied; a paused row comes
+    back applied. The same line then shows ✓, and a click on it drops the filter.
+  - With one chip set from a card AND text typed in the box, the same card line (no ✓ now) empties the box and keeps
+    the chip, and hooks.log has its `card menu: start over with …` line.
+  - The State line's dot keeps the state's color in the menu (also while the line is hovered).
+  - State, Tag and Untagged pick what the card shows; a card with tags has no Untagged line.
+  - Branch lists the sessions on that branch (other repositories' too); the chip shows ⎇ and the name.
+  - Fork family: fork a session twice, right-click one fork → Fork family "3 sessions"; the pick lists the three, the
+    chip reads "fork family: `<title>`" (on one line also for a title with a line break); a new fork of any of them
+    joins the list by itself; after the forks' first turns and a restart the same three are listed (within seconds of
+    the start, once the index is read). A fork made by hand in a "+" tab (`claude --resume <id> --fork-session`) joins
+    within five minutes, or at the next Fork family pick.
+  - Pause filter / Resume filter and Clear all filters show only while the row holds a chip, and do what the row's
+    links do.
+  - A folder picked from a card is on top of By Folder's submenu at its next open.
+  - The two new chips dim on a click and on Pause filter, and their ✕ drops them.
+  - No `[exc] … card menu …` / `_SidePanelApplyCardFilterPick` / `fork family` line in hooks.log.
+
 ### 2m. The collapsed strip hides itself — it floats in when the pointer comes within 40 DIPs (2026-11-12, NOT BUILT yet)
 
 The user's request: "When sidemenu is collapsed, we get a small strip with a button. The strip should autohide. If mouse
@@ -2212,7 +2377,7 @@ below).
 | `⌖` scroll to the selected tab (§2a) | — | `AppSettings::sidePanelScrollToSelectedTab` (true = **ON, the default**; absent key = ON) — a GLOBAL preference, broadcast live to every open window |
 | the filter box's **AI** toggle (§2h) | `WindowRecord::sidePanelAiMode` (-1 = unset; written only when set; a non-bool value reads unset) | `AppSettings::sidePanelAiMode` (false = **the session cards, the default**) |
 | a card's **Pin to Top** (§2j) | — | — **per SESSION instead**: sessions.json's `SessionInfo::sidePanelPinnedAtUnixMs` (absent / 0 = not pinned), so the pin follows the session into every window's list and through a restart |
-| the card list's **filters** (the funnel, §2l) | `WindowRecord::sidePanelFilters` (the `"sidePanelFilters"` object; absent = no filter; written only while a filter is set; read back normalized — a malformed part reads as "not set"). The pause and the chips switched off (§2l *Pause filter, Resume filter and a chip's click*) ride in the same object — `"paused"`, `"off"` (facet tokens), a folder's `"off"` — each only while set; a malformed switch reads as ON | — **none by design**, like the scope: every new window starts unfiltered. The typed text of the filter box is not kept (the box starts empty, as before), and neither is its chip's switch |
+| the card list's **filters** (the funnel, §2l) | `WindowRecord::sidePanelFilters` (the `"sidePanelFilters"` object; absent = no filter; written only while a filter is set; read back normalized — a malformed part reads as "not set"). The pause and the chips switched off (§2l *Pause filter, Resume filter and a chip's click*) ride in the same object — `"paused"`, `"off"` (facet tokens), a folder's `"off"` — each only while set; a malformed switch reads as ON. The two filters a card's menu sets (§2l *The card's Filter menu*) are `"branch"` (the branch's name) and `"forkFamilyOf"` (the id of the session the fork family is of — never its members, which are worked out at every update) | — **none by design**, like the scope: every new window starts unfiltered. The typed text of the filter box is not kept (the box starts empty, as before), and neither is its chip's switch |
 
 - **The card scope is the one field with NO last-one-wins export**: `_SidePanelSetScope`
   persists it through the window-record autosave alone — never `_SidePanelPersistDefaults`, and
@@ -2438,6 +2603,18 @@ below).
   members, the declarations, a forward declaration), `tests/tests_sidepanel.cpp` (`TestSidePanelFilters`),
   `e2e/amdriver/ui/sidepanel.py` (`filter_chips` without the new ids, `pause_link`, `filter_paused`, `chip_toggle`,
   `paused_chips`), `e2e/README.md` (the driver's table).
+  The card's Filter menu (§2l): `AgentManagerContent.{h,Tree.cpp}` (`SessionMenuHost::afterTags`, called right under the
+  Tags item of `_PopulateSessionMenu`), `AgentMaster/SessionModels.h` (`SidePanelFilters::branch` / `forkFamilyOf`),
+  `AgentMaster/SidePanelFilters.h` (the facets `Branch` and `ForkFamily` — their bits, chips, switches and JSON —,
+  `SidePanelOneLineOrEmpty`, `SidePanelFoldId`, `SidePanelForkLink` / `SidePanelForkFamily`, `SidePanelFolderLevels`,
+  `SidePanelFolderHint`, `SidePanelCardPick` / `SidePanelFiltersForCardPick` / `SidePanelCardPickIsWholeFilter` /
+  `SidePanelApplyCardPick`; the matcher's two new facts), `TerminalPage.AgentSidePanel.cpp` (`_SidePanelAppendFilterItems`,
+  `_SidePanelApplyCardFilterPick`, `_SidePanelClearAllFilters`, `_SidePanelNoteForkLinks`, `_SidePanelForkFamilyIds`,
+  `_SidePanelEnsureForkIndex`, the file-local `SidePanelWorkOutForkFamily`; the card's `afterTags` hook; the fork family
+  in `_SidePanelSyncFactCaches`, `_SidePanelFilterFactsOf`, the list update's own index stamps and the periodic tick's
+  belt; the two chips' glyphs and ids), `TerminalPage.h` (the fork family's cache members and the list's stamps, the
+  declarations, a forward declaration), `tests/tests_sidepanel.cpp`
+  (`TestSidePanelFilters`), `e2e/amdriver/ui/sidepanel.py` (`CARD_FILTER_ID` and its lines' ids).
   The self-hiding collapsed strip (§2m): `AgentMaster/SidePanelStripReveal.h` (near, and the strip's next state for one
   pointer event — pure; new), `TerminalPage.AgentSidePanel.cpp` (`_sidePanelStripHost` built in `_InitAgentSidePanel` with
   its band and fade, the two `ContentArea` pointer handlers, the collapsed column at 0 and the host's side in
