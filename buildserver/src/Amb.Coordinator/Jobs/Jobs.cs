@@ -302,9 +302,12 @@ public sealed class SmokeJob : VmJob
 /// </summary>
 public sealed class InstallJob : VmJob
 {
-    /// <summary>The ISO download (3.3 GB in 4 min) plus the install (12.5 min) plus the first logon, measured
-    /// 2026-10-25 at 16.5 min in all; twice that for a slow network or a loaded PC.</summary>
-    protected override TimeSpan HelloTimeout => TimeSpan.FromMinutes(45);
+    /// <summary>The ISO download plus the install plus the first logon: 16.5 min in all on homepc (2026-10-25: the
+    /// download 4 min, the install 12.5); on the worker machine the download from archive.org alone took 20 min and the
+    /// install was still writing its disk 23 min later on the 2013 Xeon (2026-11-12), past the 45 min this was then,
+    /// and the request ended Lost. 120 min: a slow mirror and a slow CPU together; a stuck install costs that long to
+    /// give up, a rare cost against an install thrown away.</summary>
+    protected override TimeSpan HelloTimeout => TimeSpan.FromMinutes(120);
 
     /// <inheritdoc/>
     public override async Task<JobOutcome> RunAsync(JobContext context, CancellationToken cancel)

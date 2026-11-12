@@ -85,8 +85,9 @@ public static class RequestDefaults
 
     /// <summary>How long a kind's work may run.</summary>
     /// <param name="kind">The kind.</param>
-    /// <returns>Build 3 h, test 1 h, e2e 2 h, smoke 20 min, install 75 min (its download and install took 16.5 min,
-    /// measured), layer 2 h (VS Build Tools took 28 min plus servicing), deploy 75 min (up to 45 for the requesting
+    /// <returns>Build 3 h, test 1 h, e2e 2 h, smoke 20 min, install 150 min (its download and install took 16.5 min on
+    /// homepc and over 43 min on the worker machine, measured; InstallJob waits up to 120 min for the new guest's hello),
+    /// layer 2 h (VS Build Tools took 28 min plus servicing), deploy 75 min (up to 45 for the requesting
     /// session's turn to end, 10 for the build lock, then the swap: 5-17 s down, measured, and the watch), import
     /// 30 min.</returns>
     public static TimeSpan RunOf(RequestKind kind) => TimeSpan.FromMinutes(kind switch
@@ -95,7 +96,7 @@ public static class RequestDefaults
         RequestKind.Test => 60,
         RequestKind.E2e => 120,
         RequestKind.Smoke => 20,
-        RequestKind.Install => 75,
+        RequestKind.Install => 150,
         RequestKind.Layer => 120,
         RequestKind.Deploy => 75,
         _ => 30,
