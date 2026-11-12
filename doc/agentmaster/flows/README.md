@@ -236,7 +236,9 @@ Folder… keeps its click and opens a submenu on hover: Pick…, then the folder
 every window), each line turning its folder on or off for that window (SP-14; SIDE_PANEL.md §2l; no test written yet) · a
 filter can be switched off without being dropped: a click on a chip pauses that one filter, Pause filter / Resume filter
 before Clear pauses the whole row (the typed text too) and brings back what applied, dimmed chips stay in the row, and a
-pick or typing resumes (SP-15; SIDE_PANEL.md §2l; no test written yet).
+pick or typing resumes (SP-15; SIDE_PANEL.md §2l; no test written yet) · a collapsed side panel takes no column: its strip
+floats over the terminal's edge and hides itself, showing while the pointer is within 40 DIPs of it, and a press beside
+its chevron goes to the terminal (SP-16; SIDE_PANEL.md §2m).
 
 **The regression base** — older behaviors the recent releases build on, covered because every new feature leans on
 them: the /handover family (HND-01, HND-03, HND-04, HND-05, HND-07, HND-08), the Sessions browser (SES-01, SES-02,
@@ -403,6 +405,7 @@ stalled the app's UI thread) — reruns `pqr6`–`pqr8`.
 | SP-10 | phases 1–7, E4 (`needs_fix`: a build with the ⋯ menu's 2026-11-04 shape — the mirrored line, the menu on ⋯'s outer edge, the dock below the separator — SP-F1; a 2026-11-03 build fails phases 1, 2 and 6) | `…::test_more_menu_holds_the_header_controls` |
 | SP-11 | phases 1–5 (`needs_fix`: a build with Pin to Top — SP-F2; written 2026-11-06, never run) | `…::test_pin_to_top` |
 | SP-12 | phases 1–2 (`needs_fix`: a build where a card's Open New Session Here / Fork session open next to its tab — SP-F3; written 2026-11-07, never run) | `…::test_card_menu_opens_next_to_its_tab` |
+| SP-16 | phases 1–6 (`needs_fix`: a build with the self-hiding collapsed strip — SP-F4; written 2026-11-12, never run; phase 5 only when the window leaves room at its left) | `…::test_collapsed_strip_hides_itself` |
 | TCM-01 | phases 1–3, E1 | `test_tab_menu.py::test_menu_fits_the_tab`, `…::test_triage_item_follows_the_state` |
 | TCM-02 | phases 1–3 | `…::test_position_decides_what_is_enabled` |
 | TCM-03 | phases 1–2, E2, E3; TCM-K1 | `…::test_rename_renames_the_session_everywhere`, `…::test_restart_restores_the_renamed_tab_dormant`, `…::test_known_defect_blank_rename_shows_claudes_own_title` |

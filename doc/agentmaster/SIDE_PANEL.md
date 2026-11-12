@@ -82,8 +82,9 @@ model's answer and its list of sessions instead of the session cards; the summar
 - The header's line of buttons is the **funnel** (the filters, §2l), **+** (the launcher, §2e), **Sum** (the
   summary-area toggle, §2d) and **⋯** (§2i), a menu holding **Scroll to the selected tab** (`⌖`, §2a), **Card scope ▸** (LOCAL /
   GLOBAL, §2), **Card order ▸** (§2), then below a separator **Dock on the right / left** (`⇄`) and
-  **Collapse the side panel**, which shrinks the panel to a 20px expander strip (the strip's chevron
-  brings it back).
+  **Collapse the side panel**, which gives the panel's whole column back to the terminal. What is left is a
+  20 DIP expander strip that FLOATS over the terminal's docked edge and hides itself: it shows while the
+  pointer is within 40 DIPs of it, and its chevron brings the panel back (§2m).
 - The header is **two lines** (one 2-row grid): the buttons, at the panel's OUTER end (the window's
   edge) and in a line that mirrors with the dock — `⋯ Sum ⏷ +` left-aligned docked left, `+ ⏷ Sum ⋯`
   right-aligned docked right, so `⋯` is always outermost (§2i) and `+` innermost with the funnel beside it (the user's
@@ -1956,6 +1957,129 @@ same day to the three design questions (asked with mockups):
   - No `[exc] _SidePanelToggleFilter…` / `_SidePanelNoteFilterTextChanged` / `side panel filter chip: …` /
     `side panel filter row: queue the pause` line in hooks.log.
 
+### 2m. The collapsed strip hides itself — it floats in when the pointer comes within 40 DIPs (2026-11-12, NOT BUILT yet)
+
+The user's request: "When sidemenu is collapsed, we get a small strip with a button. The strip should autohide. If mouse
+comes close by 40pixels the strips appears." Their answer the same day to the one design question (asked with three live
+mocks of the window, each following the mouse):
+
+| Question | Answer |
+|---|---|
+| What comes back when the pointer is near: only the button as a small handle, the whole strip floating over the terminal's edge, or the strip in its own column again (the terminal 20 px narrower at every show) | **"The whole strip, floating"** — "and button inside" |
+
+```
+ collapsed, the pointer elsewhere                     the pointer within 40 DIPs of the strip's place
+┌ tab row ───────────────────────────────────┐       ┌ tab row ───────────────────────────────────┐
+├────────────────────────────────────────────┤       ├──┬─────────────────────────────────────────┤
+│● I'll look at how the collapsed side panel │       │  │I'll look at how the collapsed side panel│
+│                                            │       │  │                                         │
+│● Read(src/cascadia/TerminalApp/…)          │       │[»]Read(src/cascadia/TerminalApp/…)         │  ← the strip, 20 DIPs, OVER the
+│  ⎿  Read 412 lines                         │       │  │ ⎿  Read 412 lines                       │    terminal's first columns; the
+│                                            │       │  │                                         │    terminal keeps its width
+└────────────────────────────────────────────┘       └──┴─────────────────────────────────────────┘
+ the terminal has the whole width                      │←20→│←── 40 ──→│  (the reach: 60 DIPs from the edge)
+```
+
+- **A collapsed panel takes no column.** `_SidePanelApplyLayout` gives the panel's column 0 px while collapsed (it was
+  the strip's 20), so the content has the whole width whether the strip shows or not. The strip is
+  `_sidePanelStripHost`: a child of `ContentArea` of its own, spanning all three columns, 20 DIPs wide
+  (`kSidePanelStripPx`), aligned to the docked edge and appended LAST, so it draws over the tab content's edge. It is
+  never a child of `TabContent` (every tab switch clears that grid). A strip in a column that came and went would resize
+  the terminal — and re-lay Claude's screen — at every pass of the pointer along the edge: the third mock, not chosen.
+- **What it is made of**: the panel's dark band (`#2E2E2E`, a CHILDLESS `Border` that takes no input) and, over it, the
+  centered column with the expand chevron (the same `Button`, `am.side.expand`; » docked left, « docked right). It is a
+  surface root of its own now, so it sets `RequestedTheme(Dark)` itself.
+- **Hidden by opacity, never by `Visibility`.** While the panel is collapsed the strip host stays `Visible` and is
+  hidden with `Opacity 0` + `IsHitTestVisible false` (the board card's hover button does the same); an implicit
+  `OpacityTransition` of 120 ms fades it both ways (no Storyboard). So the chevron keeps its rectangle in the UI
+  Automation tree: the e2e driver's `strip_button().click()` moves the real pointer there, which brings the strip in
+  before the press; a screen reader's Invoke works on a hidden strip. UI Automation reports no opacity, so the chevron's
+  ItemStatus reads `hidden` while the strip is hidden and is empty while it shows. The host is `Collapsed` only while
+  the panel is expanded.
+- **Near** (`SidePanelStripPointerNear`, pure): the pointer is inside the content area and at most
+  `kSidePanelStripRevealDistance` = **40 DIPs from the strip** — measured from the strip's inner edge, so 60 DIPs from
+  the docked edge of the content, inclusive. Only the horizontal distance counts: the strip is as tall as the content,
+  so any height along that edge is near. A pointer outside the content area is never near — over the tab row, or past
+  the window's edge: the strip's edge is usually the window's own, and a pointer that left through it must hide the strip.
+- **The rule** (`NextSidePanelStripReveal`, pure; the strip's state is two flags, `shown` and `dismissed`):
+
+  | Event | What the strip does |
+  |---|---|
+  | The pointer ARRIVES near it: a move, no button held, by a mouse or a pen in range | shows |
+  | The pointer stays near | stays |
+  | The pointer is away | hides, armed for the next approach |
+  | A drag passes by (a move with a button held: a text selection dragged to the first column) | stays hidden, and stays away until the pointer has left and come back |
+  | A press beside the chevron | hides at once — the band takes no input, so the press reaches the terminal's first columns (docked right: its scroll bar) — and stays away until the pointer has left and come back |
+  | A press on the chevron | stays (its click expands the panel) |
+  | A finger's tap near the edge (a finger cannot hover) | shows; a tap beside the chevron hides it; nothing else hides it |
+  | The watch finds the cursor away (below) | hides, or arms a strip that had stepped aside. It never shows the strip |
+  | Just collapsed | shows for 1.5 s wherever the pointer is (`kSidePanelStripCollapseLingerMs`), so the user sees where the panel went; a press anywhere but the chevron ends that at once |
+
+- **Where the pointer is** (`_SidePanelStripOnPointer`): `ContentArea` gets a `PointerMoved` and a `PointerPressed`
+  handler through `AddHandler(…, handledEventsToo)` — the terminal marks its moves and presses Handled. Pointer events
+  are routed, so every move over the terminal, the Agent Manager page or the strip itself bubbles there; an element laid
+  over the terminal to catch the pointer would take its input. The handler's first test is "the panel is collapsed":
+  an expanded panel pays one flag read per event.
+- **The watch** (`_SidePanelStripWatchTick`, a 200 ms `DispatcherTimer`): a pointer that leaves the window sends the
+  content area no further event, so while the strip shows — or waits for the pointer to leave — the watch reads the mouse
+  cursor (`_SidePanelStripCursorNear`: screen px → the window's client px → island DIPs → `ContentArea`-local,
+  `_DockProbeHit`'s recipe) and applies the "away" half of the rule. It runs in those two states only: a hidden, armed
+  strip runs no timer. When it cannot read the cursor it changes nothing. It never runs after a finger (the cursor is
+  not where the finger was): a tap elsewhere hides a strip a tap brought in, and the next mouse or pen event over the
+  content starts the watch again.
+- **Nothing is persisted and nothing is logged per show or hide**: the collapsed flag is saved as before (§4), and a
+  window that opens collapsed starts with the strip hidden. `~TerminalPage` stops the watch.
+- **The words**: the `⋯` menu's **Collapse the side panel** tip says the strip hides itself and which edge of the
+  terminal area brings it back — the one place that can tell a first-time user where the panel went.
+- **What the strip covers while it shows**: docked left, the terminal's first 20 DIPs (two text columns); docked right,
+  its scroll bar and the right end of the tab's badge (TAB_OVERLAY.md). A press there goes through and sends the strip
+  away; the pointer leaving the 60 DIPs hides it.
+- **Cost**: one flag read per pointer event while expanded; while collapsed one position read and the pure rule per
+  event, and writes only when the strip's state changes; one composition node for the strip (its opacity transition).
+- **Tested** (no build): `TestSidePanelStripReveal` (`tests_sidepanel.cpp`, 78 checks and 6 `static_assert`s) — the
+  geometry (the 60 DIP boundary inclusive from both docks, any height, never outside the area, an unmeasured area, NaN /
+  negative / infinite inputs, a seeded mirror sweep of 20,000 points), every named case of the rule's table, all 288
+  combinations of its inputs against a second statement of the rule plus six invariants (never shown and stepped aside at
+  once, the watch never shows, a mouse press never shows, nothing appears while the pointer is away, a press on the
+  chevron changes nothing, an away pointer always leaves it hidden and armed), and one user's visit event by event.
+  Twelve one-line mutations of the header (the boundary exclusive, the reach without the strip, outside the area
+  counting, the watch showing, a drag showing, a dismissed strip returning at once, a press beside the chevron keeping
+  it, a press on the chevron hiding it, a mouse press showing it, the linger ignored, the watch judging after a finger,
+  "away" keeping the dismissal) each fail the test — four at a `static_assert`, eight on a named check — and the
+  unmutated header passes through the same script. The whole m5 harness on an isolated copy of 2c4736020 plus the four
+  changed files, on a scratch profile: 12,882 checks, the 3 known taskbar-badge failures only. `cl /Zs` in a shadow of
+  2c4736020 against the Release worktree build of ad89700e3 (§2j's recipe; no `.idl`, `.xaml` or `pch.h` changed
+  since): `TerminalPage.AgentSidePanel.cpp`, `TerminalPage.AgentEngine.cpp` and the 15 other units that include
+  `TerminalPage.h` (`TerminalPage.cpp`, `TabManagement.cpp`, the nine other `TerminalPage.Agent*.cpp`,
+  `AppActionHandlers.cpp`, `ActionPreviewHandlers.cpp`, `TerminalWindow.cpp`, `AppLogic.cpp`) all pass; three controls
+  planted in the new code failed as they must (an undeclared name in `_SidePanelStripOnPointer`: C2065 at its line; a
+  probe on `kSidePanelStripRevealDistance`: C2338, so the new header is the one read; a wrong argument count for
+  `_SidePanelStripApply` in `_SidePanelStripWatchTick`: C2660). The bytes checked are the bytes committed (compared
+  file by file). The e2e test `test_side_panel.py::test_collapsed_strip_hides_itself` (flows/02 SP-16 phases 1–6,
+  `needs_fix("SP-F4")`) is written and collects, never run (it needs a build). Not seen on screen: what the strip looks
+  like over a real terminal, the fade, and that UI Automation reports the opacity-hidden chevron as on screen are
+  checks for the first build (below).
+- **Check after the build** (purged: `TerminalPage.h` gained data members):
+  - Collapse the panel (`⋯` ▸ Collapse the side panel): the terminal takes the whole width; the strip shows over its
+    edge for about 1.5 s, then fades out. Click into the terminal during that time: the strip goes at once.
+  - Move the pointer toward the docked edge: the strip fades in when the pointer is 40 DIPs from it (60 from the edge),
+    at any height; the terminal's text does not move. Move away: it fades out.
+  - Move the pointer out of the window through that edge: the strip goes within about a third of a second.
+  - With the strip showing, click on its band beside the chevron: the strip goes, the click lands in the terminal (the
+    caret / a selection starts there), and moving the pointer near the edge does not bring the strip back until the
+    pointer has gone more than 60 DIPs away and returned.
+  - Drag a text selection from the middle of the terminal to its first column: no strip appears during the drag, nor
+    after the release until the pointer has left the edge and come back.
+  - Click the chevron: the panel expands; its tooltip still opens after 3 s of rest on it.
+  - Dock on the right, collapse: the same at the right edge, the chevron reads «; the scroll bar under the strip still
+    takes a press (the strip goes).
+  - The Agent Manager page (Home) with a collapsed panel: the strip floats over the page's edge the same way.
+  - A window that opens with its panel collapsed shows no strip until the pointer comes near.
+  - Inspect / Accessibility Insights: `am.side.expand` is in the tree while the strip is hidden, ItemStatus `hidden`;
+    empty while it shows; IsOffscreen false in both states. The e2e flows that collapse and expand (SP-06, SP-10, the
+    restart) depend on that last fact: their real click on the chevron refuses an element reported off screen.
+  - No `[exc] sidepanel strip: …` line in hooks.log.
+
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 
 The bottom area hosts a REAL `AgentTabOverlay` whose summary panel is switched into the new
@@ -2101,6 +2225,8 @@ below).
   a filter is set), so — like the panel's other per-window keys — a build from before the filters that rewrites the record
   drops it, and the older-writer repair cannot bring it back (PERSISTENCE.md §17, "What is still not covered").
 
+- **The collapsed strip's showing is not state** (§2m): only the collapsed flag is saved, as before. Whether the
+  floating strip shows follows the pointer, and a window that opens collapsed starts with it hidden.
 - Every drag release / collapse toggle / **Sum** click: update the live members → the window-record
   autosave captures them (`_CaptureWindowRecord`) → a GRANULAR freshest-disk RMW exports ONLY the
   adjusted field as the new global default (`_SidePanelPersistDefaults` — a width drag never
@@ -2164,6 +2290,12 @@ below).
   down (detached) before its card leaves the list or the list resets, its floating tips are silenced
   meanwhile (`AgentSuppressTip`), its arm-build reads no transcript, and every handler it wires holds
   the page and the host weakly.
+- The collapsed strip (§2m): it floats over the content, so showing and hiding it never resizes a terminal; an
+  expanded panel pays one flag read per pointer event over the content, a collapsed one a position read and a pure
+  rule, with XAML written only when the strip's state changes; its fade is an implicit opacity transition (no
+  Storyboard); its 200 ms watch runs only while the strip shows or waits for the pointer to leave, holds the page
+  weakly and is stopped by `~TerminalPage`; the strip is hidden by opacity, never `Visibility`, so its chevron stays in
+  the UI Automation tree.
 - Pin to Top (§2j): one integer comparison per sort step, one lean read per menu open, one lean snapshot per pin click;
   the pushpin exists only on a pinned card (built at its first pinned apply, dropped at unpin), is not hit-testable and
   adds no handler, and the band's rounded shape stays childless.
@@ -2306,3 +2438,13 @@ below).
   members, the declarations, a forward declaration), `tests/tests_sidepanel.cpp` (`TestSidePanelFilters`),
   `e2e/amdriver/ui/sidepanel.py` (`filter_chips` without the new ids, `pause_link`, `filter_paused`, `chip_toggle`,
   `paused_chips`), `e2e/README.md` (the driver's table).
+  The self-hiding collapsed strip (§2m): `AgentMaster/SidePanelStripReveal.h` (near, and the strip's next state for one
+  pointer event — pure; new), `TerminalPage.AgentSidePanel.cpp` (`_sidePanelStripHost` built in `_InitAgentSidePanel` with
+  its band and fade, the two `ContentArea` pointer handlers, the collapsed column at 0 and the host's side in
+  `_SidePanelApplyLayout`, the linger in `_SidePanelToggleCollapsed`, `_SidePanelStripOnPointer`, `_SidePanelStripApply`,
+  `_SidePanelStripWatchTick`, `_SidePanelStripCursorNear`, `_SidePanelStripShowAfterCollapse`, `_SidePanelStripLingering`,
+  the collapse item's tip, `kSidePanelStripFade` / `kSidePanelStripWatchInterval` / `kSidePanelStripHiddenStatus`),
+  `TerminalPage.h` (the host, the two state flags, the last device, the linger deadline, the watch, the declarations),
+  `TerminalPage.AgentEngine.cpp` (`~TerminalPage` stops the watch), `TerminalAppLib.vcxproj` (the header),
+  `tests/tests_sidepanel.cpp` (`TestSidePanelStripReveal`), `tests/m5_tests.{h,cpp}`, `e2e/amdriver/ui/sidepanel.py`
+  (`strip_hidden`, `wait_strip`), `e2e/suites/test_side_panel.py` (SP-16).

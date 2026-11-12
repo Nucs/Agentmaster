@@ -61,6 +61,15 @@ ItemStatus 'paused' — while nothing does). The row stays on screen while pause
 unfiltered list's ('2 sessions in this window'), and the funnel's ItemStatus reads 'N filters paused'. A click on the row
 within the system's double-click time of a toggle is ignored by the app: leave more than that (500 ms by default) between
 two clicks on the row.
+
+THE COLLAPSED STRIP HIDES ITSELF (SIDE_PANEL.md §2m; a build of 2026-11-12 or later — NOT BUILT on that day): a collapsed
+panel takes no column. Its 20 px strip floats over the content's docked edge, hidden, and shows while the pointer is
+within 40 px of it (60 px from the edge, at any height); it lingers ~1.5 s after a collapse. The chevron (STRIP_ID) stays
+in the tree with its rectangle while hidden — the app hides the strip by opacity — so `strip_button` and its real click
+work as before (the pointer's arrival brings the strip in before the press). Its ItemStatus is 'hidden'
+(STRIP_HIDDEN_STATUS) while the strip is hidden and empty while it shows: `strip_hidden` reads it, `wait_strip` waits for
+it. A press on the strip beside the chevron goes to the terminal and hides the strip until the pointer has left the
+60 px and come back. On an older build the strip is a 20 px column that always shows, and the status is always empty.
 """
 from __future__ import annotations
 
@@ -84,6 +93,9 @@ CARD_ID_PREFIX = "am.side.card."
 """The AutomationId prefix of a card's title text (the session id's first 8 characters follow)."""
 STRIP_ID = "am.side.expand"
 """The collapsed strip's chevron (» docked left, « docked right) by AutomationId."""
+STRIP_HIDDEN_STATUS = "hidden"
+"""The chevron's ItemStatus while the collapsed strip is hidden (SIDE_PANEL.md §2m; a build of 2026-11-12 or later): the
+strip hides itself and shows while the pointer is near; the status is empty while it shows, and always on older builds."""
 MORE_ID = "am.side.more"
 """The header's ⋯ button (a build with the ⋯ menu, SIDE_PANEL.md §2i) by AutomationId."""
 MORE_ITEM_IDS = {"dock": "am.side.dock", "scroll": "am.side.scrollToTab", "scope": "am.side.scope",
@@ -640,6 +652,34 @@ class SidePanel:
         chevron = wait_until(self.strip_button, 5.0, what="the collapsed strip's chevron")
         chevron.click()
         wait_until(lambda: not self.collapsed(), 5.0, what="the panel expanded")
+
+    def strip_hidden(self) -> Optional[bool]:
+        """Whether the collapsed strip is hidden right now (SIDE_PANEL.md §2m: it hides itself and shows while the
+        pointer is within 40 px of it). Read off the chevron's ItemStatus: UI Automation reports no opacity.
+
+        Returns:
+            True while hidden, False while it shows; None while the panel is expanded (no chevron). On a build from
+            before the auto-hide the status is always empty, so this reads False whenever the panel is collapsed.
+        """
+        chevron = self.strip_button()
+        if chevron is None:
+            return None
+        return chevron.item_status == STRIP_HIDDEN_STATUS
+
+    def wait_strip(self, hidden: bool, timeout_s: float = 5.0) -> None:
+        """Wait until the collapsed strip is hidden, or shows.
+
+        Args:
+            hidden: The state to wait for (True = hidden).
+            timeout_s: How long it may take. A hide after a collapse takes the app's 1.5 s linger plus its 0.2 s watch.
+        Returns:
+            None.
+        Raises:
+            WaitTimeout: When the strip did not get there (the message says what it read last; None = the panel is
+                expanded).
+        """
+        wait_until(lambda: self.strip_hidden() is hidden, timeout_s,
+                   what=f"the collapsed strip {'hidden' if hidden else 'shown'}", describe=self.strip_hidden)
 
     # ---- the cards --------------------------------------------------------------------------------
 

@@ -311,6 +311,13 @@ void TestSidePanelPins();
 // filter-folders.json file through the `...In` seams on a scratch profile, the submenu's lines and their toggle, and a
 // line's coverage equal to the matcher's verdict (tests_sidepanel.cpp)
 void TestSidePanelFilters();
+// SidePanelStripReveal.h (SIDE_PANEL.md §2m): the collapsed strip's AUTO-HIDE — the user's "The strip should autohide. If
+// mouse comes close by 40pixels the strips appears" (2026-11-12; the whole strip floating over the content's edge): the
+// geometry (40 DIPs from the strip = 60 from the docked edge, inclusive, any height, both docks, never outside the content
+// area, NaN / negative / unmeasured inputs) and the rule (the approach, staying, leaving; a drag passing by and a press
+// beside the button keep it away until the pointer has left; a press on the button; a finger's taps; the watch that only
+// hides; the after-collapse linger), all 288 input combinations against a second statement of it (tests_sidepanel.cpp)
+void TestSidePanelStripReveal();
 // tests_presets.cpp — HARNESSES.md, PRESETS (LaunchPresets.h, the pure core): the list starts EMPTY (no template is added
 // by itself) and an empty list offers "Add presets…" with help text naming the way to the Presets tab (a list of hidden
 // presets does not); one click adds a template as a linked, visible "p-" preset and "Add all tested" adds the five tested

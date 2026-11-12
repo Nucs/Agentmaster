@@ -28,6 +28,7 @@ right after the card's tab, in that tab's window (SP-12).
    ├─ summary: FOLLOWS the focused tab's session ──card click──► PEEK (pinned) ──click into the terminal──► FOLLOW
    ├─ + ─► launcher card at the click (folder list open) ─► launch / Esc×2 / outside / + / tab switch ─► closed
    └─ ⋯ ▸ Collapse (« on 0.8.x) ─► 20 px strip ─► » ─► panel (updates deferred while collapsed, one catch-up)
+        (2026-11-12: the strip floats over the terminal's edge, hidden; the pointer within 40 DIPs of it shows it — SP-16)
 
  per window (windows/<id>.json): width, split, collapsed, Sum, LOCAL/GLOBAL      global: dock side, ⌖, the defaults
 ```
@@ -230,7 +231,8 @@ switch closes it; no keystroke leaks into the terminal.
 2. **New window.** *Expect:* a new window uses the LAST resize as its default; the first window keeps its
    own.
 3. **Collapse.** *Do:* ⋯ ▸ Collapse the side panel (« on 0.8.x). *Expect:* a 20 px strip; » restores; per window,
-   last change seeds new windows.
+   last change seeds new windows. On a 2026-11-12 build the strip floats over the terminal's edge and hides itself
+   (SP-16): » is still found by its id and its real click restores.
 4. **Dock.** *Do:* ⋯ ▸ Dock on the right (⇄ on 0.8.x). *Expect:* the panel moves to the right of the terminal in
    EVERY window (global); the strip's chevron and the menu's collapse symbol flip; on a 2026-11-04 build the header
    line mirrors too (`⋯ Sum +` → `+ Sum ⋯`, ⋯ at the window's edge — SP-10).
@@ -596,6 +598,47 @@ does not. The window keeps a paused row and a switched-off chip across a restart
 - **E6 A folder picked again** → a dimmed folder picked again in the folder card comes back on (and resumes a paused
   row). The submenu's ✓ marks a folder that is PICKED, on or off: a click on it drops the folder. The pick history never
   lists a folder as off.
+
+---
+
+### SP-16 · The collapsed strip hides itself
+
+> **Since** 2026-11-12 (NOT BUILT) · **P1** · **Needs** F-S (one session, its terminal on screen), the panel docked left ·
+> **Spec** SIDE_PANEL.md §2m
+
+**Promise.** A collapsed panel leaves the terminal the whole width. Its 20 DIP strip, with the expand chevron in its
+middle, floats over the terminal's docked edge and hides itself: it shows for a moment after the collapse, then only
+while the pointer is within 40 DIPs of it (60 DIPs from the edge), at any height. Showing and hiding it never changes
+the terminal's size. A press on the strip beside the chevron goes to the terminal and sends the strip away until the
+pointer has left and come back. The chevron's ItemStatus reads `hidden` while the strip is hidden, nothing while it shows.
+
+**Phases**
+1. **Collapse.** *Do:* ⋯ ▸ Collapse the side panel; move the pointer to the middle of the terminal. *Expect:* the strip
+   shows over the terminal's edge for about 1.5 s, then fades out (ItemStatus `hidden`); the terminal's rectangle starts
+   at the content's left edge and is as wide as the content; `am.side.expand` is still in the tree with its rectangle.
+2. **Approach.** *Do:* move the pointer to 200 px from the edge, then to 30 px from it, well above the chevron.
+   *Expect:* hidden at 200 px; at 30 px the strip shows (ItemStatus empty) and stays while the pointer rests; the
+   terminal's rectangle is unchanged.
+3. **Away.** *Do:* move back to 200 px. *Expect:* the strip hides.
+4. **A press beside the chevron.** *Do:* approach again; click the strip 10 px from the edge, above the chevron.
+   *Expect:* the strip hides at once and the click lands in the terminal; moving the pointer along the edge shows
+   nothing; after the pointer went 200 px away and returned, the strip shows again.
+5. **Out through the edge.** *Do:* with the strip showing, move the pointer out of the window past the docked edge.
+   *Expect:* the strip hides within about a third of a second (the app's watch; no pointer event tells the content).
+6. **Expand.** *Do:* click the chevron. *Expect:* the panel is back at its width, the terminal narrower again; no
+   `[exc] sidepanel strip` line in hooks.log.
+
+**Edge cases**
+- **E1 A drag passing by** → a text selection dragged from the middle of the terminal to its first column shows no
+  strip, during the drag or after the release, until the pointer has left the edge and come back.
+- **E2 Click during the linger** → a click into the terminal right after the collapse hides the strip at once.
+- **E3 Docked right** → the same at the right edge; the chevron reads «; a press on the strip reaches the scroll bar
+  under it.
+- **E4 The Agent Manager page** → with the page showing and the panel collapsed, the strip floats over the page's edge
+  the same way.
+- **E5 A window that opens collapsed** → no strip (and no linger) until the pointer comes near.
+- **E6 A finger** → a tap near the edge shows the strip; a tap beside the chevron hides it; a tap on the chevron expands.
+- **E7 A dock flip from another window** → a collapsed window's strip moves to the other edge, hidden.
 
 ---
 

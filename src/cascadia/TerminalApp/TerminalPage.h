@@ -747,7 +747,7 @@ namespace winrt::TerminalApp::implementation
         // --- Agentmaster SIDE PANEL state (TerminalPage.AgentSidePanel.cpp; built by _InitAgentSidePanel) ---
         // UI elements. All UI-thread-only; null until _InitAgentSidePanel builds them (every method
         // early-outs on !_sidePanelBuilt so a pre-init call is a safe no-op).
-        winrt::Windows::UI::Xaml::Controls::Grid _sidePanelHost{ nullptr }; // the panel column's root (dark, RequestedTheme Dark): header row + body; also hosts the collapsed expander strip
+        winrt::Windows::UI::Xaml::Controls::Grid _sidePanelHost{ nullptr }; // the panel column's root (dark, RequestedTheme Dark): header row + body. Its column is 0 wide while the panel is collapsed (the collapsed strip floats on its own: _sidePanelStripHost)
         winrt::Windows::UI::Xaml::Controls::Border _sidePanelSplitter{ nullptr }; // the draggable VERTICAL separator between the terminal content and the panel (its own grid column)
         winrt::Windows::UI::Xaml::Controls::Grid _sidePanelBody{ nullptr }; // rows: cards area (star*split) / horizontal splitter / summary area (star*(1-split)); hidden while collapsed
         winrt::Windows::UI::Xaml::Controls::Border _sidePanelHSplitter{ nullptr }; // the draggable HORIZONTAL separator between the cards list and the summary area
@@ -783,8 +783,33 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBlock _sidePanelCountText{ nullptr }; // dim "N shown / M live" line under the header (reads the filter's effect at a glance)
         winrt::Windows::UI::Xaml::Controls::Grid _sidePanelSummaryHost{ nullptr }; // the bottom area hosting the fill-mode AgentTabOverlay summary panel (or the no-selection hint)
         winrt::Windows::UI::Xaml::Controls::TextBlock _sidePanelSummaryHint{ nullptr }; // "select a session…" placeholder shown while nothing is bound below
-        winrt::Windows::UI::Xaml::Controls::StackPanel _sidePanelStrip{ nullptr }; // the COLLAPSED state's thin expander strip (a chevron button), shown instead of the body
+        winrt::Windows::UI::Xaml::Controls::StackPanel _sidePanelStrip{ nullptr }; // the collapsed strip's centered column holding the expand chevron (_sidePanelStripBtn); a child of _sidePanelStripHost
         winrt::Windows::UI::Xaml::Controls::Grid _sidePanelExpandedRoot{ nullptr }; // the EXPANDED state's whole content (header + count + body) — one element to toggle against the strip, so collapse never squeezes live controls into a 20px column
+        // --- The collapsed strip's AUTO-HIDE (SIDE_PANEL.md §2m; the rule is AgentMaster/SidePanelStripReveal.h) ---
+        // The COLLAPSED state's strip: 20 DIPs wide, as tall as the content, with the expand chevron in its middle. It
+        // FLOATS: a child of ContentArea spanning all three columns, aligned to the docked edge and above the tab content,
+        // so showing and hiding it never changes the terminal's size (a collapsed panel takes no column). Collapsed
+        // (Visibility) while the panel is expanded; while the panel is collapsed it stays Visible and is hidden by Opacity 0
+        // + IsHitTestVisible false — ⚠ never by Visibility: the chevron must stay in the UI Automation tree with its
+        // rectangle (the e2e driver clicks it with the real pointer, which brings the strip in; a screen reader invokes it).
+        // Its dark band is a childless Border that takes no input, so a press beside the chevron reaches the terminal.
+        winrt::Windows::UI::Xaml::Controls::Grid _sidePanelStripHost{ nullptr };
+        // The strip's state, the two flags of ::Agentmaster::SidePanelStripReveal (kept as bools so this header needs no
+        // include): shown == on screen; dismissed == it stepped aside for a press or a drag at the edge and waits for the
+        // pointer to leave. Never both. Written only by _SidePanelStripApply.
+        bool _sidePanelStripShown{ false };
+        bool _sidePanelStripDismissed{ false };
+        // The device of the last pointer event the content area saw while collapsed: true == a mouse or a pen (it moves the
+        // cursor the watch reads), false == a finger (the watch then judges nothing: the cursor is not where the finger was).
+        bool _sidePanelStripPointerHovers{ true };
+        // The after-collapse linger's deadline (GetTickCount64 ms; 0 == none): until then the strip stays wherever the pointer
+        // is, so the user sees where the panel went. Set by _SidePanelStripShowAfterCollapse, cleared when the strip hides.
+        uint64_t _sidePanelStripLingerUntilTick{ 0 };
+        // The WATCH: a slow timer that runs only while the strip shows or waits for the pointer to leave, and only after a
+        // device that moves the cursor (_sidePanelStripPointerHovers). It reads the mouse cursor, because a pointer that
+        // leaves the window (the strip's edge is usually the window's edge) sends the content area no further event.
+        // Created at its first start; stopped in ~TerminalPage (UI-affine: guarded).
+        winrt::Windows::UI::Xaml::DispatcherTimer _sidePanelStripWatch{ nullptr };
         // The bottom area's summary renderer: a real AgentTabOverlay in fill-host mode for the SELECTED
         // session — maximal reuse of the per-tab summary business logic (analyze/render/JUMP/times/
         // wrap-truncate-previous toggles). DELIBERATELY NOT in _claudeOverlays: that map is keyed by
@@ -3669,7 +3694,46 @@ namespace winrt::TerminalApp::implementation
         double _SidePanelCardToolTipRoomWidth(); // the px the terminal side has for the card beside the panel (content area - panel - splitter - the framework's 20px gap - a margin); 0 when unmeasured (the push then uses the flat 660). Never throws
         void _SidePanelSuspendCardToolTip(const std::wstring& id); // a tag ribbon / "+N" of this card is hovered: DETACH its rich tooltip (the framework closes it — no IsOpen write) so it never floats beside the panel under the tag hover panel; the next hover over the card's body re-attaches it (the push's !Attached condition). A no-op in the classic mode
         void _SidePanelDropCardToolTip(AgentSidePanelCardView& view, const std::wstring& id); // before a card leaves the list (remove / reset): shut its tooltip host down (detach + drop callbacks — a ToolTip left attached to a dropped element is the islands leak class) and forget its surface-keyed signature + scroll state. Never throws
-        void _SidePanelToggleCollapsed(); // collapse to the thin expander strip / expand back; persists per window (record autosave) AND as the global default (RMW)
+        void _SidePanelToggleCollapsed(); // collapse to the floating, self-hiding expander strip / expand back; persists per window (record autosave) AND as the global default (RMW)
+        // --- The collapsed strip's AUTO-HIDE (SIDE_PANEL.md §2m) ---
+        // One pointer event over the content area (a move or a press, handled ones too), judged by the strip's rule
+        // (::Agentmaster::NextSidePanelStripReveal): the pointer coming within 40 DIPs of the strip shows it, moving away
+        // hides it, a press beside its chevron sends it away until the pointer has left. ⚠ Runs for EVERY pointer move over
+        // the content while the window lives: its first test (the panel is collapsed) is all an expanded panel pays.
+        //   e       - the routed event (its position is read relative to ContentArea).
+        //   press   - true for PointerPressed, false for PointerMoved.
+        //   returns - nothing; a no-op before the panel is built and while it is expanded.
+        //   throws  - nothing: a failed read is logged (Rule #18) and leaves the strip as it was.
+        void _SidePanelStripOnPointer(const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e, bool press) noexcept;
+        // Make the strip's state `shown` / `dismissed`: its opacity and hit-testing, the chevron's item status ("hidden"
+        // while hidden), the linger's end when it hides, and the watch (running exactly while shown or dismissed, after a
+        // mouse or pen — never after a finger, whose taps the watch cannot judge). Writes
+        // XAML only when `shown` changed. The ONE writer of _sidePanelStripShown / _sidePanelStripDismissed.
+        //   shown     - the strip is on screen.
+        //   dismissed - it stepped aside and waits for the pointer to leave (never with `shown`).
+        //   returns   - nothing.
+        //   throws    - nothing: a failed XAML write (a window tearing down) is logged; the flags are set first, so the
+        //               rule's next event still judges the right state.
+        void _SidePanelStripApply(bool shown, bool dismissed) noexcept;
+        // The watch's tick: read the mouse cursor and apply the "away" half of the rule (hide the strip, or arm it again,
+        // once the cursor is no longer near; never show it). Hides and stops when the panel is no longer collapsed.
+        //   returns - nothing.
+        //   throws  - nothing (logged).
+        void _SidePanelStripWatchTick() noexcept;
+        // Is the mouse cursor near the strip's place right now? Screen pixels -> this window's client pixels -> island DIPs
+        // -> ContentArea-local (_DockProbeHit's recipe), then ::Agentmaster::SidePanelStripPointerNear.
+        //   nearStrip - receives the answer when the call returns true.
+        //   returns   - false when it cannot tell (no window handle, no XAML root, a failed read): the caller then changes
+        //               nothing, because a wrong "away" would hide a strip the pointer rests on at every tick.
+        //   throws    - nothing (logged).
+        bool _SidePanelStripCursorNear(bool& nearStrip) noexcept;
+        // The panel was just collapsed by the user: show the strip and start its linger (kSidePanelStripCollapseLingerMs),
+        // so they see where the panel went before it hides itself. Not called for a window that opens collapsed.
+        //   returns - nothing; throws nothing.
+        void _SidePanelStripShowAfterCollapse() noexcept;
+        // True while the after-collapse linger runs.
+        //   returns - whether _sidePanelStripLingerUntilTick lies ahead; throws nothing.
+        bool _SidePanelStripLingering() const noexcept;
         void _SidePanelFlipDock(); // flip left<->right: RMW the GLOBAL sidePanelOnLeft, re-dock THIS window live (other windows re-dock via the settings broadcast)
         // --- The header's ⋯ MENU (SIDE_PANEL.md §2i) ---
         // Fill the ⋯ button's MenuFlyout from the live state, at every open (the caller emptied it): Scroll to the selected

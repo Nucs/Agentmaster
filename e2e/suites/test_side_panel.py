@@ -540,6 +540,95 @@ def test_pin_to_top(am, s2):
 
 
 @pytest.mark.p1
+@pytest.mark.flow("SP-16")
+@pytest.mark.needs_fix("SP-F4")
+def test_collapsed_strip_hides_itself(am, s1):
+    """SP-16 phases 1-6 (SP-F4, the user's request of 2026-11-12 - a build with the self-hiding strip; SIDE_PANEL.md
+    section 2m): a collapsed panel takes no column and its strip floats over the terminal's edge, hidden; it shows for a
+    moment after the collapse, then only while the pointer is within 40 DIPs of it; the terminal never changes size; a
+    press on the strip beside the chevron goes to the terminal and sends the strip away until the pointer has left and
+    come back; the pointer leaving the window through the edge hides it; the chevron expands the panel. The strip's state
+    is read off the chevron's ItemStatus ("hidden"; empty while it shows): UI Automation reports no opacity. (Docked
+    right, a drag passing by, touch and the Agent Manager page are not covered here.)
+
+    The distances are in screen pixels with wide margins, so they hold at any display scale from 100% to 250%: 30 px
+    from the edge is within the 60 DIP reach at every scale, 200 px is outside it.
+
+    Args:
+        am: The app.
+        s1: F-S (one session, its terminal on screen).
+    """
+    w = am.window
+    panel = w.side_panel
+    assert panel.dock_side() == "left"
+    width_expanded = w.terminal.element().rect[2]
+
+    def terminal_rect():
+        """The terminal's rectangle now.
+
+        Returns:
+            (left, top, width, height) in screen pixels.
+        """
+        return w.terminal.element().rect
+
+    # 1. Collapse: the strip shows for its moment (the pointer rests far from the edge), then hides itself; the terminal
+    #    has the content's whole width - no column is left for the strip.
+    panel.collapse()
+    left, top, width, height = w.content().rect
+    high = top + height // 5  # well above the chevron, which sits at mid-height
+    inputs.move(left + width // 2, high)
+    panel.wait_strip(hidden=True, timeout_s=6)
+    hidden_rect = terminal_rect()
+    # Within 4 px on each side: far less than the 20 px column the strip used to take.
+    assert abs(hidden_rect[0] - left) <= 4 and abs(hidden_rect[2] - width) <= 4, (hidden_rect, (left, top, width, height))
+    assert hidden_rect[2] > width_expanded, (hidden_rect, width_expanded)
+    chevron = panel.strip_button()
+    assert chevron is not None and chevron.visible and chevron.name == "Expand the side panel", chevron and chevron.line()
+
+    # 2. Far from the edge nothing shows; within reach the strip shows, at any height; the terminal does not move.
+    inputs.move(left + 200, high)
+    hold_true(lambda: panel.strip_hidden() is True, 1.0, what="the strip stays hidden with the pointer 200 px from the edge",
+              describe=panel.strip_hidden)
+    inputs.move(left + 30, high)
+    panel.wait_strip(hidden=False, timeout_s=3)
+    assert terminal_rect() == hidden_rect, (terminal_rect(), hidden_rect)
+    hold_true(lambda: panel.strip_hidden() is False, 1.0, what="the strip stays while the pointer rests near it",
+              describe=panel.strip_hidden)
+
+    # 3. Away again: it hides.
+    inputs.move(left + 200, high)
+    panel.wait_strip(hidden=True, timeout_s=3)
+
+    # 4. A press on the strip beside the chevron belongs to the terminal: the strip steps aside, and stays away while the
+    #    pointer stays at the edge; leaving and coming back brings it in again.
+    inputs.move(left + 30, high)
+    panel.wait_strip(hidden=False, timeout_s=3)
+    inputs.click(left + 10, high)
+    panel.wait_strip(hidden=True, timeout_s=3)
+    inputs.move(left + 25, high)
+    hold_true(lambda: panel.strip_hidden() is True, 1.0, what="the strip stays away after a press at the edge",
+              describe=panel.strip_hidden)
+    inputs.move(left + 200, high)
+    time.sleep(0.5)  # one tick of the app's watch, so the leave is seen whichever way it is noticed
+    inputs.move(left + 30, high)
+    panel.wait_strip(hidden=False, timeout_s=3)
+
+    # 5. The pointer leaves the window through the docked edge: no pointer event tells the content, the app's watch does.
+    #    Only when the window leaves room on its left (a maximized window's edge is the screen's).
+    if left >= 100:
+        inputs.move(left - 60, high)
+        panel.wait_strip(hidden=True, timeout_s=3)
+    else:
+        print(f"SP-16 phase 5 skipped: the content starts {left} px from the screen's left edge (no room to leave through it)")
+
+    # 6. The chevron brings the panel back (its real click: the pointer's arrival shows the strip before the press).
+    panel.expand()
+    assert panel.strip_button() is None and panel.dock_side() == "left"
+    assert abs(w.terminal.element().rect[2] - width_expanded) <= 2, (w.terminal.element().rect, width_expanded)
+    assert not am.profile.hooks.find(r"\[exc\] sidepanel strip")
+
+
+@pytest.mark.p1
 @pytest.mark.flow("SP-12")
 @pytest.mark.needs_fix("SP-F3")
 def test_card_menu_opens_next_to_its_tab(am, s2, mock):

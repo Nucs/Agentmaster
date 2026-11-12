@@ -312,6 +312,10 @@
          the four flags, Active within), the matcher, the edits, the chips and the window record's JSON (pure, header-only;
          TestSidePanelFilters). -->
     <ClInclude Include="AgentMaster\SidePanelFilters.h" />
+    <!-- Agentmaster (SIDE_PANEL.md section 2m): the collapsed side panel's self-hiding strip - when the pointer is near it
+         (within 40 DIPs of the strip) and the strip's next state for one pointer event (pure, header-only;
+         TestSidePanelStripReveal). -->
+    <ClInclude Include="AgentMaster\SidePanelStripReveal.h" />
     <ClInclude Include="SnippetsPaneContent.h">
       <DependentUpon>SnippetsPaneContent.xaml</DependentUpon>
     </ClInclude>

@@ -80,6 +80,13 @@
 // record's unlisted folders first and checked, the history's order, the record's spelling and choice on a checked line), the
 // toggle judged against the record as it is, a line turned off turning back on as it was, the removal by any spelling, the
 // line's words, and a line's coverage equal to the matcher's By Folder verdict for that folder alone.
+//
+// TestSidePanelStripReveal pins WHEN the collapsed panel's strip shows (AgentMaster/SidePanelStripReveal.h, SIDE_PANEL.md
+// section 2m; the user's request of 2026-11-12): near = within 40 DIPs of the strip (60 from the docked edge of the content,
+// inclusive, any height, mirrored docked right, never outside the area, bad inputs neutralized); the rule - an approach
+// shows it, away hides it, a drag passing by and a press beside the button keep it away until the pointer has left, a press
+// on the button keeps it, a finger's taps, the watch that only hides, the after-collapse linger; all 288 input combinations
+// against a second statement of the rule; one user's visit event by event.
 
 #include "m5_tests.h"
 
@@ -90,6 +97,7 @@
 #include "../SidePanelAiCopy.h" // the crossed circle's refill and the copy button's Markdown (TestSidePanelAiCopy)
 #include "../SidePanelFilters.h" // the funnel's FILTERS: facets, matcher, edits, chips, the record's JSON (TestSidePanelFilters)
 #include "../SidePanelPins.h" // Pin to Top: pinned cards first, the newest pin on top, the pin stamp, the re-home carry (TestSidePanelPins)
+#include "../SidePanelStripReveal.h" // the collapsed strip's auto-hide: when the pointer is near it, and the strip's next state (TestSidePanelStripReveal)
 #include "../StatusIconMotion.h" // the status icon's motion rule, shared by the tab header and the card icon (TestStatusIconMotion)
 #include "../VirtualListWindow.h" // the virtualized card list's realized rows (TestVirtualListWindow)
 
@@ -2655,5 +2663,342 @@ void TestSidePanelFilters()
             }
         }
         CHECK(agree, "folder menu: a line's coverage equals the matcher's By Folder verdict for that folder alone (with and without subfolders)");
+    }
+}
+
+namespace
+{
+    // The strip's rule stated a second time, for the exhaustive cross-check of TestSidePanelStripReveal: one flat chain of
+    // the cases in the order SIDE_PANEL.md section 2m lists them, changing two flags, where NextSidePanelStripReveal
+    // returns early from nested blocks. A slip in either one shows as a disagreement.
+    //   now     - the strip's state before the event.
+    //   p       - the event.
+    //   returns - the state the section's words give.
+    SidePanelStripReveal ExpectedStripReveal(SidePanelStripReveal now, const SidePanelStripPointer& p)
+    {
+        const bool press = p.kind == SidePanelStripPointerKind::Press;
+        const bool watch = p.kind == SidePanelStripPointerKind::Watch;
+        bool shown = now.shown;
+        bool dismissed = now.dismissed;
+        if (press && p.onButton)
+        {
+            // the button's own press changes nothing
+        }
+        else if (press && now.shown)
+        {
+            shown = false; // the press belongs to what is under the strip
+            dismissed = p.nearStrip;
+        }
+        else if (press && !p.hovers && p.nearStrip)
+        {
+            shown = true; // a finger's tap near the edge
+            dismissed = false;
+        }
+        else if (press)
+        {
+            dismissed = now.dismissed && p.nearStrip; // a mouse press never shows
+        }
+        else if (watch && !p.hovers)
+        {
+            // a finger moved no cursor: the watch has nothing to judge
+        }
+        else if (!p.nearStrip)
+        {
+            if (!(now.shown && p.lingering))
+            {
+                shown = false; // away
+                dismissed = false;
+            }
+        }
+        else if (!watch && !now.shown)
+        {
+            if (p.inContact)
+            {
+                dismissed = true; // a drag passing by
+            }
+            else if (!now.dismissed && p.hovers)
+            {
+                shown = true; // the pointer came close
+            }
+        }
+        return { shown, dismissed };
+    }
+
+    // A pointer event for the strip's rule, written in one line at the call.
+    //   kind      - move, press or the watch's look.
+    //   nearStrip - the pointer is near the strip's place.
+    //   inContact - a button is held (or the pen / finger touches).
+    //   hovers    - a mouse or a pen (false = a finger).
+    //   onButton  - (press) it landed on the expand button.
+    //   lingering - the after-collapse linger runs.
+    //   returns   - the event.
+    constexpr SidePanelStripPointer StripEvent(SidePanelStripPointerKind kind, bool nearStrip, bool inContact = false, bool hovers = true, bool onButton = false, bool lingering = false) noexcept
+    {
+        SidePanelStripPointer p{};
+        p.kind = kind;
+        p.nearStrip = nearStrip;
+        p.inContact = inContact;
+        p.hovers = hovers;
+        p.onButton = onButton;
+        p.lingering = lingering;
+        return p;
+    }
+}
+
+// TestSidePanelStripReveal pins WHEN the collapsed side panel's strip shows (AgentMaster/SidePanelStripReveal.h, SIDE_PANEL.md
+// section 2m; the user's request of 2026-11-12, "The strip should autohide. If mouse comes close by 40pixels the strips
+// appears", and their pick of the floating whole strip): the geometry - the user's 40 measured from the strip, so 60 DIPs
+// from the docked edge of the content, inclusive, at any height, mirrored docked right, never outside the area, an
+// unmeasured area and every NaN / negative input neutralized, plus a seeded mirror sweep; the rule's named cases - the
+// approach, staying and leaving, a drag passing by, a press beside the button (the strip steps aside until the pointer
+// has left), a press on the button, a finger's taps, the watch that only hides, the after-collapse linger; all 288
+// combinations of the inputs against a second statement of the rule and its invariants; and one user's whole visit,
+// event by event.
+void TestSidePanelStripReveal()
+{
+    std::wprintf(L"Collapsed strip auto-hide (SidePanelStripReveal.h, SIDE_PANEL.md section 2m):\n");
+    using Kind = SidePanelStripPointerKind;
+    constexpr double kStrip = 20.0; // the strip's width in the app (kSidePanelStripPx)
+    constexpr double kW = 1000.0;
+    constexpr double kH = 600.0;
+
+    // --- the geometry -------------------------------------------------------------------------------------------------
+    static_assert(kSidePanelStripRevealDistance == 40.0, "the reveal distance is the user's 40");
+    // Docked left: the strip's place is x in [0, 20); "within 40 of it" reaches x = 60, inclusive.
+    CHECK(SidePanelStripPointerNear(true, kW, kH, 0.0, 300.0, kStrip), "strip near: docked left, the very edge is near");
+    CHECK(SidePanelStripPointerNear(true, kW, kH, 10.0, 300.0, kStrip), "strip near: docked left, over the strip's own place");
+    CHECK(SidePanelStripPointerNear(true, kW, kH, 59.75, 300.0, kStrip), "strip near: docked left, 39.75 from the strip");
+    CHECK(SidePanelStripPointerNear(true, kW, kH, 60.0, 300.0, kStrip), "strip near: docked left, exactly 40 from the strip is still near");
+    CHECK(!SidePanelStripPointerNear(true, kW, kH, 60.25, 300.0, kStrip), "strip near: docked left, 40.25 from the strip is away");
+    CHECK(!SidePanelStripPointerNear(true, kW, kH, 500.0, 300.0, kStrip), "strip near: docked left, the middle of the content is away");
+    CHECK(!SidePanelStripPointerNear(true, kW, kH, 990.0, 300.0, kStrip), "strip near: docked left, the OTHER edge is away");
+    // Any height along the edge - the strip is as tall as the content.
+    CHECK(SidePanelStripPointerNear(true, kW, kH, 30.0, 0.0, kStrip) && SidePanelStripPointerNear(true, kW, kH, 30.0, 599.75, kStrip),
+          "strip near: the top row and the bottom row of the content count like the middle");
+    // Outside the content area the pointer is never near, however close to the strip's place.
+    CHECK(!SidePanelStripPointerNear(true, kW, kH, -0.25, 300.0, kStrip), "strip near: a pointer that left through the docked edge (x < 0) is away");
+    CHECK(!SidePanelStripPointerNear(true, kW, kH, 30.0, -1.0, kStrip), "strip near: over the tab row above the content (y < 0) is away");
+    CHECK(!SidePanelStripPointerNear(true, kW, kH, 30.0, 600.0, kStrip), "strip near: the first row below the content (y == height) is away");
+    CHECK(!SidePanelStripPointerNear(false, kW, kH, 1000.0, 300.0, kStrip), "strip near: docked right, the first column past the content (x == width) is away");
+    // Docked right: the mirror image.
+    CHECK(SidePanelStripPointerNear(false, kW, kH, 999.75, 300.0, kStrip), "strip near: docked right, the very edge is near");
+    CHECK(SidePanelStripPointerNear(false, kW, kH, 940.0, 300.0, kStrip), "strip near: docked right, exactly 40 from the strip is still near");
+    CHECK(!SidePanelStripPointerNear(false, kW, kH, 939.75, 300.0, kStrip), "strip near: docked right, 40.25 from the strip is away");
+    CHECK(!SidePanelStripPointerNear(false, kW, kH, 10.0, 300.0, kStrip), "strip near: docked right, the left edge is away");
+    // Nothing to measure against: never near.
+    CHECK(!SidePanelStripPointerNear(true, 0.0, kH, 0.0, 300.0, kStrip) && !SidePanelStripPointerNear(true, kW, 0.0, 0.0, 0.0, kStrip),
+          "strip near: an unmeasured content area (a 0 width or height) has no edge to be near");
+    CHECK(!SidePanelStripPointerNear(true, -5.0, kH, 0.0, 300.0, kStrip), "strip near: a negative width reads as unmeasured");
+    {
+        const double nan = std::nan("");
+        CHECK(!SidePanelStripPointerNear(true, nan, kH, 10.0, 300.0, kStrip) && !SidePanelStripPointerNear(true, kW, nan, 10.0, 300.0, kStrip) &&
+                  !SidePanelStripPointerNear(true, kW, kH, nan, 300.0, kStrip) && !SidePanelStripPointerNear(true, kW, kH, 10.0, nan, kStrip),
+              "strip near: a NaN size or coordinate is never near");
+        // A broken strip width or distance counts as 0, it never widens the reach.
+        CHECK(SidePanelStripPointerNear(true, kW, kH, 40.0, 300.0, nan) && !SidePanelStripPointerNear(true, kW, kH, 40.25, 300.0, nan),
+              "strip near: a NaN strip width counts as 0 (the reach is the 40 alone)");
+        CHECK(SidePanelStripPointerNear(true, kW, kH, 20.0, 300.0, kStrip, nan) && !SidePanelStripPointerNear(true, kW, kH, 20.25, 300.0, kStrip, nan),
+              "strip near: a NaN distance counts as 0 (only the strip's own place is near)");
+    }
+    CHECK(SidePanelStripPointerNear(true, kW, kH, 40.0, 300.0, -8.0) && !SidePanelStripPointerNear(true, kW, kH, 40.25, 300.0, -8.0),
+          "strip near: a negative strip width counts as 0");
+    CHECK(SidePanelStripPointerNear(true, kW, kH, 20.0, 300.0, kStrip, -1.0) && !SidePanelStripPointerNear(true, kW, kH, 20.25, 300.0, kStrip, -1.0),
+          "strip near: a negative distance counts as 0");
+    CHECK(SidePanelStripPointerNear(true, kW, kH, 100.0, 300.0, kStrip, 80.0) && !SidePanelStripPointerNear(true, kW, kH, 100.25, 300.0, kStrip, 80.0),
+          "strip near: another distance moves the boundary with it (20 + 80)");
+    // A content area narrower than the reach: the whole of it is near, from either dock.
+    CHECK(SidePanelStripPointerNear(true, 50.0, kH, 49.0, 10.0, kStrip) && SidePanelStripPointerNear(false, 50.0, kH, 0.0, 10.0, kStrip),
+          "strip near: a content area narrower than 60 is near all over");
+    {
+        // An infinite width (never produced by layout; a belt): docked left the edge is where it always is, docked right it
+        // is infinitely far.
+        CHECK(SidePanelStripPointerNear(true, HUGE_VAL, kH, 30.0, 10.0, kStrip) && !SidePanelStripPointerNear(false, HUGE_VAL, kH, 30.0, 10.0, kStrip),
+              "strip near: an infinite width keeps the left edge and loses the right one");
+    }
+    {
+        // The two docks are mirror images: a pointer x from the left edge docked left reads like one x from the right edge
+        // docked right. Quarter-DIP positions and whole sizes, so every subtraction is exact.
+        uint64_t seed = 0xA0761D6478BD642Full;
+        const auto next = [&seed](uint64_t span) {
+            seed += 0x9E3779B97F4A7C15ull;
+            uint64_t z = seed;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+            z ^= z >> 31;
+            return z % span;
+        };
+        size_t cases = 0;
+        size_t mirrorBroken = 0; // the docks disagree about mirrored points
+        size_t boundaryBroken = 0; // near does not equal "at most 60 from the docked edge"
+        for (int i = 0; i < 20000; ++i)
+        {
+            const double width = static_cast<double>(1 + next(3000));
+            const double height = static_cast<double>(1 + next(2000));
+            const double quarters = static_cast<double>(1 + next(static_cast<uint64_t>(width) * 4 - 1)); // 1 .. 4*width - 1
+            const double x = quarters / 4.0; // strictly inside (0, width)
+            const double y = static_cast<double>(next(static_cast<uint64_t>(height)));
+            const bool fromLeft = SidePanelStripPointerNear(true, width, height, x, y, kStrip);
+            const bool fromRight = SidePanelStripPointerNear(false, width, height, width - x, y, kStrip);
+            ++cases;
+            if (fromLeft != fromRight)
+            {
+                ++mirrorBroken;
+            }
+            if (fromLeft != (x <= 60.0))
+            {
+                ++boundaryBroken;
+            }
+        }
+        CHECK(cases == 20000 && mirrorBroken == 0, "strip near (sweep): docked right is the mirror image of docked left");
+        CHECK(boundaryBroken == 0, "strip near (sweep): near is exactly 'at most 60 DIPs from the docked edge', whatever the area's size");
+    }
+
+    // --- the rule's named cases ----------------------------------------------------------------------------------------
+    const SidePanelStripReveal hidden{ false, false };
+    const SidePanelStripReveal shown{ true, false };
+    const SidePanelStripReveal dismissed{ false, true };
+
+    // The approach: a mouse arriving near the strip, no button held.
+    CHECK(NextSidePanelStripReveal(hidden, StripEvent(Kind::Move, true)) == shown, "strip rule: the pointer comes close - the strip shows");
+    CHECK(NextSidePanelStripReveal(hidden, StripEvent(Kind::Move, false)) == hidden, "strip rule: a move far from the strip shows nothing");
+    // It stays while the pointer is near and goes when the pointer is away.
+    CHECK(NextSidePanelStripReveal(shown, StripEvent(Kind::Move, true)) == shown, "strip rule: it stays while the pointer stays near");
+    CHECK(NextSidePanelStripReveal(shown, StripEvent(Kind::Move, true, /*inContact*/ true)) == shown, "strip rule: a held button does not hide a strip that shows");
+    CHECK(NextSidePanelStripReveal(shown, StripEvent(Kind::Move, false)) == hidden, "strip rule: the pointer moves away - the strip hides, armed again");
+
+    // A drag passing by (a text selection dragged to the first column) never brings it in, and it stays away until the
+    // pointer has left and come back.
+    CHECK(NextSidePanelStripReveal(hidden, StripEvent(Kind::Move, true, /*inContact*/ true)) == dismissed, "strip rule: a drag arriving near the strip keeps it hidden");
+    CHECK(NextSidePanelStripReveal(dismissed, StripEvent(Kind::Move, true)) == dismissed, "strip rule: after that drag, the released pointer moving near still shows nothing");
+    CHECK(NextSidePanelStripReveal(dismissed, StripEvent(Kind::Move, false)) == hidden, "strip rule: the pointer leaves - the strip is armed again");
+    CHECK(NextSidePanelStripReveal(dismissed, StripEvent(Kind::Move, false, /*inContact*/ true)) == hidden, "strip rule: leaving with the button still held arms it too");
+
+    // A press beside the button belongs to what is under the strip: the strip steps aside.
+    CHECK(NextSidePanelStripReveal(shown, StripEvent(Kind::Press, true, true)) == dismissed, "strip rule: a press beside the button hides the strip until the pointer has left");
+    CHECK(NextSidePanelStripReveal(shown, StripEvent(Kind::Press, true, true, true, /*onButton*/ true)) == shown, "strip rule: a press ON the button keeps the strip under it");
+    CHECK(NextSidePanelStripReveal(dismissed, StripEvent(Kind::Press, true, true)) == dismissed, "strip rule: a second press at the edge (a double-click) keeps it away");
+    CHECK(NextSidePanelStripReveal(hidden, StripEvent(Kind::Press, true, true)) == hidden, "strip rule: a mouse press never shows the strip");
+    CHECK(NextSidePanelStripReveal(dismissed, StripEvent(Kind::Press, false, true)) == hidden, "strip rule: a press far from the strip arms it (the pointer is away)");
+
+    // A finger cannot hover: its tap near the edge is the approach; a tap beside the button sends the strip away again.
+    CHECK(NextSidePanelStripReveal(hidden, StripEvent(Kind::Press, true, true, /*hovers*/ false)) == shown, "strip rule: a finger's tap near the edge shows the strip");
+    CHECK(NextSidePanelStripReveal(dismissed, StripEvent(Kind::Press, true, true, false)) == shown, "strip rule: a finger's tap shows it even after it stepped aside");
+    CHECK(NextSidePanelStripReveal(shown, StripEvent(Kind::Press, true, true, false)) == dismissed, "strip rule: a finger's tap beside the button hides it");
+    CHECK(NextSidePanelStripReveal(shown, StripEvent(Kind::Press, true, true, false, /*onButton*/ true)) == shown, "strip rule: a finger's tap on the button keeps it for the click");
+    CHECK(NextSidePanelStripReveal(hidden, StripEvent(Kind::Press, false, true, false)) == hidden, "strip rule: a finger's tap far from the edge shows nothing");
+    CHECK(NextSidePanelStripReveal(hidden, StripEvent(Kind::Move, true, true, false)) == dismissed && NextSidePanelStripReveal(hidden, StripEvent(Kind::Move, true, false, false)) == hidden,
+          "strip rule: a finger's move never shows the strip");
+
+    // The watch (the cursor read while the strip shows or waits): it hides and arms, it never shows.
+    CHECK(NextSidePanelStripReveal(shown, StripEvent(Kind::Watch, true)) == shown, "strip watch: the cursor still near - the strip stays");
+    CHECK(NextSidePanelStripReveal(shown, StripEvent(Kind::Watch, false)) == hidden, "strip watch: the cursor left the window - the strip hides");
+    CHECK(NextSidePanelStripReveal(dismissed, StripEvent(Kind::Watch, false)) == hidden, "strip watch: the cursor left - a strip that stepped aside is armed again");
+    CHECK(NextSidePanelStripReveal(dismissed, StripEvent(Kind::Watch, true)) == dismissed, "strip watch: the cursor still near - it stays stepped aside");
+    CHECK(NextSidePanelStripReveal(hidden, StripEvent(Kind::Watch, true)) == hidden, "strip watch: the watch never shows the strip");
+    CHECK(NextSidePanelStripReveal(shown, StripEvent(Kind::Watch, false, false, /*hovers*/ false)) == shown, "strip watch: after a finger's tap the cursor proves nothing - the strip stays");
+
+    // The after-collapse linger: the strip shows for a moment wherever the pointer is.
+    CHECK(NextSidePanelStripReveal(shown, StripEvent(Kind::Move, false, false, true, false, /*lingering*/ true)) == shown, "strip linger: a move far away does not hide the just-collapsed strip");
+    CHECK(NextSidePanelStripReveal(shown, StripEvent(Kind::Watch, false, false, true, false, true)) == shown, "strip linger: nor does the watch");
+    CHECK(NextSidePanelStripReveal(shown, StripEvent(Kind::Watch, false)) == hidden, "strip linger: once it is over, the watch hides the strip");
+    CHECK(NextSidePanelStripReveal(shown, StripEvent(Kind::Press, false, true, true, false, true)) == hidden, "strip linger: a press far from the strip ends it at once, armed");
+    CHECK(NextSidePanelStripReveal(shown, StripEvent(Kind::Press, true, true, true, false, true)) == dismissed, "strip linger: a press beside the button ends it, stepped aside");
+    CHECK(NextSidePanelStripReveal(shown, StripEvent(Kind::Press, true, true, true, true, true)) == shown, "strip linger: a press on the button keeps it for the click");
+    CHECK(NextSidePanelStripReveal(hidden, StripEvent(Kind::Move, false, false, true, false, true)) == hidden && NextSidePanelStripReveal(hidden, StripEvent(Kind::Watch, true, false, true, false, true)) == hidden,
+          "strip linger: lingering never SHOWS a hidden strip");
+
+    // --- every combination against the second statement and the invariants ----------------------------------------------
+    {
+        const SidePanelStripReveal states[] = { hidden, shown, dismissed }; // shown + dismissed is not a state
+        const Kind kinds[] = { Kind::Move, Kind::Press, Kind::Watch };
+        size_t cases = 0;
+        size_t disagree = 0; // the rule and its second statement differ
+        size_t bothFlags = 0; // shown and dismissed at once
+        size_t watchShowed = 0; // the watch turned a hidden strip on
+        size_t mousePressShowed = 0; // a mouse or pen press turned a hidden strip on
+        size_t showedFromAfar = 0; // a hidden strip turned on with the pointer away
+        size_t buttonPressChanged = 0; // a press on the button changed anything
+        size_t awayKept = 0; // an away pointer (no linger, a hovering device) left the strip shown or dismissed
+        for (const auto& state : states)
+        {
+            for (const auto kind : kinds)
+            {
+                for (unsigned bits = 0; bits < 32; ++bits)
+                {
+                    const auto p = StripEvent(kind, (bits & 1u) != 0, (bits & 2u) != 0, (bits & 4u) != 0, (bits & 8u) != 0, (bits & 16u) != 0);
+                    const auto got = NextSidePanelStripReveal(state, p);
+                    const auto want = ExpectedStripReveal(state, p);
+                    ++cases;
+                    if (!(got == want))
+                    {
+                        ++disagree;
+                        std::wprintf(L"    state %d/%d kind %d bits 0x%02X: got %d/%d, expected %d/%d (shown/dismissed)\n",
+                                     state.shown ? 1 : 0,
+                                     state.dismissed ? 1 : 0,
+                                     static_cast<int>(kind),
+                                     bits,
+                                     got.shown ? 1 : 0,
+                                     got.dismissed ? 1 : 0,
+                                     want.shown ? 1 : 0,
+                                     want.dismissed ? 1 : 0);
+                    }
+                    bothFlags += (got.shown && got.dismissed) ? 1 : 0;
+                    watchShowed += (kind == Kind::Watch && !state.shown && got.shown) ? 1 : 0;
+                    mousePressShowed += (kind == Kind::Press && p.hovers && !state.shown && got.shown) ? 1 : 0;
+                    showedFromAfar += (!state.shown && got.shown && !p.nearStrip) ? 1 : 0;
+                    buttonPressChanged += (kind == Kind::Press && p.onButton && !(got == state)) ? 1 : 0;
+                    awayKept += (kind != Kind::Press && !p.nearStrip && !p.lingering && p.hovers && !(got == hidden)) ? 1 : 0;
+                }
+            }
+        }
+        CHECK(cases == 288 && disagree == 0, "strip rule: all 288 combinations match the second statement of the rule");
+        CHECK(bothFlags == 0, "strip rule: never shown and stepped aside at once");
+        CHECK(watchShowed == 0, "strip rule: the watch never shows the strip");
+        CHECK(mousePressShowed == 0, "strip rule: a mouse or pen press never shows the strip");
+        CHECK(showedFromAfar == 0, "strip rule: the strip never appears while the pointer is away");
+        CHECK(buttonPressChanged == 0, "strip rule: a press on the button never changes the strip");
+        CHECK(awayKept == 0, "strip rule: an away pointer (no linger) always leaves the strip hidden and armed");
+    }
+
+    // --- one visit, event by event --------------------------------------------------------------------------------------
+    {
+        // The pointer positions go through the real geometry (docked left, a 1000 x 600 content area).
+        const auto at = [&](double x) { return SidePanelStripPointerNear(true, kW, kH, x, 300.0, kStrip); };
+        SidePanelStripReveal s{}; // a window that opens with its panel collapsed: hidden
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(400.0)));
+        CHECK(s == hidden, "strip visit: working in the middle of the terminal - nothing shows");
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(61.0)));
+        CHECK(s == hidden, "strip visit: 41 from the strip - still nothing");
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(58.0)));
+        CHECK(s == shown, "strip visit: 38 from the strip - it shows");
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(12.0)));
+        CHECK(s == shown, "strip visit: over the strip itself - it stays");
+        // A click on the terminal's first column, beside the button: the strip steps aside for it.
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Press, at(12.0), true));
+        CHECK(s == dismissed, "strip visit: a click beside the button - the strip steps aside");
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(14.0), true));
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(30.0)));
+        CHECK(s == dismissed, "strip visit: selecting and moving at the edge - it stays away");
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(200.0)));
+        CHECK(s == hidden, "strip visit: the pointer leaves the edge - armed again");
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(40.0)));
+        CHECK(s == shown, "strip visit: back at the edge - it shows again");
+        // The pointer leaves the window through the edge: no move reaches the content, the watch sees it.
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Watch, at(-80.0)));
+        CHECK(s == hidden, "strip visit: the pointer left the window through the edge - the watch hides the strip");
+        // Back in, onto the button, and a click on it: the strip is still there for the click.
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(8.0)));
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Press, at(8.0), true, true, /*onButton*/ true));
+        CHECK(s == shown, "strip visit: the click on the button finds the strip shown (its click expands the panel)");
+    }
+
+    // constexpr: both functions are pure and usable at compile time.
+    {
+        static_assert(SidePanelStripPointerNear(true, 1000.0, 600.0, 60.0, 0.0, 20.0), "40 DIPs from a 20 DIP strip is near");
+        static_assert(!SidePanelStripPointerNear(true, 1000.0, 600.0, 61.0, 0.0, 20.0), "41 DIPs from it is away");
+        static_assert(NextSidePanelStripReveal(SidePanelStripReveal{}, StripEvent(SidePanelStripPointerKind::Move, true)).shown, "an approach shows the strip");
+        static_assert(!NextSidePanelStripReveal(SidePanelStripReveal{}, StripEvent(SidePanelStripPointerKind::Watch, true)).shown, "the watch never does");
+        static_assert(kSidePanelStripCollapseLingerMs >= 1000 && kSidePanelStripCollapseLingerMs <= 3000,
+                      "the after-collapse linger is long enough to be seen (1 s) and short enough not to read as stuck (3 s)");
     }
 }
