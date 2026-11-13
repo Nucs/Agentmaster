@@ -81,13 +81,18 @@ amb e2e <build id> --suite-rev REV           # the suite is REV's committed e2e/
 
 ## Builds
 
-`amb build` builds a **commit**, never the working tree: it resolves `<rev>` (default HEAD) in `K:\source\Agentmaster`
-(`AMB_REPO` overrides) and sends the full SHA. A build id names immutable bytes, so commit first, or snapshot.
+`amb build` builds a **commit**, never the working tree: it resolves `<rev>` (default HEAD) in the checkout it runs from
+when that is `K:\source\Agentmaster` or one of its linked worktrees, else in `K:\source\Agentmaster` (`AMB_REPO`
+overrides; a checkout other than K:'s is named on amb's first line: `WorkingTreeSnapshot.CheckoutOf`), and sends the full
+SHA. A build id names immutable bytes, so commit first, or snapshot. `--dry-run` shows the checkout and the commit, or
+a snapshot's changes, and sends nothing (an import, smoke or e2e request refuses the flag: it would be sent for real).
 
 - **Uncommitted work** (`amb build --snapshot [-- <paths>]`, `src/Amb.Cli/WorkingTreeSnapshot.cs`): the CLI makes a
-  commit of HEAD plus the work - the whole working tree (other sessions' uncommitted edits included), or only `<paths>`
-  over HEAD - in a PRIVATE index (`GIT_INDEX_FILE`), so HEAD, the branches, the repository's index and the files stay as
-  they are, and keeps it under `refs/buildserver/snapshots/<commit>`, which the site's mirror fetches. The commit is
+  commit of HEAD plus that checkout's work - the whole working tree (every changed and untracked file, ignored ones not;
+  other sessions' uncommitted edits included), or only `<paths>` over HEAD - in a PRIVATE index (`GIT_INDEX_FILE`), so
+  HEAD, the branches, the repository's index and the files stay as they are, and keeps it under
+  `refs/buildserver/snapshots/<commit>`, which this PC's site's mirror fetches and the worker machine's gets pushed like
+  any commit. A submodule is taken at its checked-out commit, never its own uncommitted files. The commit is
   reproducible (a fixed author, HEAD's date, a message of HEAD and the tree): the same work twice is the same build id.
   Refused: a file over 100 MB or more than 300 MB in all (the objects go to K:). A clean tree builds HEAD. The build's
   record names the commit it was made on (`snapshotOf`; `amb builds` shows it); a built snapshot's ref in the repository
@@ -218,7 +223,7 @@ python buildserver/image/images.py list
 ## Build and test
 
 ```text
-dotnet test buildserver/src/Buildserver.slnx            # build everything + 116 unit tests (output in Q:\tmp\buildserver-build)
+dotnet test buildserver/src/Buildserver.slnx            # build everything + 119 unit tests (output in Q:\tmp\buildserver-build)
 python buildserver/tests/local_chain.py                 # the chain without a VM (Q:\tmp\buildserver-test, removed after)
 python buildserver/tests/site_outcomes.py               # Phase 1's done-when on the real site: e2e passed, failed, cancelled, lost VM
 python buildserver/tests/site_build.py                  # the build MVP's done-when on the real site (it builds: ask first)
@@ -383,7 +388,7 @@ python buildserver/image/images.py --site worker base | e2e | build-image | chec
 | [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API (artifacts streamed by name; the source mirrors' tips and pushed bundles), the scheduler (admission by priority × availability, wait and run timeouts, cancel, one build at a time, existing builds answered without a slot), the guest broker, the jobs (import, a pulled build too; smoke, install, layer, e2e, a suite out of the mirror too; build, deploy), the source mirror (fetching K:, or taking pushes; snapshots too) and its bundles, the slot manager and its drivers (podman + dockur, kept VMs with a data disk, capped slots with the site's swap file, a site's longer firmware wait, a stopped slot's last output; cgroup v1 and v2 memory figures; local, for tests); its settings say which site it serves (homepc's or a Linux one) | runs in both sites; 70 unit tests (`src/Amb.Coordinator.Tests`) |
 | [`src/Amb.GuestAgent`](src/Amb.GuestAgent) | `amb-guest.exe` (Native AOT, 7 MB): the agent in every VM; hello, heartbeat with the guest's memory, one step at a time by long poll (run, fetch, expand, put, shutdown) | in every slot |
 | [`src/Amb.HostFacts`](src/Amb.HostFacts) | `amb-hostfacts.exe` (Native AOT): Windows' available memory, free commit, Q: free space and a full-screen game, as one line of JSON; the coordinator runs it every 10 s through WSL's interop | in use |
-| [`src/Amb.Cli`](src/Amb.Cli) | `amb.exe`: the command line above; `Sites.cs` (the two sites, a build id's site by its letter), `SourcePush.cs` (a commit pushed to the worker as a bundle of what it lacks), `WorkingTreeSnapshot.cs` (`--snapshot`), `ProcessAncestry.cs` (the requesting claude.exe of `amb install`: the process chain, else `CLAUDE_PID`) | in use; 15 unit tests (`src/Amb.Cli.Tests`) |
+| [`src/Amb.Cli`](src/Amb.Cli) | `amb.exe`: the command line above; `Sites.cs` (the two sites, a build id's site by its letter), `SourcePush.cs` (a commit pushed to the worker as a bundle of what it lacks), `WorkingTreeSnapshot.cs` (`--snapshot`), `ProcessAncestry.cs` (the requesting claude.exe of `amb install`: the process chain, else `CLAUDE_PID`) | in use; 18 unit tests (`src/Amb.Cli.Tests`) |
 | [`tests/local_chain.py`](tests/local_chain.py) | the whole chain on this PC without a VM: the coordinator with the local slot driver, the real guest agent, the real API | 15 checks pass |
 | [`tests/site_outcomes.py`](tests/site_outcomes.py) | Phase 1's done-when on the real site: e2e runs that pass, fail, are cancelled and lose their VM, each leaving nothing behind | 14 checks passed (2026-10-25) |
 | [`tests/site_build.py`](tests/site_build.py) | the build MVP's done-when on the real site: a build of HEAD, its manifest, an identical request, e2e on the build, fetch, no slot left, K: only read | 7 checks passed (2026-10-26, `b20261026-3`) |

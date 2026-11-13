@@ -24,10 +24,11 @@ using Amb.Core.Protocol;
 //   amb install <build id> --instance dev|production [--dry-run] [--reinstall] [--wait-others MIN] [--wait] [--wait-max S]
 //   import, smoke, e2e, build and install also take --run-timeout MIN and --wait-timeout MIN (1-1440; else the kind's
 //   defaults, e.g. e2e 120 / 120, build 180 / 60: the whole e2e suite needs a longer run timeout).
-//   build resolves <rev> (default HEAD) in K:\source\Agentmaster (AMB_REPO overrides) and sends that commit: a build id
-//   names immutable bytes, so the service is never asked for a branch that may move. --snapshot makes a commit of the
-//   uncommitted work instead (WorkingTreeSnapshot.cs: a private index, a ref under refs/buildserver/snapshots/, nothing
-//   else in the repository changes). fetch writes to Q:\buildserver\out\<build id> unless --to says otherwise, never to
+//   build resolves <rev> (default HEAD) in the checkout amb runs from, when that is K:\source\Agentmaster or one of its
+//   linked worktrees (else K:\source\Agentmaster; AMB_REPO overrides), and sends that commit: a build id names
+//   immutable bytes, so the service is never asked for a branch that may move. --snapshot makes a commit of that
+//   checkout's uncommitted work instead (WorkingTreeSnapshot.cs: a private index, a ref under
+//   refs/buildserver/snapshots/, nothing else in the repository changes). fetch writes to Q:\buildserver\out\<build id> unless --to says otherwise, never to
 //   K: (every build writes to Q:).
 //   install (alias deploy) moves an instance onto a build through the swap script (Jobs/DeployJob.cs): it stops the
 //   instance and ends every claude it hosts. Run from a session INSIDE that instance it waits for this session's turn to
@@ -154,8 +155,8 @@ internal sealed class Options
 
           amb status | list [--limit N] | show <id> | builds | cancel <id>
           amb logs <id> [-f] [--wait-max S]
-          amb build [<rev>] [--config Release|Debug] [--identity dev|release] [--purge none|force] [--wait]
-          amb build --snapshot [--config ...] [--identity ...] [--purge ...] [--wait] [-- <paths>]
+          amb build [<rev>] [--config Release|Debug] [--identity dev|release] [--purge none|force] [--wait] [--dry-run]
+          amb build --snapshot [--config ...] [--identity ...] [--purge ...] [--wait] [--dry-run] [-- <paths>]
           amb artifacts <build id>
           amb fetch <build id> [--kind portable-zip|layout-zip|symbols-zip|build-log|build-binlog|build-json|all] [--to DIR]
           amb install <build id> --instance dev|production [--dry-run] [--reinstall] [--wait-others MIN] [--wait]   (alias: deploy)
@@ -168,6 +169,13 @@ internal sealed class Options
           cannot read K:: build and e2e push the commit to it first (only what it lacks), and its e2e suite is a commit's
           e2e folder (--suite-rev REV, default HEAD; --suite PATH works at home only). install always runs at home and
           pulls a worker build there first; import reads a file on this PC, so it runs at home.
+
+          The checkout: build, --snapshot and --suite-rev read the checkout amb runs from when it is K:\source\Agentmaster
+          or one of its worktrees, else K:\source\Agentmaster (AMB_REPO overrides). --snapshot builds its uncommitted
+          work: every changed and untracked file (ignored ones not), at most 100 MB a file and 300 MB in all, or only
+          the paths after --; a submodule at its checked-out commit. Nothing in the checkout changes. build --dry-run
+          shows the checkout and the commit, or the snapshot's changes, and sends nothing; install --dry-run stages and
+          checks the build, prints the swap's plan and puts the slot back; other requests refuse --dry-run.
 
           e2e and smoke VMs: --ram GB is the most the VM keeps in the PC's memory; a larger --guest-ram GB is the RAM
           Windows in it sees, the rest in the site's swap file on Q: (home only: slower, admitted with a 6 GB commit
@@ -463,6 +471,12 @@ internal static class Commands
         return Fail(status, text);
     }
 
+    /// <summary>Whether a request command honors --dry-run, sending nothing for real: build (shows what it would build)
+    /// and install (the site stages, checks and puts the slot back). Every other request refuses the flag.</summary>
+    /// <param name="command">The command (null when none was given).</param>
+    /// <returns>True for build, install and install's alias deploy.</returns>
+    internal static bool HonorsDryRun(string? command) => command is "build" or "install" or "deploy";
+
     /// <summary>Submits an import, smoke, e2e or build request, and follows it with --wait.</summary>
     /// <param name="sites">The sites (the chosen one, and the others a build id or an install routes to).</param>
     /// <param name="options">The command line.</param>
@@ -487,6 +501,15 @@ internal static class Commands
         if (options.SlotSized && options.Command is not ("e2e" or "smoke"))
         {
             Console.Error.WriteLine("amb: --ram, --guest-ram and --vcpus size an e2e or smoke VM only");
+            return 2;
+        }
+        // --dry-run sends nothing only where it is implemented: install hands it to the site (its install stages and
+        // checks, and never swaps), and build stops after showing what it would build. An import, smoke or e2e request
+        // would be sent for real, so it is refused there (until 2026-11-13 every command took the flag and only install
+        // honored it: `amb build --snapshot --dry-run` started a real build).
+        if (options.Flags.Contains("--dry-run") && !HonorsDryRun(options.Command))
+        {
+            Console.Error.WriteLine($"amb: --dry-run belongs to build and install only; {options.Command} would be sent for real, so nothing was sent");
             return 2;
         }
         switch (options.Command)
@@ -514,6 +537,12 @@ internal static class Commands
                     return 2;
                 }
                 Console.WriteLine($"{rev} = {commit}");
+                if (options.Flags.Contains("--dry-run"))
+                {
+                    // Nothing is pushed and nothing is sent: the dry run only names the checkout (Repo) and the commit.
+                    Console.WriteLine($"dry run: the {client.Site} site would build {commit[..9]} ({rev} of {repo}); nothing was pushed or sent");
+                    return 0;
+                }
                 if (await PushIfNeededAsync(client, commit, cancel) is { } pushError)
                 {
                     Console.Error.WriteLine($"amb: {commit[..9]} could not be pushed to the {client.Site} site: {pushError}");
@@ -639,9 +668,31 @@ internal static class Commands
             : 0;
     }
 
-    /// <summary>The repository `amb build` works in: AMB_REPO, else <see cref="DefaultRepo"/>.</summary>
-    /// <returns>Its folder.</returns>
-    private static string Repo() => Environment.GetEnvironmentVariable("AMB_REPO") is { Length: > 0 } r ? r : DefaultRepo;
+    /// <summary>The checkout `amb build`, `amb build --snapshot` and an e2e run's suite work in: AMB_REPO; else the
+    /// checkout of <see cref="DefaultRepo"/>'s repository that the current folder is in (the main checkout or one of
+    /// its linked worktrees: WorkingTreeSnapshot.CheckoutOf); else <see cref="DefaultRepo"/>.</summary>
+    /// <returns>Its folder (the same one for the whole command: worked out once).</returns>
+    /// <remarks>A checkout other than <see cref="DefaultRepo"/> is announced on its first use, so a build of a worktree
+    /// never passes for a build of the main checkout.</remarks>
+    private static string Repo() => RepoOnce.Value;
+
+    /// <summary>The checkout <see cref="Repo"/> returns, worked out at its first use (a handful of git calls).</summary>
+    private static readonly Lazy<string> RepoOnce = new(() =>
+    {
+        if (Environment.GetEnvironmentVariable("AMB_REPO") is { Length: > 0 } chosen)
+        {
+            return chosen;
+        }
+        if (WorkingTreeSnapshot.CheckoutOf(Environment.CurrentDirectory, DefaultRepo) is string checkout)
+        {
+            if (!string.Equals(Path.TrimEndingDirectorySeparator(checkout), DefaultRepo, StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine($"checkout: {checkout} (a worktree of {DefaultRepo}, the current folder's)");
+            }
+            return checkout;
+        }
+        return DefaultRepo;
+    });
 
     /// <summary>Whether a site takes commits only by push (its status says so: the worker machine's).</summary>
     /// <param name="client">The site's client.</param>
@@ -789,28 +840,34 @@ internal static class Commands
     };
 
     /// <summary>Makes the snapshot `amb build --snapshot` builds (DESIGN.md §11): HEAD plus the uncommitted work of the
-    /// whole working tree, or of the paths after "--".</summary>
+    /// whole working tree, or of the paths after "--", in the checkout <see cref="Repo"/> names. With --dry-run it
+    /// lists that work and stops: no ref is tidied, no commit made.</summary>
     /// <param name="client">The client (to learn which snapshots were built, whose refs then go).</param>
     /// <param name="options">The command line.</param>
     /// <param name="cancel">Cancels the call.</param>
-    /// <returns>The build's inputs, or null with the exit code (1 a refusal, 2 a repository git cannot read).</returns>
+    /// <returns>The build's inputs, or null with the exit code (0 after a dry run, 1 a refusal, 2 a repository git
+    /// cannot read).</returns>
     /// <exception cref="SiteUnavailableException">The coordinator could not be reached or woken.</exception>
     private static async Task<(int Code, RequestInputs? Inputs)> SnapshotAsync(SiteClient client, Options options,
         CancellationToken cancel)
     {
         string repo = Repo();
         IReadOnlyList<string> paths = options.Rest;
+        bool dryRun = options.Flags.Contains("--dry-run");
         try
         {
             // Tidy first: the refs of snapshots already built go (the site's mirror keeps them); this one's ref stays
-            // until its build exists.
-            var (_, builds, _) = await client.GetAsync("builds", AmbJsonLine.Default.ListBuildRecord, cancel);
-            if (builds is not null)
+            // until its build exists. A dry run writes nothing into the repository, this tidying included.
+            if (!dryRun)
             {
-                int pruned = WorkingTreeSnapshot.PruneBuilt(repo, builds.Where(b => b.Commit is not null).Select(b => b.Commit!).ToHashSet());
-                if (pruned > 0)
+                var (_, builds, _) = await client.GetAsync("builds", AmbJsonLine.Default.ListBuildRecord, cancel);
+                if (builds is not null)
                 {
-                    Console.WriteLine($"deleted {pruned} built snapshot ref(s) in {repo}");
+                    int pruned = WorkingTreeSnapshot.PruneBuilt(repo, builds.Where(b => b.Commit is not null).Select(b => b.Commit!).ToHashSet());
+                    if (pruned > 0)
+                    {
+                        Console.WriteLine($"deleted {pruned} built snapshot ref(s) in {repo}");
+                    }
                 }
             }
             IReadOnlyList<WorkingTreeSnapshot.Change> changes = WorkingTreeSnapshot.Changes(repo, paths);
@@ -825,6 +882,15 @@ internal static class Commands
             if (changes.Count > 20)
             {
                 Console.WriteLine($"  ... and {changes.Count - 20} more");
+            }
+            if (dryRun)
+            {
+                // The listing above is the answer; no commit, no ref, no push, no request.
+                string head = WorkingTreeSnapshot.Git(repo, ["rev-parse", "--verify", "HEAD^{commit}"]).Output.Trim();
+                Console.WriteLine(changes.Count == 0
+                    ? $"dry run: nothing differs from HEAD, so the {client.Site} site would build HEAD {head[..9]} of {repo}; nothing was sent"
+                    : $"dry run: a snapshot of these changes on HEAD {head[..9]} of {repo} would be pushed to the {client.Site} site and built; nothing was made or sent");
+                return (0, null);
             }
             WorkingTreeSnapshot.Result snapshot = WorkingTreeSnapshot.Create(repo, paths, @"Q:\buildserver\tmp");
             if (!snapshot.Changed)

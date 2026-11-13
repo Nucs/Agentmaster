@@ -189,6 +189,85 @@ internal static class WorkingTreeSnapshot
         return deleted;
     }
 
+    /// <summary>The checkout a folder is in, when that checkout belongs to <paramref name="repository"/>'s repository: the
+    /// repository's own working tree or one of its linked worktrees (`git worktree add`), which share its common git
+    /// folder.</summary>
+    /// <param name="folder">The folder (the command line's current directory).</param>
+    /// <param name="repository">A checkout of the repository the folder's checkout must belong to
+    /// (K:\source\Agentmaster).</param>
+    /// <returns>The checkout's top folder, or null when the folder is in no checkout of that repository: another
+    /// repository, no repository, a folder that does not exist, or git failing (the caller then keeps its default).</returns>
+    /// <remarks>
+    /// <para>Why: `amb build`, `amb build --snapshot` and an e2e run's suite take their commit or their uncommitted work
+    /// from this checkout, so a session working in a worktree builds its own tree. Before 2026-11-13 they always read
+    /// K:\source\Agentmaster, and a snapshot made from a worktree silently built the main checkout's files.</para>
+    /// <para>A folder inside a submodule (refs/claude-agent-sdk-cpp) answers with the checkout that holds the
+    /// submodule, the tree a session working there builds. Never throws: every failure reads as "no such checkout".</para>
+    /// </remarks>
+    internal static string? CheckoutOf(string folder, string repository)
+    {
+        try
+        {
+            if (TopFolder(folder) is not string top)
+            {
+                return null;
+            }
+            // A submodule's own checkout belongs to another repository: take the checkout that holds it.
+            (int code, string superproject, _) = Git(top, ["rev-parse", "--show-superproject-working-tree"], check: false);
+            if (code == 0 && superproject.Trim() is { Length: > 0 } holder)
+            {
+                top = Path.GetFullPath(holder);
+            }
+            return CommonFolder(top) is string mine && CommonFolder(repository) is string theirs && SamePath(mine, theirs)
+                ? top
+                : null;
+        }
+        catch (InvalidOperationException)
+        {
+            // Expected when git cannot run at all: the caller's default checkout is used, and its own git calls then
+            // report the problem.
+            return null;
+        }
+    }
+
+    /// <summary>The top folder of the checkout a folder is in.</summary>
+    /// <param name="folder">The folder.</param>
+    /// <returns>The checkout's top folder as a full path, or null when the folder does not exist or is in no checkout.</returns>
+    /// <exception cref="InvalidOperationException">git cannot be run.</exception>
+    private static string? TopFolder(string folder)
+    {
+        if (!Directory.Exists(folder))
+        {
+            return null;
+        }
+        (int code, string output, _) = Git(folder, ["rev-parse", "--show-toplevel"], check: false);
+        // git prints the path with forward slashes on Windows ("K:/source/Agentmaster"): the full path normalizes it.
+        return code == 0 && output.Trim() is { Length: > 0 } top ? Path.GetFullPath(top) : null;
+    }
+
+    /// <summary>A checkout's common git folder: the main repository's .git, which every linked worktree shares.</summary>
+    /// <param name="checkout">The checkout.</param>
+    /// <returns>The folder as a full path, or null when git cannot read the checkout.</returns>
+    /// <exception cref="InvalidOperationException">git cannot be run.</exception>
+    private static string? CommonFolder(string checkout)
+    {
+        if (!Directory.Exists(checkout))
+        {
+            return null;
+        }
+        (int code, string output, _) = Git(checkout, ["rev-parse", "--path-format=absolute", "--git-common-dir"], check: false);
+        return code == 0 && output.Trim() is { Length: > 0 } common ? Path.GetFullPath(common) : null;
+    }
+
+    /// <summary>Whether two full paths name one folder (case-insensitive on Windows, whose file systems are; a trailing
+    /// separator ignored).</summary>
+    /// <param name="a">One path.</param>
+    /// <param name="b">The other.</param>
+    /// <returns>True when they are the same folder.</returns>
+    private static bool SamePath(string a, string b) =>
+        string.Equals(Path.TrimEndingDirectorySeparator(a), Path.TrimEndingDirectorySeparator(b),
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+
     /// <summary>Runs git in a repository.</summary>
     /// <param name="repo">The repository (git's -C).</param>
     /// <param name="args">git's arguments.</param>

@@ -1,7 +1,15 @@
 ---
 name: build-install
 description: |
-  Build and install Agentmaster ON THIS MACHINE — every build flavor (lib-only compile
+  Build and install Agentmaster. THE DEFAULT (since 2026-11-13, §A): the BUILD SERVER builds and this PC
+  only swaps — `amb build` on the worker machine's site (CT 803 in Stuttgart, build ids w…, nothing of
+  this PC's memory used): a commit, or UNCOMMITTED work with `amb build --snapshot [-- <paths>]` (HEAD +
+  the checkout's changed and untracked files, run from the worktree you work in; `--dry-run` shows it
+  and sends nothing); then `amb install w… --instance dev|production` downloads the build's layout zip
+  to this PC and swaps it in (the free slot, the commit check, the requester's turn, the build-launch
+  mutex, the swap with rollback, a 60-s watch), or by hand `amb fetch … --kind layout-zip` +
+  tools\Swap-AgentmasterLayout.ps1 when the home site cannot. Builds ON THIS MACHINE stay for compile
+  checks while iterating and for when the build server cannot: every build flavor (lib-only compile
   check, ClCompile-only for locked binaries, full Debug package, full Release package,
   the engine test harness) and both local installs: the DEV instance (AgentmasterDev,
   Debug loose layout, close → build → relaunch) and the PRODUCTION instance (Agentmaster,
@@ -28,18 +36,153 @@ description: |
   in one session. Use when asked to build, rebuild, compile-check, deploy/reinstall/relaunch the
   dev or production instance, make the build faster, register the loose layout, or diagnose a
   build/registration/crash-on-launch failure.
-keywords: build, install, deploy, register, relaunch, hot deploy, hot build, minimal downtime, zero downtime, blue green, layout slot, Release-B, Debug-B, PackageName, swap, LayoutDir, AgentmasterLayoutDir, Swap-AgentmasterLayout, InstallLocation, C1085, not enough space, obj junction, msbuild, TerminalAppLib, ClCompile, loose layout, Add-AppxPackage, Remove-AppxPackage, AgentmasterDev, Agentmaster, profile picker, resources.pri, PRI210, 0x80070020, 0x80073CF6, am-lock, build mutex, run-m5-tests, appxsym, AppxSymbolPackageEnabled, build speed, faster build, slow build, D8040, GenerateAppxSymbolPackage, stale build, incremental build, LNK2019, unresolved external, heap corruption, 0xC0000374, STATUS_HEAP_CORRUPTION, RTC1, stack corruption, ClMpCount, PCH, C3859, C1076, crash on launch, purge Generated Files
-keywords-sparse: build release without closing it, deploy release with minimal downtime, build while production runs, swap to the new build, roll back the release, deploy dev by swap, hot deploy dev, build dev while it runs, dev swap, build the app, install it here, deploy dev, deploy production, reinstall agentmaster, relaunch the instance, compile check, register the layout, the build failed, make the build faster, build is slow, it crashes on launch, unresolved external symbol, heap corruption crash, deploy dev please, build and deploy dev
-keywords-regex: \bbuild\b|\binstall\b|\bdeploy\b|\bregister\b|\brelaunch\b|\bmsbuild\b|PRI210|0x800704c8|0x80070020|0x80073CF6|resources\.pri|Add-AppxPackage|appxsym|AppxSymbolPackageEnabled|D8040|GenerateAppxSymbolPackage|LNK2019|0xC0000374|STATUS_HEAP_CORRUPTION|ClMpCount|C3859|C1076
+keywords: build server, buildserver, amb, amb build, amb install, amb fetch, worker, worker machine, remote build, snapshot, uncommitted, working tree, worktree, layout-zip, w-build, build, install, deploy, register, relaunch, hot deploy, hot build, minimal downtime, zero downtime, blue green, layout slot, Release-B, Debug-B, PackageName, swap, LayoutDir, AgentmasterLayoutDir, Swap-AgentmasterLayout, InstallLocation, C1085, not enough space, obj junction, msbuild, TerminalAppLib, ClCompile, loose layout, Add-AppxPackage, Remove-AppxPackage, AgentmasterDev, Agentmaster, profile picker, resources.pri, PRI210, 0x80070020, 0x80073CF6, am-lock, build mutex, run-m5-tests, appxsym, AppxSymbolPackageEnabled, build speed, faster build, slow build, D8040, GenerateAppxSymbolPackage, stale build, incremental build, LNK2019, unresolved external, heap corruption, 0xC0000374, STATUS_HEAP_CORRUPTION, RTC1, stack corruption, ClMpCount, PCH, C3859, C1076, crash on launch, purge Generated Files
+keywords-sparse: build on the worker, build on the build server, build it remotely, build my uncommitted changes, build this worktree, install the worker build, download the build and swap, build release without closing it, deploy release with minimal downtime, build while production runs, swap to the new build, roll back the release, deploy dev by swap, hot deploy dev, build dev while it runs, dev swap, build the app, install it here, deploy dev, deploy production, reinstall agentmaster, relaunch the instance, compile check, register the layout, the build failed, make the build faster, build is slow, it crashes on launch, unresolved external symbol, heap corruption crash, deploy dev please, build and deploy dev
+keywords-regex: \bamb\b|buildserver|build server|\bsnapshot\b|\bbuild\b|\binstall\b|\bdeploy\b|\bregister\b|\brelaunch\b|\bmsbuild\b|PRI210|0x800704c8|0x80070020|0x80073CF6|resources\.pri|Add-AppxPackage|appxsym|AppxSymbolPackageEnabled|D8040|GenerateAppxSymbolPackage|LNK2019|0xC0000374|STATUS_HEAP_CORRUPTION|ClMpCount|C3859|C1076
 ---
 
-# Agentmaster — build & install on THIS machine
+# Agentmaster — build & install (the build server first, then this machine)
 
-The runnable runbook for every local build flavor and both local installs. The
-authoritative source is **`CLAUDE.md`** (*Building FAST*, *Deploy & run*, *Gotchas*) and
-**`doc/agentmaster/PROFILES.md`**; if this skill ever disagrees, they win — re-read them.
-For cutting a public GitHub release, use the **`release-version`** skill instead (it shares
-these build recipes but adds the pipeline/draft/publish flow).
+The runnable runbook for building Agentmaster and installing it on this PC. **The default is §A: the build
+server builds on the worker machine, and this PC only downloads the build and swaps it in.** §0–§6 are the
+local ways: compile checks while iterating, and full local builds and deploys for when the build server
+cannot. The authoritative sources are **`CLAUDE.md`** (*The build server*, *Building FAST*, *Deploy & run*,
+*Gotchas*), **`buildserver/README.md`** (`amb`, "The worker site") and **`doc/agentmaster/PROFILES.md`**; if
+this skill ever disagrees, they win — re-read them. For cutting a public GitHub release, use the
+**`release-version`** skill instead (it shares these build recipes but adds the pipeline/draft/publish flow).
+
+---
+
+## A. The default: build on the worker, swap here (since 2026-11-13)
+
+The owner (2026-11-13): "prefer building on worker station buildserver and even swapping also to start there and
+just download the artifact and swap here". The worker machine's build server site (CT 803 in Stuttgart, on the LAN
+through the link home; `buildserver/README.md` "The worker site") builds in its own VM, so a build costs this PC no
+memory and no CPU. This PC downloads the finished layout and swaps it in: seconds of downtime, as in §4a.
+
+**Ask first:** a build and an install each need the owner's go (CLAUDE.md *Development Rules*). A `--dry-run` of
+either changes nothing: build sends nothing; install stages the free slot, checks it and puts it back.
+
+### A.1 The tool and the sites
+
+```bash
+AMB='/q/tmp/buildserver-build/Amb.Cli/bin/Debug/net10.0-windows/win-x64/amb.exe'   # the live CLI (two sites)
+"$AMB" --help     # every command and option; an unknown option is refused and nothing is sent
+"$AMB" status     # the worker site: its coordinator, free memory, active requests, slots
+"$AMB" builds     # its builds: id, version, time, zip, commit ("snapshot of …" for a snapshot)
+```
+
+- **Sites:** the worker is the default (build ids `w…`). This PC's WSL site is `--site home` (build ids `b…`), the
+  second choice for a build: it builds in this PC's memory (8 GB beyond Windows' 6 GB) and waits while this PC has
+  too little free. A build id goes to the site its letter names.
+- **The worker cannot read K::** `amb build` pushes the commit to it first, a git bundle of only what its mirror
+  lacks (kilobytes for a day's commits).
+- **When the worker cannot be used** (`amb status` fails: the link home down, CT 803 stopped): build at home
+  (`--site home`), or locally with §4a.
+
+### A.2 Build: a commit, or uncommitted work
+
+Run `amb` FROM THE CHECKOUT YOU CHANGED: K:\source\Agentmaster, or one of its worktrees (`git worktree list`). It
+resolves HEAD and takes uncommitted work in that checkout, and it names a worktree on its first line
+("checkout: …"). Anywhere else it uses K:\source\Agentmaster; `AMB_REPO=<folder>` overrides.
+
+| What | Command |
+|---|---|
+| Uncommitted work: the whole working tree | `"$AMB" build --snapshot --config <C> --identity <I>` |
+| Uncommitted work: only your files | `"$AMB" build --snapshot --config <C> --identity <I> -- <paths>` |
+| A commit | `"$AMB" build [<rev>] --config <C> --identity <I>` (default HEAD) |
+| See it first, send nothing | add `--dry-run`: the checkout, HEAD, the commit or the snapshot's changes |
+
+- **The configuration and identity follow the instance:** dev = `--config Debug --identity dev` (dev runs Debug
+  builds); production = `--config Release --identity release`. An install refuses the other identity's build. e2e
+  runs take Release builds (a Debug build needs the Windows SDK's debug UCRT).
+- **What a snapshot takes:** HEAD plus every changed and untracked file of the checkout (ignored files not), at most
+  100 MB a file and 300 MB in all, and a submodule at its checked-out commit. It is a commit made in a PRIVATE index,
+  kept under `refs/buildserver/snapshots/`: HEAD, the branches, the index and the files stay as they are. ⚠ A
+  whole-tree snapshot of K:\source\Agentmaster takes OTHER sessions' uncommitted edits too (`git status` shows them):
+  name your paths after `--`, or work in a worktree of your own. The same work snapshotted twice is the same commit,
+  so an identical request answers with the existing build id.
+- **Purge** (§5.8's rule): `--purge force` when `SessionModels.h`, `SessionRegistry.*`, an `.idl` or a shared class's
+  data members changed since THAT worktree's last build on the worker (one worktree per configuration × identity;
+  `"$AMB" builds` names each build's commit, then `git diff --stat <it> HEAD -- <those files>`). A worktree's first
+  build is cold anyway, and a build cut off mid-step is purged by itself next time.
+- **Times on the worker (measured 2026-11-13):** a cold (purged) Release build took 104.7 min of build and 115 min from
+  request to build id (homepc: ~43): its 2013 Xeon is slower per core. An incremental build there: not measured yet
+  (homepc: 10–12 min). One build at a time; the next one waits.
+- **Follow it** without blocking: without `--wait` it prints the request id. Poll in the foreground, at most ~270 s per
+  tool call (never a background watcher):
+  ```bash
+  ID=<request id>; end=$((SECONDS+270)); s=""
+  while [ $SECONDS -lt $end ]; do
+    s=$("$AMB" show $ID | grep -o '"state": *"[A-Za-z]*"' | head -1 | cut -d'"' -f4)
+    case "$s" in Succeeded|Failed|Cancelled|NoCapacity|Lost) break;; esac; sleep 20
+  done; echo "$s"; "$AMB" logs $ID | tail -15      # the outcome line names the build id (w…)
+  ```
+
+### A.3 Install it here: `amb install` downloads the layout and swaps it in
+
+```bash
+"$AMB" list | grep Deploy                                 # never install a build the instance already runs
+"$AMB" install w<id> --instance dev --dry-run --wait      # stage, check, the swap's plan; the slot goes back
+"$AMB" install w<id> --instance dev --wait                # the install (ask first); production: --instance production
+```
+
+What it does: the CLI copies the build's layout zip and build.json from the worker into `Q:\buildserver\out\<id>`
+(SHA-256 checked) and has this PC's site import them under the same id. This PC's site (its WSL distro `buildserver`,
+woken by amb; it starts no VM for an install) then runs `buildserver\steps\install\install-build.ps1` on Windows:
+- the instance's free slot (`Q:\agentmaster-layouts\…`), the zip staged into it (an older build there moved aside);
+- the checks: the package, the version, the build's commit baked into `TerminalApp.dll`, no binary missing;
+- a wait for the requesting session's turn, then the `build-launch` mutex;
+- `tools\Swap-AgentmasterLayout.ps1`: GUI-only stop, drain, register, launch; a failure after the stop brings the old
+  version back;
+- a 60-s watch of the new instance.
+
+The rules:
+- **Do not hold the `build-launch` mutex** (§1.1) around it: the install takes it itself before the swap.
+- **Run it DIRECTLY in the Bash tool's command**, never through `bash script.sh`: the CLI names the requesting session
+  by its `claude.exe` ancestor, a broken process chain loses it, and the swap then cuts your own turn off. Check that
+  `"$AMB" show <request id>` carries `requestedByPid`.
+- **From a session inside the instance it swaps:** the swap runs through WSL's interop, outside every instance, so it
+  works. `--wait` returns as soon as the install starts waiting for your turn: END THE TURN then. A resumed turn must
+  never run the install again unconditionally (2026-11-04: one build installed 7 times).
+- **Other sessions' running turns** are cut off by the swap unless `--wait-others MIN` waits for them; check first
+  (`agentmaster sessions --json`, or `--instance dev`; read derivedState).
+- **A build the instance already runs** (its `TerminalApp.dll`, byte for byte) is left alone and nothing stops;
+  `--reinstall` forces it.
+- **Refused:** an installed MSIX (production on a GitHub release's package: by hand, §4a's
+  `-ReplaceInstalledPackage`), and the other identity's build.
+- **After it:** the user may have to answer "Reopen your N previous Agentmaster windows?" (§4a). Then update
+  CLAUDE.md's *Builds* table (`Get-AppxPackage Agentmaster*`: the version and folder; the build's commit).
+- ⚠ The pull of a `w…` build into this PC's site has not run live yet (2026-11-13): make the first one a `--dry-run`.
+
+### A.4 By hand: download the layout and swap (when this PC's site cannot)
+
+```bash
+"$AMB" fetch w<id> --kind layout-zip      # → Q:\buildserver\out\<id>\<zip>, SHA-256 checked (refused on K:)
+```
+
+Then, holding the mutex (§1.1), from a shell OUTSIDE the instance (§1.2; from inside it, the one-shot scheduled task
+of CLAUDE.md *What a swap ends, and who can run it*):
+
+```powershell
+$pkg = 'AgentmasterDev'                       # or 'Agentmaster' for production
+$pair = if ($pkg -eq 'AgentmasterDev') { 'Q:\agentmaster-layouts\Debug', 'Q:\agentmaster-layouts\Debug-B' }
+        else { 'Q:\agentmaster-layouts\Release', 'Q:\agentmaster-layouts\Release-B' }
+$running = (Get-AppxPackage $pkg).InstallLocation.TrimEnd('\')
+$slot = $pair | Where-Object { $_ -ine $running } | Select-Object -First 1
+# Nothing may run from the free slot (must print nothing):
+Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like "$slot\*" } | Select-Object ProcessId, Name
+# Its older build moves aside, and the zip goes into a fresh folder (the zip holds the layout at its root):
+if (Test-Path $slot) { Rename-Item $slot ('{0}.prev-{1:yyyyMMdd-HHmmss}' -f (Split-Path $slot -Leaf), (Get-Date)) }
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[IO.Compression.ZipFile]::ExtractToDirectory('Q:\buildserver\out\<id>\<zip>', $slot)
+([xml](Get-Content "$slot\AppxManifest.xml")).Package.Identity.Name      # must be $pkg
+pwsh -ExecutionPolicy Bypass -File .\tools\Swap-AgentmasterLayout.ps1 -LayoutDir $slot -PackageName $pkg -WhatIf
+pwsh -ExecutionPolicy Bypass -File .\tools\Swap-AgentmasterLayout.ps1 -LayoutDir $slot -PackageName $pkg
+```
+
+This path skips `amb install`'s commit check and its wait for your turn, so prefer A.3. The `.prev-…` folder can go
+once the new build is trusted.
 
 ---
 
@@ -52,7 +195,7 @@ these build recipes but adds the pipeline/draft/publish flow).
 | Registered from | **a Q: layout slot** (§4a): `Q:\agentmaster-layouts\Debug` or `Debug-B` (since 2026-10-13) — always read `(Get-AppxPackage AgentmasterDev).InstallLocation` | **a Q: layout slot** (§4a): `Q:\agentmaster-layouts\Release` or `Release-B` (since 2026-10-12) — always read `(Get-AppxPackage Agentmaster).InstallLocation`. **Or the installed MSIX of a GitHub release** (0.8.0.0 under `C:\Program Files\WindowsApps` since 2026-10-22), which no plain hot swap can replace; `-ReplaceInstalledPackage` removes it on the way (§4a) |
 | Launch | alias `agentmasterdev` · Start "Agentmaster Dev" · `shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App` | alias `agentmaster` · Start "Agentmaster" · `shell:appsFolder\Agentmaster_56k4f06dsfp9r!App` |
 | Profile (state) | `~\.agentmaster-dev` | `~\.agentmaster` |
-| Updated by | any full **Debug** package build | any full **Release** package build (incl. release pre-validation!) |
+| Updated by | `amb install` of a dev build (§A), or a full **Debug** package build into its slot | `amb install` of a release build (§A), or a full **Release** package build into its slot (incl. release pre-validation!) |
 
 - Both are **loose registrations over build-output trees** — a full package build of that
   configuration relinks the binaries UNDER the running instance, so the close→build→relaunch
@@ -88,6 +231,8 @@ these build recipes but adds the pipeline/draft/publish flow).
    Stale lock from a dead shell (e.g. you killed your own host — see rule 2): `status` shows
    `HELD-BUT-STALE`; `release --token <saved>` then re-acquire (an `acquire` also auto-breaks
    a lock past its 30-min TTL).
+   ⚠ **`amb install` (§A.3) takes this lock itself**, right before its swap: never hold it around an `amb install`,
+   or the install waits for you. A build on the build server needs no lock (it never touches this PC's trees).
 2. **THE SELF-KILL CHECK — before closing ANY instance, verify your own shell isn't hosted
    in it.** Claude sessions on this machine often run INSIDE Agentmaster; closing it kills
    you mid-deploy (it happened — exit code 137, half-finished cycle, stale mutex). Walk your
@@ -133,12 +278,13 @@ these build recipes but adds the pipeline/draft/publish flow).
 
 | Goal | Recipe | Lock? |
 |---|---|---|
+| **Ship code into dev or production (the default)** | **§A:** `amb build` on the worker (`--snapshot` for uncommitted work), then `amb install w… --instance dev\|production` here | the install takes it |
 | Validate TerminalApp/engine code compiles | `TerminalAppLib.vcxproj` full build (static lib — nothing loaded by a running app) | no |
 | Validate exe-side code (WindowEmperor/main) | `WindowsTerminal.vcxproj` **`-t:ClCompile`** (objects only — the exe itself is locked by the running instance) | no |
 | Validate a loaded-DLL project (e.g. TerminalSettingsModel) | its `*Lib.vcxproj` full build, or the dll project `-t:ClCompile` — never relink a dll the running app has loaded | no |
 | Engine tests (604 checks) | `cmd //c "K:\source\Agentmaster\src\cascadia\TerminalApp\AgentMaster\tests\run-m5-tests.bat"` | no |
-| Ship code into the DEV instance | full Debug package: `pwsh -ExecutionPolicy Bypass -File ./tools/Build-Agentmaster.ps1 -NoRestore` | **yes** |
-| Ship code into PRODUCTION / pre-validate a release | full Release package: `... Build-Agentmaster.ps1 -NoRestore -Configuration Release -ReleaseIdentity` | **yes** |
+| Ship code into the DEV instance locally (when §A cannot) | full Debug package: `pwsh -ExecutionPolicy Bypass -File ./tools/Build-Agentmaster.ps1 -NoRestore` | **yes** |
+| Ship code into PRODUCTION locally (when §A cannot) / pre-validate a release | full Release package: `... Build-Agentmaster.ps1 -NoRestore -Configuration Release -ReleaseIdentity` | **yes** |
 
 First-ever build on a machine: drop `-NoRestore` once (nuget restore; the bundled nuget.exe
 can't parse `.slnx` — the wrapper restores `dep\nuget\packages.config` itself).
@@ -159,7 +305,8 @@ can't parse `.slnx` — the wrapper restores `dep\nuget\packages.config` itself)
 
 ## 3. Deploy the DEV instance (the inner loop)
 
-**Needs the user's permission** (CLAUDE.md *Development Rules*: build, deploy and install are
+**The default is §A** (the worker builds, `amb install` swaps it in here); this section and §4a are the local ways,
+for when the build server cannot. **Needs the user's permission** (CLAUDE.md *Development Rules*: build, deploy and install are
 asked for first — the old "always auto deploy" standing authorization is REVOKED, and CLAUDE.md
 wins over this skill). **Prefer the HOT deploy (§4a)**: dev keeps running for the whole build
 and the swap costs seconds (8.2 s measured, 2026-10-05). The close cycle below is the fallback.
@@ -213,7 +360,8 @@ Start-Process "shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App"
 ## 4. Install/refresh PRODUCTION locally (the Release loose layout)
 
 What "install regular Agentmaster on this PC" means — no GitHub involved. **For a routine
-"build and deploy release" prefer the HOT deploy (§4a)** — this classic close-first flow keeps
+"build and deploy release" prefer §A (`amb build --config Release --identity release` on the worker, then
+`amb install w… --instance production`), then the local HOT deploy (§4a)** — this classic close-first flow keeps
 production down for the whole build (15–30 min when a header change forces a purge).
 
 ```bash
@@ -260,9 +408,10 @@ Start-Process "shell:appsFolder\Agentmaster_56k4f06dsfp9r!App"
   import needs an admin/UAC step) — replaces the loose registration's coupling to the repo
   tree. Same-family replace may need `Remove-AppxPackage` of the loose one first (§5.3 risk).
 
-## 4a. HOT deploy of PRODUCTION (and DEV) — build while it runs, swap in seconds (the default)
+## 4a. HOT deploy of PRODUCTION (and DEV) — build while it runs, swap in seconds (the default LOCAL way)
 
-The same two scripts serve the dev identity; its variant is at the end of this section.
+The default is §A: the worker builds and `amb install` runs this same swap script for you. This section builds on
+this PC. The same two scripts serve the dev identity; its variant is at the end of this section.
 
 Production is a loose registration over a package LAYOUT folder, and it locks only THAT folder
 (loaded images + the mapped `resources.pri`). Nothing it loads comes from the intermediate

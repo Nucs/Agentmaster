@@ -156,11 +156,79 @@ public sealed class SnapshotTests : IDisposable
         Assert.Empty(global::Options.Parse(["e2e", "b1", "--", "-v", "--collect-only"]).UnknownOptions);
     }
 
+    /// <summary>--dry-run is honored by build and install (and install's alias deploy) only; an import, smoke or e2e
+    /// request refuses it, because it would be sent for real (until 2026-11-13 `amb build --snapshot --dry-run` started
+    /// a real build).</summary>
+    [Fact]
+    public void DryRunIsHonoredOrRefused()
+    {
+        Assert.True(Commands.HonorsDryRun("build"));
+        Assert.True(Commands.HonorsDryRun("install"));
+        Assert.True(Commands.HonorsDryRun("deploy"));
+        Assert.False(Commands.HonorsDryRun("e2e"));
+        Assert.False(Commands.HonorsDryRun("smoke"));
+        Assert.False(Commands.HonorsDryRun("import"));
+        Assert.False(Commands.HonorsDryRun(null));
+    }
+
     /// <summary>The test process runs under no claude.exe; the walk ends without one (and without throwing).</summary>
     [Fact]
     public void AncestryWalkEnds()
     {
         int? claude = ProcessAncestry.NearestAncestor("no-such-program-amb.exe");
         Assert.Null(claude);
+    }
+
+    /// <summary>The checkout a folder is in: a folder deep in a linked worktree is that worktree (a session working there
+    /// builds its own tree), a folder in the main checkout is the main checkout, from either side; another
+    /// repository, a folder in no repository and a missing folder are none (amb then keeps K:\source\Agentmaster).</summary>
+    [Fact]
+    public void CheckoutIsTheWorktreeTheFolderIsIn()
+    {
+        string worktree = Path.Combine(_root, "wt");
+        Git("worktree", "add", "-q", worktree);
+        string deep = Path.Combine(worktree, "sub", "deeper");
+        Directory.CreateDirectory(deep);
+        Directory.CreateDirectory(Path.Combine(Repo, "inside"));
+        string other = Path.Combine(_root, "other");
+        Directory.CreateDirectory(other);
+        WorkingTreeSnapshot.Git(other, ["init", "-q"]);
+        string plain = Path.Combine(_root, "plain");
+        Directory.CreateDirectory(plain);
+
+        Assert.Equal(Path.GetFullPath(worktree), WorkingTreeSnapshot.CheckoutOf(deep, Repo));
+        Assert.Equal(Path.GetFullPath(Repo), WorkingTreeSnapshot.CheckoutOf(Path.Combine(Repo, "inside"), Repo));
+        // The two share one repository, whichever of them names it.
+        Assert.Equal(Path.GetFullPath(Repo), WorkingTreeSnapshot.CheckoutOf(Repo, worktree));
+        Assert.Null(WorkingTreeSnapshot.CheckoutOf(other, Repo));
+        Assert.Null(WorkingTreeSnapshot.CheckoutOf(plain, Repo));
+        Assert.Null(WorkingTreeSnapshot.CheckoutOf(Path.Combine(_root, "missing"), Repo));
+    }
+
+    /// <summary>A worktree's snapshot takes the worktree's own uncommitted work on the worktree's HEAD, while the main
+    /// checkout (clean) has nothing to take; the snapshot's ref lives in the repository both share, where the push
+    /// to the worker machine's site finds it.</summary>
+    [Fact]
+    public void WorktreeSnapshotTakesItsOwnWork()
+    {
+        string worktree = Path.Combine(_root, "wt");
+        Git("worktree", "add", "-q", worktree);
+        WorkingTreeSnapshot.Git(worktree, ["config", "core.autocrlf", "false"]);
+        File.WriteAllText(Path.Combine(worktree, "a.txt"), "a in the worktree\n");
+        File.WriteAllText(Path.Combine(worktree, "only-here.txt"), "new\n");
+        string worktreeHead = WorkingTreeSnapshot.Git(worktree, ["rev-parse", "HEAD"]).Output.Trim();
+
+        WorkingTreeSnapshot.Result main = WorkingTreeSnapshot.Create(Repo, [], Temp);
+        WorkingTreeSnapshot.Result mine = WorkingTreeSnapshot.Create(worktree, [], Temp);
+
+        Assert.False(main.Changed);
+        Assert.True(mine.Changed);
+        Assert.Equal(worktreeHead, mine.Head);
+        Assert.Equal("a in the worktree", Git("show", mine.Commit + ":a.txt"));
+        Assert.Equal("new", Git("show", mine.Commit + ":only-here.txt"));
+        Assert.Equal(mine.Commit, Git("rev-parse", WorkingTreeSnapshot.RefPrefix + mine.Commit));
+        // The main checkout's files are untouched by the worktree's work and its snapshot.
+        Assert.Equal("a", File.ReadAllText(Path.Combine(Repo, "a.txt")).Trim());
+        Assert.False(File.Exists(Path.Combine(Repo, "only-here.txt")));
     }
 }

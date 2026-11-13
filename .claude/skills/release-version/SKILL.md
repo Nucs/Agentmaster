@@ -85,6 +85,9 @@ that WIP MUST be committed or the clean build fails. Check it deliberately.
 
 ## Path A — Local deploy (inner loop)
 
+**The default since 2026-11-13 is the build server** (build-install §A): `amb build` on the worker
+machine (`--snapshot` for uncommitted work), then `amb install w… --instance dev|production`, which
+downloads the layout and swaps it in here. The local ways below are for when it cannot.
 **Needs the user's permission** (CLAUDE.md *Development Rules*: the old "always auto deploy"
 standing authorization is REVOKED). **Prefer the HOT deploy** (build-install §4a: dev keeps
 running, the swap costs seconds); the close cycle below is the fallback, and build-install §3 is its
