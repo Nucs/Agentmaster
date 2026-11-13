@@ -7,7 +7,7 @@ _By developers, for developers - Never lose a session again - feel like Windows 
 
 Each session is a real `claude.exe` on a **ConPTY** connection: a full-fidelity terminal with a shared stdin (you and the orchestrator coexist), output tapped for the UI, and semantic state from **Claude Code hooks** and an **out-of-band observer** — never screen-scraping.
 
-[![The Agentmaster Manager tab — the Triage Board (sessions as cards in state columns: Running · Waiting-for-you · Needs-approval · Error · Idle/Done · External), the Explorer Tree (working directories → their sessions), and the per-tab summary panel, with a managed tab's right-click menu open showing the Copy submenu (Session Id · Path · Branch · Claude/Codex launch CLI · Summary · Transcript)](doc/agentmaster/img/agent-manager.png)](https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/agent-manager.png)
+[![Agentmaster's main window — the side panel's session cards on the left (each with its state, age and folder / branch, the selected session's summary below them), the tab strip with every tab's state dot and its folder's color, and a Claude Code session in the terminal with its status badge at the top right (model · state · Prompt Queue Runner mode · folder / branch)](doc/agentmaster/img/main-window.png)](https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/main-window.png)
 
 ## ✨ What it does for you
 
@@ -22,6 +22,8 @@ Close a window and reopen it **whole**: geometry, **resumed** Claude *and* Codex
 - every save keeps what another version wrote;
 - each new version first copies your state files into `backups\`.
 
+[![The Sessions browser — every Claude Code session on disk in one list (title, folder, branch, created, last active, messages · tools, context size) under the search box with its AI toggle, the scope buttons, the Open / Hidden / Favorite and Folders filters, the time range and the tag chips; on the right the selected session's details and summary, with Jump to tab · Fork here · Open New Session Here](doc/agentmaster/img/sessions-browser.png)](https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/sessions-browser.png)
+
 ### 👀 Manages every agent — even the ones you didn't launch
 The **Fleet Observer** detects, correlates, and enriches *every* Claude/Codex session by reading process memory and transcripts **out-of-band** — no hooks, no setup, completely invisible to the shell. Hand-type `claude` in any tab and it's managed within seconds. Sessions running *outside* the app show up too: watch them read-only, or **adopt** them (fork a safe copy, or resume).
 
@@ -33,11 +35,11 @@ You never have to open the Manager to read a session. Every classified tab wears
 
 <table>
 <tr>
-<td width="74%" valign="top">
-<a href="https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/sessions-browser.png"><img alt="The Agentmaster Sessions browser — every on-disk Claude Code session with a scoped, fuzzy search bar and time-range filter on the left, and a detail pane (metadata · conversation · Resume / Fork / Open-New-Session) on the right" src="doc/agentmaster/img/sessions-browser.png" width="100%"></a>
+<td width="30%" valign="top">
+<a href="https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/tab-copy-menu.png"><img alt="A Claude tab's right-click menu with the Copy submenu open (Session Id · Copy Path · Copy Branch Name · Copy Current Prompt · Claude Launch CLI · Summary · Transcript ▸), beside Show Transcript, Mark Unread, Open In Explorer, Move to Idle/Done, Favorite, Tags, New Session Here, Restart session, Fork session, Deactivate and Close" src="doc/agentmaster/img/tab-copy-menu.png" width="100%"></a>
 </td>
-<td width="26%" valign="top">
-<a href="https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/tab-copy-menu.png"><img alt="The managed-tab right-click menu (per-tab actions + observability) with the Copy submenu open — Session Id · Path · Branch · Claude/Codex launch CLI · Summary · Transcript" src="doc/agentmaster/img/tab-copy-menu.png" width="100%"></a>
+<td width="70%" valign="top">
+<a href="https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/side-panel-fork-menu.png"><img alt="A side-panel session card's right-click menu (Jump to Tab · Pin to Top · Rename · Tags · Copy · Show Transcript · Open New Session Here · Restart session · Fork session · Deactivate · Close) with Fork session ▸ open: fork onto the default model, a model you specify, a model from your list, or a preset on another provider (three NanoGPT models)" src="doc/agentmaster/img/side-panel-fork-menu.png" width="100%"></a>
 </td>
 </tr>
 </table>
