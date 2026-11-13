@@ -308,7 +308,10 @@ python buildserver/image/images.py --site worker base | e2e | build-image | chec
 - **Installs:** the site has no Windows beside it, so a deploy there fails at once. `amb install w…` runs at this PC's
   site: it fetches the build's layout zip and build.json from the worker into `Q:\buildserver\out\<id>` (SHA-256
   checked), has this PC's site import that folder under the SAME id (every file checked against the worker's record;
-  `Imported`, its origin "pulled from worker"), then installs as before.
+  `Imported`, its origin "pulled from worker"), then installs as before. First run live on 2026-11-13 as a dry run
+  (`amb install w20261113-1 --instance dev --dry-run`): the 206 MB layout zip downloaded and checked, the import 4 s,
+  the install's dry run 38 s (staged into `Debug-B`, every check passed, the swap's plan, the slot put back). This is
+  the owner's default for deploys: build on the worker, swap here (the build-install skill's §A).
 - **The service:** OpenRC's `amb-coordinator` under supervise-daemon (`worker/files/amb-coordinator.initd`): it starts at
   boot and again 5 s after any exit; a stop gives it 5 minutes to stop its slots. Its settings are
   `/etc/amb-coordinator.env`; it never idles out. `amb` wakes it through `ssh worker pct exec 803 --

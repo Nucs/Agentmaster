@@ -139,8 +139,9 @@ woken by amb; it starts no VM for an install) then runs `buildserver\steps\insta
 
 The rules:
 - **Do not hold the `build-launch` mutex** (§1.1) around it: the install takes it itself before the swap.
-- **Run it DIRECTLY in the Bash tool's command**, never through `bash script.sh`: the CLI names the requesting session
-  by its `claude.exe` ancestor, a broken process chain loses it, and the swap then cuts your own turn off. Check that
+- **Run it in the Bash tool's command**, not through `bash script.sh`: the CLI names the requesting session by its
+  `claude.exe` ancestor, else by the `CLAUDE_PID` the Bash tool sets (a `timeout` or a pipe breaks the chain; that
+  fallback found the session on 2026-11-13). Without either, the swap cuts your own turn off. Check that
   `"$AMB" show <request id>` carries `requestedByPid`.
 - **From a session inside the instance it swaps:** the swap runs through WSL's interop, outside every instance, so it
   works. `--wait` returns as soon as the install starts waiting for your turn: END THE TURN then. A resumed turn must
@@ -153,7 +154,10 @@ The rules:
   `-ReplaceInstalledPackage`), and the other identity's build.
 - **After it:** the user may have to answer "Reopen your N previous Agentmaster windows?" (§4a). Then update
   CLAUDE.md's *Builds* table (`Get-AppxPackage Agentmaster*`: the version and folder; the build's commit).
-- ⚠ The pull of a `w…` build into this PC's site has not run live yet (2026-11-13): make the first one a `--dry-run`.
+- **Measured (2026-11-13, the first live pull: a dry run of `w20261113-1` into dev):** the 206 MB layout zip
+  downloaded and SHA-checked, the import 4 s, the dry run 38 s (staged into `Debug-B`, every check passed, the swap's
+  plan printed, the slot put back; nothing stopped). That Release build's layout lacked 27 loose `.xbf` files the
+  running Debug layout has; the check compares only DLLs and EXEs, and it passed.
 
 ### A.4 By hand: download the layout and swap (when this PC's site cannot)
 
