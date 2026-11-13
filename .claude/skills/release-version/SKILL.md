@@ -146,6 +146,9 @@ strips each component to digits, so `ver3`/`ver4` stay numeric (`X.Y.Z` / `X.Y.Z
 TAG + release name + installer `-Version` keep the full suffix (`rawver`). **`X.Y.Z` must be
 bumped past the newest release** — the updater's compare is numeric `major.minor.patch`
 (suffixes ignored), so a nightly reusing the current version is never offered to anyone.
+**A STABLE after a pre-release follows the same rule:** a stable `vX.Y.Z` equal to a published
+`vX.Y.Z-prerelease` is never offered to the users already on that pre-release (`CompareVersion` returns
+0 in `Updater.h`), so the stable goes past it — v0.8.2-prerelease was followed by v0.9.0 (2026-11-13).
 
 ### B0.5. Map the topology — diverged tags & "reunification" releases
 A version's tag is a **snapshot**, not necessarily a point on mainline. Prereleases and hotfixes
@@ -289,6 +292,13 @@ Expect exactly these, non-empty (the msixbundle and zip sizes of v0.8.0, plus th
 A missing, stale or unindexed PDB never gets this far: the build job's "Package the full symbols" step and the
 portable step's `-RequireSymbolsUnder` fail the run first. Spot-check one: `unzip -l Agentmaster_<ver4>_x64.zip |
 grep -c '\.pdb$'` → 16, and the same for the `_symbols.zip`.
+- **A DRAFT's asset is downloaded by its id** (`gh release download` and `releases/tags/<tag>` cannot see a
+  draft): read the id from `gh api 'repos/Nucs/Agentmaster/releases?per_page=4'` (select by `tag_name`), then
+  `gh api -H 'Accept: application/octet-stream' repos/Nucs/Agentmaster/releases/assets/<asset id> > x64.zip`.
+- **The portable zip's files sit under `agentmaster-<ver4>/`** (`agentmaster-0.9.0.0/.am-version`, never at the
+  root): `.am-version` reads `<ver4>`, and its `TerminalApp.dll` bakes the tag's commit as UTF-16LE text
+  (`AGENTMASTER_COMMIT_HASH`, `git rev-parse --short=9`): `python -I -c "import sys; print(sys.argv[2].encode('utf-16-le')
+  in open(sys.argv[1],'rb').read())" <dll> <short hash>`.
 
 **Nightly note:** `<ver4>` is always the NUMERIC `X.Y.Z.0` — for a nightly the TAG/release name
 carry the `-prerelease-nightly` suffix but the asset names do NOT (prep strips components to

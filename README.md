@@ -12,7 +12,7 @@ Each session is a real `claude.exe` on a **ConPTY** connection: a full-fidelity 
 ## ✨ What it does for you
 
 ### 🗂️ One page to run the whole fleet
-The **Agent Manager** — one click on the tab strip's **Home** button — is mission control: a **Triage Board** that sorts every session into *Running · Waiting-for-you · Needs-approval · Error · Done*, an **Explorer Tree** of your working-dirs → sessions, and a **Prompt Queue** to queue prompts per session. Click a card and its terminal tab follows — both ways, across every window — so you never lose which tab is which. A **side panel** beside the terminal keeps the session cards in view while you work.
+The **Agent Manager** — one click on the tab strip's **Home** button — is mission control: a **Triage Board** that sorts every session into *Running · Waiting-for-you · Needs-approval · Error · Done*, an **Explorer Tree** of your working-dirs → sessions, and a **Prompt Queue** to queue prompts per session. Click a card and its terminal tab follows — both ways, across every window — so you never lose which tab is which. A **side panel** beside the terminal keeps the session cards in view while you work: filter them by folder, state, tag, git branch or fork family (from its funnel, or a card's own right-click menu), pause the filter with one click, and pin the cards you watch to the top.
 
 ### 💾 Never lose a session — ever
 Close a window and reopen it **whole**: geometry, **resumed** Claude *and* Codex conversations, shell tabs back at their real cwd, even the focused tab. And the **Sessions browser** searches *every* conversation that's ever hit disk — an instant index, then ripgrep across the actual content — so you can **Resume or Fork** anything, from any day. Closing only archives a session; your transcripts are never deleted. Your workspace also survives installs and version changes:
@@ -48,7 +48,7 @@ You never have to open the Manager to read a session. Every classified tab wears
 Turn on the **Telegram** bot (**Settings → Messaging**, with a bot of your own; only your account is answered) and every working session becomes a topic on your phone: its whole conversation, Claude's replies with their Markdown rendered, and a live status card with buttons. A message in a topic is queued as that session's next prompt (`/steer` sends it into the running turn). From the phone you can:
 - answer Claude's questions with a tap;
 - send a 🎤 **voice note**, transcribed with that session's own vocabulary and read as its prompt;
-- see the terminal's screen, which every status card carries as it updates;
+- see the terminal's screen on a session's status card with one tap (🖼️);
 - see the whole conversation as tall pictures (📜 **All Screen**), file diffs included;
 - press **Esc**, deactivate, fork or restart a session, and read its `/status` and your plan usage;
 - start a new session in any folder and window;
@@ -61,6 +61,7 @@ Turn on the **Telegram** bot (**Settings → Messaging**, with a bot of your own
 - **AI search** — the Sessions page's **AI** toggle takes a request in plain words; a hosted Sonnet 5.5 reads your sessions, shows the ones that fit with the evidence, and can reopen them into the window you choose.
 - **Presets** — launch or fork a session on other models and providers (OpenRouter, Xiaomi MiMo, NanoGPT, your own RunPod endpoint, any Anthropic-compatible URL), keys kept in Windows Credential Manager.
 - **Show Transcript** — any conversation as Markdown in a reading view; **Copy ▸ Transcript** at five detail levels.
+- **Self-healing turns** — a response Claude Code cut off, or a temporary API failure that outlived its retries, restarts the session by itself and the turn goes on; an error that needs you (a limit, credits, a login) never loops.
 - **Deactivate** — park a session's claude while its tab keeps its place; entering the tab resumes the conversation. **Deactivate All Idle Tabs** parks every idle tab, and **Deactivate All Waiting-for-you** every tab waiting for you (each stays Waiting-for-you), in this window or all of them.
 - **`agentmaster` CLI** — query the fleet from any shell, app up or down (`show` / `list` / `sessions` / `tabs` / `windows` / `external`, `--self`, `--json`).
 - **In-app updater** — checks GitHub on launch and from Settings → Updates; one-click update, pre-release and (warning-gated) nightly opt-ins, and uninstall. Nightly builds — unstable dev versions, tag contains `nightly` — are always skipped unless you accept the nightly opt-in.
