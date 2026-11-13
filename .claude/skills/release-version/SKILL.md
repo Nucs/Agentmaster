@@ -172,19 +172,20 @@ git rev-parse HEAD origin/agentmaster          # is local ahead of origin? (push
   mainline is now the **superset** of all of them, releasing mainline REUNIFIES the line. But the
   NOTES still follow the §2 rule by release TYPE: a reunification **prerelease** lists only ITS OWN
   delta — the work it newly ships (e.g. a previously-abandoned batch), MINUS anything already shipped
-  in an intervening hotfix prerelease; the comprehensive fold waits for the eventual STABLE. Today's
+  in an intervening hotfix prerelease; the comprehensive merge waits for the eventual STABLE. Today's
   case: 0.6.2 (abandoned prerelease) + 0.6.3/0.6.4 (diverged hotfixes) all sat off the 0.6.1 base;
   mainline carried the full superset, so v0.6.5 released mainline as one **prerelease** whose notes are
   just the 0.6.2 batch + newer state/triage commits (NOT the 23 GB leak / hourly-update / crash-loop
   that already shipped in 0.6.3/0.6.4) — even though 0.6.2–0.6.4 are "newer" tags.
 - **A prerelease baselines off the PREVIOUS release; a STABLE baselines off the last stable.** `Latest`
   = the newest **non**-prerelease; intervening prereleases do NOT advance it. That last-stable is the
-  baseline for the STABLE fold (§6) only — a prerelease's delta is measured against whatever release
+  baseline for the STABLE merge (release-notes §6: ONE changelog naming no pre-release version) only —
+  a prerelease's delta is measured against whatever release
   came right before it, not off the last stable or the highest version number (release-notes §2).
   **NIGHTLIES are INVISIBLE to baselining** (release-notes §2): a pre-release/stable's delta is
   measured against the previous NON-nightly release — a nightly is a throwaway snapshot almost nobody
-  installed, so its commits must still appear in the next real release's notes, and the stable fold
-  (§6) folds pre-releases only, never nightlies.
+  installed, so its commits must still appear in the next real release's notes, and the stable merge
+  (§6) merges pre-releases only, never nightlies.
 - **Push mainline before tagging** so `origin/agentmaster` reflects the released tree (the install
   one-liner pulls `tools/*.ps1` from the branch). A clean fast-forward (`git merge-base --is-ancestor
   origin/agentmaster HEAD`) is a plain `git push origin agentmaster`.

@@ -6,8 +6,9 @@ description: |
   themed bullets, and the three framings: NIGHTLY vs PRE-RELEASE vs STABLE. Encodes the
   mechanics done repeatedly: derive the changelog since the right baseline (nightlies are
   INVISIBLE to baselines), the copy-paste Install block, the "comprehensive changelog since
-  last stable" ASSEMBLY (a stable release folds every intervening pre-release's notes in
-  full — never nightlies), stripping the draft's HTML-comment header before publishing,
+  last stable" MERGE (a stable release merges every intervening pre-release's notes into ONE
+  changelog — one New, one Fixes, one "Worth knowing" — that names no pre-release version;
+  never nightlies), stripping the draft's HTML-comment header before publishing,
   applying via `gh release edit --notes-file`, and CONVERTING a live release between stable
   and pre-release — including the gotcha that `--latest=false` does NOT move the Latest
   badge (you must explicitly `--latest` the release you want as Latest). Use when writing
@@ -50,14 +51,19 @@ The `<NNN>` file name and the committed archive are the convention — match it.
   and do NOT re-list changes that already shipped in an earlier prerelease. (User's rule, stated
   2026-07: *"all the prereleases … are supposed to only show what has changed in that prerelease
   explicitly."*)
-- A **STABLE** vX.Y.Z → notes = the **complete changelog since the last stable** — you **fold in every
-  intervening pre-release's notes in full** (§6 assembly). **The accumulation happens ONLY at the
-  prerelease→stable promotion** — that is *when we actually take care of accumulating all prerelease
-  notes into the same release.* Example: 0.6.0 stable folded the entire 0.5.6→0.5.9 prerelease line.
+- A **STABLE** vX.Y.Z → notes = the **complete changelog since the last stable**, written as **ONE
+  merged changelog**: every intervening pre-release's items **merged into the stable's own sections**
+  (one New, one Fixes, one "Worth knowing when you upgrade"), each item in its final state, and **no
+  pre-release version named anywhere** (§6). **The accumulation happens ONLY at the prerelease→stable
+  promotion** — that is *when we actually take care of accumulating all prerelease notes into the same
+  release.* The owner's rule of 2026-11-13, after v0.9.0 first shipped with 0.8.2-prerelease's body
+  folded under its own banner: *"merge the release notes (all of them) since last release (non
+  prerelease), no mentioning of prerelease versions but 0.9.0"* — v0.9.0's published body was replaced
+  with the merge (`.claude/skills/release-version/am_release_090_notes.draft.md` is the model).
 
 - **Last stable** = the newest release in `gh release list -R Nucs/Agentmaster` NOT marked
   `Pre-release` (it wears `Latest`); intervening prereleases do not reset it. It is the baseline for
-  the STABLE fold — **NOT** for a prerelease. A **prerelease baselines off the PREVIOUS release**,
+  the STABLE merge — **NOT** for a prerelease. A **prerelease baselines off the PREVIOUS release**,
   whatever version that was (e.g. a reunification prerelease that ships a previously-abandoned batch
   lists only that batch as ITS delta, minus anything already shipped in an intervening hotfix).
 - **NIGHTLIES are INVISIBLE to baselining, in BOTH directions.** A nightly (tag contains `nightly`,
@@ -67,11 +73,11 @@ The `<NNN>` file name and the committed archive are the convention — match it.
   - A later **pre-release/stable NEVER baselines off a nightly** — its delta is measured against the
     previous NON-nightly release, so commits that first shipped in a nightly still appear in the next
     real release's notes (almost nobody installed the nightly; "already shipped" doesn't apply).
-  - The **STABLE fold (§6) folds pre-releases only, never nightlies** — a nightly's content reaches
-    the fold through the pre-release/stable that re-ships it.
+  - The **STABLE merge (§6) merges pre-releases only, never nightlies** — a nightly's content reaches
+    the merge through the pre-release/stable that re-ships it.
 
 Get the delta and omit-list — `<prev>` is the release RIGHT BEFORE `<target>` (prerelease: the prior
-prerelease/stable; stable: the last stable, then fold each intervening prerelease's body per §6):
+prerelease/stable; stable: the last stable, then merge each intervening prerelease's items per §6):
 ```bash
 git log --oneline 'v<prev>^{commit}'..<target> 2>/dev/null          # the changelog for THIS release
 git log --oneline 'v<prev>^{commit}'..<target> | grep -icE ' (docs|refactor|chore|test)\(|Merge '  # omit these from user notes
@@ -104,10 +110,12 @@ the one-line subject rarely captures the user-facing story.
      Agentmaster.cer. -->
 ## Agentmaster X.Y.Z<  (pre-release)>
 
-**X.Y.Z is a <stable release|pre-release>** building on <prev>. <one-paragraph headline of the top themes>.
-< PRE-RELEASE only: >Enable **Settings → Updates → "Allow pre-release versions"** to receive it
+< PRE-RELEASE: >**X.Y.Z is a pre-release** building on <prev>. <one-paragraph headline of its own themes>.
+Enable **Settings → Updates → "Allow pre-release versions"** to receive it
 automatically, or install from the assets below. The stable **<prevstable>** remains the default for everyone else.
-< STABLE only: >This build becomes the new default **Latest**.
+< STABLE: >**X.Y.Z is a stable release** and the new default **Latest**. <one-paragraph headline of every
+theme since the last stable — no other Agentmaster version named (§6)>. Agentmaster offers it as an update
+by itself, or install it from the assets below.
 
 ## New in X.Y.Z
 - **Feature.** …
@@ -187,38 +195,53 @@ from git (`git show <notes-commit>:<draft path>`), so revert-and-reapply rather 
 
 ---
 
-## 6. Comprehensive assembly — a STABLE release's full changelog since last stable
+## 6. Comprehensive merge — a STABLE release's full changelog since last stable
 
 **This section is STABLE-only — it is _the_ prerelease→stable accumulation step.** A prerelease never
 does this (it shows only its own delta, §2); accumulating all the prerelease notes into one body is
-exactly what you do WHEN you cut the stable release. Its body must include the **complete** changelog:
-the new stable work on top, then each intervening pre-release's **full** New/Fixes folded in. Pull the
-authoritative **published** bodies and transform them (strip each Install, demote `##`→`###`, wrap
-under a per-version banner, one Install at the end):
+exactly what you do WHEN you cut the stable release. Two of the owner's requirements shape it:
+*"the release notes must contain all notes since last stable release"* and (2026-11-13) *"merge the
+release notes (all of them) since last release (non prerelease), no mentioning of prerelease versions
+but 0.9.0"*. So the body is ONE changelog over `v<laststable>..<target>`, never a stack of per-version
+sections (the per-version banner fold used up to v0.9.0's first body is retired).
 
+**Inputs:** the stable's own delta since the newest pre-release (§2–§3), and each intervening
+pre-release's **published** body (the authoritative items, already reviewed):
 ```bash
-SC=/tmp; for V in 0.5.9 0.5.8 0.5.7 0.5.6; do
-  gh release view v$V -R Nucs/Agentmaster --json body --jq '.body' 2>/dev/null > "$SC/pub_$V.md"
+SC=<scratchpad>; for V in 0.8.2-prerelease; do   # every pre-release since the last stable, never a nightly
+  env -u GH_TOKEN -u GITHUB_TOKEN gh release view v$V -R Nucs/Agentmaster --json body --jq '.body' 2>/dev/null \
+    | grep -v '^\* Request' > "$SC/pub_$V.md"
 done
-{
-  # 1. the new stable's own intro + New + Fixes (from your draft, minus the comment/Install)
-  awk '/^## Agentmaster/{f=1} /^## Install/{f=0} f' your_draft.md
-  echo; echo '---'; echo; echo '# Full changelog since the last stable (<prevstable>)'; echo
-  # 2. each pre-release, verbatim minus its Install, headers demoted, under a version banner
-  for V in 0.5.9 0.5.8 0.5.7 0.5.6; do
-    awk '/^## Install/{exit} {print}' "$SC/pub_$V.md" \
-      | sed -E -e 's/^## Agentmaster /## /' \
-               -e 's/Enable \*\*Settings.*everyone else\.//' \
-               -e 's/^## New in [0-9.]+.*/### New/' -e 's/^## Fixes.*/### Fixes/' -e 's/^## Thanks.*/### Thanks/'
-    echo
-  done
-  # 3. one stable Install (from your draft)
-  awk '/^## Install/{f=1} f' your_draft.md
-} > "$SC/full_body.md"
-grep -c '^## Install' "$SC/full_body.md"   # want 1; and 0 stray "remains the default"
 ```
-(The user requirement that surfaced this: *"the release notes must contain all notes since last
-stable release."*)
+**The merge** — one intro, `## New in X.Y.Z`, `## Fixes`, `## Worth knowing when you upgrade`, one
+`## Install`:
+- **Every item in its FINAL state, measured against the last stable.** An item a later change reworked
+  becomes ONE item (v0.9.0: 0.8.2's "a turn cut by Connection lost restarts by itself" + 0.9.0's widening
+  = one "A session restarts by itself …" item; the side panel's header described as it ends). An item a
+  later change REMOVED is left out (v0.9.0: 0.8.2's "The card's screen follows the status", undone by the
+  screenshot-on-tap change). Check "no longer / now / used to" wording against the last stable's own
+  code: `git merge-base --is-ancestor <commit> v<laststable>`.
+- **Group by theme, not by origin:** a pre-release's sub-items and the stable's additions to the same
+  feature sit together (the filters, the AI search, Telegram).
+- **No other Agentmaster version in the body** — no pre-release version, no "pre-release" / "folded in",
+  and no previous version as a reference point: "0.8.1 asked only …" → "Agentmaster used to ask only …";
+  "You will see it at the first update offered after 0.8.2" → "… from the next update on"; the intro is
+  "the new default Latest", not "replacing <prev>". Other products' versions stay (Claude Code 2.1.x,
+  Windows 10 2004, Windows Terminal v1.24…). The draft's HTML-comment header (stripped before publishing)
+  still records the range, the pre-releases merged and what was left out.
+- **Worth knowing when you upgrade** merges every pre-release's upgrade warnings with the stable's own,
+  de-duplicated, as they apply to someone upgrading from the last stable.
+
+**Checks before applying** (the published body = the draft minus its comment, §7):
+```bash
+B=$SC/body.md; P=$SC/pub_<V>.md; S=$SC/stable_delta.md   # the merged body, a pre-release body, your delta draft
+grep -c '^## Install' "$B"                                  # want 1 (and one each of New / Fixes / Worth knowing)
+grep -noiE 'pre-?release|nightly|\b0\.[0-9]+\.[0-9]+' "$B" | grep -v 'X\.Y\.Z'   # want only the release's own X.Y.Z
+# every lead item of the inputs is present, or merged / left out ON PURPOSE (say which in the comment header):
+grep -ohE '^ *- (⚠️ )?\*\*[^*]+\*\*' "$P" "$S" | sed -E 's/^ *- //' | sort -u > $SC/old.txt
+grep -ohE '^ *- (⚠️ )?\*\*[^*]+\*\*' "$B" | sed -E 's/^ *- //' | sort -u > $SC/new.txt
+comm -23 $SC/old.txt $SC/new.txt                            # each line here needs a reason
+```
 
 ---
 
@@ -245,9 +268,11 @@ Finally, commit the draft archive (single `git add` + `git commit`, extensive me
 - `-R Nucs/Agentmaster` on **every** `gh` call; `--jq` exiting 1 empty ⇒ use the plain form.
 - A **PRE-RELEASE**'s notes show ONLY its OWN delta (vs the immediately-previous release) — never fold
   in earlier prereleases, never re-list an already-shipped change; each prerelease stands alone (§2).
-- A **STABLE** release's notes must carry the **whole** changelog since the last stable — fold in the
-  intervening pre-releases (§6), don't just condense them to a recap. This fold is the ONLY place
-  accumulation happens (the prerelease→stable moment).
+- A **STABLE** release's notes must carry the **whole** changelog since the last stable as ONE merged
+  changelog — the intervening pre-releases' items merged into the stable's own New / Fixes / Worth
+  knowing, each in its final state, no pre-release (or other Agentmaster) version named (§6) — never a
+  recap, never per-version sections. This merge is the ONLY place accumulation happens (the
+  prerelease→stable moment).
 - A **NIGHTLY** is invisible to baselining in both directions (§2): its own notes may be terse, the
   next real release baselines off the previous NON-nightly release (re-listing nightly-shipped work
   is CORRECT), and the stable fold never includes it. Same publish flags as a pre-release, never
