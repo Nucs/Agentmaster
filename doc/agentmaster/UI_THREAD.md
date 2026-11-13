@@ -1535,3 +1535,62 @@ cd <scratch> && cp tools/stacksnap.exe "<SDK>/Debuggers/x64/dbghelp.dll" "<SDK>/
 export STACKSNAP_SYMSRV='srv*Q:\symcache*https://msdl.microsoft.com/download/symbols'   # the layout ships our PDBs
 ./stacksnap.exe sample <pid> 6 300 <uiTid>          # the first run downloads symbols (~2 min); the .folded file holds the stack
 ```
+
+## 17. Every window switch re-themed every tab: the tab-row color in the tab's render key (2026-11-13)
+
+The report (production 0.8.0.12, pid 114436, up since 2026-11-10; 5 windows of 692 + 181 + 47 + 7 + 1 tabs, 926 live
+sessions): "The UI is slow, interacting with tabs or even creating a new tab freezes ui". hooks.log: tab switches
+settling in 5–10 s (`[tab-switch-settle] … idle-again-after=10041ms`), content swaps of 0.7–0.9 s, and the window that
+sits on its Agent Manager page (181 cards) rebuilding it for 1.0–1.4 s every few minutes (§15).
+
+### 17a. The evidence
+
+`stacksnap sample <pid> 20 50 <uiTid>` (nothing suspended): the UI thread busy 41.5% of the 20 s, and HALF of its busy
+samples in one chain — `TerminalPage::_ApplyTabThemeColorsChunk` (a Low-priority dispatcher item, 8 tabs per item) →
+`Tab::ThemeColor` → `Tab::_ApplyTabColorOnUIThread` → `Tab::_RecalculateAndApplyTabColor` → `Tab::_RefreshVisualState`
+→ `TabViewItem::RequestedTheme` (upstream's "BODGY" Light → Dark → restore flip plus two visual-state changes, which
+re-resolve each tab's whole template). The chain starts at `TerminalPage::WindowActivated` → `_updateThemeColors`.
+
+### 17b. Why a window switch costs every tab
+
+- `_updateThemeColors` runs at every window activation AND deactivation and calls `Tab::ThemeColor(tab background,
+  unfocused background, tabRowColor)` for every tab of that window.
+- With no theme in Terminal's settings, the default `dark` theme applies: its `tabRow` has only an
+  `unfocusedBackground` (#333333), so a focused window's row is `TabViewBackground` (#2e2e2e, App.xaml) and an
+  unfocused one's #333333. `tabRowColor` therefore changes for every tab at every switch, for the window gaining focus
+  and for the one losing it.
+- `ThemeColor`'s input gate (the 2026-08-14 RDP fix) skips only identical inputs, and `_ApplyTabColorOnUIThread`'s
+  output gate keyed on `{color, _tabRowColor, deselectedTabColor}` — the raw row color — so both missed, and each tab
+  rewrote its ~20 theme brushes and ran the triple flip: a 692-tab window paid it for 692 tabs, twice per switch
+  between two big windows, in dispatcher items that a click, a tab switch or a new tab had to wait behind.
+
+### 17c. The fix (`Tab.cpp` `_ApplyTabColorOnUIThread`, no Tab layout change)
+
+- The row color reaches this tab's brushes in exactly two places, both a black-or-white font pick: the selected font
+  (the color layered on the row) and the deselected font (the translucent deselected color layered on the row).
+  Everything else is the tab's own color and its deselected color.
+- The output key is now `{color, deselectedTabColor, the two picks}`: a row-color change that flips no pick leaves
+  every brush identical and costs one comparison per tab. #2e2e2e ↔ #333333 flips no pick for a normal tab color (the
+  threshold is lightness 0.6), so a window switch no longer re-themes anything. A pick that does flip still applies.
+- The picks ride in a `til::color`'s red and green bytes, so `_lastAppliedTabColorKey` keeps its type: no change to
+  `Tab`'s layout, no purge.
+- Checked without a build: `cl /Zs` of Tab.cpp against the release worktree's PCH (`Q:\tmp\am-release-wt`,
+  ad89700e3), PASS; a planted defect fails at its line (C2065). Not measured live yet (owed after a build: a 20 s
+  `stacksnap sample` while switching between the two big windows should show no `_RefreshVisualState`).
+
+### 17d. What is left
+
+- The Agent Manager page in a background window still rebuilds on registry changes, 1.0–1.4 s for its 181 cards
+  (§15's recommendations — keep the cards and edit them in place, or virtualize — are not built). Leaving that window
+  on a tab instead of its page stops it.
+- A real theme change (a settings reload, a font pick that flips) still re-themes every tab, staggered as before.
+
+### 17e. How it was measured
+
+```bash
+cd <scratch> && cp tools/stacksnap.exe "<SDK>/Debuggers/x64/dbghelp.dll" "<SDK>/Debuggers/x64/symsrv.dll" . && touch symsrv.yes
+export STACKSNAP_SYMSRV='srv*Q:\symcache*https://msdl.microsoft.com/download/symbols'   # the layout ships our PDBs
+uiTid=$(powershell -NoProfile -Command "(Get-Process -Id <pid>).Threads | Sort-Object StartTime | Select -First 1 -ExpandProperty Id")
+./stacksnap.exe sample <pid> 20 50 $uiTid          # section (b): our frames, inclusive
+rg -n "tab-switch-slow|tab-switch-settle|slow rebuild" <profile>/hooks.log
+```

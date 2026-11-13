@@ -401,7 +401,8 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster: per-tab refresh gates (the N×M half of the 2026-08-14 RDP freeze).
         // _themeColorSeeded arms ThemeColor()'s input-equality skip after the first real apply;
-        // _lastAppliedTabColorKey is the (color, tab-row, deselected) render key that lets
+        // _lastAppliedTabColorKey is the (color, deselected color, the two font picks the tab-row color
+        // decides) render key that lets
         // _ApplyTabColorOnUIThread no-op an identical re-apply — skipping its ~20-brush resource-
         // dictionary rewrite and _RefreshVisualState's RequestedTheme Light→Dark→restore flip —
         // and _tabColorCleared lets _ClearTabBackgroundColor no-op once already cleared (the FIRST

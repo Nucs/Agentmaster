@@ -3761,7 +3761,10 @@ namespace winrt::TerminalApp::implementation
 
         // The tab font should be based on the evaluated appearance of the tab color layered on tab row.
         const auto layeredTabColor = color.layer_over(_tabRowColor);
-        if (ColorFix::GetLightness(layeredTabColor) >= lightnessThreshold)
+        // Agentmaster: the first of the only two ways the tab-row color reaches this tab's brushes (a black or
+        // white selected font); kept as a bool for the output-equality key below.
+        const bool fontIsDark = ColorFix::GetLightness(layeredTabColor) >= lightnessThreshold;
+        if (fontIsDark)
         {
             fontBrush.Color(winrt::Windows::UI::Colors::Black());
             auto secondaryFontColor = winrt::Windows::UI::Colors::Black();
@@ -3806,14 +3809,29 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
+        // Agentmaster: the second way the tab-row color reaches the brushes (a black or white font on a
+        // DESELECTED tab, whose translucent color shows the row through it); computed here, ahead of the
+        // gate, for the key. The upstream comment where it is used below says why the row matters.
+        const auto deselectedActualColor = deselectedTabColor.layer_over(_tabRowColor);
+        const bool deselectedFontIsDark = ColorFix::GetLightness(deselectedActualColor) >= lightnessThreshold;
+
         // Agentmaster: output-equality gate. Everything inserted below derives from exactly
-        // (color, _tabRowColor, deselectedTabColor) — deselectedTabColor already folds in the
-        // unfocused-theme evaluation over the control's brush, so a control-background change
+        // (color, deselectedTabColor, fontIsDark, deselectedFontIsDark) — deselectedTabColor already folds
+        // in the unfocused-theme evaluation over the control's brush, so a control-background change
         // lands in the key. An identical key would re-insert ~20 identical brushes and run
         // _RefreshVisualState's RequestedTheme Light→Dark→restore flip + two animated
         // VisualStateManager transitions — the per-tab constant that made settings-reload ×
         // tabs quadratic work freeze the app at fleet scale (the 2026-08-14 RDP freeze).
-        const std::array<til::color, 3> applyKey{ color, _tabRowColor, deselectedTabColor };
+        // The key holds the two font picks, NOT the raw tab-row color: the default "dark" theme gives the
+        // row a different color unfocused (#333333) than focused (TabViewBackground), so a key holding the
+        // row color changed for EVERY tab at every window (de)activation, and each of a 600-tab window's tabs
+        // paid the whole apply twice per window switch (2026-11-13, production at 926 sessions: half of the UI
+        // thread's busy time in _ApplyTabThemeColorsChunk → _RefreshVisualState → RequestedTheme, tab
+        // switches and new tabs waiting seconds behind it). A row change that flips no font pick leaves every
+        // brush identical, so it now costs this comparison. The picks ride in a til::color's red and green
+        // bytes (1 = a dark font) so _lastAppliedTabColorKey keeps its type (no Tab layout change).
+        const std::array<til::color, 3> applyKey{ color, deselectedTabColor,
+                                                  til::color{ static_cast<uint8_t>(fontIsDark ? 1 : 0), static_cast<uint8_t>(deselectedFontIsDark ? 1 : 0), 0, 0 } };
         if (_lastAppliedTabColorKey == applyKey)
         {
             return;
@@ -3837,8 +3855,9 @@ namespace winrt::TerminalApp::implementation
         //
         // We don't want that to result in white text on a white tab row for
         // inactive tabs.
-        const auto deselectedActualColor = deselectedTabColor.layer_over(_tabRowColor);
-        if (ColorFix::GetLightness(deselectedActualColor) >= lightnessThreshold)
+        // Agentmaster: decided above the output-equality gate (deselectedFontIsDark), from the same
+        // deselectedActualColor, because the pick is part of the gate's key.
+        if (deselectedFontIsDark)
         {
             deselectedFontBrush.Color(winrt::Windows::UI::Colors::Black());
         }
