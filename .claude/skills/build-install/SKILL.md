@@ -120,9 +120,14 @@ resolves HEAD and takes uncommitted work in that checkout, and it names a worktr
   ```
 - **Test it (since 2026-11-13):** every build also compiles its commit's engine harness into its `m5-tests` artifact
   (the outcome ends "m5 tests compiled in N min"). `"$AMB" test <build id> m5` runs THAT artifact in a fresh VM on
-  the build's site, nothing compiled there; its outcome is the harness's summary (`m5: 12942 checks, 3 failures …`;
+  the build's site, nothing compiled there; its outcome is the harness's summary (`m5: 12907 checks, 3 failures …`;
   the three TaskbarBadge failures are a known baseline). Follow it like a build. `"$AMB" e2e <build id> -- <pytest
   args>` runs e2e suites on the same build's portable zip.
+- **Times on the worker (measured twice 2026-11-13, buildserver/DESIGN.md §16.18):** the same build request again:
+  11 s, no VM ("build … exists"); a new commit without app changes: ~6.5 min (the commit hash is compiled in);
+  `amb test`: the harness 78.5 s, plus the VM's start; an e2e run of three tests: 4.2 min on a quiet worker. While
+  another build writes, drive 2 stretches every VM's start to 9-20 min and an e2e run can fail its 60-s waits: read
+  a failure then as possibly the drive's, and run it again once the worker is quiet (`"$AMB" status`: no Build).
 
 ### A.3 Install it here: `amb install` downloads the layout and swaps it in
 

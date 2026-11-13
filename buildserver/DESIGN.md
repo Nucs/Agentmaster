@@ -1094,6 +1094,62 @@ TraderLab's worker and the desktops of claude-fleet.
 - **What is still slow without the drive:** PowerShell 5.1 needs 13-28 s to reach the bootstrap's first line in a
   fresh guest, and the firmware ~30-40 s to start Windows; both run on every boot.
 
+### 16.18 Build, test and e2e twice on the worker: the service's own time (2026-11-13)
+
+The owner: "try measuring times and compare: a. build b. tests (just a few) c. e2e (just a few). After a,b,c do them
+again to see if build finishes instantly as no code changed, tests and e2e should closely to same. We are focusing on
+our infra time and performance cost". Every request went to the worker site (§5.5), coordinator 907bde046. The build
+is `w20261113-4` (907bde046, Release dev, purge none); the test `amb test w20261113-4 m5` (its own m5-tests.zip, §2);
+the e2e run `test_smoke.py`, `test_cli.py` and `test_manager_page.py::test_open_the_page_and_leave_it`, the suite of
+907bde046. Round 0 is the build of the docs-only commit before it (6390e3106, `w20261113-2`), on a quiet drive.
+
+| | Round 0 (05:27) | Round 1 (07:05-09:38) | Round 2 (07:57-10:34) |
+|---|---|---|---|
+| **a. build, command to outcome** | 6.5 min | 34.7 min | **11 s: "build w20261113-4 exists", no VM** |
+| the CLI (resolve, push) | ~5 s | 2.0 s (0.1 MB pushed in 0.4 s) | ~3 s |
+| VM ready (Windows up) | 31 s (27 s) | 534 s (452 s) | — |
+| disk + checkout | 8 + 5 s | 9 + 5 s | — |
+| build step | 3.0 min | 18.6 min: TerminalAppLib in 4 min, the link's code generation 56 s, then **10.8 min writing TerminalApp.dll and its PDB** (12 s in round 0) | — |
+| tests step (the m5 compile, new) | — | 76 s (cl 74 s) | — |
+| package | 2.6 min | 2.5 min | — |
+| collect + shutdown | 3 + 8 s | **136 + 34 s** | — |
+| **b. test, command to outcome** | — | 15.5 min | 11.5 min |
+| VM ready (Windows up) | — | 841 s (576 s) | 597 s (522 s) |
+| stage, expand, prepare | — | 1 s | 0.4 s |
+| the harness | — | **78.5 s: 12907 checks, 3 failures** | **78.5 s: the same** |
+| **c. e2e, command to outcome** | — | 4.2 min | 43.7 min |
+| VM ready (Windows up) | — | 124 s (25 s) | **1182 s (400 s)**: 18 s under the hello limit |
+| provisioning | — | 33 s | 236 s (the zip's extraction 143 s, a Defender call 72 s) |
+| the suite | — | 1.4 min: collection 3 s, the tests 29 + 1 + 49 s | 19.6 min: collection **7.8 min**, the tests 585 (error) + 1.5 + 108 s |
+| outcome | — | 2 passed, 1 failed | 1 passed, 1 failed, 1 error |
+
+- **What ran beside each:** round 1's build started right after another session's cold Release build (83.7 min of
+  writes on drive 2); round 1's test ran beside another session's cold Debug build starting; round 1's e2e ran on a
+  quiet drive (5 minutes after that build, direct 4 KB reads at 1.5 ms); round 2's test and e2e ran while another
+  session's PURGED Release build deleted and rebuilt its tree, with two claude-fleet desktops on the same drive.
+  Drive 2's reads, sampled on the host: 0.6-1.2 s each after a build, 2.5-4.6 s during round 1's link.
+- **The work itself is stable:** the m5 harness took 78.5 s both times, with the same 12907 checks; the e2e tests take
+  29-49 s each on a quiet drive. Everything around them varies 10-40× with drive 2's state: a VM's start 31-124 s
+  quiet against 534-1182 s busy, provisioning 33 against 236 s, pytest's collection 3 s against 7.8 min, a PDB write
+  12 s against 10.8 min, the collect 3 against 136 s.
+- **A busy drive also fails tests:** round 2's smoke test errored ("timed out after 60.0 s waiting for" Claude Code's
+  box) after passing in round 1; its 60-s waits assume a normal disk. `test_cli.py`'s failure is no infra fault: it
+  checks that a RELEASE-identity CLI never reads the dev profile, and `w20261113-4` is a dev build.
+- **"No code changed" is instant only for the same request:** round 2's identical build answered in 11 s without a VM
+  (a scheduler pass, then the build's lookup). A NEW commit without app changes (round 0) still costs ~6.5 min: the
+  commit hash goes into `Generated Files\AgentmasterBuildInfo.g.h`, which the five AgentManagerContent*.cpp include
+  (their recompile ~55 s), TerminalApp.dll's LTCG relink (~66 s), and the packaging (2.6 min: three zips one after
+  another, 213 + 209 + 181 MB).
+- **The m5 artifact:** the tests step costs a build 1.3 min; the run outside a checkout and on a VM counts 12907 checks
+  against 12946 in the checkout here: `TestDialogEchoCoverage`'s source scan skips without a checkout (4), and the
+  live checks that read this PC's own state (its ~/.claude transcripts and heartbeats, the live `.claude.json`,
+  `claude.exe` under `.local\bin`, `rg` on PATH) skip on a clean VM (35). The three TaskbarBadge failures are this
+  PC's too.
+- **Where the time can come back** (not done; the owner's calls): (1) drive 2: the images (~32 GB) on drive 1 or held
+  in the host's page cache (it holds 85 GB of cache now), or a datacenter SSD with DRAM and power-loss protection for
+  drive 2; (2) the package step's three zips at once (~2.5 → ~1 min a build); (3) the commit hash in one small unit
+  instead of five large ones (~50 s a build); (4) e2e waits that tolerate a slow disk, or no e2e while a build writes.
+
 ## 17. Evidence
 
 - **The scripts:** [`measure/README.md`](measure/README.md), one per measurement.

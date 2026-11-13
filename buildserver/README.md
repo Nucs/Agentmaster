@@ -156,11 +156,15 @@ to use artifacts for tests and e2e that are produced by the build step").
   picks another): the zip is staged (SHA-256 checked against the build's record), unpacked on C:, and `m5_tests.exe`
   runs with a fresh profile (`AGENTMASTER_PROFILE`). Its output streams as the request's events (each section, each
   `[FAIL]`) and is kept as `store/requests/<id>/m5-output.txt`; the outcome is the harness's own summary
-  (`m5: 12942 checks, 3 failures (exit 1), 92 s; build w…`), and the request succeeds only when every check passed.
-  The build VM is never used, so a test runs while the next build builds.
-- **What differs from a run in the checkout:** `TestDialogEchoCoverage` scans the repository's `src\cascadia` and skips
-  itself outside a checkout (4 checks fewer: 12942 against 12946 on this PC). The three `TaskbarBadge` checks fail on
-  this PC either way (anti-aliasing; a known baseline).
+  (`m5: 12907 checks, 3 failures (exit 1), 78 s; build w20261113-4`), and the request succeeds only when every check
+  passed. The build VM is never used, so a test runs while the next build builds.
+- **What differs from a run in the checkout:** 12907 checks on a VM against 12946 in the checkout on this PC.
+  `TestDialogEchoCoverage` scans the repository's `src\cascadia` and skips itself outside a checkout (4), and the live
+  checks that read this PC's own state (its `~/.claude` transcripts and heartbeats, the live `.claude.json`,
+  `claude.exe` under `.local\bin`, `rg` on PATH) skip on a clean VM (35). The three `TaskbarBadge` checks fail on this
+  PC too (anti-aliasing; a known baseline).
+- **How long, on the worker** (DESIGN.md §16.18, measured twice): the harness 78.5 s both times; a test request
+  11.5-15.5 min, nearly all of it the VM's start while drive 2 was busy (on a quiet drive a VM is ready in 31-124 s).
 - **Locally**, `run-m5-tests.bat` still compiles and runs in one go from any checkout or worktree: it finds its own
   repository (five folders up, or `AM_REPO_ROOT`) and its MSVC by vswhere (or `AM_VCVARS`).
 
@@ -391,6 +395,13 @@ python buildserver/image/images.py --site worker base | e2e | build-image | chec
   time), the next in 46 s with provisioning in 29 s, an e2e smoke run in 2 minutes. The cache is charged to CT 803's
   memory cgroup, which lxcfs reports as available, so the site's capacity does not shrink. The site's hello limit is
   20 minutes (`AMB_GUEST_HELLO_MINUTES`; 10 elsewhere).
+- **The cache does not help right after a build, and the drive still sets the service's pace** (2026-11-13, DESIGN.md
+  §16.18): a build's tens of GB of writes push the images out of the cache, and the drive's reads then take 0.6-4.6 s
+  for tens of minutes. Measured the same day with builds of other sessions running: a VM ready after 534-1182 s
+  (31-124 s quiet; one e2e guest 18 s under the 20-minute limit), TerminalApp.dll and its PDB written in 10.8 min (12 s
+  quiet), an e2e run's pytest collection 7.8 min (3 s) and its smoke test failing a 60-s wait it passes when quiet.
+  The work itself does not change (the m5 harness 78.5 s both times). The candidate fixes (the images on drive 1 or held
+  in memory, a datacenter SSD for drive 2) are the owner's calls.
 - **Looking inside a silent guest:** QEMU's monitor answers in the slot container (`podman exec -i <slot> python3 -
   "<command>" < /srv/buildserver/bin/hmp.py`): `screendump /tmp/s.png -f png` shows its screen, and `sendkey` types
   (meta_l-r opens Run). A command typed into Run that writes into `\\host.lan\Data\amb\` lands in the slot's exchange
