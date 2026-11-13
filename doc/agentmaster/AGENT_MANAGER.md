@@ -144,6 +144,19 @@ it), `AgentLaunchBar.{h,cpp}` (the launch row), `TabManagement.cpp` (closing tab
 - **Tooltips** open at ~1/3 of the system hover delay (`AgentSetTip`); on the page their text renders in
   a fixed panel nested in the board's top-right corner (`AgentLocalTooltip`, `_managerLocalTip`; the
   settings and claude-missing overlays stay outside it).
+- **The panel behaves like a tooltip** (`AgentLocalTooltip::SetTooltipTiming`, the owner's pick of
+  2026-11-13 from three live mocks, and 10 s from 5 s / 10 s / by length). A description shows once the pointer RESTS on its
+  control for Windows' hover time (`SPI_GETMOUSEHOVERTIME`, 400 ms by default; every move restarts the wait,
+  so a pointer sweeping across the page shows nothing, and the board cards' 4 s `kCardTipDelay` applies only
+  to the floating fallback of a too-narrow window). It stays while the pointer moves inside that control,
+  and hides when the pointer is off it (a gap, another control, out of the toolbar / board / bottom scope),
+  on any press in the scope, after 10 s, and when the page hides (`SetLensVisible(false)` → `Hide()`). A
+  description hidden by the 10 s limit or a press stays hidden while the pointer stays on its control.
+  - **Why:** the panel covers the board's corner, and its sticky default (still the Settings cog's and the
+    Sessions page's) kept the last description up for good: moving on never hid it, and nothing else did.
+  - **How it notices a leave:** `PointerExited` bubbles, so every exit is judged by the pointer's position
+    against each element the timing keeps (the shown control, the control a rest wait is armed on, the
+    dismissed control); the 10 s limit is the belt for a pointer that leaves the window without an exit.
 - The board and tree show only open (`live`) sessions; a closed session lives in the Sessions browser.
 
 ## Explorer Tree

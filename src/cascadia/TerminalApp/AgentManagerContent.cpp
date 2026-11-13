@@ -704,6 +704,15 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         _lensVisible = visible;
+        if (!visible)
+        {
+            // Leaving the page takes its description panel down with it, and ends any rest wait still
+            // running (a keyboard switch away — Ctrl+Tab — leaves the pointer resting on a control and
+            // raises no exit): coming back must show the board's corner clear, not the description of
+            // whatever was hovered last. A no-op before the layout built the panel (the page host
+            // hides the lens right at creation).
+            _managerLocalTip.Hide();
+        }
         if (visible && _refreshDirty)
         {
             _Refresh();
@@ -2065,16 +2074,23 @@ namespace winrt::TerminalApp::implementation
         // Hovering any tipped control in the toolbar / Triage Board / Explorer Tree / Auto Testing
         // renders its description (title + text) in ONE fixed panel nested in the BOARD's top-right
         // corner, instead of a floating ToolTip popping over the very card/row being aimed at (and
-        // instead of the board cards' 4s hold-back workaround for exactly that intrusiveness — a
-        // side panel can update immediately). Scoped to the three CONTENT regions — deliberately
+        // instead of the board cards' 4s hold-back workaround for exactly that intrusiveness).
+        // Scoped to the three CONTENT regions — deliberately
         // NOT _root: the settings / claude-missing overlay cards are _root children too, and
         // scoping the regions keeps them outside (settings has its OWN panel; claude-missing keeps
         // floating tips over its modal dim). Click-through: the panel floats over board cards, so
         // it must never eat a click (the modal panels swallow instead — they sit over a dim whose
         // tap means dismiss). Appended after the content children (floats above them) and before
         // the overlay builders below (a modal's dim covers it).
+        // TOOLTIP TIMING (the owner's choice, 2026-11-13: "Like a tooltip", up for 10 s): unlike the
+        // cog's and the Sessions page's sticky panels, this one covers the board's corner, and a
+        // sticky description stayed there for good — moving on kept the last one up, and nothing hid
+        // it. Timed, a description shows once the pointer rests on its control for Windows' hover
+        // time, and goes when the pointer leaves that control, on a press, or after kManagerTipShowFor.
+        constexpr auto kManagerTipShowFor = std::chrono::seconds{ 10 }; // the owner's pick among 5 s / 10 s / by length (5-15 s)
         _managerLocalTip.Initialize();
         _managerLocalTip.SetClickThrough(true);
+        _managerLocalTip.SetTooltipTiming(kManagerTipShowFor);
         _managerLocalTip.AttachScope(_toolbarCol);
         _managerLocalTip.AttachScope(boardSection);
         _managerLocalTip.AttachScope(bottomGrid);

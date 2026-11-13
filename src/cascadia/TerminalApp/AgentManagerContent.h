@@ -306,6 +306,10 @@ namespace winrt::TerminalApp::implementation
         // thread that every window shares) for pixels nobody can see; becoming visible again runs the
         // ONE catch-up rebuild. Defaults to visible; the page host hides it right at creation
         // (TerminalPage::_CreateAgentManagerPage), since the page starts off screen until Home shows it.
+        // Hiding also takes down the page's description panel and its pending rest wait
+        // (_managerLocalTip.Hide()), so the page comes back with the board's corner clear.
+        //   visible - true when the window's Agent Manager page is on screen.
+        // UI thread only. Throws what the catch-up rebuild throws (XAML element creation; std::bad_alloc).
         void SetLensVisible(bool visible);
         // Agentmaster (Linked Lenses — the per-tab -> Manager sync): select a managed session in the
         // lens from OUTSIDE. The page calls this when the user switches to that session's terminal tab,
@@ -1457,7 +1461,11 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (LocalTooltip): the Manager TAB's hover-description panel — the toolbar /
         // Triage Board / Explorer Tree / Auto Testing regions' tips render in a click-through panel
         // nested in the board's top-right corner (scoped per region, NOT on _root, so the settings /
-        // claude-missing overlay cards stay outside it — see _BuildLayout's wiring block).
+        // claude-missing overlay cards stay outside it — see _BuildLayout's wiring block). The one
+        // panel with TOOLTIP TIMING (AgentLocalTooltip::SetTooltipTiming, 10 s): it shows after the
+        // pointer rests on a control and hides when the pointer leaves it, on a press, after 10 s,
+        // and when the page hides (SetLensVisible) — it floats over board cards, where the sticky
+        // default would cover the corner for good.
         AgentLocalTooltip _managerLocalTip;
         // Agentmaster: the cog's TOP TABS. The strip buttons + their content panels are parallel-indexed
         // (button i <-> panel i); _SwitchSettingsTab SWAPS panel i into the single _settingsScroll (the
