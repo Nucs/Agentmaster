@@ -74,7 +74,10 @@ database tools from the next start; the CLI verbs `search`, `sql`, `sessdb`; a s
   4950ece21 (the define now only for a non-Release identity; NOT BUILT): the marker comes off with the first release
   build that holds it. Proved by `e2e/suites/test_cli.py::test_a_plain_shell_reads_the_installs_own_profile`
   (`needs_fix("CLI-K2")`: the guest's install folder, `sessions --json` with no `AGENTMASTER_PROFILE`, the envelope's
-  `profile` is `%USERPROFILE%\.agentmaster`, never `.agentmaster-dev`).
+  `profile` is `%USERPROFILE%\.agentmaster`, never `.agentmaster-dev`). ⚠ The test needs a RELEASE-identity build:
+  a dev-identity build's CLI carries `AGENTMASTER_DEV` by design (the fix keeps it for non-Release identities) and
+  reads `.agentmaster-dev`, so the test fails there (the build server's `w20261113-4`, Release configuration with
+  the dev identity, 2026-11-13). The test does not skip itself on a dev build yet.
 
 ---
 

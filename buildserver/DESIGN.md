@@ -581,7 +581,9 @@ On dock, also fastrund's pod memory limit and the LXC changes of §5.3 (E3).
   a snapshot commit under `refs/buildserver/snapshots/<id>`; no branch or HEAD moves.
 - **Into a VM:** a git bundle of what its clone lacks, written into its exchange folder.
 - **Out of a VM:** the guest writes the layout, zip and logs to its exchange share; the host agent moves them into the
-  store and records their SHA-256 in the build's manifest.
+  store and records their SHA-256 in the build's manifest. Since 2026-11-13 a build also leaves its test artifact
+  there (`m5-tests.zip`, the commit's engine harness compiled in the same tree), which `amb test` runs in another VM:
+  tests and e2e use what the build produced, never a compile of their own (§2).
 - **The build steps come from the commit; the install steps from the host agent's versioned copy**
   (`buildserver/steps/`).
 - **Purge decisions:** the build-install skill's triggers (`SessionModels.h`, `SessionRegistry.*`, any `.idl`, widened

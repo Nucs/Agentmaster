@@ -38,6 +38,16 @@ The results folder holds `summary.txt` (the run's end, below), `pytest.log`, `ju
 and, for every failed test, its evidence: `screen.png`, `uia.txt` (every window of the app), `terminal-<n>.txt`, the
 profile's logs and records, `mock.json`, `processes.txt`. A test that passes leaves nothing.
 
+**On the build server** (`buildserver/README.md`), the same suite runs on a build's own portable zip in a fresh VM
+that leaves nothing behind: `amb e2e <build id> --suite-rev <the build's commit> -- -v suites/test_smoke.py` (on the
+worker machine's site the suite is always a commit's `e2e/`). Two things to know when reading its results
+(measured 2026-11-13, `buildserver/DESIGN.md` §16.18):
+- `test_cli.py::test_a_plain_shell_reads_the_installs_own_profile` needs a RELEASE-identity build: on a dev build
+  (`--identity dev`) its CLI reads the dev profile by design, and the test fails.
+- On the worker, a VM started while any build writes to the site's drive waits on it: three tests took 4.2 min on a
+  quiet worker and 43.7 min beside a build, and the smoke test failed its 60-s wait for Claude Code's input box (it
+  passed when quiet). Run a failure like that again once `amb status` shows no Build.
+
 ### Waiting for a run
 
 **The wait costs nothing, and nobody reads a log.** The guest writes into `Z:\e2e\out`, which is a folder of this

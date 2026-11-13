@@ -7,8 +7,10 @@ description: |
   2 full-PDB symbols zips) → apply notes → publish). Encodes
   the hard rules: hold the build mutex, pin `-R Nucs/Agentmaster` (gh defaults to the
   upstream microsoft/terminal remote), confirm the version with the user first, build the
-  RELEASE identity, and ALWAYS pre-validate with a clean local Release build (incremental
-  Debug builds mask clean-build errors the runner WILL hit). Use when the user asks to
+  RELEASE identity, and ALWAYS pre-validate with a clean Release build (incremental Debug
+  builds mask clean-build errors the runner WILL hit): locally, or as a PURGED build on the
+  build server (`amb build --config Release --identity release --purge force`, then
+  `amb test <id> m5`), which costs this PC nothing. Use when the user asks to
   release a new version, cut/publish a release, ship vX.Y.Z, cut a NIGHTLY
   (vX.Y.Z-prerelease-nightly — auto-marked prerelease, offered only to nightly-opted users),
   or deploy the dev instance.
@@ -184,7 +186,7 @@ git rev-parse HEAD origin/agentmaster          # is local ahead of origin? (push
   one-liner pulls `tools/*.ps1` from the branch). A clean fast-forward (`git merge-base --is-ancestor
   origin/agentmaster HEAD`) is a plain `git push origin agentmaster`.
 
-### B1. PRE-VALIDATE with a clean local Release build — REQUIRED
+### B1. PRE-VALIDATE with a clean Release build — REQUIRED (locally, or purged on the build server)
 This is the single most important step. **The CI/release runner does a from-scratch Release x64
 build; your incremental Debug builds MASK errors it will hit** (e.g. a dead `using namespace
 ::Microsoft::Console;` in a TU that doesn't include `utils.hpp` — compiles in stale Debug, fails
@@ -209,9 +211,19 @@ appxsym is safe for pre-validation: it catches compile/link errors, and the symb
 fails. NOTE the CI `release.yml` does NOT pass the flag, so it still spends ~156s/arch generating an
 `.appxsym` nobody consumes — a separate, untouched CI-speedup opportunity.) `cl /MP` here reveals
 errors roughly one file at a time — fix, rebuild, repeat until green. (Optional belt-and-suspenders:
-the engine harness — `tests/run-m5-tests.bat`, ~1700 checks, no lock needed — but it validates the
-pure-C++ ENGINE TUs only, NOT the WinRT/XAML app TUs where clean-build-only errors bite, so it is
-NOT a substitute for B1.)
+the engine harness — `tests/run-m5-tests.bat`, ~12,900 checks in ~1.5 min, no lock needed — but it
+validates the pure-C++ ENGINE TUs only, NOT the WinRT/XAML app TUs where clean-build-only errors bite,
+so it is NOT a substitute for B1.)
+
+**B1 on the build server instead** (it costs this PC nothing; build-install §A, whose §A.1 names the CLI:
+`AMB='/q/tmp/buildserver-build/Amb.Cli/bin/Debug/net10.0-windows/win-x64/amb.exe'`). A PURGED build is
+a clean build in a VM, as the runner's is —
+`"$AMB" build <commit> --config Release --identity release --purge force --wait` (measured 2026-11-13 on
+the worker: 104.7 min of build, 115 min to the build id; `--site home` builds on this PC in ~33 min
+when it has the memory), then `"$AMB" test <build id> m5` (that build's own compiled harness in a
+fresh VM; the three TaskbarBadge failures are the known baseline). Its layout is also what
+production would install (`amb install <id> --instance production`), so one build both validates and
+deploys. It does not replace B3's CI run, which builds x64 AND arm64 and signs.
 
 **Self-kill caveat — when the release HOST is itself the production instance.** If your Claude
 session runs *inside* production (`Q:\agentmaster-layouts\Release*\Agentmaster.exe` since

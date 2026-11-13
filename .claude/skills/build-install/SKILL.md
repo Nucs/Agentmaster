@@ -8,9 +8,11 @@ description: |
   and sends nothing); then `amb install w… --instance dev|production` downloads the build's layout zip
   to this PC and swaps it in (the free slot, the commit check, the requester's turn, the build-launch
   mutex, the swap with rollback, a 60-s watch), or by hand `amb fetch … --kind layout-zip` +
-  tools\Swap-AgentmasterLayout.ps1 when the home site cannot. Builds ON THIS MACHINE stay for compile
-  checks while iterating and for when the build server cannot: every build flavor (lib-only compile
-  check, ClCompile-only for locked binaries, full Debug package, full Release package,
+  tools\Swap-AgentmasterLayout.ps1 when the home site cannot. Every build also compiles its commit's
+  engine test harness into its `m5-tests` artifact, which `amb test <build id> m5` runs in a fresh VM
+  (nothing compiled at test time); `amb e2e` runs suites on the same build's zip. Builds ON THIS
+  MACHINE stay for compile checks while iterating and for when the build server cannot: every build
+  flavor (lib-only compile check, ClCompile-only for locked binaries, full Debug package, full Release package,
   the engine test harness) and both local installs: the DEV instance (AgentmasterDev,
   Debug loose layout, close → build → relaunch) and the PRODUCTION instance (Agentmaster,
   Release loose layout: build -ReleaseIdentity → stamp version → register → launch →
@@ -36,8 +38,8 @@ description: |
   in one session. Use when asked to build, rebuild, compile-check, deploy/reinstall/relaunch the
   dev or production instance, make the build faster, register the loose layout, or diagnose a
   build/registration/crash-on-launch failure.
-keywords: build server, buildserver, amb, amb build, amb install, amb fetch, worker, worker machine, remote build, snapshot, uncommitted, working tree, worktree, layout-zip, w-build, build, install, deploy, register, relaunch, hot deploy, hot build, minimal downtime, zero downtime, blue green, layout slot, Release-B, Debug-B, PackageName, swap, LayoutDir, AgentmasterLayoutDir, Swap-AgentmasterLayout, InstallLocation, C1085, not enough space, obj junction, msbuild, TerminalAppLib, ClCompile, loose layout, Add-AppxPackage, Remove-AppxPackage, AgentmasterDev, Agentmaster, profile picker, resources.pri, PRI210, 0x80070020, 0x80073CF6, am-lock, build mutex, run-m5-tests, appxsym, AppxSymbolPackageEnabled, build speed, faster build, slow build, D8040, GenerateAppxSymbolPackage, stale build, incremental build, LNK2019, unresolved external, heap corruption, 0xC0000374, STATUS_HEAP_CORRUPTION, RTC1, stack corruption, ClMpCount, PCH, C3859, C1076, crash on launch, purge Generated Files
-keywords-sparse: build on the worker, build on the build server, build it remotely, build my uncommitted changes, build this worktree, install the worker build, download the build and swap, build release without closing it, deploy release with minimal downtime, build while production runs, swap to the new build, roll back the release, deploy dev by swap, hot deploy dev, build dev while it runs, dev swap, build the app, install it here, deploy dev, deploy production, reinstall agentmaster, relaunch the instance, compile check, register the layout, the build failed, make the build faster, build is slow, it crashes on launch, unresolved external symbol, heap corruption crash, deploy dev please, build and deploy dev
+keywords: build server, buildserver, amb, amb build, amb install, amb fetch, amb test, m5, m5-tests, test artifact, engine tests, worker, worker machine, remote build, snapshot, uncommitted, working tree, worktree, layout-zip, w-build, build, install, deploy, register, relaunch, hot deploy, hot build, minimal downtime, zero downtime, blue green, layout slot, Release-B, Debug-B, PackageName, swap, LayoutDir, AgentmasterLayoutDir, Swap-AgentmasterLayout, InstallLocation, C1085, not enough space, obj junction, msbuild, TerminalAppLib, ClCompile, loose layout, Add-AppxPackage, Remove-AppxPackage, AgentmasterDev, Agentmaster, profile picker, resources.pri, PRI210, 0x80070020, 0x80073CF6, am-lock, build mutex, run-m5-tests, appxsym, AppxSymbolPackageEnabled, build speed, faster build, slow build, D8040, GenerateAppxSymbolPackage, stale build, incremental build, LNK2019, unresolved external, heap corruption, 0xC0000374, STATUS_HEAP_CORRUPTION, RTC1, stack corruption, ClMpCount, PCH, C3859, C1076, crash on launch, purge Generated Files
+keywords-sparse: build on the worker, build on the build server, build it remotely, build my uncommitted changes, test the build, run the engine tests on the build server, how long does a build take, build this worktree, install the worker build, download the build and swap, build release without closing it, deploy release with minimal downtime, build while production runs, swap to the new build, roll back the release, deploy dev by swap, hot deploy dev, build dev while it runs, dev swap, build the app, install it here, deploy dev, deploy production, reinstall agentmaster, relaunch the instance, compile check, register the layout, the build failed, make the build faster, build is slow, it crashes on launch, unresolved external symbol, heap corruption crash, deploy dev please, build and deploy dev
 keywords-regex: \bamb\b|buildserver|build server|\bsnapshot\b|\bbuild\b|\binstall\b|\bdeploy\b|\bregister\b|\brelaunch\b|\bmsbuild\b|PRI210|0x800704c8|0x80070020|0x80073CF6|resources\.pri|Add-AppxPackage|appxsym|AppxSymbolPackageEnabled|D8040|GenerateAppxSymbolPackage|LNK2019|0xC0000374|STATUS_HEAP_CORRUPTION|ClMpCount|C3859|C1076
 ---
 
@@ -106,9 +108,20 @@ resolves HEAD and takes uncommitted work in that checkout, and it names a worktr
   data members changed since THAT worktree's last build on the worker (one worktree per configuration × identity;
   `"$AMB" builds` names each build's commit, then `git diff --stat <it> HEAD -- <those files>`). A worktree's first
   build is cold anyway, and a build cut off mid-step is purged by itself next time.
-- **Times on the worker (measured 2026-11-13):** a cold (purged) Release build took 104.7 min of build and 115 min from
-  request to build id (homepc: ~43): its 2013 Xeon is slower per core. An incremental build there: not measured yet
-  (homepc: 10–12 min). One build at a time; the next one waits.
+- **Times on the worker (measured 2026-11-13, buildserver/DESIGN.md §16.17–§16.18):** its 2013 Xeon is slower per
+  core than this PC, so plan on:
+
+  | What | Build step | Request to build id |
+  |---|---|---|
+  | the same request again (commit, config, identity, purge) | none, no VM | **11 s** ("build … exists") |
+  | a new commit without app changes (docs only) | 3.0 min | ~6.5 min |
+  | an incremental build of app changes (a header `TerminalPage.h` includes) | 18.6 min: TerminalAppLib 4 min, then 10.8 min writing one PDB on a busy drive 2 (12 s quiet) | 34.7 min (the VM's start 9 min of it) |
+  | a worktree's first build (Release / Debug) | 83.7 / 89.6 min | ~95 min |
+  | a purged (cold) Release build | 104.7 min | 115 min (homepc ~43) |
+
+  Why a docs-only commit still builds: the commit hash is compiled into the five AgentManagerContent units and
+  TerminalApp.dll's LTCG relink follows, then the packaging's three zips (~2.5 min). One build at a time: the next one
+  waits for the build VM, also behind other sessions' builds (`"$AMB" status` lists them).
 - **Follow it** without blocking: without `--wait` it prints the request id. Poll in the foreground, at most ~270 s per
   tool call (never a background watcher):
   ```bash
@@ -121,13 +134,16 @@ resolves HEAD and takes uncommitted work in that checkout, and it names a worktr
 - **Test it (since 2026-11-13):** every build also compiles its commit's engine harness into its `m5-tests` artifact
   (the outcome ends "m5 tests compiled in N min"). `"$AMB" test <build id> m5` runs THAT artifact in a fresh VM on
   the build's site, nothing compiled there; its outcome is the harness's summary (`m5: 12907 checks, 3 failures …`;
-  the three TaskbarBadge failures are a known baseline). Follow it like a build. `"$AMB" e2e <build id> -- <pytest
-  args>` runs e2e suites on the same build's portable zip.
-- **Times on the worker (measured twice 2026-11-13, buildserver/DESIGN.md §16.18):** the same build request again:
-  11 s, no VM ("build … exists"); a new commit without app changes: ~6.5 min (the commit hash is compiled in);
-  `amb test`: the harness 78.5 s, plus the VM's start; an e2e run of three tests: 4.2 min on a quiet worker. While
-  another build writes, drive 2 stretches every VM's start to 9-20 min and an e2e run can fail its 60-s waits: read
-  a failure then as possibly the drive's, and run it again once the worker is quiet (`"$AMB" status`: no Build).
+  the three TaskbarBadge failures are a known baseline, so the request reads "Failed" until those are fixed). Follow it
+  like a build. `"$AMB" e2e <build id> -- <pytest args>` runs e2e suites on the same build's portable zip (on the
+  worker the suite is a commit's `e2e/`: `--suite-rev <the build's commit>` keeps the two in step).
+- **Their times on the worker** (measured twice 2026-11-13): the harness 78.5 s plus the VM's start; an e2e run of
+  three tests 4.2 min on a quiet worker (the VM ready in 124 s, provisioning 33 s). ⚠ **Drive 2 sets the pace:**
+  right after ANY build's writes (another session's too) a VM takes 9–20 min to start, a PDB write minutes instead of
+  seconds, and an e2e run can fail its 60-s waits (a smoke test did, and passed when quiet). Read a slow or failed run
+  while `"$AMB" status` lists a Build as possibly the drive's, and run it again once the worker is quiet.
+- **`test_cli.py` needs a RELEASE-identity build:** it checks that a release CLI never reads the dev profile, so on a
+  dev build (`--identity dev`) it fails by design.
 
 ### A.3 Install it here: `amb install` downloads the layout and swaps it in
 
