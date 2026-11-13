@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using Amb.Coordinator.Jobs;
 using Amb.Core.Allocation;
 using Amb.Core.Json;
 using Amb.Core.Model;
@@ -27,6 +28,11 @@ public static class RequestDefaults
         RequestKind.E2e => new ResourceRequest(
             new Resources(Resources.Gib(2), 4, Resources.Gib(1)),
             new Resources(Resources.Gib(2), 4, Resources.Gib(3))),
+        // A test VM runs one program from its build's test artifact (the m5 harness: 99 s on this PC, mostly one core); its
+        // overlay grows by the unpacked harness (~20 MB) and Windows' own writes.
+        RequestKind.Test => new ResourceRequest(
+            new Resources(Resources.Gib(2), 2, Resources.Gib(1)),
+            new Resources(Resources.Gib(4), 4, Resources.Gib(2))),
         // The smoke check only boots and runs one command.
         RequestKind.Smoke => new ResourceRequest(
             new Resources(Resources.Gib(2), 2, Resources.Gib(1)),
@@ -202,8 +208,8 @@ public sealed class RequestBook
     /// <param name="ask">What the caller asked for.</param>
     /// <returns>The new record.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="ask"/> is null.</exception>
-    /// <exception cref="RequestRejectedException">The kind is not served yet, an input is missing or unsafe, or the request
-    /// asks for a capped slot on a site that has none (<see cref="RequestSizing.CappedSlots"/>).</exception>
+    /// <exception cref="RequestRejectedException">An input is missing or unsafe (a test of a kind not served), or the
+    /// request asks for a capped slot on a site that has none (<see cref="RequestSizing.CappedSlots"/>).</exception>
     /// <exception cref="IOException">The record could not be written.</exception>
     public RequestRecord Create(CreateRequest ask)
     {
@@ -229,7 +235,8 @@ public sealed class RequestBook
                 inputs = inputs with { SuiteCommit = suiteCommit };
                 break;
             case RequestKind.Test:
-                throw new RequestRejectedException("Test is not served yet (DESIGN.md §13: `amb test` comes after the build MVP)");
+                inputs = NormalizeTest(inputs);
+                break;
             case RequestKind.Build:
                 inputs = NormalizeBuild(inputs);
                 break;
@@ -379,6 +386,29 @@ public sealed class RequestBook
             throw new RequestRejectedException("inputs.snapshotOf must be a full 40-character commit SHA");
         }
         return inputs with { Commit = commit, Configuration = configuration, Identity = identity, Purge = purge, SnapshotOf = snapshotOf };
+    }
+
+    /// <summary>Checks a test request's inputs and fills its defaults, so its record says exactly what runs.</summary>
+    /// <param name="inputs">The inputs as asked.</param>
+    /// <returns>The inputs with the test kind in lower case (default "m5", the engine's harness).</returns>
+    /// <exception cref="RequestRejectedException">The build id is missing or unsafe, or the test kind is not served
+    /// (<see cref="TestJob.Kinds"/>).</exception>
+    /// <remarks>Whether the build HAS the kind's artifact is the job's to say (it reads the build's record when it
+    /// starts): a request for a build made before its build had a tests step is accepted, and fails at once with the
+    /// reason, starting no slot.</remarks>
+    internal static RequestInputs NormalizeTest(RequestInputs inputs)
+    {
+        if (!Ids.IsSafe(inputs.BuildId))
+        {
+            throw new RequestRejectedException("a test needs inputs.buildId (an existing build id)");
+        }
+        string kind = (inputs.TestKind ?? "m5").Trim().ToLowerInvariant();
+        if (!TestJob.Kinds.Contains(kind, StringComparer.Ordinal))
+        {
+            throw new RequestRejectedException(
+                $"inputs.testKind must be {string.Join(" or ", TestJob.Kinds)} (syntax and installer are not served yet), not {inputs.TestKind}");
+        }
+        return inputs with { TestKind = kind };
     }
 
     /// <summary>Checks a deploy request's inputs and fills its defaults.</summary>

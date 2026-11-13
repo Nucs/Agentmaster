@@ -201,4 +201,49 @@ public sealed class RequestBookTests : IDisposable
         Assert.EndsWith("(exit 4: pytest's usage error (a test path that does not exist, an unknown option); see pytest.log in the results)",
             E2eJob.Summarize(status, 4).Summary);
     }
+
+    /// <summary>A test request (`amb test`, since 2026-11-13) names a build and a served kind: the kind defaults to m5 and
+    /// is lower-cased; no build id, an unsafe one, or a kind not served is refused; its slot is the kind's small default
+    /// VM, and its record waits and runs by the test kind's timeouts.</summary>
+    [Fact]
+    public void TestRequestsNameABuildAndAServedKind()
+    {
+        RequestBook book = Book();
+        RequestRecord record = book.Create(new CreateRequest(RequestKind.Test, new RequestInputs { BuildId = "w20261113-3" }));
+        Assert.Equal("m5", record.Inputs.TestKind);
+        Assert.Equal(RequestDefaults.ResourcesOf(RequestKind.Test), record.Resources);
+        Assert.Equal(TimeSpan.FromMinutes(30), record.WaitTimeout);
+        Assert.Equal(TimeSpan.FromMinutes(60), record.RunTimeout);
+        Assert.Equal("m5", RequestBook.NormalizeTest(new RequestInputs { BuildId = "b1", TestKind = " M5 " }).TestKind);
+        Assert.Throws<RequestRejectedException>(() => book.Create(new CreateRequest(RequestKind.Test)));
+        Assert.Throws<RequestRejectedException>(() => book.Create(new CreateRequest(RequestKind.Test,
+            new RequestInputs { BuildId = "../etc" })));
+        RequestRejectedException kind = Assert.Throws<RequestRejectedException>(() => book.Create(new CreateRequest(
+            RequestKind.Test, new RequestInputs { BuildId = "w20261113-3", TestKind = "syntax" })));
+        Assert.Contains("must be m5", kind.Message, StringComparison.Ordinal);
+        // A test VM is sized by its kind only: --ram and --vcpus size e2e and smoke VMs.
+        Assert.Throws<RequestRejectedException>(() => book.Create(new CreateRequest(RequestKind.Test,
+            new RequestInputs { BuildId = "w20261113-3", MemoryMiB = 8192 })));
+        Assert.Single(book.Active);
+    }
+
+    /// <summary>The m5 outcome comes from the harness's own last summary line: a pass needs exit 0 and no failures, and a
+    /// run without the line (a crash, a stop) says so instead of passing nothing.</summary>
+    [Fact]
+    public void M5Summary()
+    {
+        string[] failing = ["=== Agentmaster engine tests ===", "  [FAIL] disc: the rim", "", "12946 checks, 3 failures - FAILURES"];
+        (bool passed, string summary) = TestJob.Summarize(failing, 1, 99.4);
+        Assert.False(passed);
+        Assert.Equal("m5: 12946 checks, 3 failures (exit 1), 99 s", summary);
+        (passed, summary) = TestJob.Summarize(["12946 checks, 0 failures - ALL PASS"], 0, 120);
+        Assert.True(passed);
+        Assert.Equal("m5: 12946 checks, 0 failures (exit 0), 120 s", summary);
+        // No summary line: the harness ended early (or was stopped), whatever its exit code.
+        (passed, summary) = TestJob.Summarize(["=== Agentmaster engine tests ===", "-- PendingInput --"], 0, 3);
+        Assert.False(passed);
+        Assert.Equal("m5: no summary line (exit 0: the harness ended early), 3 s", summary);
+        Assert.Contains("(exit -1: stopped)", TestJob.Summarize([], -1, 3540).Summary, StringComparison.Ordinal);
+        Assert.Equal(@"Z:\test\out\m5-output.txt", TestJob.GuestPathOnShare("test/out/m5-output.txt"));
+    }
 }

@@ -17,9 +17,10 @@ namespace Amb.Coordinator.Jobs;
 /// <para><b>The flow:</b> a build that exists (the same commit, configuration, identity and purge) is returned as it
 /// is. Otherwise the site's mirror fetches the source repository, the kept VM boots (its overlay over am-build and its
 /// data disk D: survive between builds), the guest gets a bundle of what its worktree lacks, checks the commit out,
-/// builds it with that commit's own tools\Build-Agentmaster.ps1 into a layout on D:, and packages the portable zip, the
-/// layout zip and the symbols; the coordinator moves them into the store with their SHA-256 and writes the build's
-/// record. The VM then shuts down (its disks stay for the next build).</para>
+/// builds it with that commit's own tools\Build-Agentmaster.ps1 into a layout on D:, compiles the commit's engine test
+/// harness in the same tree (m5-tests.zip, which `amb test` runs in a fresh VM: <see cref="TestJob"/>), and packages the
+/// portable zip, the layout zip and the symbols; the coordinator moves them into the store with their SHA-256 and
+/// writes the build's record. The VM then shuts down (its disks stay for the next build).</para>
 /// <para><b>Nothing touches K::</b> the mirror only reads the source repository; the VM's disks, the share and the store
 /// are all in the site, whose disk lives on Q:.</para>
 /// <para><b>One at a time:</b> there is one kept VM, so the scheduler admits one build at a time; a second identical
@@ -134,6 +135,10 @@ public sealed class BuildJob : VmJob
                     built.ExitCode, ResultsPath: $"requests/{request.Id}");
             }
 
+            // The engine's test harness, compiled in the tree the build just made, goes into the share's out folder before
+            // the package step, which lists every file there in build.json: `amb test <build id> m5` runs it in a fresh VM
+            // and compiles nothing (TestJob). Its outcome is a note on the build's, never a failed build.
+            string testsNote = await CompileTestsAsync(context, lease, worktree, outShare, cancel).ConfigureAwait(false);
             await RunAsync(context, lease, Script("package", "package.ps1", 1800,
                 ["-Worktree", worktree, "-Configuration", configuration, "-Identity", identity, "-Layout", layout,
                  "-Log", log, "-Out", outShare]), cancel).ConfigureAwait(false);
@@ -144,7 +149,7 @@ public sealed class BuildJob : VmJob
             graceful = true;
             ArtifactRef? zip = record.Artifacts.FirstOrDefault(a => a.Kind == "portable-zip");
             return new JobOutcome(true, FormattableString.Invariant(
-                $"built {record.Id}: {zip?.Name} ({(zip?.Bytes ?? 0) / 1048576.0:0} MB), {configuration} {identity}, {commit[..9]}, build {built.DurationSeconds / 60:0.0} min"),
+                $"built {record.Id}: {zip?.Name} ({(zip?.Bytes ?? 0) / 1048576.0:0} MB), {configuration} {identity}, {commit[..9]}, build {built.DurationSeconds / 60:0.0} min; {testsNote}"),
                 BuildId: record.Id);
         }
         finally
@@ -240,6 +245,47 @@ public sealed class BuildJob : VmJob
         };
         return (Math.Max(1, Math.Min(maxCpu, grant.Vcpus)), clMp);
     }
+
+    /// <summary>The tests step's exit code for "this commit's m5 runner cannot compile without running" (one made before
+    /// 2026-11-13): the build has no m5 artifact, and nothing failed.</summary>
+    internal const int TestsNotInThisCommit = 3;
+
+    /// <summary>Compiles the commit's engine test harness (m5) in the worktree the build just made, leaving m5-tests.zip
+    /// and m5-compile.log in the share's out folder, where the package step lists them in build.json and the collect
+    /// keeps them as the build's "m5-tests" and "m5-log" artifacts.</summary>
+    /// <param name="context">The job's context.</param>
+    /// <param name="lease">The slot.</param>
+    /// <param name="worktree">The worktree's folder in the guest (built).</param>
+    /// <param name="outShare">The share's out folder of the request, as the guest sees it.</param>
+    /// <param name="cancel">Cancels the step.</param>
+    /// <returns>A note for the build's outcome (<see cref="TestsNote"/>).</returns>
+    /// <exception cref="SlotLostException">The guest went silent.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> was cancelled.</exception>
+    /// <remarks>The step runs directly, as the build step does: a harness that does not compile is a result (its log is
+    /// kept), not a failure of the job, and the build's own artifacts are kept all the same. It costs the build about a
+    /// minute of compiling (cl /MP over ~80 files: 36 s on this PC); the time is in the outcome's note.</remarks>
+    private static async Task<string> CompileTestsAsync(JobContext context, SlotLease lease, string worktree,
+        string outShare, CancellationToken cancel)
+    {
+        GuestStep step = Script("tests", "tests.ps1", 1800, ["-Worktree", worktree, "-Out", outShare]);
+        context.Event("step", "step tests: the m5 harness compiled for `amb test` (tests.ps1)");
+        StepResult result = await lease.Session.RunStepAsync(step, SilenceOf(context), cancel).ConfigureAwait(false);
+        context.Event("step", FormattableString.Invariant($"step tests: {result.Outcome} ({result.DurationSeconds:0.0} s)"));
+        LogTails(context, result);
+        return TestsNote(result.ExitCode, result.DurationSeconds);
+    }
+
+    /// <summary>The build outcome's note on its tests step.</summary>
+    /// <param name="exitCode">tests.ps1's exit code: 0 made, <see cref="TestsNotInThisCommit"/> none in this commit,
+    /// anything else failed (-1: the step timed out or was stopped).</param>
+    /// <param name="seconds">The step's time.</param>
+    /// <returns>E.g. "m5 tests compiled in 0.7 min".</returns>
+    internal static string TestsNote(int exitCode, double seconds) => exitCode switch
+    {
+        0 => FormattableString.Invariant($"m5 tests compiled in {seconds / 60:0.0} min"),
+        TestsNotInThisCommit => "no m5 tests (this commit's runner cannot compile without running)",
+        _ => FormattableString.Invariant($"the m5 tests did not compile (exit {exitCode}; see m5-compile.log)"),
+    };
 
     /// <summary>One build step: a staged script run with the image's PowerShell 7.</summary>
     /// <param name="id">The step's id.</param>
@@ -524,7 +570,8 @@ public sealed class BuildJob : VmJob
     /// <summary>What a file of a build is, by its name.</summary>
     /// <param name="name">The file's name.</param>
     /// <param name="portable">The portable zip's name (from build.json).</param>
-    /// <returns>"portable-zip", "layout-zip", "symbols-zip", "build-log", "build-binlog", "build-json" or "file".</returns>
+    /// <returns>"portable-zip", "layout-zip", "symbols-zip", "build-log", "build-binlog", "build-json", "m5-tests",
+    /// "m5-log" or "file".</returns>
     internal static string ArtifactKind(string name, string portable) => name switch
     {
         _ when name == portable => "portable-zip",
@@ -535,6 +582,9 @@ public sealed class BuildJob : VmJob
         // fetched only when wanted, never with the text log.
         "build.binlog" => "build-binlog",
         "build.json" => "build-json",
+        // The tests step's (tests.ps1): the compiled engine harness TestJob runs, and the compile's own output.
+        TestJob.M5Zip => TestJob.M5ArtifactKind,
+        "m5-compile.log" => "m5-log",
         _ => "file",
     };
 }

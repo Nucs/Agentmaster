@@ -114,7 +114,7 @@ id at once; `--wait` streams its events until it ends.
 | Operation | Takes | Gives | Runs in |
 |---|---|---|---|
 | `build` | a commit (uncommitted work only as an explicit snapshot commit), `Debug` or `Release`, identity `dev` or `release`, purge `auto` / `force` / `none`, optional sizes | a **build id** and its artifacts: the package layout, the portable zip, the build log and binlog, a manifest (commit, configuration, identity, versions, each artifact's SHA-256) | a build VM (§5.1) |
-| `test` | a build id and a kind: `m5`, `syntax` (the `/Zs` sweep), `installer`, more later | a result with its logs | the build VM that holds the build's tree |
+| `test` | a build id and a kind: `m5` (served since 2026-11-13), `syntax` (the `/Zs` sweep), `installer`, more later | a result with its logs | a fresh VM that runs the build's own test artifact (`m5-tests.zip`, compiled by the build's tests step: the owner's rule that tests and e2e use what the build produced); the build VM is never used. The first plan ran tests in the build VM that holds the tree |
 | `e2e` | a build id and the suite's arguments | JUnit XML, the run's evidence, logs | fresh `am-e2e` VMs; the install lane in `am-install` |
 | `install` (later) | a build id and an instance | the swap's record | the host agent, through `Swap-AgentmasterLayout.ps1` |
 | `publish` (deferred, D11) | a Release build id and a version | a GitHub release | — |
@@ -141,7 +141,7 @@ run timeout and locks (a build VM's data disk, an install's instance). The first
 | install-lane VM (`am-install`) | 3 / 6 GB | 2 / 4 | an overlay, deleted | the same guest plus Defender (~180 MB, measured by claude-desktops) |
 | build VM, Debug (`am-build`) | 8 / 16 GB | 4 / 8 | a kept data disk, ~35 GB the first time | native: a Debug build at 3 compilers took 8.7 GB of commit; the TerminalApp PCH is 1.8–2.3 GB per compiler |
 | build VM, Release | 8 / 16 GB | 4 / 8 | ~40 GB the first time | native: 7.8 GB of commit at 3 compilers |
-| `m5` / `syntax` test | runs in the build VM it tests | | | |
+| `m5` test (`am-base`) | 2 / 4 GB | 2 / 4 | an overlay, ~0.1 GB, deleted | one program, the build's compiled harness (92 s on this PC, mostly one core); `syntax` is not served |
 | Linux job | 0.25 / 1 GB | 1 / 2 | — | |
 
 After ten runs of a kind, its values come from them: minimum = the median of the guest's committed memory at rest +
@@ -673,7 +673,8 @@ and K: was only read (§16.12). It differs from the table and from §2, §5.1, �
   Debug build's binaries link the debug UCRT (`ucrtbased.dll`, which only the Windows SDK installs), so its portable zip
   runs on no PC without the SDK, `am-e2e` included. A Debug build of HEAD works the same way in its own worktree:
   `b20261026-4` (4115b1067), cold, 23.9 min from its request (§16.12).
-- **Not built yet:** `amb test m5|syntax`; purge `auto` (`none` is the default, `force` deletes the worktree's build
+- **Not built yet:** `amb test syntax` (`amb test m5` is built since 2026-11-13: each build compiles the harness into
+  its `m5-tests` artifact, and the test runs that artifact in a fresh VM, §16.18); purge `auto` (`none` is the default, `force` deletes the worktree's build
   outputs first); the store's budget (each Release build keeps ~0.6 GB, and nothing deletes builds yet). Built since
   (2026-10-29, 25c320417): snapshot commits of uncommitted work (`amb build --snapshot [-- <paths>]`: a reproducible
   commit made in a private index under `refs/buildserver/snapshots/`, as §11 asks; the CLI makes it, the mirror fetches

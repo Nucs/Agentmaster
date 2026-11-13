@@ -14,7 +14,9 @@ public enum RequestKind
     /// <summary>Builds a commit as Debug or Release into a new build id (a build VM; Phase 3).</summary>
     Build,
 
-    /// <summary>Runs a test kind on a build (m5, syntax, installer) in the build VM that holds the build's tree.</summary>
+    /// <summary>Runs a build's test artifact in a fresh VM (`amb test`, since 2026-11-13): "m5", the engine's harness the
+    /// build compiled in its own tree (m5-tests.zip). Nothing is compiled at test time; the build VM is never used.
+    /// ("syntax" and "installer", named by DESIGN.md §2, are not served.)</summary>
     Test,
 
     /// <summary>Runs e2e suites on a build id's artifacts in fresh <c>am-e2e</c> VMs.</summary>
@@ -123,7 +125,8 @@ public sealed record RequestInputs
     /// <summary>E2e: the arguments for the suite runner (pytest's), e.g. ["-v", "suites/test_tab_menu.py"].</summary>
     public IReadOnlyList<string>? SuiteArgs { get; init; }
 
-    /// <summary>E2e: the image the VM boots ("am-e2e" by default; "am-install" for the install lane).</summary>
+    /// <summary>E2e, test and smoke: the image the VM boots (e2e "am-e2e" by default, "am-install" for the install lane;
+    /// test and smoke "am-base").</summary>
     public string? Image { get; init; }
 
     /// <summary>E2e and smoke: the memory the slot is granted, in MiB, as both its minimum and its preferred amount (the
@@ -155,7 +158,8 @@ public sealed record RequestInputs
     /// same configuration, identity and purge returns that build id.</summary>
     public string? Purge { get; init; }
 
-    /// <summary>Test: the test kind ("m5", "syntax", "installer").</summary>
+    /// <summary>Test: the test kind: "m5" (the engine's harness from the build's m5-tests.zip; the default). Any other
+    /// kind is refused.</summary>
     public string? TestKind { get; init; }
 
     /// <summary>Install, layer: the new image's name (it must not exist yet).</summary>

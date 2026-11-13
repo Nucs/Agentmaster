@@ -14,13 +14,16 @@ using Amb.Core.Protocol;
 //   amb smoke [--image am-base] [--ram GB] [--guest-ram GB] [--vcpus N] [--wait] [--wait-max S]
 //   amb e2e <build id> [--image am-e2e] [--suite PATH] [--ram GB] [--guest-ram GB] [--vcpus N] [--wait] [--wait-max S]
 //       [-- pytest arguments]
+//   amb test <build id> [m5] [--image am-base] [--wait] [--wait-max S]   (the build's own compiled harness, m5-tests.zip,
+//       run in a fresh VM: Jobs/TestJob.cs; nothing is compiled at test time)
 //   --ram GB is the most the VM keeps in the PC's memory (its grant); a larger --guest-ram GB is the RAM Windows in the
 //   VM sees, the rest of it in the site's swap file on Q: (a capped slot: slower, admitted with a 6 GB commit margin
 //   instead of 16, DESIGN.md §16.14); --vcpus N fixes its vCPUs.
 //   amb build [<rev>] [--config Release|Debug] [--identity dev|release] [--purge none|force] [--wait] [--wait-max S]
 //   amb build --snapshot [--config ...] [-- <paths>]     (uncommitted work: the whole working tree, or only <paths>)
 //   amb artifacts <build id>
-//   amb fetch <build id> [--kind portable-zip|layout-zip|symbols-zip|build-log|build-binlog|build-json|all] [--to DIR]
+//   amb fetch <build id> [--kind portable-zip|layout-zip|symbols-zip|build-log|build-binlog|build-json|m5-tests|m5-log|all]
+//       [--to DIR]
 //   amb install <build id> --instance dev|production [--dry-run] [--reinstall] [--wait-others MIN] [--wait] [--wait-max S]
 //   import, smoke, e2e, build and install also take --run-timeout MIN and --wait-timeout MIN (1-1440; else the kind's
 //   defaults, e.g. e2e 120 / 120, build 180 / 60: the whole e2e suite needs a longer run timeout).
@@ -63,7 +66,7 @@ if (options.UnknownOptions.Count > 0)
 }
 if (options.Command is null)
 {
-    Console.Error.WriteLine("usage: amb status|list|show|logs|cancel|builds|import|smoke|e2e|build|artifacts|fetch|install ... (amb --help)");
+    Console.Error.WriteLine("usage: amb status|list|show|logs|cancel|builds|import|smoke|e2e|test|build|artifacts|fetch|install ... (amb --help)");
     return 2;
 }
 // The site: --site, else AMB_SITE, else the worker machine's. An unknown name is refused before anything is sent.
@@ -93,7 +96,7 @@ try
         "cancel" => await Commands.CancelAsync(await sites.ForRequestAsync(options.Positional.FirstOrDefault(), stop.Token), options, stop.Token),
         "logs" => await Commands.FollowAsync(await sites.ForRequestAsync(options.Positional.FirstOrDefault(), stop.Token),
             options.Positional.FirstOrDefault(), options, stop.Token),
-        "import" or "smoke" or "e2e" or "build" or "install" or "deploy" => await Commands.SubmitAsync(sites, options, stop.Token),
+        "import" or "smoke" or "e2e" or "test" or "build" or "install" or "deploy" => await Commands.SubmitAsync(sites, options, stop.Token),
         "artifacts" => await Commands.ArtifactsAsync(sites.ForBuild(options.Positional.FirstOrDefault()), options, stop.Token),
         "fetch" => await Commands.FetchAsync(sites.ForBuild(options.Positional.FirstOrDefault()), options, stop.Token),
         _ => Usage($"unknown command {options.Command}"),
@@ -158,11 +161,16 @@ internal sealed class Options
           amb build [<rev>] [--config Release|Debug] [--identity dev|release] [--purge none|force] [--wait] [--dry-run]
           amb build --snapshot [--config ...] [--identity ...] [--purge ...] [--wait] [--dry-run] [-- <paths>]
           amb artifacts <build id>
-          amb fetch <build id> [--kind portable-zip|layout-zip|symbols-zip|build-log|build-binlog|build-json|all] [--to DIR]
+          amb fetch <build id> [--kind portable-zip|layout-zip|symbols-zip|build-log|build-binlog|build-json|m5-tests|m5-log|all] [--to DIR]
           amb install <build id> --instance dev|production [--dry-run] [--reinstall] [--wait-others MIN] [--wait]   (alias: deploy)
           amb import <portable zip> [--commit SHA] [--wait]
           amb e2e <build id> [--image am-e2e] [--suite PATH | --suite-rev REV] [--ram GB] [--guest-ram GB] [--vcpus N] [--wait] [-- pytest arguments]
+          amb test <build id> [m5] [--image am-base] [--wait]
           amb smoke [--image am-base] [--ram GB] [--guest-ram GB] [--vcpus N] [--wait]
+
+          Tests: a build compiles its commit's engine test harness (m5) beside the app and keeps it as its m5-tests
+          artifact; `amb test` runs that artifact in a fresh VM on the build's site (nothing is compiled at test time) and
+          ends with the harness's own summary. A build made before 2026-11-13 has none.
 
           Sites: --site worker|home on any command (default AMB_SITE, else worker: the worker machine in Stuttgart, build
           ids w...; home is this PC's WSL site, build ids b...). A build id goes to the site its letter names. The worker
@@ -477,15 +485,15 @@ internal static class Commands
     /// <returns>True for build, install and install's alias deploy.</returns>
     internal static bool HonorsDryRun(string? command) => command is "build" or "install" or "deploy";
 
-    /// <summary>Submits an import, smoke, e2e or build request, and follows it with --wait.</summary>
+    /// <summary>Submits an import, smoke, e2e, test, build or install request, and follows it with --wait.</summary>
     /// <param name="sites">The sites (the chosen one, and the others a build id or an install routes to).</param>
     /// <param name="options">The command line.</param>
     /// <param name="cancel">Cancels the watch.</param>
     /// <returns>0 succeeded (or accepted without --wait), 1 ended otherwise (or a push or pull failed), 2 usage (or a rev
     /// that names no commit), 97 still running at --wait-max.</returns>
     /// <exception cref="SiteUnavailableException">The coordinator could not be reached or woken.</exception>
-    /// <remarks>Where each kind goes: build and smoke to the chosen site; e2e to its build's site; install and import to
-    /// home. A site that takes commits only by push (the worker's) gets the build's commit, or the e2e suite's, pushed
+    /// <remarks>Where each kind goes: build and smoke to the chosen site; e2e and test to their build's site; install and
+    /// import to home. A site that takes commits only by push (the worker's) gets the build's commit, or the e2e suite's, pushed
     /// first; an install of a worker build pulls it into home first.</remarks>
     public static async Task<int> SubmitAsync(SiteSet sites, Options options, CancellationToken cancel)
     {
@@ -644,8 +652,19 @@ internal static class Commands
                     Vcpus = vcpus,
                 });
                 break;
+            case "test" when options.Positional.Count is 1 or 2:
+                // The run goes where its build is (the letter), like an e2e run: the artifact is in that site's store.
+                client = sites.ForBuild(options.Positional[0]);
+                body = new CreateRequest(RequestKind.Test, new RequestInputs
+                {
+                    BuildId = options.Positional[0],
+                    // The site checks the kind (m5 only for now) and says which kinds it serves.
+                    TestKind = options.Positional.Count == 2 ? options.Positional[1] : "m5",
+                    Image = options.Values.GetValueOrDefault("--image", "am-base"),
+                });
+                break;
             default:
-                Console.Error.WriteLine("amb import <zip> | amb smoke [--image I] | amb e2e <build id> [-- pytest args] | amb build [<rev>] | amb build --snapshot [-- <paths>] | amb install <build id> --instance dev|production");
+                Console.Error.WriteLine("amb import <zip> | amb smoke [--image I] | amb e2e <build id> [-- pytest args] | amb test <build id> [m5] | amb build [<rev>] | amb build --snapshot [-- <paths>] | amb install <build id> --instance dev|production");
                 return 2;
         }
         // The kind's defaults (DESIGN.md §2) fit a suite or two; a long run (the whole e2e suite takes hours) or a
@@ -974,7 +993,10 @@ internal static class Commands
     private const string DefaultRepo = @"K:\source\Agentmaster";
 
     /// <summary>The kinds `amb fetch` copies on request ("all" copies every one).</summary>
-    private static readonly string[] ArtifactKinds = ["portable-zip", "layout-zip", "symbols-zip", "build-log", "build-binlog", "build-json"];
+    /// <remarks>"m5-tests" and "m5-log" are the tests step's (since 2026-11-13): the compiled engine harness `amb test`
+    /// runs, and its compile's output.</remarks>
+    private static readonly string[] ArtifactKinds = ["portable-zip", "layout-zip", "symbols-zip", "build-log", "build-binlog", "build-json",
+        "m5-tests", "m5-log"];
 
     /// <summary>Resolves a revision to the full SHA of the commit it names, with git on this PC.</summary>
     /// <param name="repo">The repository.</param>
@@ -1057,7 +1079,7 @@ internal static class Commands
         string kind = options.Values.GetValueOrDefault("--kind", "portable-zip");
         if (options.Positional.Count != 1 || (kind != "all" && !ArtifactKinds.Contains(kind)))
         {
-            Console.Error.WriteLine("amb fetch <build id> [--kind portable-zip|layout-zip|symbols-zip|build-log|build-binlog|build-json|all] [--to DIR]");
+            Console.Error.WriteLine("amb fetch <build id> [--kind portable-zip|layout-zip|symbols-zip|build-log|build-binlog|build-json|m5-tests|m5-log|all] [--to DIR]");
             return 2;
         }
         string id = options.Positional[0];

@@ -383,6 +383,7 @@ public sealed class Scheduler : BackgroundService
         RequestKind.Install => new InstallJob(),
         RequestKind.Layer => new LayerJob(),
         RequestKind.E2e => new E2eJob(),
+        RequestKind.Test => new TestJob(),
         RequestKind.Build => new BuildJob(),
         RequestKind.Deploy => new DeployJob(),
         _ => throw new NotSupportedException($"{kind} is not served yet"),

@@ -118,6 +118,11 @@ resolves HEAD and takes uncommitted work in that checkout, and it names a worktr
     case "$s" in Succeeded|Failed|Cancelled|NoCapacity|Lost) break;; esac; sleep 20
   done; echo "$s"; "$AMB" logs $ID | tail -15      # the outcome line names the build id (w…)
   ```
+- **Test it (since 2026-11-13):** every build also compiles its commit's engine harness into its `m5-tests` artifact
+  (the outcome ends "m5 tests compiled in N min"). `"$AMB" test <build id> m5` runs THAT artifact in a fresh VM on
+  the build's site, nothing compiled there; its outcome is the harness's summary (`m5: 12942 checks, 3 failures …`;
+  the three TaskbarBadge failures are a known baseline). Follow it like a build. `"$AMB" e2e <build id> -- <pytest
+  args>` runs e2e suites on the same build's portable zip.
 
 ### A.3 Install it here: `amb install` downloads the layout and swaps it in
 
@@ -286,7 +291,7 @@ once the new build is trusted.
 | Validate TerminalApp/engine code compiles | `TerminalAppLib.vcxproj` full build (static lib — nothing loaded by a running app) | no |
 | Validate exe-side code (WindowEmperor/main) | `WindowsTerminal.vcxproj` **`-t:ClCompile`** (objects only — the exe itself is locked by the running instance) | no |
 | Validate a loaded-DLL project (e.g. TerminalSettingsModel) | its `*Lib.vcxproj` full build, or the dll project `-t:ClCompile` — never relink a dll the running app has loaded | no |
-| Engine tests (604 checks) | `cmd //c "K:\source\Agentmaster\src\cascadia\TerminalApp\AgentMaster\tests\run-m5-tests.bat"` | no |
+| Engine tests (~12,900 checks, ~1.5 min) | `cmd //c "K:\source\Agentmaster\src\cascadia\TerminalApp\AgentMaster\tests\run-m5-tests.bat"` (from any checkout or worktree: the runner finds its own repository and MSVC); on a build server build: `amb test <build id> m5` (§A.2) | no |
 | Ship code into the DEV instance locally (when §A cannot) | full Debug package: `pwsh -ExecutionPolicy Bypass -File ./tools/Build-Agentmaster.ps1 -NoRestore` | **yes** |
 | Ship code into PRODUCTION locally (when §A cannot) / pre-validate a release | full Release package: `... Build-Agentmaster.ps1 -NoRestore -Configuration Release -ReleaseIdentity` | **yes** |
 

@@ -53,9 +53,10 @@ same byte.
 It links against the objects of a built m5 harness:
 
 1. Build the harness from a COPY of the engine folder, so the source tree stays clean and the build writes to Q:
-   copy `src\cascadia\TerminalApp\AgentMaster` to e.g. `Q:\tmp\am-m5\AgentMaster`, change the copy's
-   `tests\run-m5-tests.bat` `cd /d` line to the copy's `tests` folder, and run it (its scratch-profile isolation
-   stays as it is).
+   copy `src\cascadia\TerminalApp\AgentMaster` to e.g. `Q:\tmp\am-m5\AgentMaster` and run the copy's
+   `tests\run-m5-tests.bat` with `AM_REPO_ROOT=K:\source\Agentmaster` set. The runner compiles in its own folder
+   (the copy's), and the variable gives it this checkout's cmark and WebView2 trees, which a copy lacks. Its
+   scratch-profile isolation stays as it is, and `--compile-only` stops before the run.
 2. `tools\interrupt-probe\build_rewind_probe.bat Q:\tmp\am-m5\AgentMaster\tests Q:\tmp\am-interrupt-probe\bin`
    (the objects must come from the same sources as this checkout's `ApiErrorRewind.h`).
 3. With the mock running:

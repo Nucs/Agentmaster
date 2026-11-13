@@ -9,12 +9,30 @@ REM           binary carries (the C4066 "characters beyond first" warning was th
 REM  /MP    - parallel compile across the ~20 TUs (measured ~3x on this suite).
 REM  /DUNICODE /D_UNICODE - app-build parity too: msbuild defines both globally, and Updater.h's
 REM           resource lookup (RT_RCDATA -> MAKEINTRESOURCE) requires the W flavor.
-call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
+REM Where this runner sits decides the rest (2026-11-13): the build server's build VM compiles it in a worktree on D:
+REM (buildserver\steps\build\tests.ps1, `--compile-only`; `amb test` then runs the zipped result), this PC from K:.
+REM The repository's root is five folders up (tests, AgentMaster, TerminalApp, cascadia, src), or AM_REPO_ROOT when set:
+REM a copy of the engine folder elsewhere (tools\interrupt-probe builds from one on Q:) takes cmark and WebView2 from the
+REM checkout it names. AM_ROOT is this file's own result: never read as an input, since a call from an interactive cmd
+REM leaves it set (no setlocal here) and would carry one checkout's root into another's run.
+REM MSVC: AM_VCVARS when set; else the newest Visual Studio with the C++ tools, by vswhere (Community here, the Build
+REM Tools in the build VM); else Community's own path. One-line IFs only, no labels: this file has LF line endings,
+REM with which cmd's GOTO can miss a label.
+for %%I in ("%~dp0..\..\..\..\..") do set "AM_ROOT=%%~fI"
+if defined AM_REPO_ROOT set "AM_ROOT=%AM_REPO_ROOT%"
+set "AM_VS="
+set "AM_VCVARS_BAT=%AM_VCVARS%"
+set "AM_VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if not defined AM_VCVARS_BAT if exist "%AM_VSWHERE%" for /f "usebackq delims=" %%I in (`"%AM_VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "AM_VS=%%I"
+if not defined AM_VCVARS_BAT if defined AM_VS if exist "%AM_VS%\VC\Auxiliary\Build\vcvars64.bat" set "AM_VCVARS_BAT=%AM_VS%\VC\Auxiliary\Build\vcvars64.bat"
+if not defined AM_VCVARS_BAT set "AM_VCVARS_BAT=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+call "%AM_VCVARS_BAT%" >nul 2>&1
 if errorlevel 1 (
   echo [error] could not initialize MSVC environment
   exit /b 2
 )
-cd /d "K:\source\Agentmaster\src\cascadia\TerminalApp\AgentMaster\tests"
+REM vcvars may move the current folder (to %USERPROFILE%\source when that exists): come back to this runner's own.
+cd /d "%~dp0"
 REM user32 + oleaut32: ProcessInspect's BringClaudeWindowToFront (EnumWindows/ShowWindow/... + UIA BSTR names)
 REM icu.lib: ClaudeInvisibleChars.cpp (DELIVERY.md 15 - claude's invisible-character rule: Unicode properties, NFC, grapheme breaks)
 REM TranscriptWatcher.cpp: SessionScanner's ReadDirectoryChangesW change feed (HOOKS.md "Transcript watcher") - a LINK dependency of SessionScanner.cpp.
@@ -111,7 +129,7 @@ REM (VoiceCorrect.h, pure; its claude call, VoiceCorrect.cpp, is not linked: no 
 REM as a LINK dependency of Messaging.cpp (the service's voice lanes and thread); the transcriber behind its seam
 REM (VoiceTranscriber.cpp, VoiceWorker.cpp, VoiceHttp.cpp, VoiceCorrect.cpp) is TerminalApp-only, like the Search agent's
 REM bridge: with no factory set, the harness's service answers a voice note "not available in this build".
-set "AM_VCPKG=K:\source\Agentmaster\obj\x64\vcpkg\x64-windows-static"
+set "AM_VCPKG=%AM_ROOT%\obj\x64\vcpkg\x64-windows-static"
 set "AM_MD_SRC=conversation_image_stub.cpp"
 set "AM_MD_FLAGS="
 if exist "%AM_VCPKG%\include\cmark.h" if exist "%AM_VCPKG%\lib\cmark.lib" (
@@ -129,7 +147,7 @@ REM tests_reopen.cpp: PERSISTENCE.md 18 - several windows at start: the reopen q
 REM setting (ReopenWindowsAtStart.h, pure; ReopenWindowsPrompt.h, header-only Win32 like Updater.h, which it includes for the
 REM settings.json helpers - so this unit compiles the update prompt window too, with the same flags as tests_spawn_sched.cpp).
 REM No engine .cpp joins; no dialog is ever shown (the asking path is modal: an e2e / manual check).
-set "AM_WV2=K:\source\Agentmaster\packages\Microsoft.Web.WebView2.1.0.1661.34\build\native"
+set "AM_WV2=%AM_ROOT%\packages\Microsoft.Web.WebView2.1.0.1661.34\build\native"
 set "AM_WV2_FLAGS="
 set "AM_WV2_LIB="
 if exist "%AM_WV2%\include\WebView2.h" if exist "%AM_WV2%\x64\WebView2LoaderStatic.lib" (
@@ -140,6 +158,11 @@ cl /std:c++20 /EHsc /nologo /W3 /utf-8 /MP /DUNICODE /D_UNICODE %AM_MD_FLAGS% %A
 if errorlevel 1 (
   echo [error] compile failed
   exit /b 1
+)
+REM --compile-only: the build server's build step makes the test artifact here, and `amb test` runs it elsewhere.
+if /i "%~1"=="--compile-only" (
+  echo compiled m5_tests.exe; not run: --compile-only
+  exit /b 0
 )
 echo.
 REM State isolation: run against a WIPED %TEMP% scratch profile so the engine traces the linked

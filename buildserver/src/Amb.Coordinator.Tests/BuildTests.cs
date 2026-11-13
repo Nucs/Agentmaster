@@ -302,8 +302,23 @@ public sealed class BuildTests : IDisposable
         Assert.Equal("build-log", BuildJob.ArtifactKind("build.log.err", Portable));
         Assert.Equal("build-binlog", BuildJob.ArtifactKind("build.binlog", Portable));
         Assert.Equal("build-json", BuildJob.ArtifactKind("build.json", Portable));
+        // The tests step's two files (since 2026-11-13): what `amb test` runs, and its compile's output.
+        Assert.Equal("m5-tests", BuildJob.ArtifactKind("m5-tests.zip", Portable));
+        Assert.Equal(TestJob.M5ArtifactKind, BuildJob.ArtifactKind(TestJob.M5Zip, Portable));
+        Assert.Equal("m5-log", BuildJob.ArtifactKind("m5-compile.log", Portable));
         Assert.Equal("file", BuildJob.ArtifactKind("other.txt", Portable));
         Assert.Equal("release-dev", BuildJob.WorktreeKey("Release", "dev"));
+    }
+
+    /// <summary>The build outcome's note on its tests step tells a compiled harness (with its time), a commit whose runner
+    /// cannot compile without running (no artifact, nothing failed), and a harness that did not compile apart.</summary>
+    [Fact]
+    public void TestsStepNotes()
+    {
+        Assert.Equal("m5 tests compiled in 0.7 min", BuildJob.TestsNote(0, 42));
+        Assert.StartsWith("no m5 tests", BuildJob.TestsNote(BuildJob.TestsNotInThisCommit, 1), StringComparison.Ordinal);
+        Assert.Equal("the m5 tests did not compile (exit 2; see m5-compile.log)", BuildJob.TestsNote(2, 30));
+        Assert.Contains("(exit -1;", BuildJob.TestsNote(-1, 1800), StringComparison.Ordinal);
     }
 
     /// <summary>A rebuilt image gets another stamp (its kept VMs are then discarded).</summary>

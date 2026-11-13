@@ -13,7 +13,8 @@ on dev or production through the swap script (a failure after the stop brings th
 --snapshot` builds uncommitted work, and every build keeps msbuild's binary log (DESIGN.md §13 "Phase 4's install as
 built", §16.13). Since 2026-11-12 there is a second site, on the worker machine in Stuttgart (CT 803, see "The worker
 site" below): builds and e2e runs go there by default (build ids `w…`), and `amb install` still runs through this PC's
-site, which pulls a worker build first.**
+site, which pulls a worker build first. Since 2026-11-13 every build also compiles its commit's engine test harness,
+which `amb test <build id> m5` runs in a fresh VM (see "Tests").**
 
 **As built, it differs from DESIGN.md §10 in one way:** there is no always-on host agent yet. The coordinator reads
 Windows' numbers itself (it runs `amb-hostfacts.exe` through WSL's interop, which works from a daemon after the call that
@@ -39,6 +40,7 @@ amb builds                                   # the build ids
 amb e2e <build id> [--wait] -- suites/test_smoke.py -v     # a suite in a fresh am-e2e VM; pytest arguments after --
 amb e2e <build id> --run-timeout 480 -- -v                 # the whole suite (hours): a run timeout of its own
 amb e2e|smoke ... [--ram GB] [--guest-ram GB] [--vcpus N]  # the VM's size: a cap on a larger guest RAM, its vCPUs
+amb test <build id> [m5] [--wait]            # the build's own compiled engine harness, run in a fresh am-base VM
 amb logs <request id> [-f]                   # its events: placement, slot, steps, each step's output, progress
 amb list | show <id> | cancel <id>
 amb ... --site home|worker                   # any command: the site (default AMB_SITE, else worker)
@@ -113,7 +115,8 @@ a snapshot's changes, and sends nothing (an import, smoke or e2e request refuses
   `build.log` / `build.log.err`, `build.binlog` (msbuild's binary log, kind `build-binlog`: open it in the MSBuild
   Structured Log Viewer) and `build.json`, each with its SHA-256 in the build's manifest. The binary log comes from a
   `Directory.Build.rsp` the build step puts beside the solution for the build's duration (msbuild reads it by itself), so
-  a commit of any age gets one; a failed build keeps it in `store/requests/<id>/`.
+  a commit of any age gets one; a failed build keeps it in `store/requests/<id>/`. Since 2026-11-13 also `m5-tests.zip`
+  (kind `m5-tests`: the compiled engine harness `amb test` runs) and `m5-compile.log` (kind `m5-log`): "Tests" below.
 - **The same request twice** (commit, configuration, identity, purge) returns the first build's id at once, without a
   slot; one that comes while the first still builds waits for the VM, then answers with the first's id.
 - **A failed build** ends `Failed` with the end of its log; the whole log is kept in `store/requests/<id>/build.log`.
@@ -135,6 +138,31 @@ a snapshot's changes, and sends nothing (an import, smoke or e2e request refuses
 - **Memory:** a build needs 8 GB beyond Windows' 6 GB reserve. While the PC has less, the request waits; the site's
   page cache counts as used memory for Windows, so after big copies it can help to drop it
   (`python buildserver/site/sitectl.py run -- sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'`).
+
+## Tests
+
+Tests run on what a build produced, never on a compile of their own (the owner's rule of 2026-11-13: "we are supposed
+to use artifacts for tests and e2e that are produced by the build step").
+
+- **The test artifact:** after the build step, every build's `tests` step (`steps/build/tests.ps1`) compiles the
+  commit's engine harness in the same worktree with the commit's own runner, `run-m5-tests.bat --compile-only` (cl /MP
+  over the harness and the engine's .cpp files; cmark and WebView2 come from the tree the build made), and zips
+  `m5_tests.exe`, its manifest and the `turns\` and `voice\` data folders into `m5-tests.zip` (~5.5 MB), kept with the
+  build as kind `m5-tests`, plus `m5-compile.log` (`m5-log`). It costs the build about a minute; the build's outcome
+  ends with its note ("m5 tests compiled in 0.7 min", or why not). A harness that does not compile never fails the
+  build: the app was built either way. A commit whose runner cannot compile without running (before 2026-11-13) gets no
+  artifact.
+- **`amb test <build id> [m5]`** goes to the build's site and boots a fresh `am-base` VM (2-4 GB, 2-4 vCPUs; `--image`
+  picks another): the zip is staged (SHA-256 checked against the build's record), unpacked on C:, and `m5_tests.exe`
+  runs with a fresh profile (`AGENTMASTER_PROFILE`). Its output streams as the request's events (each section, each
+  `[FAIL]`) and is kept as `store/requests/<id>/m5-output.txt`; the outcome is the harness's own summary
+  (`m5: 12942 checks, 3 failures (exit 1), 92 s; build w…`), and the request succeeds only when every check passed.
+  The build VM is never used, so a test runs while the next build builds.
+- **What differs from a run in the checkout:** `TestDialogEchoCoverage` scans the repository's `src\cascadia` and skips
+  itself outside a checkout (4 checks fewer: 12942 against 12946 on this PC). The three `TaskbarBadge` checks fail on
+  this PC either way (anti-aliasing; a known baseline).
+- **Locally**, `run-m5-tests.bat` still compiles and runs in one go from any checkout or worktree: it finds its own
+  repository (five folders up, or `AM_REPO_ROOT`) and its MSVC by vswhere (or `AM_VCVARS`).
 
 ## Installs
 
