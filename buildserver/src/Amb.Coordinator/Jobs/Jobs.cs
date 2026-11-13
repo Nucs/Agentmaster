@@ -306,8 +306,16 @@ public sealed class InstallJob : VmJob
     /// download 4 min, the install 12.5); on the worker machine the download from archive.org alone took 20 min and the
     /// install was still writing its disk 23 min later on the 2013 Xeon (2026-11-12), past the 45 min this was then,
     /// and the request ended Lost. 120 min: a slow mirror and a slow CPU together; a stuck install costs that long to
-    /// give up, a rare cost against an install thrown away.</summary>
-    protected override TimeSpan HelloTimeout => TimeSpan.FromMinutes(120);
+    /// give up, a rare cost against an install thrown away. The site's boot limit
+    /// (<see cref="CoordinatorOptions.GuestHello"/>, at most 60 min) never shortens it.</summary>
+    /// <param name="context">The job's context.</param>
+    /// <returns>120 minutes.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="context"/> is null.</exception>
+    protected override TimeSpan HelloTimeoutOf(JobContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return TimeSpan.FromMinutes(120);
+    }
 
     /// <inheritdoc/>
     public override async Task<JobOutcome> RunAsync(JobContext context, CancellationToken cancel)

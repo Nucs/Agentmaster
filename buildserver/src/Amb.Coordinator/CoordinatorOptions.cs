@@ -47,6 +47,23 @@ public sealed record CoordinatorOptions
     /// <see cref="DockurImage"/>): <see cref="Slots.PodmanSlotDriver.BootWaitScript"/>.</remarks>
     public int? DockurBootWaitSeconds { get; init; }
 
+    /// <summary>The host cache mode of a slot's disks (<c>AMB_DOCKUR_DISK_CACHE</c>: none, writeback, writethrough or
+    /// directsync; unset or empty = dockur's own "none", which homepc's site keeps).</summary>
+    /// <remarks>
+    /// <para>dockur opens a slot's system disk with cache=none and aio=native (O_DIRECT), so every read goes to the disk
+    /// and every slot reads its image from the disk again. The worker machine's drive 2, a DRAM-less consumer SSD (a
+    /// Crucial BX500) behind a Smart Array P420i that passes it no TRIM, writes about 7 times what it is given (its own
+    /// SMART counters) and answered reads in 1-2 s each while it digested a build's writes: boots over the layer images
+    /// then sat on Windows' boot spinner for 6-20 minutes with the guest idle, its slot's I/O pressure "full" a quarter
+    /// of the time (2026-11-13). "writeback" reads through the host's page cache, so an image read once boots from
+    /// memory, and it buffers writes. The guest's flushes still reach the disk (QEMU tells the guest its disk has a
+    /// write cache), so NTFS stays consistent after a host crash, as on any disk with its own cache.</para>
+    /// <para>When set, the kept build VM's data disk uses the same mode
+    /// (<see cref="Slots.PodmanSlotDriver.DataDiskArguments"/>). dockur itself turns aio=native into threads for a cached
+    /// mode, as the data disk's arguments do. ⚠ "unsafe" (which drops the guest's flushes) is refused.</para>
+    /// </remarks>
+    public string? DockurDiskCache { get; init; }
+
     /// <summary>How long a slot's guest agent may make no call before its slot counts as lost
     /// (<c>AMB_GUEST_SILENCE_MINUTES</c>, 1-60; default 3, homepc's).</summary>
     /// <remarks>The agent calls every 10 s (its heartbeat), so 3 minutes is many missed calls on a site whose slots reach
@@ -56,6 +73,16 @@ public sealed record CoordinatorOptions
     /// limit only delays the verdict on a slot that really died: the liveness watch still ends a stopped VM within two
     /// checks (SlotManager.WatchInterval).</remarks>
     public TimeSpan GuestSilence { get; init; } = TimeSpan.FromMinutes(3);
+
+    /// <summary>How long a slot's guest may take from the VM's start to its agent's hello before the slot counts as lost
+    /// (<c>AMB_GUEST_HELLO_MINUTES</c>, 5-60; default 10, homepc's). An install waits at least 120 minutes whatever this
+    /// says (<see cref="Jobs.InstallJob"/>: the ISO's download and Windows' setup come before its hello).</summary>
+    /// <remarks>A boot to ready took 30-75 s on homepc over the base image and 137-188 s over the e2e layer. On the
+    /// worker machine, boots over a layer image waited on Windows' boot spinner for minutes with the guest nearly idle
+    /// (0.15 of a CPU, almost no disk reads): 348, 556 and 572 s, then one past the 600 s limit (2026-11-13, an e2e smoke
+    /// run lost before its provisioning), while the same image's next boot was ready in 81 s; its site sets 20. A longer
+    /// limit only delays the verdict on a guest that never comes up.</remarks>
+    public TimeSpan GuestHello { get; init; } = TimeSpan.FromMinutes(10);
 
     /// <summary>Minutes with no active request and no slot after which the coordinator exits
     /// (<c>AMB_IDLE_EXIT_MINUTES</c>; default 10, 0 = never): the site is lazy, and the distro stops when its last process
@@ -195,8 +222,10 @@ public sealed record CoordinatorOptions
     /// <returns>The settings.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="env"/> is null.</exception>
     /// <exception cref="FormatException">A numeric variable is not a number, a "least:most" pair is malformed,
-    /// <c>AMB_BUILD_LETTER</c> is not a build-id letter, <c>AMB_DOCKUR_BOOT_WAIT</c> is not 30-1800 seconds, or
-    /// <c>AMB_GUEST_SILENCE_MINUTES</c> is not 1-60 minutes.</exception>
+    /// <c>AMB_BUILD_LETTER</c> is not a build-id letter, <c>AMB_DOCKUR_BOOT_WAIT</c> is not 30-1800 seconds,
+    /// <c>AMB_DOCKUR_DISK_CACHE</c> is not a cache mode QEMU keeps the guest's flushes in,
+    /// <c>AMB_GUEST_SILENCE_MINUTES</c> is not 1-60 minutes, or <c>AMB_GUEST_HELLO_MINUTES</c> is not 5-60
+    /// minutes.</exception>
     /// <remarks>Three variables tell UNSET from EMPTY: <c>AMB_SOURCE_REPO</c>, <c>AMB_E2E_SOURCE</c> and
     /// <c>AMB_WINDOWS_PWSH</c> (and <c>AMB_HOSTFACTS</c>, as before). Unset keeps homepc's default; set to "" turns the
     /// feature off, which is how the worker machine's site says it cannot read K: or reach Windows.</remarks>
@@ -220,7 +249,9 @@ public sealed record CoordinatorOptions
             GuestAgentPath = env("AMB_GUEST_AGENT") is { Length: > 0 } a ? a : Path.Combine(root, "bin", "amb-guest.exe"),
             DockurImage = env("AMB_DOCKUR_IMAGE") is { Length: > 0 } i ? i : "docker.io/dockurr/windows:6.05",
             DockurBootWaitSeconds = BootWait(env("AMB_DOCKUR_BOOT_WAIT")),
+            DockurDiskCache = DiskCache(env("AMB_DOCKUR_DISK_CACHE")),
             GuestSilence = Silence(env("AMB_GUEST_SILENCE_MINUTES")),
+            GuestHello = Hello(env("AMB_GUEST_HELLO_MINUTES")),
             // Set but empty is "no default suite" (the worker machine's site): e2e suites then come from the mirror.
             E2eSourceDir = env("AMB_E2E_SOURCE") is { } e ? e : "/mnt/k/source/Agentmaster/e2e",
             IdleExitMinutes = env("AMB_IDLE_EXIT_MINUTES") is { Length: > 0 } m
@@ -282,6 +313,42 @@ public sealed record CoordinatorOptions
             && minutes is >= 1 and <= 60
             ? TimeSpan.FromMinutes(minutes)
             : throw new FormatException($"AMB_GUEST_SILENCE_MINUTES must be whole minutes from 1 to 60, not '{value}'");
+    }
+
+    /// <summary>Reads <c>AMB_DOCKUR_DISK_CACHE</c> (<see cref="DockurDiskCache"/>).</summary>
+    /// <param name="value">The variable's value.</param>
+    /// <returns>Null when it is unset or empty (dockur's own "none"); else the mode, as given.</returns>
+    /// <exception cref="FormatException">It is not none, writeback, writethrough or directsync (lowercase, as QEMU spells
+    /// them): "unsafe" drops the guest's flushes, so a host crash could leave a slot's NTFS broken, and anything else
+    /// is a typo QEMU would only refuse when the first slot starts.</exception>
+    private static string? DiskCache(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+        string mode = value.Trim();
+        return mode is "none" or "writeback" or "writethrough" or "directsync"
+            ? mode
+            : throw new FormatException(
+                $"AMB_DOCKUR_DISK_CACHE must be none, writeback, writethrough or directsync, not '{value}'");
+    }
+
+    /// <summary>Reads <c>AMB_GUEST_HELLO_MINUTES</c> (<see cref="GuestHello"/>).</summary>
+    /// <param name="value">The variable's value.</param>
+    /// <returns>10 minutes when it is unset or empty; else its minutes.</returns>
+    /// <exception cref="FormatException">It is not a whole number from 5 to 60: below 5 minutes a healthy guest on a
+    /// busy host would be given up, and past an hour a guest that never comes up would hold its slot as long.</exception>
+    private static TimeSpan Hello(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return TimeSpan.FromMinutes(10);
+        }
+        return int.TryParse(value.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out int minutes)
+            && minutes is >= 5 and <= 60
+            ? TimeSpan.FromMinutes(minutes)
+            : throw new FormatException($"AMB_GUEST_HELLO_MINUTES must be whole minutes from 5 to 60, not '{value}'");
     }
 
     /// <summary>Reads <c>AMB_DOCKUR_BOOT_WAIT</c> (<see cref="DockurBootWaitSeconds"/>).</summary>

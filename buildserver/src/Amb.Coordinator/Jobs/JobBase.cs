@@ -126,9 +126,17 @@ public interface IJob
 /// <summary>What VM jobs share: starting the slot, waiting for its guest, running steps, staging files.</summary>
 public abstract class VmJob : IJob
 {
-    /// <summary>How long a guest may take from VM start to hello (a boot to ready took 30-75 s, measured; an install
-    /// takes 12-17 minutes, see <see cref="InstallJob"/>).</summary>
-    protected virtual TimeSpan HelloTimeout => TimeSpan.FromMinutes(10);
+    /// <summary>How long a guest may take from VM start to hello: the site's <see cref="CoordinatorOptions.GuestHello"/>
+    /// (10 minutes unless the site sets another; a boot to ready took 30-75 s on homepc, measured; an install takes
+    /// far longer, see <see cref="InstallJob"/>).</summary>
+    /// <param name="context">The job's context.</param>
+    /// <returns>The limit.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="context"/> is null.</exception>
+    protected virtual TimeSpan HelloTimeoutOf(JobContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return context.Options.GuestHello;
+    }
 
     /// <summary>How long a guest may go without any call before its slot counts as lost (DESIGN.md §12): the site's
     /// <see cref="CoordinatorOptions.GuestSilence"/> (3 min unless the site sets another).</summary>
@@ -155,7 +163,7 @@ public abstract class VmJob : IJob
     /// <returns>The lease; the caller stops it in a finally block.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="context"/> is null.</exception>
     /// <exception cref="InvalidOperationException">The slot could not be started.</exception>
-    /// <exception cref="SlotLostException">No hello within <see cref="HelloTimeout"/>.</exception>
+    /// <exception cref="SlotLostException">No hello within <see cref="HelloTimeoutOf"/>.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancel"/> was cancelled.</exception>
     protected async Task<SlotLease> StartAndWaitAsync(JobContext context, string image, CancellationToken cancel,
         string? installVersion = null, string? oemDir = null, string? keptVm = null, int? dataDiskGiB = null)
@@ -169,11 +177,13 @@ public abstract class VmJob : IJob
             context.Event("slot", $"slot {lease.Spec.SlotId} started ({image}, {context.Grant})");
             Stage(context, lease);
             DateTimeOffset started = context.Clock.GetUtcNow();
-            GuestHello hello = await lease.Session.WaitHelloAsync(HelloTimeout, cancel).ConfigureAwait(false);
+            GuestHello hello = await lease.Session.WaitHelloAsync(HelloTimeoutOf(context), cancel).ConfigureAwait(false);
             context.Slots.MarkReady(lease.Spec.SlotId);
             double seconds = (context.Clock.GetUtcNow() - started).TotalSeconds;
+            // The guest's own uptime splits a slow start in two: the VM's start to Windows' boot (the firmware, a busy
+            // host) and Windows' boot to the hello (the logon, the bootstrap, the share, the agent's first calls).
             context.MarkRunning(FormattableString.Invariant(
-                $"guest ready after {seconds:0} s: {hello.Facts.Os}, {hello.Facts.Vcpus} vCPU, {hello.Facts.MemoryMiB} MiB, agent {hello.AgentVersion}"));
+                $"guest ready after {seconds:0} s (Windows up {hello.Facts.UptimeSeconds:0} s): {hello.Facts.Os}, {hello.Facts.Vcpus} vCPU, {hello.Facts.MemoryMiB} MiB, agent {hello.AgentVersion}"));
             lease.Session.LogSink = log =>
             {
                 foreach (string line in log.Lines)

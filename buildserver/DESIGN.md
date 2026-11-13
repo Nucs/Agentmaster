@@ -437,6 +437,18 @@ the shape:
   refuses to start when the line is not there, so a new dockur image never falls back to 30 s unseen. A slot that stops
   by itself is given up with its last output lines in the reason (`ISlotDriver.ReadLastOutputAsync`): the first two
   such failures needed a reproduction to see dockur's message, because the container went with the slot.
+- **A disk that stalls reads, so slots read through the host's page cache:** drive 2 is a DRAM-less consumer SSD (a
+  Crucial BX500) behind the Smart Array P420i, which passes it no TRIM, and it writes ~7 times what it is given. After
+  heavy writes (a cold build) it answered reads in 1-2 s each, and boots over the layer images then waited 6-18
+  minutes in the firmware and the boot loader, which read one request at a time (§16.17). dockur opens a slot's disk
+  with O_DIRECT, so every slot read its image from the drive again. A site may set the cache mode
+  (`AMB_DOCKUR_DISK_CACHE`, the worker writeback; `CoordinatorOptions.DockurDiskCache`): dockur's `DISK_CACHE` for the
+  system disk and the same mode for the build VM's data disk (`aio=threads`, since native AIO needs direct I/O). An
+  image read once then boots from memory (46 s, against 572-1065 s), and the guest's flushes still reach the drive
+  (QEMU gives the guest a disk with a write cache, which NTFS flushes like any other). "unsafe", which drops the
+  flushes, is refused. A site may also give a guest longer to say hello (`AMB_GUEST_HELLO_MINUTES`, the worker 20,
+  else 10), and every guest-ready line says how long Windows had been up, which tells a slow firmware or disk from a
+  slow logon.
 - **Risks:** the link home is the only way in (when it is down, `--site home` builds here as before); drive 2 is not
   backed up and may be lost (every image can be made again, every build id built again); the machine is rented, and its
   provider's own console is the way back when it does not boot (`workermachine/provider.md`).
@@ -595,6 +607,9 @@ On dock, also fastrund's pod memory limit and the LXC changes of §5.3 (E3).
   build is retried once. A slot whose VM stops by itself is given up sooner: the slot manager asks its driver every
   15 s whether it runs, and two "not running" answers in a row end the request `lost` (29 s after a killed QEMU,
   measured), with the slot's last output lines in the reason.
+- **The hello:** a guest has 10 minutes from its VM's start to its agent's hello (a site may set 5-60:
+  `AMB_GUEST_HELLO_MINUTES`, the worker machine 20, §5.5; an install always 120), else the request is `lost`. The
+  guest-ready event gives both halves: "ready after N s (Windows up M s)", N − M being the firmware and boot loader.
 - **A build cut off mid-step** (its slot lost or cancelled) leaves truncated outputs on the kept VM's data disk (a
   precompiled header, 2026-11-12: C1852 at the next build). The VM's record lists the worktree while its build step
   runs and takes it off when the step ends (`VmRecord.Interrupted`); a worktree still listed is purged by its next
@@ -1041,6 +1056,42 @@ The owner asked how feasible a build on dock is. Measured on dock and on this PC
   20:20) and is off the rest of the week (homelab commit 9f95683, `pve/host-backup/install.txt` 3.10). dock's
   available memory rose from 6 to 9 GiB. By §3.2's rule (MemAvailable − 2 GB) that is 7 GB, still 1 GB short of a
   build VM's 8 GB minimum, so the memory fix above is still needed.
+
+### 16.17 The worker machine's site (2026-11-12 to 11-13)
+
+CT 803 on the worker machine (§5.5): an Intel Xeon E5-2690 v2 (10 cores / 20 threads, 2013), 128 GB, the site's data
+on drive 2 (a Crucial BX500 1 TB behind a Smart Array P420i with its 1 GB flash-backed cache on), shared with
+TraderLab's worker and the desktops of claude-fleet.
+
+| What | Measured |
+|---|---|
+| base install (`am-base-0`, Tiny11 Core) | 88.1 min: archive.org's ISO 20-25 min, then Windows setup on 4 vCPUs (homepc 16.5 min in all) |
+| the bootstrap's re-registration (`retask`, the worker's `am-base`) | 3.4 min; guests of 4 and 8 vCPUs over it ready in 29-30 s |
+| the e2e layer (`am-e2e`) | 2.5 min |
+| the build layer (`am-build`) | 89.5 min, the Build Tools install 87.4 of it (single-threaded Windows Installer; homepc 22.4) |
+| the first cold Release build (`w20261113-1`, purged, 32 GB / 16 vCPUs, `/m:4`, `CL_MPCount` 3) | 104.7 min of build, 115 min from request to build id (homepc: ~43 min) |
+| the first push of the source | 174 MB in 50 s; a day's commits later 0.2 MB in 0.7 s |
+| `amb fetch` of a build's portable zip to this PC | 8 s, SHA-256 checked |
+| a guest's hello over a layer image, the disk O_DIRECT, drive 2 quiet | 70-81 s (Windows up 33-36 s), five smoke runs, three of them at once |
+| the same, drive 2 digesting a build's writes | 348, 556, 572 and 1065 s (that last guest's Windows up 26 s), and one past 600 s (Lost) |
+| drive 2's reads and writes, lifetime average (host up 12.5 h, its builds included) | 43.4 ms per read, 20.3 ms per write (drive 1: 0.6 ms per read) |
+| drive 2 during a slow boot | 213 reads in 15 s at 1.9 s each, 90 % busy; then 119 at 1.0 s, its writes at 0 ms in the controller's cache |
+| drive 2's SMART (cciss,1) | 34 °C, no reallocated, pending, uncorrectable or corrected blocks, 8 % of its life used; 7.78 G pages programmed by its FTL against 1.27 G by the host (write amplification ~7) |
+| a slow boot's guest, seen from the host | its vCPU threads halted (`kvm_vcpu_block`), 0.15 of a CPU; its slot's cgroup I/O pressure "full" 25 % (avg10) |
+| a guest's hello with the slot disks through the host's page cache (`writeback`) | 54 s for the first boot after the change, 46 s (Windows up 19 s) for the next |
+| an e2e smoke run (one test), request to result, with the cache warm | 2 min: hello 46 s, provisioning 29 s, the suite 30 s |
+| the first e2e provisioning after the change | 229 s: `claude.exe` (the "claude" check) read from the drive for the first time took 159 s; the next run's 9.5 s |
+| the page cache the slots fill | charged to CT 803's memory cgroup (3.0 GB after three runs); lxcfs counts it as available, so the site's capacity stays 98 GB |
+
+- **The wait was in the firmware and the boot loader:** the 1065-s boot's guest had been up 26 s at its hello, so its
+  kernel started 17 minutes after the VM. Both read the disk one request at a time, so a drive answering in 1-2 s
+  stretches them most. Screenshots of a slow boot showed only Windows' boot spinner.
+- **Not the cause, checked:** the request's kind (e2e and smoke slots get the same container), a new network card per
+  slot (dockur keeps the same MAC), the bootstrap or the share (a fast boot's guest maps the share 6 s after the
+  bootstrap starts), the seal or the trims of the layers (homepc's images, made by the same recipe, boot in 137-188 s),
+  three boots at once (70-72 s each), and another guest's writes (the off-site PBS writes to drive 1).
+- **What is still slow without the drive:** PowerShell 5.1 needs 13-28 s to reach the bootstrap's first line in a
+  fresh guest, and the firmware ~30-40 s to start Windows; both run on every boot.
 
 ## 17. Evidence
 

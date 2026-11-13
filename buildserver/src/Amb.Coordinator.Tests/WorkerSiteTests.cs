@@ -60,7 +60,9 @@ public sealed class WorkerSiteTests : IDisposable
         ["AMB_E2E_GUEST_MEMORY_MIB"] = "0",
         ["AMB_CAPPED_SLOTS"] = "0",
         ["AMB_DOCKUR_BOOT_WAIT"] = "180",
+        ["AMB_DOCKUR_DISK_CACHE"] = "writeback",
         ["AMB_GUEST_SILENCE_MINUTES"] = "10",
+        ["AMB_GUEST_HELLO_MINUTES"] = "20",
         ["AMB_RESERVE_HOST_MEMORY_MIB"] = "8192",
         ["AMB_USABLE_VCPUS"] = "20",
         ["AMB_RESERVE_DISK_MIB"] = "51200",
@@ -86,7 +88,9 @@ public sealed class WorkerSiteTests : IDisposable
         Assert.Equal(new Resources(6144, 6, Resources.Gib(3)), worker.Sizing.E2e!.Preferred);
         Assert.Equal(0, worker.Sizing.E2eGuestMemoryMiB);
         Assert.Equal(180, worker.DockurBootWaitSeconds);
+        Assert.Equal("writeback", worker.DockurDiskCache);
         Assert.Equal(TimeSpan.FromMinutes(10), worker.GuestSilence);
+        Assert.Equal(TimeSpan.FromMinutes(20), worker.GuestHello);
         Assert.Equal(Path.Combine(_root, "tmp"), worker.TmpDir);
 
         CoordinatorOptions homepc = CoordinatorOptions.FromEnvironment(name => name == "AMB_ROOT" ? _root : null);
@@ -98,9 +102,12 @@ public sealed class WorkerSiteTests : IDisposable
         Assert.Null(homepc.Sizing.Build);
         Assert.Null(homepc.Sizing.E2e);
         Assert.Null(homepc.Sizing.E2eGuestMemoryMiB);
-        // homepc keeps dockur's own 30-s firmware wait (its slots boot in seconds) and the 3-minute silence limit.
+        // homepc keeps dockur's own 30-s firmware wait (its slots boot in seconds) and O_DIRECT disks, the 3-minute
+        // silence limit and the 10-minute boot limit.
         Assert.Null(homepc.DockurBootWaitSeconds);
+        Assert.Null(homepc.DockurDiskCache);
         Assert.Equal(TimeSpan.FromMinutes(3), homepc.GuestSilence);
+        Assert.Equal(TimeSpan.FromMinutes(10), homepc.GuestHello);
     }
 
     /// <summary>A malformed size, a zero, a least above the most, or a letter that request or slot ids use is refused at
@@ -121,15 +128,41 @@ public sealed class WorkerSiteTests : IDisposable
             ("AMB_DOCKUR_BOOT_WAIT", "29"),
             ("AMB_DOCKUR_BOOT_WAIT", "1801"),
             ("AMB_DOCKUR_BOOT_WAIT", "3m"),
+            ("AMB_DOCKUR_DISK_CACHE", "unsafe"),
+            ("AMB_DOCKUR_DISK_CACHE", "WriteBack"),
+            ("AMB_DOCKUR_DISK_CACHE", "fast"),
             ("AMB_GUEST_SILENCE_MINUTES", "0"),
             ("AMB_GUEST_SILENCE_MINUTES", "61"),
             ("AMB_GUEST_SILENCE_MINUTES", "5m"),
+            ("AMB_GUEST_HELLO_MINUTES", "4"),
+            ("AMB_GUEST_HELLO_MINUTES", "61"),
+            ("AMB_GUEST_HELLO_MINUTES", "20m"),
         })
         {
             Dictionary<string, string> env = WorkerEnvironment(_root);
             env[name] = value;
             Assert.Throws<FormatException>(() => CoordinatorOptions.FromEnvironment(key => env.GetValueOrDefault(key)));
         }
+    }
+
+    /// <summary>The kept build VM's data disk follows the site's cache mode: O_DIRECT with native AIO when the site sets
+    /// none (homepc), the host's page cache with threaded AIO for writeback (QEMU refuses native AIO on a cached file),
+    /// and native AIO again for directsync, which is direct I/O too.</summary>
+    [Fact]
+    public void DataDiskFollowsTheSiteCacheMode()
+    {
+        Assert.Contains(",cache=none,aio=native,", PodmanSlotDriver.DataDiskArguments(null), StringComparison.Ordinal);
+        Assert.Contains(",cache=writeback,aio=threads,", PodmanSlotDriver.DataDiskArguments("writeback"),
+            StringComparison.Ordinal);
+        Assert.Contains(",cache=writethrough,aio=threads,", PodmanSlotDriver.DataDiskArguments("writethrough"),
+            StringComparison.Ordinal);
+        Assert.Contains(",cache=directsync,aio=native,", PodmanSlotDriver.DataDiskArguments("directsync"),
+            StringComparison.Ordinal);
+        // Everything else of the attachment stays as measured: its own controller, the raw file, discard.
+        Assert.StartsWith(" -device virtio-scsi-pci,id=ambdata -drive file=/storage/data-disk.raw",
+            PodmanSlotDriver.DataDiskArguments("writeback"), StringComparison.Ordinal);
+        Assert.EndsWith(",discard=unmap,if=none -device scsi-hd,drive=ambdata0,bus=ambdata.0,rotation_rate=1",
+            PodmanSlotDriver.DataDiskArguments("writeback"), StringComparison.Ordinal);
     }
 
     /// <summary>The firmware-wait patch, run by a real POSIX shell over a copy of dockur 6.05's line: only that exact line

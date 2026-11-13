@@ -218,7 +218,7 @@ python buildserver/image/images.py list
 ## Build and test
 
 ```text
-dotnet test buildserver/src/Buildserver.slnx            # build everything + 115 unit tests (output in Q:\tmp\buildserver-build)
+dotnet test buildserver/src/Buildserver.slnx            # build everything + 116 unit tests (output in Q:\tmp\buildserver-build)
 python buildserver/tests/local_chain.py                 # the chain without a VM (Q:\tmp\buildserver-test, removed after)
 python buildserver/tests/site_outcomes.py               # Phase 1's done-when on the real site: e2e passed, failed, cancelled, lost VM
 python buildserver/tests/site_build.py                  # the build MVP's done-when on the real site (it builds: ask first)
@@ -286,7 +286,10 @@ python buildserver/image/images.py --site worker base | e2e | build-image | chec
   owner's drive for "building and holding artifacts": data that may be lost (every build can be made again).
 - **Why it is faster:** its VMs are plain KVM guests of the host (no nested virtualization, no WSL VM in between), on
   drive 2's SSD, with 128 GB of RAM and nobody at its screen. A build VM gets 16-32 GB and 8-16 vCPUs (4 projects × 3
-  compilers at 32 GB), an e2e VM 6 GB uncapped with 4-6 vCPUs (`worker/files/amb-coordinator.env`).
+  compilers at 32 GB), an e2e VM 6 GB uncapped with 4-6 vCPUs (`worker/files/amb-coordinator.env`). ⚠ Measured, a
+  build is slower there than on this PC: the first purged cold Release build (`w20261113-1`, 32 GB / 16 vCPUs, `/m:4`,
+  3 compilers each) took 104.7 min of build and 115 min from request to build id, against ~43 min here; the 2013 Xeon
+  is slower per core. The site's worth is that builds and e2e runs leave this PC's memory alone.
 - **Its capacity** (`SiteCapacity.LinuxFree`): the smaller of the HOST's available memory (its own `/proc/meminfo`,
   bind-mounted read-only into the container) minus 8 GB for the host's other guests, and the container's own (lxcfs:
   its 100 GB ceiling) minus 2 GB; 20 vCPUs; drive 2's free space minus 50 GB. No swap: a capped slot (`--guest-ram`
@@ -337,6 +340,21 @@ python buildserver/image/images.py --site worker base | e2e | build-image | chec
   the site's silence limit is 10 minutes (`AMB_GUEST_SILENCE_MINUTES`), the agent retries a failed heartbeat after 2 s
   and logs each failure's inner exceptions (the next one names the broken link), and a build cut off mid-step purges
   its worktree next time (its truncated precompiled header failed the next build with C1852).
+- **Boots over a layer image sat on Windows' boot spinner for 6-18 minutes** (2026-11-13): e2e guests said hello after
+  572 s, then not within the 10-minute limit (Lost), then after 1065 s, while smokes of the same image at the same size
+  between them were ready in 70-81 s. The slow guest was idle (its vCPUs halted, 0.15 of a CPU) and its slot's I/O
+  pressure was "full" a quarter of the time: drive 2 completed 213 reads in 15 s at 1.9 s each. The guest-ready line
+  now reads "ready after N s (Windows up M s)", and it put the whole wait before Windows' kernel started (1065 s,
+  Windows up 26 s): in the firmware and the boot loader, which read the disk one request at a time. Drive 2 is a
+  DRAM-less Crucial BX500 behind the P420i, which passes it no TRIM; its SMART counters show 7.8 G pages programmed for
+  its own housekeeping against 1.27 G for the host (write amplification ~7), no errors, 34 °C, and its reads stall
+  behind that housekeeping after heavy writes such as a cold build's. The site now sets `AMB_DOCKUR_DISK_CACHE=
+  writeback`: slot disks go through the host's page cache (dockur's `DISK_CACHE`; the build VM's data disk with
+  `aio=threads`), so an image read once boots from memory, and the guest's flushes still reach the disk. Measured: the
+  first such boot was ready in 54 s (its provisioning took 229 s while `claude.exe` came from the drive for the first
+  time), the next in 46 s with provisioning in 29 s, an e2e smoke run in 2 minutes. The cache is charged to CT 803's
+  memory cgroup, which lxcfs reports as available, so the site's capacity does not shrink. The site's hello limit is
+  20 minutes (`AMB_GUEST_HELLO_MINUTES`; 10 elsewhere).
 - **Looking inside a silent guest:** QEMU's monitor answers in the slot container (`podman exec -i <slot> python3 -
   "<command>" < /srv/buildserver/bin/hmp.py`): `screendump /tmp/s.png -f png` shows its screen, and `sendkey` types
   (meta_l-r opens Run). A command typed into Run that writes into `\\host.lan\Data\amb\` lands in the slot's exchange
@@ -362,7 +380,7 @@ python buildserver/image/images.py --site worker base | e2e | build-image | chec
 | [`steps/install/`](steps/install) | `install-build.ps1`: the Windows side of `amb install` (stage into the free slot, check, wait for the requesting session, the mutex, the swap, the watch), run by the coordinator through WSL's interop | in use (2026-10-29) |
 | [`measure/`](measure/README.md) | the measurements and proofs behind DESIGN.md §16, with their raw results | P0.1 (§16.9), P0.5's comparison (§16.11) and P0.4's native half (§16.12) |
 | [`src/Amb.Core`](src/Amb.Core) | the shared core: the allocation rule (§3, homepc's and a Linux site's), the request / build / slot / VM model (build ids by site letter), the guest and API protocol, the atomic record store (§6) | 31 unit tests (`src/Amb.Core.Tests`) |
-| [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API (artifacts streamed by name; the source mirrors' tips and pushed bundles), the scheduler (admission by priority × availability, wait and run timeouts, cancel, one build at a time, existing builds answered without a slot), the guest broker, the jobs (import, a pulled build too; smoke, install, layer, e2e, a suite out of the mirror too; build, deploy), the source mirror (fetching K:, or taking pushes; snapshots too) and its bundles, the slot manager and its drivers (podman + dockur, kept VMs with a data disk, capped slots with the site's swap file, a site's longer firmware wait, a stopped slot's last output; cgroup v1 and v2 memory figures; local, for tests); its settings say which site it serves (homepc's or a Linux one) | runs in both sites; 69 unit tests (`src/Amb.Coordinator.Tests`) |
+| [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API (artifacts streamed by name; the source mirrors' tips and pushed bundles), the scheduler (admission by priority × availability, wait and run timeouts, cancel, one build at a time, existing builds answered without a slot), the guest broker, the jobs (import, a pulled build too; smoke, install, layer, e2e, a suite out of the mirror too; build, deploy), the source mirror (fetching K:, or taking pushes; snapshots too) and its bundles, the slot manager and its drivers (podman + dockur, kept VMs with a data disk, capped slots with the site's swap file, a site's longer firmware wait, a stopped slot's last output; cgroup v1 and v2 memory figures; local, for tests); its settings say which site it serves (homepc's or a Linux one) | runs in both sites; 70 unit tests (`src/Amb.Coordinator.Tests`) |
 | [`src/Amb.GuestAgent`](src/Amb.GuestAgent) | `amb-guest.exe` (Native AOT, 7 MB): the agent in every VM; hello, heartbeat with the guest's memory, one step at a time by long poll (run, fetch, expand, put, shutdown) | in every slot |
 | [`src/Amb.HostFacts`](src/Amb.HostFacts) | `amb-hostfacts.exe` (Native AOT): Windows' available memory, free commit, Q: free space and a full-screen game, as one line of JSON; the coordinator runs it every 10 s through WSL's interop | in use |
 | [`src/Amb.Cli`](src/Amb.Cli) | `amb.exe`: the command line above; `Sites.cs` (the two sites, a build id's site by its letter), `SourcePush.cs` (a commit pushed to the worker as a bundle of what it lacks), `WorkingTreeSnapshot.cs` (`--snapshot`), `ProcessAncestry.cs` (the requesting claude.exe of `amb install`: the process chain, else `CLAUDE_PID`) | in use; 15 unit tests (`src/Amb.Cli.Tests`) |

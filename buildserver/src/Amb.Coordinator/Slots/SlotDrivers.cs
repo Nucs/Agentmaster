@@ -192,6 +192,9 @@ public static class Commands
 /// <item>A virtio balloon device is always attached (dockur's own balloon controller stays off: BALLOONING=N is its
 /// default); the coordinator sets it through QEMU's monitor (<c>hmp.py</c>). The screen is 1600×900, the claude-fleet
 /// desktops' size (<see cref="QemuArguments"/>).</item>
+/// <item>The disks: O_DIRECT (cache=none) unless the site sets <see cref="CoordinatorOptions.DockurDiskCache"/>; the
+/// worker machine sets writeback, because its drive 2 answered the boot loader's reads in 1-2 s each while it
+/// digested a build's writes (a boot then took 1065 s, 1039 of them before Windows' kernel started, 2026-11-13).</item>
 /// </list>
 /// </remarks>
 public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanSlotDriver> log) : ISlotDriver
@@ -264,13 +267,23 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
     }
 
     /// <summary>QEMU's arguments that attach a slot's raw data disk (the measured attachment of
-    /// buildserver/measure/run-slot.sh: a virtio-scsi controller of its own, a raw sparse file, O_DIRECT, discard).</summary>
+    /// buildserver/measure/run-slot.sh: a virtio-scsi controller of its own, a raw sparse file, discard), in the site's
+    /// cache mode.</summary>
+    /// <param name="cache">The site's <see cref="CoordinatorOptions.DockurDiskCache"/>; null is O_DIRECT (cache=none),
+    /// as measured on homepc.</param>
+    /// <returns>The arguments, to append to <see cref="QemuArguments"/>.</returns>
     /// <remarks>discard=unmap passes the guest's TRIMs through, so what a build deletes (a purged tree) is punched out of
-    /// the sparse file again (measured: a 64 GB data disk held 92 MB after its files were deleted).</remarks>
-    internal const string DataDiskArguments =
-        " -device virtio-scsi-pci,id=ambdata -drive file=/storage/" + DataDiskFile
-        + ",id=ambdata0,format=raw,cache=none,aio=native,discard=unmap,if=none"
-        + " -device scsi-hd,drive=ambdata0,bus=ambdata.0,rotation_rate=1";
+    /// the sparse file again (measured: a 64 GB data disk held 92 MB after its files were deleted). aio=native needs
+    /// direct I/O, so a cached mode (writeback, writethrough) runs with aio=threads, the rule dockur applies to the
+    /// system disk: QEMU refuses native AIO on a cached file when the slot starts.</remarks>
+    internal static string DataDiskArguments(string? cache)
+    {
+        string mode = cache ?? "none";
+        string aio = mode is "none" or "directsync" ? "native" : "threads";
+        return " -device virtio-scsi-pci,id=ambdata -drive file=/storage/" + DataDiskFile
+            + ",id=ambdata0,format=raw,cache=" + mode + ",aio=" + aio + ",discard=unmap,if=none"
+            + " -device scsi-hd,drive=ambdata0,bus=ambdata.0,rotation_rate=1";
+    }
 
     /// <summary>The line of dockur 6.05's /run/entry.sh that gives the firmware 30 s to start booting Windows (it kills
     /// QEMU after that): <see cref="BootWaitScript"/> rewrites it on a site that sets
@@ -381,7 +394,7 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
         if (spec.DataDiskGiB is int dataGiB)
         {
             EnsureDataDisk(Path.Combine(spec.SlotDir, DataDiskFile), dataGiB);
-            arguments += DataDiskArguments;
+            arguments += DataDiskArguments(options.DockurDiskCache);
         }
         List<string> args =
         [
@@ -401,6 +414,12 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
         ];
         // RAM_SIZE, and for a capped slot the container's cap and its swap allowance.
         args.AddRange(MemoryArguments(spec));
+        if (options.DockurDiskCache is string cache)
+        {
+            // The system disk through the host's page cache on a site whose disk is slow to read
+            // (CoordinatorOptions.DockurDiskCache); dockur switches aio=native to threads for a cached mode itself.
+            args.AddRange(["-e", "DISK_CACHE=" + cache]);
+        }
         if (spec.InstallVersion is not null)
         {
             // An install: dockur downloads the version's ISO into /storage, installs unattended onto a new 64 GB
