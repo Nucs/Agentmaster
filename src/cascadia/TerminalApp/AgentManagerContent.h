@@ -213,6 +213,11 @@ namespace winrt::TerminalApp::implementation
         // Claude tab you're working in, in another window) would yank the OS foreground to the Manager
         // on every ~2s observer/registry tick. The page wires this to GetForegroundWindow()==hwnd; when
         // backgrounded the user isn't keyboard-navigating this board, so the focus-restore is skipped.
+        // It ALSO gates the rebuild itself (UI_THREAD.md §18): while it answers false, _Refresh only marks
+        // the lens dirty, and NoteWindowActivated(true) runs the one catch-up when the window comes forward.
+        // No provider (standalone / tests) = always foreground: every refresh rebuilds, as before.
+        //   provider - answers "is this page's window the OS foreground window right now?"; called on the
+        //              UI thread at every refresh request, so it must be cheap and must not throw.
         void SetWindowForegroundProvider(std::function<bool()> provider);
         // Agentmaster (the GLOBAL PAUSE — DELIVERY.md §17): the "Pause Prompt Queue Runner" button's action.
         // The button only ASKS: the handler (the hosting page) sets the process-wide state on the ONE
@@ -311,6 +316,18 @@ namespace winrt::TerminalApp::implementation
         //   visible - true when the window's Agent Manager page is on screen.
         // UI thread only. Throws what the catch-up rebuild throws (XAML element creation; std::bad_alloc).
         void SetLensVisible(bool visible);
+        // Agentmaster (UI_THREAD.md §18 — the background-window rebuild tax): the page's window was
+        // activated or deactivated (TerminalPage::WindowActivated). A page that is "on screen" in a window
+        // that is NOT the foreground window — minimized, or behind the window the user works in — skips its
+        // rebuilds (_Refresh's foreground gate) and only marks itself dirty; this runs the ONE catch-up when
+        // its window comes forward. The catch-up is queued at Low priority, so the activation's own paint
+        // and input go first and the user sees the window at once (its board one rebuild behind for that
+        // moment). A deactivation does nothing: the gate itself stops the next rebuild.
+        //   activated - true when the window just became the active (foreground) window.
+        // UI thread only. Throws nothing: the queued catch-up contains and logs its own failure (Rule #18,
+        // "[exc] AgentManagerContent window catch-up"); a queue that refuses the item (the window is
+        // closing) leaves the lens dirty for the next show or activation.
+        void NoteWindowActivated(bool activated);
         // Agentmaster (Linked Lenses — the per-tab -> Manager sync): select a managed session in the
         // lens from OUTSIDE. The page calls this when the user switches to that session's terminal tab,
         // so returning to the Manager tab shows the session you were just in selected (board card + tree
@@ -1062,7 +1079,9 @@ namespace winrt::TerminalApp::implementation
         // Agent Manager page is on screen"; _refreshDirty records a refresh that was REQUESTED while
         // hidden, so the first SetLensVisible(true) runs exactly one catch-up _Refresh(). Every
         // refresh trigger (registry notify, timing tick, selection sync, RefreshNow) funnels through
-        // _Refresh, which is where the gate lives — no caller needs to know.
+        // _Refresh, which is where the gate lives — no caller needs to know. _refreshDirty is also set by
+        // the foreground gate (a page on screen in a BACKGROUND window, UI_THREAD.md §18), and then
+        // NoteWindowActivated(true) runs the catch-up; either way one owed rebuild runs once.
         bool _lensVisible{ true };
         bool _refreshDirty{ false };
 

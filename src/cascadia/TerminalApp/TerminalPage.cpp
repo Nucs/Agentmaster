@@ -6836,6 +6836,15 @@ namespace winrt::TerminalApp::implementation
         _activated = activated;
         _updateThemeColors();
 
+        // Agentmaster (UI_THREAD.md §18): an Agent Manager page on screen in this window skipped its rebuilds
+        // while the window was in the background (minimized, or behind another window); coming forward runs
+        // its one owed catch-up, queued behind this activation's own paint. No-op for a page not on screen
+        // or with nothing owed.
+        if (_managerPage)
+        {
+            _managerPage->NoteWindowActivated(activated);
+        }
+
         _adjustProcessPriorityThrottled->Run();
 
         if (const auto& tab{ _GetFocusedTabImpl() })

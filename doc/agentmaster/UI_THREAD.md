@@ -1594,3 +1594,57 @@ uiTid=$(powershell -NoProfile -Command "(Get-Process -Id <pid>).Threads | Sort-O
 ./stacksnap.exe sample <pid> 20 50 $uiTid          # section (b): our frames, inclusive
 rg -n "tab-switch-slow|tab-switch-settle|slow rebuild" <profile>/hooks.log
 ```
+
+## 18. Agent Manager pages nobody could see froze every window: the background-window rebuild tax (2026-11-13)
+
+The report, the same morning as §17: "We can't lock UI thread like that. I got thread locked again, see why"
+(production 0.8.0.12, pid 114436, 928 live sessions).
+
+### 18a. The evidence
+
+- `stacksnap sample <pid> 8 100 <uiTid>` right after the lock: the UI thread at 78% of a core, in
+  `AgentManagerContent::_RefreshFromRegistryEvent → _Refresh → _RebuildBoard → UIElementCollection::Clear` (the old
+  cards' teardown, each through XAML's event table: `CEventManager::RemoveObject → xchainedmap::Remove`), in
+  `_RebuildPlan`, and in §17's tab re-theme.
+- hooks.log: `[manager] slow rebuild: 1.1–2.5 s (board cards=181 …)` about once a minute — at most one slow rebuild a
+  minute is logged, and the registry-driven pacing allows one every 2× its cost (2.4–5 s).
+- The process's top-level windows (EnumWindows, read-only): THREE windows titled "Agent Manager" — two MINIMIZED,
+  one maximized on the same monitor at the same rectangle as the window the user worked in ("question"), so fully
+  covered by it.
+
+### 18b. Why
+
+`SetLensVisible` means "this window's Agent Manager page is the window's content", not "someone can see it". A
+page in a minimized window, or under another window, therefore rebuilt its whole board, tree and plan at every
+registry change — with 928 live sessions, changes never stop — on the ONE UI thread all windows share, 1.1–2.5 s
+each time (§15: every card destroyed and made again). The user's tab clicks and new tabs waited behind those
+rebuilds in windows they WERE looking at.
+
+### 18c. The fix (`AgentManagerContent.{h,cpp}`, `TerminalPage::WindowActivated`; no data member added)
+
+- **The foreground gate:** `_Refresh` now treats a page in a window that is not the OS foreground window like a hidden
+  one: `_refreshDirty = true`, the keep-awake hold re-evaluated, no rebuild. The test is the existing
+  `_windowForegroundProvider` (`GetForegroundWindow() == hwnd`, wired in `_WireAgentManagerContent` for the
+  focus-steal fix). Every automatic trigger funnels through `_Refresh`: the registry notify and its trailing
+  timer, the 30 s tick's fallback rebuild, `SetExternalClaudes`, `RefreshNow`, `ApplyExternalSettings`,
+  `SetLensVisible(true)` in a background window. A click on the page always passes: it made the window the foreground
+  window first. No provider (standalone, tests) = always foreground.
+- **The catch-up:** `NoteWindowActivated(bool)`, called from `TerminalPage::WindowActivated`; on activation of a window
+  whose page is on screen and owed a rebuild, it queues ONE `_Refresh` at Low dispatcher priority (the window's
+  activation paints first), re-checks "still owed and on screen" when it runs, stamps the registry pacing after it,
+  and contains its own failure (`[exc] AgentManagerContent window catch-up`).
+- **The trade-off:** a Manager page in a background window shows the board as it was until its window is
+  activated (a dashboard on a second monitor no longer updates by itself while you work in another window); the
+  catch-up on activation is still one full rebuild.
+- Checked without a build: `cl /Zs` of `AgentManagerContent.cpp` (PASS) and of `TerminalPage.cpp` (PASS from the
+  header overlay, `zs_overlay.py` with BASE ad89700e3 — the plain run hits the known `cppwinrt_utils.h` path split),
+  against the release worktree's PCH; a planted defect in the catch-up item fails at its line (C2039). The e2e
+  driver focuses a window before it opens its Manager page (`ManagerPage.open`); a test that READS another window's
+  board without focusing it would now see that board as it was — none was found, watch the next full run.
+
+### 18d. What is left
+
+- A rebuild still recreates every card (§15e 1–2: edit cards in place, virtualize), so a page in the FOREGROUND
+  window keeps the 1–2.5 s rebuilds at fleet scale, and so does the one catch-up on activation.
+- A page on screen in a visible but not active window (side by side, a second monitor) now goes stale until
+  clicked; making rebuilds cheap is what would let it update live again.

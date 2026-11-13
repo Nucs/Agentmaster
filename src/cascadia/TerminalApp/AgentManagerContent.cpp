@@ -719,6 +719,46 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (UI_THREAD.md §18): see the header. Queued, not run inline: WindowActivated runs inside the
+    // window's activation, and a catch-up of 1-2 s there would hold the very first paint of the window the
+    // user just brought forward. The item re-checks "still owed and still on screen" when it runs, because a
+    // click on the page (its own _Refresh) or a switch to a tab (SetLensVisible(false)) can land first.
+    void AgentManagerContent::NoteWindowActivated(bool activated)
+    {
+        if (!activated || !_lensVisible || !_refreshDirty)
+        {
+            return; // nothing owed, or the page is not on screen (SetLensVisible(true) catches up then)
+        }
+        const auto queue = winrt::Windows::System::DispatcherQueue::GetForCurrentThread();
+        if (!queue)
+        {
+            return; // not on a UI thread: nothing to catch up from here; the next show or activation does
+        }
+        const bool queued = queue.TryEnqueue(winrt::Windows::System::DispatcherQueuePriority::Low, [weak = get_weak()]() {
+            try
+            {
+                if (auto self = weak.get(); self && self->_lensVisible && self->_refreshDirty)
+                {
+                    self->_Refresh();
+                    // From the END of the rebuild, like the registry path: the next registry-driven rebuild
+                    // keeps its paced gap after this catch-up (_RefreshFromRegistryEvent).
+                    self->_lastRegistryRefreshMs = static_cast<int64_t>(::GetTickCount64());
+                }
+            }
+            catch (...)
+            {
+                // A dispatcher item must not let an exception escape (it would fail the whole process); the
+                // lens stays as it was and the next refresh request rebuilds it.
+                ::Agentmaster::AgentLogCaughtException(L"AgentManagerContent window catch-up");
+            }
+        });
+        if (!queued)
+        {
+            // The queue is shutting down (the window is closing): the lens stays dirty, nothing else to do.
+            return;
+        }
+    }
+
     // Agentmaster (perf — the 30s timing tick): rewrite the "created …, active … ago" timing text of every live card and
     // row IN PLACE from a fresh live snapshot (the observer refreshes convLastActivityUnixMs SILENTLY —
     // no notify — so the tick is what keeps "ago" honest), and detect whether any card's ⚡ "still
@@ -2211,6 +2251,22 @@ namespace winrt::TerminalApp::implementation
         // comes back. The only _Refresh side effect that matters off-screen — the keep-awake hold (a SYSTEM
         // state, not a pixel) — is re-evaluated here so WhileRunning keeps tracking the fleet while hidden.
         if (!_lensVisible)
+        {
+            _refreshDirty = true;
+            _RefreshKeepAwakeHold(nullptr);
+            return;
+        }
+        // Agentmaster (UI_THREAD.md §18 — the background-window rebuild tax, 2026-11-13): the page is "on
+        // screen" in its window, but that window is not the one the user is in — minimized, or behind it.
+        // Production then had three windows on their Agent Manager page (two minimized, one under the
+        // working window), each rebuilding its board for 1.1-2.5 s at every registry change (928 live
+        // sessions: changes never stop), and the ONE UI thread every window shares froze each time: the
+        // reported "interacting with tabs or creating a tab freezes the UI". Nobody can see such a page, so
+        // it is treated like a hidden one: marked dirty (with the keep-awake hold kept tracking the fleet,
+        // as above), and NoteWindowActivated(true) runs the one catch-up when the window comes forward. A
+        // refresh the user's own click on this page asks for always passes: the click made the window the
+        // foreground window first.
+        if (_windowForegroundProvider && !_windowForegroundProvider())
         {
             _refreshDirty = true;
             _RefreshKeepAwakeHold(nullptr);
