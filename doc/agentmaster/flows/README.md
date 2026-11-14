@@ -241,7 +241,9 @@ floats over the terminal's edge and hides itself, showing while the pointer is w
 its chevron goes to the terminal (SP-16; SIDE_PANEL.md §2m) · a side-panel card's right-click menu has Filter › under
 Tags — the card's folder and the folders above it, its state, its tags, its branch and its fork family (two new kinds of
 filter), plus Pause filter / Resume filter and Clear — and a pick starts the filter over with that one thing (SP-17;
-SIDE_PANEL.md §2l; no test written yet).
+SIDE_PANEL.md §2l; no test written yet) · a click on that menu's Folder line itself picks the session's whole working
+folder with its subfolders, and a tab's right-click menu has the same Filter › under its Tags, whose picks also bring the
+side panel's cards on screen (SP-17 phases 10–11, TCM-10; SIDE_PANEL.md §2l; no test written yet).
 
 **The regression base** — older behaviors the recent releases build on, covered because every new feature leans on
 them: the /handover family (HND-01, HND-03, HND-04, HND-05, HND-07, HND-08), the Sessions browser (SES-01, SES-02,

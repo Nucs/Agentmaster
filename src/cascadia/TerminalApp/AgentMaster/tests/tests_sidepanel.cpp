@@ -2766,6 +2766,57 @@ void TestSidePanelFilters()
             auto untouched = busy;
             CHECK(SidePanelApplyCardPick(untouched, false, pickOf(SidePanelCardPickKind::Folder, L"not a path")) == SidePanelCardPickOutcome::Nothing && untouched == busy, "card pick: a line that names nothing changes nothing");
         }
+
+        // The Folder line's OWN click (the user's request of 2026-11-14, their pick "Folder + subfolders"): the card's own
+        // folder, its full working folder, with its subfolders - the very pick of the submenu's first line.
+        {
+            const std::vector<std::wstring> levels = SidePanelFolderLevels(L"K:\\source\\Agentmaster\\e2e");
+            const SidePanelCardPick line = SidePanelFolderLinePick(levels);
+            CHECK(line.kind == SidePanelCardPickKind::Folder && line.value == L"K:\\source\\Agentmaster\\e2e" && line.includeSubfolders,
+                  "folder line click: the card's own folder (its full path), with its subfolders");
+            SidePanelCardPick first;
+            first.kind = SidePanelCardPickKind::Folder;
+            first.value = levels.front();
+            first.includeSubfolders = true;
+            CHECK(SidePanelFiltersForCardPick(line) == SidePanelFiltersForCardPick(first), "folder line click: the same filter as the submenu's first line");
+            SidePanelFilters record;
+            CHECK(SidePanelApplyCardPick(record, false, line) == SidePanelCardPickOutcome::StartedOver && SidePanelCardPickIsWholeFilter(record, false, first),
+                  "folder line click: it starts the filter over, and the submenu's first line then reads checked");
+            CHECK(SidePanelCardPickIsWholeFilter(record, false, line) && SidePanelApplyCardPick(record, false, first) == SidePanelCardPickOutcome::Dropped && record == SidePanelFilters{},
+                  "folder line click: the line itself reads checked too, and a click on the first line drops what the folder line set");
+            SidePanelFilters exactly;
+            SidePanelAddFolderFilter(exactly, levels.front(), false);
+            CHECK(!SidePanelCardPickIsWholeFilter(exactly, false, line), "folder line click: the folder 'exactly' is another filter - the line is not checked");
+            SidePanelFilters other;
+            SidePanelAddFolderFilter(other, L"K:\\work", true);
+            const SidePanelFilters before = other;
+            CHECK(SidePanelFolderLinePick({}).value.empty() && SidePanelApplyCardPick(other, false, SidePanelFolderLinePick({})) == SidePanelCardPickOutcome::Nothing && other == before,
+                  "folder line click: no level names nothing, and changes nothing");
+        }
+
+        // The TAB menu's Filter (the user's request of 2026-11-14): the menus' names and ids, and what a pick does to a panel
+        // that cannot show its cards (their pick "Show the result").
+        {
+            CHECK(SidePanelFilterMenuName(SidePanelFilterMenu::Card) == L"card menu" && SidePanelFilterMenuName(SidePanelFilterMenu::Tab) == L"tab menu",
+                  "tab menu filter: each menu is named in the nav trail, the card menu's words unchanged");
+            CHECK(SidePanelFilterMenuAutomationStem(SidePanelFilterMenu::Card) == L"am.side.cardFilter" && SidePanelFilterMenuAutomationStem(SidePanelFilterMenu::Tab) == L"am.tabmenu.filter",
+                  "tab menu filter: the card menu keeps its automation ids, the tab menu has a stem of its own");
+            const auto shown = SidePanelRevealForTabMenuPick(false, false, L"ignored out of AI mode");
+            CHECK(!shown.expand && !shown.leaveAiView && !shown.aiViewKept, "tab menu reveal: a panel that shows its cards is left as it is");
+            const auto collapsed = SidePanelRevealForTabMenuPick(true, false, L"");
+            CHECK(collapsed.expand && !collapsed.leaveAiView && !collapsed.aiViewKept, "tab menu reveal: a collapsed panel expands");
+            const auto aiEmpty = SidePanelRevealForTabMenuPick(false, true, L"");
+            CHECK(!aiEmpty.expand && aiEmpty.leaveAiView && !aiEmpty.aiViewKept, "tab menu reveal: an AI view with an empty box goes back to the cards");
+            const auto aiBlank = SidePanelRevealForTabMenuPick(false, true, L" \t\r\n ");
+            CHECK(aiBlank.leaveAiView && !aiBlank.aiViewKept, "tab menu reveal: blanks alone are no request - the view goes back to the cards");
+            const auto aiRequest = SidePanelRevealForTabMenuPick(false, true, L"  sessions about the e2e gate");
+            CHECK(!aiRequest.leaveAiView && aiRequest.aiViewKept && !aiRequest.expand, "tab menu reveal: an unsent request keeps the AI view (the user's words are never emptied)");
+            const auto both = SidePanelRevealForTabMenuPick(true, true, L"");
+            CHECK(both.expand && both.leaveAiView && !both.aiViewKept, "tab menu reveal: collapsed AND in the AI view - both are undone");
+            const auto collapsedRequest = SidePanelRevealForTabMenuPick(true, true, L"x");
+            CHECK(collapsedRequest.expand && collapsedRequest.aiViewKept && !collapsedRequest.leaveAiView,
+                  "tab menu reveal: a kept AI view still expands, so the user sees the request that kept the cards away");
+        }
     }
 
     // By Folder's PICK HISTORY (its hover submenu, SIDE_PANEL.md section 2l "The By Folder submenu"; the user's request of

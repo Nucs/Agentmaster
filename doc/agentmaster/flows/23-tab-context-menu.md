@@ -42,6 +42,7 @@ command does; the deeper behavior of Deactivate, Close and the strip lives in [0
 | Move to Idle/Done · Move to Waiting-for-you | by state | — | Waiting / Error → "Move to Idle/Done"; Idle / Done → "Move to Waiting-for-you"; Running / Needs-approval → hidden |
 | Favorite · Unfavorite | ✓ | — | the label follows the star |
 | Tags | ✓ | — | |
+| Filter ▸ | ✓ | — | 2026-11-14, NOT BUILT: the side panel card menu's Filter lines for this session (Folder ▸ — a click on Folder itself picks the whole working folder —, State, the tags or Untagged, Branch, Fork family; Pause / Resume filter and Clear all filters while the panel's row holds a chip); a pick filters this window's side panel and brings its cards on screen — TCM-10 |
 | Split tab | ✓ | ✓ | |
 | Move tab ▸ | ✓ | ✓ | Move tab to new window · Move right · Move left · Move to start · Move to end |
 | Change tab color | ✓ | ✓ | disabled in the "Remove colors" mode |
@@ -293,6 +294,42 @@ between the board's columns without touching its claude.
 - **E2 Closing the last tab** → the window stays on its Agent Manager page (MGR-03).
 - **E3 Closing onto dormant neighbors** → the page shows instead of waking one (TAB-04).
 - **E4 Close ▸ Of Same Folder** → TAB-03.
+
+### TCM-10 · Filter ▸ narrows the side panel to sessions like this tab's
+
+> **Since** 2026-11-14 (NOT BUILT) · **P1** · **Needs** F-S2 (two sessions in two folders A and B, in different states;
+> one of them tagged), a shell tab · **Spec** SIDE_PANEL.md §2l *The Folder line's own click, and the tab menu's
+> Filter*; the lines themselves: SP-17
+
+**Promise.** A session tab's menu has **Filter ▸** right under Tags, with exactly the lines a side panel card's Filter
+offers for that session; a pick filters THIS window's side panel the way the card's pick does (it starts the filter
+over; the line that is the whole filter shows ✓ and drops it), and brings the cards on screen: a collapsed panel
+expands, and the AI search view goes back to the cards — unless its box holds a request not sent yet, which is never
+emptied (the view then stays, the filter set behind it).
+
+**Phases**
+1. **Where it is.** *Do:* right-click A's tab. *Expect:* "Filter" (`am.tabmenu.filter`) right under Tags; its lines
+   are SP-17 phase 1's, with the stem `am.tabmenu.filter` (`…folder`, `…state`, `…tag.<folded name>` or `…untagged`,
+   `…branch`, `…family`). *Do:* right-click the shell tab. *Expect:* no Filter line.
+2. **A pick.** *Do:* A's tab ▸ Filter › State. *Expect:* the menu closes; the side panel's row shows one chip, A's
+   state; `[nav] sidepanel filter tab menu: start over with state -> 1 filter on`.
+3. **Folder's own click.** *Do:* A's tab ▸ Filter › click Folder (no waiting). *Expect:* one chip, A's folder (with its
+   subfolders); `[nav] sidepanel filter tab menu: the Folder line's own click`. *Do:* open the menu again. *Expect:*
+   "✓ Folder" (ItemStatus "checked"); a click on it drops the filter.
+4. **Collapsed.** *Do:* collapse the panel (⋯ ▸ Collapse); A's tab ▸ Filter › State. *Expect:* the panel expands with
+   the filter applied; `[nav] sidepanel expand`.
+5. **The AI view.** *Do:* turn the AI toggle on with an empty box; B's tab ▸ Filter › State. *Expect:* the cards come
+   back, filtered (`sidepanel ai off box=0`). *Do:* AI on again, type a request without sending it; A's tab ▸ Filter ›
+   Clear all filters (set a filter first if none). *Expect:* the AI view stays with the request in the box; `[nav]
+   sidepanel filter tab menu: the AI view stays (its box holds a request of N characters)`; AI off shows the cards with
+   no filter.
+6. **The two links.** *Do:* with a filter set, A's tab ▸ Filter › Pause filter. *Expect:* the row is paused (SP-15);
+   the line now reads Resume filter.
+
+**Edge cases**
+- **E1 A dormant tab** → its menu has Filter (its session is open); the pick does not start its claude.
+- **E2 A tab of another window** → its Filter filters THAT window's side panel, never this one's.
+- **E3 A Codex tab** → Filter is offered (a managed session), with the lines its facts allow.
 
 ---
 

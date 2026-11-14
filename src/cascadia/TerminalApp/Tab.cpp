@@ -2527,6 +2527,27 @@ namespace winrt::TerminalApp::implementation
         }
 
         {
+            // "Filter ▸" (Agentmaster, SIDE_PANEL.md §2l "The tab menu's Filter"; the user's request of 2026-11-14: "The
+            // filter, support that for the top tabs bar right click menu context, place below Tags. The filter from top bar
+            // works exactly like filter in card sidemenu menu items") — the side panel card menu's Filter lines for THIS
+            // tab's session: its folder and the folders above it (a click on Folder itself picks the whole working folder),
+            // its state, its tags, its branch, its fork family, and Pause / Resume and Clear while the panel's filter row
+            // holds a chip. A pick narrows the SIDE PANEL's cards of this window and brings them on screen.
+            // Built EMPTY and COLLAPSED: the page fills it and shows it at every open (TerminalPage::_SidePanelFillTabFilterMenu,
+            // from the flyout's Opening — a managed agent-session tab only, like "Tags"), because each line is the session's
+            // fact and the panel's filter as they are at that moment. Its tooltip and AutomationId are set by that fill too
+            // (through the islands-safe AgentSetTip, never a build-time ToolTip): a tab whose menu never opens carries
+            // neither, and the strip holds hundreds of tabs (per-tab XAML is multiplied by them).
+            Controls::FontIcon filterSymbol;
+            filterSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            filterSymbol.Glyph(L"\xE71C"); // Filter — the glyph of the side panel's funnel and of its card menu's Filter line
+
+            _filterSubMenu.Text(L"Filter");
+            _filterSubMenu.Icon(filterSymbol);
+            _filterSubMenu.Visibility(WUX::Visibility::Collapsed); // shown only on a managed agent-session tab (page-driven)
+        }
+
+        {
             // "Activate Tab (Shift+Click)" (Agentmaster, eager-init) — start this tab's DORMANT session's
             // claude IN PLACE (TermControl::InitializeWithSize), without switching the view. A WT background/
             // restored tab spawns its child lazily, only when first SHOWN, so a window-restored tab never
@@ -2721,6 +2742,7 @@ namespace winrt::TerminalApp::implementation
         contextMenuFlyout.Items().Append(_triageMoveMenuItem); // Agentmaster (Waiting-for-you + Error triage): status-adaptive "Move to Idle/Done" / "Move to Waiting-for-you" — session-only, beside "Mark Unread"
         contextMenuFlyout.Items().Append(_favoriteMenuItem); // Agentmaster (FAVORITES.md): "Favorite"/"Unfavorite" — session-only, beside "Mark Unread"
         contextMenuFlyout.Items().Append(_tagMenuItem); // Agentmaster (bookmark tags): "Tag" — session-only, beside "Favorite"
+        contextMenuFlyout.Items().Append(_filterSubMenu); // Agentmaster (SIDE_PANEL.md §2l "The tab menu's Filter"): "Filter ▸" right under "Tags" — session-only, its lines filled by the page at every open
         contextMenuFlyout.Items().Append(Controls::MenuFlyoutSeparator{}); // Agentmaster: separator above "Split tab" — sets rename/session ops apart from the layout group
         contextMenuFlyout.Items().Append(_splitTabMenuItem);
         _AppendMoveMenuItems(contextMenuFlyout);
@@ -2977,6 +2999,16 @@ namespace winrt::TerminalApp::implementation
         ASSERT_UI_THREAD();
 
         _tagMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+    }
+
+    // Agentmaster (SIDE_PANEL.md §2l "The tab menu's Filter"): the "Filter ▸" line right under "Tags", handed to the page,
+    // which fills its lines, its tooltip and its AutomationId and shows or hides it at every flyout-open
+    // (TerminalPage::_SidePanelFillTabFilterMenu) — the lines are the side panel's, built by the page's one Filter-menu
+    // builder, so a tab's Filter and a side panel card's can never drift apart. No UI-thread assert: handing out the
+    // reference touches no XAML property (the page's fill, on the UI thread, does).
+    winrt::Windows::UI::Xaml::Controls::MenuFlyoutSubItem Tab::AgentFilterSubMenu() const noexcept
+    {
+        return _filterSubMenu;
     }
 
     // Agentmaster (eager-init): show/hide the "Activate Tab" item — shown ONLY when this tab's managed

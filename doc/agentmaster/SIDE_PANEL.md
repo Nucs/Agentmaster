@@ -1504,7 +1504,7 @@ same, in the window that hosts the card's tab.
     strip of the window they were used in.
   - No `[exc] _SidePanelLaunchNextToTab` line in hooks.log.
 
-### 2l. The filters — the funnel, its panel, By Folder and the chips row (2026-11-08; in dev 0.0.1.44 and production 0.8.0.12) — By Folder's hover submenu (2026-11-10, NOT BUILT yet) — Pause filter, Resume filter and a chip's click (2026-11-12, NOT BUILT yet) — the card's Filter menu (2026-11-12, NOT BUILT yet)
+### 2l. The filters — the funnel, its panel, By Folder and the chips row (2026-11-08; in dev 0.0.1.44 and production 0.8.0.12) — By Folder's hover submenu (2026-11-10, NOT BUILT yet) — Pause filter, Resume filter and a chip's click (2026-11-12, NOT BUILT yet) — the card's Filter menu (2026-11-12, NOT BUILT yet) — the Folder line's own click and the tab menu's Filter (2026-11-14, NOT BUILT yet)
 
 The user's request: "In sidemenu, we need to introduce ability to filter, Filter by folder and even have like the +, but a
 button for FILTER and in it have menu appear on click and then By Folder -> <the picker of +>. The row below the filter with
@@ -1997,7 +1997,9 @@ suggestions were shown as mockups; their answers the same day:
     WHERE it is, dim, at the line's end, then **`<folder> (exactly)`** for the card's folder without its subfolders. The
     folder is the card's EFFECTIVE one (the one its own folder line shows: the inferred folder while it infers, else the
     working folder). The drive's or the share's root is not offered — a filter on `K:\` lists nearly everything — unless
-    it is the card's own folder; at most eight levels. A card with no absolute folder has no Folder line.
+    it is the card's own folder; at most eight levels. A card with no absolute folder has no Folder line. A click on
+    the Folder line ITSELF picks the first of them (2026-11-14: *The Folder line's own click, and the tab menu's Filter*
+    below).
     The dim hint is the folder's path, a deep one cut in the middle (`SidePanelFolderHint`, at most 32 characters: the
     root with the first folder under it, an ellipsis, then as many whole trailing folders as fit —
     `K:\source\…\AgentMaster\tests`). ⚠ Why a cap: a menu is at most 456 DIPs wide and a menu line gives its hint
@@ -2121,6 +2123,108 @@ suggestions were shown as mockups; their answers the same day:
   - A folder picked from a card is on top of By Folder's submenu at its next open.
   - The two new chips dim on a click and on Pause filter, and their ✕ drops them.
   - No `[exc] … card menu …` / `_SidePanelApplyCardFilterPick` / `fork family` line in hooks.log.
+
+#### The Folder line's own click, and the tab menu's Filter (2026-11-14, NOT BUILT yet)
+
+The user's two requests of 2026-11-14:
+1. "In sidemenu, right clicking a card and clicking Filter->, If i click Folder -> then i should get the full working dir
+   opened, i dont have to go to -> items."
+2. "The filter, support that for the top tabs bar right click menu context, place below Tags. The filter from top bar
+   works exactly like filter in card sidemenu menu items."
+
+Their answers the same day (asked with mockups):
+
+| Question | Answer |
+|---|---|
+| What a click on **Folder** itself filters by (resting on it still opens its submenu) | **Folder + subfolders**: the session's full working folder and every folder under it, the same as the submenu's first line (over "Exactly that folder") |
+| What the tab menu's Filter does while the panel cannot show its cards (collapsed, or the AI search view on) | **Show the result**: a pick expands a collapsed panel and switches the AI view back to the cards; an unsent AI request in the box is never lost, so the AI view then stays (over "Just filter", and over "Hide Filter then") |
+
+```
+ a tab's right-click menu                      the Filter line's lines (the side panel card's, for this tab's session)
+ Rename Tab                                    📁 Folder                 ›   ← a CLICK picks the full working folder
+ Copy                          ›                                                (with subfolders); resting opens the
+ Show Transcript                                                                submenu: the folders above it, "(exactly)"
+ Mark Unread                                   ●  State: Waiting for you
+ Open In Explorer                              🏷 Tag: release
+ Favorite                                      ⎇  Branch: agentmaster
+ Tags                                          ⧉  Fork family    3 sessions
+ Filter                        ›  ─────────►   ───────────────────────────
+ ───────────────                               ⏸  Pause filter       (while the row holds a chip)
+ Split Tab                                     ✕  Clear all filters
+```
+
+- **The Folder line's own click.** A click on **Folder** (in a card's menu and in a tab's) closes the menu and picks the
+  session's own folder WITH its subfolders (`SidePanelFolderLinePick`: the first level of `SidePanelFolderLevels` —
+  the very pick of the submenu's first line). Like every line it starts the filter over, and it toggles: when that
+  folder already is the whole filter, Folder shows **✓** (the submenu's first line does too: both name one filter), and
+  a click drops the filter. Its tooltip names the folder the click picks. Resting on the line still opens the submenu
+  (the item's own hover delay), for the folders above it and "(exactly)".
+  - **How.** ⚠ A `MenuFlyoutSubItem` raises no Click: its class handlers take the press and open the submenu at the
+    release, both marked handled, both before any handler of ours. So the line watches the pointer itself, with
+    handledEventsToo: a LEFT press by a mouse or a pen arms; the release of that button on the line, while armed, picks
+    — the whole menu is closed (`MenuFlyout::Hide`, which takes the submenu the item just opened with it) and the pick
+    runs one tick later through `_SidePanelRunMenuCommand`, like every line. Leaving the line or a cancelled pointer
+    disarms, and every release ends the arm, so a press that began on another line never picks here; a release off the
+    line's bounds does not pick either. (Not a lost capture: an item that captured the pointer would lose it as it
+    handles the release, before our handler, and a disarm there would eat the click.) The handlers hold the menu WEAKLY
+    (it owns the line: a strong capture would be a cycle C++/WinRT never frees), the page weakly, the pick by value.
+  - **What keeps the item's own behavior:** a finger's TAP (a finger cannot hover, so a tap is its only way to the
+    submenu's other lines) and the keyboard (Enter, Space and → open the submenu, whose first line is this very pick).
+- **The tab menu's Filter.** A tab's right-click menu has **Filter ▸** right under **Tags** (`Tab::AgentFilterSubMenu`,
+  `_filterSubMenu`), shown only on a tab that hosts a managed session, like Tags. Its lines are the side panel card
+  menu's, built by the same filler for the tab's session (`_SidePanelFillFilterLines`, which `_SidePanelAppendFilterItems`
+  now wraps), so the two menus cannot drift apart. They filter the side panel of the window the tab is in.
+  - **Filled at every open.** The tab builds the line EMPTY and collapsed with its menu; the flyout's Opening (in
+    `_RegisterTabEvents`) calls `_SidePanelFillTabFilterMenu`, which drops the last open's lines, fills them from the
+    session and the filter as they are now, and shows the line — or hides it for a shell tab, a session the registry no
+    longer holds open, or a panel not built yet. Its tooltip and AutomationId are set by that fill (`AgentSetTip`, never
+    a build-time ToolTip): a tab whose menu never opens carries neither (the strip holds hundreds of tabs). The last
+    open's lines stay until the next open (no clear at the menu's Closed: its order against a quick re-open is not
+    guaranteed, and a clear landing after the next fill would leave an empty Filter).
+  - **Show the result** (`_SidePanelShowCardsForTabMenu`, the pure decision `SidePanelRevealForTabMenuPick`): after a
+    line of the tab menu acted — a pick, a drop, Pause / Resume filter, Clear all filters —, the AI search view goes back
+    to the session cards (the AI mode off, as its toggle would: saved for the window and as the default), unless the AI
+    box holds a request that is not only blanks: switching the view off would make that text the filter box's text, and
+    the pick's start over would empty it. The view then stays, the filter set behind it, and a `[nav]` line gives the
+    request's length. Then a collapsed panel expands (saved the same way, like the strip's chevron) — also when the AI
+    view stayed, so the user sees why no cards came. The AI view goes first: its close catches the card list up, and an
+    expand that came first would refresh the AI results for nothing. A line of a CARD's menu never does this (a card's
+    menu is only reachable while the cards show).
+  - **The scope.** The tab is in this window, so its session is in the panel's LOCAL scope; the Fork family line counts
+    the family's cards in the panel's scope, as in a card's menu.
+- **Which menu** (`SidePanelFilterMenu`: `Card`, `Tab`): every line carries it by value into its deferred click.
+  `SidePanelFilterMenuName` names it in the nav trail ("card menu" / "tab menu"); `SidePanelFilterMenuAutomationStem`
+  gives the ids' stem ("am.side.cardFilter", unchanged / "am.tabmenu.filter").
+- **Logs:** `[nav] sidepanel filter <card menu | tab menu>: the Folder line's own click`, then the pick's own line
+  (`sidepanel filter tab menu: start over with folder (with subfolders) -> 1 filter on`, `... tab menu: drop ...`,
+  `... clear (tab menu) -> 0 filters on`); for a tab menu line that brought the cards on screen, `sidepanel ai off
+  box=0` and / or `sidepanel expand`, or `sidepanel filter tab menu: the AI view stays (its box holds a request of N
+  characters)`. A failure is an `[exc] side panel filter menu: the Folder line's press / click`,
+  `_SidePanelFillTabFilterMenu`, `_SidePanelShowCardsForTabMenu` or `side panel more menu: tab menu: …` line.
+- **UI Automation** (E2E_TESTING.md §6.3): a card's menu keeps its ids; the Folder line's ItemStatus is now "checked"
+  while its own pick is the whole filter. A tab's menu: `am.tabmenu.filter` and its lines `am.tabmenu.filter.{folder,
+  folder.<N>, folder.exact, state, tag.<folded name>, untagged, branch, family, pause, clear}`.
+- **Tested** (no build): the m5 harness on an isolated copy of HEAD's TerminalApp folder plus the two changed engine
+  files — 13,101 checks, 3 failures, the known `TestTaskbarBadge` ones (`TestSidePanelFilters`: the Folder line's pick
+  against the first line, its check and its drop, the menus' names and stems, the reveal's seven cases); `cl /Zs` of
+  all 20 `TerminalAppLib` units that include a changed header (`Tab.cpp`, `TerminalPage.cpp` and
+  `TerminalPage.AgentSidePanel.cpp` among them) from a shadow of HEAD plus the changed files, with the clean Release
+  worktree's recorded lines and PCH, and agentmaster-cli's `Persistence.cpp` at /W4 /WX — all pass; four negative
+  controls fail at their planted lines (C2039, C2338 ×3). ⚠ NOT tested: anything on screen.
+- **Check after the build** (purged: `Tab.h` gained a data member):
+  - Right-click a side panel card ▸ Filter ▸ click **Folder** (no waiting): the menu closes and the row shows ONE chip,
+    the card's folder; sessions in its subfolders are listed. Right-click again: "✓ Folder", and the submenu's first
+    line is checked too; a click on Folder drops the filter.
+  - Rest on Folder: the submenu opens as before; its lines pick as before. Press Enter or → on Folder: the submenu
+    opens, nothing is picked. On a touch screen, a tap on Folder opens the submenu.
+  - Press on another line, drag onto Folder, let go there: nothing is picked. Press on Folder, drag off it, let go:
+    nothing is picked.
+  - Right-click a Claude tab: **Filter ›** right under Tags, with the card's lines for that session; a shell tab's menu
+    has no Filter. Each line does what the card's does, and the nav line says "tab menu".
+  - Collapse the panel, then pick from a tab's Filter: the panel expands with the filter applied. Turn the AI view on
+    with an empty box, pick: the cards come back filtered (AI off). Type a request without sending it, pick: the AI view
+    stays with the request in the box; turning AI off later shows the filter.
+  - No `[exc] … Folder line …` / `_SidePanelFillTabFilterMenu` / `_SidePanelShowCardsForTabMenu` line in hooks.log.
 
 ### 2m. The collapsed strip hides itself — it floats in when the pointer comes within 40 DIPs (2026-11-12, NOT BUILT yet)
 
@@ -2615,6 +2719,14 @@ below).
   belt; the two chips' glyphs and ids), `TerminalPage.h` (the fork family's cache members and the list's stamps, the
   declarations, a forward declaration), `tests/tests_sidepanel.cpp`
   (`TestSidePanelFilters`), `e2e/amdriver/ui/sidepanel.py` (`CARD_FILTER_ID` and its lines' ids).
+  The Folder line's own click and the tab menu's Filter (§2l): `AgentMaster/SidePanelFilters.h`
+  (`SidePanelFolderLinePick`, `SidePanelFilterMenu` with `SidePanelFilterMenuName` / `SidePanelFilterMenuAutomationStem`,
+  `SidePanelTabMenuReveal` / `SidePanelRevealForTabMenuPick`), `TerminalPage.AgentSidePanel.cpp` (`_SidePanelFillFilterLines`
+  — the one builder of both menus' lines, the Folder line's pointer handlers —, `_SidePanelAppendFilterItems` around it,
+  `_SidePanelFillTabFilterMenu`, `_SidePanelShowCardsForTabMenu`; `_SidePanelApplyCardFilterPick` and
+  `_SidePanelClearAllFilters` take the menu), `TerminalPage.h` (the declarations, the opaque `SidePanelFilterMenu`),
+  `Tab.{h,cpp}` (`_filterSubMenu` right under Tags, `AgentFilterSubMenu`), `TerminalPage.cpp` (the tab menu's Opening
+  fills it), `tests/tests_sidepanel.cpp` (`TestSidePanelFilters`).
   The self-hiding collapsed strip (§2m): `AgentMaster/SidePanelStripReveal.h` (near, and the strip's next state for one
   pointer event — pure; new), `TerminalPage.AgentSidePanel.cpp` (`_sidePanelStripHost` built in `_InitAgentSidePanel` with
   its band and fade, the two `ContentArea` pointer handlers, the collapsed column at 0 and the host's side in

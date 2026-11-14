@@ -79,6 +79,11 @@ namespace Agentmaster
     struct SidePanelFilterFacts; // Agentmaster (SIDE_PANEL.md §2l): SidePanelFilters.h — what the filters read of one session (the return type of _SidePanelFilterFactsOf; complete in TerminalPage.AgentSidePanel.cpp)
     struct SidePanelFilterChip; // Agentmaster (SIDE_PANEL.md §2l): SidePanelFilters.h — one chip of the chips row (the parameter of _SidePanelToggleFilterChip; complete in TerminalPage.AgentSidePanel.cpp)
     struct SidePanelCardPick; // Agentmaster (SIDE_PANEL.md §2l "The card's Filter menu"): SidePanelFilters.h — one line of a card's Filter menu (the parameter of _SidePanelApplyCardFilterPick; complete in TerminalPage.AgentSidePanel.cpp)
+    // Agentmaster (SIDE_PANEL.md §2l "The tab menu's Filter"): SidePanelFilters.h — which menu a Filter line sits in, a side
+    // panel card's or a tab's (a by-value parameter of the Filter menu's members). OPAQUE like SidePanelFacet above: its
+    // underlying type is fixed, so the type is complete; only TerminalPage.AgentSidePanel.cpp, which includes the header,
+    // names its values. ⚠ The underlying type must stay the header's (uint8_t), or the two declarations disagree (C3433).
+    enum class SidePanelFilterMenu : uint8_t;
 }
 
 namespace winrt::TerminalApp::implementation
@@ -4026,20 +4031,68 @@ namespace winrt::TerminalApp::implementation
         // then, while the row holds a chip, Pause filter / Resume filter and Clear all filters. The line that is the whole
         // filter is checked. Every click runs one tick later (_SidePanelRunMenuCommand). Appends nothing for a session
         // that is unknown or closed since its card was drawn.
+        // The lines themselves are _SidePanelFillFilterLines' (shared with a tab's menu); this builds the Filter line around
+        // them and appends it only when they were filled.
         //   menu - the session menu being filled.
         //   id   - the card's session.
         //   throws - what building XAML or the registry read throws (the session menu contains it and builds the rest).
         void _SidePanelAppendFilterItems(winrt::Windows::UI::Xaml::Controls::MenuFlyout& menu, const std::wstring& id);
+        // Fill a Filter submenu with its lines for session `id` — the ONE builder of both menus that hold it (SIDE_PANEL.md
+        // §2l: a side panel card's, and a tab's since the user's request of 2026-11-14, "works exactly like filter in card
+        // sidemenu menu items"): Folder ▸ (the session's effective folder and each folder above it, then "<folder>
+        // (exactly)"), State, one line per tag (or Untagged), Branch, Fork family — each read from the session AS IT IS NOW
+        // — then, while the filter row holds a chip, Pause filter / Resume filter and Clear all filters. The line that is
+        // the whole filter is checked; every click runs one tick later (_SidePanelRunMenuCommand), carrying `from`.
+        // The Folder line answers a mouse or pen CLICK on itself (the user's request of 2026-11-14: "If i click Folder ->
+        // then i should get the full working dir opened, i dont have to go to -> items"): it closes `rootMenu` and picks the
+        // session's own folder with its subfolders (SidePanelFolderLinePick); resting on it, the keyboard and a finger's
+        // tap still open its submenu. ⚠ A MenuFlyoutSubItem has no Click: the line watches its own press and release
+        // (handledEventsToo), and holds `rootMenu` weakly (the menu owns the line).
+        //   lines    - the Filter submenu's Items, empty (the caller's Filter line).
+        //   id       - the session the lines describe (a card's, or the right-clicked tab's).
+        //   from     - which menu: the nav trail's words, the AutomationId stem (SidePanelFilterMenuAutomationStem), and
+        //              whether a pick brings the cards on screen (the tab menu's, _SidePanelShowCardsForTabMenu).
+        //   rootMenu - the right-click menu the Filter line sits in: the Folder line's click closes it.
+        //   returns  - true when lines were added (a live session: the Fork family line is always there); false when the
+        //              panel is not built, there is no registry, or the session is unknown or closed — the caller then
+        //              shows no Filter line.
+        //   throws   - what building XAML or the registry read throws; `lines` may then hold part of the lines (each caller
+        //              drops or hides its Filter line).
+        bool _SidePanelFillFilterLines(const winrt::Windows::Foundation::Collections::IVector<winrt::Windows::UI::Xaml::Controls::MenuFlyoutItemBase>& lines,
+                                       const std::wstring& id,
+                                       ::Agentmaster::SidePanelFilterMenu from,
+                                       const winrt::Windows::UI::Xaml::Controls::MenuFlyout& rootMenu);
+        // The TAB menu's "Filter ▸" (SIDE_PANEL.md §2l "The tab menu's Filter"; the user's request of 2026-11-14: "The
+        // filter, support that for the top tabs bar right click menu context, place below Tags"): refill the tab's Filter
+        // line (Tab::AgentFilterSubMenu, right under Tags) with the lines of `sid`, and show it — or hide it for a tab that
+        // hosts no managed session (like Tags), for a session the registry no longer holds open, and while the side panel
+        // is not built. Called from the tab menu's Opening (TerminalPage::_RegisterTabEvents), so every open reads the
+        // session and the filter as they are then. Sets the line's tooltip and AutomationId ("am.tabmenu.filter") at the
+        // fill: a tab whose menu never opens carries neither.
+        //   tab - the right-clicked tab.
+        //   sid - its managed session (_ClaudeSessionForTab); "" = none: the line is hidden.
+        // Never throws: a failure is logged and the line hidden (a half-filled Filter would offer only some lines).
+        void _SidePanelFillTabFilterMenu(Tab& tab, const std::wstring& sid) noexcept;
+        // Bring the session cards on screen after a line of a TAB's Filter menu acted (the user's pick of 2026-11-14, "Show
+        // the result"; SidePanelRevealForTabMenuPick): the AI search view goes back to the cards (the AI mode off, as its
+        // toggle would: saved for this window and as the default), unless the AI box holds a request the user has not sent
+        // — the view then stays, and one [nav] line says why; and a collapsed panel expands (saved the same way). Called
+        // AFTER the line's change, so the list update the change owes is paid once, on the list the user then sees.
+        // Never throws (logged; the filter is set either way).
+        void _SidePanelShowCardsForTabMenu() noexcept;
         // A click on a line of the card's Filter menu — the user's "Start over": the filter becomes EXACTLY that pick
         // (every other chip dropped, the typed text emptied, the pause lifted), or, when it already was exactly that
         // pick, is dropped (SidePanelApplyCardPick). A folder picked this way joins By Folder's pick history, like a
         // folder picked in the folder card; a fork family asks the session index to refresh. Through
-        // _SidePanelSetFilters. Never throws (a failure is logged and nothing changes).
+        // _SidePanelSetFilters. From a TAB's menu, the cards then come on screen (_SidePanelShowCardsForTabMenu) when the
+        // pick changed the record. Never throws (a failure is logged and nothing changes).
         //   pick - the line (plain values captured when the menu was filled).
-        void _SidePanelApplyCardFilterPick(const ::Agentmaster::SidePanelCardPick& pick) noexcept;
-        // Drop every filter and empty the filter box — what the chips row's Clear does — from the card menu's "Clear all
-        // filters". Never throws (logged).
-        void _SidePanelClearAllFilters() noexcept;
+        //   from - the menu the line sat in: named in the [nav] line ("sidepanel filter tab menu: start over with ...").
+        void _SidePanelApplyCardFilterPick(const ::Agentmaster::SidePanelCardPick& pick, ::Agentmaster::SidePanelFilterMenu from) noexcept;
+        // Drop every filter and empty the filter box — what the chips row's Clear does — from a Filter menu's "Clear all
+        // filters"; from a TAB's menu, the cards then come on screen (_SidePanelShowCardsForTabMenu). Never throws (logged).
+        //   from - the menu the line sat in: named in the [nav] line ("clear (card menu)", "clear (tab menu)").
+        void _SidePanelClearAllFilters(::Agentmaster::SidePanelFilterMenu from) noexcept;
         // Remember the fork links a list update's snapshot shows (a fork that still carries its parent on the registry),
         // so they outlive the registry clearing them at the fork's first turn. Bounded: past 4,096 links the map starts
         // over (the session index holds every link by then). Never throws (a failure is logged; a link is missed until the

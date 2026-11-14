@@ -3096,6 +3096,12 @@ namespace winrt::TerminalApp::implementation
                     tab->SetAgentOpenInExplorerVisible(isSession); // Agentmaster: "Open In Explorer" is session-only too (opens the session's EFFECTIVE work dir — inferred → cwd — like the overlay Open Path)
                     tab->SetAgentFavoriteState(isSession, isSession && ::Agentmaster::IsSessionFavorite(sid)); // Agentmaster (FAVORITES.md): session-only; label reflects the current star
                     tab->SetAgentTagVisible(isSession); // Agentmaster (bookmark tags): "Tag" is session-only too
+                    // Agentmaster (SIDE_PANEL.md §2l "The tab menu's Filter"; the user's request of 2026-11-14): "Filter ▸"
+                    // right under Tags — the side panel card menu's Filter lines for THIS tab's session (its folder and the
+                    // folders above it, its state, its tags, its branch, its fork family; Pause / Resume and Clear while the
+                    // panel's filter row holds a chip), filled now from the session and the filter as they are, and hidden on
+                    // a tab with no managed session (sid empty), like Tags. Never throws (a failure hides the line, logged).
+                    page->_SidePanelFillTabFilterMenu(*tab, sid);
                     // Agentmaster (tab color modes — NoColor/"Remove colors"): NO tab can be
                     // recolored while the mode loads no colors — shell and Manager tabs included
                     // ("remove colors" is strip-wide; a color set anyway would only be parked by

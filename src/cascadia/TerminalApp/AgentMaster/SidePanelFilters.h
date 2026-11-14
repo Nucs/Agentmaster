@@ -41,6 +41,10 @@
 // "Parent folders too", "Branch and fork family" — two NEW facets, set from a card alone), plus Pause filter / Resume
 // filter and Clear ("Pause / Resume and Clear"); a pick STARTS THE FILTER OVER — it replaces the whole filter with that
 // one thing, every other chip dropped ("Start over"); the line sits under Tags ("Under Tags").
+// Two more requests of 2026-11-14: a click on the Folder line ITSELF picks the card's whole working folder with its
+// subfolders, without going into its submenu (SidePanelFolderLinePick); and a TAB's right-click menu holds the same Filter
+// line under its Tags, for the tab's session, which also brings the cards on screen (SidePanelFilterMenu,
+// SidePanelRevealForTabMenuPick).
 //
 // WHAT lives here (no WinRT, no XAML, no file IO): the facets and their bits, the six states and the four "active within"
 // windows the panel offers, the filter record and its edits, the per-session facts the predicate reads, the compiled
@@ -57,6 +61,7 @@
 #include <algorithm>
 #include <cstddef> // std::ptrdiff_t — a folder chip's erase offset
 #include <cstdint>
+#include <cwctype> // std::iswspace — an AI box that holds only blanks holds no request (SidePanelRevealForTabMenuPick)
 #include <string>
 #include <string_view>
 #include <unordered_map> // the fork links' adjacency (SidePanelForkFamily)
@@ -1859,6 +1864,97 @@ namespace Agentmaster
         }
         filters = std::move(only);
         return SidePanelCardPickOutcome::StartedOver;
+    }
+
+    // The pick a click on the FOLDER LINE ITSELF makes — the line that opens the Folder submenu (the user's request of
+    // 2026-11-14: "If i click Folder -> then i should get the full working dir opened, i dont have to go to -> items", and
+    // their pick the same day, from mockups: "Folder + subfolders"). The card's OWN folder — the first level, its full
+    // working folder — WITH every folder under it: the very pick of the submenu's first line, so the Folder line and that
+    // first line are checked together (SidePanelCardPickIsWholeFilter), and a click on either drops the filter they are.
+    // Resting on the line still opens the submenu, for the folders above it and "exactly".
+    //   levels  - the Folder submenu's lines (SidePanelFolderLevels), nearest first.
+    //   returns - the pick; with no level, a Folder pick that names nothing (SidePanelApplyCardPick then changes nothing).
+    //   throws  - std::bad_alloc (the path's copy).
+    [[nodiscard]] inline SidePanelCardPick SidePanelFolderLinePick(const std::vector<std::wstring>& levels)
+    {
+        SidePanelCardPick pick;
+        pick.kind = SidePanelCardPickKind::Folder;
+        pick.includeSubfolders = true; // the user's pick, and the folder filter's default everywhere (the folder card's check box)
+        if (!levels.empty())
+        {
+            pick.value = levels.front(); // the card's own folder: SidePanelFolderLevels lists it first
+        }
+        return pick;
+    }
+
+    // ===== The TAB menu's Filter (SIDE_PANEL.md §2l "The tab menu's Filter") ============================================
+    // The user's request of 2026-11-14: "The filter, support that for the top tabs bar right click menu context, place below
+    // Tags. The filter from top bar works exactly like filter in card sidemenu menu items." So a tab's right-click menu holds
+    // the same Filter line, under Tags, with the same lines and the same rules, for the session of the right-clicked tab.
+    // Their pick the same day (mockups) for a panel that cannot show its cards when the line is picked — collapsed, or
+    // covered by the AI search view: "Show the result" — the pick expands the panel and switches the AI view back to the
+    // cards, unless the AI box holds a request the user has not sent (the view then stays: switching it off would turn that
+    // text into the filter box's text, and the pick's start over would empty it — the user's words lost).
+
+    // Which menu a line of the Filter menu sits in. Plain data: a line captures it by value and hands it to the page with its
+    // pick, so the page names the menu in the nav trail and knows whether to bring the cards on screen.
+    enum class SidePanelFilterMenu : uint8_t
+    {
+        Card, // a side panel SESSION card's right-click menu (the shared session menu's afterTags hook)
+        Tab, // a tab's right-click menu in the tab strip (Tab::AgentFilterSubMenu, filled at every open)
+    };
+
+    // The menu's name in the [nav] trail and in a failure's log line: "card menu" or "tab menu" (the card menu's lines read
+    // "sidepanel filter card menu: start over with ...", as before this enum existed).
+    //   menu    - the menu.
+    //   returns - a static string (never empty).
+    //   throws  - nothing.
+    [[nodiscard]] constexpr std::wstring_view SidePanelFilterMenuName(SidePanelFilterMenu menu) noexcept
+    {
+        return menu == SidePanelFilterMenu::Tab ? std::wstring_view{ L"tab menu" } : std::wstring_view{ L"card menu" };
+    }
+
+    // The UI Automation id of the menu's Filter line, which is also the STEM of its lines' ids ("<stem>.folder",
+    // "<stem>.folder.<N>", "<stem>.folder.exact", "<stem>.state", "<stem>.tag.<folded name>", "<stem>.untagged",
+    // "<stem>.branch", "<stem>.family", "<stem>.pause", "<stem>.clear"; E2E_TESTING.md §6.3). A card's menu keeps the ids it
+    // had ("am.side.cardFilter"); a tab's is "am.tabmenu.filter". ⚠ The e2e driver finds the lines by these ids: add a stem,
+    // never rename one.
+    //   menu    - the menu.
+    //   returns - a static string (never empty).
+    //   throws  - nothing.
+    [[nodiscard]] constexpr std::wstring_view SidePanelFilterMenuAutomationStem(SidePanelFilterMenu menu) noexcept
+    {
+        return menu == SidePanelFilterMenu::Tab ? std::wstring_view{ L"am.tabmenu.filter" } : std::wstring_view{ L"am.side.cardFilter" };
+    }
+
+    // What the side panel must do so that a Filter line picked from a TAB's menu shows its result (the user's "Show the
+    // result"). The caller applies the pick FIRST, then this — so a list update the pick owes is paid once, by the expand or
+    // the AI view's close, on the list as it then is.
+    struct SidePanelTabMenuReveal
+    {
+        bool leaveAiView{ false }; // switch the AI search view back to the session cards (the AI mode off, as its toggle would)
+        bool aiViewKept{ false }; // the AI view stays: its box holds a request the user has not sent (the caller logs why)
+        bool expand{ false }; // expand the collapsed panel (as its strip's chevron would) — also when the AI view stays
+    };
+
+    // Decide SidePanelTabMenuReveal for the panel as it is when the pick runs.
+    //   collapsed - the panel is collapsed to its strip.
+    //   aiMode    - the AI search view covers the card list.
+    //   aiBoxText - the filter box's text, which in AI mode is the request line; read only when aiMode is true. Blanks alone
+    //               are no request: switching the view off keeps them in the box, where they filter nothing.
+    //   returns   - what to do: never leaveAiView and aiViewKept together; both false out of AI mode; expand == collapsed.
+    //   throws    - nothing.
+    [[nodiscard]] inline SidePanelTabMenuReveal SidePanelRevealForTabMenuPick(bool collapsed, bool aiMode, std::wstring_view aiBoxText) noexcept
+    {
+        SidePanelTabMenuReveal reveal;
+        reveal.expand = collapsed;
+        if (aiMode)
+        {
+            const bool holdsRequest = std::any_of(aiBoxText.begin(), aiBoxText.end(), [](wchar_t c) { return !std::iswspace(static_cast<wint_t>(c)); });
+            reveal.leaveAiView = !holdsRequest;
+            reveal.aiViewKept = holdsRequest;
+        }
+        return reveal;
     }
 
     // ===== By Folder's PICK HISTORY and its hover SUBMENU (SIDE_PANEL.md §2l "The By Folder submenu") =====================

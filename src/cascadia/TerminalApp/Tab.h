@@ -207,6 +207,15 @@ namespace winrt::TerminalApp::implementation
         void SetAgentTriageMoveState(bool visible, bool toIdle, bool fromError); // Agentmaster (Waiting-for-you + Error triage): show/hide the status-adaptive "Move to Idle/Done" / "Move to Waiting-for-you" item + set its label/icon by direction (toIdle == this session is Waiting-for-you OR Error, so offer the demote — fromError picks the error-dismissal tooltip; else it is Idle/Done, so offer the plain promote). Managed agent-session tabs only; page-driven at flyout-open
         void SetAgentFavoriteState(bool visible, bool isFavorite); // Agentmaster (FAVORITES.md): show/hide the "Favorite"/"Unfavorite" item + set its label by the session's current star (managed agent-session tabs only; page-driven at flyout-open)
         void SetAgentTagVisible(bool visible); // Agentmaster (bookmark tags): show/hide the "Tag" item (managed agent-session tabs only; page-driven at flyout-open, like Favorite)
+        // Agentmaster (SIDE_PANEL.md §2l "The tab menu's Filter"; the user's request of 2026-11-14: "The filter, support that
+        // for the top tabs bar right click menu context, place below Tags. The filter from top bar works exactly like filter
+        // in card sidemenu menu items"): the "Filter ▸" line right under "Tags". The tab builds it EMPTY and collapsed with
+        // its menu; the page fills it, shows it or hides it at every open (TerminalPage::_SidePanelFillTabFilterMenu, from
+        // the flyout's Opening: a managed session tab only, like Tags), because its lines are the session's facts and the
+        // side panel's filter as they are at that moment — the tab knows neither.
+        //   returns - the line (a member: the same object for the tab's whole life, never null).
+        //   throws  - nothing (a projected object's copy only adds a reference).
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutSubItem AgentFilterSubMenu() const noexcept;
         void SetAgentActivateVisible(bool visible); // Agentmaster (eager-init): show/hide the "Activate Tab" item (shown only when this tab's managed session is DORMANT — its claude hasn't started; page-driven at flyout-open from ConnectionState())
         void SetAgentDeactivateState(bool visible, bool thisTabDormant); // Agentmaster (deactivate): show/hide the "Deactivate ▸" submenu (managed, NON-adopted session tabs only; page-driven at flyout-open) + gray its "Deactivate Tab" item while THIS session is already dormant (nothing running to stop — "Activate Tab" is the offered verb then; the batch items do not follow it, because OTHER tabs may be running — the strip-position ones are gated by tab index in _EnableMenuItems instead)
         // Agentmaster (deactivate — "Deactivate All Idle Tabs"): gray that item of the "Deactivate ▸" submenu while no window
@@ -328,6 +337,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _triageMoveMenuItem{}; // Agentmaster (Waiting-for-you + Error triage): status-adaptive "Move to Idle/Done" / "Move to Waiting-for-you" — member so the page sets its visibility + label/icon per the session's state at flyout-open (collapsed by default)
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _favoriteMenuItem{}; // Agentmaster (FAVORITES.md): "Favorite"/"Unfavorite" — toggle this tab's session star; member so the page sets visibility + label per managed-session-tab (collapsed by default)
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _tagMenuItem{}; // Agentmaster (bookmark tags): "Tag" — open the tag panel for this tab's session; member so the page can show/hide it per managed-session-tab (collapsed by default)
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutSubItem _filterSubMenu{}; // Agentmaster (SIDE_PANEL.md §2l "The tab menu's Filter"): "Filter ▸" right under "Tags" — the side panel card menu's Filter lines for this tab's session; built EMPTY and collapsed (no tooltip, no AutomationId: a tab whose menu never opens carries neither), filled + shown per managed-session tab at every flyout-open by the page (AgentFilterSubMenu → TerminalPage::_SidePanelFillTabFilterMenu)
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _activateSessionMenuItem{}; // Agentmaster (eager-init): "Activate Tab" — start this tab's DORMANT session in place; member so the page shows it only when the session's claude hasn't started (collapsed by default)
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closeOtherTabsMenuItem{};
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closeTabsBeforeMenuItem{}; // Agentmaster: "Close tabs to the left" (the left-hand twin of _closeTabsAfterMenuItem)

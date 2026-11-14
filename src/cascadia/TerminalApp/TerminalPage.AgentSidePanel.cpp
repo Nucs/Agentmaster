@@ -8680,6 +8680,16 @@ namespace winrt::TerminalApp::implementation
     // PARENT is not, once the fork has a transcript of its own — so the family's links come from the process's session
     // index (SharedSessionCatalogKeeper, read in the background by whoever asks first) plus the registry's link of a fork
     // with no transcript yet; the list follows the index through a belt in the periodic tick.
+    // TWO MORE REQUESTS (2026-11-14), each with the user's pick from mockups:
+    //   - "If i click Folder -> then i should get the full working dir opened, i dont have to go to -> items" ("Folder +
+    //     subfolders"): the Folder line answers a mouse or pen click on itself with the session's own folder and every folder
+    //     under it — the submenu's first line (SidePanelFolderLinePick) — while resting on it still opens the submenu;
+    //   - "The filter, support that for the top tabs bar right click menu context, place below Tags. The filter from top bar
+    //     works exactly like filter in card sidemenu menu items" ("Show the result"): a tab's menu holds the same Filter
+    //     line under its Tags (Tab::AgentFilterSubMenu, filled at every open by _SidePanelFillTabFilterMenu), built by the
+    //     same filler (_SidePanelFillFilterLines) for the tab's session; a line acting from there then brings the cards on
+    //     screen (_SidePanelShowCardsForTabMenu: a collapsed panel expands, the AI view goes back to the cards unless its box
+    //     holds an unsent request). SidePanelFilterMenu tells the two menus apart in the nav trail and the AutomationIds.
 
     void TerminalPage::_SidePanelNoteForkLinks(const std::vector<::Agentmaster::SessionInfo>& snap) noexcept
     {
@@ -8766,7 +8776,7 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    void TerminalPage::_SidePanelClearAllFilters() noexcept
+    void TerminalPage::_SidePanelClearAllFilters(::Agentmaster::SidePanelFilterMenu from) noexcept
     {
         try
         {
@@ -8777,7 +8787,14 @@ namespace winrt::TerminalApp::implementation
             // The text chip went with the box's text (told to the writer: a row of typed text alone holds no record to
             // change, and the Clear must still write its nav line and re-filter at once).
             const bool textDropped = hadText && ::Agentmaster::ParseSessionQuery(_sidePanelSearchText).empty();
-            _SidePanelSetFilters(::Agentmaster::SidePanelFilters{}, L"clear (card menu)", textDropped);
+            // "clear (card menu)" as before the tab menu existed; "clear (tab menu)" from a tab's Filter line.
+            _SidePanelSetFilters(::Agentmaster::SidePanelFilters{}, L"clear (" + std::wstring{ ::Agentmaster::SidePanelFilterMenuName(from) } + L")", textDropped);
+            if (from == ::Agentmaster::SidePanelFilterMenu::Tab)
+            {
+                // The user's "Show the result": the full list the clear leaves comes on screen. After the clear, so the
+                // update it owes is paid on the list the user then sees. Never throws.
+                _SidePanelShowCardsForTabMenu();
+            }
         }
         catch (...)
         {
@@ -8787,7 +8804,7 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    void TerminalPage::_SidePanelApplyCardFilterPick(const ::Agentmaster::SidePanelCardPick& pick) noexcept
+    void TerminalPage::_SidePanelApplyCardFilterPick(const ::Agentmaster::SidePanelCardPick& pick, ::Agentmaster::SidePanelFilterMenu from) noexcept
     {
         using ::Agentmaster::SidePanelCardPickKind;
         using ::Agentmaster::SidePanelCardPickOutcome;
@@ -8835,7 +8852,16 @@ namespace winrt::TerminalApp::implementation
                 break;
             }
             const bool startedOver = outcome == SidePanelCardPickOutcome::StartedOver;
-            _SidePanelSetFilters(std::move(next), std::wstring{ startedOver ? L"card menu: start over with " : L"card menu: drop " } + kind, textDropped);
+            // "card menu: start over with ..." as before the tab menu existed; "tab menu: ..." from a tab's Filter line.
+            _SidePanelSetFilters(std::move(next), std::wstring{ ::Agentmaster::SidePanelFilterMenuName(from) } + (startedOver ? L": start over with " : L": drop ") + kind, textDropped);
+            if (from == ::Agentmaster::SidePanelFilterMenu::Tab)
+            {
+                // The user's "Show the result": a pick from a TAB's menu brings the cards on screen (a collapsed panel
+                // expands, the AI view goes back to the cards unless its box holds an unsent request) — for a drop too, so
+                // the list it widened is seen. After the record changed, so the update it owes is paid once, on the list the
+                // user then sees. Never throws.
+                _SidePanelShowCardsForTabMenu();
+            }
             if (!startedOver)
             {
                 return;
@@ -8863,20 +8889,46 @@ namespace winrt::TerminalApp::implementation
 
     void TerminalPage::_SidePanelAppendFilterItems(MenuFlyout& menu, const std::wstring& id)
     {
+        // The Filter line the card menu adds under Tags. Its lines come from the one filler both Filter menus share; the line
+        // is appended only when the filler added lines (it adds none for a closed or unknown session, or before the panel
+        // is built — the card then has no Filter line, as before the filler existed).
+        MenuFlyoutSubItem filterSub;
+        filterSub.Text(L"Filter");
+        FontIcon filterIcon{};
+        filterIcon.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ kSidePanelFluentFont });
+        filterIcon.Glyph(kSidePanelFilterGlyph);
+        filterSub.Icon(filterIcon);
+        AgentSetTip(filterSub, L"Filter the cards to sessions like this one: its folder, its state, a tag, its branch or its fork family. A pick starts the filter over \x2014 it replaces whatever was filtering.");
+        AgentSetAutomationId(filterSub, ::Agentmaster::SidePanelFilterMenuAutomationStem(::Agentmaster::SidePanelFilterMenu::Card));
+        if (_SidePanelFillFilterLines(filterSub.Items(), id, ::Agentmaster::SidePanelFilterMenu::Card, menu))
+        {
+            menu.Items().Append(filterSub);
+        }
+    }
+
+    bool TerminalPage::_SidePanelFillFilterLines(const winrt::Windows::Foundation::Collections::IVector<MenuFlyoutItemBase>& lines,
+                                                 const std::wstring& id,
+                                                 ::Agentmaster::SidePanelFilterMenu from,
+                                                 const MenuFlyout& rootMenu)
+    {
         using ::Agentmaster::SidePanelCardPick;
         using ::Agentmaster::SidePanelCardPickKind;
         if (!_sidePanelBuilt || !_sessionRegistry)
         {
-            return;
+            return false;
         }
         // The session as it is NOW (the menu is being filled at its open): a lean read — no line needs the queue.
         const auto lean = _sessionRegistry->GetWithoutQueue(id);
         if (!lean || !lean->live)
         {
-            return; // unknown, or closed since its card was drawn: no card of the list to be "like"
+            return false; // unknown, or closed since its card was drawn (or its tab's menu was built): no session to be "like"
         }
         const bool textActive = !::Agentmaster::ParseSessionQuery(_sidePanelSearchText).empty();
         const auto weakThis = get_weak();
+        // Every line's AutomationId starts with its menu's stem ("am.side.cardFilter" in a card's menu — the ids the lines
+        // always had —, "am.tabmenu.filter" in a tab's), and every deferred click names its menu when it fails.
+        const std::wstring idStem{ ::Agentmaster::SidePanelFilterMenuAutomationStem(from) };
+        const std::wstring menuName{ ::Agentmaster::SidePanelFilterMenuName(from) };
         // An item's icon from an icon font or the symbol font (a FontIcon per item — a menu element cannot be shared).
         const auto fontIcon = [](const wchar_t* family, const wchar_t* glyph) {
             FontIcon icon{};
@@ -8886,7 +8938,8 @@ namespace winrt::TerminalApp::implementation
         };
         // One PICK line: its words (checked when the line is the whole filter), its icon, a dim hint at its right end, its
         // tip, its id — and its click, which runs one tick later through the ⋯ menu's command helper (inside the Click the
-        // menu is still closing and hands focus back as it closes). The pick is captured BY VALUE; the page weakly.
+        // menu is still closing and hands focus back as it closes). The pick, the menu's kind and the menu's name are captured
+        // BY VALUE; the page weakly.
         const auto addPick = [&](const winrt::Windows::Foundation::Collections::IVector<MenuFlyoutItemBase>& items,
                                  const std::wstring& words,
                                  const FontIcon& icon,
@@ -8911,32 +8964,125 @@ namespace winrt::TerminalApp::implementation
                                                        L"Start the filter over with " + what + L". Every other filter is dropped, and the filter box is emptied." });
             AgentSetAutomationId(item, automationId);
             AgentSetItemStatus(item, whole ? L"checked" : L"");
-            item.Click([weakThis, pick](const IInspectable&, const RoutedEventArgs&) {
+            item.Click([weakThis, pick, from, menuName](const IInspectable&, const RoutedEventArgs&) {
                 if (const auto self = weakThis.get())
                 {
-                    self->_SidePanelRunMenuCommand(L"card menu: Filter", [pick](TerminalPage& page) { page._SidePanelApplyCardFilterPick(pick); });
+                    self->_SidePanelRunMenuCommand(menuName + L": Filter", [pick, from](TerminalPage& page) { page._SidePanelApplyCardFilterPick(pick, from); });
                 }
             });
             items.Append(item);
         };
 
-        MenuFlyoutSubItem filterSub;
-        filterSub.Text(L"Filter");
-        filterSub.Icon(fontIcon(kSidePanelFluentFont, kSidePanelFilterGlyph));
-        AgentSetTip(filterSub, L"Filter the cards to sessions like this one: its folder, its state, a tag, its branch or its fork family. A pick starts the filter over \x2014 it replaces whatever was filtering.");
-        AgentSetAutomationId(filterSub, L"am.side.cardFilter");
-        const auto lines = filterSub.Items();
-
         // 1. Folder ▸ : the card's folder — the EFFECTIVE one, which the card's own folder line shows — and each folder
         //    above it (the user's "Parent folders too"), then that folder "exactly". The drive's root is not offered.
+        //    A CLICK on the Folder line itself picks the first of them, the session's whole working folder with its
+        //    subfolders (the user's request of 2026-11-14, see below); resting on it opens the submenu as before.
         const auto levels = ::Agentmaster::SidePanelFolderLevels(::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, *lean));
         if (!levels.empty())
         {
+            // The Folder line's own pick — the very pick of the submenu's first line — checked when it is the whole filter,
+            // like every pick line (the first line then reads checked too: both name one filter).
+            const SidePanelCardPick folderLinePick = ::Agentmaster::SidePanelFolderLinePick(levels);
+            const bool folderLineWhole = ::Agentmaster::SidePanelCardPickIsWholeFilter(_sidePanelFilters, textActive, folderLinePick);
             MenuFlyoutSubItem folderSub;
-            folderSub.Text(L"Folder");
+            folderSub.Text(folderLineWhole ? L"\x2713 Folder" : L"Folder");
             folderSub.Icon(fontIcon(kSidePanelFluentFont, kSidePanelFolderGlyph));
-            AgentSetTip(folderSub, L"Sessions that work in this card's folder, or in a folder above it: choose how wide.");
-            AgentSetAutomationId(folderSub, L"am.side.cardFilter.folder");
+            AgentSetTip(folderSub, winrt::hstring{ folderLineWhole ? L"This folder and every folder under it are the whole filter now. Click to drop it: the list shows every session again. Rest on it, or press \x2192, for the folders above it." :
+                                                                     L"Click: the sessions that work in " + levels.front() + L" or in any folder under it. Rest on it, or press \x2192, to choose a folder above it, or this one exactly." });
+            AgentSetAutomationId(folderSub, idStem + L".folder");
+            AgentSetItemStatus(folderSub, folderLineWhole ? L"checked" : L"");
+            // THE LINE'S OWN CLICK (the user's request of 2026-11-14: "If i click Folder -> then i should get the full working
+            // dir opened, i dont have to go to -> items"; their pick "Folder + subfolders"). ⚠ A MenuFlyoutSubItem raises no
+            // Click: its class handlers take the press and, at the release, open the submenu — both marked handled, both
+            // run before any handler of ours. So the line watches the pointer itself, with handledEventsToo:
+            //   - a LEFT press on it, by a mouse or a pen, ARMS (a finger is left to the item: it cannot hover, so its tap
+            //     is its only way to the submenu's other lines; the keyboard is left to the item too — Enter, Space and →
+            //     open the submenu, whose first line is this very pick);
+            //   - the release of that button, ON the line, while armed, PICKS: the whole menu closes (the submenu the item
+            //     just opened goes with it) and the pick runs one tick later, like every line (_SidePanelRunMenuCommand);
+            //   - leaving the line or a cancelled pointer DISARMS, and every release ends the arm, so a press that began on
+            //     another line never picks here. (Not a lost capture: an item that captured the pointer would lose it as it
+            //     handles the release, before our release handler, and a disarm there would eat the click.)
+            // The handlers hold the menu WEAKLY (it owns this line through its Items: a strong capture would be a cycle that
+            // C++/WinRT never frees), the page weakly, the pick and the menu's kind by value, and the arm in a shared flag;
+            // never the line itself (it is each handler's sender).
+            const auto armed = std::make_shared<bool>(false);
+            const auto weakMenu = winrt::make_weak(rootMenu);
+            folderSub.AddHandler(
+                UIElement::PointerPressedEvent(),
+                winrt::box_value(PointerEventHandler{ [armed](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+                    *armed = false; // a new press decides afresh
+                    try
+                    {
+                        const auto line = sender.try_as<UIElement>();
+                        if (!line || e.Pointer().PointerDeviceType() == winrt::Windows::Devices::Input::PointerDeviceType::Touch)
+                        {
+                            return; // a finger's tap opens the submenu: the item's own way, untouched
+                        }
+                        *armed = e.GetCurrentPoint(line).Properties().IsLeftButtonPressed();
+                    }
+                    catch (...)
+                    {
+                        // Not armed: the release opens the submenu, the item's own behavior. Recorded (Rule #18).
+                        ::Agentmaster::AgentLogCaughtException(L"side panel filter menu: the Folder line's press");
+                    }
+                } }),
+                true /* handledEventsToo — the item marks its press handled */);
+            folderSub.AddHandler(
+                UIElement::PointerReleasedEvent(),
+                winrt::box_value(PointerEventHandler{ [armed, weakThis, weakMenu, folderLinePick, from, menuName](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+                    if (!std::exchange(*armed, false))
+                    {
+                        return; // no press of ours began on this line (another line's press, a finger, a right button)
+                    }
+                    try
+                    {
+                        const auto line = sender.try_as<FrameworkElement>();
+                        if (!line)
+                        {
+                            return;
+                        }
+                        const auto point = e.GetCurrentPoint(line);
+                        if (point.Properties().PointerUpdateKind() != winrt::Windows::UI::Input::PointerUpdateKind::LeftButtonReleased)
+                        {
+                            return; // another button let go while the left one is still down: not the click
+                        }
+                        const auto at = point.Position();
+                        if (at.X < 0 || at.Y < 0 || at.X >= line.ActualWidth() || at.Y >= line.ActualHeight())
+                        {
+                            return; // let go off the line (a pointer the item captured reports here too): no click
+                        }
+                        // The whole menu closes at once, like a pick line's click closes it — with the submenu the item
+                        // opened at this very release (a menu's close takes its open submenus with it).
+                        if (const auto menu = weakMenu.get())
+                        {
+                            menu.Hide();
+                        }
+                        if (const auto self = weakThis.get())
+                        {
+                            // The click's own line in the trail (the pick's own line follows it, one tick later): "I clicked
+                            // Folder and nothing happened" then reads where it stopped.
+                            ::Agentmaster::LogNav(L"sidepanel filter " + menuName + L": the Folder line's own click");
+                            self->_SidePanelRunMenuCommand(menuName + L": the Folder line", [folderLinePick, from](TerminalPage& page) { page._SidePanelApplyCardFilterPick(folderLinePick, from); });
+                        }
+                    }
+                    catch (...)
+                    {
+                        // The click is lost (the menu may stay open, its submenu shown); the next click tries again. Recorded
+                        // (Rule #18).
+                        ::Agentmaster::AgentLogCaughtException(L"side panel filter menu: the Folder line's click");
+                    }
+                } }),
+                true /* handledEventsToo — the item marks its release handled (it opens the submenu there) */);
+            // The two disarms, each its own handler object (a delegate is registered once per event).
+            folderSub.AddHandler(
+                UIElement::PointerExitedEvent(),
+                winrt::box_value(PointerEventHandler{ [armed](const IInspectable&, const PointerRoutedEventArgs&) { *armed = false; } }),
+                true /* handledEventsToo — the item handles its exit (its hover delay) */);
+            folderSub.AddHandler(
+                UIElement::PointerCanceledEvent(),
+                winrt::box_value(PointerEventHandler{ [armed](const IInspectable&, const PointerRoutedEventArgs&) { *armed = false; } }),
+                true /* handledEventsToo */);
             for (size_t level = 0; level < levels.size(); ++level)
             {
                 SidePanelCardPick pick;
@@ -8946,7 +9092,7 @@ namespace winrt::TerminalApp::implementation
                 // The hint says WHERE the folder is: its path, a deep one cut in the middle (SidePanelFolderHint) so the hint
                 // never takes the line's room from the folder's own name. The tooltip carries the whole path.
                 addPick(folderSub.Items(), ::Agentmaster::SidePanelFolderLeaf(levels[level]), fontIcon(kSidePanelFluentFont, kSidePanelFolderGlyph), ::Agentmaster::SidePanelFolderHint(levels[level]), pick,
-                        L"the folder " + levels[level] + L" and every folder under it", L"am.side.cardFilter.folder." + std::to_wstring(level));
+                        L"the folder " + levels[level] + L" and every folder under it", idStem + L".folder." + std::to_wstring(level));
             }
             folderSub.Items().Append(MenuFlyoutSeparator{});
             SidePanelCardPick exact;
@@ -8954,7 +9100,7 @@ namespace winrt::TerminalApp::implementation
             exact.value = levels.front();
             exact.includeSubfolders = false;
             addPick(folderSub.Items(), ::Agentmaster::SidePanelFolderLineName(levels.front(), false), fontIcon(kSidePanelFluentFont, kSidePanelFolderGlyph), L"without its subfolders", exact,
-                    L"exactly the folder " + levels.front() + L" (its subfolders are not included)", L"am.side.cardFilter.folder.exact");
+                    L"exactly the folder " + levels.front() + L" (its subfolders are not included)", idStem + L".folder.exact");
             lines.Append(folderSub);
         }
 
@@ -8970,7 +9116,7 @@ namespace winrt::TerminalApp::implementation
             pick.stateBit = choice.bit;
             auto dot = fontIcon(kSidePanelSymbolFont, L"\x25CF");
             dot.Foreground(SolidColorBrush{ StateColor(choice.state) });
-            addPick(lines, std::wstring{ L"State: " } + choice.label, dot, std::wstring{}, pick, std::wstring{ L"the sessions that are " } + choice.label + L" now", L"am.side.cardFilter.state");
+            addPick(lines, std::wstring{ L"State: " } + choice.label, dot, std::wstring{}, pick, std::wstring{ L"the sessions that are " } + choice.label + L" now", idStem + L".state");
             break;
         }
 
@@ -8982,13 +9128,13 @@ namespace winrt::TerminalApp::implementation
             SidePanelCardPick pick;
             pick.kind = SidePanelCardPickKind::Tag;
             pick.value = tag;
-            addPick(lines, L"Tag: " + tag, fontIcon(kSidePanelFluentFont, kSidePanelTagGlyph), std::wstring{}, pick, L"the sessions tagged " + tag, L"am.side.cardFilter.tag." + ::Agentmaster::FoldTagName(tag));
+            addPick(lines, L"Tag: " + tag, fontIcon(kSidePanelFluentFont, kSidePanelTagGlyph), std::wstring{}, pick, L"the sessions tagged " + tag, idStem + L".tag." + ::Agentmaster::FoldTagName(tag));
         }
         if (tags.empty())
         {
             SidePanelCardPick pick;
             pick.kind = SidePanelCardPickKind::Untagged;
-            addPick(lines, L"Untagged", fontIcon(kSidePanelFluentFont, kSidePanelTagGlyph), std::wstring{}, pick, L"the sessions that carry no tag", L"am.side.cardFilter.untagged");
+            addPick(lines, L"Untagged", fontIcon(kSidePanelFluentFont, kSidePanelTagGlyph), std::wstring{}, pick, L"the sessions that carry no tag", idStem + L".untagged");
         }
 
         // 4. Branch: the card's git branch, when it has one (the name as the record would keep it: one line).
@@ -8997,7 +9143,7 @@ namespace winrt::TerminalApp::implementation
             SidePanelCardPick pick;
             pick.kind = SidePanelCardPickKind::Branch;
             pick.value = branch;
-            addPick(lines, L"Branch: " + branch, fontIcon(kSidePanelSymbolFont, kSidePanelBranchSymbol), std::wstring{}, pick, L"the sessions on the git branch " + branch + L" (in any repository)", L"am.side.cardFilter.branch");
+            addPick(lines, L"Branch: " + branch, fontIcon(kSidePanelSymbolFont, kSidePanelBranchSymbol), std::wstring{}, pick, L"the sessions on the git branch " + branch + L" (in any repository)", idStem + L".branch");
         }
 
         // 5. Fork family: this session, the session it was forked from and their forks. Who is in it comes from the
@@ -9039,7 +9185,7 @@ namespace winrt::TerminalApp::implementation
             const std::wstring& current = _sidePanelFilters.forkFamilyOf;
             pick.value = (!current.empty() && family.count(::Agentmaster::SidePanelFoldId(current)) != 0) ? current : id;
             addPick(lines, L"Fork family", fontIcon(kSidePanelFluentFont, kSidePanelForkGlyph), members <= 1 ? std::wstring{ L"this session alone" } : std::to_wstring(members) + L" sessions", pick,
-                    L"this session's fork family: the session, the one it was forked from, and their forks", L"am.side.cardFilter.family");
+                    L"this session's fork family: the session, the one it was forked from, and their forks", idStem + L".family");
         }
 
         // 6. Pause filter / Resume filter and Clear all filters (the user's "Pause / Resume and Clear"): the chips row's two
@@ -9053,11 +9199,19 @@ namespace winrt::TerminalApp::implementation
             pause.Icon(fontIcon(kSidePanelFluentFont, applies ? kSidePanelPauseGlyph : kSidePanelResumeGlyph));
             AgentSetTip(pause, winrt::hstring{ applies ? L"Switch every filter off without dropping it: the list shows every session. Resume filter brings them back as they were." :
                                                          L"Apply the filters again, as they were before the pause." });
-            AgentSetAutomationId(pause, L"am.side.cardFilter.pause");
-            pause.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+            AgentSetAutomationId(pause, idStem + L".pause");
+            pause.Click([weakThis, from, menuName](const IInspectable&, const RoutedEventArgs&) {
                 if (const auto self = weakThis.get())
                 {
-                    self->_SidePanelRunMenuCommand(L"card menu: Pause filter", [](TerminalPage& page) { page._SidePanelToggleFilterPause(); });
+                    self->_SidePanelRunMenuCommand(menuName + L": Pause filter", [from](TerminalPage& page) {
+                        page._SidePanelToggleFilterPause(); // noexcept
+                        if (from == ::Agentmaster::SidePanelFilterMenu::Tab)
+                        {
+                            // The user's "Show the result": what the pause or the resume leaves listed comes on screen. After
+                            // the switch, like a pick. Never throws.
+                            page._SidePanelShowCardsForTabMenu();
+                        }
+                    });
                 }
             });
             lines.Append(pause);
@@ -9065,17 +9219,119 @@ namespace winrt::TerminalApp::implementation
             clear.Text(L"Clear all filters");
             clear.Icon(fontIcon(kSidePanelFluentFont, kSidePanelClearGlyph));
             AgentSetTip(clear, L"Drop every filter, and empty the filter box: the cards list every session again.");
-            AgentSetAutomationId(clear, L"am.side.cardFilter.clear");
-            clear.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+            AgentSetAutomationId(clear, idStem + L".clear");
+            clear.Click([weakThis, from, menuName](const IInspectable&, const RoutedEventArgs&) {
                 if (const auto self = weakThis.get())
                 {
-                    self->_SidePanelRunMenuCommand(L"card menu: Clear all filters", [](TerminalPage& page) { page._SidePanelClearAllFilters(); });
+                    self->_SidePanelRunMenuCommand(menuName + L": Clear all filters", [from](TerminalPage& page) { page._SidePanelClearAllFilters(from); });
                 }
             });
             lines.Append(clear);
         }
 
-        menu.Items().Append(filterSub);
+        return true; // a live session always gets lines: the Fork family line, at least
+    }
+
+    void TerminalPage::_SidePanelFillTabFilterMenu(Tab& tab, const std::wstring& sid) noexcept
+    {
+        MenuFlyoutSubItem filterLine{ nullptr };
+        try
+        {
+            filterLine = tab.AgentFilterSubMenu();
+            if (!filterLine)
+            {
+                return; // the tab's menu was never built: nothing to fill
+            }
+            const auto lines = filterLine.Items();
+            // The last open's lines go: every open shows the session and the filter as they are NOW (a line holds its pick by
+            // value, so a kept line would offer a state, a tag or a check that is no longer true).
+            lines.Clear();
+            bool filled = false;
+            // The menu this line sits in: the Folder line's own click closes it. The tab's ContextFlyout is the one
+            // _CreateContextMenu built (a MenuFlyout); anything else leaves the line hidden. ⚠ Each step checked for null: a
+            // call on an empty projected object is an access violation, not an exception the catch below could hold.
+            if (!sid.empty())
+            {
+                if (const auto item = tab.TabViewItem())
+                {
+                    if (const auto flyout = item.ContextFlyout())
+                    {
+                        if (const auto rootMenu = flyout.try_as<MenuFlyout>())
+                        {
+                            filled = _SidePanelFillFilterLines(lines, sid, ::Agentmaster::SidePanelFilterMenu::Tab, rootMenu);
+                        }
+                    }
+                }
+            }
+            if (filled)
+            {
+                // Set at the fill, not when the tab was made: the strip holds hundreds of tabs, and a tab whose menu never
+                // opens should carry no tooltip state (AgentSetTip writes its text again at each open; the hover handlers are
+                // hooked once).
+                AgentSetTip(filterLine, L"Filter the side panel's cards to sessions like this tab's: its folder, its state, a tag, its branch or its fork family. A pick starts the filter over \x2014 it replaces whatever was filtering \x2014 and brings the cards on screen: a collapsed panel expands, and the AI search view goes back to the cards (unless its box holds a request you have not sent).");
+                AgentSetAutomationId(filterLine, ::Agentmaster::SidePanelFilterMenuAutomationStem(::Agentmaster::SidePanelFilterMenu::Tab));
+            }
+            filterLine.Visibility(filled ? Visibility::Visible : Visibility::Collapsed);
+        }
+        catch (...)
+        {
+            // A half-filled Filter would offer only some of its lines: the line is hidden for this open (the next open fills
+            // it again). Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelFillTabFilterMenu");
+            try
+            {
+                if (filterLine)
+                {
+                    filterLine.Visibility(Visibility::Collapsed);
+                }
+            }
+            catch (...)
+            {
+                // The line may show what was filled before the throw; each line still acts on its own pick. Recorded.
+                ::Agentmaster::AgentLogCaughtException(L"_SidePanelFillTabFilterMenu: hide the line");
+            }
+        }
+    }
+
+    void TerminalPage::_SidePanelShowCardsForTabMenu() noexcept
+    {
+        try
+        {
+            if (!_sidePanelBuilt)
+            {
+                return;
+            }
+            // The AI box's text is read only in AI mode (it is the request line there; the rule never looks at it otherwise).
+            const std::wstring aiBoxText = (_sidePanelAiMode && _sidePanelSearchBox) ? std::wstring{ _sidePanelSearchBox.Text() } : std::wstring{};
+            const auto reveal = ::Agentmaster::SidePanelRevealForTabMenuPick(_sidePanelCollapsed, _sidePanelAiMode, aiBoxText);
+            // 1. The AI view first: its close catches the card list up (_SidePanelSetAiMode's off half rebuilds the cards),
+            //    and an expand that came first would refresh the AI view's results for nothing. userAction: the switch is
+            //    saved for this window and as the default — the user's own pick took the view away, as the toggle would.
+            //    It logs its own [nav] line ("sidepanel ai off box=N").
+            if (reveal.leaveAiView)
+            {
+                _SidePanelSetAiMode(false, /*userAction*/ true);
+            }
+            else if (reveal.aiViewKept)
+            {
+                // Switching the view off would make that text the filter box's text, and the pick's start over would empty
+                // it: the user's unsent request lost. The filter stays set behind the view; the length only, never the words
+                // (the nav trail keeps the user's words out, like the AI toggle's own lines).
+                ::Agentmaster::LogNav(L"sidepanel filter tab menu: the AI view stays (its box holds a request of " + std::to_wstring(aiBoxText.size()) + L" characters)");
+            }
+            // 2. Then the expand (saved for this window and as the default, like the strip's chevron; it logs "sidepanel
+            //    expand"). Re-checked: _SidePanelToggleCollapsed TOGGLES, and it must never collapse an expanded panel.
+            if (reveal.expand && _sidePanelCollapsed)
+            {
+                _SidePanelToggleCollapsed();
+            }
+        }
+        catch (...)
+        {
+            // The filter is set either way; the panel stays as it is (collapsed, or in the AI view) and shows the filter when the
+            // user opens it. Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelShowCardsForTabMenu");
+        }
     }
 
     bool TerminalPage::_SidePanelEnsureFolderCard() noexcept

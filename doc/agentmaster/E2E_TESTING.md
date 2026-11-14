@@ -573,7 +573,12 @@ differs from the plan above, and why:
   Tags): the line `am.side.cardFilter` and, in its submenus (open only while pointed at), `am.side.cardFilter.{folder,
   folder.<N>, folder.exact, state, tag.<folded name>, untagged, branch, family, pause, clear}` (N = the folder's level, 0 =
   the card's own folder; a pick line's ItemStatus is "checked" while it is the whole filter, and its words then start
-  with ✓), with the two chips it adds, `am.side.chip.branch` and `am.side.chip.family`. From the filters' build the card mode
+  with ✓), with the two chips it adds, `am.side.chip.branch` and `am.side.chip.family`. Since 2026-11-14 (NOT BUILT) the
+  Folder line `…folder` is a pick of its own (a click on it picks the card's folder with its subfolders) and its
+  ItemStatus is "checked" while that is the whole filter; a TAB's right-click menu has the same Filter line under its
+  Tags, with the stem `am.tabmenu.filter` (`am.tabmenu.filter.{folder, folder.<N>, folder.exact, state, tag.<folded
+  name>, untagged, branch, family, pause, clear}`; set when the menu opens, absent on a shell tab — SIDE_PANEL.md §2l *The
+  Folder line's own click, and the tab menu's Filter*). From the filters' build the card mode
   shows NO count line: its words
   ("2 sessions in this window", "1 of 3 sessions across all windows") are the filter box's (`am.side.filter`) ItemStatus.
   Home keeps its XAML id `ManagerHomeButton` (an x:Name is never overridden).

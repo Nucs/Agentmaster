@@ -72,6 +72,9 @@ drag gesture), `AgentMaster/TabDragMath.h` (the pure placement math).
 Agentmaster's items in a tab's context menu (shown for a managed session unless noted; visibility set
 when the flyout opens): Activate Tab and Activate All Tabs (N) for dormant tabs, Mark Unread, Open In
 Explorer (`OpenSessionFolder`: the effective folder), Copy ▸ (`CopySessionField`), Show Transcript, Tags,
+Filter ▸ right under Tags (the side panel card menu's Filter lines for the tab's session, filled at every open by
+`TerminalPage::_SidePanelFillTabFilterMenu`; a pick narrows this window's side panel and brings its cards on screen —
+[SIDE_PANEL.md](SIDE_PANEL.md) §2l *The Folder line's own click, and the tab menu's Filter*),
 Favorite / Unfavorite, New Session Here ▸ and Fork session ▸ (Default, `Specify…`, the launch models, the
 presets; a shell tab's Fork session is Windows Terminal's duplicate tab), Restart session, Deactivate ▸
 and Close ▸ (Close tabs to the left / right, Other tabs, Of Same Folder, Other of Same Folder, All tabs,

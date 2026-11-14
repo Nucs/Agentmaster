@@ -683,6 +683,13 @@ it drops the filter. Branch and fork family are filters of their own, with a chi
 9. **Restart.** *Do:* set Fork family; close and reopen the window. *Expect:* the family chip and the same cards (at the
    latest a few seconds after the start, once the session index is read); `windows/<id>.json`'s `sidePanelFilters` has
    `"forkFamilyOf"`.
+10. **Folder's own click** (2026-11-14, NOT BUILT). *Do:* right-click A's card ▸ Filter › click Folder at once (no rest).
+    *Expect:* the menu closes; one chip, A's folder with its subfolders (the same as Folder › the first line); `[nav]
+    sidepanel filter card menu: the Folder line's own click`, then `... start over with folder (with subfolders)`.
+    *Do:* right-click again ▸ Filter. *Expect:* "✓ Folder" (`am.side.cardFilter.folder` ItemStatus "checked"), and in
+    its submenu the first line checked too. *Do:* click Folder. *Expect:* no filter.
+11. **Folder still opens.** *Do:* rest the pointer on Folder. *Expect:* its submenu opens (nothing picked). *Do:* Enter
+    or → on Folder. *Expect:* the submenu opens, nothing picked.
 
 **Edge cases**
 - **E1 A paused row** → a pick from the card's menu applies at once (the pause is lifted with everything else).
@@ -698,6 +705,10 @@ it drops the filter. Branch and fork family are filters of their own, with a chi
 - **E9 A fork made by hand** → a fork started in a "+" tab (`claude --resume <id> --fork-session`) joins a listed
   family within five minutes (the index is asked that often), or at the next Fork family pick.
 - **E10 A title with a line break** → the family chip shows the title on one line.
+- **E11 A drag onto or off Folder** → a press on another line released on Folder, or a press on Folder released off
+  it, picks nothing.
+- **E12 A finger** → a tap on Folder opens its submenu (a finger cannot hover; the tap is its way to the other lines).
+- **E13 The tab's menu** → the same lines under a tab's Tags (flows/23 TCM-10).
 
 ---
 
