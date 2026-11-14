@@ -1952,7 +1952,9 @@ showing beyond unformatted ascii".
   sync's plan (its Rename / Create / Rekey ops carry the state), with the glyph.
 - **The "topic renamed" notice**: Telegram posts a service message for every topic edit; the bot gets its own back
   through getUpdates (like the `forum_topic_created` of every topic it makes) and DELETES a `forum_topic_edited` one
-  (Backfill priority; three refusals in a row stop the deletes). A rename therefore costs two calls.
+  (Backfill priority; three refusals in a row stop the deletes). A rename therefore costs two calls. **Changed by Telegram
+  (about 2026-10-30, §21.53):** an edit of a topic in a private chat makes no service message any more, and an existing app
+  keeps showing the topic's old name and icon.
 
 #### 21.11.4 The SECRETARY: the user's turns as the user's own messages
 
@@ -7813,6 +7815,62 @@ threads are held, what died, and the journal.
 **Check after the build:** after a swap that lifts idle topics into the top 24, one `[msg] re-sort (the top 24 drifted)`
 line with at most 24 re-posts, then `[msg] re-sort: … go in 1 deleteMessages call(s)`; no `can't be deleted for everyone` in
 `messaging.log`.
+
+### 21.53 A renamed topic keeps its old name in the Telegram apps: Telegram's change, not ours (2026-11-14; investigation, nothing built)
+
+> The user's report (2026-11-14, session 19e6d9eb): "it appears that we are unable to rename topics … I create a tab and send
+> a message, or even before I send a message I rename the tab, that name does not sync with the topic name … I have many
+> topics that the title in the messages is different from the topic name."
+
+#### 21.53.1 What the investigation found
+
+- **The bot renames every topic, and Telegram takes the name.** Production on 2026-11-14: the 626 topic records hold exactly
+  their sessions' titles (`state.json` against `sessions.json`: 0 differ). `hooks.log` holds 3,765 `[msg] topic renamed`
+  lines (written only for an `ok` answer) and 36 `topic rename failed` (15 × 429 from an older build, 21 × `Bad Gateway`).
+  Every tab rename of a session that had a topic (`[nav] rename <sid8> -> "…" (tab strip)`) was followed by a topic rename
+  carrying the new title — 258 of them, the newest 0.1 s after the tab's (`10s pause prompt`, 06:12:12.807 → 06:12:12.911) —
+  and 286 more came before the session's topic existed and went into its create; none was missed. For the 561 topics whose
+  last name the log shows, that name is the record's title.
+- **Telegram no longer tells the apps** ([tdlib/telegram-bot-api#915](https://github.com/tdlib/telegram-bot-api/issues/915),
+  opened 2026-11-01, open): in a PRIVATE chat with a bot, `editForumTopic` answers `{"ok":true,"result":true}` and the server
+  stores the new name and icon (`messages.getForumTopics` / `getForumTopicsByID` read them back), but it makes no
+  `messageActionTopicEdit` service message and sends no update — for the bot's edits and for the user's own rename from their
+  account (aspalagin's MTProto timeline of 2026-11-04: the topic's history holds only the creation's service message). A
+  supergroup forum's edit still makes one. Telegram's levlam on #915: "This will be fixed after updates of user apps. There
+  is no way to fix this from the bot's side."
+- **The apps keep the name a topic was CREATED with.** Telegram for Android (13.1.1, read from its source by aspalagin): a
+  known topic takes a new title only from that service message (`MessagesStorage` → `TopicsController.updateTopicInUi`); a
+  reload from the server (`TopicsController.processTopics`) merges only `closed` into a known topic and ignores `title` and
+  `icon_emoji_id`; topics live in the app's local database, so a restart shows the old name again. Only Settings → Data and
+  Storage → Storage Usage → **Clear Local Database**, a logout or a reinstall reads them anew. #915 reports existing iOS clients
+  stale too ("fully closing and reopening the existing clients did not help"); Telegram Desktop re-reads a title when a topic
+  is opened or the list reloads (its source, not tried); a newly signed-in Telegram Web K shows the new names.
+- **When it changed:** on 2026-10-17 dev's bot got a `forum_topic_edited` notice back for every rename and deleted it
+  (`editForumTopic=42 deleteMessage=42`, §21.11.3); #915's reporters date the change to about 2026-10-29 – 10-31.
+- **What it means for Agentmaster, in an existing app:**
+  1. A topic shows the name it was created with: a renamed tab's topic keeps its old title. The card, the change line
+     ("… changed the title to …", §21.13) and every title mention are MESSAGES, which the apps do update — hence "the title in
+     the messages is different from the topic name".
+  2. The state icons (§21.22) show the state the topic was made in; every state change still costs an `editForumTopic`.
+  3. The bot never hears a rename the user makes in Telegram: `_onUserTopicRenamed` (§21.17) and `_onNewThreadRenamed`
+     (§21.25) logged none in either profile's `hooks.log`.
+  4. The notice deletes of §21.11.3 find nothing to delete.
+- **Ours, beside it:** `_renameTopic` records a rename that Telegram refused with a 5xx as done (the 21 `Bad Gateway`, one
+  morning in early November): the plan then reads the title as shown, and the server keeps the old name until the topic's
+  next rename, which sends the whole name again (a state change does; every one of the 561 topics above had one).
+
+#### 21.53.2 Open decisions (the user's)
+
+- **The topics already on the phone:** Clear Local Database once — the server holds every current name (the user's action;
+  nothing to build).
+- **A rename from now on**, until Telegram's apps are fixed: only a CREATE's name reaches an existing app, so the one bot-side
+  way is to make the topic again under the new name (delete + create + the history replay — what `/recreate` in a topic does,
+  `_recreateOneTopic`). Making a topic again deletes its messages, the ones the user typed in it too; the replay posts the
+  conversation again from the transcript (§21.9), on the chat's budget, and the topic lands on top of the list. The choices:
+  (a) nothing automatic — the change line tells the rename and `/recreate` (or a 🔁 button on the change line) makes the topic
+  again; (b) automatic for a YOUNG topic (renamed within its first N minutes, where the replay is short — the user's "create a
+  tab, send a message, rename it" case), (a) for the others; (c) automatic for every title change.
+- **The 5xx refusal:** not recorded; made again after a back-off, as a refused create is (§21.51.3).
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
