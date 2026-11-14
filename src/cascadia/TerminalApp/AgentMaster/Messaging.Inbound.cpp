@@ -555,7 +555,8 @@ namespace Agentmaster::Msg
             return answerText; // a double tap: the first tap's re-post is on its way, so nothing new is queued
         }
         _tickCv.notify_all(); // the re-post goes at the next tick, not at the end of the tick's wait (kTickMs)
-        _log(L"[msg] " + ShortId(sessionId) + L" put first in the thread list (a directory dot)" +
+        // §21.54: a title row's ⤴ lift sends the dot's own data, so this line names both (the data cannot tell them apart).
+        _log(L"[msg] " + ShortId(sessionId) + L" put first in the thread list (a directory dot or a \x2934 lift)" +
              (historyPending ? std::wstring{ L"; its card moves once its history replay is in" } : std::wstring{}));
         LogNav(L"remote telegram front " + ShortId(sessionId));
         return answerText;

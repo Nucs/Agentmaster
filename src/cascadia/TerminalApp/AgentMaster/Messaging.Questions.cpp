@@ -1674,7 +1674,10 @@ namespace Agentmaster::Msg
                 return; // gone, no topic, or a post on its way (its answer catches up with any change)
             }
             c->messageId = -1;
-            html = BuildAskCardHtml(c->model, WallMs());
+            // §21.54: the session's title row under the card's header ("❓ Claude is asking", "✅ Answered …") — in its CLASSIC render
+            // (the square and the linked title), because the card is EDITED classic (_queueQuestionCardEdit), and a rich post with
+            // classic edits would lose the chip at its first edit anyway. The leaf locks it takes are safe under `_mtx`.
+            html = WithTopicTitleRowAfterHeader(BuildAskCardHtml(c->model, WallMs()), _titleRowClassic(c->threadId));
             const auto rows = BuildAskCardButtons(c->model, key);
             if (!rows.empty())
             {
@@ -1733,7 +1736,9 @@ namespace Agentmaster::Msg
             },
             0,
             true,
-            replyRef);
+            replyRef,
+            nullptr,
+            false); // §21.54: the row is in the card already (classic, after its header): no second one, and the card stays classic
     }
 
     void MessagingService::_queueQuestionCardEdit(const std::wstring& key)
@@ -1749,7 +1754,8 @@ namespace Agentmaster::Msg
                 return; // not posted (or on its way: the post's answer queues this edit when it is needed)
             }
             messageId = c->messageId;
-            html = BuildAskCardHtml(c->model, WallMs());
+            // §21.54: the same row as the post (classic, under the header): an edit without it would take it away.
+            html = WithTopicTitleRowAfterHeader(BuildAskCardHtml(c->model, WallMs()), _titleRowClassic(c->threadId));
             const auto rows = BuildAskCardButtons(c->model, key);
             if (!rows.empty())
             {
@@ -1776,7 +1782,8 @@ namespace Agentmaster::Msg
                 {
                     return;
                 }
-                latest = BuildAskCardHtml(c->model, WallMs());
+                // §21.54: the row again, with the title of NOW (a rename since the post shows here too).
+                latest = WithTopicTitleRowAfterHeader(BuildAskCardHtml(c->model, WallMs()), me->_titleRowClassic(c->threadId));
                 const auto rows = BuildAskCardButtons(c->model, key);
                 if (!rows.empty())
                 {

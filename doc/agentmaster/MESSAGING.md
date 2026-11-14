@@ -7877,6 +7877,150 @@ line with at most 24 re-posts, then `[msg] re-sort: … go in 1 deleteMessages c
   tab, send a message, rename it" case), (a) for the others; (c) automatic for every title change.
 - **The 5xx refusal:** not recorded; made again after a back-off, as a refused create is (§21.51.3).
 
+#### 21.53.3 The stress test on the owner's phone: renames DO show on Telegram for Android 13.2.x (2026-11-14, the same day)
+
+> The user's pick was "Remake on every rename", with the condition "Can't we rename a topic? if no, we go with remake but fully
+> stress out if we can or not rename topics" — then "Use K:/source/*android* … use any app yourself with wireless adb".
+
+- **The phone's app was the cause.** Over wireless ADB (`K:\source\android-phone`'s `Connect-Phone.ps1` + `Assert-AndroidTarget`;
+  only Telegram's package entries read, the list filtered on the phone): Telegram for Android **12.10.6** (Play, last updated
+  2026-10-07). Telegram changed the client in **13.2.1** (2026-11-07, DrKLO/Telegram `7be672ead2`): `TopicsController.processTopics`
+  now merges a KNOWN topic's `title`, `icon_emoji_id`, `icon_color`, `hidden` and `pinned` from every server load
+  (`!fromCache`) and stores them (`updateTopicData`); 13.2.0's file has no such merge, 13.1.1 merged `closed` only. A bot chat's
+  topic tabs (`TopicsTabsView`, `isBotForumWithEditableTopics`) load from the server when the chat opens
+  (`LOAD_TYPE_HASH_CHECK`) and as the list pages in.
+- **The owner updated the phone to 13.2.2 and unlocked it (never unlocked from here); the test, driven over ADB** (`uiautomator
+  dump /dev/tty` straight into memory, only labels equal to an allowlist printed, the bot's chat opened by its t.me link):
+  1. After the update the stale topics already read their CURRENT names: "plotting fix for options", "predictive pattern",
+     "ask question tool" (created as "strategy calls (fork)", "options", "Agentmaster").
+  2. The rigorous case — a topic the phone already KNOWS: the production bot made a throwaway topic "🧪 rename test A"; the
+     phone listed it as A. The bot renamed it "🧪 rename test B" (`editForumTopic` ok); **6 s later the phone showed B, live,
+     without reopening the chat.**
+  3. With the chat closed (Back), renamed to "🧪 rename test A" again; on reopening, the phone showed A.
+  4. The topic was deleted; it left the phone's list.
+- **How the live update arrives:** not as a service message the BOT sees — in the 10-minute census that holds those renames
+  the bot made no `deleteMessage`, so no `forum_topic_edited` reached getUpdates. The server now pushes the edit to the user's
+  apps only (the update a 13.2.x client applies), as #915 asked.
+- **What does not help as a check:** an `editForumTopic` that sets a private topic's name and icon to what they already are
+  answers plain `ok` — `TOPIC_NOT_MODIFIED` never came back in either bot's log (`hooks.log`, `messaging.log`: 0), so a "probe
+  with the same name" proves nothing about the server's name there (it was tried on 6 renamed topics: 6 × ok; harmless — it
+  pushes nothing to an old app and only repeats the name a new one shows).
+- **The topic LINK still does not open a topic on Android 13.2.2:** `LaunchActivity` gives a user peer `user_id` + `message_id`
+  only (the thread is read and dropped), and on the phone `https://t.me/<bot>/<thread>?topic=<thread>` left the chat in "All"
+  (the header read the bot's name, with the directory pinned under it). Telegram's own docs now say that link "opens the topic
+  only for the user": true for Desktop, not for Android.
+
+**Decided (the user's condition):** topics CAN be renamed — no remake on rename; the bot's renames stay as they are, and any app
+from Telegram for Android 13.2.1 on shows them (live while the chat is open, else at the next server load). An older app needs an
+update (or Clear Local Database). The title of every message (§21.54) names the session either way. The 5xx refusal of
+§21.53.2 stays open.
+
+### 21.54 Every message in a topic names its session: the title row and its ⤴ lift (2026-11-14; NOT BUILT — the next build must purge: `Messaging.h`'s `MessagingService` gained members)
+
+> The user's request (2026-11-14, session 19e6d9eb): "every message belongs to a topic and has a title, and we send such a title
+> in the bottom pinned messages for example. I want the title to be in all messages at the first line, or at the second line if
+> there's info like in the bottom pinned one, and this way we'll always have a jump icon that people can click and go to the
+> topic." The picks (AskUserHtmlQuestion, rendered mockups): placement **"After a header"**; look **"Chip alone"**, with "is chip
+> clickable like we planned with lift? if no then add lift" — the chip is a link, which Android cannot follow into a topic, so
+> the **⤴ lift** joins it.
+
+#### 21.54.1 What Telegram allows (measured 2026-11-14)
+
+- **A rich MARKDOWN message keeps inline buttons.** The dev bot, a throwaway topic (deleted after): `sendRichMessage` with
+  `markdown` = `<tg-button type="url" style="primary" url="…">🟦 title</tg-button> <tg-button type="callback_data"
+  data="d:front:N">⤴</tg-button>` + a blank line + Markdown came back with its first block a `paragraph` of two `button` parts
+  (the URL, its style and the callback data intact); the same after a header line ("📋 **Plan ready …**  \n" + the buttons): one
+  paragraph — header, line break, the buttons. The docs: rich Markdown "can contain arbitrary HTML".
+- **`sendRichMessage` takes every keyboard** (inline, reply keyboard, ForceReply), so a message with a ForceReply can go rich.
+- **A caption has no rich form:** HTML parse mode only.
+- **Android cannot follow a topic link** (§21.53.3), so the chip alone is no way in there; the lift is (§21.16.7's dot).
+
+#### 21.54.2 The row, the lift, the card
+
+- **One row for the whole topic:** `TopicTitleRow(title, sessionId, square, thread)` — the Plain title token naming the topic
+  (the record's title on one line, cut at 120; the short id when blank), WITH the lift. Rich: the URL chip in the tab's color
+  family, a space, ⤴. Classic: `🟦 <a href="…">title</a>` (classic HTML has no in-text button: no lift). `UserLineTitleRow` (the
+  "👤 You" lines, their status edits, the replay's user lines) is now this same row, so those lines gained the ⤴ too.
+- **The lift on the token:** `TgTitleToken(…, lift = true)` writes the form letter upper-cased (`P`, `B`) — only for a Plain or
+  Bold token that names its topic, so every token without it is byte for byte as before. `TgParseTitleToken` reads it
+  (`bool& lift`; an overload without it serves the classic render). The CLASSIC render ignores it. The RICH render appends
+  `TgTopicLiftButtonHtml(thread)` after the chip: `<tg-button type="callback_data" data="d:front:<thread>">⤴</tg-button>`, the
+  directory dot's own data (`kTgTopicLiftCallbackPrefix`; `MessagingDirectory.h` has a `static_assert` that it equals
+  `kDirectoryFrontCallbackPrefix`). A tap is the dot's tap: `_bringTopicToFront` re-posts the topic's sticky card (two calls;
+  a second tap within 10 s queues nothing), so the topic is first in the thread list on every app — on Android one more tap
+  (the first thread tab) opens it. The toast is the dot's ("↑ “title” goes first in the thread list").
+- **The sticky card's title line** ("📌 title", line 2 under the state) is lifted too. Its hash is taken over the classic render
+  (`Messaging.cpp`, `_refreshCard`), which the lift does not change, so NO card is edited because of it: a card shows the ⤴
+  from its next edit or re-post on, in the ordinary traffic (no form flag, no slow upgrade).
+
+#### 21.54.3 Where the row goes
+
+| Message | Row | Who places it |
+|---|---|---|
+| Claude's replies and remarks (Markdown) | line 1 | `_sendRich`: EVERY part gets the row as its first paragraph (inline rich HTML, `TgTitleRowRichInline`, added AFTER `TgPrepareRichMarkdown`, which would escape it); the part's HTML fallback gets the token, rendered classic |
+| the work log (verbose) | line 1 | `_flushWorkLog`, in the post AND every edit |
+| replies to commands, the voice echo, a show-only question, an interrupt, a "write your answer" prompt, any other post | line 1 | `_sendText` (central: `WithTopicTitleRow`) |
+| a file, a picture | caption line 1 | `_sendDocument` / `_sendPhoto`: `TitledCaptionHtml` — the classic row, the caption escaped below, cut so both stay within 1,000 characters, `parse_mode` HTML |
+| 📋 Plan ready for approval | line 2 | `_applyItems`: the token after the header (HTML), the row MARKER after it (Markdown), rendered by `_sendRich` |
+| ⚠ API error | line 2 | `_applyItems`: the token after the header |
+| — a new conversation in this tab — | line 2 | `_rekeyTopic`, named after the NEW conversation |
+| ♻️ This topic was made again | line 2 | `_settleGoneThread`, classic (it goes the HTML way); from the new record |
+| ❓ the question card, 📁 the /add-dir card | line 2 | their post and BOTH edit paths, as the CLASSIC render after the header, `_sendText(…, addTitleRow = false)`: these cards are edited classic (`_classicEditItem` + `beforeSend`), so they stay classic — the linked title, no chip, no ⤴ |
+| the replay's day line; a conversation-only plan, interrupt or API error | line 2 | `RenderHistory` (`emitHeaderLed`: the token in `html`, the marker in `markdown`) |
+| every other replay post | line 1 | the sender, like the live ones |
+| the sticky card, the "👤 You" lines | line 2, as before, now with ⤴ | `BuildCardText`, `UserLineTitleRow` |
+| the change line, a reply that names the session ("⏸ You interrupted 🟦 tab") | none added | it names its topic already (`TextNamesTopic`) |
+| the main view, 🔎 Search, a wizard's thread, a message sent AS the user | none | no session owns the thread / the user's own words |
+
+- **Placement rule** (`WithTopicTitleRow`): a row MARKER (`kTgTitleRowMarker`, U+E004 — a Markdown builder writes it where a
+  header-led message wants its row, `MarkdownTitleRowAfterHeader`) takes the row in its place, or goes with its line when the
+  thread has no session; a text that already names its topic keeps as it is; a blank text, an empty row or the main view: no
+  change; else `row + "\n" + text`. Every renderer drops a stray marker (`TgIsTitleTokenMarker`), so it never reaches Telegram.
+- **Every chunk:** a long HTML message goes as several messages; each one after the first gets the classic row too
+  (`_htmlItems`' `chunkRow`; the chunks are cut that much shorter). The rich fallbacks and a recovered outbox item pass it.
+- **Edits add no row** (an edit knows no thread): every edited message's builder writes it into the post and the edits (the work
+  log, the "👤 You" status edits, the card, the question and /add-dir cards) — the title of NOW, so an edit after a rename shows
+  the new one. Messages already sent keep the title they were sent with (editing them would cost the chat's whole budget).
+- **Every topic message is now TITLED:** it goes as a rich message (chips, ⤴) while rich messages are on, and as HTML with the
+  linked title otherwise — the work log and the command replies included, which went as plain HTML before.
+- **The thread → row map:** `_refreshTitleRows()` copies thread → {session, the record's title, its name's square} from the
+  topic records once per tick (right after the topic sync and the name tick, before the mirror, the cards and the replay post
+  anything) and once before the first tick, into `_titleRows` behind `_titleRowsMtx` — a LEAF lock like `_linkBotMtx`, because
+  some callers of `_sendText` hold `_mtx`. `_titleRowToken(thread)` / `_titleRowClassic(thread)` read it from any thread. A
+  title renamed in this tick names the messages from the next tick on.
+- **Logs:** `_bringTopicToFront`'s line now reads `[msg] <sid8> put first in the thread list (a directory dot or a ⤴ lift)` (the
+  callback data cannot tell the two apart).
+
+#### 21.54.4 What it costs
+
+- No call of its own: the row rides each message. A ⤴ tap costs what a dot tap costs (the card's re-post, two calls).
+- The rich converter runs on every topic message now (it did on the titled ones before): string work per message, no I/O.
+
+#### 21.54.5 Tests and checks
+
+- m5 (`TestMessagingTitleRows`, `tests_messaging_titlerows.cpp`, new): the token's lift (the letter, the parse, the classic render
+  unchanged with and without the username, the rich chip + ⤴, the copy chip + ⤴ before the username is known, both outside the
+  bold around them, the inline row, the dot's data read back), the row marker dropped everywhere, `TopicTitleRow`,
+  `TextNamesTopic`, `WithTopicTitleRow` (line 1, a marker's place, a second marker, no row, a blank text), line 2 under a header,
+  the Markdown pair through the real `TgPrepareRichMarkdown` (the header's hard break, the buttons never escaped), the work
+  log's and a reply's renders, a caption (escaped, 1,000 characters exactly, no half surrogate pair), the card (the lift in the
+  rich form only, the hashed render and its hash unchanged, no lift without a topic) and `RenderHistory` (the day line and the
+  conversation-only plan / interrupt / API error with the row on line 2, a question and a reply without one, a verbose pack
+  without one, and no row asked = no token and no marker anywhere). `TestMessagingNewThread`'s two token checks now expect the
+  lifted row.
+- **Run before the commit (2026-11-14, nothing built):** the isolated m5 harness (the engine folder copied to Q:, its own
+  profile) counts 13,060 checks with the 3 known `TestTaskbarBadge` failures only. The harness compiles at /W3 without /WX, so
+  the 13 units that reach a changed header (`Messaging*.cpp`, `Engine.cpp`, `HooksBridge.cpp`, `MessagingSearchBridge.cpp`,
+  `AgentManagerContent.Settings.cpp`, `TerminalPage.AgentEngine.cpp`, `TerminalPage.AgentMessaging.cpp`; no CLI unit) passed a
+  `cl /Zs` with TerminalAppLib's own recorded Release line (/W3 /WX + the `/we` list) over a shadow of HEAD + this change, and
+  three negative controls failed as they must (a probe on the new `kTgTitleRowMarker` → C2338 in an engine unit and in a PCH
+  unit; a forced-include unused parameter + local → C4100 + C4189).
+- **Check after the build** (the dev bot, then production): a reply, a remark and a work log (verbose) open with the chip and ⤴;
+  a plan and an API error show their header, then the row; a question card and an /add-dir card show the linked title under
+  their header and keep it through their edits; a /transcript file and a 🖼️ picture carry the row in their caption; a reply
+  longer than 4,096 characters as HTML (rich off) repeats the row on each part; the ⤴ on Android puts the topic first; the chip
+  on Desktop opens the topic; a card shows ⤴ after its next edit; the census shows no burst of card edits after the build.
+
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
 > The user's questions (2026-10-17, session 0b1f8635): "Lets discover how can we make forums/groups to: Can you make groups

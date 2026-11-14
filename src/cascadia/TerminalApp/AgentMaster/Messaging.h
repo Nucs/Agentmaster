@@ -835,7 +835,11 @@ namespace Agentmaster::Msg
         /// the reply reference the first, only the last may ring. Chunk i sorts at (`seq`, `subSeqBase` + 2i); a chunk
         /// Telegram refuses as HTML ("can't parse entities") is sent again as plain text in the slot right after it.
         /// </summary>
-        std::vector<OutItem> _htmlItems(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, uint64_t seq, uint32_t subSeqBase, std::shared_ptr<PromptRef> replyRef = nullptr);
+        /// <param name="chunkRow">§21.54: the session's title row in its CLASSIC render (_titleRowClassic), for EVERY CHUNK AFTER THE
+        /// FIRST — each chunk is a message of its own in the chat's "All" view, and the first one has the row already (the caller put
+        /// it in `html`). With a row the chunks are cut that much shorter, so a chunk with its row still fits Telegram's limit.
+        /// "" (the default) = the chunks as before (the main view, the directory, a thread that is no session's topic).</param>
+        std::vector<OutItem> _htmlItems(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, uint64_t seq, uint32_t subSeqBase, std::shared_ptr<PromptRef> replyRef = nullptr, const std::wstring& chunkRow = {});
         /// <summary>
         /// Posts HTML into a topic (chunked at Telegram's limit; the buttons and `onDone` ride the LAST chunk, the
         /// reply reference the first; a refused HTML is re-sent as plain text). `movesCard` (default) stamps the
@@ -847,13 +851,20 @@ namespace Agentmaster::Msg
         /// <param name="picture">§21.42: the card's screenshot, shown as the rich message's last block (_sendTitledRich). Only the
         /// rich form can carry it: a text that goes classic (rich off, past the rich limit, no title tokens) goes without it.
         /// Null (the default) = no picture.</param>
+        /// <param name="addTitleRow">§21.54: true (the default) gives a message in a SESSION'S topic that session's title row as its
+        /// first line (WithTopicTitleRow with _titleRowToken: a builder's row marker takes it in place; a text that names its topic
+        /// already is left as it is; a thread no session owns gets none). false = the caller placed the row itself in a form the
+        /// central step cannot see — the question and /add-dir cards write its CLASSIC render after their header, because they are
+        /// edited classic — or wants none; a stray marker still goes either way.</param>
         /// <remarks>
         /// §21.15: a text that names a session carries TITLE TOKENS (TgTitleToken). While title chips are wanted
         /// (_titleChipsWanted) and the rich form fits Telegram's rich limit, it goes as ONE rich message whose titles are chips
         /// (_sendTitledRich); otherwise — and as that message's fallback — its classic render (TgRenderTitleTokensClassic: the
         /// §21.13 squares) goes the HTML way described above. A text without tokens goes the HTML way exactly as before.
+        /// §21.54: since every message in a session's topic carries its title row (a token), every such message is TITLED: it goes
+        /// rich (chip + ⤴) while chips are wanted, and as HTML (the linked title, every chunk with its row) otherwise.
         /// </remarks>
-        void _sendText(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId = 0, bool movesCard = true, std::shared_ptr<PromptRef> replyRef = nullptr, std::shared_ptr<const CardPicture> picture = nullptr);
+        void _sendText(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId = 0, bool movesCard = true, std::shared_ptr<PromptRef> replyRef = nullptr, std::shared_ptr<const CardPicture> picture = nullptr, bool addTitleRow = true);
         /// <summary>
         /// Whether a message that names a session goes as a RICH message whose titles are CHIPS (§21.15): the cog's rich switch
         /// (AppSettings::messagingRichMessages, the same switch as Claude's rich Markdown) is on, and this run has not found the
@@ -892,10 +903,16 @@ namespace Agentmaster::Msg
         /// again as HTML in its own place: `fallbackHtml` for a message of one part, else that part converted. With rich
         /// messages off (AppSettings::messagingRichMessages) or `markdown` empty, `fallbackHtml` goes at once (_sendText).
         /// Only the last part rings and gets `onDone`; the first carries the reply reference; `movesCard` as _sendText.
+        /// §21.54: in a session's topic EVERY part carries the session's title row (each part is a message of its own): the rich
+        /// part gets it as inline rich HTML (the chip and the ⤴ lift, TgTitleRowRichInline) — in the place of the part's row marker
+        /// (a header-led message: MarkdownTitleRowAfterHeader), else as the part's first paragraph — and the part's HTML fallback gets
+        /// the same row (WithTopicTitleRow, rendered classic), every one of its chunks too.
         /// </summary>
         /// <param name="threadId">The topic (0 = the chat's General view).</param>
-        /// <param name="markdown">Claude's Markdown as written (the caller's own lines escaped with TgMdEscapeText).</param>
-        /// <param name="fallbackHtml">The same message as Telegram HTML ("" = TgMarkdownToHtml of the Markdown).</param>
+        /// <param name="markdown">Claude's Markdown as written (the caller's own lines escaped with TgMdEscapeText; §21.54: a row
+        /// marker on a line of its own where a header-led message wants its row).</param>
+        /// <param name="fallbackHtml">The same message as Telegram HTML ("" = TgMarkdownToHtml of the Markdown; §21.54: the row token
+        /// already in place, or none — the row then goes first).</param>
         /// <param name="silent">No sound (the last part rings otherwise).</param>
         /// <param name="prio">The outbox priority.</param>
         /// <param name="onDone">Called with the last part's answer (on the send thread; may be empty).</param>
@@ -953,6 +970,8 @@ namespace Agentmaster::Msg
         /// messages 909 / 910) — else as its classic render. A rich edit Telegram refuses (RichEditRefusalWantsFallback) is made
         /// again with the classic render, in its own outbox place and without a key, so it never replaces a newer edit queued
         /// meanwhile.
+        /// §21.54: an edit knows no thread, so it adds no title row: an edited message's builder puts the row in every text it posts
+        /// AND edits (the work log, the "👤 You" status edits, the card), or the edit would drop it. A stray row marker is dropped.
         /// </remarks>
         /// <exception cref="std::bad_alloc">If the item cannot be allocated.</exception>
         void _editText(int64_t messageId, const std::wstring& html, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone = nullptr, std::function<void(bool)> onForm = nullptr, std::shared_ptr<const CardPicture> picture = nullptr);
@@ -1006,6 +1025,17 @@ namespace Agentmaster::Msg
         /// <exception cref="std::bad_alloc">If the item (or its copy of the picture's bytes) cannot be allocated.</exception>
         OutItem _richEditItem(int64_t messageId, const std::wstring& richHtml, SendPriority prio, const std::wstring& key, const json::Value& replyMarkup, const CardPicture* picture, uint64_t seq, uint32_t subSeq) const;
         void _react(int64_t messageId, std::wstring_view emoji);
+        /// <summary>
+        /// Sends a file into a topic as a DOCUMENT (sendDocument, silent, at `prio`): a transcript, a linked file, an All Screen
+        /// picture, a photo Telegram would not take as one. §21.54: in a session's topic the caption opens with the session's title
+        /// row (TitledCaptionHtml — a caption has no rich form, so the row's classic render: the square and the linked title — and
+        /// parse_mode HTML); in any other thread, or with no caption and no row, it goes as before (plain text).
+        /// </summary>
+        /// <param name="threadId">The topic (0 = the chat's main view).</param>
+        /// <param name="fileName">The file's name as Telegram shows it.</param>
+        /// <param name="bytes">The file's bytes.</param>
+        /// <param name="caption">The caption, plain text ("" = none; cut so that it and its row stay within 1,000 characters).</param>
+        /// <param name="prio">The send priority.</param>
         void _sendDocument(int64_t threadId, std::wstring_view fileName, std::string bytes, const std::wstring& caption, SendPriority prio);
         json::Value _buttons(const std::vector<std::vector<std::pair<std::wstring, std::wstring>>>& rows) const;
         /// <summary>
@@ -1642,6 +1672,38 @@ namespace Agentmaster::Msg
         /// <returns>The username; "" = no links yet (titles go as copy chips / plain mentions, as before §21.17).</returns>
         /// <exception cref="std::bad_alloc">If the copy cannot be allocated.</exception>
         std::wstring _linkBot() const;
+        /// <summary>
+        /// §21.54: rebuilds the THREAD -&gt; TITLE ROW snapshot (`_titleRows`) from the topic records — each session topic's thread,
+        /// with its session, the title its record holds and the square its name shows — so every send path can put the session's
+        /// title row on a message whatever lock its caller holds. Tick thread: once per tick right after the topic sync and the
+        /// name tick (every create, rename, rekey and delete of the tick is in), and once before the first tick. A message sent in
+        /// between (a reply on the poll thread) reads the last snapshot: a title renamed this very tick shows from the next one.
+        /// </summary>
+        /// <remarks>
+        /// Takes `_mtx` (to read the records), then `_titleRowsMtx` (to swap the map in) — never both at once, so it must not be
+        /// called with `_mtx` held. Its cost is one copy of ~600 short records per 1.5 s tick. Never throws: an allocation failure
+        /// keeps the previous snapshot (logged, Rule #18).
+        /// </remarks>
+        void _refreshTitleRows() noexcept;
+        /// <summary>
+        /// §21.54: the TITLE ROW token (TopicTitleRow, with the ⤴ lift) of the session whose topic is `threadId`, from the snapshot
+        /// `_refreshTitleRows` keeps. "" for a thread that is no session's topic — the main view (0), the 🔎 Search topic, a new
+        /// thread still in its wizard — so those messages get no row. Any thread; `_titleRowsMtx` only (a LEAF lock), so a caller may
+        /// hold `_mtx`.
+        /// </summary>
+        /// <param name="threadId">The message's topic.</param>
+        /// <returns>The token; "" when no session owns the thread.</returns>
+        /// <exception cref="std::bad_alloc">If the token cannot be allocated.</exception>
+        std::wstring _titleRowToken(int64_t threadId) const;
+        /// <summary>
+        /// §21.54: _titleRowToken's row in its CLASSIC render — "🟦 &lt;a href&gt;title&lt;/a&gt;" with the topic link once the bot's
+        /// username is known (_linkBot) — for what has no rich form: a caption, a classic-edited card (the question and /add-dir
+        /// cards), a chunk after the first of a message that goes as HTML. Any thread; leaf locks only.
+        /// </summary>
+        /// <param name="threadId">The message's topic.</param>
+        /// <returns>The rendered row; "" when no session owns the thread.</returns>
+        /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+        std::wstring _titleRowClassic(int64_t threadId) const;
         /// <summary>
         /// The thread of a session's topic (§21.17): what a reply that names the session links its title to. Takes `_mtx` — never
         /// call it with `_mtx` held.
@@ -2327,11 +2389,14 @@ namespace Agentmaster::Msg
         /// <summary>
         /// Sends a picture into a topic as a PHOTO (sendPhoto, silent, at `prio`); when Telegram refuses it as a photo (a size
         /// it will not take as one, a picture it cannot read), the same bytes go again as a document, in its place.
+        /// §21.54: in a session's topic the caption opens with the session's title row (TitledCaptionHtml: its classic render, the
+        /// caption escaped below it, parse_mode HTML); elsewhere it stays plain text, as before. The document fallback gets the
+        /// original caption and adds the same row itself (_sendDocument).
         /// </summary>
         /// <param name="threadId">The topic (0 = the chat's main view).</param>
         /// <param name="fileName">The file's name (screen-TITLE.png).</param>
         /// <param name="bytes">The PNG.</param>
-        /// <param name="caption">The caption, plain text (cut at 1,000 characters).</param>
+        /// <param name="caption">The caption, plain text (cut so that it and its row stay within 1,000 characters).</param>
         /// <param name="prio">The send priority.</param>
         void _sendPhoto(int64_t threadId, std::wstring fileName, std::string bytes, std::wstring caption, SendPriority prio);
 
@@ -2944,6 +3009,24 @@ namespace Agentmaster::Msg
         /// </summary>
         mutable std::mutex _linkBotMtx;
         std::wstring _linkBotName;
+        /// <summary>
+        /// §21.54: what a TITLE ROW names — one session topic's session, the title its record holds (TopicRecord::title) and the
+        /// square its name shows (TopicRecord::nameColor). A value in `_titleRows`.
+        /// </summary>
+        struct TitleRowFacts
+        {
+            std::wstring sessionId;
+            std::wstring title;
+            std::wstring square;
+        };
+        /// <summary>
+        /// §21.54: the THREAD -&gt; TITLE ROW snapshot (_refreshTitleRows writes it, _titleRowToken / _titleRowClassic read it), behind
+        /// `_titleRowsMtx` — a LEAF lock like `_linkBotMtx`: nothing else is taken while it is held, so a send path reads it with
+        /// `_mtx` held by its caller (some callers of _sendText hold it). ⚠ A data member of MessagingService: a build that brings it
+        /// must purge (CLAUDE.md, Building FAST #5).
+        /// </summary>
+        mutable std::mutex _titleRowsMtx;
+        std::unordered_map<int64_t, TitleRowFacts> _titleRows;
         std::wstring _status;
         std::wstring _stateFile;
         MessagingState _state;

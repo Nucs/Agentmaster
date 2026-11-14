@@ -1380,6 +1380,27 @@ namespace Agentmaster::Msg
     // should jump to the thread"); a token without one (every token written before §21.17, a session that has no topic yet)
     // renders as before: a copy chip, or the plain classic mention.
     inline constexpr wchar_t kTgTitleTokenThread = L'\xE003';
+    // §21.54: the ROW MARKER — where a builder puts its session's TITLE ROW when that row is not the message's first line: a
+    // message that opens with a header line of the bot's own ("📋 Plan ready for approval", "⚠ API error", a replay's day line)
+    // carries the row on its SECOND line (the user's rule of 2026-11-14: "the title … at the first line, or at the second line if
+    // there's info like in the bottom pinned one"). Builders of HTML write the row token itself there (WithTopicTitleRowAfterHeader);
+    // Markdown cannot hold a token through TgPrepareRichMarkdown (it escapes every '<'), so a Markdown builder writes this character
+    // on its own line instead (MarkdownTitleRowAfterHeader), and the send layer puts the rendered row in its place
+    // (WithTopicTitleRow / WithTopicTitleRowMarkdown). A private-use character like the token's frame: every renderer drops a stray
+    // one (TgIsTitleTokenMarker), so it never reaches Telegram, and a title that holds one loses it in TgTitleToken.
+    inline constexpr wchar_t kTgTitleRowMarker = L'\xE004';
+
+    // §21.54: the ⤴ LIFT — a small in-text CALLBACK button right after a title row's chip, in a RICH message only, that puts the
+    // topic FIRST in the chat's thread list. It is the directory dot's own action (§21.16.7, MessagingService::_bringTopicToFront:
+    // the topic's sticky card is posted again, so the topic has the chat's newest message), so its data is the dot's —
+    // "d:front:<thread>"; MessagingDirectory.h asserts that kDirectoryFrontCallbackPrefix is this very prefix. Why it exists: the
+    // chip is a LINK to the topic, which Telegram Desktop opens, but Telegram for Android cannot open a bot chat's topic from any
+    // link (§21.16.3; re-read in 13.2.2's LaunchActivity and tried on the owner's phone, 2026-11-14: a user peer gets only
+    // user_id + message_id, so the link lands in "All"). There the lift, then the first thread tab, is the way in. Telegram's
+    // classic HTML has no in-text callback button, so a classic render shows the linked title alone.
+    inline constexpr std::wstring_view kTgTopicLiftCallbackPrefix = L"d:front:";
+    // The lift's label: "⤴" (U+2934), an arrow that rises — the topic goes up the list.
+    inline constexpr std::wstring_view kTgTopicLiftLabel = L"\x2934";
 
     // A chip's label shows at most this many UTF-16 units of the title (an ellipsis past it: a button is no place for a
     // paragraph); its copy is the whole title up to Telegram's CopyTextButton limit, "1-256 characters".
@@ -1388,12 +1409,16 @@ namespace Agentmaster::Msg
 
     namespace detail
     {
-        /// <summary>Whether a character frames a title token (§21.15); such a character is dropped from a token's parts.</summary>
+        /// <summary>
+        /// Whether a character is one of the bot's own private-use marks: a title token's frame (§21.15), or the §21.54 row marker.
+        /// Such a character is dropped from a token's parts (TgTitleToken), and every renderer drops a stray one, so none of them
+        /// ever reaches Telegram.
+        /// </summary>
         /// <param name="c">The character.</param>
-        /// <returns>True for OPEN, MID, CLOSE and (§21.17) THREAD.</returns>
+        /// <returns>True for OPEN, MID, CLOSE, (§21.17) THREAD and (§21.54) the row marker.</returns>
         inline constexpr bool TgIsTitleTokenMarker(wchar_t c) noexcept
         {
-            return c == kTgTitleTokenOpen || c == kTgTitleTokenMid || c == kTgTitleTokenClose || c == kTgTitleTokenThread;
+            return c == kTgTitleTokenOpen || c == kTgTitleTokenMid || c == kTgTitleTokenClose || c == kTgTitleTokenThread || c == kTgTitleRowMarker;
         }
 
         /// <summary>
@@ -1482,22 +1507,26 @@ namespace Agentmaster::Msg
         }
 
         /// <summary>
-        /// Reads the title token that starts at `pos` (§21.15): its form, its square, its escaped title and (§21.17) the thread
-        /// it links to.
+        /// Reads the title token that starts at `pos` (§21.15): its form, its square, its escaped title, (§21.17) the thread it
+        /// links to and (§21.54) whether it carries the ⤴ lift — an UPPER-CASE form letter ('P', 'B'), so a token without the lift
+        /// is byte for byte what it was before §21.54.
         /// </summary>
         /// <param name="s">The text.</param>
         /// <param name="pos">The index of a kTgTitleTokenOpen.</param>
-        /// <param name="form">Receives the form (Plain for an unknown form character).</param>
+        /// <param name="form">Receives the form (Plain for an unknown form character; Plain / Bold for 'P' / 'B').</param>
         /// <param name="square">Receives the color square ("" = none).</param>
         /// <param name="escapedTitle">Receives the title, escaped by TgEscapeHtml.</param>
         /// <param name="threadId">Receives the topic the title links to: 0 for a token without a THREAD part, or with one that is
         /// not a positive decimal number (a token is our own text, so that only happens to a token cut by a caller).</param>
+        /// <param name="lift">Receives true when the token asks for the ⤴ lift after its chip (TgTitleToken's `lift`); the rich
+        /// render draws it only when the token also names a thread.</param>
         /// <returns>The index just past the token's CLOSE; npos when no well-formed token starts at `pos` (the caller drops
         /// the stray OPEN and goes on).</returns>
         /// <exception cref="std::bad_alloc">If a part cannot be copied.</exception>
-        inline size_t TgParseTitleToken(std::wstring_view s, size_t pos, TgTitleForm& form, std::wstring& square, std::wstring& escapedTitle, int64_t& threadId)
+        inline size_t TgParseTitleToken(std::wstring_view s, size_t pos, TgTitleForm& form, std::wstring& square, std::wstring& escapedTitle, int64_t& threadId, bool& lift)
         {
             threadId = 0;
+            lift = false;
             if (pos + 2 >= s.size() || s[pos] != kTgTitleTokenOpen)
             {
                 return std::wstring_view::npos;
@@ -1515,6 +1544,16 @@ namespace Agentmaster::Msg
             }
             switch (s[pos + 1])
             {
+            case L'P':
+                // §21.54: a Plain token that carries the ⤴ lift (a title row: TopicTitleRow).
+                form = TgTitleForm::Plain;
+                lift = true;
+                break;
+            case L'B':
+                // §21.54: a Bold token that carries the ⤴ lift (the sticky card's title line).
+                form = TgTitleForm::Bold;
+                lift = true;
+                break;
             case static_cast<wchar_t>(TgTitleForm::Bold):
                 form = TgTitleForm::Bold;
                 break;
@@ -1551,6 +1590,24 @@ namespace Agentmaster::Msg
             square.assign(s.substr(pos + 2, squareEnd - pos - 2));
             escapedTitle.assign(s.substr(mid + 1, close - mid - 1));
             return close + 1;
+        }
+
+        /// <summary>
+        /// TgParseTitleToken for a caller that has no use for the §21.54 lift (the classic render, which cannot draw one): the same
+        /// parse, the lift read and dropped.
+        /// </summary>
+        /// <param name="s">The text.</param>
+        /// <param name="pos">The index of a kTgTitleTokenOpen.</param>
+        /// <param name="form">Receives the form.</param>
+        /// <param name="square">Receives the color square ("" = none).</param>
+        /// <param name="escapedTitle">Receives the title, escaped by TgEscapeHtml.</param>
+        /// <param name="threadId">Receives the topic the title links to (0 = none).</param>
+        /// <returns>The index just past the token's CLOSE; npos when no well-formed token starts at `pos`.</returns>
+        /// <exception cref="std::bad_alloc">If a part cannot be copied.</exception>
+        inline size_t TgParseTitleToken(std::wstring_view s, size_t pos, TgTitleForm& form, std::wstring& square, std::wstring& escapedTitle, int64_t& threadId)
+        {
+            bool lift = false;
+            return TgParseTitleToken(s, pos, form, square, escapedTitle, threadId, lift);
         }
     }
 
@@ -1683,9 +1740,13 @@ namespace Agentmaster::Msg
     /// (TgTitleLine, which puts it on one line first, so the cut counts what is shown).</param>
     /// <param name="threadId">The session's topic (its message_thread_id); 0 (the default) = no link — a session with no topic
     /// yet, or a place that names no topic.</param>
+    /// <param name="lift">§21.54: true asks for the ⤴ LIFT after the chip in a RICH render (TgTopicLiftButtonHtml: the topic goes
+    /// first in the thread list, Android's way into a topic). Kept only for a Plain or Bold token that names its topic (`threadId`
+    /// &gt; 0) — written as the form letter upper-cased, so the token without it stays byte for byte as before. The classic render
+    /// never shows it (classic HTML has no in-text button), so a hash taken over the classic render does not move with it.</param>
     /// <returns>The token.</returns>
     /// <exception cref="std::bad_alloc">If the token cannot be allocated.</exception>
-    inline std::wstring TgTitleToken(TgTitleForm form, std::wstring_view colorSquare, std::wstring_view title, int64_t threadId = 0)
+    inline std::wstring TgTitleToken(TgTitleForm form, std::wstring_view colorSquare, std::wstring_view title, int64_t threadId = 0, bool lift = false)
     {
         const std::wstring oneLine = TgOneLineTitle(title);
         std::wstring clean;
@@ -1700,7 +1761,20 @@ namespace Agentmaster::Msg
         std::wstring token;
         token.reserve(colorSquare.size() + clean.size() + 40);
         token += kTgTitleTokenOpen;
-        token += static_cast<wchar_t>(form);
+        // §21.54: the lift rides the form letter ('P' / 'B'). Only a token that names its topic can lift it, and only the two forms a
+        // title row and the card's title line use; any other request writes the plain form letter, so it renders exactly as before.
+        if (lift && threadId > 0 && form == TgTitleForm::Plain)
+        {
+            token += L'P';
+        }
+        else if (lift && threadId > 0 && form == TgTitleForm::Bold)
+        {
+            token += L'B';
+        }
+        else
+        {
+            token += static_cast<wchar_t>(form);
+        }
         for (const wchar_t c : colorSquare)
         {
             if (!detail::TgIsTitleTokenMarker(c))
@@ -1861,6 +1935,27 @@ namespace Agentmaster::Msg
         }
         chip += TgEscapeHtml(label) + L"</tg-button>";
         return chip;
+    }
+
+    /// <summary>
+    /// The ⤴ LIFT button of a title row (§21.54): an in-text callback_data button whose data is the directory dot's
+    /// ("d:front:&lt;thread&gt;", kTgTopicLiftCallbackPrefix), so a tap reaches MessagingService::_bringTopicToFront — the topic's
+    /// sticky card is posted again and the topic goes FIRST in the chat's thread list (Android's way into a topic: the first thread
+    /// tab). No style attribute: the app's plain button, small beside the chip. Measured 2026-11-14 on the dev bot (a throwaway
+    /// topic): Telegram keeps it inside a rich HTML message and inside a rich MARKDOWN message (an inline tag in a paragraph), and
+    /// the data comes back verbatim. The data is at most 8 + 18 bytes, under Telegram's 64.
+    /// </summary>
+    /// <param name="threadId">The topic to lift (its message_thread_id).</param>
+    /// <returns>Rich-message HTML: one &lt;tg-button&gt; element; "" when `threadId` names no topic (&lt;= 0).</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring TgTopicLiftButtonHtml(int64_t threadId)
+    {
+        if (threadId <= 0)
+        {
+            return {};
+        }
+        return L"<tg-button type=\"callback_data\" data=\"" + std::wstring{ kTgTopicLiftCallbackPrefix } + std::to_wstring(threadId) + L"\">" +
+               std::wstring{ kTgTopicLiftLabel } + L"</tg-button>";
     }
 
     namespace detail
@@ -2052,7 +2147,8 @@ namespace Agentmaster::Msg
                     std::wstring square;
                     std::wstring title;
                     int64_t threadId = 0;
-                    const size_t end = TgParseTitleToken(html, i, form, square, title, threadId);
+                    bool lift = false;
+                    const size_t end = TgParseTitleToken(html, i, form, square, title, threadId, lift);
                     if (end == std::wstring_view::npos)
                     {
                         ++i; // a stray OPEN: dropped
@@ -2063,6 +2159,12 @@ namespace Agentmaster::Msg
                         run += L"</" + it->first + L">";
                     }
                     run += TgTitleChipHtml(square, title, TgTopicUrl(botUsername, threadId)); // §21.17: a link chip when it names its topic
+                    if (lift && threadId > 0)
+                    {
+                        // §21.54: the ⤴ lift right after the chip, outside every inline tag like the chip itself. It needs no username
+                        // (a callback, not a link), so it shows even while the chip is still a copy chip (before the first getMe).
+                        run += L" " + TgTopicLiftButtonHtml(threadId);
+                    }
                     for (const auto& o : open)
                     {
                         run += o.second;
@@ -2190,6 +2292,27 @@ namespace Agentmaster::Msg
     inline std::wstring TgRichHtmlFromClassic(std::wstring_view html, std::wstring_view botUsername = {})
     {
         return detail::TgRichFromClassicCore(html, true, botUsername);
+    }
+
+    /// <summary>
+    /// A title ROW (§21.54: a title token, usually with the ⤴ lift) as INLINE rich HTML — the chip, and the lift after it — with no
+    /// paragraph around it: what a rich MARKDOWN message (Claude's own text, MessagingService::_sendRich) takes as inline HTML.
+    /// Telegram's rich Markdown "can contain arbitrary HTML", and a &lt;tg-button&gt; that opens a line followed by text is an inline
+    /// tag of that line's paragraph, not an HTML block (GFM's block rule needs the opening tag alone on its line) — measured
+    /// 2026-11-14 on the dev bot: both buttons came back as one paragraph, the row first and the row after a header line alike.
+    /// </summary>
+    /// <param name="rowToken">The row: Telegram HTML holding title tokens (TopicTitleRow's token, alone).</param>
+    /// <param name="botUsername">The bot's username for the chip's topic link ("" = a copy chip; the lift needs none).</param>
+    /// <returns>Inline rich HTML ("" for an empty row).</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring TgTitleRowRichInline(std::wstring_view rowToken, std::wstring_view botUsername = {})
+    {
+        if (rowToken.empty())
+        {
+            return {};
+        }
+        // blocks == false: one inline run, no <p> around it — the caller places it in its own Markdown paragraph or line.
+        return detail::TgRichFromClassicCore(rowToken, false, botUsername);
     }
 
     /// <summary>

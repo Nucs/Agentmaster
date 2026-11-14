@@ -2508,6 +2508,9 @@ namespace Agentmaster::Msg
 
     void MessagingService::_tickLoop() noexcept
     {
+        // §21.54: the title rows know the topics the state file holds before the first tick, so a reply the poll thread sends in the
+        // first seconds already names its session.
+        _refreshTitleRows();
         while (!_stop.load())
         {
             try
@@ -2783,6 +2786,9 @@ namespace Agentmaster::Msg
                 _tendHeldThreads();
                 _flushIdleNotices(WallMs()); // §21.31: the main view names the sessions whose topics just left as idle, once they settled
                 _stateNameTick(); // §21.11 + §21.13: at most one topic name follows its session's state and color per tick, within the budget
+                // §21.54: the thread -> title row snapshot, after every create, rename, rekey and delete of this tick, and before the
+                // mirror, the cards and the history replay below post anything.
+                _refreshTitleRows();
                 _directoryTick(); // §21.16: the pinned directory follows the fleet (a check every 15 s, an edit at most every 2 min)
 
                 // The mirror and the cards, per topic. The topic set is copied under the lock; each
@@ -3380,7 +3386,8 @@ namespace Agentmaster::Msg
             {
                 replyTo = rp->I64At(L"message_id", 0);
             }
-            for (auto& fb : _htmlItems(thread, item.fallbackHtml, silent, item.prio, L"", json::Value{}, nullptr, replyTo, item.seq, item.subSeq + 1))
+            // §21.54: the journaled HTML has its row already (it was rendered with it); a chunk after the first gets its own.
+            for (auto& fb : _htmlItems(thread, item.fallbackHtml, silent, item.prio, L"", json::Value{}, nullptr, replyTo, item.seq, item.subSeq + 1, nullptr, _titleRowClassic(thread)))
             {
                 fb.fromMirror = item.fromMirror;
                 _enqueue(std::move(fb));
@@ -3548,6 +3555,9 @@ namespace Agentmaster::Msg
         bool searchTopic = false;
         bool forgot = false;
         int64_t goneAfterMs = -1; // §21.51: how long after its creation the forgotten topic was found gone (-1 = not known)
+        // §21.54: the remade topic's title row, taken from its new record under the lock: the note opens the new topic before the
+        // tick's snapshot (_refreshTitleRows) knows the new thread, so _titleRowClassic could not find it yet.
+        std::wstring noteRow;
         {
             std::lock_guard lk{ _mtx };
             const auto it = _heldThreads.find(threadId);
@@ -3617,6 +3627,7 @@ namespace Agentmaster::Msg
                     if (const auto rec = _state.topics.find(h.sessionId); rec != _state.topics.end() && rec->second.threadId > 0 && rec->second.threadId != threadId)
                     {
                         newThread = rec->second.threadId;
+                        noteRow = TopicTitleRow(rec->second.title, h.sessionId, rec->second.nameColor, newThread);
                         if (h.verbose != -1 && rec->second.verbose == -1)
                         {
                             rec->second.verbose = h.verbose; // §21.11: the gone topic's own mode carries over
@@ -3692,10 +3703,12 @@ namespace Agentmaster::Msg
         if (newThread != 0)
         {
             _log(L"[msg] outbox: " + who + L" was made again as thread " + std::to_wstring(newThread) + L": " + std::to_wstring(moved) + L" queued message(s) move there");
-            // A silent line opens the new topic, before what moved: the user deleted the old one, or Telegram lost it.
+            // A silent line opens the new topic, before what moved: the user deleted the old one, or Telegram lost it. §21.54: a
+            // session's topic gets its title row under that header line — classic (this goes the HTML way, which renders no token).
             for (auto& note : _htmlItems(newThread,
                                          searchTopic ? std::wstring{ L"\x267B\xFE0F <b>This topic was made again</b>: the old one was deleted in Telegram." }
-                                                     : std::wstring{ L"\x267B\xFE0F <b>This topic was made again</b>: the old one was deleted in Telegram. Its conversation follows." },
+                                                     : WithTopicTitleRowAfterHeader(L"\x267B\xFE0F <b>This topic was made again</b>: the old one was deleted in Telegram. Its conversation follows.",
+                                                                                    noteRow.empty() ? std::wstring{} : TgRenderTitleTokensClassic(noteRow, _linkBot())),
                                          true,
                                          SendPriority::Final,
                                          L"",
@@ -4141,13 +4154,24 @@ namespace Agentmaster::Msg
         params.Set(L"reply_parameters", std::move(rp));
     }
 
-    std::vector<MessagingService::OutItem> MessagingService::_htmlItems(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, uint64_t seq, uint32_t subSeqBase, std::shared_ptr<PromptRef> replyRef)
+    std::vector<MessagingService::OutItem> MessagingService::_htmlItems(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, uint64_t seq, uint32_t subSeqBase, std::shared_ptr<PromptRef> replyRef, const std::wstring& chunkRow)
     {
         // A text past Telegram's limit goes out as several messages; only the LAST carries the buttons and the callback,
         // and only the first the reply reference. Every chunk keeps the message's place: (seq, subSeqBase + 2i), and its
         // plain-text fallback the slot right after it.
         std::vector<OutItem> items;
-        const auto chunks = TgChunkHtml(html);
+        // §21.54: each chunk is a message of its own in the chat's "All" view, so each one after the first opens with the session's
+        // title row too (the first has it in `html` already, where the caller put it). The cut leaves the row's room, so a chunk
+        // with its row still fits; the floor keeps a pathological row from cutting the text into crumbs.
+        const size_t limit = chunkRow.empty() ? kTelegramMessageMaxChars : (std::max)(kTelegramMessageMaxChars - (std::min)(chunkRow.size() + 1, kTelegramMessageMaxChars / 2), size_t{ 1000 });
+        auto chunks = TgChunkHtml(html, limit);
+        if (!chunkRow.empty())
+        {
+            for (size_t i = 1; i < chunks.size(); ++i)
+            {
+                chunks[i] = chunkRow + L"\n" + chunks[i];
+            }
+        }
         for (size_t i = 0; i < chunks.size(); ++i)
         {
             OutItem item;
@@ -4258,24 +4282,37 @@ namespace Agentmaster::Msg
         return items;
     }
 
-    void MessagingService::_sendText(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, bool movesCard, std::shared_ptr<PromptRef> replyRef, std::shared_ptr<const CardPicture> picture)
+    void MessagingService::_sendText(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, bool movesCard, std::shared_ptr<PromptRef> replyRef, std::shared_ptr<const CardPicture> picture, bool addTitleRow)
     {
+        // §21.54 (the user's rule of 2026-11-14): a message in a SESSION'S topic names its session — the title row (TopicTitleRow:
+        // the chip that opens the topic, and the ⤴ lift) is its first line, or a header-led builder's marker takes it in place;
+        // a message that already names its topic (a "👤 You" line, the card, a change line) is left as it is. The row is a TOKEN,
+        // so from here on such a message is a titled one: rich with chips while they are wanted, else its classic render. The
+        // snapshot read is a leaf lock (_titleRowsMtx): callers that hold `_mtx` are fine. A thread no session owns (0 = the main
+        // view, the Search topic, a wizard's thread) has no row; `addTitleRow` false still takes a stray marker out.
+        const std::wstring rowToken = addTitleRow && threadId > 0 ? _titleRowToken(threadId) : std::wstring{};
+        const std::wstring rowed = WithTopicTitleRow(html, rowToken, threadId);
         // §21.15: a message that names a session carries title tokens. They never go out as they are (private-use characters):
         // with title chips wanted the message goes RICH, its titles as chips, and its classic render is the fallback; else the
         // classic render goes the HTML way. A rich form past the rich limit (never for our titled messages, which are a card, a
         // reply or a Search answer) goes classic too, chunked as usual.
-        const std::wstring* text = &html;
+        const std::wstring* text = &rowed;
         std::wstring classic;
-        if (TgHasTitleTokens(html))
+        std::wstring chunkRow; // §21.54: the row's classic render for the HTML way's chunks after the first
+        if (TgHasTitleTokens(rowed))
         {
             // §21.17: with the bot's username known, a title that names its topic links to it in both forms (a URL chip, an
             // <a> around the title); before the first getMe answers the titles go as before (copy chips, plain mentions).
             const std::wstring bot = _linkBot();
-            classic = TgRenderTitleTokensClassic(html, bot);
+            classic = TgRenderTitleTokensClassic(rowed, bot);
             text = &classic;
+            if (!rowToken.empty())
+            {
+                chunkRow = TgRenderTitleTokensClassic(rowToken, bot);
+            }
             if (_titleChipsWanted())
             {
-                if (std::wstring rich = TgRichHtmlFromClassic(html, bot); !rich.empty() && rich.size() <= kRichMessageMaxChars)
+                if (std::wstring rich = TgRichHtmlFromClassic(rowed, bot); !rich.empty() && rich.size() <= kRichMessageMaxChars)
                 {
                     // §21.42: the card's screenshot rides the rich form only (a classic message cannot hold a picture block).
                     _sendTitledRich(threadId, rich, classic, silent, prio, key, std::move(replyMarkup), std::move(onDone), replyToMessageId, std::move(replyRef), std::move(picture));
@@ -4287,7 +4324,7 @@ namespace Agentmaster::Msg
                 }
             }
         }
-        for (auto& item : _htmlItems(threadId, *text, silent, prio, key, std::move(replyMarkup), std::move(onDone), replyToMessageId, _takeOutSeq(), 0, std::move(replyRef)))
+        for (auto& item : _htmlItems(threadId, *text, silent, prio, key, std::move(replyMarkup), std::move(onDone), replyToMessageId, _takeOutSeq(), 0, std::move(replyRef), chunkRow))
         {
             _enqueue(std::move(item));
         }
@@ -4306,6 +4343,69 @@ namespace Agentmaster::Msg
     {
         std::lock_guard lk{ _linkBotMtx }; // a leaf lock: callers may hold _mtx
         return _linkBotName;
+    }
+
+    void MessagingService::_refreshTitleRows() noexcept
+    {
+        try
+        {
+            // Read the records under `_mtx`, build the map OUTSIDE every lock, then swap it in under the leaf lock alone: the two
+            // locks are never held together, so no order between them exists to get wrong, and a sender that holds `_mtx` while it
+            // reads the snapshot (the leaf lock only) can never wait on this function.
+            std::vector<std::pair<int64_t, TitleRowFacts>> rows;
+            {
+                std::lock_guard lk{ _mtx };
+                rows.reserve(_state.topics.size());
+                for (const auto& [sid, t] : _state.topics)
+                {
+                    if (t.threadId > 0)
+                    {
+                        rows.emplace_back(t.threadId, TitleRowFacts{ sid, t.title, t.nameColor });
+                    }
+                }
+            }
+            std::unordered_map<int64_t, TitleRowFacts> map;
+            map.reserve(rows.size());
+            for (auto& [thread, facts] : rows)
+            {
+                // One topic per thread: two records can only name one thread for a moment (a rekey in flight); the later wins.
+                map.insert_or_assign(thread, std::move(facts));
+            }
+            std::lock_guard lk{ _titleRowsMtx };
+            _titleRows.swap(map);
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the previous snapshot stays — a title renamed this tick shows from the next good refresh on, and a
+            // new topic's messages go without a row meanwhile (each still names its session where it did before §21.54).
+            LogSwallowedException(L"MessagingService::_refreshTitleRows");
+        }
+    }
+
+    std::wstring MessagingService::_titleRowToken(int64_t threadId) const
+    {
+        if (threadId <= 0)
+        {
+            return {}; // the main view: no session owns it
+        }
+        TitleRowFacts facts;
+        {
+            std::lock_guard lk{ _titleRowsMtx }; // a leaf lock: callers may hold _mtx
+            const auto it = _titleRows.find(threadId);
+            if (it == _titleRows.end())
+            {
+                return {}; // the Search topic, a wizard's thread, a topic not in the snapshot yet
+            }
+            facts = it->second;
+        }
+        // Built outside the lock (it allocates): the same row the "👤 You" lines draw, the ⤴ lift included.
+        return TopicTitleRow(facts.title, facts.sessionId, facts.square, threadId);
+    }
+
+    std::wstring MessagingService::_titleRowClassic(int64_t threadId) const
+    {
+        const std::wstring token = _titleRowToken(threadId);
+        return token.empty() ? std::wstring{} : TgRenderTitleTokensClassic(token, _linkBot());
     }
 
     void MessagingService::_dropQuoteOfMovedMessage(json::Value& params) noexcept
@@ -4434,7 +4534,8 @@ namespace Agentmaster::Msg
                         {
                             me->_log(L"[msg] Telegram refused a message with a title chip (" + r.description + L"); it goes as HTML with the color square in its place");
                         }
-                        for (auto& fb : me->_htmlItems(threadId, classicHtml, silent, prio, L"", replyMarkup, onDone, replyToMessageId, seq, classicSub, replyRef))
+                        // §21.54: the classic render carries the row where the rich one had it; a chunk after the first gets its own.
+                        for (auto& fb : me->_htmlItems(threadId, classicHtml, silent, prio, L"", replyMarkup, onDone, replyToMessageId, seq, classicSub, replyRef, me->_titleRowClassic(threadId)))
                         {
                             fb.durability = keyed ? 0 : -1; // §21.50: as the message it stands for
                             fb.fromMirror = mirror;
@@ -4491,21 +4592,35 @@ namespace Agentmaster::Msg
         const auto parts = TgChunkMarkdown(markdown);
         const uint64_t seq = _takeOutSeq(); // every part, and every fallback, keeps this message's place in the order
         auto self = weak_from_this();
+        // §21.54: the session's title row, in the three forms a part needs — the token (the HTML fallback's, rendered classic below),
+        // inline rich HTML (the chip and the ⤴ lift, which a rich Markdown message takes as an inline tag) and the classic render
+        // (every HTML chunk after the first). All "" in a thread no session owns: the parts then go exactly as before.
+        const std::wstring rowToken = threadId > 0 ? _titleRowToken(threadId) : std::wstring{};
+        const std::wstring bot = rowToken.empty() ? std::wstring{} : _linkBot();
+        const std::wstring rowRich = TgTitleRowRichInline(rowToken, bot);
+        const std::wstring rowClassic = rowToken.empty() ? std::wstring{} : TgRenderTitleTokensClassic(rowToken, bot);
         for (size_t j = 0; j < parts.size(); ++j)
         {
             const bool last = j + 1 == parts.size();
             const uint32_t sub = static_cast<uint32_t>(j) * kRichPartSubSeqStride;
-            // What this part falls back to: the caller's HTML for a message of one part, else this part converted.
-            const std::wstring partHtml = parts.size() == 1 && !fallbackHtml.empty() ? fallbackHtml : TgMarkdownToHtml(parts[j]);
+            // What this part falls back to: the caller's HTML for a message of one part, else this part converted — §21.54: with the
+            // row (a header-led caller's token or marker places it, else it opens the part), RENDERED here, because the HTML way
+            // (_htmlItems) sends its text as it is and a token must never reach Telegram.
+            const std::wstring partBase = parts.size() == 1 && !fallbackHtml.empty() ? fallbackHtml : TgMarkdownToHtml(parts[j]);
+            const std::wstring partHtml = TgRenderTitleTokensClassic(WithTopicTitleRow(partBase, rowToken, threadId), bot);
             std::function<void(const TgResult&)> partDone = last ? onDone : nullptr;
             const int64_t replyTo = j == 0 ? replyToMessageId : 0;
             const std::shared_ptr<PromptRef> partRef = j == 0 ? replyRef : nullptr; // §21.12: the first part quotes the prompt
             const bool quiet = silent || !last; // only the last part rings
-            std::wstring prepared = TgPrepareRichMarkdown(parts[j]);
-            if (prepared.size() > kRichMessageMaxChars || prepared.find_first_not_of(L" \t\r\n") == std::wstring::npos)
+            const std::wstring preparedBody = TgPrepareRichMarkdown(parts[j]);
+            // §21.54: the row goes in AFTER the preparation (which escapes every '<' and would show the buttons as text): in the place
+            // of the part's row marker, else as its first paragraph. Blankness is judged on the body, so a part with nothing to show
+            // still goes the HTML way below instead of becoming a message that holds a row alone.
+            std::wstring prepared = preparedBody.find_first_not_of(L" \t\r\n") == std::wstring::npos ? preparedBody : WithTopicTitleRowMarkdown(preparedBody, rowRich);
+            if (prepared.size() > kRichMessageMaxChars || preparedBody.find_first_not_of(L" \t\r\n") == std::wstring::npos)
             {
                 // Grown past the rich limit by its escapes (thousands of '<'), or nothing left to show: HTML in its place.
-                for (auto& item : _htmlItems(threadId, partHtml, quiet, prio, L"", json::Value{}, partDone, replyTo, seq, sub + 1, partRef))
+                for (auto& item : _htmlItems(threadId, partHtml, quiet, prio, L"", json::Value{}, partDone, replyTo, seq, sub + 1, partRef, rowClassic))
                 {
                     _enqueue(std::move(item));
                 }
@@ -4543,7 +4658,7 @@ namespace Agentmaster::Msg
                 item.beforeSend = [partRef](json::Value& p) { _applyReplyRef(p, *partRef); };
             }
             const bool mirror = t_outboxMirrorPass; // §21.50: the fallback, queued later from the send loop, is the mirror's when this part is
-            item.onDone = [self, threadId, partHtml, quiet, prio, seq, sub, replyTo, partDone, partRef, mirror](const TgResult& r) {
+            item.onDone = [self, threadId, partHtml, quiet, prio, seq, sub, replyTo, partDone, partRef, mirror, rowClassic](const TgResult& r) {
                 if (RichRefusalWantsFallback(r))
                 {
                     if (auto me = self.lock())
@@ -4556,7 +4671,8 @@ namespace Agentmaster::Msg
                         {
                             me->_log(L"[msg] Telegram refused a rich message (" + r.description + L"); it goes as HTML in its place");
                         }
-                        for (auto& fb : me->_htmlItems(threadId, partHtml, quiet, prio, L"", json::Value{}, partDone, replyTo, seq, sub + 1, partRef))
+                        // §21.54: `partHtml` holds the row already; its chunks after the first get their own (the row as it was queued).
+                        for (auto& fb : me->_htmlItems(threadId, partHtml, quiet, prio, L"", json::Value{}, partDone, replyTo, seq, sub + 1, partRef, rowClassic))
                         {
                             fb.fromMirror = mirror;
                             me->_enqueue(std::move(fb));
@@ -4799,6 +4915,15 @@ namespace Agentmaster::Msg
         {
             return;
         }
+        // §21.54: an edit knows no thread, so it adds no title row — the builders of edited messages write the row into every text
+        // they post and edit. A stray row marker (a builder that wrote one for a message it now edits) goes, with its line.
+        std::wstring unmarked;
+        const std::wstring* body = &html;
+        if (html.find(kTgTitleRowMarker) != std::wstring::npos)
+        {
+            unmarked = WithTopicTitleRow(html, std::wstring{}, 0);
+            body = &unmarked;
+        }
         // §21.15: the answer to a classic edit reports the classic form (the Message Telegram returns says which form it shows;
         // "not modified" means the message shows this very text already), then goes to the caller.
         const auto classicDone = [](std::function<void(const TgResult&)> done, std::function<void(bool)> form) -> std::function<void(const TgResult&)> {
@@ -4817,9 +4942,9 @@ namespace Agentmaster::Msg
                 }
             };
         };
-        if (!TgHasTitleTokens(html))
+        if (!TgHasTitleTokens(*body))
         {
-            OutItem item = _classicEditItem(messageId, html, prio, key, replyMarkup);
+            OutItem item = _classicEditItem(messageId, *body, prio, key, replyMarkup);
             item.onDone = classicDone(std::move(onDone), std::move(onForm));
             _enqueue(std::move(item));
             return;
@@ -4828,8 +4953,8 @@ namespace Agentmaster::Msg
         // message into a rich one and back — measured, thread 26785, messages 909 / 910), else the classic render.
         // §21.17: the titles link to their topics once the bot's username is known (_sendText's rule).
         const std::wstring bot = _linkBot();
-        std::wstring classic = TgRenderTitleTokensClassic(html, bot);
-        std::wstring rich = _titleChipsWanted() ? TgRichHtmlFromClassic(html, bot) : std::wstring{};
+        std::wstring classic = TgRenderTitleTokensClassic(*body, bot);
+        std::wstring rich = _titleChipsWanted() ? TgRichHtmlFromClassic(*body, bot) : std::wstring{};
         if (rich.empty() || rich.size() > kRichMessageMaxChars)
         {
             OutItem item = _classicEditItem(messageId, classic, prio, key, replyMarkup);
@@ -4942,7 +5067,14 @@ namespace Agentmaster::Msg
         {
             item.params.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(threadId)));
         }
-        if (!caption.empty())
+        // §21.54: in a session's topic the caption opens with the session's title row — its classic render (a caption has no rich
+        // form: the square and the linked title, no ⤴), so the caption becomes HTML; elsewhere it stays the plain text it was.
+        if (const std::wstring row = _titleRowClassic(threadId); !row.empty())
+        {
+            item.params.Set(L"caption", json::Value::MkStr(TitledCaptionHtml(row, caption)));
+            item.params.Set(L"parse_mode", json::Value::MkStr(L"HTML"));
+        }
+        else if (!caption.empty())
         {
             item.params.Set(L"caption", json::Value::MkStr(caption.size() > 1000 ? caption.substr(0, 1000) : caption));
         }
@@ -4967,7 +5099,14 @@ namespace Agentmaster::Msg
         {
             item.params.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(threadId)));
         }
-        if (!caption.empty())
+        // §21.54: the session's title row on the caption's first line in its topic (the caption becomes HTML), as _sendDocument does;
+        // the fallback below hands _sendDocument the ORIGINAL caption, which adds the same row itself.
+        if (const std::wstring row = _titleRowClassic(threadId); !row.empty())
+        {
+            item.params.Set(L"caption", json::Value::MkStr(TitledCaptionHtml(row, caption)));
+            item.params.Set(L"parse_mode", json::Value::MkStr(L"HTML"));
+        }
+        else if (!caption.empty())
         {
             item.params.Set(L"caption", json::Value::MkStr(caption.size() > 1000 ? caption.substr(0, 1000) : caption));
         }
@@ -7578,8 +7717,13 @@ namespace Agentmaster::Msg
              (t.transcriptPath.empty() ? std::wstring{ L"no transcript yet" } : L"mirrored from byte " + std::to_wstring(t.cursor)) + L")");
         LogNav(L"remote telegram topic-rekey " + ShortId(fromSessionId) + L" -> " + ShortId(toSessionId));
         // One silent line marks where the new conversation starts (the thread is the conversation, and this is its
-        // boundary: a /clear, a /resume or a handover the user ran at the PC).
-        _sendText(t.threadId, L"<i>\x2014 a new conversation in this tab (" + TgEscapeHtml(ShortId(toSessionId)) + L") \x2014</i>", true, SendPriority::New, L"", json::Value{}, nullptr);
+        // boundary: a /clear, a /resume or a handover the user ran at the PC). §21.54: a header-led line — the session's title row
+        // follows it, named after the NEW conversation (its title as the rename below gives it; the record still holds the old one
+        // until then, and so does the tick's snapshot).
+        _sendText(t.threadId,
+                  WithTopicTitleRowAfterHeader(L"<i>\x2014 a new conversation in this tab (" + TgEscapeHtml(ShortId(toSessionId)) + L") \x2014</i>",
+                                               TopicTitleRow(title.empty() ? oldTitle : title, toSessionId, t.nameColor, t.threadId)),
+                  true, SendPriority::New, L"", json::Value{}, nullptr);
         if (!title.empty() && title != oldTitle)
         {
             _renameTopic(toSessionId, title, s->state); // refreshes the card on success
@@ -9695,7 +9839,12 @@ namespace Agentmaster::Msg
             return;
         }
         // Past the roll-over size the message is closed and the next line starts a new one.
-        std::wstring html = L"<blockquote expandable>" + TgEscapeHtml(m.workLog) + L"</blockquote>";
+        // §21.54: the session's title row first — in the post AND in every edit (an edit adds no row, and one without it would take
+        // the row away), from the topic record in hand, so it follows a rename at the next edit. The roll-over still counts the
+        // work log's own text (m.workLog), so the row costs no line of the log.
+        std::wstring html = WithTopicTitleRow(L"<blockquote expandable>" + TgEscapeHtml(m.workLog) + L"</blockquote>",
+                                              TopicTitleRow(topic.title, sessionId, topic.nameColor, topic.threadId),
+                                              topic.threadId);
         if (m.workLog.size() > kWorkLogRolloverChars && m.workLogMessageId != 0)
         {
             _editText(m.workLogMessageId, html, SendPriority::WorkLogEdit, L"wl:" + sessionId, json::Value{});
@@ -10226,6 +10375,10 @@ namespace Agentmaster::Msg
                     html += L"\n" + TgMarkdownToHtml(it.text.size() > 3500 ? it.text.substr(0, 3500) + L"\x2026" : it.text);
                     markdown += L"\n\n" + (it.text.size() > 20000 ? it.text.substr(0, 20000) + L"\x2026" : it.text);
                 }
+                // §21.54: a header-led message — "📋 Plan ready for approval", then the session's title row, then the plan: the token in
+                // the HTML, the row marker in the Markdown (_sendRich renders the row in its place).
+                html = WithTopicTitleRowAfterHeader(html, TopicTitleRow(topic.title, sessionId, topic.nameColor, topic.threadId));
+                markdown = MarkdownTitleRowAfterHeader(markdown);
                 const bool sound = !m.approvalPinged;
                 m.awaitingAnswer = true;
                 _postFinal(sessionId, topic, m, html, L"a plan", sound, markdown);
@@ -10254,7 +10407,11 @@ namespace Agentmaster::Msg
                 // Error edge already rang the card; either way the edge that follows rings nothing more.
                 const bool sound = !topic.errorAnnounced;
                 topic.errorAnnounced = true;
-                _postFinal(sessionId, topic, m, L"\x26A0 <b>API error</b>\n" + TgEscapeHtml(it.text.size() > 2000 ? it.text.substr(0, 2000) : it.text), L"an API error", sound);
+                // §21.54: a header-led message — "⚠ API error", then the session's title row, then Claude Code's words.
+                _postFinal(sessionId, topic, m,
+                           WithTopicTitleRowAfterHeader(L"\x26A0 <b>API error</b>\n" + TgEscapeHtml(it.text.size() > 2000 ? it.text.substr(0, 2000) : it.text),
+                                                        TopicTitleRow(topic.title, sessionId, topic.nameColor, topic.threadId)),
+                           L"an API error", sound);
                 break;
             }
             case TopicItemKind::Command:

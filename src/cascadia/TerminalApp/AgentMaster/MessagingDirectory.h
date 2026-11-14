@@ -207,6 +207,10 @@ namespace Agentmaster::Msg
     /// stays, so a dot the directory drew before a rekey still finds its topic — the message is edited at most every two minutes.
     /// </summary>
     inline constexpr std::wstring_view kDirectoryFrontCallbackPrefix = L"d:front:";
+    // §21.54: a title row's ⤴ LIFT (TelegramFormat.h TgTopicLiftButtonHtml) sends the dot's own data, so _handleCallback answers both
+    // with _bringTopicToFront. TelegramFormat.h cannot include this header (it sits below it), so the two constants are tied here:
+    // a change to one without the other fails the build instead of turning every lift into an unknown button.
+    static_assert(kDirectoryFrontCallbackPrefix == kTgTopicLiftCallbackPrefix, "the title row's lift must send the directory dot's callback data");
 
     /// <summary>
     /// The callback data of a tab's dot button: "d:front:&lt;thread id&gt;" — at most 27 characters, well under the Bot API's

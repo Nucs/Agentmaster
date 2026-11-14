@@ -1043,7 +1043,9 @@ namespace Agentmaster::Msg
                 w->messageId = 0;
             }
             w->cardMessageId = -1;
-            html = BuildAddDirCardHtml(w->model, WallMs());
+            // §21.54: the session's title row under the card's header ("📁 Claude Code asks", an outcome) — CLASSIC, because the card is
+            // edited classic (_queueMenuCardEdit), the question card's rule. Leaf locks only: safe under `_mtx`.
+            html = WithTopicTitleRowAfterHeader(BuildAddDirCardHtml(w->model, WallMs()), _titleRowClassic(threadId));
             const auto rows = BuildAddDirCardButtons(w->model, key);
             if (!rows.empty())
             {
@@ -1097,7 +1099,11 @@ namespace Agentmaster::Msg
                     me->_queueMenuCardEdit(key);
                 }
             },
-            replyTo);
+            replyTo,
+            true,
+            nullptr,
+            nullptr,
+            false); // §21.54: the row is in the card already (classic, after its header): no second one, and the card stays classic
     }
 
     void MessagingService::_queueMenuCardEdit(const std::wstring& key)
@@ -1113,7 +1119,8 @@ namespace Agentmaster::Msg
                 return; // not posted (or on its way: the post's answer queues this edit when it is needed)
             }
             messageId = w->cardMessageId;
-            html = BuildAddDirCardHtml(w->model, WallMs());
+            // §21.54: the same row as the post (classic, under the header): an edit without it would take it away.
+            html = WithTopicTitleRowAfterHeader(BuildAddDirCardHtml(w->model, WallMs()), _titleRowClassic(w->threadId));
             const auto rows = BuildAddDirCardButtons(w->model, key);
             if (!rows.empty())
             {
@@ -1139,7 +1146,8 @@ namespace Agentmaster::Msg
                 {
                     return; // forgotten: the text queued with the item goes
                 }
-                latest = BuildAddDirCardHtml(w->model, WallMs());
+                // §21.54: the row again, with the title of NOW (a rename since the post shows here too).
+                latest = WithTopicTitleRowAfterHeader(BuildAddDirCardHtml(w->model, WallMs()), me->_titleRowClassic(w->threadId));
                 const auto rows = BuildAddDirCardButtons(w->model, key);
                 if (!rows.empty())
                 {

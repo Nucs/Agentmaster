@@ -1176,20 +1176,280 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
-    /// The TITLE ROW of a session's "👤 You" lines (§21.17): its title as a title token that names its topic, in the tab's color
-    /// — one call for the live mirror, the status edits and the history replay, so the three draw the same row.
+    /// A session's TITLE ROW (§21.54, the user's rule of 2026-11-14: "I want the title to be in all messages at the first line, or
+    /// at the second line if there's info like in the bottom pinned one, and this way we'll always have a jump icon"): its title as
+    /// a title token that names its topic, in the tab's color, WITH the ⤴ lift. Every message the bot posts in the session's topic
+    /// carries it — the "👤 You" lines (UserLineTitleRow), and since §21.54 every other one (MessagingService::_sendText /
+    /// _sendRich put it first, a builder whose message opens with a header line puts it second). A RICH render shows a URL chip
+    /// that opens the topic (Telegram Desktop; Android lands in "All") and the lift after it; a CLASSIC render shows
+    /// "🟦 &lt;a href&gt;title&lt;/a&gt;" (no lift: classic HTML has no in-text button). In the chat's "All" view, where every
+    /// topic's messages run together, it names the session a message belongs to — with the session's CURRENT title, while a
+    /// renamed topic's own name may still be the old one in an app older than Telegram for Android 13.2.1 (§21.53).
+    /// </summary>
+    /// <param name="title">The session's title ("" = the first 8 characters of `sessionId`).</param>
+    /// <param name="sessionId">The session id (the fallback name).</param>
+    /// <param name="colorSquare">The square the topic's name shows (TopicRecord::nameColor; "" = none).</param>
+    /// <param name="threadId">The topic's thread (0 = no link and no lift: the row names the session without either).</param>
+    /// <returns>The token (TgTitleForm::Plain with the lift, the title on one line — TgTitleLine: a two-line tab title shows both
+    /// lines, joined by a space — and cut to 120 characters).</returns>
+    /// <exception cref="std::bad_alloc">If the token cannot be allocated.</exception>
+    inline std::wstring TopicTitleRow(std::wstring_view title, std::wstring_view sessionId, std::wstring_view colorSquare, int64_t threadId)
+    {
+        const std::wstring name = title.empty() ? std::wstring{ sessionId.substr(0, 8) } : TgTitleLine(title, 120);
+        return TgTitleToken(TgTitleForm::Plain, colorSquare, name, threadId, true);
+    }
+
+    /// <summary>
+    /// The TITLE ROW of a session's "👤 You" lines (§21.17): since §21.54 exactly TopicTitleRow — one row for the live mirror, the
+    /// status edits and the history replay, and for every other message of the topic, so all of them draw the same row (the ⤴ lift
+    /// included).
     /// </summary>
     /// <param name="title">The session's title ("" = the first 8 characters of `sessionId`).</param>
     /// <param name="sessionId">The session id (the fallback name).</param>
     /// <param name="colorSquare">The square the topic's name shows (TopicRecord::nameColor; "" = none).</param>
     /// <param name="threadId">The topic's thread (0 = no link: the row names the session without one).</param>
-    /// <returns>The token (TgTitleForm::Plain, the title on one line — TgTitleLine: a two-line tab title shows both lines,
-    /// joined by a space — and cut to 120 characters).</returns>
+    /// <returns>TopicTitleRow's token.</returns>
     /// <exception cref="std::bad_alloc">If the token cannot be allocated.</exception>
     inline std::wstring UserLineTitleRow(std::wstring_view title, std::wstring_view sessionId, std::wstring_view colorSquare, int64_t threadId)
     {
-        const std::wstring name = title.empty() ? std::wstring{ sessionId.substr(0, 8) } : TgTitleLine(title, 120);
-        return TgTitleToken(TgTitleForm::Plain, colorSquare, name, threadId);
+        return TopicTitleRow(title, sessionId, colorSquare, threadId);
+    }
+
+    /// <summary>
+    /// Whether a text already NAMES a topic (§21.54): it holds a title token whose THREAD part is that topic — a "👤 You" line's row,
+    /// the card's title line, a change line, a reply that names the session ("⏸ You interrupted 🟦 tab"). Such a message gets no
+    /// second row from the send layer (WithTopicTitleRow): its own title is already the link into the topic.
+    /// </summary>
+    /// <param name="text">Telegram HTML with title tokens.</param>
+    /// <param name="threadId">The topic.</param>
+    /// <returns>True when a well-formed token names `threadId` (&gt; 0); false otherwise, and always for `threadId` &lt;= 0.</returns>
+    /// <exception cref="std::bad_alloc">If a token's parts cannot be copied.</exception>
+    inline bool TextNamesTopic(std::wstring_view text, int64_t threadId)
+    {
+        if (threadId <= 0)
+        {
+            return false;
+        }
+        for (size_t at = text.find(kTgTitleTokenOpen); at != std::wstring_view::npos; at = text.find(kTgTitleTokenOpen, at + 1))
+        {
+            TgTitleForm form{ TgTitleForm::Plain };
+            std::wstring square;
+            std::wstring title;
+            int64_t thread = 0;
+            if (detail::TgParseTitleToken(text, at, form, square, title, thread) != std::wstring_view::npos && thread == threadId)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    namespace detail
+    {
+        /// <summary>Whether a text shows nothing (empty, or spaces, tabs and line breaks only): such a text gets no title row.</summary>
+        /// <param name="text">The text.</param>
+        /// <returns>True for a blank text.</returns>
+        inline bool TitleRowTextBlank(std::wstring_view text) noexcept
+        {
+            return text.find_first_not_of(L" \t\r\n") == std::wstring_view::npos;
+        }
+
+        /// <summary>
+        /// Puts `row` where the FIRST §21.54 row marker stands in `text` and drops every other marker; an empty `row` takes the
+        /// first marker's line out with it (the marker and the line break right after it), so a message whose thread has no session
+        /// reads exactly as it would have without the row.
+        /// </summary>
+        /// <param name="text">The text, holding at least one kTgTitleRowMarker.</param>
+        /// <param name="row">The row to put in the marker's place (a token, rendered HTML, or inline rich HTML), or "".</param>
+        /// <returns>The text with the row in place and no marker left.</returns>
+        /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+        inline std::wstring PlaceTitleRowAtMarker(std::wstring_view text, std::wstring_view row)
+        {
+            std::wstring out;
+            out.reserve(text.size() + row.size());
+            bool placed = false;
+            for (size_t i = 0; i < text.size(); ++i)
+            {
+                const wchar_t c = text[i];
+                if (c != kTgTitleRowMarker)
+                {
+                    out += c;
+                    continue;
+                }
+                if (placed)
+                {
+                    continue; // a second marker: the row is in one place only
+                }
+                placed = true;
+                if (!row.empty())
+                {
+                    out.append(row);
+                }
+                else if (i + 1 < text.size() && text[i + 1] == L'\n')
+                {
+                    ++i; // no row: its line goes too, so no empty line is left where it would have stood
+                }
+            }
+            return out;
+        }
+    }
+
+    /// <summary>
+    /// The send layer's half of §21.54 (MessagingService::_sendText, _sendRich's HTML forms): a message posted in a session's topic
+    /// gets the session's title ROW as its FIRST line — unless it places the row itself or already names its topic:
+    /// - a §21.54 row MARKER in the text (a builder whose message opens with a header line wrote it on line 2) takes the row in its
+    ///   place; with no row (a thread that is no session's topic) the marker's line goes;
+    /// - a text that already names the topic (TextNamesTopic: a "👤 You" line, the card, a change line, a reply naming the session)
+    ///   is left as it is;
+    /// - a blank text, an empty row or a thread &lt;= 0 (the main view) changes nothing;
+    /// - else "row\n" + the text: the row is line 1 (the classic render is "🟦 &lt;a&gt;title&lt;/a&gt;" on its own line; the rich
+    ///   converter makes it the first line of the first paragraph, a quote or a code block that opens the text starting a block of
+    ///   its own below it).
+    /// </summary>
+    /// <param name="html">Telegram HTML as a builder wrote it (title tokens and row markers allowed).</param>
+    /// <param name="rowToken">TopicTitleRow's token for the topic's session; "" = none (no session owns the thread, or the caller
+    /// opted out — a stray marker still goes).</param>
+    /// <param name="threadId">The topic the text goes to.</param>
+    /// <returns>The text with its row (and no marker).</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring WithTopicTitleRow(std::wstring_view html, std::wstring_view rowToken, int64_t threadId)
+    {
+        if (html.find(kTgTitleRowMarker) != std::wstring_view::npos)
+        {
+            return detail::PlaceTitleRowAtMarker(html, rowToken);
+        }
+        if (rowToken.empty() || threadId <= 0 || detail::TitleRowTextBlank(html) || TextNamesTopic(html, threadId))
+        {
+            return std::wstring{ html };
+        }
+        std::wstring out;
+        out.reserve(rowToken.size() + 1 + html.size());
+        out.append(rowToken);
+        out += L'\n';
+        out.append(html);
+        return out;
+    }
+
+    /// <summary>
+    /// The builders' half of §21.54 for a message that opens with a HEADER line of the bot's own (the question card's "❓ Claude is
+    /// asking", "📋 Plan ready for approval", "⚠ API error", "— a new conversation in this tab —", a replay's day line): the row goes
+    /// on line 2, right under that header — the card's own layout (the state, then "📌 title"), and the "👤 You" line's.
+    /// </summary>
+    /// <param name="html">The message (its first line is the header).</param>
+    /// <param name="row">The row: a title token (a message the send layer renders) or its classic render (a message that is posted
+    /// and edited classic, like the question card); "" = the message unchanged.</param>
+    /// <returns>The header, the row, then the rest; a one-line message gets the row as its second line.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring WithTopicTitleRowAfterHeader(std::wstring_view html, std::wstring_view row)
+    {
+        if (row.empty())
+        {
+            return std::wstring{ html };
+        }
+        const size_t nl = html.find(L'\n');
+        std::wstring out;
+        out.reserve(html.size() + row.size() + 2);
+        if (nl == std::wstring_view::npos)
+        {
+            out.append(html);
+            out += L'\n';
+            out.append(row);
+            return out;
+        }
+        out.append(html.substr(0, nl + 1));
+        out.append(row);
+        out += L'\n';
+        out.append(html.substr(nl + 1));
+        return out;
+    }
+
+    /// <summary>
+    /// WithTopicTitleRowAfterHeader for MARKDOWN (§21.54): a Markdown message cannot carry the row token through TgPrepareRichMarkdown
+    /// (it escapes every '&lt;' and would not render a token), so the header line is followed by the row MARKER on a line of its
+    /// own and a blank line, and _sendRich puts the rendered row there after the preparation (WithTopicTitleRowMarkdown). Prepared,
+    /// the header line gets its two-space hard break, so the header and the row are one paragraph, as the dev bot showed them.
+    /// </summary>
+    /// <param name="markdown">The message's Markdown (its first line is the header).</param>
+    /// <returns>The header, the marker's line, a blank line, then the rest with its leading line breaks dropped.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring MarkdownTitleRowAfterHeader(std::wstring_view markdown)
+    {
+        const size_t nl = markdown.find(L'\n');
+        std::wstring out;
+        out.reserve(markdown.size() + 4);
+        out.append(markdown.substr(0, nl == std::wstring_view::npos ? markdown.size() : nl));
+        out += L'\n';
+        out += kTgTitleRowMarker;
+        if (nl == std::wstring_view::npos)
+        {
+            return out;
+        }
+        std::wstring_view rest = markdown.substr(nl + 1);
+        while (!rest.empty() && (rest.front() == L'\n' || rest.front() == L'\r'))
+        {
+            rest.remove_prefix(1);
+        }
+        if (!rest.empty())
+        {
+            out += L"\n\n";
+            out.append(rest);
+        }
+        return out;
+    }
+
+    /// <summary>
+    /// _sendRich's §21.54 step for one PREPARED Markdown part (after TgPrepareRichMarkdown): the row (inline rich HTML,
+    /// TgTitleRowRichInline) takes the place of the part's row marker (a header-led message), else it opens the part as a paragraph
+    /// of its own ("row\n\n" + the part); an empty row or a blank part changes nothing but the markers, which always go.
+    /// </summary>
+    /// <param name="prepared">The prepared Markdown part.</param>
+    /// <param name="rowRich">The row as inline rich HTML; "" = none.</param>
+    /// <returns>The part with its row (and no marker).</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring WithTopicTitleRowMarkdown(std::wstring_view prepared, std::wstring_view rowRich)
+    {
+        if (prepared.find(kTgTitleRowMarker) != std::wstring_view::npos)
+        {
+            return detail::PlaceTitleRowAtMarker(prepared, rowRich);
+        }
+        if (rowRich.empty() || detail::TitleRowTextBlank(prepared))
+        {
+            return std::wstring{ prepared };
+        }
+        std::wstring out;
+        out.reserve(rowRich.size() + 2 + prepared.size());
+        out.append(rowRich);
+        out += L"\n\n";
+        out.append(prepared);
+        return out;
+    }
+
+    // §21.54: what Telegram allows a CAPTION (a document's, a photo's): 0-1024 characters after entity parsing. Our captions stay
+    // under this many, the row included, as the plain captions did (cut at 1000).
+    inline constexpr size_t kTitledCaptionMaxChars = 1000;
+
+    /// <summary>
+    /// A file's or a picture's CAPTION with the session's title row as its first line (§21.54): Telegram HTML — the row's CLASSIC
+    /// render (a caption has no rich form, so no chip and no lift: the square and the linked title), a line break, then the caption
+    /// escaped. The visible text stays within kTitledCaptionMaxChars: the caption is cut (never inside a surrogate pair) by what the
+    /// row shows, before it is escaped, so no entity or tag is ever cut. The caller sends it with parse_mode HTML.
+    /// </summary>
+    /// <param name="rowClassicHtml">The row's classic render (TgRenderTitleTokensClassic of TopicTitleRow's token).</param>
+    /// <param name="caption">The caption as plain text ("" = the row alone).</param>
+    /// <returns>The caption as Telegram HTML.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring TitledCaptionHtml(std::wstring_view rowClassicHtml, std::wstring_view caption)
+    {
+        // What the row SHOWS: its tags dropped and its entities read back, so the cut counts what Telegram counts.
+        const size_t rowShown = TgStripTags(rowClassicHtml).size();
+        const size_t room = rowShown + 1 < kTitledCaptionMaxChars ? kTitledCaptionMaxChars - rowShown - 1 : 0;
+        std::wstring out{ rowClassicHtml };
+        if (!caption.empty() && room > 0)
+        {
+            out += L'\n';
+            out += TgEscapeHtml(detail::TgPrefixUnits(caption, room));
+        }
+        return out;
     }
 
     // ===== the history replay (§21.9) ========================================================
@@ -1246,7 +1506,9 @@ namespace Agentmaster::Msg
     /// <param name="verbose">True: the narrative too (remarks, tool calls, compactions); false: the conversation only.</param>
     /// <param name="titleRow">§21.17: the session's title token (UserLineTitleRow) for the second row of every "👤 You" line the
     /// bot posts (a prompt, an answer, a command); "" (the default) = no row. A post sent AS THE USER carries only the user's
-    /// words, so the row is in its `html` (the bot's fallback) only.</param>
+    /// words, so the row is in its `html` (the bot's fallback) only. §21.54: also line 2 of the bot posts that open with a header
+    /// line — a day line, and in the conversation-only mode a plan, an interrupt or an API error posted on its own (the token in
+    /// `html`, the row marker in `markdown`); every other bot post gets its row as line 1 from the sender, not from here.</param>
     /// <returns>The posts, in the order they are to be sent.</returns>
     /// <exception cref="std::bad_alloc">If the posts cannot be allocated.</exception>
     inline std::vector<HistoryPost> RenderHistory(const std::vector<TopicItem>& items, bool lastTurnContinues, int64_t& lastDayKey, const std::function<PromptSource(const std::wstring&)>& promptSource = {}, bool verbose = true, std::wstring_view titleRow = {})
@@ -1261,6 +1523,21 @@ namespace Agentmaster::Msg
                 p.markdown = std::move(markdown);
                 out.push_back(std::move(p));
             }
+        };
+        // §21.54: a post that OPENS WITH A HEADER LINE of the bot's own — a day line, and (conversation only) a plan, an interrupt or
+        // an API error posted on its own — carries the session's title row on line 2, as the live ones do: the token in the HTML,
+        // the row marker in the Markdown (the sender renders it there). Every other bot post gets its row as line 1 when it is SENT
+        // (MessagingService::_sendText / _sendRich), so nothing is added here; with no `titleRow` nothing changes at all, byte for byte.
+        const auto emitHeaderLed = [&](std::wstring html, std::wstring markdown) {
+            if (!titleRow.empty())
+            {
+                html = WithTopicTitleRowAfterHeader(html, titleRow);
+                if (!markdown.empty())
+                {
+                    markdown = MarkdownTitleRowAfterHeader(markdown);
+                }
+            }
+            emitBot(std::move(html), std::move(markdown));
         };
         const auto userLine = [&](const TopicItem& it, bool midTurn) {
             // §21.12: "👤 You · 14:02 · <source>" over the prompt; a history line carries no status (only the live LAST
@@ -1321,7 +1598,7 @@ namespace Agentmaster::Msg
                 const TopicItem& p = items[start];
                 if (const int64_t day = TgDayKey(p.tsMs); day != 0 && day != lastDayKey)
                 {
-                    emitBot(L"<i>\x2014 " + TgEscapeHtml(TgDayText(p.tsMs)) + L" \x2014</i>", std::wstring{});
+                    emitHeaderLed(L"<i>\x2014 " + TgEscapeHtml(TgDayText(p.tsMs)) + L" \x2014</i>", std::wstring{}); // §21.54: the day, then the row
                     lastDayKey = day;
                 }
                 out.push_back(userLine(p, false));
@@ -1513,12 +1790,12 @@ namespace Agentmaster::Msg
                     auto [html, md] = planBlock(it);
                     if (verbose)
                     {
-                        addBlock(html, md);
+                        addBlock(html, md); // §21.54: inside a packed message — its row is the message's first line, at send time
                     }
                     else
                     {
                         flush();
-                        emitBot(std::move(html), std::move(md));
+                        emitHeaderLed(std::move(html), std::move(md)); // §21.54: "📋 Plan", then the row
                     }
                     break;
                 }
@@ -1539,7 +1816,7 @@ namespace Agentmaster::Msg
                     else
                     {
                         flush();
-                        emitBot(std::move(html), std::move(md));
+                        emitHeaderLed(std::move(html), std::move(md)); // §21.54: "■ interrupted", then the row
                     }
                     break;
                 }
@@ -1554,7 +1831,7 @@ namespace Agentmaster::Msg
                     else
                     {
                         flush();
-                        emitBot(std::move(html), std::move(md));
+                        emitHeaderLed(std::move(html), std::move(md)); // §21.54: "⚠ API error", then the row
                     }
                     break;
                 }
@@ -5793,7 +6070,11 @@ namespace Agentmaster::Msg
         // without extras); §21.15: as a title token — "🟦 <b>title</b>" in a classic card, a chip in a rich one. Only the title
         // and the state line traded places (§21.26): the state's own action line and every line after it keep their order.
         out += L"\n\U0001F4CC ";
-        out += TgTitleToken(TgTitleForm::Bold, extras ? std::wstring_view{ extras->colorSquare } : std::wstring_view{}, s.title.empty() ? s.id.substr(0, 8) : s.title, extras ? extras->threadId : 0);
+        // §21.54: with the ⤴ lift after the chip in the RICH card, like every title row of the topic. The classic render — the text
+        // the card's hash covers — ignores the lift, so no card is edited because of it: a card shows the lift from its next edit or
+        // re-post on, in the ordinary traffic (no form flag, no slow upgrade).
+        out += TgTitleToken(TgTitleForm::Bold, extras ? std::wstring_view{ extras->colorSquare } : std::wstring_view{}, s.title.empty() ? s.id.substr(0, 8) : s.title,
+                            extras ? extras->threadId : 0, true);
         // The user is not supposed to care whether a tab is "activated" (§21.5): a message here starts a parked
         // tab by itself, and ▶ Reactivate (the card's button, /reactivate) does it on demand. §21.24 (the user's rule of
         // 2026-10-19): a session in ERROR, or one whose claude EXITED, names 🔄 Restart Session instead - the one button

@@ -1451,11 +1451,12 @@ void TestMessagingNewThread()
     // ===== 1. the "You" lines' title row ======================================================================================
     {
         const std::wstring row = UserLineTitleRow(L"my tab", L"12345678-aaaa-bbbb-cccc-dddddddddddd", blue, 42);
-        CHECK(row == TgTitleToken(TgTitleForm::Plain, blue, L"my tab", 42), "UserLineTitleRow: the title as a Plain token naming the topic");
-        CHECK(UserLineTitleRow(L"", L"12345678-aaaa", L"", 0) == TgTitleToken(TgTitleForm::Plain, L"", L"12345678", 0), "no title: the short id, no link");
+        // §21.54: the row is TopicTitleRow's — the Plain token naming the topic WITH the ⤴ lift (only a token that names its topic can lift it).
+        CHECK(row == TgTitleToken(TgTitleForm::Plain, blue, L"my tab", 42, true), "UserLineTitleRow: the title as a Plain token naming the topic, with the lift");
+        CHECK(UserLineTitleRow(L"", L"12345678-aaaa", L"", 0) == TgTitleToken(TgTitleForm::Plain, L"", L"12345678", 0), "no title: the short id, no link (and no lift)");
         // 2026-10-18: a title is printed on ONE line (TgTitleLine), no longer cut to its first line.
-        CHECK(UserLineTitleRow(L"line one\nline two", L"x", L"", 1) == TgTitleToken(TgTitleForm::Plain, L"", L"line one line two", 1) &&
-                  UserLineTitleRow(L"line one\rline two", L"x", L"", 1) == TgTitleToken(TgTitleForm::Plain, L"", L"line one line two", 1),
+        CHECK(UserLineTitleRow(L"line one\nline two", L"x", L"", 1) == TgTitleToken(TgTitleForm::Plain, L"", L"line one line two", 1, true) &&
+                  UserLineTitleRow(L"line one\rline two", L"x", L"", 1) == TgTitleToken(TgTitleForm::Plain, L"", L"line one line two", 1, true),
               "a two-line title: both lines, joined by a space (an LF, or the lone CR the tab's rename box writes)");
         const std::wstring without = BuildPromptLineHtml(0, PromptSource::Pc, L"hello", PromptTurnStatus::Running, false);
         const std::wstring with = BuildPromptLineHtml(0, PromptSource::Pc, L"hello", PromptTurnStatus::Running, false, row);
@@ -1469,7 +1470,8 @@ void TestMessagingNewThread()
         CHECK(answer.find(L"\n" + row + L"\n") != std::wstring::npos && BuildAnswerLineHtml(0, L"yes") == BuildAnswerLineHtml(0, L"yes", L""), "the answer line has the row; none without it");
         const std::wstring command = BuildCommandLineHtml(0, L"/compact", row);
         CHECK(command.find(L"\n" + row + L"\n<code>/compact</code>") != std::wstring::npos, "the command line has the row above the command");
-        // The history replay: every "You" line of the bot carries the row; the assistant's posts do not.
+        // The history replay: every "You" line of the bot carries the row; the assistant's posts do not — §21.54: they get theirs as
+        // line 1 when they are SENT (MessagingService::_sendText / _sendRich), not from RenderHistory.
         // (A first turn gets a day line before its prompt, so the prompt is looked up, not taken as the first post.)
         int64_t day = 0;
         const auto posts = RenderHistory({ NtItem(TopicItemKind::Prompt, L"go", 1'800'000'000'000), NtItem(TopicItemKind::Text, L"Done.", 0, true) }, false, day, {}, false, row);
