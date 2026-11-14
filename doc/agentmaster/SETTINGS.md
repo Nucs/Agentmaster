@@ -209,11 +209,13 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
 - `messagingAllScreenLevel` (`full`): 📜 All Screen's default transcript level (`minimal` / `compact` / `default` / `full` /
   `max`): what a bare `/allscreen` draws and the level the card's level picker marks with ⭐; an empty or unknown word reads
   as `full`. Applied live (MESSAGING.md §21.39).
-- `messagingCardScreenshots` (true): every session's sticky card can carry a screenshot of its terminal, taken ONLY when its 🖼️
-  (Main, beside ⚙️ Session) is tapped — a changed screen uploaded with the card's next edit, an unchanged one reused by
-  `file_id` — and kept, carried by every later post and edit by `file_id`, until the next tap; off = text-only cards and no 🖼️.
-  Needs rich messages. Costs one upload (~0.1–0.6 MB) per tap on a changed screen. Applied live; a flip adds or drops 🖼️ on every
-  card one card at a time (the slow upgrade's slot). MESSAGING.md §21.42, §21.49.
+- `messagingCardScreenshots` (true): every session's sticky card can carry a screenshot of its terminal, taken when its 🖼️
+  (Main, beside ⚙️ Session) is tapped and, by itself, 3 s after a turn ends, errs or asks for approval (one such read per 10 s
+  across the chat; a ring for an approval or an error waits up to 6 s for its picture) — a changed screen uploaded with the card's
+  next edit or re-post, an unchanged one reused by `file_id` — and kept, carried by every later post and edit by `file_id`, until
+  the next one; off = text-only cards and no 🖼️. Needs rich messages. Costs one upload (~0.1–0.6 MB) per new picture of a changed
+  screen. Applied live; a flip adds or drops 🖼️ on every card one card at a time (the slow upgrade's slot). MESSAGING.md §21.42,
+  §21.49, §21.55.
 - File links: `messagingFileLinksMode` (`off` / home network / through the hosted address),
   `messagingFileLinkStation`, `messagingFileLinkPort`, `messagingFileLinkLanBase`,
   `messagingFileLinkHostedBase` (the user's own public address; empty = `https://example.com`, a placeholder that reaches

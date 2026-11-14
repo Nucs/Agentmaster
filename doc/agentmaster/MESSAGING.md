@@ -7466,7 +7466,9 @@ already launching`; `[msg] new thread N aborted (its only message was /help, ans
   full width but put the button elsewhere: an in-text button at the end of the card's first line, or the rich message's own
   button row at the card's bottom right (new in Bot API 10.3, its look unverified).
 - **After a tap: keep it.** The picture stays on the card until the next tap; every later post and edit reuses it by its
-  `file_id` (no upload), and its caption keeps the moment it was taken. **No screenshot is ever taken automatically.**
+  `file_id` (no upload), and its caption keeps the moment it was taken. **No screenshot is ever taken automatically.** (2026-11-14,
+  the user's next request: the card also takes one by itself after a turn's end, an error and an approval request — §21.55; the
+  tap stays as it is.)
 
 #### 21.49.3 How it works
 
@@ -8020,6 +8022,125 @@ update (or Clear Local Database). The title of every message (§21.54) names the
   their header and keep it through their edits; a /transcript file and a 🖼️ picture carry the row in their caption; a reply
   longer than 4,096 characters as HTML (rich off) repeats the row on each part; the ⤴ on Android puts the topic first; the chip
   on Desktop opens the topic; a card shows ⤴ after its next edit; the census shows no burst of card edits after the build.
+
+### 21.55 The card's picture after a turn's end, an error and an approval request (2026-11-14; NOT BUILT — the next build must purge: `Messaging.h`'s `CardState` and `MessagingService` gained members)
+
+> The user's request (2026-11-14): "So the bottom pinned messages now use pictures only when we click on the button, but I want
+> the bottom pinned messages to have a picture when the turn finishes. [...] there's only one pinned message so there's only one
+> image so we refresh it, and it happens on every individual session once a turn is done or there's an error or if there is an
+> approval required in any of those status changes, we should bring a picture. Otherwise we just keep it added."
+
+#### 21.55.1 What production says (measured before the change)
+
+- **The edges are rare.** Production's `hooks.log`, 21.6 days of messaging (3,107 ten-minute census windows): the mirror saw 1,631
+  changes out of Running (`[msg] <sid8> running -> …`) — 1,247 to Waiting for you, 29 to Idle, 303 to Needs approval, 52 to Error.
+  Per 10 minutes: mean 0.52, p99 4, max 17; per minute at most 6 (one minute), 4 (one), 3 (six). The 6-hour flood hold of
+  2026-11-09 came after 43–128 uploads per 10 minutes (§21.49.1): these edges are about a tenth of that at their busiest.
+- **A restart re-asserts states.** The same log has 101 `idle -> error` and 13 `idle -> needs-approval` changes: the scanner putting
+  a state back on a session that read Idle at the start (§21.6's once-per-episode note), in bursts after each start — not a moment
+  the user asked to see.
+- **Claude Code draws a turn's end late.** It ends a turn, and draws its idle prompt, only once its Stop hooks exited, while the
+  hook's line reaches the engine as the hook runs — the reason §21.42's settle look (2026-11-01) waited 3 s.
+
+#### 21.55.2 The decision (the user's, 2026-11-14)
+
+- **The edges:** the user's three — a turn's end, an error, an approval request. Every other change keeps the card's picture
+  ("Otherwise we just keep it added").
+- **"Ring with the picture"** (asked with two mockups): a card that RINGS for its state — a Needs approval, an Error the topic was
+  not told about (§21.6) — waits for the picture, at most 6 s after the change, so opening the notification shows the state's own
+  screen, and one call goes instead of two. The other mockup rang at once with the previous picture and swapped the new one in ~3 s
+  later.
+- **The 🖼️ tap stays** as §21.49 made it: a picture at any moment.
+
+#### 21.55.3 How it works
+
+- **The edges** (`CardPictureEdgeFor`, `MessagingCardPicture.h`): out of a turn's work — Running, or its dialog (Needs approval:
+  a denied or interrupted dialog ends the turn) — into Waiting for you or Idle (a turn's end), Error, or (from Running) Needs
+  approval: 7 of the 36 changes. Never from Idle, Waiting for you, Error or Done (a restart's restore, a decay, a resumed old
+  question), and never into Running or Done (an exit was not asked for).
+- **The trigger** (`_noteCardPictureEdge`, called by `_onStateEdge` in the tick's per-topic pass, before the edge's own card
+  refresh): the card owes a picture, due 3 s later (`kCardPictureSettleMs`), when pictures go at all (the cog's switch, rich cards,
+  a window that reads screens: `_cardPicturesWanted`) and the tab shows a screen (its claude started, or an adopted claude).
+  `_onStateEdge` reports no edge at a session's first look in a run, so a start makes no burst. Every other edge clears what the
+  card owed.
+- **The read** (`_startDueEdgePictures` at the top of every send-loop pass, at least every 0.5 s — the tick's 1.5 s would eat a
+  third of the ring's wait; `_readEdgePicture`):
+  - one due picture per pass, when the chat-wide gap since the last edge's read has passed (10 s, `kCardPictureEdgeGapMs`) and
+    Telegram holds no flood pause (`CardEdgePictureMayStart`); a card whose ring waits goes first, then the one due longest;
+  - never on a card a 🖼️ tap's work runs on (the tap's picture is the newer screen);
+  - just before it reads, the session must still show the edge's state (`CardPictureEdgeStillHolds`: a turn's end while it rests,
+    an Error or a Needs approval while it lasts), else nothing is read — an approval answered at the PC within the 3 s, a new
+    turn, an error the automatic restart healed;
+  - the read is a tap's (`_withCardPicture`): the hosting window reads the screen once, a changed screen is drawn on the worker,
+    an unchanged one reuses the card's photo by `file_id`; a blank screen (a starting claude) or none brings no picture;
+  - an owed picture whose read cannot start within a minute of its moment is dropped (`kCardPictureEdgeMaxWaitMs`).
+- **Delivery** (`_refreshCard`): the picture becomes the card's waiting picture (`CardState::tapPicture`, marked
+  `tapPictureFromEdge`), carried by the card's next post or edit like a tap's:
+  - **the ring** is held while the edge's picture is on its way (`CardRingWaitsForPicture`; `CardState::ringWaitsUntilTickMs`, 6 s
+    after the change, `kCardRingWaitMs`). Nothing goes meanwhile — neither the ring nor the state's edit, which the ring carries.
+    The picture's arrival runs the tick at once; a read that brings none, a picture not taken, the session's next change or the
+    wait's end lets the ring go; a change into Running before it went DROPS the ring (the state it rang for is gone);
+  - **a turn's end**: the card sits above the turn's reply and moves below it 6 s after the topic went quiet (§21.5's sticky lag);
+    the drawn picture waits for that re-post (`CardEdgePictureWaitsForRepost`, at most 15 s, `kCardEdgePictureRepostWaitMs`)
+    instead of an edit of its own; a text change meanwhile carries it anyway;
+  - **otherwise** a picture-only edit at the cards' own priority (`SendPriority::CardEdit`; a tap's goes at an answer's).
+- **With a tap** (§21.49): a 🖼️ tap while an edge's picture is owed takes its place (the edge's read would take the same screen a
+  few seconds later), and a ring that waits for it waits for the tap's; a tap while an edge's read runs is told the screen is being
+  taken (`Busy`). A failed delivery of an edge's picture is a log line, never a toast.
+- **Nothing is persisted**: the owed picture, the ring's wait and the gap live in memory.
+
+#### 21.55.4 What it costs
+
+- Per edge: one screen read (0.3–0.6 ms on the hosting window's UI thread), one drawing on the worker (~90–185 ms) and one upload
+  (~0.1–0.6 MB). The upload rides the card's ring or its re-post below the newest message (the turn's reply, a ❓ question card, an
+  ⚠ error), so those edges add no call; an edge after which no message lands below the card (a turn interrupted with nothing more
+  to say, a card that already moved below the reply before the Stop hooks ended) adds one picture-only edit. At production's
+  measured rates: ~0.5 pictures per 10 minutes on average, 17 at the busiest, at most 6 a minute — and never more than one read per
+  10 s.
+- The census: `pictures(edge=N … drawn=N … edge-dropped=N edge-expired=N ring-with=N ring-late=N …)`.
+
+#### 21.55.5 Logs
+
+`[msg] <sid8> card picture after a turn's end owed: the screen is read in 3 s[; the card's ring waits for it (6 s at most)]` ·
+`… after a turn's end: reading the screen (<state>)` · `… : drawn (the card's next post or edit carries it)` / `… : the screen is
+the card's photo (reused, no upload)` / `… : none (blank | noscreen | stale); the card keeps its picture` · `… not taken: the
+session went on (<state>) | the session is closed | its tab is parked | the cards' pictures are off or stopped | the topic has no
+card | a tap is taking the screen | no read could start within 60 s …` · `[msg] <sid8> card rings without its new picture (not
+ready within 6 s …)` · `[msg] <sid8> card ring dropped: the session runs again before its picture came (…)` · `[msg] <sid8> card
+picture of a state change was not delivered (…)` · the late read's `card picture after … not ready within 30 s`. The other edges
+read `after an error`, `after an approval request`.
+
+#### 21.55.6 The code, the tests, what was checked
+
+- **Code.** `MessagingCardPicture.h` (`CardPictureEdge`, `CardPictureEdgeFor`, `CardPictureEdgeStillHolds`, `CardPictureEdgeWord`,
+  `CardPictureEdgePhrase`, the bounds `kCardPictureSettleMs` / `kCardRingWaitMs` / `kCardPictureEdgeGapMs` /
+  `kCardPictureEdgeMaxWaitMs` / `kCardEdgePictureRepostWaitMs`, `CardEdgePictureMayStart`, `CardEdgePictureExpired`,
+  `CardRingWaitsForPicture`, `CardEdgePictureWaitsForRepost`); `Messaging.h` / `Messaging.cpp` (`CardState`'s edge fields,
+  `_noteCardPictureEdge`, `_startDueEdgePictures`, `_readEdgePicture`, `_refreshCard`'s ring hold, re-post wait and priority,
+  `_settleTapPicture`'s edge words, `_withCardPicture`'s `what`, `_cardPictureFromTap` taking an owed edge's place, the send loop's
+  call, the census); the topic's `/help` line (`Messaging.Inbound.cpp`); the cog's tooltip (`AgentManagerContent.Settings.cpp`);
+  SETTINGS.md.
+- **Tests** (`TestMessagingCard`, section 1d): the whole edge table (36 changes, 7 take a picture, every one out of a turn's work),
+  a restart's restore and a decay take none, the state-still-holds rule, the words and phrases, the bounds' order, the start rule
+  (settle, gap, flood pause), the expiry, the ring's wait, the re-post wait.
+- **Checked** (2026-11-14, HEAD 8624c00ad + this change, nothing built): the isolated m5 suite — 13,086 checks, only the 3 known
+  `TestTaskbarBadge` failures; `cl /Zs` with TerminalAppLib's recorded Release line (/W3 /WX + the `/we` list) over a shadow of HEAD
+  + this change, on the 11 units that reach `MessagingCardPicture.h` or `Messaging.h` (the seven `Messaging*.cpp`, `Engine.cpp`,
+  `MessagingSearchBridge.cpp`, `AgentManagerContent.Settings.cpp`, `TerminalPage.AgentEngine.cpp`; the CLI compiles none): all
+  pass; three negative controls fail as they must (a probe on the new `kCardRingWaitMs` → C2338 in an engine unit and in a PCH
+  unit; a forced-include unused parameter and unused local → C4100 + C4189). Nothing tried live.
+
+**Check after the build** (the dev bot; `hooks.log` and the census):
+1. A turn ends: the reply arrives, and ~6 s later the card moves below it showing the screen at the turn's end (captioned ~3 s after
+   the reply); hooks.log shows `card picture after a turn's end: drawn`, then the re-post — no picture-only edit of its own.
+2. A permission prompt: the card rings ~3–4 s after the prompt, WITH the dialog's screen (`ring-with` in the census).
+3. Approve at the PC within ~2 s: no ring at all (`card ring dropped`), no picture.
+4. An error: the card shows the error's screen (and rings with it when no ⚠ message told the topic).
+5. A running turn: the card's picture does not change by itself; 🖼️ still takes one at once.
+6. 🖼️ during the 3 s after a turn's end: one read (the tap's), not two.
+7. Restart Agentmaster: no burst of pictures — no `card picture after` line for a restored session until its first real edge.
+8. The cog's switch off: no `owed` lines; on again: the next turn's end brings a picture.
+9. Several sessions ending within seconds: their reads go 10 s apart (the `reading the screen` stamps), and each picture lands.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

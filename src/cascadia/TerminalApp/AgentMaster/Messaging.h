@@ -1068,14 +1068,16 @@ namespace Agentmaster::Msg
         /// a missing card), so the user's wait is not spent behind the fleet's work logs and card edits.
         /// §21.42: `picture` (may be null) is the card's screenshot, carried by the rich post (_sendText -> _sendTitledRich); the
         /// answer records the photo Telegram shows (TopicRecord::cardPictureFileId and its moment and hash) for the next post or
-        /// edit to reuse. §21.49: the picture is the one the card already has (CardPictureToCarry: a 🖼️ tap's picture still on its
-        /// way, else the held photo by its file_id) - a post never reads the screen - and the answer settles a tap's picture it
-        /// carried (_settleTapPicture: delivered, or dropped with a toast that says why).
+        /// edit to reuse. §21.49: the picture is the one the card already has (CardPictureToCarry: a 🖼️ tap's - or, §21.55, a state
+        /// edge's - picture still on its way, else the held photo by its file_id) - a post never reads the screen - and the answer
+        /// settles a tap's or an edge's picture it carried (_settleTapPicture: delivered, or dropped with a toast or a log line
+        /// that says why).
         /// </summary>
         void _postCard(const std::wstring& sessionId, int64_t threadId, const std::wstring& text, json::Value markup, int64_t deleteFirst, bool ping, uint32_t textHash, SendPriority prio = SendPriority::CardEdit, std::shared_ptr<const CardPicture> picture = nullptr);
         /// <summary>
         /// §21.42: whether card posts and edits carry a picture at all - the one the card has (§21.49: a 🖼️ tap's, or the held photo
-        /// by its file_id): the cog's switch (AppSettings::messagingCardScreenshots) is on, this run has not stopped them after
+        /// by its file_id) - and, since §21.55, whether a state edge takes one by itself: the cog's switch
+        /// (AppSettings::messagingCardScreenshots) is on, this run has not stopped them after
         /// kCardPictureRefusalsToStop refusals in a row, titled messages go rich (_titleChipsWanted: the picture is a block of the
         /// rich card, which no classic message can hold) and a window can read screens (ServiceHooks::sessionAction). Any thread
         /// (atomics and a hook set once at construction).
@@ -1092,9 +1094,10 @@ namespace Agentmaster::Msg
         /// <returns>True when the cards show 🖼️ (a parked tab's card still does not: BuildCardButtonRows).</returns>
         bool _cardPictureButtonWanted() const noexcept;
         /// <summary>
-        /// One picture to draw on the worker (_queueCardPictureRender): a 🖼️ tap's screen that changed since the card's picture.
-        /// `then` gets the drawn picture with CardPictureRead::Fresh - or `fallback` with CardPictureRead::Stale when the drawing
-        /// failed or the card moved on since the tap (its `seq`) - exactly once, on the worker thread, inside a TapScope of `taps`.
+        /// One picture to draw on the worker (_queueCardPictureRender): a 🖼️ tap's - or a state edge's (§21.55) - screen that
+        /// changed since the card's picture. `then` gets the drawn picture with CardPictureRead::Fresh - or `fallback` with
+        /// CardPictureRead::Stale when the drawing failed or the card moved on since the read began (its `seq`) - exactly once, on
+        /// the worker thread, inside a TapScope of `taps` (none for an edge's read).
         /// </summary>
         struct CardPictureJob
         {
@@ -1108,27 +1111,30 @@ namespace Agentmaster::Msg
             std::vector<TapHoldRef> taps; // §21.28: the tapped button that waits for its picture
         };
         /// <summary>
-        /// §21.49: reads a card's screen for a 🖼️ tap and settles its picture, then runs `then` with it - EXACTLY ONCE, with the
-        /// picture or with null and how the read settled (CardPictureRead), on the thread that settled it (the hosting window's UI
-        /// thread, the picture worker, the send loop past the wait, or the thread that dropped the last copy of an unanswered
-        /// request). The hosting window reads the screen ("screen-snapshot"); the rules (PlanCardPicture): a screen that changed
-        /// since the card's stored picture is drawn on the worker (Fresh, a PNG to upload), an unchanged one reuses the stored
-        /// file_id captioned with now (Fresh), no screen (a parked tab, a terminal not up) is NoScreen, a screen that shows NOTHING
-        /// (ScreenSnapshotShowsNothing: a claude still starting) is never drawn (Blank), and no answer within kCardPictureTapWaitMs
-        /// - or none at all, or a failure - is Stale. Nothing is sent here: `then` hands a Fresh picture to the card, whose next
-        /// edit carries it (§21.49), and a toast says why for the rest.
+        /// §21.49: reads a card's screen for a 🖼️ tap - or, since §21.55, after a state edge (_readEdgePicture) - and settles its
+        /// picture, then runs `then` with it - EXACTLY ONCE, with the picture or with null and how the read settled
+        /// (CardPictureRead), on the thread that settled it (the hosting window's UI thread, the picture worker, the send loop past
+        /// the wait, or the thread that dropped the last copy of an unanswered request). The hosting window reads the screen
+        /// ("screen-snapshot"); the rules (PlanCardPicture): a screen that changed since the card's stored picture is drawn on the
+        /// worker (Fresh, a PNG to upload), an unchanged one reuses the stored file_id captioned with now (Fresh), no screen (a
+        /// parked tab, a terminal not up) is NoScreen, a screen that shows NOTHING (ScreenSnapshotShowsNothing: a claude still
+        /// starting) is never drawn (Blank), and no answer within kCardPictureTapWaitMs - or none at all, or a failure - is Stale.
+        /// Nothing is sent here: `then` hands a Fresh picture to the card, whose next post or edit carries it (§21.49), and a
+        /// tap's toast (or an edge's log line) says why for the rest.
         /// </summary>
         /// <remarks>
         /// ⚠ `then` must be callable from any thread and must not throw past its own catch (it runs in a window's dispatcher item,
-        /// a worker thread or a destructor). It runs inside a TapScope of the calling scope's taps (_holdTaps, taken here), so what
-        /// it queues and the toast it sets reach the tapped button (§21.28). The caller has stamped CardState::pictureSeq for this
-        /// read; the worker and `then` compare it to drop a read whose card state was made anew meanwhile. Takes `_mtx` (call it
-        /// without holding it). Never throws (Rule #18 inside): a failure at any step still runs `then` (Stale), so a tap is always
-        /// told, and the card's busy mark is always cleared.
+        /// a worker thread or a destructor). It runs inside a TapScope of the calling scope's taps (_holdTaps, taken here; none on
+        /// the send loop's pass, which starts an edge's read), so what it queues and the toast it sets reach the tapped button
+        /// (§21.28). The caller has stamped CardState::pictureSeq for this read; the worker and `then` compare it to drop a read
+        /// whose card state was made anew meanwhile. Takes `_mtx` (call it without holding it). Never throws (Rule #18 inside): a
+        /// failure at any step still runs `then` (Stale), so a tap is always told, and the card's busy mark is always cleared.
         /// </remarks>
         /// <param name="sessionId">The card's session (its topic's stored picture; the window that hosts its tab reads the screen).</param>
         /// <param name="then">Takes the picture (null = none) and how the read settled.</param>
-        void _withCardPicture(const std::wstring& sessionId, std::function<void(std::shared_ptr<const CardPicture>, CardPictureRead)> then) noexcept;
+        /// <param name="what">Whose read this is, as the late-read log line names it ("of a tap", or "after a turn's end" and the
+        /// other edges' phrases, §21.55): a static string that outlives the wait (PendingCardPicture keeps the view).</param>
+        void _withCardPicture(const std::wstring& sessionId, std::function<void(std::shared_ptr<const CardPicture>, CardPictureRead)> then, std::wstring_view what = L"of a tap") noexcept;
         /// <summary>
         /// §21.42: a 🖼️ tap's read that waits for its picture (_withCardPicture registers it before the screen read), with the
         /// deadline after which it settles as Stale (kCardPictureTapWaitMs, §21.49): a frozen window must not keep the card busy and
@@ -1139,14 +1145,16 @@ namespace Agentmaster::Msg
             int64_t deadlineTickMs{ 0 }; // GetTickCount64 past which the read settles as Stale
             std::wstring sessionId; // for the log line
             int64_t waitMs{ 0 }; // the wait that ran out (the log line names it)
+            std::wstring_view what; // §21.55: whose read ("of a tap", "after a turn's end", ...) - a static string - for the log line
             std::function<bool()> settled; // true once the tap's continuation ran (its picture settled, or a failure ran it)
             std::function<void()> expire; // runs the continuation with no picture (Stale), inside a scope of its taps (a no-op once settled)
         };
         /// <summary>
-        /// §21.42: settles every 🖼️ tap's read past its kCardPictureTapWaitMs as Stale (no picture: the card keeps the one it shows,
-        /// and the tap's toast says so if the tap is still open; one log line each) and forgets the waits that settled. Called at
-        /// the top of each send-loop pass (at least every 0.5 s); cheap when nothing waits. Takes only `_pictureMtx` while it sorts;
-        /// the continuations run outside it. Never throws (Rule #18 inside).
+        /// §21.42: settles every screen read - a 🖼️ tap's or a state edge's (§21.55) - past its kCardPictureTapWaitMs as Stale (no
+        /// picture: the card keeps the one it shows, and the tap's toast says so if the tap is still open; one log line each, naming
+        /// whose read it was) and forgets the waits that settled. Called at the top of each send-loop pass (at least every 0.5 s);
+        /// cheap when nothing waits. Takes only `_pictureMtx` while it sorts; the continuations run outside it. Never throws (Rule
+        /// #18 inside).
         /// </summary>
         void _expireCardPictureWaits() noexcept;
         /// <summary>
@@ -1155,12 +1163,15 @@ namespace Agentmaster::Msg
         /// screen) - and its picture handed to the card, whose next edit carries it, at an answer's priority and at once (a
         /// picture-only edit when nothing else changed). The tap's button keeps spinning until that edit is in. Refused at once,
         /// with the toast that says why (CardPictureTapRefusal), for a closed session, pictures off or stopped, classic cards, a
-        /// parked tab, no card, or a tap whose read or delivery still runs (one at a time per card, kCardPictureTapBusyMs at most).
+        /// parked tab, no card, or a tap whose read or delivery still runs (one at a time per card, kCardPictureTapBusyMs at most) -
+        /// a state edge's read included (§21.55: the toast says the screen is being taken, which it is).
         /// </summary>
         /// <remarks>
         /// ⚠ An empty return means the read's outcome sets the toast (from a window's UI thread or the worker, possibly before this
         /// returns) or the picture on the card answers the tap: the caller must then leave the tap alone - an answer("") after it
-        /// would wipe that toast (⎋ Esc's rule, _escFromCard).
+        /// would wipe that toast (⎋ Esc's rule, _escFromCard). §21.55: a tap that reads takes the place of an edge picture the card
+        /// still owes (its read would only take the same screen again a few seconds later); a ring that waits for that edge's
+        /// picture waits for the tap's instead.
         /// </remarks>
         /// <param name="sessionId">The session the button's data names.</param>
         /// <param name="messageId">The message the button sits on (0 = unknown: the named session's card).</param>
@@ -1169,17 +1180,56 @@ namespace Agentmaster::Msg
         /// <exception cref="std::system_error">If the service's lock cannot be taken.</exception>
         std::wstring _cardPictureFromTap(const std::wstring& sessionId, int64_t messageId);
         /// <summary>
-        /// §21.49: Telegram answered a card post or edit that carried a picture: when that picture is the 🖼️ tap's one the card is
-        /// waiting to deliver (CardState::tapPicture, matched by identity), the wait is over - delivered (_noteCardPictureShown has
-        /// recorded it: every later post and edit reuses it), or refused or failed (dropped: the next tap tries again) - and the
-        /// card's busy mark goes. A failure's toast (CardPictureDeliveryText) goes to the taps in scope: the send loop runs this
-        /// inside the item's own holds, so the tapped button's answer still carries it. A card the user deleted ("message to edit
-        /// not found") keeps the picture waiting: the card posted in its place carries it. Any thread; takes `_mtx`.
+        /// §21.49: Telegram answered a card post or edit that carried a picture: when that picture is the one the card is waiting to
+        /// deliver - a 🖼️ tap's, or a state edge's (§21.55) (CardState::tapPicture, matched by identity) - the wait is over -
+        /// delivered (_noteCardPictureShown has recorded it: every later post and edit reuses it), or refused or failed (dropped:
+        /// the next tap or edge tries again) - and the card's busy mark goes. A tap's failure toast (CardPictureDeliveryText) goes
+        /// to the taps in scope: the send loop runs this inside the item's own holds, so the tapped button's answer still carries
+        /// it; an edge's failure is a log line only (a tap that happens to wait on the same send asked for something else). A card
+        /// the user deleted ("message to edit not found") keeps the picture waiting: the card posted in its place carries it. Any
+        /// thread; takes `_mtx`.
         /// </summary>
         /// <param name="sessionId">The card's session (its CardState).</param>
         /// <param name="picture">The picture the answered call carried.</param>
         /// <param name="r">Telegram's answer (for an edit whose rich form was refused: the answer of its retry without the picture).</param>
         void _settleTapPicture(const std::wstring& sessionId, const std::shared_ptr<const CardPicture>& picture, const TgResult& r) noexcept;
+        /// <summary>
+        /// §21.55: a session's state changed (_onStateEdge, the tick thread, before the edge's own card refresh): the card's picture
+        /// follows the edges the user looks at. A turn's end, an Error or a Needs approval (CardPictureEdgeFor) makes the card OWE a
+        /// picture, read kCardPictureSettleMs later (_startDueEdgePictures) - when pictures go at all (_cardPicturesWanted) and the
+        /// tab shows a screen (its claude started, or an adopted one); when the edge also RINGS (`ping`: a Needs approval, an
+        /// Error the topic was not told about) the ring waits for that picture, kCardRingWaitMs at most (the user's pick "Ring with
+        /// the picture"). Any other edge clears what the card owed and lets a waiting ring go; a change into Running before the
+        /// ring went drops the ring itself (the state it rang for is gone: an approval answered at the PC, an error healed). One
+        /// log line per decision that does something.
+        /// </summary>
+        /// <param name="sessionId">The session (its CardState).</param>
+        /// <param name="from">The state before the edge (the mirror's lastState).</param>
+        /// <param name="s">The session now (its state, and whether its tab's claude started).</param>
+        /// <param name="ping">The edge's card re-post rings (_onStateEdge's decision).</param>
+        void _noteCardPictureEdge(const std::wstring& sessionId, SessionState from, const SessionInfo& s, bool ping) noexcept;
+        /// <summary>
+        /// §21.55, at the top of every send-loop pass (at least every 0.5 s, so a read starts within half a second of its settle -
+        /// the tick's 1.5 s would eat a third of the ring's wait): drops the owed edge pictures that waited past
+        /// kCardPictureEdgeMaxWaitMs (letting a ring that waited for one go now), then starts the read of ONE due picture when the
+        /// chat-wide gap since the last edge's read has passed and Telegram holds no flood pause (CardEdgePictureMayStart) - a
+        /// card whose ring waits first, then the one due longest - never on a card a 🖼️ tap's work runs on. Cheap when nothing is
+        /// owed (one atomic read). Takes `_mtx` briefly; the read starts outside it (_readEdgePicture). Never throws (Rule #18
+        /// inside).
+        /// </summary>
+        void _startDueEdgePictures() noexcept;
+        /// <summary>
+        /// §21.55: reads a card's screen for its state edge, the way a 🖼️ tap does (_withCardPicture: the hosting window reads, a
+        /// changed screen is drawn on the worker, an unchanged one reuses the card's photo) but with no tap to answer: the picture
+        /// becomes the card's waiting picture (CardState::tapPicture with tapPictureFromEdge), and the tick runs at once, so a ring
+        /// that waits for it goes with it and a card at rest is edited for it (or left to the re-post that is coming anyway). Not
+        /// read - the edge's picture dropped, a ring that waits for it let go - when the session no longer shows the edge's state
+        /// (CardPictureEdgeStillHolds), is closed or parked, pictures stopped going, the topic has no card, or a 🖼️ tap's work began
+        /// on the card meanwhile. Every outcome is one hooks.log line. Never throws (Rule #18 inside).
+        /// </summary>
+        /// <param name="sessionId">The card's session.</param>
+        /// <param name="edge">The edge the picture is owed for (its state is checked again here).</param>
+        void _readEdgePicture(const std::wstring& sessionId, CardPictureEdge edge) noexcept;
         /// <summary>
         /// The answer handler every card EDIT gets: Telegram's "message to edit not found" (the user deleted the card on the phone)
         /// makes the topic record - matched by thread and card id, so a Rekey or a newer card meanwhile is left alone - forget its
@@ -1772,7 +1822,8 @@ namespace Agentmaster::Msg
             // post takes them (going at once, at an answer's priority) and holds them until Telegram answered it; a card dropped
             // with its topic lets them go, and the hold's limit answers a tap whose card never changes (kTapAnswerHoldMaxMs).
             std::vector<TapHoldRef> tapHolds;
-            // §21.49: the generation of this card's newest 🖼️ read (_cardPictureFromTap). The read is asynchronous (a window reads
+            // §21.49: the generation of this card's newest 🖼️ read (_cardPictureFromTap; §21.55: or state edge's read,
+            // _readEdgePicture). The read is asynchronous (a window reads
             // the screen, the worker draws it), and the drawing worker and the read's continuation compare this number to drop a read
             // whose card moved on. Taken from the service-wide _cardPictureGen: a card state is made anew when its topic is rebound
             // or recreated, and a read of the old one that settles late must never match the new one's number by chance - it would
@@ -1782,15 +1833,37 @@ namespace Agentmaster::Msg
             // edit that carries its picture. A second tap meanwhile is answered "already taking it" (CardPictureTapBusy) instead of
             // reading and uploading the same screen twice. Cleared when the read brings no picture or when Telegram answered the
             // send that carried it (_settleTapPicture); past kCardPictureTapBusyMs a new tap goes anyway (a send never answered).
+            // §21.55: a state edge's read marks the card busy the same way (_readEdgePicture), so a tap meanwhile is told the screen
+            // is being taken, and an edge never reads while a tap's work runs (_startDueEdgePictures waits for it).
             int64_t tapPictureSinceTickMs{ 0 };
-            // §21.49: the picture a 🖼️ tap took, waiting to be delivered: EVERY post and edit of this card carries it
-            // (CardPictureToCarry) until Telegram answers one of them - its answer records the photo the card shows
-            // (TopicRecord::cardPictureFileId, reused by every later post and edit) or, refused or failed, drops it
-            // (_settleTapPicture matches the answered call's picture by identity). Null = none waiting.
+            // §21.49: the picture a 🖼️ tap took - or, since §21.55, a state edge's read (tapPictureFromEdge) - waiting to be
+            // delivered: EVERY post and edit of this card carries it (CardPictureToCarry) until Telegram answers one of them - its
+            // answer records the photo the card shows (TopicRecord::cardPictureFileId, reused by every later post and edit) or,
+            // refused or failed, drops it (_settleTapPicture matches the answered call's picture by identity). Null = none waiting.
             std::shared_ptr<const CardPicture> tapPicture;
             // §21.49: a post or edit carrying tapPicture is queued already, so _refreshCard makes no picture-only edit for it (a
             // status edit or a re-post decided meanwhile carries it too, and the outbox keeps the newest edit of the card).
             bool tapPictureQueued{ false };
+            // §21.55: tapPicture came from a state edge, not a 🖼️ tap: no tap waits for it (no toast; its failure is a log line),
+            // its picture-only edit goes at the cards' own priority, and it may wait for a re-post that is coming anyway instead of
+            // an edit of its own (CardEdgePictureWaitsForRepost). Cleared with tapPicture.
+            bool tapPictureFromEdge{ false };
+            // §21.55: when that edge's picture was handed to the card (GetTickCount64 ms; 0 = none): the bound of its wait for the
+            // re-post (kCardEdgePictureRepostWaitMs). Cleared with tapPicture.
+            int64_t tapPictureReadyTickMs{ 0 };
+            // §21.55: the picture this card owes for a state edge - a turn's end, an Error, a Needs approval (CardPictureEdgeFor) - and
+            // when its read is due (GetTickCount64 ms; 0 = none owed): kCardPictureSettleMs after the edge, once Claude Code has drawn
+            // the state. Set by _noteCardPictureEdge and replaced by the session's next edge (any edge: one that takes no picture
+            // clears it); started by _startDueEdgePictures (the chat-wide gap, no flood pause, no 🖼️ tap's work on this card); a
+            // 🖼️ tap meanwhile takes its place (_cardPictureFromTap); dropped unread past kCardPictureEdgeMaxWaitMs.
+            CardPictureEdge edgePicture{ CardPictureEdge::None };
+            int64_t edgePictureDueTickMs{ 0 };
+            // §21.55: until when this card's RING - pingWanted's re-post with sound, for a Needs approval or an Error the topic was
+            // not told about - waits for the edge's picture (GetTickCount64 ms; 0 = the ring waits for nothing): the user's pick
+            // "Ring with the picture" (2026-11-14), so opening the notification shows the state's own screen. kCardRingWaitMs after
+            // the edge at most; a read that brings no picture, a picture dropped unread or the session's next edge ends the wait at
+            // once (CardRingWaitsForPicture), and a change into Running before the ring went drops the ring itself.
+            int64_t ringWaitsUntilTickMs{ 0 };
         };
         void _followTranscript(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const SessionInfo& s);
         void _applyItems(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const std::vector<TopicItem>& items, const SessionInfo& s);
@@ -3496,8 +3569,16 @@ namespace Agentmaster::Msg
         std::map<std::wstring, uint32_t> _cardPicturesByKind;
         uint64_t _cardPictureBytes{ 0 };
         // §21.42, under `_mtx`: the last generation handed to a card's 🖼️ read (CardState::pictureSeq). One counter for every card,
-        // so a generation never repeats in a run - not across a card state made anew for the same session either.
+        // so a generation never repeats in a run - not across a card state made anew for the same session either. §21.55: a state
+        // edge's read takes its generation from the same counter.
         uint64_t _cardPictureGen{ 0 };
+        // §21.55, under `_mtx`: when the last state edge's screen read started (GetTickCount64 ms; 0 = none this run) - the chat-wide
+        // gap between two such reads (kCardPictureEdgeGapMs), so a burst of turn ends never becomes a burst of uploads.
+        int64_t _lastEdgePictureTickMs{ 0 };
+        // §21.55: some card MAY owe an edge picture (CardState::edgePictureDueTickMs != 0). Set when one is owed (_noteCardPictureEdge,
+        // under `_mtx`), cleared by the send loop's pass when its walk finds none (_startDueEdgePictures, under `_mtx`), and read
+        // first, without the lock: the pass costs one atomic read while nothing is owed - the common case, every half second.
+        std::atomic<bool> _edgePicturesMaybeOwed{ false };
         // §21.39: the conversations being drawn right now (_startConversationImage's worker threads) - at most
         // kConversationImageMaxRenders at once. Its own count, not _screenImageRenders: one conversation takes seconds and hundreds of
         // MB, and it must not hold back the quick screen pictures and question previews that share that one.

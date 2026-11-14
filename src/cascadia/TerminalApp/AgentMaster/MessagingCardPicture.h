@@ -25,16 +25,22 @@
 // to the right of Session button, add a picture emoji button [...] When user clicks on that emoji, it updates the bottom pinned
 // tab with a picture like we do now automatically" - and the picture stays until the next tap.
 //
-// So the screen is read ONLY for a 🖼️ tap (MessagingService::_cardPictureFromTap): the hosting window reads it once; a screen
-// that changed since the card's picture is drawn on the worker and uploaded by the card's next edit (no call of its own); an
-// unchanged one reuses the photo Telegram holds, captioned with the moment it was read again. Every other post and edit of the
-// card CARRIES the picture it has (CardPictureToCarry: by its file_id - no upload, no read), since a rich edit without it would
-// drop the photo; a card that never had one goes as text until the first tap.
+// So the screen is read for a 🖼️ tap (MessagingService::_cardPictureFromTap) and - since §21.55, the user's request of 2026-11-14
+// ("I want the bottom pinned messages to have a picture when the turn finishes [...] once a turn is done or there's an error or if
+// there is an approval required [...] Otherwise we just keep it") - by itself after the state edges the user looks at: a turn's
+// end, an Error, a Needs approval (MessagingService::_noteCardPictureEdge). Those are rare next to the old cadence - production's
+// 21.6 days before the change saw 0.5 such edges per 10 minutes on average and 17 at most, against the 43-128 uploads per 10
+// minutes that preceded the flood hold - and a chat-wide gap between two such reads still bounds a burst. Either way the hosting
+// window reads the screen once; a screen that changed since the card's picture is drawn on the worker and uploaded by the card's
+// next post or edit; an unchanged one reuses the photo Telegram holds, captioned with the moment it was read again. Every other
+// post and edit of the card CARRIES the picture it has (CardPictureToCarry: by its file_id - no upload, no read), since a rich
+// edit without it would drop the photo; a card that never had one goes as text until its first tap or edge.
 //
 // This header is the pure half: the media id, the picture as a message carries it, the plan (upload, reuse, none), the picture
-// a post or edit carries, how a tap's read settled (CardPictureRead), the tap's bounds and its toasts, the rich HTML block, the
-// media list, reading the photo back from Telegram's answer, and the caption's clock. The m5 suite pins every rule
-// (tests_messaging_card.cpp, section 1d).
+// a post or edit carries, how a read settled (CardPictureRead), the tap's bounds and its toasts, the rich HTML block, the media
+// list, reading the photo back from Telegram's answer, the caption's clock, and §21.55's edge rules (which edges take a picture,
+// whether the session still shows that state, the settle, the chat-wide gap, how long the card's ring waits for its picture).
+// The m5 suite pins every rule (tests_messaging_card.cpp, section 1d).
 
 #pragma once
 
@@ -46,6 +52,7 @@
 
 #include "Json.h"
 #include "ScreenSnapshot.h" // ScreenSnapshotShowsNothing: a blank screen (a tab whose claude is still starting) is never drawn
+#include "SessionModels.h" // SessionState: §21.55's edges are read from the session's state changes
 
 namespace Agentmaster::Msg
 {
@@ -92,7 +99,7 @@ namespace Agentmaster::Msg
         return h == 0 ? 1u : h;
     }
 
-    /// <summary>What a 🖼️ tap's read does about the card's picture (PlanCardPicture).</summary>
+    /// <summary>What a screen read - a 🖼️ tap's, or a state edge's (§21.55) - does about the card's picture (PlanCardPicture).</summary>
     enum class CardPictureSource
     {
         None, // no picture: no screen could be read and the card never had a picture
@@ -101,9 +108,10 @@ namespace Agentmaster::Msg
     };
 
     /// <summary>
-    /// How a 🖼️ tap's read settled - what the tap's continuation learns besides the picture itself (MessagingService::
-    /// _withCardPicture hands both over). Only Fresh brings a picture for the card; every other outcome picks the tap's toast
-    /// (CardPictureTapReadText), so "the window did not answer" is never told as "there is no screen to read".
+    /// How a screen read settled - a 🖼️ tap's, or a state edge's (§21.55) - what the read's continuation learns besides the
+    /// picture itself (MessagingService::_withCardPicture hands both over). Only Fresh brings a picture for the card; every other
+    /// outcome picks the tap's toast (CardPictureTapReadText) - an edge's read has no tap and only logs it (CardPictureReadWord) -
+    /// so "the window did not answer" is never told as "there is no screen to read".
     /// </summary>
     enum class CardPictureRead
     {
@@ -161,12 +169,13 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
-    /// The picture a card post or edit carries (§21.49): the picture a 🖼️ tap took, while it waits for the send that delivers it;
-    /// else the photo the card shows, reused by its file_id (no upload, no screen read) and captioned with ITS moment; else none.
-    /// Every post and edit of a card that has a picture carries one, because a rich edit without it drops the photo (measured,
-    /// §21.42) - so a status update, a page flip or a re-post below newer messages keeps the picture until the next tap. Pure.
+    /// The picture a card post or edit carries (§21.49): the picture a 🖼️ tap - or, since §21.55, a state edge - took, while it
+    /// waits for the send that delivers it; else the photo the card shows, reused by its file_id (no upload, no screen read) and
+    /// captioned with ITS moment; else none. Every post and edit of a card that has a picture carries one, because a rich edit
+    /// without it drops the photo (measured, §21.42) - so a status update, a page flip or a re-post below newer messages keeps the
+    /// picture until the next tap or edge. Pure.
     /// </summary>
-    /// <param name="tapPicture">The tap's picture waiting for its send (null = none).</param>
+    /// <param name="tapPicture">The tap's (or edge's) picture waiting for its send (null = none).</param>
     /// <param name="storedFileId">The file_id of the photo the card shows (TopicRecord::cardPictureFileId; "" = none).</param>
     /// <param name="storedAtMs">The moment that photo's screen was read (its caption's clock).</param>
     /// <param name="storedShotHash">That screen's hash (kept with the photo, so the next tap reuses it when the screen is the same).</param>
@@ -507,5 +516,208 @@ namespace Agentmaster::Msg
             return L"The picture did not reach Telegram (no answer) \x2014 tap \U0001F5BC\xFE0F again.";
         }
         return L"The picture did not reach Telegram (HTTP " + std::to_wstring(httpStatus) + L") \x2014 tap \U0001F5BC\xFE0F again.";
+    }
+
+    // ===== The picture after a state edge (§21.55) ====================================================
+
+    /// <summary>
+    /// The state edges after which a card takes its picture BY ITSELF (§21.55, the user's request of 2026-11-14: "every individual
+    /// session once a turn is done or there's an error or if there is an approval required [...] we should bring a picture").
+    /// CardPictureEdgeFor names an edge; every other edge leaves the card's picture as it is ("Otherwise we just keep it").
+    /// </summary>
+    enum class CardPictureEdge
+    {
+        None, // no picture: a new turn, an approval answered, claude exiting, a decay, a restart's restore
+        TurnEnded, // the turn's work ended: Running (or its dialog, Needs approval) -> Waiting for you / Idle
+        Error, // the turn ended in an Error: Running or Needs approval -> Error
+        NeedsApproval, // the turn waits for the user: Running -> Needs approval (a permission prompt, a question)
+    };
+
+    /// <summary>
+    /// The edge a state change is, for the card's picture (§21.55). Only an edge OUT OF A TURN'S WORK counts - from Running, or
+    /// from Needs approval (a dialog the user denied or interrupted, which ends the turn: 28 + 7 such edges in production's 21.6
+    /// days before the change) - into a turn's end (Waiting for you, Idle), an Error, or (from Running) a Needs approval. Never
+    /// from Idle, Waiting for you, Error or Done: those edges are a restart's restore (the scanner re-asserting Error on a session
+    /// that read Idle at the start - 101 "idle -> error" in the same days, in bursts after each start), a decay (Waiting for you ->
+    /// Idle) or a session resumed onto an old question, none of them a moment the user asked to see. Done (claude exited) was not
+    /// asked for. Pure.
+    /// </summary>
+    /// <param name="from">The state the service last saw (the mirror's lastState).</param>
+    /// <param name="to">The state now.</param>
+    /// <returns>The edge; None for every change that takes no picture (and for no change).</returns>
+    inline CardPictureEdge CardPictureEdgeFor(SessionState from, SessionState to) noexcept
+    {
+        if (from == to)
+        {
+            return CardPictureEdge::None;
+        }
+        const bool fromRunning = from == SessionState::Running;
+        if (!fromRunning && from != SessionState::NeedsApproval)
+        {
+            return CardPictureEdge::None;
+        }
+        switch (to)
+        {
+        case SessionState::WaitingForInput:
+        case SessionState::Idle:
+            return CardPictureEdge::TurnEnded;
+        case SessionState::Error:
+            return CardPictureEdge::Error;
+        case SessionState::NeedsApproval:
+            return fromRunning ? CardPictureEdge::NeedsApproval : CardPictureEdge::None;
+        default:
+            return CardPictureEdge::None; // Running (an approval answered: the turn goes on), Done (claude exited: not asked for)
+        }
+    }
+
+    /// <summary>
+    /// Whether a session still shows what its edge's picture is for, read just before the screen is (§21.55): a turn's end while
+    /// the session rests (Waiting for you, or Idle after its decay), an Error or a Needs approval while it lasts. A session that
+    /// moved on during the settle - a new turn, an approval answered at the PC, an error the automatic restart healed - gets no
+    /// picture of a screen that no longer shows that state. Pure.
+    /// </summary>
+    /// <param name="edge">The edge the picture is owed for.</param>
+    /// <param name="now">The session's state now.</param>
+    /// <returns>True when the screen still belongs to the edge; false for None.</returns>
+    inline bool CardPictureEdgeStillHolds(CardPictureEdge edge, SessionState now) noexcept
+    {
+        switch (edge)
+        {
+        case CardPictureEdge::TurnEnded:
+            return now == SessionState::WaitingForInput || now == SessionState::Idle;
+        case CardPictureEdge::Error:
+            return now == SessionState::Error;
+        case CardPictureEdge::NeedsApproval:
+            return now == SessionState::NeedsApproval;
+        case CardPictureEdge::None:
+        default:
+            return false;
+        }
+    }
+
+    /// <summary>An edge's word in hooks.log's "[msg] <sid8> card picture after …" lines and in the census ("turn-end", "error",
+    /// "approval"; "none"). Pure.</summary>
+    /// <param name="edge">The edge.</param>
+    /// <returns>The word (a static string, no space).</returns>
+    inline const wchar_t* CardPictureEdgeWord(CardPictureEdge edge) noexcept
+    {
+        switch (edge)
+        {
+        case CardPictureEdge::TurnEnded:
+            return L"turn-end";
+        case CardPictureEdge::Error:
+            return L"error";
+        case CardPictureEdge::NeedsApproval:
+            return L"approval";
+        case CardPictureEdge::None:
+        default:
+            return L"none";
+        }
+    }
+
+    /// <summary>An edge as hooks.log's lines name the picture taken for it ("card picture after a turn's end: …"): a static string,
+    /// so the read's wait can keep it as a view (MessagingService::PendingCardPicture::what). Pure.</summary>
+    /// <param name="edge">The edge.</param>
+    /// <returns>"after a turn's end", "after an error", "after an approval request" ("after a state change" for None).</returns>
+    inline const wchar_t* CardPictureEdgePhrase(CardPictureEdge edge) noexcept
+    {
+        switch (edge)
+        {
+        case CardPictureEdge::TurnEnded:
+            return L"after a turn's end";
+        case CardPictureEdge::Error:
+            return L"after an error";
+        case CardPictureEdge::NeedsApproval:
+            return L"after an approval request";
+        case CardPictureEdge::None:
+        default:
+            return L"after a state change";
+        }
+    }
+
+    /// <summary>
+    /// How long after an edge its screen is read (§21.55): Claude Code ends a turn - and draws its idle prompt - only once its Stop
+    /// hooks exited, while the hook's line reaches the engine as the hook runs, so a read at the edge itself could still show the
+    /// turn's spinner (§21.42, 2026-11-01: the reason its settle look waited this long). 3 s covers Agentmaster's own hooks and the
+    /// usual user hooks, and leaves the read and the drawing (~0.3-0.6 ms + ~90-185 ms) well inside the ring's wait
+    /// (kCardRingWaitMs) and the card's re-post below the turn's reply (kCardStickyLagMs, 6 s after the reply).
+    /// </summary>
+    inline constexpr int64_t kCardPictureSettleMs = 3 * 1000;
+
+    /// <summary>
+    /// The longest a card's RING - its re-post WITH SOUND for a Needs approval or an Error the topic was not told about (§21.6) -
+    /// waits for its edge's picture, counted from the edge (§21.55: the user's pick "Ring with the picture", 2026-11-14, so opening
+    /// the notification shows the dialog's own screen). The settle plus a read and a drawing take ~3.5 s; a window that answers
+    /// later (a busy UI thread answered 5-9 s late on 2026-11-01) lets the ring go without it, and the picture follows in an edit
+    /// of its own. A read that brings no picture ends the wait at once.
+    /// </summary>
+    inline constexpr int64_t kCardRingWaitMs = 6 * 1000;
+
+    /// <summary>
+    /// The chat-wide gap between two edges' screen reads (§21.55): one per 10 s at most, so a burst of turn ends across the fleet
+    /// never turns into a burst of uploads - the cadence that earned the 6-hour flood hold (§21.49.1). Measured before the change
+    /// (production, 21.6 days): 6 edges in the busiest minute, at most 3 in any other, so the gap delays a picture by tens of
+    /// seconds only in those rare minutes. A card whose ring waits goes first.
+    /// </summary>
+    inline constexpr int64_t kCardPictureEdgeGapMs = 10 * 1000;
+
+    /// <summary>
+    /// The longest an edge's picture waits for its read to START past its settle (the chat-wide gap, Telegram's flood pause, a 🖼️
+    /// tap's read on the same card) before it is dropped (§21.55): a minute late, the user has likely looked already, and the
+    /// card's 🖼️ takes a fresh one. The read itself is bounded by kCardPictureTapWaitMs, like a tap's.
+    /// </summary>
+    inline constexpr int64_t kCardPictureEdgeMaxWaitMs = 60 * 1000;
+
+    /// <summary>
+    /// The longest an edge's picture, once drawn, waits for the card's re-post that is coming anyway - the card sits above newer
+    /// messages (the turn's reply, a question card), and it moves below them kCardStickyLagMs after they went quiet - instead of an
+    /// edit of its own (§21.55: the picture rides a send that happens anyway). A topic whose messages keep coming past this bound
+    /// gets the picture in its own edit.
+    /// </summary>
+    inline constexpr int64_t kCardEdgePictureRepostWaitMs = 15 * 1000;
+
+    /// <summary>Whether an owed edge picture may start its screen read now (§21.55): its settle is over, the chat-wide gap since the
+    /// last edge's read has passed, and Telegram is not holding the chat in a flood pause (a picture is the least urgent call there
+    /// is). Pure.</summary>
+    /// <param name="dueTickMs">When the settle ends (GetTickCount64 ms; 0 = no picture owed).</param>
+    /// <param name="lastEdgeReadTickMs">When the last edge's read started, chat-wide (0 = none this run).</param>
+    /// <param name="nowTickMs">Now, on the same monotonic clock.</param>
+    /// <param name="floodPaused">A 429's pause holds, or the card edit method is parked.</param>
+    /// <returns>True when the read may start.</returns>
+    inline bool CardEdgePictureMayStart(int64_t dueTickMs, int64_t lastEdgeReadTickMs, int64_t nowTickMs, bool floodPaused) noexcept
+    {
+        return dueTickMs != 0 && nowTickMs >= dueTickMs && !floodPaused && (lastEdgeReadTickMs == 0 || nowTickMs - lastEdgeReadTickMs >= kCardPictureEdgeGapMs);
+    }
+
+    /// <summary>Whether an owed edge picture is dropped unread: kCardPictureEdgeMaxWaitMs past its due moment (§21.55). Pure.</summary>
+    /// <param name="dueTickMs">When its settle ended (GetTickCount64 ms; 0 = none owed: never expired).</param>
+    /// <param name="nowTickMs">Now, on the same monotonic clock.</param>
+    /// <returns>True when the picture is to be dropped.</returns>
+    inline bool CardEdgePictureExpired(int64_t dueTickMs, int64_t nowTickMs) noexcept
+    {
+        return dueTickMs != 0 && nowTickMs - dueTickMs >= kCardPictureEdgeMaxWaitMs;
+    }
+
+    /// <summary>Whether a card's ring (its re-post with sound) still waits for its edge's picture (§21.55): a wait was set at the
+    /// edge, no picture is ready yet, and the wait has not run out (kCardRingWaitMs). Pure.</summary>
+    /// <param name="ringWaitsUntilTickMs">The wait's end (GetTickCount64 ms; 0 = the ring waits for nothing).</param>
+    /// <param name="nowTickMs">Now, on the same monotonic clock.</param>
+    /// <param name="pictureReady">A new picture waits on the card for its send (the edge's - or a 🖼️ tap's, which serves as well).</param>
+    /// <returns>True while the ring is held.</returns>
+    inline bool CardRingWaitsForPicture(int64_t ringWaitsUntilTickMs, int64_t nowTickMs, bool pictureReady) noexcept
+    {
+        return ringWaitsUntilTickMs != 0 && !pictureReady && nowTickMs < ringWaitsUntilTickMs;
+    }
+
+    /// <summary>Whether an edge's drawn picture leaves its delivery to the card's coming re-post instead of an edit of its own
+    /// (§21.55): newer messages sit below the card (it moves below them once they are quiet), and the picture has waited less than
+    /// kCardEdgePictureRepostWaitMs. A 🖼️ tap's picture never waits: the user asked for it now. Pure.</summary>
+    /// <param name="repostComing">The card has a message id and newer messages were posted after it (no history replay holds it).</param>
+    /// <param name="readyTickMs">When the picture was drawn (GetTickCount64 ms; 0 = unknown: no wait).</param>
+    /// <param name="nowTickMs">Now, on the same monotonic clock.</param>
+    /// <returns>True when the picture waits for the re-post.</returns>
+    inline bool CardEdgePictureWaitsForRepost(bool repostComing, int64_t readyTickMs, int64_t nowTickMs) noexcept
+    {
+        return repostComing && readyTickMs != 0 && nowTickMs - readyTickMs < kCardEdgePictureRepostWaitMs;
     }
 }

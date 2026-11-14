@@ -23,7 +23,9 @@
 //      tap's picture while it waits, else the card's photo by its file_id), the tap's wait and busy bounds, every toast a tap can
 //      get (a refusal, a read with no picture, a delivery that failed) and the blank screen test (ScreenSnapshotShowsNothing);
 //      section 1 pins the 🖼️ button itself (Main, right of the cog; Restart Session on a row of its own; never on a parked tab or a
-//      closed session's card);
+//      closed session's card); and since §21.55 (the user's request of 2026-11-14: a picture when a turn ends, errs or asks for
+//      approval) the whole edge table (CardPictureEdgeFor over all 36 changes), whether the state still holds at the read, the
+//      settle, the chat-wide gap, the read's start bound, the ring's wait for its picture and the re-post the picture rides;
 //   2. 🖼 Screen Image: the terminal's live screen drawn as a picture — the styled snapshot's format (ScreenSnapshot.h, shared
 //      with ControlCore.cpp) and the renderer (ScreenImage.h), which draws a REAL PNG here with Direct2D + DirectWrite + WIC; the
 //      test decodes it again and reads its pixels.
@@ -972,6 +974,89 @@ void TestMessagingCard()
 
         // The plan treats a blank screen as no screen: the stored picture is kept with its own moment, nothing is drawn.
         CHECK(PlanCardPicture(false, 0, now, L"FILE1", h, now - 60'000).source == CardPictureSource::Reuse, "tap: a blank screen (unreadable) keeps the stored picture");
+
+        // §21.55 (the user's request of 2026-11-14): the card takes its picture BY ITSELF after the edges the user looks at - a turn's
+        // end, an Error, a Needs approval - and after no other; a ring for such an edge waits for the picture (the user's pick).
+        {
+            using S = SessionState;
+            const S all[] = { S::Idle, S::Running, S::WaitingForInput, S::NeedsApproval, S::Error, S::Done };
+            // The whole table, every (from, to) pair: an edge that takes a picture can only come in on purpose.
+            int edges = 0;
+            bool onlyOutOfWork = true;
+            for (const S from : all)
+            {
+                for (const S to : all)
+                {
+                    if (CardPictureEdgeFor(from, to) != CardPictureEdge::None)
+                    {
+                        ++edges;
+                        onlyOutOfWork = onlyOutOfWork && (from == S::Running || from == S::NeedsApproval);
+                    }
+                }
+            }
+            CHECK(edges == 7 && onlyOutOfWork, "edge: 7 of the 36 changes take a picture, every one out of a turn's work (Running, or its dialog)");
+            CHECK(CardPictureEdgeFor(S::Running, S::WaitingForInput) == CardPictureEdge::TurnEnded && CardPictureEdgeFor(S::Running, S::Idle) == CardPictureEdge::TurnEnded,
+                  "edge: a turn's end - Running to Waiting for you, or to Idle - takes a picture");
+            CHECK(CardPictureEdgeFor(S::Running, S::Error) == CardPictureEdge::Error && CardPictureEdgeFor(S::Running, S::NeedsApproval) == CardPictureEdge::NeedsApproval,
+                  "edge: an Error, and an approval request, take one");
+            CHECK(CardPictureEdgeFor(S::NeedsApproval, S::WaitingForInput) == CardPictureEdge::TurnEnded && CardPictureEdgeFor(S::NeedsApproval, S::Idle) == CardPictureEdge::TurnEnded &&
+                      CardPictureEdgeFor(S::NeedsApproval, S::Error) == CardPictureEdge::Error,
+                  "edge: a dialog denied or interrupted ends the turn - a turn's end or an Error out of Needs approval takes one too");
+            CHECK(CardPictureEdgeFor(S::NeedsApproval, S::Running) == CardPictureEdge::None && CardPictureEdgeFor(S::Running, S::Done) == CardPictureEdge::None &&
+                      CardPictureEdgeFor(S::NeedsApproval, S::Done) == CardPictureEdge::None,
+                  "edge: an approval answered (the turn goes on) and claude exiting take none");
+            CHECK(CardPictureEdgeFor(S::Idle, S::Error) == CardPictureEdge::None && CardPictureEdgeFor(S::Idle, S::NeedsApproval) == CardPictureEdge::None &&
+                      CardPictureEdgeFor(S::WaitingForInput, S::Idle) == CardPictureEdge::None && CardPictureEdgeFor(S::WaitingForInput, S::NeedsApproval) == CardPictureEdge::None &&
+                      CardPictureEdgeFor(S::Error, S::WaitingForInput) == CardPictureEdge::None && CardPictureEdgeFor(S::Done, S::Idle) == CardPictureEdge::None,
+                  "edge: a restart's restore (Idle to Error or to Needs approval), a decay, an old question read again take none - no burst after a start");
+            CHECK(CardPictureEdgeFor(S::Running, S::Running) == CardPictureEdge::None && CardPictureEdgeFor(S::Idle, S::Running) == CardPictureEdge::None &&
+                      CardPictureEdgeFor(S::WaitingForInput, S::Running) == CardPictureEdge::None,
+                  "edge: no change, and a new turn, take none (\"otherwise we just keep it\": the card keeps its picture)");
+
+            // Still the edge's state when the screen is read, after the settle: a session that moved on gets no picture of a screen that
+            // no longer shows that state.
+            CHECK(CardPictureEdgeStillHolds(CardPictureEdge::TurnEnded, S::WaitingForInput) && CardPictureEdgeStillHolds(CardPictureEdge::TurnEnded, S::Idle) &&
+                      !CardPictureEdgeStillHolds(CardPictureEdge::TurnEnded, S::Running) && !CardPictureEdgeStillHolds(CardPictureEdge::TurnEnded, S::NeedsApproval),
+                  "edge holds: a turn's end while the session rests (Waiting for you, or Idle after its decay); not once a new turn runs");
+            CHECK(CardPictureEdgeStillHolds(CardPictureEdge::Error, S::Error) && !CardPictureEdgeStillHolds(CardPictureEdge::Error, S::Running) &&
+                      CardPictureEdgeStillHolds(CardPictureEdge::NeedsApproval, S::NeedsApproval) && !CardPictureEdgeStillHolds(CardPictureEdge::NeedsApproval, S::Running),
+                  "edge holds: an Error and an approval request while they last - not once the error healed or the approval was answered");
+            CHECK(!CardPictureEdgeStillHolds(CardPictureEdge::None, S::Idle) && !CardPictureEdgeStillHolds(CardPictureEdge::None, S::Running), "edge holds: None never does");
+
+            // The words of the census and the phrases of the log.
+            CHECK(std::wstring{ CardPictureEdgeWord(CardPictureEdge::TurnEnded) } == L"turn-end" && std::wstring{ CardPictureEdgeWord(CardPictureEdge::Error) } == L"error" &&
+                      std::wstring{ CardPictureEdgeWord(CardPictureEdge::NeedsApproval) } == L"approval" && std::wstring{ CardPictureEdgeWord(CardPictureEdge::None) } == L"none",
+                  "edge: the log words, one each, no space");
+            CHECK(std::wstring{ CardPictureEdgePhrase(CardPictureEdge::TurnEnded) } == L"after a turn's end" && std::wstring{ CardPictureEdgePhrase(CardPictureEdge::Error) } == L"after an error" &&
+                      std::wstring{ CardPictureEdgePhrase(CardPictureEdge::NeedsApproval) } == L"after an approval request",
+                  "edge: the log phrases");
+
+            // The bounds keep their order: the settle ends inside the ring's wait, the ring is not held for long, the gap fits in the
+            // minute an owed picture may wait, and a drawn picture outwaits the card's 6 s sticky lag for the re-post.
+            CHECK(kCardPictureSettleMs >= 2'000 && kCardPictureSettleMs < kCardRingWaitMs, "edge: the settle (Claude Code draws after its Stop hooks) ends well inside the ring's wait");
+            CHECK(kCardRingWaitMs <= 10'000, "edge: a ring waits at most a few seconds for its picture (the notification is not held back for long)");
+            CHECK(kCardPictureEdgeGapMs >= 10'000 && kCardPictureEdgeGapMs < kCardPictureEdgeMaxWaitMs, "edge: at most one edge read per 10 s across the chat, inside an owed picture's minute");
+            CHECK(kCardEdgePictureRepostWaitMs > 6'000, "edge: a drawn picture waits longer than the card's 6 s sticky lag for the re-post that carries it");
+
+            const int64_t t = 5'000'000; // a monotonic clock reading (GetTickCount64 ms)
+            CHECK(!CardEdgePictureMayStart(0, 0, t, false), "edge start: nothing owed, nothing starts");
+            CHECK(!CardEdgePictureMayStart(t + 1, 0, t, false) && CardEdgePictureMayStart(t, 0, t, false),
+                  "edge start: not before its settle ended; at once after it for the run's first edge read");
+            CHECK(!CardEdgePictureMayStart(t, t - kCardPictureEdgeGapMs + 1, t, false) && CardEdgePictureMayStart(t, t - kCardPictureEdgeGapMs, t, false),
+                  "edge start: the chat-wide gap since the last edge's read");
+            CHECK(!CardEdgePictureMayStart(t, 0, t, true), "edge start: never during Telegram's flood pause");
+            CHECK(!CardEdgePictureExpired(0, t) && !CardEdgePictureExpired(t, t + kCardPictureEdgeMaxWaitMs - 1) && CardEdgePictureExpired(t, t + kCardPictureEdgeMaxWaitMs),
+                  "edge start: an owed picture is dropped a minute after its moment, never before");
+
+            CHECK(!CardRingWaitsForPicture(0, t, false), "ring: a ring nothing waits for goes at once");
+            CHECK(CardRingWaitsForPicture(t + 1, t, false) && !CardRingWaitsForPicture(t, t, false), "ring: held until its wait ends, not a moment longer");
+            CHECK(!CardRingWaitsForPicture(t + kCardRingWaitMs, t, true), "ring: a picture ready lets it go at once (the user's pick: ring WITH the picture)");
+
+            CHECK(CardEdgePictureWaitsForRepost(true, t, t + 1'000) && !CardEdgePictureWaitsForRepost(true, t, t + kCardEdgePictureRepostWaitMs),
+                  "re-post: a drawn edge picture rides the card's coming re-post, for a bounded time");
+            CHECK(!CardEdgePictureWaitsForRepost(false, t, t + 1'000) && !CardEdgePictureWaitsForRepost(true, 0, t),
+                  "re-post: no re-post coming (or no ready moment) means an edit of its own now");
+        }
     }
 
     // ===== 2. the card's line for the state's action =====

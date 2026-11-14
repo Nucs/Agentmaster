@@ -7047,8 +7047,9 @@ namespace Agentmaster::Msg
                    // §21.41: the card's two stopping buttons, the typed commands' twins (one path each, so they behave alike). Both
                    // live on the Session page only (the user's rule of 2026-10-28 for Esc: "only inside Sessions menu").
                    L"On \x2699\xFE0F Session's page the card has \x238B Esc (one Esc at once, as at the PC) and \U0001F319 Deactivate (claude stops, the tab keeps its place)\n"
-                   // §21.49: the card's 🖼️ (the user's request of 2026-11-10) - the only way the card's picture changes.
-                   L"The card's \U0001F5BC\xFE0F (beside \x2699\xFE0F Session) puts the terminal's screen on the card as it is now; the card takes no picture by itself\n"
+                   // §21.49: the card's 🖼️ (the user's request of 2026-11-10); §21.55 (2026-11-14): the card also takes a picture by
+                   // itself after a turn's end, an error and an approval request.
+                   L"The card's \U0001F5BC\xFE0F (beside \x2699\xFE0F Session) puts the terminal's screen on the card as it is now; the card also takes one by itself a few seconds after a turn ends, an error or an approval request\n"
                    L"/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not\n"
                    // §21.19: <code> keeps "/search-tab" from becoming a "/search" link (see the Search help above).
                    L"/search_tab \x2014 jump to the \U0001F50E Search topic: it goes first in the thread list (typed, <code>/search-tab</code> works too)\n"

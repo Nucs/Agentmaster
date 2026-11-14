@@ -1297,10 +1297,11 @@ namespace winrt::TerminalApp::implementation
         _setMsgRich.Header(winrt::box_value(L"Send Claude's Markdown as rich messages (tables, headings)"));
         AgentSetTip(_setMsgRich, L"On (the default): Claude's replies, remarks and plans go as Telegram rich messages, which show its tables, headings, lists and code blocks as Claude wrote them. Off: the older HTML conversion, which shows a table as plain text \x2014 for a Telegram app too old to show rich messages. A rich message Telegram refuses goes as HTML anyway.");
         panel.Children().Append(_setMsgRich);
-        // §21.42: the card's screenshot. Under the rich switch because it needs it: the picture is a block of the rich card.
+        // §21.42: the card's screenshot. Under the rich switch because it needs it: the picture is a block of the rich card. §21.55:
+        // the same switch covers the pictures a card takes by itself after a turn's end, an error or an approval request.
         _setMsgCardScreens = ToggleSwitch{};
         _setMsgCardScreens.Header(winrt::box_value(L"Show the screen in each session's card"));
-        AgentSetTip(_setMsgCardScreens, L"On (the default): every session's status card in Telegram has a \U0001F5BC\xFE0F button beside \x2699\xFE0F Session. A tap puts a picture of the terminal, as it is now, on the card: a screen that changed is uploaded with the card's next edit (no extra message), an unchanged one reuses the picture Telegram already has. The picture stays until the next tap; the card never takes one by itself. About half a megabyte per new picture. Needs rich messages (above). Off: text-only cards, no \U0001F5BC\xFE0F. Applies at once.");
+        AgentSetTip(_setMsgCardScreens, L"On (the default): every session's status card in Telegram shows a picture of its terminal. The card takes one by itself a few seconds after a turn ends, an error stops it or it asks for approval (a card that rings for an approval or an error waits for its picture, so the notification opens on that screen), and a tap on its \U0001F5BC\xFE0F button beside \x2699\xFE0F Session takes one at any moment. A screen that changed is uploaded with the card's next edit or re-post (no extra message), an unchanged one reuses the picture Telegram already has; the picture stays until the next one. About half a megabyte per new picture. Needs rich messages (above). Off: text-only cards, no \U0001F5BC\xFE0F. Applies at once.");
         panel.Children().Append(_setMsgCardScreens);
         // §21.39: 📜 All Screen's default level. One item per Msg::kAllScreenLevels entry, in its order, so an item's index is the
         // table's row on load and on Save; the built-in default (Full) says so, as the other boxes' placeholders do.
