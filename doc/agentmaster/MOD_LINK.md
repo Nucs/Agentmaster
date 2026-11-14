@@ -6,6 +6,14 @@
 > day, in answer to the user's "What language is the mod written in? can we use 3rd party libraries to
 > communicate to the agentmaster process".
 >
+> **2026-11-14 — the first slice has a user: AskUserHtmlQuestion answered from Telegram** (design only,
+> [`INTERACTIVE_TOOLS.md`](INTERACTIVE_TOOLS.md) §12). The owner: "we are supposed to have one centralized agentmaster
+> mod", and picked that `agentmaster-link` WRAPS the question tool: its `tool.call` hook (the outer one: a `--plugin-dir`
+> mod sits above installed plugins) passes the call on to ask-user-html-question with `next(e)`, reports it over the
+> link the moment it opens, takes the phone's answer back through a held poll that runs only while the question is
+> open, hands it to the mod's helper and words Claude's result "in Telegram". That slice needs §4.1's LinkServer (hello,
+> events, one held route) and §4.2's spawn wiring, not the status, queue or draft features.
+>
 > **The user's ask (2026-10-16):** "design a new integration between agentmaster to claude code sessions via
 > mods. Supporting 100+ sessions on a machine efficiently and low-cost. Features like queue and the status can
 > all be done through mods. We will ensure claude sessions running in agentmaster are loaded with mods and are

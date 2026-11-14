@@ -4466,6 +4466,11 @@ The gaps were rare in practice, but once the reply is gone each would leave a re
 
 ### 21.30 Claude's questions answered from Telegram — the QUESTION CARD (2026-10-19; in production since 0.6.8.23 and dev since 0.0.1.31)
 
+> **AskUserHtmlQuestion** (the ask-user-html-question mod's MCP question tool, whose options are HTML pages) gets a card
+> of its own: an album of the designs' pictures, one tap per question with ◀ Back, a 🌐 link to the live question page,
+> answered through the one central mod, agentmaster-link — designed 2026-11-14, NOT BUILT:
+> [`INTERACTIVE_TOOLS.md`](INTERACTIVE_TOOLS.md) §12.
+
 > The user's request (2026-10-19): "Kindly close the gap, enabling telegram picking a choice, including the user manual text
 > input. Use telegram to the best of its ability to produce a managed message that will cover this interaction and
 > including custom answer". The research, the probe and the design are [`INTERACTIVE_TOOLS.md`](INTERACTIVE_TOOLS.md)

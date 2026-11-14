@@ -942,4 +942,143 @@ review, Cancel, a reply), and a dialog the AFK timer resolves while a card is op
   at all (the mod's `tool.check` lets its tool run without a prompt). Answering one from a topic needs its own way in: the
   tool's input is HTML pages (`questions[].options[].html`), which a card cannot show as AskUserQuestion's text previews,
   and the answer goes back through the tool's own helper (a local web server; its `answer` and `dismiss` routes), not
-  through a hook's `updatedInput`.
+  through a hook's `updatedInput`. The design for that next phase is §12.
+
+## 12. AskUserHtmlQuestion answered from Telegram — the design (2026-11-14, NOT BUILT)
+
+> **2026-11-14, DESIGN ONLY: nothing of it is built.** The owner: "Now learn AskUserHtmlQuestion and ask how can we
+> integrate that the mcp with telegram". Learned from the mod's source (`~/.claude/mods/ask-user-html-question` 0.13.0:
+> `hooks/ask.ts`, `hooks/register.tsx`, `helper/server.mjs`, `helper/page.html`) and the mod API's types; the choices
+> below were the owner's, asked with AskUserHtmlQuestion itself in two rounds (§12.2). The state half — a waiting
+> AskUserHtmlQuestion reads Needs approval — is §11 / HOOKS.md *Question tools*.
+
+### 12.1 What the mod is, as far as Telegram is concerned
+
+| Piece | What it does | What Telegram can use |
+|---|---|---|
+| The tool | `mcp__ask-user-html-question__AskUserHtmlQuestion`, registered by the mod (`$.tool.register`) and served by its own `tool.call` hook; `tool.check` lets it run without a permission prompt. Input: 1–4 `questions`, each with `question` (Markdown or simple HTML), `header`, `multiSelect`, 2–6 `options` of `label`, `description` and a page (`html`, or an absolute `htmlFile`), plus a `viewport` (default 1280×800). | The questions, labels and descriptions are plain data; the pages are HTML. |
+| The call folder | `%TEMP%\claude-ask-user-html-question\<tool_use_id>\` (the id with anything but `[A-Za-z0-9_-]` made `_`): `manifest.json` (the questions, each option's page file `q<q>-o<i>.html`), `server.json` (below), and, as the helper reads the designs, `q<q>-o<i>.png` (each design's FIRST SCREEN at the viewport, a headless Chrome / Edge `Page.captureScreenshot`, two at a time), `.layout.json` and `.rgb`. The helper deletes the folder when the question ends, before it says so. | The PNGs are the pictures (§12.4). Shot only while the mod draws a picture (`preview` not `off`, a terminal surface): true in every Agentmaster tab. |
+| The helper | `node helper/server.mjs <manifest>`: 127.0.0.1 on a random port, every path under `/s/<random token>/`; it refuses any `Host` but `127.0.0.1:<port>` / `localhost:<port>` (DNS rebinding). Routes: `GET /` the browser page, `GET events` (SSE: `done` when the question ends), `GET o/<q>/<i>/<file>` a design and the files beside it, `POST answer` / `POST dismiss` / `POST open`. It writes `server.json` = `{ url, pid }` — in its own words "the address for whatever else wants the open question". | The answer route, and the page the 🌐 link opens (§12.5). |
+| The answer | `POST answer` with JSON `{ source, answers: [{ picks: [i…], other: [text…], notes: [text per option], note: text }] }` — one answer per question, each with a pick or an own text (`other`), a comment per PICKED option (`notes`) and the question's own note (`note`); a several-answer question takes picks in tap order and up to 9 answers in all. `POST dismiss` `{ source, message }` is "Chat about this" (`''` = closed without a word). First answer wins: a later one hears 409. Only `browser` is kept as a source; anything else reads `terminal`. | The phone's answer goes in by the page's own route; nothing else in the mod changes. |
+| What Claude reads | `formatAnswer`: `The person answered your design question (in the browser page \| in the terminal):` then `- "<question>" = "<label>" (the person's comment: "…"), Other: "…"; the person's note on this question: "…"`. `formatChat`: `The person did not pick an option for "…"; they chose to chat about this instead (…) and wrote: "…"`. The source tells the model whether the person saw the live designs. | §12.3 rewords the source for an answer from the phone. |
+
+### 12.2 The owner's choices
+
+| # | Question | Picked | The owner's comment |
+|---|---|---|---|
+| T1 | What the topic shows of each design (several allowed) | **Pictures album** + **Live page link** (not the HTML files, not the text outline) | — |
+| T2 | How the card takes an answer | **One tap answers** (not "pick, then Send", not "the live page only") | "With back ability" |
+| T3 | How the answer reaches Claude, and what Claude reads | **Through the helper, with a Telegram source** (not the mod unchanged, not typed into the prompt box) | "we are supposed to have one centralized agentmaster mod" |
+| T4 | What the one central mod does (asked after T3's comment) | **It WRAPS the tool**: `agentmaster-link` (MOD_LINK.md) hooks the question tool's calls; ask-user-html-question stays untouched (not "contains the tool", not "direct first, mod later") | — |
+| T5 | What "back" does (asked after T2's comment) | **Back to an earlier question**: each tap answers its question and moves on; ◀ Back returns to change an earlier answer before the last tap sends (not an undo window, not both) | "after going back we can change the answer" |
+
+### 12.3 The architecture: agentmaster-link's first slice wraps the tool
+
+```
+📱 topic ── album · card · 🌐 ──┐
+                                 ▼
+Agentmaster.exe ── the bot (MessagingService) ── LinkServer (new: loopback HTTP, token per launch)
+                                 ▲ question.open / question.closed      │ the phone's answer (held poll)
+                                 │                                      ▼
+claude.exe ── agentmaster-link (--plugin-dir, OUTER tool.call hook on AskUserHtmlQuestion)
+                 └─ next(e) ──► ask-user-html-question (INNER: band + browser page + helper, unchanged)
+                                   └─ helper 127.0.0.1/s/<token>/ ◄── POST answer (the page's route)
+```
+
+- **Why it works** (the mod API's types, 2.1.31x): `tool.call` hooks form a chain — a hook gets `(e, next)`, can pass the
+  call on with `next(e)`, serve it itself, or rewrite what `next` answers (`{ result }` / `{ deny }`). A `--plugin-dir`
+  mod sits ABOVE installed plugins in the chain (measured 2026-11-02, BUNDLED_MODS.md), so agentmaster-link's hook is the
+  outer one. ⚠ P1 below checks it for a plugin-registered tool.
+- **On a call** the wrapper: (1) posts `question.open` {session, `tool_use_id`, the call's input without the pages'
+  HTML, the call folder} over the link — the exact moment and the whole question, with no transcript or `%TEMP%`
+  discovery; (2) starts `next(e)` (the band and the browser page open as today); (3) while that runs, holds
+  `GET /v1/questions/<tool_use_id>/answer?hold=5000` in a loop — a poll only while a question is open, so MOD_LINK.md's
+  F9 (an open fetch holds a session's end) costs nothing new: the question's own wait already holds the turn.
+- **The phone answers first:** the wrapper reads `server.json` in the call folder and POSTs the answer (or the
+  Chat-about-this message) to the helper — the page's own route, so the band closes, the PC window says it is answered
+  and the folder goes as for any answer; `next(e)` then resolves with the mod's own result, and the wrapper rewords its
+  source (below) and posts `question.closed` {by: telegram}.
+- **The PC answers first:** `next(e)` resolves; the wrapper posts `question.closed` {by: pc, the result's answer
+  lines} and returns the result unchanged; the card reads ✅ Answered at the PC.
+- **Esc:** `next.signal` aborts; `question.closed` {by: interrupt}; the card reads ⏹ Closed at the PC.
+- **What Claude reads (T3):** for an answer the wrapper delivered, the result's first line says `(in Telegram, from
+  pictures of the designs)` — or `(on the live page, in Telegram's browser)` for one given on the 🌐 page — in place of
+  the mod's `(in the terminal)` / `(in the browser page)`. Only the first line changes, so the mod's transcript row
+  (`answerLinesOf`, keyed on `The person answered your design question`) still lists the picks. ⚠ It leans on the mod's
+  wording: the wrapper's tests pin the phrases, and an unknown wording is left as the mod wrote it (never a wrong one).
+- **Nothing of this needs the hooks bridge or a new hook process;** the state (Needs approval while the question waits)
+  stays the scanner's (§11).
+
+### 12.4 The topic: the album, the card, one tap and Back
+
+- **The album (T1):** per question, one `sendMediaGroup` of the options' PNGs from the call folder (the helper's
+  first-screen shots, 1280×800 by default), each captioned `<n> · <label>`. The card goes first; each album follows when
+  its pictures exist (they take a few seconds). An option without a page, or a picture that failed, is left out of
+  the album and named on the card. Only the first screen of a tall design shows: the 🌐 page has the rest.
+- **The card:** ONE managed message per call, edited in place (the §10 card's idiom: a random card key in every
+  button, `q`-style callbacks, ✅ / ⏹ outcomes, forgotten 30 min after). It shows the current question, its options'
+  labels and descriptions, the answers given so far and a step line (`2 of 3 · Palette`).
+- **One tap (T2):** on a one-answer question a tap IS that question's answer and moves to the next one; on the LAST
+  question it sends every answer (the helper refuses a call with an unanswered question, so nothing goes before every
+  question has one). A one-question call sends on the tap. A several-answer question takes ticks in tap order and
+  ▶ Next / 📨 Send.
+- **◀ Back (T5):** shown from the second question on; it brings back the previous question with its answer marked,
+  and a tap there CHANGES it and moves on again (the later questions keep their answers). Back exists only until the
+  last tap sends.
+- **Beside the options:** ✍️ Something else (a ForceReply; the reply is the question's own answer, `other`, and moves
+  on), 📝 Note (a ForceReply asked BEFORE the tap: the question's `note`, shown on the card, sent with the answer),
+  💬 Chat about this (a ForceReply; its text goes to `dismiss`; Claude answers it in the chat). A comment per pick is
+  not on the card: the 🌐 page has them all.
+- **🌐 Open the live question (T1):** a plain URL button (Telegram allows Mini App buttons only in private chats, not
+  in a topic) to the page through the file-links address (§12.5); answering there is the page's own answer.
+- **Outcomes:** ✅ Answered from Telegram (the answers) · ✅ Answered at the PC (its answer lines, from
+  `question.closed`) · ✅ Answered on the live page · ⏹ Closed at the PC · ⏹ Its session ended. A tap on a card whose
+  question is no longer open answers "This question is no longer open here."
+- **The mirror:** the topic's transcript mirror pairs with the card as it does for AskUserQuestion (§10.2): no second
+  post of the call, no "👤 You ↩ answer" line under a card that shows the answer.
+
+### 12.5 The live page through the file-links address
+
+- **The route:** `<file-links base>/station-<station>/<session key>/ask/<tool_use_id>/<rest>` — under the session's own
+  secret key path, the file links' capability idiom (MESSAGING.md §21.32.4) — is passed through by `MessagingFileServer`
+  to `http://127.0.0.1:<port>/s/<token>/<rest>` from that call's `server.json`, with `Host` rewritten to the helper's
+  own (its rebinding guard) and the token never shown to the phone. GET (the page, the designs and their files, the SSE
+  `events` stream) and POST (`answer`, `dismiss`; `open` is refused: it would open a window on the PC).
+- **Relative paths:** the page and its designs use relative URLs (`answer`, `events`, `o/<q>/<i>/<file>`), so the
+  prefix carries through untouched.
+- **Who answered:** the server marks an `answer` / `dismiss` that came through it, so the wrapper words the source
+  `(on the live page, in Telegram's browser)`.
+- **Off / LAN:** with file links off there is no 🌐 button; in LAN mode it works on the home network and the VPN only.
+  ⚠ The hosted relay must let this path's POSTs and its SSE stream through (P4).
+
+### 12.6 What gets built
+
+| Piece | Where | What |
+|---|---|---|
+| agentmaster-link (first slice) | the mod's source in `~/.claude/mods/agentmaster-link` (TypeScript, the plugin-authoring rules), vendored into `AgentMaster/mods/` and embedded like file-links (`tools/bundled-mods/bundled_mods.py sync \| gen`) | `session.start`: read `AM_LINK` / `AM_LINK_TOKEN`, start the link detached (MOD_LINK.md F4); the `tool.call` wrapper on `mcp__ask-user-html-question__AskUserHtmlQuestion` (§12.3); `question.open` / `question.closed`; the held answer poll; the helper POST; the source rewording. Observe-only otherwise. |
+| LinkServer (first slice) | the engine, beside `HooksBridge` (MOD_LINK.md §4.1, §4.3) | loopback HTTP: AF_UNIX `<profile>\link\am.sock`, TCP `127.0.0.1` fallback; the per-launch token; `POST /v1/hello`, `POST /v1/events`, `GET /v1/questions/<id>/answer?hold=`; release on park / restart / close. |
+| Spawn | `ClaudeSpawn` seams (MOD_LINK.md §4.2) | `--plugin-dir` for the link (a `BundledModCatalog` entry; it stands aside like the others), `AM_LINK` + `AM_LINK_TOKEN` in the ConPTY env. |
+| The card | `AskHtmlQuestion.h` (pure: the card model, one tap, Back, ticks, the answer JSON, texts, callbacks; tested) + `Messaging.Questions.cpp` beside the §10 card | the album, the card, the taps, the ForceReply texts, the outcomes, the mirror pairing. |
+| The pass-through | `MessagingFileServer` | §12.5's route, with the Host rewrite and the source mark. |
+| The relay | outside this repository (the hosted address's relay) | let `/station-*/…/ask/…` POST and SSE through (P4). |
+
+### 12.7 Open measurements (before the build)
+
+- **P1** — agentmaster-link's `tool.call` hook on `mcp__ask-user-html-question__AskUserHtmlQuestion` runs OUTSIDE the
+  installed ask-user-html-question's, and `next(e)` serves the call (a plugin tool, not a core one).
+- **P2** — the wrapper reads the call folder's `server.json` (`$.fs.read` of `%TEMP%`) and POSTs to the helper with
+  `$.http.fetch` (127.0.0.1 measured, MOD_LINK.md F1); the helper accepts the `Host` the engine's fetch sends.
+- **P3** — an Esc while the wrapper waits aborts `next` and the poll together; the band and the helper end as today.
+- **P4** — the hosted relay passes a POST and an SSE stream on the live page's path; the page works in Telegram's
+  in-app browser (Android, iOS).
+- **P5** — the PNGs: how many seconds after the call they exist, their size, how an album of six reads on a phone.
+- **P6** — the source rewording against the installed mod's exact phrases (0.13.0), and what an older or newer mod writes.
+
+### 12.8 Limits that stay
+
+- The pictures are each design's first screen; the rest is on the 🌐 page.
+- A comment per pick is given on the 🌐 page only (the card has the question's note).
+- A session that runs without agentmaster-link (an old Claude Code, the mod off, a hand-typed claude) gets no card for
+  this tool; its question still reads Needs approval (§11).
+- Other listed question tools are not answered from Telegram: answering needs the tool's own route, which only
+  AskUserHtmlQuestion's helper publishes.
