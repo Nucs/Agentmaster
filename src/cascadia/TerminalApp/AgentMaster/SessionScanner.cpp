@@ -75,25 +75,33 @@ namespace
         return b > 0 && s[b - 1] == L'?';
     }
 
-    // The name of an INTERACTIVE (blocks-on-user) tool_use block in this message's content, else "".
-    // The scanner uses it to flag a session blocked waiting for the user to answer (AskUserQuestion)
-    // — non-interactive tool_use blocks (Bash, Read, …) are ignored: those are genuinely working.
-    std::wstring CollectInteractiveToolName(const Agentmaster::json::Value* content)
+    // The name of EVERY tool_use block in this message's content, in block order (a block without a name
+    // is skipped). The parser picks the INTERACTIVE (blocks-on-user) one from it for TranscriptEvent::
+    // toolName (FirstInteractiveToolName: AskUserQuestion or a listed QUESTION TOOL — a session blocked
+    // waiting for the user to answer; Bash, Read, … are genuinely working), and keeps the whole list in
+    // TranscriptEvent::toolUseNames so the scanner can re-judge a still-pending call when the question-tool
+    // list changes (HOOKS.md "Question tools").
+    //   content - the message's `content` (an array of blocks; anything else has no tool_use).
+    // Returns the names, empty when there is no tool_use. Throws std::bad_alloc only.
+    std::vector<std::wstring> CollectToolUseNames(const Agentmaster::json::Value* content)
     {
         using Agentmaster::json::Value;
+        std::vector<std::wstring> names;
         if (!content || content->type != Value::Type::Arr)
         {
-            return {};
+            return names;
         }
         for (const auto& blk : content->arr)
         {
-            if (blk.type == Value::Type::Obj && blk.StrAt(L"type") == L"tool_use" &&
-                Agentmaster::IsInteractiveTool(blk.StrAt(L"name")))
+            if (blk.type == Value::Type::Obj && blk.StrAt(L"type") == L"tool_use")
             {
-                return blk.StrAt(L"name");
+                if (std::wstring name = blk.StrAt(L"name"); !name.empty())
+                {
+                    names.push_back(std::move(name));
+                }
             }
         }
-        return {};
+        return names;
     }
 
     // Agentmaster (COMMANDS.md): the file-WRITING tool_use paths of this message — each
@@ -280,7 +288,11 @@ namespace Agentmaster
                 // The parser stays a plain extractor and keeps the line as an Assistant event with its
                 // terminal stop_reason; the fold decides what it means (it never ends a turn).
                 ev.resumePlaceholder = IsResumePlaceholder(ev.model, ev.apiError, ev.text);
-                ev.toolName = CollectInteractiveToolName(content); // "" unless an interactive tool_use is present
+                // Every tool_use name, and the interactive one among them under the question-tool list in effect now
+                // ("" unless AskUserQuestion or a listed question tool is present). The scanner re-judges the names on
+                // every pass (ScanState::pendingToolUses); a one-shot reader such as the CLI uses toolName as is.
+                ev.toolUseNames = CollectToolUseNames(content);
+                ev.toolName = FirstInteractiveToolName(ev.toolUseNames);
                 ev.fileWritePaths = CollectFileWritePaths(content); // Write/Edit file_path values (COMMANDS.md markdown await)
                 // Context occupancy from message.usage (≈ the size of the request that produced this
                 // message). cache_read carries the whole conversation forward, so this single block is
@@ -925,6 +937,15 @@ namespace Agentmaster
         const bool wasPrimed = st.primed;
         bool consumedTurnEvent = false;
         st.answeredInteractive = false; // per-pass scratch (see ScanState) — only THIS pass's reads count
+        // Agentmaster (QUESTION TOOLS — HOOKS.md "Question tools"): re-judge the still-pending call against the
+        // question-tool list in effect NOW, before this pass's read and every decision below. The fold judges a call
+        // once, when it reads its line; without this, a tool the user adds to the cog's list while its call is open
+        // would keep reading Running until the next call, and a tool removed from it would still count for a call read
+        // before the change (holding recon-resume and the presence-idle release for it). Before the
+        // read on purpose: the fold's answer check (a tool_result clearing a pending question -> answeredInteractive)
+        // then sees the current verdict too, and a line this read folds is judged under the same list by the parser.
+        // Cheap: pendingToolUses holds the latest assistant line's tool names, almost always zero or one.
+        st.pendingInteractiveTool = FirstInteractiveToolName(st.pendingToolUses);
         // Agentmaster (the 2026-09-25 CATCH-UP STALL, session d1f3f198): read on a size change OR while
         // the previous read left complete bytes unread (a window-capped chunk, a failed open, a short
         // grown re-read). The old `size != lastSize` gate alone froze the cursor mid-history the moment
@@ -1205,6 +1226,13 @@ namespace Agentmaster
         }
         const int64_t subagentActivityMs = st.subagentActivityMs;
         const bool presenceWorking = PresenceIsWorking(s.presenceStatus); // "busy" OR a live "shell" job (claude's own heartbeat)
+        if (!presenceWorking)
+        {
+            // HOOKS.md "Question tools": the heartbeat that covered the pending call is gone (claude at rest, waiting,
+            // exited or not yet published). A "busy" read later is a NEW stint of work — a resumed claude, say — and
+            // never proves that call is still open. See ScanState::pendingCallUnderWork.
+            st.pendingCallUnderWork = false;
+        }
         const bool subagentActive = subagentActivityMs > 0 && (NowMs() - subagentActivityMs) <= kScanSubagentFreshMs;
         // Agentmaster (work that OUTLIVES the turn — teammates / background agents / shells): external
         // work postdating the parent transcript's last write by MORE than kScanExternalWorkGraceMs has
@@ -1228,6 +1256,17 @@ namespace Agentmaster
                 quietForMs = subQuietMs; // the conversation IS being written (just not the main file)
             }
         }
+        // Agentmaster (QUESTION TOOLS — HOOKS.md "Question tools"): the quiet clock recon-block reads — this fold
+        // WITHOUT the working-heartbeat override just below. Claude Code reports "busy" for as long as ANY tool runs,
+        // and a question tool other than AskUserQuestion (an MCP tool such as the ask-user-html-question mod's
+        // AskUserHtmlQuestion) runs until the user answers: measured 2026-11-14, the heartbeat read "busy" through a
+        // whole 8-minute question while the transcript's newest line was the call itself. With the override,
+        // recon-block — the ONLY belt for such a tool (it has no "waiting" heartbeat and no hook) — would hold for
+        // exactly as long as the question stays open. So recon-block reads this clock for a LISTED question tool
+        // whose call arrived under that same unbroken "busy" (ScanState::pendingCallUnderWork), where "busy" IS
+        // that call waiting; everything else keeps quietForMs (the recon-block call site says why). A writing
+        // subagent still delays it (the fold above), and a compaction still stands it down (below).
+        int64_t questionQuietForMs = quietForMs;
         if (presenceWorking)
         {
             quietForMs = 0; // claude self-reports working (a turn OR a live shell job) — the transcript may be momentarily quiet, the work is not over
@@ -1244,6 +1283,7 @@ namespace Agentmaster
         if (CompactionInFlight(s.compactingSinceUnixMs, NowMs(), s.presenceStatus))
         {
             quietForMs = 0;
+            questionQuietForMs = 0; // the compaction window stands recon-block down too, as it always did
         }
 
         // Subagent/fork activity reconciliation — the EXTERNAL-WORK mirror of recon-run above.
@@ -1599,13 +1639,22 @@ namespace Agentmaster
         }
 
         // Blocked-on-user reconciliation: the latest assistant message is an UNANSWERED interactive
-        // tool_use (AskUserQuestion) and the transcript has gone quiescent — the session is blocked
-        // waiting for the user to answer, NOT working, so it must not show Running. Synthesize a
-        // permission-style Notification (-> NeedsApproval, the "needs you" column). Idempotent: only
-        // from Running, so once it lands NeedsApproval it stays until the answer + the turn's end
-        // release it via the missed-Stop reconciliation above. (Autorunner treats NeedsApproval as
-        // NOT ready — Rule #1 — so it won't auto-answer the question with a queued prompt.)
-        if (tailCurrent && ShouldSynthesizeBlockedOnUser(s.state, st.pendingInteractiveTool, st.interrupted, quietForMs))
+        // tool_use (AskUserQuestion, or a QUESTION TOOL the user listed) and the transcript has gone
+        // quiescent — the session is blocked waiting for the user to answer, NOT working, so it must not
+        // show Running. Synthesize a permission-style Notification (-> NeedsApproval, the "needs you"
+        // column). Idempotent: only from Running, so once it lands NeedsApproval it stays until the answer
+        // + the turn's end release it via the missed-Stop reconciliation above. (Autorunner treats
+        // NeedsApproval as NOT ready — Rule #1 — so it won't auto-answer the question with a queued prompt.)
+        // The quiet clock it is judged on (HOOKS.md "Question tools"): for a LISTED question tool whose call line
+        // arrived under claude's working heartbeat, with no break in that heartbeat since (pendingCallUnderWork),
+        // questionQuietForMs — the clock without the "busy" override, because such a tool keeps the heartbeat on
+        // "busy" for the whole question. For everything else the classic quietForMs, bit for bit as before: the
+        // built-in AskUserQuestion (its live heartbeat reads "waiting", and its call line is written only once
+        // answered, so a pending one under "busy" is a stale line), and a listed call left over from a claude
+        // that died (the resumed claude's "busy" is its own work, not that question).
+        const bool listedQuestionPending = !st.pendingInteractiveTool.empty() && st.pendingInteractiveTool != kBuiltInQuestionTool;
+        const int64_t blockQuietForMs = (listedQuestionPending && st.pendingCallUnderWork) ? questionQuietForMs : quietForMs;
+        if (tailCurrent && ShouldSynthesizeBlockedOnUser(s.state, st.pendingInteractiveTool, st.interrupted, blockQuietForMs))
         {
             const auto fresh = _registry->Get(s.id);
             if (fresh && fresh->state == SessionState::Running)
@@ -2039,9 +2088,16 @@ namespace Agentmaster
                     st.errorBranchUuids.clear();
                 }
                 // The latest assistant block sets / clears the "blocked on the user" flag: an
-                // interactive tool_use (AskUserQuestion) parks the turn on the user until answered;
-                // a text / non-interactive-tool message means the agent moved on (clear it).
+                // interactive tool_use (AskUserQuestion, or a listed QUESTION TOOL) parks the turn on the
+                // user until answered; a text / non-interactive-tool message means the agent moved on
+                // (clear it). The raw names are kept beside it (HOOKS.md "Question tools"): each pass
+                // re-judges them against the question-tool list in effect then (_reconcileSession).
                 st.pendingInteractiveTool = ev.toolName; // "" unless this message is an interactive tool_use
+                st.pendingToolUses = ev.toolUseNames;
+                // Was claude working when this call's line arrived? A live question tool opens inside a running turn
+                // ("busy"); a line replayed from a claude that died is read while no live heartbeat says so. See
+                // ScanState::pendingCallUnderWork for what reads it.
+                st.pendingCallUnderWork = !ev.toolUseNames.empty() && PresenceIsWorking(s.presenceStatus);
                 if (!ev.text.empty())
                 {
                     st.lastAssistantText = ev.text;
@@ -2105,6 +2161,8 @@ namespace Agentmaster
                     st.answeredInteractive = true;
                 }
                 st.pendingInteractiveTool.clear();
+                st.pendingToolUses.clear(); // the call got its result: nothing of that message is pending any more
+                st.pendingCallUnderWork = false;
                 st.lastWasApiError = false; // activity past any error -> the tail is no longer that error
                 st.errorUuid.clear();
                 st.errorBranchUuids.clear();
@@ -2205,6 +2263,8 @@ namespace Agentmaster
                 // ToolResult event above — so this only resets on a genuine human line.)
                 st.lastStopReason.clear();
                 st.pendingInteractiveTool.clear(); // a human line supersedes any pending question
+                st.pendingToolUses.clear(); // ...and any pending call's names (a re-judge must not revive it)
+                st.pendingCallUnderWork = false;
                 st.lastWasApiError = false; // a new human turn supersedes a prior API error -> recovery (Error -> Running)
                 st.errorUuid.clear();
                 st.errorBranchUuids.clear();

@@ -1582,6 +1582,47 @@ namespace winrt::TerminalApp::implementation
         AgentSetTitledTip(_setBundledModsStatus, L"What the next Claude tab does with each mod", L"Read from the switches above, the detected claude.exe and your own Claude Code settings (~/.claude/settings.json and the managed settings). Each launch also reads the project's own .claude\\settings.json and .claude\\settings.local.json: a project that enables its own copy of a mod gets that copy instead. hooks.log has a [mods] line for every launch.");
         panel.Children().Append(_setBundledModsStatus);
 
+        // QUESTION TOOLS (HOOKS.md "Question tools"; QuestionTools.h): the tools that, like AskUserQuestion, ask the user
+        // something and wait for the answer. While a session's newest tool call is one of them and has no answer yet, the
+        // scanner reads the session from its transcript as Needs approval. The box is AppSettings::questionTools as text,
+        // checked as typed (_RefreshQuestionToolsLex, the same rules the engine applies); Save installs it at once
+        // (ApplyQuestionToolsSetting in the settings sink): no restart and no hook, a question already open included.
+        panel.Children().Append(SettingsSeparator(L"QUESTION TOOLS"));
+        {
+            auto intro = Text(L"Tools that ask you something and wait for your answer, like Claude Code's own AskUserQuestion (always a question, built in). While one of them waits in a session, that session shows Needs approval: its tab and card say so, the toast and the flash ring tell you, and the Prompt Queue Runner sends nothing into it until you answer. One tool per line; * stands for any characters (mcp__my-server__* is every tool of that server); # starts a note.", 11, false, 0.75);
+            intro.TextWrapping(TextWrapping::Wrap);
+            panel.Children().Append(intro);
+        }
+        _setQuestionTools = TextBox{};
+        _setQuestionTools.Header(winrt::box_value(L"Question tools (one per line)"));
+        _setQuestionTools.AcceptsReturn(true);
+        _setQuestionTools.TextWrapping(TextWrapping::NoWrap); // a tool name never wraps: a wrapped one would read as two lines
+        _setQuestionTools.FontFamily(FontFamily{ L"Consolas" });
+        _setQuestionTools.FontSize(12);
+        _setQuestionTools.MinHeight(64);
+        _setQuestionTools.MaxHeight(140);
+        _setQuestionTools.BorderThickness(Thickness{ 0, 0, 0, 0 }); // the lexer's colored Border below is the frame
+        ScrollViewer::SetVerticalScrollBarVisibility(_setQuestionTools, ScrollBarVisibility::Auto);
+        _setQuestionTools.PlaceholderText(L"mcp__server__tool \x2014 one per line, * for any characters (empty: AskUserQuestion only)");
+        AgentSetTip(_setQuestionTools, L"A line is a tool's full name as Claude Code calls it \x2014 an MCP tool is mcp__<server>__<tool>, e.g. mcp__ask-user-html-question__AskUserHtmlQuestion \x2014 or a name with * for any characters. Letters, digits, _ and - only, matched case-sensitively against the whole name.\n\nWhile a listed tool's call has no answer yet, Agentmaster reads the session from its transcript as Needs approval, about two seconds after the question opens, and back to Running once the answer arrives (an Esc ends the turn as usual). Save applies the list at once, to questions already open too; no tab restarts.\n\nAskUserQuestion needs no line. List only tools that wait for you: a working tool listed here would read Needs approval whenever it runs quietly for two seconds.");
+        // Through the page's weak reference, the mods switches' idiom: the box lives in the overlay this page owns, and a
+        // handler holding the page strongly would keep it alive.
+        _setQuestionTools.TextChanged([weak = get_weak()](const IInspectable&, const TextChangedEventArgs&) {
+            if (auto self = weak.get())
+            {
+                self->_RefreshQuestionToolsLex();
+            }
+        });
+        _setQuestionToolsBorder = Border{};
+        _setQuestionToolsBorder.BorderThickness(Thickness{ 1, 1, 1, 1 });
+        _setQuestionToolsBorder.CornerRadius(CornerRadius{ 2, 2, 2, 2 });
+        _setQuestionToolsBorder.BorderBrush(Fill(0x60, 0x80, 0x80, 0x80)); // subtle neutral until the lexer paints it
+        _setQuestionToolsBorder.Child(_setQuestionTools);
+        panel.Children().Append(_setQuestionToolsBorder);
+        _setQuestionToolsStatus = Text(L"", 11, false, 0.7);
+        _setQuestionToolsStatus.TextWrapping(TextWrapping::Wrap);
+        panel.Children().Append(_setQuestionToolsStatus);
+
         // === PROMPT QUEUE RUNNER tab === (named "Tests Autorunner" until 2026-10-09; the panel variable and
         // the settings keys keep the old "autorunner" word)
         panel = autorunnerPanel;
@@ -3036,7 +3077,7 @@ namespace winrt::TerminalApp::implementation
         addSettingsTab(L"Notifications", L"Windows notifications when a session's status changes from Running to another state \x2014 which states notify, the focused-tab skip, and the sound.", notificationsPanel);
         addSettingsTab(L"Messaging", L"The fleet in Telegram \x2014 one topic per working session, the whole session in it, messages as queued prompts, a Search topic that revives old sessions. The bot token, your user id, the idle grace.", messagingPanel);
         addSettingsTab(L"Tabs & Overlay", L"The terminal tab strip + the per-tab overlay badge \x2014 close affordances, tab size (width, height, title font), the rename key and title naming, the favorite marker, tab colors, the status-flash color, and overlay opacity.", tabsPanel);
-        addSettingsTab(L"Claude", L"The Claude install Agentmaster drives \x2014 which native claude.exe, and how long Claude keeps session history.", claudePanel);
+        addSettingsTab(L"Claude", L"The Claude install Agentmaster drives \x2014 which native claude.exe, how long Claude keeps session history, the mods it loads into Claude tabs, and which tools count as questions.", claudePanel);
         addSettingsTab(L"About", L"Version + build, updates, the active profile folder, and uninstall.", aboutPanel);
 
         outer.Children().Append(tabStrip);
@@ -3239,6 +3280,12 @@ namespace winrt::TerminalApp::implementation
             modSwitch.IsOn(!off);
         }
         _RefreshBundledModsStatus();
+        if (_setQuestionTools)
+        {
+            // HOOKS.md "Question tools": the stored text, verbatim (the shipped default for a settings.json without the key).
+            _setQuestionTools.Text(winrt::hstring{ _appSettings.questionTools });
+            _RefreshQuestionToolsLex(); // explicit: a re-seed of IDENTICAL text fires no TextChanged, and the border/status must reflect THIS open's value
+        }
         if (_setDefaultMode)
         {
             // Index contract (see where the combo is built): 0 == Off ("Paused"), 1 == Full ("Auto").
@@ -4142,6 +4189,14 @@ namespace winrt::TerminalApp::implementation
         if (!_setBundledMods.empty())
         {
             _appSettings.bundledModsOff = _BundledModsOffFromSwitches();
+        }
+        if (_setQuestionTools)
+        {
+            // HOOKS.md "Question tools": stored VERBATIM (the launchModels idiom: blank lines, notes and even refused lines
+            // stay, so the box reopens exactly as typed; LexQuestionToolsText decides what applies). A cleared box stores
+            // "" (no tool beyond AskUserQuestion), which Persistence keeps and never re-seeds. The settings sink installs
+            // it right after this (ApplyQuestionToolsSetting).
+            _appSettings.questionTools = std::wstring{ _setQuestionTools.Text() };
         }
         if (_setCleanupDays)
         {
@@ -5674,6 +5729,75 @@ namespace winrt::TerminalApp::implementation
             }
             _setLaunchModelsStatus.Text(winrt::hstring{ msg });
             _setLaunchModelsStatus.Foreground(fg);
+        }
+    }
+
+    // HOOKS.md "Question tools": the QUESTION TOOLS box's live check — the _RefreshLaunchModelsLex twin over
+    // LexQuestionToolsText, the very rules ApplyQuestionToolsSetting applies on Save, so the box's green is exactly what
+    // will count. Border: neutral when nothing is listed, green when every line applies, amber when a line carries a
+    // remark (AskUserQuestion listed, a repeat, past the cap, a pattern that also matches a working tool), red when a
+    // line is refused. The status line counts what applies, or names the most severe problem and its line.
+    void AgentManagerContent::_RefreshQuestionToolsLex()
+    {
+        if (!_setQuestionTools)
+        {
+            return;
+        }
+        const auto res = ::Agentmaster::LexQuestionToolsText(std::wstring{ _setQuestionTools.Text() });
+
+        // Same palette as _RefreshLaunchModelsLex / _RefreshEnvLex: green ok / amber warn / red error.
+        const SolidColorBrush green = Fill(0xFF, 0x4C, 0xAF, 0x50);
+        const SolidColorBrush red = Fill(0xFF, 0xE5, 0x39, 0x35);
+        const SolidColorBrush amber = Fill(0xFF, 0xDA, 0xA5, 0x20);
+        const SolidColorBrush neutral = Fill(0x60, 0x80, 0x80, 0x80);
+        const SolidColorBrush dim = Fill(0xFF, 0x99, 0x99, 0x99);
+
+        const bool empty = (res.ok == 0 && res.warn == 0 && res.error == 0);
+        if (_setQuestionToolsBorder)
+        {
+            const SolidColorBrush bc = empty ? neutral :
+                                       res.worst == ::Agentmaster::QuestionToolLineKind::Error ? red :
+                                       res.worst == ::Agentmaster::QuestionToolLineKind::Warn  ? amber :
+                                                                                                  green;
+            _setQuestionToolsBorder.BorderBrush(bc);
+        }
+        if (_setQuestionToolsStatus)
+        {
+            // The line to quote: the FIRST line of the worst kind present, so a refused line is never hidden behind an
+            // earlier remark (the lexer's firstIssue is merely the first Warn-or-Error).
+            const ::Agentmaster::QuestionToolLineDiag* worstLine = nullptr;
+            for (const auto& diag : res.lines)
+            {
+                if (diag.kind == res.worst && (diag.kind == ::Agentmaster::QuestionToolLineKind::Warn || diag.kind == ::Agentmaster::QuestionToolLineKind::Error))
+                {
+                    worstLine = &diag;
+                    break;
+                }
+            }
+            const std::wstring counted = std::to_wstring(res.ok) + (res.ok == 1 ? L" tool counts as a question" : L" tools count as questions");
+            std::wstring msg;
+            SolidColorBrush fg = dim;
+            if (empty)
+            {
+                msg = L"No tools listed \x2014 only Claude Code's own AskUserQuestion reads Needs approval.";
+            }
+            else if (res.worst == ::Agentmaster::QuestionToolLineKind::Error && worstLine)
+            {
+                msg = L"\x2715 Line " + std::to_wstring(worstLine->line) + L": " + worstLine->message + L" \x2014 that line does not count \x00B7 " + counted + L".";
+                fg = red;
+            }
+            else if (res.worst == ::Agentmaster::QuestionToolLineKind::Warn && worstLine)
+            {
+                msg = L"\x26A0 " + counted + L" \x00B7 line " + std::to_wstring(worstLine->line) + L": " + worstLine->message + L".";
+                fg = amber;
+            }
+            else
+            {
+                msg = L"\x2713 " + counted + L", besides the built-in AskUserQuestion.";
+                fg = green;
+            }
+            _setQuestionToolsStatus.Text(winrt::hstring{ msg });
+            _setQuestionToolsStatus.Foreground(fg);
         }
     }
 

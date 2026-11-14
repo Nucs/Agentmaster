@@ -452,6 +452,11 @@ namespace Agentmaster
             // 0 disables (the cog's "Never"). (A second tiny LoadAppSettings read happens below for the
             // hook files — both are one small-file read at process init.)
             e->scanner->SetWaitingDecayMinutes(LoadAppSettings().waitingForYouTimeoutMinutes);
+            // Agentmaster (QUESTION TOOLS — HOOKS.md "Question tools"): install the question tools — the tools that, like
+            // AskUserQuestion, wait for the user, so a session sitting in one reads NeedsApproval — BEFORE the worker
+            // starts (thread creation is the happens-before for its first pass). Without this the process judges by the
+            // shipped default, not the user's list. The cog's Save installs a changed list at once (TerminalPage).
+            ApplyQuestionToolsSetting(LoadAppSettings().questionTools, L"engine init");
             // Agentmaster (COMMANDS.md): the slash-command binding/await engine, attached BEFORE the
             // scanner worker starts (the feed pointer is read unsynchronized on the worker; thread
             // creation is the happens-before). The one v1 binding is /handover: when a managed
@@ -833,6 +838,44 @@ namespace Agentmaster
         e.claudeExePath = ResolveClaudeExe(overridePath);
         AppendStateLog(L"hooks.log", L"[engine] claude.exe refreshed: " + (e.claudeExePath.empty() ? std::wstring{ L"<not detected>" } : e.claudeExePath) + L"\n");
         return e.claudeExePath;
+    }
+
+    void ApplyQuestionToolsSetting(std::wstring_view text, std::wstring_view reason) noexcept
+    {
+        try
+        {
+            std::vector<std::wstring> patterns = ParseQuestionToolPatterns(text);
+            // "Never installed" is the slot's own empty state (the process judges by the shipped default until now), read
+            // directly so the first install always logs, even when the user's list equals that default.
+            const auto installed = detail::QuestionToolPatternsSlot().load();
+            const bool changed = !installed || *installed != patterns;
+            if (!changed)
+            {
+                return; // a Save that left the box alone: nothing to swap, nothing to log
+            }
+            // The log line names what now counts, so a "why did this tab turn orange / stay blue" question is answered
+            // from hooks.log alone. Built before the move below hands the patterns to the slot.
+            std::wstring line = L"[question-tools] " + std::wstring{ reason } + L": ";
+            if (patterns.empty())
+            {
+                line += L"none beyond AskUserQuestion";
+            }
+            else
+            {
+                line += std::to_wstring(patterns.size()) + (patterns.size() == 1 ? L" tool beyond AskUserQuestion:" : L" tools beyond AskUserQuestion:");
+                for (const auto& pattern : patterns)
+                {
+                    line += L" " + pattern;
+                }
+            }
+            SetQuestionToolPatterns(std::move(patterns));
+            AppendStateLog(L"hooks.log", line + L"\n");
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the previous list (or the shipped default) stays in effect; the scanner keeps judging by it.
+            LogSwallowedException(L"ApplyQuestionToolsSetting");
+        }
     }
 
     ClaudeInstallState ClaudeInstallKind()

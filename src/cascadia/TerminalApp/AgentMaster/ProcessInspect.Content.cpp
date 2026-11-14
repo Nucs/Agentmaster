@@ -1752,10 +1752,10 @@ namespace Agentmaster
         // resolve it when the matching tool_result is seen, and fall back to "edited" for any with no
         // result by end-of-transcript (a truncated tail).
         std::unordered_map<std::wstring, std::wstring> pendingWrites;
-        // Agentmaster: tool_use ids of interactive (AskUserQuestion) blocks seen so far — a later user
-        // tool_result answering one is a REAL user interaction (the user chose an answer), so it must
-        // advance "last user msg" (out.lastUserTs) like a typed prompt. The interactive-tool set mirrors
-        // SessionScanner.h's IsInteractiveTool (today: AskUserQuestion).
+        // Agentmaster: tool_use ids of interactive blocks seen so far (AskUserQuestion, or a listed QUESTION
+        // TOOL) — a later user tool_result answering one is a REAL user interaction (the user chose an
+        // answer), so it must advance "last user msg" (out.lastUserTs) like a typed prompt. The
+        // interactive-tool set IS SessionScanner.h's IsInteractiveTool (asked directly below).
         std::unordered_set<std::wstring> interactiveAskIds;
         json::Value lastTodos;
         bool haveTodos = false;
@@ -2115,10 +2115,13 @@ namespace Agentmaster
                             {
                                 out.hasExitPlanMode = true;
                             }
-                            // Agentmaster: remember each interactive (AskUserQuestion) tool_use id so the
-                            // user's later tool_result answering it advances "last user msg" (see the
-                            // externalUser branch above). Mirrors SessionScanner.h's IsInteractiveTool.
-                            if (name == L"AskUserQuestion")
+                            // Agentmaster: remember each interactive tool_use id (AskUserQuestion, or a QUESTION
+                            // TOOL the user listed — HOOKS.md "Question tools") so the user's later tool_result
+                            // answering it advances "last user msg" (see the externalUser branch above). Asks
+                            // SessionScanner.h's IsInteractiveTool itself, so the summary and the state machine
+                            // agree on what a question is. ⚠ The analysis is cached by the file's stamp: a
+                            // question-tool list change reaches an unchanged transcript at its next write.
+                            if (IsInteractiveTool(name))
                             {
                                 if (const std::wstring askId = blk.StrAt(L"id"); !askId.empty())
                                 {

@@ -926,3 +926,20 @@ deduplicated by tool_use id; `--real-only` leaves out the probes' sessions): 1,0
 
 **Owed after the build:** the phone checks of MESSAGING.md §21.30 (the tab row with four and five tabs on the phone, the
 review, Cancel, a reply), and a dialog the AFK timer resolves while a card is open.
+
+## 11. Question tools beyond AskUserQuestion (2026-11-14; the state only, Telegram is the next phase)
+
+> **2026-11-14, NOT BUILT yet.** The user lists the tools that, like AskUserQuestion, ask and wait (the cog's Claude tab,
+> QUESTION TOOLS; shipped with the ask-user-html-question mod's `mcp__ask-user-html-question__AskUserHtmlQuestion`), and
+> a session waiting in one reads **Needs approval**. The design, the measurements and the limits are
+> [`HOOKS.md`](HOOKS.md) *Question tools*; the setting is [`SETTINGS.md`](SETTINGS.md) *Claude*.
+
+- **What this phase does:** the state only. A listed tool's open call reads NeedsApproval from the transcript (claude's
+  heartbeat reads `busy` for such a tool, never `waiting`, and no hook reports it), so the Triage Board, the tab, the
+  toast, the flash ring and the Prompt Queue Runner treat it as they treat an AskUserQuestion.
+- **What it does not do yet — answering from Telegram (the next phase).** The question hook of §10 is a
+  `PermissionRequest` hook matched to `AskUserQuestion` only, and a listed MCP question tool raises no permission request
+  at all (the mod's `tool.check` lets its tool run without a prompt). Answering one from a topic needs its own way in: the
+  tool's input is HTML pages (`questions[].options[].html`), which a card cannot show as AskUserQuestion's text previews,
+  and the answer goes back through the tool's own helper (a local web server; its `answer` and `dismiss` routes), not
+  through a hook's `updatedInput`.

@@ -1007,6 +1007,28 @@ void TestAppSettings()
         CHECK(mine.launchModels == L"Opus 4.8 | claude-opus-4-8", "settings launchModels: a USER-edited list (even pinned ids) is kept verbatim");
     }
 
+    // Agentmaster (QUESTION TOOLS — HOOKS.md "Question tools"): questionTools gates its default on key PRESENCE, the
+    // launchModels idiom. An ABSENT key (every settings.json from before the feature) loads the shipped default, so the
+    // ask-user-html-question mod's tool reads Needs approval on existing installs too; a PRESENT empty string is the user's
+    // "nothing beyond AskUserQuestion" and must stay empty; a present non-string (a hand edit) keeps the default; and the
+    // box's text round-trips VERBATIM (notes, blank lines and the XAML box's CR newlines included).
+    {
+        const auto absent = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"model\":\"opus\"}}");
+        CHECK(absent.questionTools == std::wstring{ kDefaultQuestionTools }, "settings questionTools ABSENT key -> the shipped default (the AskUserHtmlQuestion tool)");
+        const auto cleared = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"questionTools\":\"\"}}");
+        CHECK(cleared.questionTools.empty(), "settings questionTools PRESENT-but-empty stays empty (the user's AskUserQuestion-only)");
+        const auto odd = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"questionTools\":7}}");
+        CHECK(odd.questionTools == std::wstring{ kDefaultQuestionTools }, "settings questionTools of another type -> the shipped default stays");
+        AppSettings in;
+        in.questionTools = L"# mine\rmcp__srv__*\r\rmcp__a__ask";
+        const auto out = DeserializeAppSettings(SerializeAppSettings(in));
+        CHECK(out.questionTools == in.questionTools, "settings questionTools round-trips verbatim (notes, blank lines, CR newlines)");
+        AppSettings none;
+        none.questionTools.clear();
+        CHECK(DeserializeAppSettings(SerializeAppSettings(none)).questionTools.empty(), "settings questionTools: a cleared box is WRITTEN (empty) and never re-seeded");
+        CHECK(DeserializeAppSettings(L"").questionTools == std::wstring{ kDefaultQuestionTools }, "settings questionTools defaults on an empty / missing file");
+    }
+
     // Agentmaster (SIDE PANEL): the dock side defaults to LEFT on BOTH load paths — the struct default
     // (a missing/corrupt file; the empty/garbage block below) AND AppSettingsFromJson's absent-key
     // fallback (a VALID settings.json written before the key existed), which only this block reaches.

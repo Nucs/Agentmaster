@@ -531,7 +531,7 @@ termination arguments: without them two synths would undo each other on every pa
 | `recon-run` (`ShouldSynthesizeRunning`) | a live append (a primed cursor, a fresh write) with a non-terminal tail while the session reads Idle, WaitingForInput or Error: a prompt hook missed or folded, or a retry after an API error | Running (an empty `UserPromptSubmit`, state-only) |
 | `recon-stop` (`ShouldSynthesizeStop`) | a terminal stop reason or a user-interrupt marker on a tail quiet ≥ 2 s, from Running or NeedsApproval | WaitingForInput (`quiescentStop`) |
 | `recon-stop-idle` (`ShouldSynthesizeStopFromPresenceIdle`) | the heartbeat reads `idle` while the tail is neither terminal nor interrupted and holds no pending interactive tool: a turn that ended with no Stop hook and no terminal line | WaitingForInput (`quiescentStop`) |
-| `recon-block` (`ShouldSynthesizeBlockedOnUser`) | an unanswered interactive tool_use (`AskUserQuestion`, `IsInteractiveTool`) on a quiet transcript, from Running | NeedsApproval |
+| `recon-block` (`ShouldSynthesizeBlockedOnUser`) | an unanswered interactive tool_use (`AskUserQuestion` or a listed question tool, `IsInteractiveTool`; *Question tools* below) on a quiet transcript, from Running; its quiet clock ignores a `busy` heartbeat | NeedsApproval |
 | `recon-block-presence` (`ShouldSynthesizeBlockedFromPresence`) | the heartbeat reads `waiting` (with its `waitingFor` detail), from Running or Idle | NeedsApproval |
 | `recon-resume` (`ShouldSynthesizeResumed`) | NeedsApproval, and the agent kept working (a live append, no pending interactive tool, no interrupt, a non-terminal tail), or the answer line arrived (`answeredPendingQuestion`) | Running (`PostToolUse`) |
 | `recon-resume-presence` (`ShouldSynthesizeResumedFromPresence`) | NeedsApproval, and the heartbeat moved from `waiting` to `busy` / `shell` on a tail that has not ended | Running |
@@ -559,7 +559,9 @@ termination arguments: without them two synths would undo each other on every pa
   (2) The answer line (a `ToolResult` that clears a non-empty pending interactive tool). (3) `recon-block`
   and the real `Notification` / `Stop` hooks. Hooks can drop, and a pending question's `tool_use` line can
   stay unwritten for 10+ minutes, so `recon-block` alone could leave a question showing Running. The first
-  belt to fire wins; the others are no-ops through the one state machine.
+  belt to fire wins; the others are no-ops through the one state machine. A listed question tool (an MCP tool
+  such as `AskUserHtmlQuestion`) has neither the heartbeat nor a hook, only the transcript: *Question tools*
+  below.
   - `recon-block-presence` never fires from WaitingForInput: `recon-stop` can fire from NeedsApproval on a
     stale terminal tail and land Waiting, so a persistent `waiting` heartbeat would flap NeedsApproval ⇄
     Waiting on every pass. Waiting is a "needs you" state already.
@@ -616,6 +618,98 @@ termination arguments: without them two synths would undo each other on every pa
     heartbeat off `busy` / `shell`), `recon-stop` settles the session.
   - `TranscriptTimesIn` folds the newest side-file write into `convLastActivityUnixMs` (the "active … ago"
     timing); `convApiActivityUnixMs`, which the ⚡ cache hint reads, does not.
+
+### Question tools — a listed tool that waits for the user reads Needs approval (2026-11-14, NOT BUILT yet)
+
+**The request (2026-11-14).** Some tools ask the user something and wait, like `AskUserQuestion`, and should
+show "Needs approval" while they run; the user lists them in the settings; the owner's own MCP
+`AskUserHtmlQuestion` is one. That tool (`mcp__ask-user-html-question__AskUserHtmlQuestion`, served by the
+ask-user-html-question mod) opens a browser window and a band above the prompt and waits for the pick, often for
+minutes, while the session read **Running**. Answering it from Telegram is the next phase (INTERACTIVE_TOOLS.md).
+
+**What Claude Code shows while such a tool waits** (measured 2026-11-14 on Claude Code 2.1.322: this design
+session's own 8-minute question, with a watcher polling its transcript and heartbeat every 100 ms, plus the
+production `hooks.log`):
+
+| Signal | During the question |
+|---|---|
+| The transcript | the call's `tool_use` line landed 0.2 s after the question opened (Claude Code writes an assistant message's lines when its stream ends); nothing else until the answer, whose `tool_result` landed the moment the user answered |
+| claude's heartbeat (`~/.claude/sessions/<pid>.json`) | `busy` the whole time, never `waiting` (that is AskUserQuestion's own status) |
+| Hooks | one `Notification`, from the mod's `$.ui.notify`: its text is the question, with no permission word, so the state stays; no `PermissionRequest` (the mod's `tool.check` lets its tool run without a prompt) |
+
+So AskUserQuestion's three belts (*A question has three belts*, above) saw nothing. The heartbeat said `busy`, no hook
+said "permission", and `recon-block`, which had the call's line, held: a `busy` heartbeat forces the quiet clock to 0.
+
+**What counts** (`QuestionTools.h`, pure apart from one process-wide list):
+- **AskUserQuestion is built in,** always, whatever the list says.
+- **The list** is the cog's Claude tab, QUESTION TOOLS (`AppSettings::questionTools`, SETTINGS.md *Claude*): one
+  pattern per line, a full tool name or one with `*` for any characters, anchored at both ends and case-sensitive
+  (`QuestionToolGlobMatch`), built from letters, digits, `_`, `-` and `*` (the characters Claude Code leaves in a tool
+  name); `#` starts a note. Shipped default: `mcp__ask-user-html-question__AskUserHtmlQuestion`. A `settings.json`
+  without the key gets it (presence-gated, the `launchModels` idiom); a cleared box stays cleared.
+- **The lexer** (`LexQuestionToolsText`) is one rule set for the box's border and status line AND what the engine
+  applies. Refused (red): any other character, a line of nothing but `*` (every tool call would read Needs approval),
+  a line longer than 256 characters. Skipped (amber): AskUserQuestion itself, a repeat, a line past the 64th pattern.
+  Applied with a remark (amber): a pattern that also matches one of Claude Code's own working tools (Bash, Read, …).
+- **One list per process** (`SetQuestionToolPatterns`, an atomic `shared_ptr` swap): the engine installs it at init,
+  before the scanner's first pass, and the cog's Save installs a changed one at once (`ApplyQuestionToolsSetting`,
+  which logs `[question-tools] <reason>: …` in hooks.log on the first install and on every change, naming the tools).
+  A process that never installs one judges by the shipped default. The CLI installs its profile's list at its start
+  (`ApplyProfileQuestionTools`).
+
+**How it is detected: from the transcript only** (the owner's choice; a `PreToolUse` / `PostToolUse` pair matched
+to the listed tools, ~0.4 s of background PowerShell per call, was offered and declined).
+- `IsInteractiveTool` (SessionScanner.h) is `IsQuestionTool`, so the parser's interactive tool
+  (`TranscriptEvent::toolName`) and `recon-block` follow the list.
+- **The quiet clock.** For a LISTED tool `recon-block` reads `questionQuietForMs`: the parent + subagent fold
+  WITHOUT the `busy` override; a compaction still forces it to 0. There `busy` IS the call waiting. The session reads
+  NeedsApproval about 2 s after the call's line lands (`kScanStopQuiescenceMs`), with the toast and the flash ring of
+  any Running → NeedsApproval, and the Prompt Queue Runner holds (Rule #1).
+  - **Only under the heartbeat that saw the call open** (`ScanState::pendingCallUnderWork`): the fold records whether
+    claude's heartbeat read working (`busy` / `shell`) when the call's line arrived, and any pass that reads it not
+    working clears the record. A call left behind by a claude that died (a cut-off turn) is read with no live
+    heartbeat, so a resumed claude's `busy` while it loads — 16.7 s before its first line, measured on a cut-off
+    resume — is its own work, and the session is not shown blocked on the old question.
+  - **AskUserQuestion keeps the classic clock, bit for bit:** its live heartbeat reads `waiting` (not working, so the
+    clocks are equal anyway), and its call line is written only once answered, so a pending one under `busy` is a
+    stale line and stays Running as before.
+- **A list change reaches a call that is already open.** The parser keeps every tool_use name
+  (`TranscriptEvent::toolUseNames`), the scanner keeps the latest assistant line's (`ScanState::pendingToolUses`,
+  cleared by a tool result or a human line, like `pendingInteractiveTool`) and re-judges them at the start of every
+  pass (`FirstInteractiveToolName`). A tool added while its call waits blocks on the next pass, with no new line; a
+  tool removed stops blocking a new call at once.
+- **The exits are AskUserQuestion's.** The answer's `tool_result` → `recon-resume` (`answeredInteractive`) →
+  Running. An Esc → the tool's error result and the interrupt marker → `recon-stop` from NeedsApproval, once the
+  heartbeat leaves `busy` → WaitingForInput, never through Running (`recon-resume` refuses an interrupted tail). The
+  turn's own end → `recon-stop`. While the question waits nothing pulls it back to Running: `recon-resume` refuses a
+  pending interactive tool, `recon-resume-presence` needs a `waiting` → `busy` edge this heartbeat never makes, and
+  `recon-subagent` starts only from Idle / Waiting.
+- **Reach:** every open session at once, also one started before the list changed (no hook carries the list) and an
+  adopted claude: the transcript is all it takes.
+
+**Elsewhere:**
+- The CLI (`agentmaster sessions`, `show`): a `busy` heartbeat over a pending call of a LISTED tool derives
+  NeedsApproval (`DeriveState`), the way `recon-block` reads it; a pending AskUserQuestion under `busy` stays Running.
+  A one-shot read has no `pendingCallUnderWork`: for the seconds a resumed claude loads over a call a dead claude left,
+  the CLI says NeedsApproval where the app says Running.
+- The summary's "last user msg" clock counts the answer to a listed tool like an AskUserQuestion answer
+  (`AnalyzeSessionTranscript`, through `IsInteractiveTool`). Its analysis is cached by the transcript's stamp, so a
+  list change reaches an unchanged transcript at its next write.
+
+**Limits:**
+- The latest assistant line wins, as for AskUserQuestion: a question call followed by another tool_use block (a
+  later line) is not seen, and a parallel call's result clears it.
+- The first ~2 s of a question read Running, and a question answered within them never reads NeedsApproval (the
+  settle window that keeps a quick answer from flickering).
+- The session database (`agentmaster-sessiondb.exe`, off by default) still knows only AskUserQuestion.
+- Telegram does not answer a listed question tool yet (the next phase).
+
+**Tests:** `TestQuestionTools` (tests_transcript.cpp): the glob, every lexer verdict, the list and its default, the
+parser; then end to end on a real scanner thread with a `busy` heartbeat: (a) a listed question → NeedsApproval,
+(b) a pending Bash stays Running, (c) a list change reaches an open call with no new line, (d) the answer →
+Running, (e) an Esc → WaitingForInput with no Running in between, (f) a call read with no live heartbeat and then a
+new `busy` stint (a resumed claude) stays Running, (g) a pending AskUserQuestion line under `busy` stays Running.
+`TestAppSettings` (tests_persistence.cpp): the presence-gated key and its verbatim round trip.
 
 ### Cut-off turns — a turn that a shutdown cut off reads Error (2026-10-09, NOT BUILT yet)
 

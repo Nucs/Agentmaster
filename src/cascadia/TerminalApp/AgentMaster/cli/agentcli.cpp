@@ -537,6 +537,18 @@ namespace
 
     // ===== derived state (offline) ==========================================================
 
+    // HOOKS.md "Question tools": install the profile's question tools (the cog's QUESTION TOOLS box, AppSettings::
+    // questionTools) as this process's list, so a session waiting in a listed tool (an MCP question such as
+    // AskUserHtmlQuestion) derives NeedsApproval exactly as the app's scanner reads it, never Running. Must run AFTER the
+    // profile targeting (LoadAppSettings reads the resolved profile's settings.json, and ResolveProfileDir caches once)
+    // and BEFORE any transcript is parsed (ParseTranscriptDelta judges tool names under the installed list).
+    // Read-only: the settings file is read, never written. A missing or unreadable file loads the defaults, so the
+    // shipped default list applies. Throws std::bad_alloc only.
+    void ApplyProfileQuestionTools()
+    {
+        SetQuestionToolPatterns(ParseQuestionToolPatterns(LoadAppSettings().questionTools));
+    }
+
     struct DerivedState
     {
         std::wstring state; // Running / WaitingForInput / NeedsApproval / Idle / Archived
@@ -545,7 +557,7 @@ namespace
         std::wstring lastAssistant; // where the conversation left off
         std::wstring recap; // Claude Code's idle "away_summary" recap (the >5-min "what we did / next")
         std::wstring lastStopReason;
-        std::wstring pendingTool; // an unanswered interactive tool (AskUserQuestion) => NeedsApproval
+        std::wstring pendingTool; // an unanswered interactive tool (AskUserQuestion, or a listed question tool — ApplyProfileQuestionTools) => NeedsApproval
         std::vector<std::wstring> lastTurnTools;
     };
 
@@ -637,7 +649,14 @@ namespace
         const bool blockedOnUser = !pendingTool.empty() && IsInteractiveTool(pendingTool);
         if (presence == L"busy")
         {
-            d.state = L"Running";
+            // HOOKS.md "Question tools": a listed question tool (an MCP tool such as AskUserHtmlQuestion) keeps claude's
+            // heartbeat on "busy" for the whole question, so "busy" over a pending call of one is that call waiting for
+            // the user — NeedsApproval, as the app's recon-block reads it. Not for AskUserQuestion: its live heartbeat
+            // reads "waiting" (below), and its call line is written only once answered, so a pending one under "busy"
+            // is a stale line and the session is Running, as before. (A one-shot read cannot tell a listed call left by
+            // a claude that died from an open one; the app's scanner can: ScanState::pendingCallUnderWork.)
+            const bool listedQuestionPending = blockedOnUser && pendingTool != kBuiltInQuestionTool;
+            d.state = listedQuestionPending ? L"NeedsApproval" : L"Running";
         }
         else if (presence == L"waiting")
         {
@@ -2010,6 +2029,8 @@ int wmain(int argc, wchar_t** argv)
         return CmdSessionDb(a.verb, std::vector<std::wstring>(positionals.begin() + 1, positionals.end()), a);
     }
 
+    // The profile is decided by now: judge question tools by ITS list before any transcript is read (DeriveState).
+    ApplyProfileQuestionTools();
     const Fleet fleet = GatherFleet();
 
     if (a.verb == L"show")

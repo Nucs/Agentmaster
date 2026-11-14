@@ -316,6 +316,10 @@
          (within 40 DIPs of the strip) and the strip's next state for one pointer event (pure, header-only;
          TestSidePanelStripReveal). -->
     <ClInclude Include="AgentMaster\SidePanelStripReveal.h" />
+    <!-- Agentmaster (HOOKS.md "Question tools"): the tools that, like AskUserQuestion, wait for the user - the glob a line of the
+         cog's QUESTION TOOLS box matches by, the box's lexer, and the process-wide list the scanner judges a pending call by
+         (header-only, std only; TestQuestionTools). -->
+    <ClInclude Include="AgentMaster\QuestionTools.h" />
     <ClInclude Include="SnippetsPaneContent.h">
       <DependentUpon>SnippetsPaneContent.xaml</DependentUpon>
     </ClInclude>

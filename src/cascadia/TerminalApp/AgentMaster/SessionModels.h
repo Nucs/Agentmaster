@@ -19,6 +19,7 @@
 #include "PendingInput.h" // InputBoxState (the R5 tri-state box read) + the ws/normalize detail helpers
 #include "PendingPaste.h" // FindPasteMarkers + segment helpers (the R4 collapse-tolerant fill verify)
 #include "ReopenWindowsAtStart.h" // AppSettings::reopenWindowsAtStart (PERSISTENCE.md §18) — pure, std only; shared with the exe's startup question
+#include "QuestionTools.h" // AppSettings::questionTools' shipped default (kDefaultQuestionTools; HOOKS.md "Question tools") — pure, std only
 
 namespace Agentmaster
 {
@@ -2682,6 +2683,20 @@ namespace Agentmaster
         // is kept as written by the cog's Save, so turning it off sticks across versions. Applies at the next launch,
         // resume or restart; a running tab keeps what it started with.
         std::vector<std::wstring> bundledModsOff{};
+        // Agentmaster (QUESTION TOOLS — HOOKS.md "Question tools", SETTINGS.md "Claude"; QuestionTools.h): the tools that,
+        // like Claude Code's own AskUserQuestion, ask the user something and WAIT for the answer. While a session's newest
+        // tool call is one of them and has no result yet, the scanner reads the session as NeedsApproval (recon-block):
+        // the Needs-approval column, the toast, the flash ring, and the Prompt Queue Runner holds (Rule #1). The cog's
+        // Claude tab edits it as text, one pattern per line — a full tool name, or one with '*' for any characters,
+        // matched case-sensitively against the whole name; '#' starts a note — and it is stored VERBATIM (the box's text),
+        // so the box reopens exactly as typed; LexQuestionToolsText decides what applies. AskUserQuestion is built in and
+        // needs no line. PRESENCE-GATED like launchModels: an ABSENT key (every settings.json from before the feature)
+        // loads the shipped default (kDefaultQuestionTools, the ask-user-html-question mod's AskUserHtmlQuestion), while
+        // a PRESENT empty string is the user's "no tool beyond AskUserQuestion" and stays empty. Applied at once — on
+        // engine init and on every Save (SetQuestionToolPatterns): the scanner judges a pending call against the list on
+        // every pass, so a change reaches a question that is already open. No hook carries it (the scanner reads the
+        // transcript), so no running claude needs a restart.
+        std::wstring questionTools{ kDefaultQuestionTools };
 
         // --- Autorunner defaults ---
         // The MODE seeds every NEW session — launched, forked, a /clear or /handover successor, adopted,

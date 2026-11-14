@@ -3583,6 +3583,313 @@ void TestTurnStartRaceGuard()
     std::filesystem::remove_all(std::filesystem::path{ cfg }, ecCleanup);
 }
 
+// Agentmaster (QUESTION TOOLS — HOOKS.md "Question tools"; QuestionTools.h): the tools that, like AskUserQuestion, ask the
+// user something and wait for the answer, listed in the cog's Claude tab. Pins the pure parts (the anchored,
+// case-sensitive glob; the box's lexer and every verdict the cog's border and status line show; the built-in
+// AskUserQuestion; the process-wide list and its never-installed default), the parser (every tool_use name kept, the
+// interactive one picked under the list in effect), and END TO END over a REAL scanner thread the measured shape the
+// feature exists for: claude's heartbeat reads "busy" for the WHOLE time an MCP question waits (2026-11-14: an
+// 8-minute AskUserHtmlQuestion, "busy" throughout, its call line the transcript's last line), and the "busy" override of
+// the quiet clock used to hold recon-block for exactly that long, so the session read Running until the answer.
+// Scenarios: (a) the fix itself, (b) a pending Bash stays Running, (c) a list change reaches a call already pending with
+// no new line, (d) the answer releases it to Running, (e) an Esc ends the turn at Waiting with no Running blip, (f) a
+// call a dead claude left behind is not taken for an open question when a resumed claude reads "busy", (g) a pending
+// AskUserQuestion line under "busy" keeps the classic clock (Running), bit for bit as before.
+// Stages a throwaway CLAUDE_CONFIG_DIR like TestTurnStartRaceGuard and restores it, and the process-wide list, before
+// returning (the list is shared by every test in this process). [Agentmaster]
+void TestQuestionTools()
+{
+    std::wprintf(L"Question tools (a listed tool that waits for the user reads Needs approval):\n");
+    const std::wstring kQ{ kDefaultQuestionTools }; // mcp__ask-user-html-question__AskUserHtmlQuestion
+    const auto savedList = ::Agentmaster::detail::QuestionToolPatternsSlot().load();
+
+    // --- Part 1: the glob ---
+    CHECK(QuestionToolGlobMatch(kQ, kQ), "glob: a full name matches itself");
+    CHECK(!QuestionToolGlobMatch(L"mcp__a__Ask", L"mcp__a__AskLater"), "glob: anchored at the end (never inside a longer name)");
+    CHECK(!QuestionToolGlobMatch(L"mcp__a__Ask", L"xmcp__a__Ask"), "glob: anchored at the start");
+    CHECK(!QuestionToolGlobMatch(L"mcp__a__ask", L"mcp__a__Ask"), "glob: case-sensitive, like Claude Code's tool names");
+    CHECK(QuestionToolGlobMatch(L"mcp__my-survey__*", L"mcp__my-survey__poll") && QuestionToolGlobMatch(L"mcp__my-survey__*", L"mcp__my-survey__"),
+          "glob: a trailing * covers every tool of a server (the empty run too)");
+    CHECK(!QuestionToolGlobMatch(L"mcp__my-survey__*", L"mcp__my-survey2__ask"), "glob: a * never excuses a literal that differs");
+    CHECK(QuestionToolGlobMatch(L"mcp__*__AskHuman", L"mcp__a__AskHuman") && !QuestionToolGlobMatch(L"mcp__*__AskHuman", L"mcp__a__AskHumanLater"),
+          "glob: an inner * still needs the literal tail at the very end");
+    CHECK(QuestionToolGlobMatch(L"*a*b", L"aaab") && QuestionToolGlobMatch(L"a*b*c", L"aXbYc") && !QuestionToolGlobMatch(L"a*b*c", L"aXbY"),
+          "glob: backtracking across several *");
+    CHECK(QuestionToolGlobMatch(L"", L"") && !QuestionToolGlobMatch(L"", L"x") && QuestionToolGlobMatch(L"*", L""), "glob: the empty pattern and the lone *");
+    CHECK(IsQuestionToolPatternChar(L'-') && IsQuestionToolPatternChar(L'*') && IsQuestionToolPatternChar(L'_') && !IsQuestionToolPatternChar(L' ') &&
+              !IsQuestionToolPatternChar(L'.') && !IsQuestionToolPatternChar(L'|'),
+          "glob: the accepted characters are a tool name's own plus *");
+
+    // --- Part 2: the box's lexer (the cog's border + status line, and what the engine applies) ---
+    {
+        const auto r = LexQuestionToolsText(kDefaultQuestionTools);
+        CHECK(r.patterns.size() == 1 && r.patterns[0] == kQ && r.ok == 1 && r.warn == 0 && r.error == 0 && r.worst == QuestionToolLineKind::Ok,
+              "lex: the shipped default is one clean pattern");
+    }
+    {
+        const auto r = LexQuestionToolsText(L"");
+        CHECK(r.patterns.empty() && r.ok == 0 && r.warn == 0 && r.error == 0 && r.worst == QuestionToolLineKind::Ok, "lex: an empty box lists nothing (AskUserQuestion only)");
+    }
+    {
+        const auto r = LexQuestionToolsText(L"# my notes\r\n\r\n   \t");
+        CHECK(r.patterns.empty() && r.warn == 0 && r.error == 0, "lex: notes and blank lines apply nothing and report nothing");
+    }
+    {
+        const auto r = LexQuestionToolsText(L"  mcp__x__ask  \r\nmcp__x__ask");
+        CHECK(r.patterns.size() == 1 && r.patterns[0] == L"mcp__x__ask" && r.warn == 1 && r.firstIssueLine == 2,
+              "lex: a line is trimmed; a repeat warns on ITS line (CRLF counts as one break)");
+    }
+    {
+        const auto r = LexQuestionToolsText(L"AskUserQuestion");
+        CHECK(r.patterns.empty() && r.warn == 1 && r.worst == QuestionToolLineKind::Warn, "lex: AskUserQuestion is built in: warned, never added");
+    }
+    {
+        const auto r = LexQuestionToolsText(L"mcp x");
+        CHECK(r.patterns.empty() && r.error == 1 && r.worst == QuestionToolLineKind::Error && r.firstIssue.find(L"a space") != std::wstring::npos,
+              "lex: a space is refused, and the status names it");
+    }
+    {
+        const auto r = LexQuestionToolsText(L"mcp__a.b");
+        CHECK(r.patterns.empty() && r.error == 1, "lex: a character no tool name holds is refused");
+    }
+    {
+        const auto r = LexQuestionToolsText(L"**");
+        CHECK(r.patterns.empty() && r.error == 1, "lex: nothing but * is refused (every tool call would read Needs approval)");
+    }
+    {
+        const auto r = LexQuestionToolsText(std::wstring(kMaxQuestionToolPatternChars + 1, L'a'));
+        CHECK(r.patterns.empty() && r.error == 1, "lex: an over-long line is refused");
+    }
+    {
+        const auto r = LexQuestionToolsText(L"mcp__a__q\rB*");
+        CHECK(r.patterns.size() == 2 && r.ok == 2 && r.warn == 1 && r.firstIssueLine == 2 && r.worst == QuestionToolLineKind::Warn,
+              "lex: a pattern that also matches Bash applies, with a warning (the XAML box's CR newlines)");
+    }
+    {
+        const auto r = LexQuestionToolsText(L"bad line\nmcp__ok__x");
+        CHECK(r.patterns.size() == 1 && r.patterns[0] == L"mcp__ok__x" && r.error == 1 && r.worst == QuestionToolLineKind::Error,
+              "lex: a refused line does not stop the good ones");
+    }
+    {
+        std::wstring many;
+        for (size_t i = 0; i <= kMaxQuestionTools; ++i)
+        {
+            many += L"mcp__s__t" + std::to_wstring(i) + L"\n";
+        }
+        const auto r = LexQuestionToolsText(many);
+        CHECK(r.patterns.size() == kMaxQuestionTools && r.warn == 1, "lex: a line past the cap is warned and ignored");
+    }
+    CHECK(ParseQuestionToolPatterns(L"mcp__a__q\r# n\rAskUserQuestion\rbad x") == std::vector<std::wstring>{ L"mcp__a__q" },
+          "parse: exactly the lexer's applied patterns");
+
+    // --- Part 3: the verdict, and the process-wide list ---
+    CHECK(IsQuestionToolIn(L"AskUserQuestion", {}) && !IsQuestionToolIn(L"", { L"*x" }) && IsQuestionToolIn(L"mcp__a__b", { L"mcp__a__*" }) &&
+              !IsQuestionToolIn(L"Bash", { L"mcp__a__*" }),
+          "verdict: built in, by pattern, and nothing else");
+    ::Agentmaster::detail::QuestionToolPatternsSlot().store(nullptr); // a process that never installed a list
+    CHECK(IsQuestionTool(kQ) && !IsQuestionTool(L"mcp__other__ask") && IsQuestionTool(L"AskUserQuestion"), "list: never installed -> the shipped default (and the built-in)");
+    CHECK(*QuestionToolPatterns() == std::vector<std::wstring>{ kQ }, "list: never installed -> QuestionToolPatterns() reports the shipped default");
+    SetQuestionToolPatterns({});
+    CHECK(!IsQuestionTool(kQ) && IsQuestionTool(L"AskUserQuestion") && !IsInteractiveTool(kQ) && IsInteractiveTool(L"AskUserQuestion"),
+          "list: cleared -> AskUserQuestion only (the scanner's IsInteractiveTool follows)");
+    SetQuestionToolPatterns({ L"mcp__srv__*" });
+    CHECK(IsInteractiveTool(L"mcp__srv__ask") && !IsInteractiveTool(kQ), "list: a wildcard line covers its server, and only it");
+    CHECK(FirstInteractiveToolName({ L"Bash", L"mcp__srv__ask", L"mcp__srv__b" }) == L"mcp__srv__ask" && FirstInteractiveToolName({ L"Bash" }).empty() &&
+              FirstInteractiveToolName({}).empty(),
+          "list: the first interactive name of a message, else none");
+
+    // --- Part 4: the parser keeps every tool name and picks the interactive one under the list in effect ---
+    SetQuestionToolPatterns({ kQ });
+    const std::wstring questionLine =
+        L"{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"" + kQ + L"\",\"input\":{}}]}}\n";
+    {
+        const auto p = ParseTranscriptDelta(questionLine);
+        CHECK(p.events.size() == 1 && p.events[0].toolName == kQ && p.events[0].toolUseNames == std::vector<std::wstring>{ kQ },
+              "parse: a listed MCP question tool is the message's interactive tool");
+    }
+    {
+        const std::wstring both = L"{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{}},"
+                                  L"{\"type\":\"tool_use\",\"name\":\"" + kQ + L"\",\"input\":{}}]}}\n";
+        const auto p = ParseTranscriptDelta(both);
+        CHECK(p.events.size() == 1 && p.events[0].toolName == kQ && p.events[0].toolUseNames.size() == 2 && p.events[0].toolUseNames[0] == L"Bash",
+              "parse: every tool name kept in block order, the question picked from them");
+    }
+    SetQuestionToolPatterns({});
+    {
+        const auto p = ParseTranscriptDelta(questionLine);
+        CHECK(p.events.size() == 1 && p.events[0].toolName.empty() && p.events[0].toolUseNames == std::vector<std::wstring>{ kQ },
+              "parse: a tool off the list is no question, but its name is kept for the scanner's re-judge");
+    }
+    SetQuestionToolPatterns({ kQ });
+    CHECK(ShouldSynthesizeBlockedOnUser(SessionState::Running, kQ, false, 5000), "recon-block gate: a listed question tool blocks like AskUserQuestion");
+
+    // --- Part 5: END TO END over a REAL scanner thread, claude's heartbeat on "busy" (the question tool runs) ---
+    wchar_t tmp[MAX_PATH]{};
+    ::GetTempPathW(MAX_PATH, tmp);
+    const std::wstring cfg = std::wstring{ tmp } + L"am_qtools_cfg_" + std::to_wstring(::GetCurrentProcessId());
+    const std::wstring cwd = L"K:\\am_scan\\qtools";
+    const std::wstring dir = cfg + L"\\projects\\" + EncodeCwdToProjectDir(cwd);
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path{ dir }, ec);
+    wchar_t prevBuf[2048]{};
+    const DWORD prevN = ::GetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevBuf, 2048);
+    const std::wstring prevCfg{ prevBuf, prevN };
+    ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", cfg.c_str());
+
+    // The turn as Claude Code writes it: the prompt, then the call — the transcript's last line, no result under it while
+    // the question is open (the measured shape). `tool` names the called tool (narrow: the fixture is UTF-8 bytes).
+    const std::string promptLine =
+        R"j({"type":"user","uuid":"u1","message":{"role":"user","content":"pick a design"},"timestamp":"2026-11-14T05:22:00.000Z"})j" "\n";
+    const auto callLine = [](const std::string& tool) {
+        return std::string{ R"j({"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"role":"assistant","model":"claude-test","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_a1","name":")j" } +
+               tool + R"j(","input":{}}]},"timestamp":"2026-11-14T05:22:47.233Z"})j" "\n";
+    };
+    const std::string kQNarrow = "mcp__ask-user-html-question__AskUserHtmlQuestion";
+    // The answer: the call's result, then the agent working on (a Bash call: a non-terminal tail).
+    const std::string answerLines =
+        R"j({"type":"user","uuid":"r1","parentUuid":"a1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_a1","content":"User answered: Cards"}]},"timestamp":"2026-11-14T05:30:41.280Z"})j" "\n"
+        R"j({"type":"assistant","uuid":"a2","parentUuid":"r1","message":{"role":"assistant","model":"claude-test","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_a2","name":"Bash","input":{}}]},"timestamp":"2026-11-14T05:30:44.586Z"})j" "\n";
+    // An Esc while the question is open: the aborted call's result, then Claude Code's interrupt marker.
+    const std::string escLines =
+        R"j({"type":"user","uuid":"r1","parentUuid":"a1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_a1","is_error":true,"content":"The user doesn't want to proceed with this tool use."}]},"timestamp":"2026-11-14T05:23:10.000Z"})j" "\n"
+        R"j({"type":"user","uuid":"i1","parentUuid":"r1","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]},"timestamp":"2026-11-14T05:23:10.010Z"})j" "\n";
+    const int64_t quietMs = NowMsTest() - 5'000; // the call line landed five seconds ago: past the 2 s settle
+
+    // One scenario: a LIVE, STARTED (a running tab: a dormant one holds the resume promotions), Running session whose
+    // heartbeat reads `presence` ("busy" unless a scenario says otherwise), its transcript already staged under `dir`.
+    // `act` runs once the scanner primed its cursor (~700 ms in), then the scenario watches `watchMs` more. Every notify
+    // Wake()s the scanner, the production wiring (Engine.cpp). The scanner is stopped and the observer detached before
+    // returning. Returns the final state.
+    const auto runScenario = [&](const std::wstring& id, const std::function<void(SessionRegistry&)>& act, int watchMs, const std::wstring& presence = L"busy") {
+        auto reg = std::make_shared<SessionRegistry>();
+        SessionInfo s = MakeSession(id, SessionState::Running);
+        s.workingDir = cwd;
+        s.live = true;
+        s.started = true;
+        s.presenceStatus = presence;
+        reg->Upsert(s);
+        SessionScanner scanner{ reg };
+        const auto token = reg->AddObserver([&scanner](const SessionInfo&, HookEvent) { scanner.Wake(); });
+        scanner.Start();
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));
+        if (act)
+        {
+            act(*reg);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(watchMs));
+        scanner.Stop();
+        reg->RemoveObserver(token);
+        const auto cur = reg->Get(id);
+        return cur ? cur->state : SessionState::Idle;
+    };
+    const auto stateOf = [](SessionRegistry& r, const std::wstring& id) {
+        const auto cur = r.Get(id);
+        return cur ? cur->state : SessionState::Idle;
+    };
+
+    // (a) THE FIX: a listed MCP question waiting under a "busy" heartbeat -> Needs approval.
+    {
+        const std::wstring id = L"9a0e5f1c-0000-4000-8000-0000000000a1";
+        MakeJsonl(dir + L"\\" + id + L".jsonl", promptLine + callLine(kQNarrow), quietMs, quietMs - 47'000);
+        CHECK(runScenario(id, nullptr, 1500) == SessionState::NeedsApproval,
+              "e2e (a) a listed MCP question tool waiting under a busy heartbeat -> NeedsApproval (was: Running until the answer)");
+    }
+    // (b) CONTROL: a pending Bash under the same "busy" heartbeat is work, not a question.
+    {
+        const std::wstring id = L"9a0e5f1c-0000-4000-8000-0000000000b2";
+        MakeJsonl(dir + L"\\" + id + L".jsonl", promptLine + callLine("Bash"), quietMs, quietMs - 47'000);
+        CHECK(runScenario(id, nullptr, 1500) == SessionState::Running, "e2e (b) control: a pending Bash under a busy heartbeat stays Running");
+    }
+    // (c) A LIST CHANGE reaches a call already pending: off the list it stays Running; put on the list, the next pass
+    //     re-judges the kept tool name and blocks — with no new transcript line.
+    {
+        const std::wstring id = L"9a0e5f1c-0000-4000-8000-0000000000c3";
+        MakeJsonl(dir + L"\\" + id + L".jsonl", promptLine + callLine(kQNarrow), quietMs, quietMs - 47'000);
+        SetQuestionToolPatterns({});
+        bool runningWhileOff = false;
+        const SessionState ended = runScenario(id, [&](SessionRegistry& r) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
+            runningWhileOff = stateOf(r, id) == SessionState::Running;
+            SetQuestionToolPatterns({ kQ }); // the user adds the tool in the cog and saves (the sink installs it)
+        },
+                                                     1500);
+        CHECK(runningWhileOff, "e2e (c) the tool off the list: its open call reads Running");
+        CHECK(ended == SessionState::NeedsApproval, "e2e (c) the tool put on the list while its call is open -> NeedsApproval on the next pass");
+    }
+    // (d) THE ANSWER: the call's result and the agent working on release it to Running (recon-resume on the answer).
+    {
+        const std::wstring id = L"9a0e5f1c-0000-4000-8000-0000000000d4";
+        const std::wstring path = dir + L"\\" + id + L".jsonl";
+        MakeJsonl(path, promptLine + callLine(kQNarrow), quietMs, quietMs - 47'000);
+        bool blockedFirst = false;
+        const SessionState ended = runScenario(id, [&](SessionRegistry& r) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
+            blockedFirst = stateOf(r, id) == SessionState::NeedsApproval;
+            AppendJsonl(path, answerLines, NowMsTest()); // the user answers; claude records the result and works on
+        },
+                                                     1500);
+        CHECK(blockedFirst, "e2e (d) the open question reads NeedsApproval first");
+        CHECK(ended == SessionState::Running, "e2e (d) the answer (the call's result, the agent working on) -> Running");
+    }
+    // (e) AN ESC while the question is open: the turn ends at Waiting (recon-stop on the interrupt marker, once the
+    //     heartbeat leaves "busy"), never through a false Running.
+    {
+        const std::wstring id = L"9a0e5f1c-0000-4000-8000-0000000000e5";
+        const std::wstring path = dir + L"\\" + id + L".jsonl";
+        MakeJsonl(path, promptLine + callLine(kQNarrow), quietMs, quietMs - 47'000);
+        bool blockedFirst = false;
+        bool sawRunningAfterEsc = false;
+        const SessionState ended = runScenario(id, [&](SessionRegistry& r) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
+            blockedFirst = stateOf(r, id) == SessionState::NeedsApproval;
+            AppendJsonl(path, escLines, NowMsTest() - 3'000); // written three seconds ago: past the 2 s stop quiescence
+            r.Update(id, [](SessionInfo& x) { x.presenceStatus = L"idle"; }); // claude's heartbeat after the Esc
+            for (int i = 0; i < 10; ++i)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                sawRunningAfterEsc = sawRunningAfterEsc || stateOf(r, id) == SessionState::Running;
+            }
+        },
+                                                     300);
+        CHECK(blockedFirst, "e2e (e) the open question reads NeedsApproval first");
+        CHECK(!sawRunningAfterEsc, "e2e (e) the Esc never passes through a false Running");
+        CHECK(ended == SessionState::WaitingForInput, "e2e (e) the Esc ends the turn -> WaitingForInput");
+    }
+    // (f) A CALL LEFT BY A CLAUDE THAT DIED: its line is read while no heartbeat says working (the dead claude's is gone),
+    //     then a resumed claude reads "busy" while it loads, before its first line. That "busy" is the new claude's own
+    //     work, not the old question: the session must stay Running, never a false NeedsApproval (pendingCallUnderWork).
+    //     The line is fresh (quiet under 2 s) so no pass blocks it before the heartbeat comes back.
+    {
+        const std::wstring id = L"9a0e5f1c-0000-4000-8000-0000000000f6";
+        MakeJsonl(dir + L"\\" + id + L".jsonl", promptLine + callLine(kQNarrow), NowMsTest(), NowMsTest() - 47'000);
+        bool sawBlocked = false;
+        const SessionState ended = runScenario(id, [&](SessionRegistry& r) {
+            r.Update(id, [](SessionInfo& x) { x.presenceStatus = L"busy"; }); // the resumed claude's heartbeat
+            for (int i = 0; i < 25; ++i) // 2.5 s: well past the line's 2 s settle
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                sawBlocked = sawBlocked || stateOf(r, id) == SessionState::NeedsApproval;
+            }
+        },
+                                                     200, L"");
+        CHECK(!sawBlocked && ended == SessionState::Running,
+              "e2e (f) a listed call read with no live heartbeat, then a NEW busy stint (a resumed claude) -> stays Running, no false NeedsApproval");
+    }
+    // (g) AskUserQuestion keeps the old clock bit for bit: its live heartbeat reads "waiting", and its call line is
+    //     written only once answered, so a pending one under "busy" is a stale line and the session stays Running.
+    {
+        const std::wstring id = L"9a0e5f1c-0000-4000-8000-0000000000a7";
+        MakeJsonl(dir + L"\\" + id + L".jsonl", promptLine + callLine("AskUserQuestion"), quietMs, quietMs - 47'000);
+        CHECK(runScenario(id, nullptr, 1500) == SessionState::Running,
+              "e2e (g) a pending AskUserQuestion line under a busy heartbeat keeps the classic clock -> Running (unchanged)");
+    }
+
+    ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevCfg.empty() ? nullptr : prevCfg.c_str());
+    std::error_code ecCleanup;
+    std::filesystem::remove_all(std::filesystem::path{ cfg }, ecCleanup);
+    ::Agentmaster::detail::QuestionToolPatternsSlot().store(savedList); // every later test judges by the list it found
+}
+
 // Agentmaster (DEACTIVATE == the window-restored state — ScanSessionIsDormant): a DORMANT session (live, ours,
 // not started — a window-restored tab nobody entered, or a tab parked by "Deactivate ▸") must never be
 // promoted to Running by the scanner. The Deactivate shape END TO END on a REAL SessionScanner thread: a

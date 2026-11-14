@@ -21,7 +21,7 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
 | Notifications | Which state changes notify, the focused-tab skip, the sound. |
 | Messaging | The Telegram bot ([MESSAGING.md](MESSAGING.md) §21). |
 | Tabs & Overlay | Close affordances, tab size, the rename key and title naming, the favorite marker, tab colors, the status-flash color, overlay opacity. |
-| Claude | Which native `claude.exe`, how long Claude keeps session history, the mods Agentmaster loads into its Claude tabs. |
+| Claude | Which native `claude.exe`, how long Claude keeps session history, the mods Agentmaster loads into its Claude tabs, which tools count as questions. |
 | About | Version and build, updates, the active profile folder, Debug Mode, uninstall. |
 
 - GLOBAL settings apply live in every window on Save through the settings broadcast; per-window state
@@ -307,6 +307,18 @@ Every color surface — tabs, board bands, Sessions chips, the pending dots — 
   older `settings.json`, loads them all. A name this build does not ship is kept on Save. The status line under the
   switches says what the next launch does with each (loads · stands aside for your own copy · needs a newer Claude Code
   · off), from the switches' positions before Save. Applies to the next launch, resume or restart.
+- `questionTools` (`mcp__ask-user-html-question__AskUserHtmlQuestion`; HOOKS.md *Question tools*): the **QUESTION
+  TOOLS** box, the tools that, like Claude Code's own `AskUserQuestion` (built in, never listed), ask you something and
+  wait for the answer. While a session's newest tool call is one of them and has no answer yet, the session reads
+  **Needs approval** (from its transcript, ~2 s after the question opens): the card and the tab say so, the toast and
+  the flash ring fire, the Prompt Queue Runner holds. One pattern per line: a full tool name (`mcp__<server>__<tool>`)
+  or one with `*` for any characters, matched case-sensitively against the whole name; letters, digits, `_`, `-`, `*`
+  only; `#` a note. Checked as you type (`LexQuestionToolsText`, `_RefreshQuestionToolsLex`): the border is green when
+  every line applies, amber for a remark (AskUserQuestion listed, a repeat, past 64, a pattern that also matches a
+  working tool such as Bash), red for a refused line (another character, only `*`, too long); the status line counts
+  what applies or names the worst line. Stored verbatim. Presence-gated: a `settings.json` without the key gets the
+  default; a cleared box stays cleared (AskUserQuestion only). Applied at once on Save (`ApplyQuestionToolsSetting`, a
+  `[question-tools]` line in hooks.log), to questions already open too: no tab restarts.
 
 ## About
 

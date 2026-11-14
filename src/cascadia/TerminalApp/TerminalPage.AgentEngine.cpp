@@ -2619,6 +2619,16 @@ namespace winrt::TerminalApp::implementation
                 {
                     self->_scanner->SetWaitingDecayMinutes(s.waitingForYouTimeoutMinutes);
                 }
+                // Agentmaster (QUESTION TOOLS — HOOKS.md "Question tools"): install the (possibly changed) list of tools
+                // that, like AskUserQuestion, wait for the user. Process-wide (one list for every window, so the other
+                // windows' broadcast below needs nothing more); the scanner re-judges every pending call on its next pass,
+                // so a question already open turns Needs approval (or back) without a restart. The Wake makes that pass
+                // come now instead of at the next cadence tick. No hook carries the list: no claude restarts.
+                ::Agentmaster::ApplyQuestionToolsSetting(s.questionTools, L"settings saved");
+                if (self->_scanner)
+                {
+                    self->_scanner->Wake();
+                }
                 // OBSERVER.md §13a: push the (possibly changed) orphan-reaper switch to the process-wide
                 // Fleet Observer so it applies on its next survey, not next launch (one engine per process).
                 if (self->_observer)

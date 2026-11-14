@@ -49,6 +49,7 @@
 #include <vector>
 
 #include "SessionModels.h" // SessionInfo (passed to the per-session reconcile)
+#include "QuestionTools.h" // IsQuestionTool — the question-tool list IsInteractiveTool judges by (HOOKS.md "Question tools")
 
 namespace Agentmaster
 {
@@ -358,9 +359,19 @@ namespace Agentmaster
         // error's descendant frontier — a line whose parent is already on the frontier is itself on it).
         std::wstring parentUuid;
         // Assistant only: the name of an INTERACTIVE tool_use block in this message (one that blocks
-        // on the user — AskUserQuestion), else "". Lets the scanner tell a session that is BLOCKED
-        // waiting for the user to answer (-> NeedsApproval) from one genuinely working (a long Bash).
+        // on the user — AskUserQuestion, or a QUESTION TOOL the user listed: IsInteractiveTool), else
+        // "". Lets the scanner tell a session that is BLOCKED waiting for the user to answer
+        // (-> NeedsApproval) from one genuinely working (a long Bash). Judged under the question-tool
+        // list in effect when the line was PARSED: a one-shot reader (the CLI) can use it as is; the
+        // live scanner re-judges toolUseNames below on every pass instead, so a list change applies
+        // to a call whose line it read earlier.
         std::wstring toolName;
+        // Assistant only: the name of EVERY tool_use block in this message, in block order ("" names
+        // skipped); empty for a message with no tool_use. The raw material toolName is picked from,
+        // kept so the scanner can re-judge a still-pending call when the question-tool list changes
+        // (ScanState::pendingToolUses, FirstInteractiveToolName). Claude Code writes one content
+        // block per transcript line, so this is almost always zero or one name.
+        std::vector<std::wstring> toolUseNames;
         // Assistant only: this message's context occupancy = message.usage
         // input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens
         // (≈ the size of the request that produced it). 0 when no usage block. The NEWEST assistant
@@ -506,14 +517,41 @@ namespace Agentmaster
         return text.size() >= kPrefix.size() && text.substr(0, kPrefix.size()) == kPrefix;
     }
 
-    // PURE: does this tool_use name BLOCK on the user (the agent cannot proceed until the user
-    // answers)? AskUserQuestion is the built-in interactive question tool. An unanswered one with a
-    // quiescent transcript means the session is "needs you", NOT working — distinct from a pending
-    // NON-interactive tool (a long Bash / web fetch) whose transcript is ALSO momentarily quiescent
-    // but is genuinely running. Conservative allowlist (evidence-based): only names we KNOW block.
+    // Does this tool_use name BLOCK on the user (the agent cannot proceed until the user answers)? An
+    // unanswered one with a quiescent transcript means the session is "needs you", NOT working —
+    // distinct from a pending NON-interactive tool (a long Bash / web fetch) whose transcript is ALSO
+    // momentarily quiescent but is genuinely running. An allowlist, never a guess: AskUserQuestion
+    // (built in) plus the QUESTION TOOLS the user listed in the cog's Claude tab (QuestionTools.h
+    // IsQuestionTool: the list in effect in this process — the engine installs it at init and on every
+    // Save, the CLI at its start). Not pure since 2026-11-14: it reads that process-wide list, so a
+    // test that changes the list restores it. A tool added to the list counts from the scanner's next
+    // pass on, also for a call that is already pending (the scanner re-judges the pending tool names
+    // every pass; ScanState::pendingToolUses).
+    //   toolName - a tool_use block's name ("" is never interactive).
+    // Returns true when the tool waits for the user. Never throws.
     inline bool IsInteractiveTool(std::wstring_view toolName) noexcept
     {
-        return toolName == L"AskUserQuestion";
+        return IsQuestionTool(toolName);
+    }
+
+    // The first INTERACTIVE name among one assistant message's tool_use names (IsInteractiveTool,
+    // so under the question-tool list in effect NOW), else "". The scanner calls it on every pass over
+    // the pending tool names it kept (ScanState::pendingToolUses), which is what lets a list change
+    // reach a call whose line was read before the change; the parser calls it once per assistant
+    // line to fill TranscriptEvent::toolName.
+    //   toolUseNames - the message's tool_use names, in block order (TranscriptEvent::toolUseNames).
+    // Returns the first name that waits for the user, or "" when none does. Throws std::bad_alloc only
+    // (the returned copy).
+    inline std::wstring FirstInteractiveToolName(const std::vector<std::wstring>& toolUseNames)
+    {
+        for (const auto& name : toolUseNames)
+        {
+            if (IsInteractiveTool(name))
+            {
+                return name;
+            }
+        }
+        return {};
     }
 
     // PURE + total: has the user submitted a prompt that the transcript has NOT recorded yet? While that
@@ -1743,7 +1781,23 @@ namespace Agentmaster
             bool alignSeek{ false };
             // Tail facts that disambiguate "blocked on the user" / "interrupted" from "working" —
             // the missed-Stop backstop can't read either from stop_reason alone (HookEvents.h notes).
-            std::wstring pendingInteractiveTool; // an UNANSWERED interactive tool_use (AskUserQuestion) is the latest assistant block; "" once answered / moved on
+            std::wstring pendingInteractiveTool; // an UNANSWERED interactive tool_use (AskUserQuestion, or a listed QUESTION TOOL) is the latest assistant block; "" once answered / moved on. Re-derived from pendingToolUses on every pass (FirstInteractiveToolName), so a question-tool list change reaches a call already pending
+            // Agentmaster (QUESTION TOOLS — HOOKS.md "Question tools"): the tool_use names of the latest assistant line
+            // (TranscriptEvent::toolUseNames), interactive or not, until a tool_result or a human line ends them —
+            // the same lifetime pendingInteractiveTool always had. Kept so each pass can re-judge them against the
+            // question-tool list in effect NOW: without it, a tool added to the list while its call is open would
+            // only count from the NEXT call (pendingInteractiveTool is decided once, when the line is read).
+            std::vector<std::wstring> pendingToolUses;
+            // Agentmaster (QUESTION TOOLS — HOOKS.md "Question tools"): was claude's heartbeat WORKING ("busy" /
+            // "shell") when the pending call's line was folded, and has it read working on every pass since? Only
+            // then is "busy" taken as that call still WAITING for the user (recon-block's questionQuietForMs, for a
+            // listed tool). It tells a question this claude has open from one a claude that died left behind: the dead
+            // claude's heartbeat is gone (not working) before a resumed claude reads "busy" again, which clears this,
+            // so the resumed claude's work before its first line (16.7 s measured on a cut-off resume) is not taken for
+            // the old question. Set by the fold with the line, cleared with it (a tool_result, a human line) and by any
+            // pass whose heartbeat does not read working. Never set for AskUserQuestion's sake: that tool keeps the old
+            // clock (its live heartbeat reads "waiting").
+            bool pendingCallUnderWork{ false };
             bool interrupted{ false }; // the latest user line is a turn-abort marker (Esc) — treat as a turn-ender
             // Agentmaster (presence-driven blocked-on-user, SessionScanner.h ShouldSynthesize*FromPresence):
             // have we OBSERVED claude's heartbeat report "waiting" (blocked on the user) for this

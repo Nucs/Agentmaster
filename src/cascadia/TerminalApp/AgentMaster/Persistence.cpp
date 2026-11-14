@@ -999,6 +999,10 @@ namespace Agentmaster
             modsOff.Push(json::Value::MkStr(name));
         }
         o.Set(L"bundledModsOff", std::move(modsOff));
+        // HOOKS.md "Question tools": the cog's QUESTION TOOLS box, verbatim (blank lines and '#' notes included), so the
+        // box reopens exactly as typed; LexQuestionToolsText decides what applies. Always written, an empty string too:
+        // a present empty key is the user's "no tool beyond AskUserQuestion", which the load must not re-seed.
+        o.Set(L"questionTools", json::Value::MkStr(s.questionTools));
         // Slash commands (COMMANDS.md §6a — the cog's "Commands" tab): the /handover family's
         // configured names + enables (cog-owned), plus the ENGINE-owned materialized-name markers
         // (which name's definition file the last engine init wrote; "" == none — disabled/failed).
@@ -1321,6 +1325,14 @@ namespace Agentmaster
                     s.bundledModsOff.push_back(e.str);
                 }
             }
+        }
+        // HOOKS.md "Question tools": PRESENCE-GATED like launchModels. An ABSENT key (every settings.json from before the
+        // feature) keeps the struct's shipped default (kDefaultQuestionTools: the ask-user-html-question mod's tool), so
+        // the feature reaches existing installs; a PRESENT string is the user's, an empty one included ("no tool beyond
+        // AskUserQuestion"). A present value of another type (a hand edit) is no list the user wrote: the default stays.
+        if (const auto* questionTools = v.Find(L"questionTools"); questionTools && questionTools->type == json::Value::Type::Str)
+        {
+            s.questionTools = questionTools->str;
         }
         // Slash commands (COMMANDS.md §6a). The configured NAMES normalize + collision-heal on
         // load (ResolveCommandNameTriple — a hand-edited junk value self-heals like maxTags, and

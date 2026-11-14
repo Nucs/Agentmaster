@@ -892,6 +892,13 @@ namespace winrt::TerminalApp::implementation
         // BUNDLED_MODS.md: rewrite the status line under the switches from their current positions (not yet saved): one
         // line per mod saying what the next launch does with it. A no-op before the overlay is built. UI thread.
         void _RefreshBundledModsStatus();
+        // HOOKS.md "Question tools": live-check the Claude tab's QUESTION TOOLS box (LexQuestionToolsText, the rules the
+        // engine applies on Save): recolor its border (neutral empty · green every line applies · amber applied with a
+        // remark, or a line skipped harmlessly · red a line refused) and rewrite the status line under it (how many tools
+        // count, or the first problem and its line). Runs on every keystroke (TextChanged) and once per cog open (a
+        // re-seed of identical text fires no TextChanged). A no-op before the overlay is built. UI thread; never throws
+        // beyond std::bad_alloc.
+        void _RefreshQuestionToolsLex();
         // Agentmaster: the cog's TOP TAB strip — Sessions · Autorunner · Behavior · Tabs & Overlay ·
         // Claude · About. A button-tab swaps one scrollable panel per group (the _SwitchEnvTab idiom;
         // NOT a Pivot — themes unreliably under XAML Islands). _settingsTabButtons / _settingsTabPanels
@@ -1843,6 +1850,14 @@ namespace winrt::TerminalApp::implementation
         // BUNDLED_MODS.md: the line under those switches: what the next launch does with each mod (loads / stands aside
         // for the user's own copy / needs a newer Claude Code / off), recomputed on open and on every flip.
         winrt::Windows::UI::Xaml::Controls::TextBlock _setBundledModsStatus{ nullptr };
+        // HOOKS.md "Question tools": the Claude tab's QUESTION TOOLS box — AppSettings::questionTools as text, one pattern
+        // per line (a tool name, '*' for any characters, '#' a note), seeded on every open and stored verbatim on Save,
+        // which installs it at once (ApplyQuestionToolsSetting). The box sits borderless inside _setQuestionToolsBorder,
+        // which the lexer recolors (the _setLaunchModelsBorder / _setEnvBorder idiom), and the status line under it says
+        // what will count.
+        winrt::Windows::UI::Xaml::Controls::TextBox _setQuestionTools{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Border _setQuestionToolsBorder{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setQuestionToolsStatus{ nullptr };
         // ---- UPDATES (Agentmaster updater; Updater.h) ----
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setAllowPrerelease{ nullptr }; // include GitHub pre-releases in the update check (default OFF; INSTANT-APPLY — the switch RMWs settings.json on flip, no Save needed)
         bool _seedingAllowPrerelease{ false }; // latch: a cog-open programmatic IsOn seed must not re-fire the switch's instant-apply RMW

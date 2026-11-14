@@ -509,6 +509,17 @@ namespace Agentmaster
     // restart. Updates SharedEngine().claudeExePath and returns it ("" => still not detected).
     std::wstring RefreshClaudeExe(std::wstring_view overridePath);
 
+    // Agentmaster (QUESTION TOOLS — HOOKS.md "Question tools", QuestionTools.h): install the question tools of a
+    // settings text as this process's list (SetQuestionToolPatterns), the one the scanner and the summary analyzer judge
+    // a tool call by. Called by the engine's init (before the scanner's first pass) and by the cog's
+    // Save (any thread may call it: the list is swapped atomically, and the scanner picks it up on its next pass, a
+    // question that is already open included). Logs one `[question-tools]` line to hooks.log on the first install and
+    // whenever the applied list changes, naming the tools; an unchanged Save logs nothing.
+    //   text   - AppSettings::questionTools (the cog box's text verbatim; LexQuestionToolsText decides what applies).
+    //   reason - what installs it, for the log line ("engine init", "settings saved").
+    // Never throws: a failure (std::bad_alloc) is logged as a swallowed exception and leaves the previous list in effect.
+    void ApplyQuestionToolsSetting(std::wstring_view text, std::wstring_view reason) noexcept;
+
     // Agentmaster (native-exe-only policy — the "Claude not detected" install prompt). Which install
     // situation the user is in, so the not-found UI can offer the RIGHT one-click fix:
     //   Native    — a native claude.exe is resolved (the prompt never shows; here only defensively).
