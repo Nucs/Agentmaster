@@ -2331,6 +2331,23 @@ namespace winrt::TerminalApp::implementation
                 self->_OpenTagEditorForElement(std::wstring{ id }, anchor);
             }
         });
+        // Agentmaster (2026-11-14 — the user's "Add to sidemenu right click menu context: Favorite, Mark Unread, Open In
+        // Explorer", every session menu by their pick): the session menu's "Mark Unread" and "Favorite" / "Unfavorite" (a side
+        // panel card, a board card, a tree row) run the WT tab menu's two actions, in the window that hosts the session's tab
+        // where that matters (the ring, the crown). Its "Open In Explorer" needs no page: the content runs the shared
+        // OpenSessionFolder itself. Both are noexcept (each logs its own failure).
+        content->SetMarkUnreadHandler([weakThis](winrt::hstring id) {
+            if (auto self = weakThis.get())
+            {
+                self->_MarkSessionUnreadFromMenu(std::wstring{ id });
+            }
+        });
+        content->SetToggleFavoriteHandler([weakThis](winrt::hstring id) {
+            if (auto self = weakThis.get())
+            {
+                self->_ToggleSessionFavoriteFromMenu(std::wstring{ id });
+            }
+        });
         // Agentmaster (transcript overlay): the session menu's "Show Transcript" / "Copy ▸ Transcript ▸ Show"
         // (board card, tree row, side-panel card) and the EXTERNAL menu's "Show Transcript" — open that
         // conversation in this window's reading view, over the Agent Manager page the click came from.

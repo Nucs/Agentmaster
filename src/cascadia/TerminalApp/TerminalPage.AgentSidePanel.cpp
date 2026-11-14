@@ -89,6 +89,7 @@
 #include "AgentCatchLog.h" // AgentLogCaughtException — swallowed-exception forensics (Rule #18)
 #include "AgentTipHelpers.h" // AgentSetTip / AgentSetTitledTip — the islands-safe hover tooltips
 #include "AgentAutomation.h" // the panel's AutomationIds, its glyph buttons' names, the cards' ItemStatus (E2E_TESTING.md §6.3)
+#include "AgentMenuHeaderClick.h" // AgentWireSubmenuHeaderClick — the Filter menu's Folder line answers a click on itself (SIDE_PANEL.md §2l)
 #include "AgentStatusColors.h" // PendingDotsColorFor / CacheWarmSparkColorFor — the status icon's contrast picks (the tab strip's rules, SIDE_PANEL.md §2g); AgentAnimationsEnabled
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / LogNav / ShortId
 #include "AgentMaster/Engine.h" // BroadcastSettingsChanged — the ⌖ scroll-to-tab toggle reaches every OTHER open window live; CurrentUnreadSessionIds — which cards' status icons ring (SIDE_PANEL.md §2g)
@@ -8993,96 +8994,25 @@ namespace winrt::TerminalApp::implementation
             AgentSetItemStatus(folderSub, folderLineWhole ? L"checked" : L"");
             // THE LINE'S OWN CLICK (the user's request of 2026-11-14: "If i click Folder -> then i should get the full working
             // dir opened, i dont have to go to -> items"; their pick "Folder + subfolders"). ⚠ A MenuFlyoutSubItem raises no
-            // Click: its class handlers take the press and, at the release, open the submenu — both marked handled, both
-            // run before any handler of ours. So the line watches the pointer itself, with handledEventsToo:
-            //   - a LEFT press on it, by a mouse or a pen, ARMS (a finger is left to the item: it cannot hover, so its tap
-            //     is its only way to the submenu's other lines; the keyboard is left to the item too — Enter, Space and →
-            //     open the submenu, whose first line is this very pick);
-            //   - the release of that button, ON the line, while armed, PICKS: the whole menu closes (the submenu the item
-            //     just opened goes with it) and the pick runs one tick later, like every line (_SidePanelRunMenuCommand);
-            //   - leaving the line or a cancelled pointer DISARMS, and every release ends the arm, so a press that began on
-            //     another line never picks here. (Not a lost capture: an item that captured the pointer would lose it as it
-            //     handles the release, before our release handler, and a disarm there would eat the click.)
-            // The handlers hold the menu WEAKLY (it owns this line through its Items: a strong capture would be a cycle that
-            // C++/WinRT never frees), the page weakly, the pick and the menu's kind by value, and the arm in a shared flag;
-            // never the line itself (it is each handler's sender).
-            const auto armed = std::make_shared<bool>(false);
-            const auto weakMenu = winrt::make_weak(rootMenu);
-            folderSub.AddHandler(
-                UIElement::PointerPressedEvent(),
-                winrt::box_value(PointerEventHandler{ [armed](const IInspectable& sender, const PointerRoutedEventArgs& e) {
-                    *armed = false; // a new press decides afresh
-                    try
+            // Click: AgentWireSubmenuHeaderClick (AgentMenuHeaderClick.h, shared with both Deactivate ▸ lines) arms on the
+            // line's own left mouse or pen press and clicks on the release over it, hiding `rootMenu`; resting on the line,
+            // the keyboard and a finger's tap still open the submenu, whose first line is this very pick. The click's action
+            // holds the page weakly and the pick and the menu's kind by value, and defers the pick one tick, like every line
+            // (_SidePanelRunMenuCommand: no tree change inside the release's input handler).
+            AgentWireSubmenuHeaderClick(
+                folderSub,
+                rootMenu,
+                nullptr, // always clickable: a Folder line exists only for a session with a folder
+                [weakThis, folderLinePick, from, menuName]() {
+                    if (const auto self = weakThis.get())
                     {
-                        const auto line = sender.try_as<UIElement>();
-                        if (!line || e.Pointer().PointerDeviceType() == winrt::Windows::Devices::Input::PointerDeviceType::Touch)
-                        {
-                            return; // a finger's tap opens the submenu: the item's own way, untouched
-                        }
-                        *armed = e.GetCurrentPoint(line).Properties().IsLeftButtonPressed();
+                        // The click's own line in the trail (the pick's own line follows it, one tick later): "I clicked Folder
+                        // and nothing happened" then reads where it stopped.
+                        ::Agentmaster::LogNav(L"sidepanel filter " + menuName + L": the Folder line's own click");
+                        self->_SidePanelRunMenuCommand(menuName + L": the Folder line", [folderLinePick, from](TerminalPage& page) { page._SidePanelApplyCardFilterPick(folderLinePick, from); });
                     }
-                    catch (...)
-                    {
-                        // Not armed: the release opens the submenu, the item's own behavior. Recorded (Rule #18).
-                        ::Agentmaster::AgentLogCaughtException(L"side panel filter menu: the Folder line's press");
-                    }
-                } }),
-                true /* handledEventsToo — the item marks its press handled */);
-            folderSub.AddHandler(
-                UIElement::PointerReleasedEvent(),
-                winrt::box_value(PointerEventHandler{ [armed, weakThis, weakMenu, folderLinePick, from, menuName](const IInspectable& sender, const PointerRoutedEventArgs& e) {
-                    if (!std::exchange(*armed, false))
-                    {
-                        return; // no press of ours began on this line (another line's press, a finger, a right button)
-                    }
-                    try
-                    {
-                        const auto line = sender.try_as<FrameworkElement>();
-                        if (!line)
-                        {
-                            return;
-                        }
-                        const auto point = e.GetCurrentPoint(line);
-                        if (point.Properties().PointerUpdateKind() != winrt::Windows::UI::Input::PointerUpdateKind::LeftButtonReleased)
-                        {
-                            return; // another button let go while the left one is still down: not the click
-                        }
-                        const auto at = point.Position();
-                        if (at.X < 0 || at.Y < 0 || at.X >= line.ActualWidth() || at.Y >= line.ActualHeight())
-                        {
-                            return; // let go off the line (a pointer the item captured reports here too): no click
-                        }
-                        // The whole menu closes at once, like a pick line's click closes it — with the submenu the item
-                        // opened at this very release (a menu's close takes its open submenus with it).
-                        if (const auto menu = weakMenu.get())
-                        {
-                            menu.Hide();
-                        }
-                        if (const auto self = weakThis.get())
-                        {
-                            // The click's own line in the trail (the pick's own line follows it, one tick later): "I clicked
-                            // Folder and nothing happened" then reads where it stopped.
-                            ::Agentmaster::LogNav(L"sidepanel filter " + menuName + L": the Folder line's own click");
-                            self->_SidePanelRunMenuCommand(menuName + L": the Folder line", [folderLinePick, from](TerminalPage& page) { page._SidePanelApplyCardFilterPick(folderLinePick, from); });
-                        }
-                    }
-                    catch (...)
-                    {
-                        // The click is lost (the menu may stay open, its submenu shown); the next click tries again. Recorded
-                        // (Rule #18).
-                        ::Agentmaster::AgentLogCaughtException(L"side panel filter menu: the Folder line's click");
-                    }
-                } }),
-                true /* handledEventsToo — the item marks its release handled (it opens the submenu there) */);
-            // The two disarms, each its own handler object (a delegate is registered once per event).
-            folderSub.AddHandler(
-                UIElement::PointerExitedEvent(),
-                winrt::box_value(PointerEventHandler{ [armed](const IInspectable&, const PointerRoutedEventArgs&) { *armed = false; } }),
-                true /* handledEventsToo — the item handles its exit (its hover delay) */);
-            folderSub.AddHandler(
-                UIElement::PointerCanceledEvent(),
-                winrt::box_value(PointerEventHandler{ [armed](const IInspectable&, const PointerRoutedEventArgs&) { *armed = false; } }),
-                true /* handledEventsToo */);
+                },
+                L"side panel filter menu: the Folder line");
             for (size_t level = 0; level < levels.size(); ++level)
             {
                 SidePanelCardPick pick;

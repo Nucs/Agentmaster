@@ -50,7 +50,7 @@ command does; the deeper behavior of Deactivate, Close and the strip lives in [0
 | New Session Here ▸ | ✓ (plain for Codex) | ✓ | Default · Specify… · the launch models · (presets) · Add presets… |
 | Restart session | ✓ | ✓ | |
 | Fork session ▸ | ✓ (plain for Codex) | plain = Windows Terminal's duplicate tab | Default · Specify… · the launch models · (presets) · Add presets… |
-| Deactivate ▸ | ✓, never for an ADOPTED session | — | Deactivate Tab (disabled when dormant) · Tabs to the Left · Tabs to the Right · Other Tabs · Of Same Folder · Other of Same Folder · All Tabs · Deactivate All Idle Tabs (2026-10-24, NOT BUILT: the window's Idle sessions — asking "This window / All windows" first when other windows hold Idle tabs too; disabled while none would park in any window — flows/07 TAB-02 phases 7–8) · Deactivate All Waiting-for-you (2026-11-04, NOT BUILT: the same for the window's Waiting-for-you sessions, which keep that state when parked; its own gate — flows/07 TAB-02 phases 9–10) |
+| Deactivate ▸ | ✓, never for an ADOPTED session | — | a mouse or pen click on the line itself parks this tab, like Deactivate Tab (2026-11-14, NOT BUILT; nothing for a dormant tab — TCM-11) · Deactivate Tab (disabled when dormant) · Tabs to the Left · Tabs to the Right · Other Tabs · Of Same Folder · Other of Same Folder · All Tabs · Deactivate All Idle Tabs (2026-10-24, NOT BUILT: the window's Idle sessions — asking "This window / All windows" first when other windows hold Idle tabs too; disabled while none would park in any window — flows/07 TAB-02 phases 7–8) · Deactivate All Waiting-for-you (2026-11-04, NOT BUILT: the same for the window's Waiting-for-you sessions, which keep that state when parked; its own gate — flows/07 TAB-02 phases 9–10) |
 | Close ▸ | ✓ | ✓ | Close tabs to the left · Close tabs to the right · Close other tabs · Of Same Folder · Other of Same Folder (session) · Close all tabs · ★ Favorite & close all tabs (when the window holds a managed session) · Close pane (only when the tab is split) |
 | Close tab | ✓ | ✓ | |
 
@@ -330,6 +330,28 @@ emptied (the view then stays, the filter set behind it).
 - **E1 A dormant tab** → its menu has Filter (its session is open); the pick does not start its claude.
 - **E2 A tab of another window** → its Filter filters THAT window's side panel, never this one's.
 - **E3 A Codex tab** → Filter is offered (a managed session), with the lines its facts allow.
+
+### TCM-11 · A click on Deactivate parks this tab
+
+> **Since** 2026-11-14 (NOT BUILT) · **P1** · **Needs** F-S2 (two sessions, one running) · **Spec** AGENT_MANAGER.md
+> *Deactivating sessions* ("The line's own click")
+
+**Promise.** A mouse or pen click on the **Deactivate** line itself parks this tab — exactly what its **Deactivate
+Tab** does (no question; a running turn is cut off) — while resting on the line, the keyboard and a finger's tap still
+open the submenu with its other scopes. A tab that is already parked: the click parks nothing.
+
+**Phases**
+1. **The click.** *Do:* right-click t1 (running) and click Deactivate at once (no rest). *Expect:* the menu closes, t1
+   parks (dormant, kept in place). *Check:* [LOG] `[nav] deactivate-begin scope=this` / `deactivate-done … parked=1`.
+2. **Resting opens.** *Do:* right-click t2, rest the pointer on Deactivate. *Expect:* the submenu opens; nothing parks.
+3. **The keyboard.** *Do:* right-click t2, arrow to Deactivate, press Enter. *Expect:* the submenu opens; nothing parks.
+4. **A parked tab.** *Do:* right-click t1 (parked in phase 1), click Deactivate. *Expect:* nothing parks (Deactivate Tab
+   is grayed); the submenu opens on rest.
+
+**Edge cases**
+- **E1 A press elsewhere released on Deactivate**, or a press on it released off it → nothing parks.
+- **E2 A touch screen** → a tap on Deactivate opens the submenu.
+- **E3 The session menus** (a side panel card, a board card, a tree row) → the same click (flows/02 SP-02 phase 10).
 
 ---
 

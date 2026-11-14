@@ -395,6 +395,15 @@ namespace winrt::TerminalApp::implementation
     {
         _tagsHandler = std::move(handler);
     }
+    // Agentmaster (2026-11-14): the session menu's "Mark Unread" and "Favorite" / "Unfavorite" — see the header.
+    void AgentManagerContent::SetMarkUnreadHandler(std::function<void(winrt::hstring)> handler)
+    {
+        _markUnreadHandler = std::move(handler);
+    }
+    void AgentManagerContent::SetToggleFavoriteHandler(std::function<void(winrt::hstring)> handler)
+    {
+        _toggleFavoriteHandler = std::move(handler);
+    }
     void AgentManagerContent::SetShowTranscriptHandler(std::function<void(winrt::hstring, bool, winrt::hstring, winrt::hstring)> handler)
     {
         _showTranscriptHandler = std::move(handler);

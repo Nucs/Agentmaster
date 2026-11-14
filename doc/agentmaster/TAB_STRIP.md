@@ -76,7 +76,9 @@ Filter ▸ right under Tags (the side panel card menu's Filter lines for the tab
 `TerminalPage::_SidePanelFillTabFilterMenu`; a pick narrows this window's side panel and brings its cards on screen —
 [SIDE_PANEL.md](SIDE_PANEL.md) §2l *The Folder line's own click, and the tab menu's Filter*),
 Favorite / Unfavorite, New Session Here ▸ and Fork session ▸ (Default, `Specify…`, the launch models, the
-presets; a shell tab's Fork session is Windows Terminal's duplicate tab), Restart session, Deactivate ▸
+presets; a shell tab's Fork session is Windows Terminal's duplicate tab), Restart session, Deactivate ▸ (a mouse
+or pen click on the line itself parks this tab, the same as its Deactivate Tab, unless the tab is already parked;
+resting on it opens the submenu — `AgentWireSubmenuHeaderClick`, AGENT_MANAGER.md *Deactivating sessions*)
 and Close ▸ (Close tabs to the left / right, Other tabs, Of Same Folder, Other of Same Folder, All tabs,
 ★ Favorite & Close All Tabs). Their behavior: [AGENT_MANAGER.md](AGENT_MANAGER.md) (*Closing sessions*,
 *Deactivating sessions*). In the Remove-colors mode Change tab color and `openTabColorPicker` are

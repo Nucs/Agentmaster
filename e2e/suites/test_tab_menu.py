@@ -23,6 +23,15 @@ SESSION_MENU = [
     "Favorite", "Tags", "Split tab", "Move tab", "Change tab color", "Export text", "Find", "New Session Here",
     "Restart session", "Fork session", "Deactivate", "Close", "Close tab",
 ]
+SESSION_MENU_WITH_FILTER = (SESSION_MENU[:SESSION_MENU.index("Tags") + 1] + ["Filter"]
+                            + SESSION_MENU[SESSION_MENU.index("Tags") + 1:])
+"""SESSION_MENU with the tab menu's "Filter ▸" right under Tags — the side panel card menu's Filter lines for the tab's
+session (SIDE_PANEL.md §2l "The Folder line's own click, and the tab menu's Filter"; flows/23 TCM-10). A build of the branch
+since 2026-11-14 (8c7960496) holds it; no published release does yet, so test_menu_fits_the_tab accepts both forms."""
+SESSION_SUBMENUS = ["Copy", "Move tab", "New Session Here", "Fork session", "Deactivate", "Close"]
+"""The session tab menu's lines that open a submenu, in order, on a build without the Filter line."""
+SESSION_SUBMENUS_WITH_FILTER = ["Copy", "Filter", "Move tab", "New Session Here", "Fork session", "Deactivate", "Close"]
+"""SESSION_SUBMENUS on a build with the tab menu's Filter ▸ (it is a submenu, right under Tags)."""
 SHELL_MENU = [
     "Rename tab (F2)", "Split tab", "Move tab", "Change tab color", "Export text", "Find", "New Session Here",
     "Restart session", "Fork session", "Close", "Close tab",
@@ -80,9 +89,11 @@ def test_menu_fits_the_tab(am, s1):
     w = am.window
     # 1. The session tab, Waiting for you: every session item, in order.
     menu = w.tabs.context_menu("t1")
-    assert menu.names() == SESSION_MENU
-    assert [i.name for i in menu.items() if i.is_sub] == ["Copy", "Move tab", "New Session Here", "Fork session",
-                                                           "Deactivate", "Close"]
+    # A build since 2026-11-14 has Filter ▸ under Tags (SESSION_MENU_WITH_FILTER); an older one has not.
+    names = menu.names()
+    assert names in (SESSION_MENU, SESSION_MENU_WITH_FILTER), names
+    subs = [i.name for i in menu.items() if i.is_sub]
+    assert subs in (SESSION_SUBMENUS, SESSION_SUBMENUS_WITH_FILTER), subs
     copy = menu.submenu("Copy")
     assert copy.names() == COPY_MENU
     assert copy.submenu("Transcript").names() == TRANSCRIPT_MENU

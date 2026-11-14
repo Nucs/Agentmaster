@@ -485,6 +485,32 @@ namespace winrt::TerminalApp::implementation
         _RenderSessionsTable(); // refresh the ★ glyph + (if the Favorite filter is on) the visible set
     }
 
+    void TerminalPage::_ToggleSessionFavoriteFromMenu(const std::wstring& sessionId) noexcept
+    {
+        try
+        {
+            if (sessionId.empty())
+            {
+                return;
+            }
+            _ToggleSessionFavorite(sessionId); // the store, this window's Sessions page, and this window's crown if it hosts the tab
+            if (_claudeTabs.find(sessionId) != _claudeTabs.end())
+            {
+                return; // hosted here: _ToggleSessionFavorite already repainted the crown
+            }
+            // Another window may host the tab: its crown reads the store only at a bind, so ask it to repaint now. Every window
+            // gets the action on its own UI thread and only the host acts (_RemoteSessionAction -> _RefreshTabFavoriteCrown);
+            // a session with no tab anywhere is repainted nowhere, which costs nothing.
+            ::Agentmaster::RequestSessionActionInWindows(sessionId, L"refresh-favorite", L"", {});
+        }
+        catch (...)
+        {
+            // The star may be flipped while another window's crown keeps its old look until that tab's next bind. Recorded
+            // (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_ToggleSessionFavoriteFromMenu");
+        }
+    }
+
     // ===== in-place TITLE editing (Edit Title / slow-double-click) ==========================
     // The Sessions browser lets you rename a session in place — the durable per-session TITLE the
     // SessionStore keeps (the SAME store the favorite star uses). Two entry points: the row

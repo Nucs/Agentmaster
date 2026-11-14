@@ -101,6 +101,19 @@ click back into the terminal; double-click jumps to a card's tab.
    into it: the selection stays on <B8> (the focused tab shows <A8>; …)` — `<origin>` says how the menu handed
    focus back (`nowhere (…)` as read in WinUI's source, or the closed menu's own element); `e2e/suites/
    test_side_panel.py::test_card_menu_keeps_the_peek` (`needs_fix("SP-K3")`).
+9. **The tab menu's order, and its three items** (2026-11-14, NOT BUILT; AGENT_MANAGER.md *The session menu*). *Do:*
+   right-click B's card (B Waiting for you). *Expect:* Jump to Tab · Pin to Top · ─ · Rename (F2) · Copy › · Show
+   Transcript · **Mark Unread** · **Open In Explorer** · Move to Idle/Done · **Favorite** · Tags · Filter › · ─ · Open
+   New Session Here › · Restart session · Fork session › · ─ · Deactivate › · Close ›. *Do:* **Mark Unread** (A
+   selected). *Expect:* B's tab ring flashes until B's tab is visited. *Check:* [LOG] `[nav] mark-unread <B8>`. *Do:*
+   **Open In Explorer**. *Expect:* File Explorer on B's folder (`[nav] open-path`). *Do:* **Favorite**. *Expect:* B's tab
+   wears the crown; the card menu now reads **Unfavorite**. *Check:* [LOG] `[nav] favorite <B8> on`.
+10. **Deactivate's own click** (2026-11-14, NOT BUILT). *Do:* right-click B's card (B running), click **Deactivate**
+    at once (no rest). *Expect:* the menu closes and B parks, exactly as Deactivate Tab parks it (no question; the
+    running turn is cut off). *Check:* [LOG] `[nav] session menu: the Deactivate line's own click <B8>`, then `[nav]
+    session-menu deactivate this <B8>` and `deactivate-begin scope=this` / `deactivate-done … parked=1`. *Do:* right-click
+    the parked B, click Deactivate. *Expect:* nothing parks (Deactivate Tab is grayed); resting on the line opens the
+    submenu.
 
 **Edge cases**
 - **E1 On the Agent Manager page** a card click also scrolls the tab strip to that session's tab (even a
@@ -140,6 +153,14 @@ click back into the terminal; double-click jumps to a card's tab.
   idle item can be enabled while it is grayed). *Check:* [LOG] `[nav] session-menu deactivate waiting <B8>`, then
   `[nav] deactivate-waiting-ask from=session menu here=N elsewhere=M` and `[nav] deactivate-done scope=waiting
   parked=N`.
+- **E12 Another window's session** (GLOBAL, phases 9–10; NOT BUILT) → Mark Unread flashes the ring of B's tab IN ITS
+  window (`[nav] mark-unread <B8> -> handed to the window that hosts its tab`, then that window's `[nav] remote
+  session-action markunread <B8>`); Favorite repaints that window's crown at once (`remote session-action
+  refresh-favorite`); Deactivate's click parks the tab there (E5's hand-over).
+- **E13 The board card and the tree row** (phases 9–10) → the same menu, the same order and the same click (no Pin to
+  Top, no Filter: those two are the side panel's own).
+- **E14 Deactivate on a touch screen, or with the keyboard** → a tap, Enter, Space or → opens the submenu; nothing
+  parks until Deactivate Tab is picked.
 
 ---
 

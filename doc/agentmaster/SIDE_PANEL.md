@@ -1991,7 +1991,9 @@ suggestions were shown as mockups; their answers the same day:
   Tags (`SessionMenuHost::afterTags`, the twin of §2j's hook under Jump to Tab), which appends the one **Filter** line
   (`_SidePanelAppendFilterItems`). The board card, the tree row and the AI search's result cards pass no such hook (the
   list a result card's pick would filter is covered by the AI view). The submenu is filled at the menu's open, from the
-  session as it is then.
+  session as it is then. (The mock above shows the menu's order of 2026-11-12; since 2026-11-14 the shared menu reads
+  in the tab menu's order, with Mark Unread, Open In Explorer and Favorite added and Filter still right under Tags —
+  AGENT_MANAGER.md *The session menu*.)
 - **The lines** — each stands for ONE thing (`SidePanelCardPick`):
   - **Folder ▸** — the card's folder and each folder above it, nearest first (`SidePanelFolderLevels`), each with
     WHERE it is, dim, at the line's end, then **`<folder> (exactly)`** for the card's folder without its subfolders. The
@@ -2161,7 +2163,9 @@ Their answers the same day (asked with mockups):
   (the item's own hover delay), for the folders above it and "(exactly)".
   - **How.** ⚠ A `MenuFlyoutSubItem` raises no Click: its class handlers take the press and open the submenu at the
     release, both marked handled, both before any handler of ours. So the line watches the pointer itself, with
-    handledEventsToo: a LEFT press by a mouse or a pen arms; the release of that button on the line, while armed, picks
+    handledEventsToo (`AgentWireSubmenuHeaderClick`, `AgentMenuHeaderClick.h`, since the same day also behind both
+    Deactivate ▸ lines — AGENT_MANAGER.md *Deactivating sessions*): a LEFT press by a mouse or a pen arms; the release of
+    that button on the line, while armed, picks
     — the whole menu is closed (`MenuFlyout::Hide`, which takes the submenu the item just opened with it) and the pick
     runs one tick later through `_SidePanelRunMenuCommand`, like every line. Leaving the line or a cancelled pointer
     disarms, and every release ends the arm, so a press that began on another line never picks here; a release off the
@@ -2199,7 +2203,7 @@ Their answers the same day (asked with mockups):
   (`sidepanel filter tab menu: start over with folder (with subfolders) -> 1 filter on`, `... tab menu: drop ...`,
   `... clear (tab menu) -> 0 filters on`); for a tab menu line that brought the cards on screen, `sidepanel ai off
   box=0` and / or `sidepanel expand`, or `sidepanel filter tab menu: the AI view stays (its box holds a request of N
-  characters)`. A failure is an `[exc] side panel filter menu: the Folder line's press / click`,
+  characters)`. A failure is an `[exc] side panel filter menu: the Folder line`,
   `_SidePanelFillTabFilterMenu`, `_SidePanelShowCardsForTabMenu` or `side panel more menu: tab menu: …` line.
 - **UI Automation** (E2E_TESTING.md §6.3): a card's menu keeps its ids; the Folder line's ItemStatus is now "checked"
   while its own pick is the whole filter. A tab's menu: `am.tabmenu.filter` and its lines `am.tabmenu.filter.{folder,

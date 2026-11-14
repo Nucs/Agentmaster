@@ -11,6 +11,7 @@
 #include "AgentCopyActions.h" // Agentmaster: kTranscriptCopyMenu — the shared Copy ▸ Transcript submenu (its levels, tooltips and codes)
 #include "AgentModelMenu.h" // Agentmaster (launch-model picker): AgentFillModelPickItems — the shared "New Session Here ▸ <model>" submenu recipe
 #include "AgentPanelFocus.h" // Agentmaster (TCM-K2): AgentFocusInOpenPopup — the context menu's Closed hand-back stands aside for a panel a menu item opened
+#include "AgentMenuHeaderClick.h" // Agentmaster (2026-11-14): AgentWireSubmenuHeaderClick — a click on the "Deactivate" line itself parks this tab
 #include "AgentAutomation.h" // Agentmaster (accessibility, E2E_TESTING.md §6.3): the tab item's AutomationId + ItemStatus (SetAgentAutomationSession)
 #include "AgentCatchLog.h" // Agentmaster: AgentLogCaughtException — _UpdateAgentItemStatus never lets an exception out of a XAML event handler
 #include "Utils.h"
@@ -2078,7 +2079,9 @@ namespace winrt::TerminalApp::implementation
         _deactivateSubMenu.Text(L"Deactivate");
         _deactivateSubMenu.Icon(deactivateSymbol);
         _deactivateSubMenu.Visibility(WUX::Visibility::Collapsed); // shown only for a managed, non-adopted session tab (page-driven)
-        WUX::Controls::ToolTipService::SetToolTip(_deactivateSubMenu, box_value(winrt::hstring{ L"Park session tabs in the dormant waiting-for-focus state a freshly reopened window's tabs sit in \x2014 the agent process shuts down, the tab stays where it is, and focusing or activating it resumes the conversation" }));
+        // Agentmaster (2026-11-14): the tip leads with the line's own click (wired below); a dormant tab's click does nothing,
+        // like its grayed "Deactivate Tab", which the parenthesis says.
+        WUX::Controls::ToolTipService::SetToolTip(_deactivateSubMenu, box_value(winrt::hstring{ L"Click: park THIS tab now (the same as Deactivate Tab; a running turn is cut off; nothing happens for a tab that is already parked). Rest on the line, or press \x2192, for the other tabs: park session tabs in the dormant waiting-for-focus state a freshly reopened window's tabs sit in \x2014 the agent process shuts down, the tab stays where it is, and focusing or activating it resumes the conversation" }));
         // The "Close ▸" submenu's order, so the two submenus read alike: this tab first, then left,
         // right, other, the two folder scopes, and the whole window last — followed by the two state
         // filters, which have no Close twin: Idle, then Waiting-for-you (the order they were added in, so
@@ -2093,6 +2096,49 @@ namespace winrt::TerminalApp::implementation
         _deactivateSubMenu.Items().Append(_deactivateIdleTabsMenuItem); // the window's Idle sessions only (2026-10-24)
         _deactivateSubMenu.Items().Append(_deactivateWaitingTabsMenuItem); // the window's Waiting-for-you sessions only (2026-11-04)
         flyout.Items().Append(_deactivateSubMenu);
+
+        // Agentmaster (2026-11-14 — the user's "Deactivate-> should be clickable and not only open menu. same as deactivate
+        // this tab", in every menu by their pick "Everywhere, tab strip too", parking at once by their pick "Park at once"): a
+        // mouse or pen CLICK on the "Deactivate" line itself parks THIS tab — the very action of its "Deactivate Tab" item
+        // (kDeactivateScopeThisTab -> the page's _DeactivateTabsFromMenu), so a running turn is cut off exactly as that item
+        // cuts it. ⚠ A MenuFlyoutSubItem raises no Click: AgentWireSubmenuHeaderClick (AgentMenuHeaderClick.h, shared with the
+        // session menu's Deactivate ▸ and the Filter menu's Folder line) arms on the line's own left press and clicks on the
+        // release over it, hiding this menu; resting on the line, the keyboard and a finger's tap still open the submenu.
+        //   - canClick: "Deactivate Tab" is enabled — read at each PRESS, because the page grays it at every open while this
+        //     tab's session is already dormant (SetAgentDeactivateState): then there is nothing to stop, and the line stays a
+        //     plain submenu.
+        //   - the raise waits one dispatcher tick: the page swaps the tab's content, which must not happen inside the release's
+        //     input handler (the session menu's items defer for the same reason). Contained: an exception escaping a
+        //     dispatcher callback would end the process for a menu click (Rule #18: logged, nothing parks).
+        // Both functions hold the tab weakly, so a menu that outlives its tab does nothing.
+        AgentWireSubmenuHeaderClick(
+            _deactivateSubMenu,
+            flyout,
+            [weakThis]() {
+                const auto tab{ weakThis.get() };
+                return tab && tab->_deactivateTabMenuItem.IsEnabled();
+            },
+            [weakThis]() {
+                const auto raise = [weakThis]() {
+                    try
+                    {
+                        if (const auto tab{ weakThis.get() })
+                        {
+                            tab->DeactivateTabsRequested.raise(kDeactivateScopeThisTab);
+                        }
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"tab menu: the Deactivate line's click");
+                    }
+                };
+                // No dispatcher (the window is tearing down) or a refused hop: nothing parks — the tab is going away anyway.
+                if (const auto dispatcher = DispatcherQueue::GetForCurrentThread(); !dispatcher || !dispatcher.TryEnqueue(raise))
+                {
+                    ::Agentmaster::LogNav(L"tab menu: the Deactivate line's click was dropped (no dispatcher to defer it)");
+                }
+            },
+            L"tab menu: the Deactivate line");
     }
 
     // Method Description:

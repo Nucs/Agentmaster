@@ -4299,6 +4299,39 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    void TerminalPage::_MarkSessionUnreadFromMenu(const std::wstring& sessionId) noexcept
+    {
+        try
+        {
+            if (sessionId.empty())
+            {
+                return;
+            }
+            if (_claudeTabs.find(sessionId) != _claudeTabs.end())
+            {
+                _MarkSessionUnread(sessionId); // this window hosts the tab: its ring, its visit, its taskbar count
+                return;
+            }
+            // Another window hosts the tab (a GLOBAL-scope card, the board or the tree listing the whole fleet): hand the mark
+            // to it. Only a live session has a tab to ring; the host's _RemoteSessionAction runs _MarkSessionUnread there, on
+            // its own UI thread. Fire-and-forget: a tab that left every window meanwhile is marked nowhere.
+            const auto info = _sessionRegistry ? _sessionRegistry->GetWithoutQueue(sessionId) : std::nullopt;
+            if (!info || !info->live)
+            {
+                ::Agentmaster::LogNav(L"mark-unread " + ::Agentmaster::ShortId(sessionId) + L" skipped: the session has no open tab");
+                return;
+            }
+            ::Agentmaster::LogNav(L"mark-unread " + ::Agentmaster::ShortId(sessionId) + L" -> handed to the window that hosts its tab");
+            ::Agentmaster::RequestSessionActionInWindows(sessionId, L"markunread", L"", {});
+        }
+        catch (...)
+        {
+            // The mark is lost (or only partly made: the registry flag without the ring); the item can be picked again.
+            // Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_MarkSessionUnreadFromMenu");
+        }
+    }
+
     // Agentmaster (Waiting-for-you + Error triage): the tab context-menu's status-adaptive triage move —
     // the tab-menu twin of the Manager board card's "Move to Idle/Done", plus its reverse. EXPLICITLY
     // separate from "Mark Unread": neither direction sets the sticky manualUnread flag or flashes the red

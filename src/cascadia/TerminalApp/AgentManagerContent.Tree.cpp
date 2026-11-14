@@ -32,6 +32,8 @@
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
 #include "AgentMaster/SessionRegistry.h"
+#include "AgentMaster/SessionStore.h" // IsSessionFavorite — the session menu's Favorite / Unfavorite label (2026-11-14)
+#include "AgentMenuHeaderClick.h" // AgentWireSubmenuHeaderClick — the session menu's Deactivate ▸ answers a click on itself (2026-11-14)
 #include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
 #include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Auto Testing of an external) + BringClaudeWindowToFront (EXTERNAL menu)
 #include "AgentMaster/TranscriptStore.h" // ReadTranscriptQuickFacts — resolve a launch-box session id's cwd
@@ -1594,101 +1596,10 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        // Move to Idle/Done — Waiting-for-you AND Error triage. For a Waiting card it is the immediate,
-        // user-driven twin of the timed WaitingForInput -> Idle decay (SessionScanner::_maybeDecayWaiting):
-        // demote this card so it leaves the "Waiting-for-you" column for "Idle / Done". A deliberate state
-        // transition layered on the hook-derived machine (the decay sets the SAME state the SAME way, so it
-        // sticks — the scanner only re-promotes to Waiting/Running on NEW turn activity, never bouncing a
-        // quiescent Idle back). For an ERROR card it is the manual DISMISSAL: Error is level-derived (the
-        // scanner re-asserts it off the unchanged error tail every pass), so the mutator also sets the
-        // errorDismissed ack — the recon-error gate then suppresses the re-derivation until the
-        // conversation actually moves (a retry / a NEW error re-fires normally) — and clears
-        // errorMessage/errorStatus (the "Empty/0 outside Error" invariant).
-        if (state == SessionState::WaitingForInput || state == SessionState::Error)
-        {
-            MenuFlyoutItem moveIdle;
-            moveIdle.Text(L"Move to Idle/Done");
-            moveIdle.Icon(glyphIcon(L"\xE73E")); // CheckMark — "I've handled this; stop waiting on me / stop flagging this error"
-            if (state == SessionState::Error)
-            {
-                AgentSetTip(moveIdle, L"Dismiss this errored card to the Idle / Done column \x2014 acknowledges the error (an API failure, or a turn that a shutdown cut off). It returns to Error if a new error lands.");
-            }
-            else
-            {
-                AgentSetTip(moveIdle, L"Dismiss this \x201CWaiting-for-you\x201D card to the Idle / Done column \x2014 the manual version of the unread-timeout decay. It returns to Waiting-for-you on the session's next turn.");
-            }
-            moveIdle.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
-                auto act = [weak, id]() {
-                    auto self = weak.get();
-                    if (!self || !self->_registry)
-                    {
-                        return;
-                    }
-                    // Re-check under the registry lock against the LIVE record: a new turn may have moved
-                    // the state since the menu was built — never demote a session that is now Running.
-                    // Stamp readUnixMs (mark it read) + clear manualUnread so a prior "Mark Unread" can't
-                    // keep it pinned, mirroring the decay's read-gated semantics. An Error card
-                    // additionally records the dismissal ack (so the scanner's level-derived Error can't
-                    // bounce the flip back) and drops the preserved failure reason.
-                    self->_registry->Update(id, [](SessionInfo& s) {
-                        if (s.state == SessionState::WaitingForInput)
-                        {
-                            s.state = SessionState::Idle;
-                            s.manualUnread = false;
-                            s.readUnixMs = NowMs();
-                        }
-                        else if (s.state == SessionState::Error)
-                        {
-                            s.state = SessionState::Idle;
-                            s.manualUnread = false;
-                            s.readUnixMs = NowMs();
-                            s.errorDismissed = true;
-                            s.errorMessage.clear();
-                            s.errorStatus = 0;
-                        }
-                    });
-                };
-                if (disp) { disp.TryEnqueue(act); } else { act(); }
-            });
-            menu.Items().Append(moveIdle);
-        }
-
-        // Move to Waiting-for-you — Idle/Done triage only (the reverse of "Move to Idle/Done"): a PLAIN
-        // promote of a quiescent card back into the "Waiting-for-you" column. EXPLICITLY separate from
-        // "Mark Unread" (the tab strip's sticky/flashy promote) — this sets NO sticky manualUnread and
-        // raises no red-ring flash; it just moves columns. Refresh the decay anchor + leave it unread so it
-        // behaves like a fresh turn-complete (waits the full Waiting-for-you timeout, then decays normally)
-        // instead of instantly decaying off an ancient lastActivity.
-        if (info && (state == SessionState::Idle || state == SessionState::Done))
-        {
-            MenuFlyoutItem moveWaiting;
-            moveWaiting.Text(L"Move to Waiting-for-you");
-            moveWaiting.Icon(glyphIcon(L"\xE823")); // Clock — put it back in the Waiting-for-you column
-            AgentSetTip(moveWaiting, L"Move this card into the \x201CWaiting-for-you\x201D column \x2014 a plain move (no red-ring flash; unlike \x201CMark Unread\x201D it decays normally). It returns to Idle / Done after the unread timeout.");
-            moveWaiting.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
-                auto act = [weak, id]() {
-                    auto self = weak.get();
-                    if (!self || !self->_registry)
-                    {
-                        return;
-                    }
-                    // Re-check under the registry lock against the LIVE record: only promote a still-
-                    // quiescent (Idle/Done) card — never bump a session that has since gone Running.
-                    self->_registry->Update(id, [](SessionInfo& s) {
-                        if (s.state == SessionState::Idle || s.state == SessionState::Done)
-                        {
-                            s.state = SessionState::WaitingForInput;
-                            s.manualUnread = false; // plain move (NOT the sticky "Mark Unread")
-                            s.lastActivityUnixMs = NowMs(); // restart the Waiting-for-you window (don't instant-decay)
-                            s.readUnixMs = 0; // unread for this "turn", like a real turn-complete
-                        }
-                    });
-                };
-                if (disp) { disp.TryEnqueue(act); } else { act(); }
-            });
-            menu.Items().Append(moveWaiting);
-        }
-
+        // The navigation group (Activate Tab, Jump to Tab, the host's Pin to Top) ends here. The session's own actions follow
+        // in the WT tab menu's order (the user's pick of 2026-11-14, "The whole group like the tab menu"): Rename, Copy ▸,
+        // Show Transcript, Mark Unread, Open In Explorer, the triage move (here until then, right under the host's items),
+        // Favorite, Tags, then the host's items under Tags.
         menu.Items().Append(MenuFlyoutSeparator{});
 
         MenuFlyoutItem rename;
@@ -1709,58 +1620,6 @@ namespace winrt::TerminalApp::implementation
             }
         });
         menu.Items().Append(rename);
-
-        // Tags — the bookmark-tags panel for this session (the WT tab menu's "Tags" twin): name a
-        // NEW tag (with the color picker) or toggle existing ones; each shows as a small bookmark on
-        // the session's tab. The PAGE owns the panel (SetTagsHandler -> _OpenTagEditorForElement),
-        // anchored under the right-clicked card / row (`anchor` — WEAK-captured at menu build; the
-        // page guards a recycled/dead element and falls back to a default position). Deferred one tick
-        // like Rename so the closing flyout's focus restore can't fight the panel's name-box focus.
-        //
-        // The anchor capture MUST stay weak — it was the 23 GB leak (the ToolTip leak's sequel, same
-        // class — AgentTipHelpers.h). `anchor` IS this menu's host (the tree row / board card / its ⋯
-        // button), and that host holds this menu strongly via ContextFlyout/Flyout — so a strong
-        // `anchor` capture here closed a host -> flyout -> Click-delegate -> host REFCOUNT CYCLE that
-        // C++/WinRT (pure refcounting, no cycle collector) can never free. Every _Refresh rebuild
-        // (each registry notify + the 30 s backstop, board AND tree, ~N sessions a pass) then leaked
-        // the ENTIRE discarded row/card subtree — TextBlocks + their DWrite layouts, icons, brushes,
-        // this ~14-item menu — at ~85 MB/min on a busy fleet. The row handlers above already state the
-        // rule: never capture an element into a handler its own subtree owns.
-        MenuFlyoutItem tagsItem;
-        tagsItem.Text(L"Tags");
-        tagsItem.Icon(glyphIcon(L"\xE8A4")); // Bookmarks — matches the WT tab menu's Tags item
-        AgentSetTip(tagsItem, L"Bookmark tags for this session \x2014 add a tag (pick its color) or toggle existing ones; each tag shows as a small bookmark ribbon on the session's tab.");
-        const auto anchorWeak = anchor ? winrt::make_weak(anchor) : winrt::weak_ref<winrt::Windows::UI::Xaml::FrameworkElement>{};
-        tagsItem.Click([weak, disp, id, anchorWeak](const IInspectable&, const RoutedEventArgs&) {
-            auto act = [weak, id, anchorWeak]() {
-                if (auto self = weak.get())
-                {
-                    if (self->_tagsHandler)
-                    {
-                        // A dead anchor resolves null — _OpenTagEditorForElement default-positions.
-                        self->_tagsHandler(winrt::hstring{ id }, anchorWeak.get());
-                    }
-                }
-            };
-            if (disp) { disp.TryEnqueue(act); } else { act(); }
-        });
-        menu.Items().Append(tagsItem);
-
-        // Agentmaster (SIDE_PANEL.md §2l "The card's Filter menu"): the HOST's own items right under Tags — the side panel
-        // card's "Filter ▸" submenu, the user's place for it ("Under Tags"). No Agent Manager surface passes any.
-        // Contained like the items under Jump to Tab: a host item that fails to build costs only the host's items —
-        // logged with the throw site (Rule #18) — and the rest of the menu below is still built.
-        if (host.afterTags)
-        {
-            try
-            {
-                host.afterTags(menu);
-            }
-            catch (...)
-            {
-                AgentLogCaughtException(L"session menu: the host's items under Tags");
-            }
-        }
 
         // Copy — a submenu mirroring the per-tab link badge's copy button (DESIGN §9.7 / TAB_OVERLAY.md).
         // Placed directly below Rename (at the user's request). It routes through the SAME shared
@@ -1909,6 +1768,240 @@ namespace winrt::TerminalApp::implementation
         AgentSetTip(showTranscript, kShowTranscriptMenuTip);
         showTranscript.Click([openTranscript](const IInspectable&, const RoutedEventArgs&) { openTranscript(); });
         menu.Items().Append(showTranscript);
+
+        // Agentmaster (2026-11-14): the user's "Add to sidemenu right click menu context: Favorite, Mark Unread, Open In
+        // Explorer", in EVERY session menu (a side panel card, a board card, a tree row) by their pick "Everywhere", and this
+        // whole group in the WT tab menu's order by their pick "The whole group like the tab menu" (Tab.cpp
+        // _CreateContextMenu): Rename, Copy ▸, Show Transcript, Mark Unread, Open In Explorer, the triage move, Favorite, Tags,
+        // then the host's Filter ▸. Each new item is its tab-menu twin's action, in the window that hosts the session's tab
+        // where that matters, and defers one tick like every item of this menu.
+        // Mark Unread — flash this session's tab ring until the user visits that tab, move an at-rest session to
+        // Waiting-for-you, and count it on the taskbar (TerminalPage::_MarkSessionUnread). The ring and the visit belong to
+        // the window that HOSTS the tab, so the page does it there (_MarkSessionUnreadFromMenu: this window, or handed on).
+        MenuFlyoutItem markUnread;
+        markUnread.Text(L"Mark Unread");
+        markUnread.Icon(glyphIcon(L"\xE7C1")); // Flag — the WT tab menu's glyph
+        AgentSetTip(markUnread, L"Flash this session's tab ring until you switch to that tab (in whichever window hosts it); an idle or done session moves to Waiting-for-you");
+        markUnread.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+            auto act = [weak, id]() {
+                // Contained: a dispatcher callback must never let an exception out (Rule #18: logged, the click is lost).
+                try
+                {
+                    if (const auto self = weak.get(); self && self->_markUnreadHandler)
+                    {
+                        self->_markUnreadHandler(winrt::hstring{ id });
+                    }
+                }
+                catch (...)
+                {
+                    AgentLogCaughtException(L"session menu: Mark Unread");
+                }
+            };
+            if (disp) { disp.TryEnqueue(act); } else { act(); }
+        });
+        menu.Items().Append(markUnread);
+
+        // Open In Explorer — the session's EFFECTIVE working folder (the inferred one while it infers, else the launch
+        // folder) in File Explorer, through the SAME shared OpenSessionFolder action the WT tab menu's item and the per-tab
+        // overlay's folder button run (AgentCopyActions.h), so every surface opens the same folder; it reads the registry,
+        // so it works for a session hosted in any window. It changes no tree, but it starts explorer.exe, so it defers too.
+        MenuFlyoutItem openInExplorer;
+        openInExplorer.Text(L"Open In Explorer");
+        openInExplorer.Icon(glyphIcon(L"\xE838")); // FolderOpen — the WT tab menu's glyph
+        AgentSetTip(openInExplorer, L"Open this session's working directory in File Explorer");
+        openInExplorer.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+            auto act = [weak, id]() {
+                // Contained like Mark Unread above (Rule #18).
+                try
+                {
+                    if (const auto self = weak.get(); self && self->_registry)
+                    {
+                        OpenSessionFolder(*self->_registry, id, static_cast<int>(self->_appSettings.tabColorMode));
+                    }
+                }
+                catch (...)
+                {
+                    AgentLogCaughtException(L"session menu: Open In Explorer");
+                }
+            };
+            if (disp) { disp.TryEnqueue(act); } else { act(); }
+        });
+        menu.Items().Append(openInExplorer);
+
+        // Move to Idle/Done — Waiting-for-you AND Error triage. For a Waiting card it is the immediate,
+        // user-driven twin of the timed WaitingForInput -> Idle decay (SessionScanner::_maybeDecayWaiting):
+        // demote this card so it leaves the "Waiting-for-you" column for "Idle / Done". A deliberate state
+        // transition layered on the hook-derived machine (the decay sets the SAME state the SAME way, so it
+        // sticks — the scanner only re-promotes to Waiting/Running on NEW turn activity, never bouncing a
+        // quiescent Idle back). For an ERROR card it is the manual DISMISSAL: Error is level-derived (the
+        // scanner re-asserts it off the unchanged error tail every pass), so the mutator also sets the
+        // errorDismissed ack — the recon-error gate then suppresses the re-derivation until the
+        // conversation actually moves (a retry / a NEW error re-fires normally) — and clears
+        // errorMessage/errorStatus (the "Empty/0 outside Error" invariant).
+        if (state == SessionState::WaitingForInput || state == SessionState::Error)
+        {
+            MenuFlyoutItem moveIdle;
+            moveIdle.Text(L"Move to Idle/Done");
+            moveIdle.Icon(glyphIcon(L"\xE73E")); // CheckMark — "I've handled this; stop waiting on me / stop flagging this error"
+            if (state == SessionState::Error)
+            {
+                AgentSetTip(moveIdle, L"Dismiss this errored card to the Idle / Done column \x2014 acknowledges the error (an API failure, or a turn that a shutdown cut off). It returns to Error if a new error lands.");
+            }
+            else
+            {
+                AgentSetTip(moveIdle, L"Dismiss this \x201CWaiting-for-you\x201D card to the Idle / Done column \x2014 the manual version of the unread-timeout decay. It returns to Waiting-for-you on the session's next turn.");
+            }
+            moveIdle.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+                auto act = [weak, id]() {
+                    auto self = weak.get();
+                    if (!self || !self->_registry)
+                    {
+                        return;
+                    }
+                    // Re-check under the registry lock against the LIVE record: a new turn may have moved
+                    // the state since the menu was built — never demote a session that is now Running.
+                    // Stamp readUnixMs (mark it read) + clear manualUnread so a prior "Mark Unread" can't
+                    // keep it pinned, mirroring the decay's read-gated semantics. An Error card
+                    // additionally records the dismissal ack (so the scanner's level-derived Error can't
+                    // bounce the flip back) and drops the preserved failure reason.
+                    self->_registry->Update(id, [](SessionInfo& s) {
+                        if (s.state == SessionState::WaitingForInput)
+                        {
+                            s.state = SessionState::Idle;
+                            s.manualUnread = false;
+                            s.readUnixMs = NowMs();
+                        }
+                        else if (s.state == SessionState::Error)
+                        {
+                            s.state = SessionState::Idle;
+                            s.manualUnread = false;
+                            s.readUnixMs = NowMs();
+                            s.errorDismissed = true;
+                            s.errorMessage.clear();
+                            s.errorStatus = 0;
+                        }
+                    });
+                };
+                if (disp) { disp.TryEnqueue(act); } else { act(); }
+            });
+            menu.Items().Append(moveIdle);
+        }
+
+        // Move to Waiting-for-you — Idle/Done triage only (the reverse of "Move to Idle/Done"): a PLAIN
+        // promote of a quiescent card back into the "Waiting-for-you" column. EXPLICITLY separate from
+        // "Mark Unread" (the tab strip's sticky/flashy promote) — this sets NO sticky manualUnread and
+        // raises no red-ring flash; it just moves columns. Refresh the decay anchor + leave it unread so it
+        // behaves like a fresh turn-complete (waits the full Waiting-for-you timeout, then decays normally)
+        // instead of instantly decaying off an ancient lastActivity.
+        if (info && (state == SessionState::Idle || state == SessionState::Done))
+        {
+            MenuFlyoutItem moveWaiting;
+            moveWaiting.Text(L"Move to Waiting-for-you");
+            moveWaiting.Icon(glyphIcon(L"\xE823")); // Clock — put it back in the Waiting-for-you column
+            AgentSetTip(moveWaiting, L"Move this card into the \x201CWaiting-for-you\x201D column \x2014 a plain move (no red-ring flash; unlike \x201CMark Unread\x201D it decays normally). It returns to Idle / Done after the unread timeout.");
+            moveWaiting.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+                auto act = [weak, id]() {
+                    auto self = weak.get();
+                    if (!self || !self->_registry)
+                    {
+                        return;
+                    }
+                    // Re-check under the registry lock against the LIVE record: only promote a still-
+                    // quiescent (Idle/Done) card — never bump a session that has since gone Running.
+                    self->_registry->Update(id, [](SessionInfo& s) {
+                        if (s.state == SessionState::Idle || s.state == SessionState::Done)
+                        {
+                            s.state = SessionState::WaitingForInput;
+                            s.manualUnread = false; // plain move (NOT the sticky "Mark Unread")
+                            s.lastActivityUnixMs = NowMs(); // restart the Waiting-for-you window (don't instant-decay)
+                            s.readUnixMs = 0; // unread for this "turn", like a real turn-complete
+                        }
+                    });
+                };
+                if (disp) { disp.TryEnqueue(act); } else { act(); }
+            });
+            menu.Items().Append(moveWaiting);
+        }
+
+        // Favorite / Unfavorite (FAVORITES.md) — flip the session's ★, the durable SessionStore key the Sessions page's ★
+        // column, its Favorite filter and the tab's crown read. The label follows the star as it is NOW (one session-store
+        // read per open, the WT tab menu's own Opening read); the page flips it and repaints the crown in whichever window
+        // hosts the tab (_ToggleSessionFavoriteFromMenu).
+        const bool starred = ::Agentmaster::IsSessionFavorite(id);
+        MenuFlyoutItem favoriteItem;
+        favoriteItem.Text(starred ? L"Unfavorite" : L"Favorite");
+        favoriteItem.Icon(glyphIcon(L"\xE734")); // FavoriteStar — the WT tab menu's glyph
+        AgentSetTip(favoriteItem, L"Star this session so it's easy to find in Sessions (toggle)");
+        favoriteItem.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+            auto act = [weak, id]() {
+                // Contained like Mark Unread above (Rule #18).
+                try
+                {
+                    if (const auto self = weak.get(); self && self->_toggleFavoriteHandler)
+                    {
+                        self->_toggleFavoriteHandler(winrt::hstring{ id });
+                    }
+                }
+                catch (...)
+                {
+                    AgentLogCaughtException(L"session menu: Favorite");
+                }
+            };
+            if (disp) { disp.TryEnqueue(act); } else { act(); }
+        });
+        menu.Items().Append(favoriteItem);
+
+        // Tags — the bookmark-tags panel for this session (the WT tab menu's "Tags" twin): name a
+        // NEW tag (with the color picker) or toggle existing ones; each shows as a small bookmark on
+        // the session's tab. The PAGE owns the panel (SetTagsHandler -> _OpenTagEditorForElement),
+        // anchored under the right-clicked card / row (`anchor` — WEAK-captured at menu build; the
+        // page guards a recycled/dead element and falls back to a default position). Deferred one tick
+        // like Rename so the closing flyout's focus restore can't fight the panel's name-box focus.
+        //
+        // The anchor capture MUST stay weak — it was the 23 GB leak (the ToolTip leak's sequel, same
+        // class — AgentTipHelpers.h). `anchor` IS this menu's host (the tree row / board card / its ⋯
+        // button), and that host holds this menu strongly via ContextFlyout/Flyout — so a strong
+        // `anchor` capture here closed a host -> flyout -> Click-delegate -> host REFCOUNT CYCLE that
+        // C++/WinRT (pure refcounting, no cycle collector) can never free. Every _Refresh rebuild
+        // (each registry notify + the 30 s backstop, board AND tree, ~N sessions a pass) then leaked
+        // the ENTIRE discarded row/card subtree — TextBlocks + their DWrite layouts, icons, brushes,
+        // this ~14-item menu — at ~85 MB/min on a busy fleet. The row handlers above already state the
+        // rule: never capture an element into a handler its own subtree owns.
+        MenuFlyoutItem tagsItem;
+        tagsItem.Text(L"Tags");
+        tagsItem.Icon(glyphIcon(L"\xE8A4")); // Bookmarks — matches the WT tab menu's Tags item
+        AgentSetTip(tagsItem, L"Bookmark tags for this session \x2014 add a tag (pick its color) or toggle existing ones; each tag shows as a small bookmark ribbon on the session's tab.");
+        const auto anchorWeak = anchor ? winrt::make_weak(anchor) : winrt::weak_ref<winrt::Windows::UI::Xaml::FrameworkElement>{};
+        tagsItem.Click([weak, disp, id, anchorWeak](const IInspectable&, const RoutedEventArgs&) {
+            auto act = [weak, id, anchorWeak]() {
+                if (auto self = weak.get())
+                {
+                    if (self->_tagsHandler)
+                    {
+                        // A dead anchor resolves null — _OpenTagEditorForElement default-positions.
+                        self->_tagsHandler(winrt::hstring{ id }, anchorWeak.get());
+                    }
+                }
+            };
+            if (disp) { disp.TryEnqueue(act); } else { act(); }
+        });
+        menu.Items().Append(tagsItem);
+
+        // Agentmaster (SIDE_PANEL.md §2l "The card's Filter menu"): the HOST's own items right under Tags — the side panel
+        // card's "Filter ▸" submenu, the user's place for it ("Under Tags"). No Agent Manager surface passes any.
+        // Contained like the items under Jump to Tab: a host item that fails to build costs only the host's items —
+        // logged with the throw site (Rule #18) — and the rest of the menu below is still built.
+        if (host.afterTags)
+        {
+            try
+            {
+                host.afterTags(menu);
+            }
+            catch (...)
+            {
+                AgentLogCaughtException(L"session menu: the host's items under Tags");
+            }
+        }
 
         // The three WT-tab-menu session ops (mirrored here at the user's request): New Session Here /
         // Restart session / Fork session — kind-aware (a Codex card spawns + forks codex, a Claude card
@@ -2110,7 +2203,48 @@ namespace winrt::TerminalApp::implementation
         // the user's own shell, which is not ours to swap for a dormant connection, and a closed session has no tab.
         if (info && info->live && !info->external)
         {
-            menu.Items().Append(_MakeSessionScopeSubmenu(SessionMenuVerb::Deactivate, id, cwd, dormant, spot));
+            auto deactivateLine = _MakeSessionScopeSubmenu(SessionMenuVerb::Deactivate, id, cwd, dormant, spot);
+            // Agentmaster (2026-11-14 — the user's "Deactivate-> should be clickable and not only open menu. same as deactivate
+            // this tab", in every menu by their pick "Everywhere, tab strip too", parking at once by their pick "Park at
+            // once"): a mouse or pen CLICK on the line itself parks THIS session's tab — the very action of its "Deactivate
+            // Tab" (SessionMenuScope::ThisTab, which the page runs in the window that hosts the tab), deferred one tick like
+            // that item (the page swaps the tab's content: never inside the release's input handler). A running turn is cut
+            // off, as Deactivate Tab cuts it. Not while the session is already dormant (canClick): "Deactivate Tab" is grayed
+            // then, and the line stays a plain submenu. Resting on it, the keyboard and a finger's tap still open the submenu
+            // (AgentMenuHeaderClick.h: a MenuFlyoutSubItem raises no Click).
+            AgentWireSubmenuHeaderClick(
+                deactivateLine,
+                menu,
+                [dormant]() { return !dormant; },
+                [weak, disp, id]() {
+                    auto act = [weak, id]() {
+                        // Contained: a dispatcher callback must never let an exception out (Rule #18: logged, nothing parks).
+                        try
+                        {
+                            if (const auto self = weak.get(); self && self->_sessionMenuScopeHandler)
+                            {
+                                // The click's own line in the trail (the park's own lines follow it): a click on the line and a
+                                // pick of "Deactivate Tab" read apart.
+                                ::Agentmaster::LogNav(L"session menu: the Deactivate line's own click " + ::Agentmaster::ShortId(id));
+                                self->_sessionMenuScopeHandler(winrt::hstring{ id }, SessionMenuVerb::Deactivate, SessionMenuScope::ThisTab);
+                            }
+                        }
+                        catch (...)
+                        {
+                            AgentLogCaughtException(L"session menu: the Deactivate line's click");
+                        }
+                    };
+                    if (disp)
+                    {
+                        disp.TryEnqueue(act);
+                    }
+                    else
+                    {
+                        act();
+                    }
+                },
+                L"session menu: the Deactivate line");
+            menu.Items().Append(deactivateLine);
         }
         // Close ▸ — always offered, as before: closing is the one verb every session menu has.
         menu.Items().Append(_MakeSessionScopeSubmenu(SessionMenuVerb::Close, id, cwd, dormant, spot));
@@ -2135,7 +2269,12 @@ namespace winrt::TerminalApp::implementation
         headerGlyph.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
         headerGlyph.Glyph(close ? L"\xE711" : L"\xE708"); // Close (the X) / QuietHours (the moon) — the WT tab menu's two headers
         sub.Icon(headerGlyph);
-        AgentSetTip(sub, close ? L"Close this session's tab, the tabs around it in the window that hosts it, or every session that shares its folder. Closed sessions stay in Sessions and can be resumed anytime; the conversation on disk is never deleted." : L"Park session tabs in the dormant waiting-for-focus state a freshly reopened window's tabs sit in \x2014 the agent process shuts down, the tab stays where it is, and focusing or activating it resumes the conversation. Nothing asks first.");
+        // The Deactivate line answers a click on itself (2026-11-14; wired by _PopulateSessionMenu through
+        // AgentWireSubmenuHeaderClick) — except for a session that is already dormant, whose "Deactivate Tab" is grayed: the
+        // tip says which, so the line never promises a click that does nothing.
+        AgentSetTip(sub, close           ? L"Close this session's tab, the tabs around it in the window that hosts it, or every session that shares its folder. Closed sessions stay in Sessions and can be resumed anytime; the conversation on disk is never deleted." :
+                         sessionDormant ? L"Park session tabs in the dormant waiting-for-focus state a freshly reopened window's tabs sit in \x2014 the agent process shuts down, the tab stays where it is, and focusing or activating it resumes the conversation. Nothing asks first. (This session is already parked: rest on the line for the other tabs.)" :
+                                          L"Click: park THIS session's tab now (the same as Deactivate Tab; a running turn is cut off). Rest on the line, or press \x2192, for the other tabs: park session tabs in the dormant waiting-for-focus state a freshly reopened window's tabs sit in \x2014 the agent process shuts down, the tab stays where it is, and focusing or activating it resumes the conversation. Nothing asks first.");
 
         // The strip gates of Tab::_EnableMenuItems — a tab on the left, a tab on the right, any other tab must exist —
         // read from the spot. Without one the tab lives in another window (or nowhere yet): nothing is grayed, and the

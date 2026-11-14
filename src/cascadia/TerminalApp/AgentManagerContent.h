@@ -175,6 +175,21 @@ namespace winrt::TerminalApp::implementation
         void SetForkManagedSessionHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (sessionId, model) -> fork a managed session (kind-aware), like the WT tab's "Fork session"; model = the launch-model picker's per-LAUNCH `--model <id>` pick ("" = Default; always "" for Codex — its item is plain)
         void SetRenameHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (sessionId, newTitle) -> rename in the registry + retitle the WT tab (the one title)
         void SetTagsHandler(std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::FrameworkElement)> handler); // Agentmaster (bookmark tags): (sessionId, anchor) -> the page opens its tag editor panel under the clicked board card / tree row (the WT tab menu's "Tags" twin)
+        // Agentmaster (the session menu's "Mark Unread", 2026-11-14 — the user's "Add to sidemenu right click menu context:
+        // Favorite, Mark Unread, Open In Explorer", in every session menu by their pick): install the page's action behind
+        // the item — the WT tab menu's "Mark Unread" for this session: its tab's red ring flashes until the user visits the
+        // tab, an at-rest session moves to Waiting-for-you, and the taskbar counts it. The ring and the visit belong to the
+        // window that HOSTS the tab, so the page acts there (TerminalPage::_MarkSessionUnreadFromMenu: here, or handed on).
+        //   handler — (sessionId), called on the UI thread one dispatcher tick after the click; it must not throw (the
+        //             item's callback logs and drops an escape). Unwired => the item does nothing. Replaces any previous one.
+        // Returns nothing; throws nothing (a std::function move).
+        void SetMarkUnreadHandler(std::function<void(winrt::hstring)> handler);
+        // Agentmaster (the session menu's "Favorite" / "Unfavorite", 2026-11-14, same request): install the page's action
+        // behind the item — flip the session's ★ (the durable SessionStore key the Sessions page's ★ column and the tab
+        // menu's item flip) and repaint the tab's crown in whichever window hosts it (TerminalPage::_ToggleSessionFavoriteFromMenu).
+        //   handler — (sessionId), on the UI thread one tick after the click; must not throw. Unwired => the item does nothing.
+        // Returns nothing; throws nothing (a std::function move).
+        void SetToggleFavoriteHandler(std::function<void(winrt::hstring)> handler);
         // Agentmaster (transcript overlay — AgentTranscriptOverlay.h): the session menu's "Show Transcript"
         // (below "Copy ▸") / "Copy ▸ Transcript ▸ Show" and the EXTERNAL menu's "Show Transcript" open a
         // conversation in the page's window-level reading view. (sessionId, codex, codexRolloutId, title):
@@ -1202,6 +1217,8 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring, winrt::hstring)> _forkManagedSessionHandler; // Agentmaster: Triage Board / Explorer-tree "Fork session" -> kind-aware fork of a managed session (the WT tab menu's fork), opening the fork in the acting window. (sessionId, model) — model "" = Default (the launch-model picker)
         std::function<void(winrt::hstring, winrt::hstring)> _renameHandler; // Agentmaster: Explorer-tree rename -> page (registry title + tab title in lockstep)
         std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::FrameworkElement)> _tagsHandler; // Agentmaster (bookmark tags): board-card / tree-row "Tags" -> page opens the tag editor panel (sessionId, the clicked element as the anchor)
+        std::function<void(winrt::hstring)> _markUnreadHandler; // Agentmaster (2026-11-14): the session menu's "Mark Unread" -> the page marks the session unread in the window hosting its tab (SetMarkUnreadHandler); null until wired — the item then does nothing
+        std::function<void(winrt::hstring)> _toggleFavoriteHandler; // Agentmaster (2026-11-14): the session menu's "Favorite" / "Unfavorite" -> the page flips the session's ★ and repaints its tab's crown wherever it is hosted (SetToggleFavoriteHandler); null until wired — the item then does nothing
         std::function<void(winrt::hstring, bool, winrt::hstring, winrt::hstring)> _showTranscriptHandler; // Agentmaster (transcript overlay): "Show Transcript" / "Transcript ▸ Show" -> page opens the reading view (sessionId, codex, codexRolloutId, title)
         std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::UIElement)> _tagHoverBeginHandler; // Agentmaster (bookmark tags): a card ribbon's pointer-enter -> the page's rich tag hover panel (tag, the ribbon as the anchor)
         std::function<void()> _tagHoverEndHandler; // Agentmaster (bookmark tags): the ribbon's pointer-exit -> cancel/grace-close that panel

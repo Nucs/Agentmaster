@@ -2293,6 +2293,15 @@ namespace winrt::TerminalApp::implementation
         void _RefreshFlashRingBrush(); // Agentmaster: re-point the shared flash-ring brush at the (possibly changed) AppSettings::flashRingColor — mutates its Color in place so every tab sharing it updates live (cog Save / cross-window broadcast)
         void _RefreshOverlayOpacities(); // Agentmaster (TAB_OVERLAY.md): push the (possibly changed) AppSettings::tabOverlayRest/HoverOpacity to every per-tab overlay (linked + observe) so the badge/summary dim<->bright opacities update live (cog Save / cross-window broadcast)
         void _MarkSessionUnread(const std::wstring& sessionId); // Agentmaster (Mark Unread): force the red ring on this session's tab until VISITED — even if it is the focused tab (no active-tab skip); sticky vs automatic state changes; ALSO sets the engine manualUnread + promotes Idle/Done -> WaitingForInput (board state, every window)
+        // Agentmaster (2026-11-14): the session menu's "Mark Unread" (a side panel card, a board card, a tree row — the user's
+        // "Add to sidemenu right click menu context: … Mark Unread", every session menu by their pick). The ring, the visit
+        // that clears it and the taskbar count are the HOSTING window's (_MarkSessionUnread keeps a per-window set and paints
+        // that window's tab), so: this window's _MarkSessionUnread when it hosts the tab; else the engine's session-action
+        // fan-out with "markunread" — the action Telegram's Mark Unread sends —, which only the host acts on
+        // (_RemoteSessionAction); with no tab anywhere (a session closed since the menu opened) nothing is marked.
+        //   sessionId - the session the menu was opened for; "" does nothing.
+        // Never throws (logged; the mark is then lost and the item can be picked again).
+        void _MarkSessionUnreadFromMenu(const std::wstring& sessionId) noexcept;
         void _ClearSessionUnread(const std::wstring& sessionId); // Agentmaster (Mark Unread): clear a manual unread mark + hide the ring if the automatic flash isn't also active (from _VisitTabClearFlash / archive); ALSO clears the engine manualUnread
         void _MarkSessionRead(const std::wstring& sessionId); // Agentmaster (Waiting-for-you "unread" model): stamp readUnixMs=now (quiet) so a past-timeout WaitingForInput card may decay to Idle; from _VisitTabClearFlash (a visit) + _EvaluateAgentFlash (the focused tab of the ACTIVE window) + _OnAgentWindowActivated
         void _PublishAgentUnreadSessions(); // Agentmaster (taskbar unread badge): hand this window's unread set (the union of _flashingSessions and _manualUnreadSessions) to the engine's census when it changed; called after every mutation of either set; UI thread
@@ -3546,6 +3555,16 @@ namespace winrt::TerminalApp::implementation
         void _UnhideSessionFromList(const std::wstring& sessionId); // Sessions-page row right-click "Unhide" (shown on a revealed hidden row): remove from AppSettings.hiddenSessionIds (freshest-disk RMW) + re-render so it returns to the list normally
         void _ResetHiddenSessions(); // Settings cog "Reset hidden sessions" (via SetResetHiddenSessionsHandler): clear AppSettings.hiddenSessionIds (RMW) + re-render so every hidden session reappears
         void _ToggleSessionFavorite(const std::wstring& sessionId); // FAVORITES.md: flip the durable star (SessionStore "favorite" key), update _sessionsFavorites, re-render. Shared by the ★ column click, the row right-click "Favorite"/"Unfavorite", and the session tab's context menu.
+        // Agentmaster (2026-11-14): the session menu's "Favorite" / "Unfavorite" (a side panel card, a board card, a tree row —
+        // the user's "Add to sidemenu right click menu context: Favorite, …", every session menu by their pick). Flips the star
+        // through _ToggleSessionFavorite (the store, this window's Sessions page and — when this window hosts the tab — its
+        // crown), then, when ANOTHER window hosts the tab, asks it to repaint its crown through the engine's session-action
+        // fan-out ("refresh-favorite", the action Telegram's star sends), because the star lives in the session store, which
+        // no window observes (_RefreshTabFavoriteCrown's documented gap). The side panels' Favorite filter follows by itself
+        // (its belt reads the session-facts epoch the store bumps).
+        //   sessionId - the session the menu was opened for; "" does nothing.
+        // Never throws (logged; the star may then be flipped without the other window's crown repainted until its next bind).
+        void _ToggleSessionFavoriteFromMenu(const std::wstring& sessionId) noexcept;
         // Agentmaster: in-place TITLE editing in the Sessions browser (the durable SessionStore title).
         void _BeginSessionsRename(const std::wstring& sessionId); // "Edit Title" / slow-double-click: select the row + swap its Title cell for an in-place editor (the Manager's _OnRenameSession idiom)
         void _CommitSessionsRename(); // commit the editor: persist the trimmed title (durable store + the live rename seam for a known session — Rule #11), update the in-memory rows/index, re-render. Idempotent (a deferred Enter-commit + the LostFocus that follows collapse to one). Blank keeps the old title.
@@ -4047,7 +4066,8 @@ namespace winrt::TerminalApp::implementation
         // then i should get the full working dir opened, i dont have to go to -> items"): it closes `rootMenu` and picks the
         // session's own folder with its subfolders (SidePanelFolderLinePick); resting on it, the keyboard and a finger's
         // tap still open its submenu. ⚠ A MenuFlyoutSubItem has no Click: the line watches its own press and release
-        // (handledEventsToo), and holds `rootMenu` weakly (the menu owns the line).
+        // (handledEventsToo; AgentWireSubmenuHeaderClick, shared with both Deactivate ▸ lines), and holds `rootMenu` weakly
+        // (the menu owns the line).
         //   lines    - the Filter submenu's Items, empty (the caller's Filter line).
         //   id       - the session the lines describe (a card's, or the right-clicked tab's).
         //   from     - which menu: the nav trail's words, the AutomationId stem (SidePanelFilterMenuAutomationStem), and

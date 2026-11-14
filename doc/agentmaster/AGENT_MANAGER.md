@@ -227,10 +227,49 @@ it), `AgentLaunchBar.{h,cpp}` (the launch row), `TabManagement.cpp` (closing tab
 ## The session menu
 
 One menu for a board card, a tree row and a side-panel card (`_MakeLazySessionMenu`, filled in its
-`Opening` by `_PopulateSessionMenu`): Jump to Tab, Rename (F2), Deactivate ▸, Close ▸, Open New Session
-Here ▸ and Fork session ▸ (Default, `Specify…`, the launch models, then the presets), Copy ▸ (Session
-Id, Path, Branch, Current Prompt, Launch CLI, Summary, Transcript ▸ Show + Default / Max / Full / Compact
-/ Minimal; `CopySessionField`), Show Transcript (directly below Copy), Tags.
+`Opening` by `_PopulateSessionMenu`), top to bottom:
+
+```
+ Activate Tab (Shift+Click)      a dormant session hosted in this window only
+ Jump to Tab
+ Pin to Top · Unpin              the side panel card only (SessionMenuHost::afterJumpToTab, SIDE_PANEL.md §2j)
+ ─────────────
+ Rename (F2)
+ Copy                         ›  Session Id, Path, Branch, Current Prompt, Launch CLI, Summary, Transcript ▸
+ Show Transcript
+ Mark Unread                     2026-11-14
+ Open In Explorer                2026-11-14
+ Move to Idle/Done · Move to Waiting-for-you   by state
+ Favorite · Unfavorite           2026-11-14
+ Tags
+ Filter                       ›  the side panel card only (SessionMenuHost::afterTags, SIDE_PANEL.md §2l)
+ ─────────────
+ Open New Session Here        ›  Default, Specify…, the launch models, then the presets
+ Restart session
+ Fork session                 ›
+ ─────────────
+ Deactivate                   ›  a CLICK on the line parks this session's tab (2026-11-14)
+ Close                        ›
+```
+
+- **The tab menu's order** (the user's request and picks of 2026-11-14: "Add to sidemenu right click menu context:
+  Favorite, Mark Unread, Open In Explorer", in every session menu — "Everywhere, tab strip too" —, "The whole group
+  like the tab menu"): the middle group reads as the WT tab menu's (`Tab::_CreateContextMenu`: Rename Tab, Copy ▸,
+  Show Transcript, Mark Unread, Open In Explorer, the triage move, Favorite, Tags, Filter ▸). Until then the triage
+  move sat right under Jump to Tab (and the host's Pin to Top), and the group read Rename, Tags, Filter ▸, Copy ▸, Show
+  Transcript.
+- **Mark Unread** (the tab menu's twin, `_MarkSessionUnread`: the tab's red ring flashes until the tab is visited, an
+  at-rest session moves to Waiting-for-you, the taskbar counts it): run by the page in the window that HOSTS the tab
+  (`SetMarkUnreadHandler` → `_MarkSessionUnreadFromMenu`: here, else the session-action fan-out with `markunread`,
+  the action Telegram's Mark Unread sends; nothing for a session with no open tab). Logged `[nav] mark-unread <sid8>`
+  (+ `-> handed to the window that hosts its tab`).
+- **Open In Explorer** (the tab menu's twin): the session's effective folder in File Explorer through the shared
+  `OpenSessionFolder` (`AgentCopyActions.h`), run by the content itself (it reads the registry: any window's session).
+- **Favorite / Unfavorite** (the tab menu's twin, FAVORITES.md): the label follows the star at the open
+  (`IsSessionFavorite`); the click flips it (`SetToggleFavoriteHandler` → `_ToggleSessionFavoriteFromMenu` →
+  `_ToggleSessionFavorite`) and, when another window hosts the tab, asks that window to repaint its crown (the
+  fan-out's `refresh-favorite`). Logged `[nav] favorite <sid8> on|off`.
+- **Deactivate's own click:** see *Deactivating sessions* below.
 
 - A board-invoked Rename first makes the tree row renderable (un-collapses its folder, widens a LOCAL
   scope to GLOBAL for a session hosted elsewhere): the in-place editor lives in the tree.
@@ -293,6 +332,19 @@ Id, Path, Branch, Current Prompt, Launch CLI, Summary, Transcript ▸ Show + Def
 **Deactivate ▸** (moon glyph `\xE708`, directly above Close ▸ in the tab menu, `Tab::_AppendDeactivateMenuItems`,
 and in the session menu) parks managed tabs: claude is shut down, the tab keeps its place, title, color,
 tags, queue and runner mode, and the conversation resumes when the tab is entered or activated.
+
+- **The line's own click** (2026-11-14, NOT BUILT; the user's "Deactivate-> should be clickable and not only open
+  menu. same as deactivate this tab", their picks "Everywhere, tab strip too" and "Park at once"): a mouse or pen click
+  on **Deactivate** itself — in the tab menu and in every session menu — parks THAT tab, exactly as its **Deactivate
+  Tab** does (`kDeactivateScopeThisTab`; the session menu's goes through `_RunSessionMenuScope`, so another window's
+  tab is parked by its host). Nothing asks first, and a running turn is cut off, as with Deactivate Tab. A dormant
+  session's line does nothing on a click (its Deactivate Tab is grayed): it stays a plain submenu. Resting on the line,
+  the keyboard (Enter, Space, →) and a finger's tap still open the submenu. ⚠ A `MenuFlyoutSubItem` raises no Click:
+  `AgentWireSubmenuHeaderClick` (`AgentMenuHeaderClick.h`, also behind the Filter menu's Folder line) arms on the
+  line's own left press and clicks on the release over it (handledEventsToo), hides the menu, and the park runs one
+  dispatcher tick later (it swaps the tab's content). Logs: the session menu's `[nav] session menu: the Deactivate
+  line's own click <sid8>`, then the park's own lines; a failure `[exc] session menu: the Deactivate line…` / `tab
+  menu: the Deactivate line…`.
 
 - **Scopes:** each item raises `Tab::DeactivateTabsRequested` with a `Tab::kDeactivateScope*` code;
   `TerminalPage::_DeactivateTabsFromMenu` picks the tabs (an unknown code parks nothing and is logged).
