@@ -17,6 +17,9 @@ ItemStatus says what its header shows: the state word first ("running", "waiting
 classified shell), then "not started", "unread", "unsent draft", "favorite", "cache warm", "selected on the Agent
 Manager page" (the Linked-Lenses pill, MGR-05) and "tags: a, b", joined by "; " (`Tab.facets`). On 0.8.0 both are
 empty, and every reader here returns "" / [] / False / None for them.
+
+The strip's "+" (a build of 2026-11-14 or later, TAB_STRIP.md "The + button: the launcher") is `#am.strip.new` and opens
+the launcher card — the side panel's + card, under "+" (`open_launcher`; the card's driver is sidepanel.LauncherCard).
 """
 from __future__ import annotations
 
@@ -250,6 +253,37 @@ class TabStrip:
             It, or None (the Agent Manager page shows).
         """
         return next((t for t in self.items() if t.selected), None)
+
+    # ---- the strip's + (TAB_STRIP.md "The + button: the launcher"; a build of 2026-11-14 or later) ----------------------
+
+    def new_tab_button(self) -> uia.Element:
+        """The strip's "+" — Windows Terminal's split button, its ▾ part sized to nothing, `#am.strip.new`.
+
+        Returns:
+            The element.
+        Raises:
+            LookupError: When the strip has no such button (a build older than the launcher, or no tab row).
+        """
+        el = self.element().find(aid="am.strip.new", max_depth=4)
+        if el is None:
+            raise LookupError("no #am.strip.new in the tab strip (a build before the launcher?)")
+        return el
+
+    def open_launcher(self):
+        """Click the strip's "+" and return the launcher card it opens (the side panel's + card, opened under "+").
+
+        Returns:
+            The LauncherCard (amdriver.ui.sidepanel).
+        Raises:
+            WaitTimeout: When no card opened.
+            LookupError: When the strip has no "+".
+        """
+        from .sidepanel import LauncherCard  # the same card the side panel's + opens
+        self.window.focus()
+        self.new_tab_button().click()
+        card = LauncherCard(self.window)
+        wait_until(card.is_open, 5.0, what="the launcher card under the strip's +")
+        return card
 
     def wait_tab(self, title: str, timeout_s: float = 20.0) -> Tab:
         """Wait for a tab to exist.

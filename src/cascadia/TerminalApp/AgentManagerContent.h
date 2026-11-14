@@ -15,6 +15,7 @@
 #include "BasicPaneEvents.h"
 #include "AgentMaster/SessionModels.h"
 #include "AgentMaster/LaunchPresets.h" // Agentmaster (PRESETS, HARNESSES.md): LaunchPresetsConfig — the Presets tab's by-value draft
+#include "AgentMaster/LauncherRules.h" // Agentmaster (the launch row's kind chip): LaunchShellChoice — the shells provider's element type (pure, std-only)
 #include "AgentMaster/MessagingFileLinks.h" // Agentmaster (MESSAGING.md §21.32.4): FileLinkLanAddress — the cog's FILE LINKS dropdown (pure, no Windows header)
 #include "AgentLocalTooltip.h" // Agentmaster (LocalTooltip): the cog's designated-area tooltip panel (left-outside the card)
 
@@ -217,6 +218,18 @@ namespace winrt::TerminalApp::implementation
         // rollout [safe while the original is live]; fork=false => `codex resume` the same); adopt=false
         // launches a fresh managed Codex in cwd (fork ignored). Routes to _AdoptExternalCodex / _SpawnCodexSession.
         void SetCodexLaunchHandler(std::function<void(uint32_t, winrt::hstring, bool, bool)> handler);
+        // Agentmaster (the launch row's KIND CHIP, AGENT_MANAGER.md "The launch row" — the user's picks of 2026-11-14, "Chip opens
+        // a menu" on all launchers): the three things the chip's SHELL section needs from the page. Each may be left unset:
+        // without the handler the chip offers no shells at all (Claude and Codex only).
+        //   - the handler opens the picked Windows Terminal profile (dir, profileGuid, profileName) as a new tab in that folder
+        //     ("" = the profile's own starting directory) — the page's _LauncherSpawnShell;
+        //   - the provider lists the shells, Windows Terminal's new-tab menu flattened (TerminalPage::_LauncherShellChoices),
+        //     read at every open of the chip's menu;
+        //   - the factory makes a profile's icon element from its icon source (TerminalPage::_CreateNewTabFlyoutIcon).
+        // All three run on the UI thread from the chip's menu or Launch; each must not throw (the bar logs a throw).
+        void SetShellLaunchHandler(std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> handler);
+        void SetShellChoicesProvider(std::function<std::vector<::Agentmaster::LaunchShellChoice>()> provider);
+        void SetLaunchIconFactory(std::function<winrt::Windows::UI::Xaml::Controls::IconElement(const std::wstring&)> factory);
         // Agentmaster: the set of session ids hosted in THIS window (the page's _claudeTabs).
         // Used by the Explorer Tree's LOCAL scope to show only this window's sessions; GLOBAL
         // ignores it and shows every window's sessions (the whole process-wide registry).
@@ -459,6 +472,11 @@ namespace winrt::TerminalApp::implementation
         //   text   — the card's box text (a folder or a session id).
         //   throws — what a XAML property write throws on the UI thread (the page's callers are contained).
         void SetLaunchBoxText(const std::wstring& text);
+        // Agentmaster (the launcher panel's footer, TAB_STRIP.md "The + button: the launcher"): open the settings cog's overlay
+        // exactly as a click on ⚙ does (_ShowSettings: every control filled from the current settings, then shown). The
+        // caller shows the Agent Manager page first — the overlay lives on it. A no-op before the overlay is built. UI thread.
+        //   throws — what the overlay's XAML writes throw (the page's caller is contained).
+        void ShowSettingsOverlay();
         // Agentmaster (SIDE PANEL "+" launcher): this window's recent-folders list — the ONE list the Manager's launch bar
         // reads and pushes to. The side panel's bar is built with the same pointer, so a folder launched from either is
         // at the top of both drop-downs and neither save can drop the other's push. Never null after construction.
@@ -1224,6 +1242,9 @@ namespace winrt::TerminalApp::implementation
         std::function<void()> _tagHoverEndHandler; // Agentmaster (bookmark tags): the ribbon's pointer-exit -> cancel/grace-close that panel
         std::function<void(uint32_t, winrt::hstring, bool)> _adoptExternalHandler; // Agentmaster: EXTERNAL-tree Adopt (pid, cwd, fork) -> page forks/resumes the external's conversation into a managed tab
         std::function<void(uint32_t, winrt::hstring, bool, bool)> _codexLaunchHandler; // Agentmaster (Codex-launch): EXTERNAL-codex (pid, cwd, adopt, fork): Adopt (adopt=true; fork picks fork/resume) / Open-New-Codex (adopt=false)
+        std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _shellLaunchHandler; // Agentmaster (the launch row's kind chip): open a Windows Terminal profile (dir, profileGuid, profileName) as a new tab — SetShellLaunchHandler; null = the chip offers no shells
+        std::function<std::vector<::Agentmaster::LaunchShellChoice>()> _shellChoicesProvider; // Agentmaster (the kind chip): Windows Terminal's new-tab menu, flattened — read at every open of the chip's menu (SetShellChoicesProvider)
+        std::function<winrt::Windows::UI::Xaml::Controls::IconElement(const std::wstring&)> _launchIconFactory; // Agentmaster (the kind chip): a profile's icon element from its icon source (SetLaunchIconFactory)
         std::function<std::unordered_set<std::wstring>()> _localScopeProvider; // Agentmaster: this window's hosted session ids (for the Explorer Tree LOCAL scope)
         std::function<std::wstring(const std::wstring&)> _liveDraftProvider; // Agentmaster (PENDING_INPUT.md §8): read a session's unsent input-box draft from its LIVE buffer for "Copy Current Prompt" ("" when the tab isn't hosted/readable here — the remembered draft then wins)
         std::function<bool()> _windowForegroundProvider; // Agentmaster (focus-steal fix): is this Manager's window the OS foreground window? Gates _Refresh's focus-restore so a background rebuild can't steal foreground.

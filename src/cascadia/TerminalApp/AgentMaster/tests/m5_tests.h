@@ -319,6 +319,11 @@ void TestSidePanelFilters();
 // beside the button keep it away until the pointer has left; a press on the button; a finger's taps; the watch that only
 // hides; the after-collapse linger), all 288 input combinations against a second statement of it (tests_sidepanel.cpp)
 void TestSidePanelStripReveal();
+// LauncherRules.h (TAB_STRIP.md "The + button: the launcher", SIDE_PANEL.md §2e, AGENT_MANAGER.md "The launch row"): the
+// launcher's persisted kind token both ways (damaged / future values read Claude), the GUID compare, the new-tab menu
+// lookups (a folder searched, the default first), a remembered pick checked against what the host offers now, which card
+// rows show, the folder a + opens on (the focused tab's) and the Launch button's words per kind (tests_sidepanel.cpp)
+void TestLauncherRules();
 // tests_presets.cpp — HARNESSES.md, PRESETS (LaunchPresets.h, the pure core): the list starts EMPTY (no template is added
 // by itself) and an empty list offers "Add presets…" with help text naming the way to the Presets tab (a list of hidden
 // presets does not); one click adds a template as a linked, visible "p-" preset and "Add all tested" adds the five tested

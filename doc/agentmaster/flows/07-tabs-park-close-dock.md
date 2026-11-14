@@ -364,6 +364,51 @@ start answers by itself, as remembered. A lone window always comes back without 
 
 ---
 
+### TAB-12 · The strip's + opens the launcher
+
+> **Since** NOT BUILT (2026-11-14) · **P0** · **Needs** F-S, mock, keys · **Spec** TAB_STRIP.md *The + button: the
+> launcher*, *The scroll arrows*; SIDE_PANEL.md §2e; `AgentMaster/LauncherRules.h`
+
+**Promise.** The tab strip's `+` (alone: the ▾ beside it is gone) opens Agentmaster's launcher card under itself — the
+side panel's `+` card: the kind chip (Claude, Codex, every Windows Terminal profile), the box on the FOCUSED TAB's folder,
+the MODEL / PRESET pills for a new Claude session (Default lit), Launch, a footer. "+, Enter" starts a Claude session in
+the focused tab's folder; Ctrl+Shift+T opens the card too; a shell picked on the chip opens as a new tab; the pick is
+remembered. Alt / Shift / Ctrl + click keep Windows Terminal's `+`. The `<` / `>` scroll arrows sit level with `+`.
+
+**Phases**
+1. **Open.** *Do:* F-S (t1 focused); click `+`. *Expect:* no new tab; a card whose top edge is under `+`, extending
+   toward the window's center: `● Claude ⌄ [ <t1's folder> ] [Launch Claude]`, MODEL pills with Default lit, PRESET pills
+   (or "Add presets…"), the footer; the caret in the box; the folder list open UNDER THE CARD. *Check:* [UIA]
+   `#am.strip.new`, `#am.launcher.kind` "What to launch: Claude", `#am.launcher.model.default` ItemStatus "selected";
+   [LOG] `[nav] tab strip launcher open (+ click) kind=claude`.
+2. **Esc.** *Do:* Esc, Esc. *Expect:* the list closes, then the card. *Check:* t1 got no ESC.
+3. **+, Enter.** *Do:* click `+`; Enter. *Expect:* one new Claude session in t1's folder, its tab in front, the card
+   closed. *Check:* [ENG] exactly one new session, `workingDir` = t1's folder; t1 got no CR.
+4. **Keys.** *Do:* Ctrl+Shift+T. *Expect:* the card under `+`, no new tab. A click on `+` closes it. *Check:* [LOG]
+   `[nav] tab strip launcher open (keys) …`.
+5. **A shell.** *Do:* click `+`; click the kind chip; pick **Windows PowerShell**. *Expect:* the chip reads the profile
+   (its icon and name), the pills are gone, Launch reads **Open Windows PowerShell**; Enter opens a Windows PowerShell tab
+   in the box's folder. *Check:* [LOG] `[launchbar] kind picked: profile:{…} (Windows PowerShell)`, `[nav] launcher shell
+   end (launcher card): Windows PowerShell`.
+6. **Remembered.** *Do:* select t1; click `+`. *Expect:* the chip still names Windows PowerShell (any window: `settings.json`
+   `launcherKind` = `profile:{…}`); pick **Claude** → the pills come back, Default lit, Launch reads "Launch Claude".
+7. **Windows Terminal's +.** *Do:* Alt+click `+`; Shift+click `+`. *Expect:* the focused pane split with the default
+   profile; a new window — no card.
+8. **The scroll arrows.** *Do:* open enough tabs for the strip to scroll (or set Tabs & Overlay → min height 44). *Expect:*
+   `<` and `>` centred on the row, level with `+`. *Check:* [LOG] `[strip] scroll arrows centred on the tab row (level with
+   +)`; [UIA] the three buttons' vertical centers within 1 px.
+
+**Edge cases**
+- **E1 A folder dropped on +** → the card opens with that folder in its box (Alt / Shift / Ctrl + drop keep Windows
+  Terminal's drop).
+- **E2 The card open at the side panel's +** → a click on the strip's `+` moves it under `+` (the press closes it there).
+- **E3 Over the Agent Manager page** → `+` opens the card on the Manager box's folder; a Claude launch stays behind the
+  page and is selected there (MGR-07); a shell opens in front.
+- **E4 A remembered profile deleted in Windows Terminal** → the card opens on Claude.
+- **E5 Alt+Down / F4 on the focused +** → the card, never Windows Terminal's profile menu.
+
+---
+
 ## Known defects (expected failures until fixed)
 
 ### TAB-K1 · A close can save the window's Claude tabs as plain shell tabs — FIXED in code 2026-10-23 (NOT BUILT into a release)

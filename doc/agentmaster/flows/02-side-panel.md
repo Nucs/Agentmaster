@@ -217,11 +217,17 @@ switch closes it; no keystroke leaks into the terminal.
    *Check:* the terminal received no ESC (Claude did not interrupt / no stray input).
 4. **Launch.** *Do:* + again, pick a recent folder, click **Launch Claude** once. *Expect:* one new session
    (a tab), the card closes. *Check:* [ENG] exactly one new session.
-5. **One click with the presets menu open** (SP-K1's fix, 2026-10-23). *Do:* + over a tab, type a folder, rest on
-   **Launch Claude** until its presets menu shows, click ONCE. *Expect:* one new session in front, the card closed.
-   *Check:* [LOG] `[launchbar] Launch clicked while its hover menu was up: …` (`its release on Launch completed the
-   click` or `the release watch completed the click`); no `a second Launch click … was ignored`. Over the PAGE the
-   launch stays behind it (MGR-07 phase 5).
+5. **One click, no hover menu** (the launcher panel, 2026-11-14 — TAB-12; SP-K1's fix of the old hover menu before).
+   *Do:* + over a tab, type a folder, rest on **Launch Claude**, click ONCE. *Expect:* no menu opens (the models and
+   presets are the card's pills, Default lit); one new session in front, the card closed. *Check:* no `a second Launch
+   click … was ignored`. Over the PAGE the launch stays behind it (MGR-07 phase 5). The Agent Manager row's Launch keeps
+   its hover menu and SP-K1's one-click completion.
+
+> **Since 2026-11-14 (TAB-12, NOT BUILT yet) this card is the LAUNCHER PANEL** (TAB_STRIP.md *The + button: the
+> launcher*): phase 1's `● Claude` is the kind chip "What to launch: Claude" (Claude, Codex, the Windows Terminal
+> profiles), the box opens on the FOCUSED TAB's folder (the Agent Manager box's text is the fallback), the MODEL / PRESET
+> pills and a footer sit under the row, and the folder list hangs under the whole card. E3 changed: Enter in the box
+> LAUNCHES.
 
 **Edge cases**
 - **E1 A session id typed** in the box (found on disk) → green underline, **Resume session** + **Fork**.
@@ -229,10 +235,10 @@ switch closes it; no keystroke leaks into the terminal.
   double-click); a double-click launches once. (On 0.8.0 the + card needed two clicks: SP-K1, phase 5.)
 - **E2b The + card over the Agent Manager page** → the launch keeps the page and selects the new session there
   (MGR-07 phase 5); over a tab it opens in front.
-- **E3 Enter** → in the BOX it only commits the path (the folder list closes, nothing launches — the Agent
-  Manager page's Enter); on the focused **Launch** button it launches, on the KEY-UP, so no CR reaches the terminal
-  (`TerminalPage.AgentSidePanel.cpp`, the card's PreviewKeyDown/Up). Corrected 2026-10-23 by the e2e suite: this
-  line first said Enter in the box launches.
+- **E3 Enter** → in the BOX it LAUNCHES what is lit (since the launcher panel, 2026-11-14; while Launch is disabled — a
+  red box — it only commits the path, the Agent Manager page's Enter), and so does Enter on the focused **Launch**
+  button; both on the KEY-UP, so no CR reaches the terminal (`TerminalPage.AgentSidePanel.cpp`, the card's
+  PreviewKeyDown/Up). From 2026-10-23 to 2026-11-14 Enter in the box only committed the path.
 - **E4 Card near the window's right/bottom edge** → opens leftward/upward.
 - **E5 Window resized while open** → re-placed on the next tick; the list re-anchors.
 - **E6 A tab switch / collapse / dock flip** → closes the card.
@@ -737,7 +743,9 @@ it drops the filter. Branch and fork family are filters of their own, with a chi
 
 ### SP-K1 · In the + card, Launch needs a second click while its presets menu is open — FIXED in code 2026-10-23 (NOT BUILT into a release)
 > **P1** · Found by the e2e suite on 2026-10-23 against 0.8.0 (its known-defect test, replaced by
-> `e2e/suites/test_side_panel.py::test_plus_card_launch_takes_one_click_with_its_menu_open`, SP-05 phase 5).
+> `e2e/suites/test_side_panel.py::test_plus_card_launch_takes_one_click_with_its_menu_open`, SP-05 phase 5; since the
+> launcher panel of 2026-11-14 the card's Launch has NO hover menu, and that test became
+> `test_plus_card_launch_has_no_hover_menu_and_takes_one_click` — the fix still serves the Agent Manager row's Launch).
 > **The fix** (`AgentLaunchBar`, the bar both hosts share): the press that closes the menu is also recognized from the
 > pointer MESSAGE being processed (`GetPointerInfo` — a busy UI thread may process the press after the physical
 > release), and a release WATCH completes an armed press whose release never reached Launch: it polls the physical

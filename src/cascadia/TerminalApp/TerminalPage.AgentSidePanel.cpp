@@ -80,6 +80,8 @@
 #include "pch.h"
 #include "TerminalPage.h"
 
+#include "../../types/inc/utils.hpp" // IsValidDirectory / GuidToPlainString / GuidToString — the launcher's focused-tab folder and its shells' GUIDs (TAB_STRIP.md "The + button: the launcher")
+
 #include "AgentManagerContent.h" // CycleBoardSort / BuildSessionMenuFor / SelectSession (the Linked-Lenses delegation targets) + LaunchBoxText / SetLaunchBoxText / LaunchRecentDirs (the "+" launcher mirrors its box)
 #include "AgentLaunchBar.h" // the "+" launcher card's launch row — the Agent Manager's own launch bar, Claude only (SIDE_PANEL.md §2e)
 #include "AgentModelMenu.h" // AgentFillModelPickItems — the AI search's closed-result menu: Fork here ▸ / Open New Session Here ▸ (SIDE_PANEL.md §2h)
@@ -99,6 +101,7 @@
 #include "AgentMaster/PointerCardPlacement.h" // PlacePointerCard — the "+" launcher card opens at the click, toward the window's center (SIDE_PANEL.md §2e)
 #include "AgentMaster/Persistence.h" // Load/SaveAppSettings + EffectiveWorkingDir / ResolveSessionColorHex + LoadDirColorIndex (one color snapshot per list update)
 #include "AgentMaster/ProcessInspect.h" // ExternalClaudeRow (the Internal.h MakeSortKey overload's parameter type)
+#include "AgentMaster/ProcessObserver.h" // Activity() — the folder the Fleet Observer read for a shell tab: where the launcher opens over it (TAB_STRIP.md "The + button: the launcher")
 #include "AgentMaster/ProfileBootstrap.h" // (Internal.h convention — harmless here, keeps the include set board-identical)
 #include "AgentMaster/SessionRegistry.h" // SnapshotLiveForCards / Get
 #include "AgentMaster/SessionSearch.h" // ParseSessionQuery / MatchesQueryText / MatchesPathQuery — the Sessions grammar, reused
@@ -1354,6 +1357,14 @@ namespace
     // A measure bound large enough to read an element's natural (content) size — the _ReflowLaunchBar idiom: NoWrap
     // text and buttons treat it like infinity.
     constexpr float kSidePanelLaunchMeasureBound = 100000.0f;
+    // THE LAUNCHER PANEL (TAB_STRIP.md "The + button: the launcher"): the gap between the panel's lines (the row, MODEL,
+    // PRESET, the footer) and the width of the MODEL / PRESET captions' column — wide enough for "PRESET" at 10.5 px with
+    // its letter spacing, so the pills of both rows start on one line.
+    constexpr double kLauncherRowGapPx = 8.0;
+    constexpr double kLauncherLabelColumnPx = 58.0;
+    // A pill's margin on top of the wrap panel's own 4 / 3 DIP gaps: 6 DIPs between pills and lines in all.
+    constexpr double kLauncherPillGapRightPx = 2.0;
+    constexpr double kLauncherPillGapBottomPx = 3.0;
 
     // The COM identity of `o` (its IUnknown pointer), or null for a null object: two references to one element compare
     // equal by it whatever interface they hold. Read once per element, so a walk that compares an ancestor chain with
@@ -2022,7 +2033,7 @@ namespace winrt::TerminalApp::implementation
         _sidePanelLaunchBtn.Content(SidePanelIconButtonFace(kSidePanelAddGlyph));
         // A screen reader would otherwise have no words for the icon (a private-use glyph): name the button for what it does.
         winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(_sidePanelLaunchBtn, winrt::hstring{ L"Launch a session" });
-        AgentSetTitledTip(_sidePanelLaunchBtn, L"Launch a session", winrt::hstring{ L"Open the launcher at the click: the Agent Manager's own launch box \x2014 a working directory (recent and matching folders as you type, Browse\x2026) or a session id to resume or fork \x2014 and Launch Claude (hover it for a model or a preset).\nIt shows the same text as the Agent Manager's box. Click outside it, press Esc, or click + again to close it." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        AgentSetTitledTip(_sidePanelLaunchBtn, L"Launch a session", winrt::hstring{ L"Open the launcher at the click \x2014 the same one the tab strip's + opens: what to start (Claude, Codex or any Windows Terminal shell), the folder (the focused tab's; recent and matching folders as you type, Browse\x2026) or a session id to resume or fork, and for Claude the model or preset. Enter launches.\nClick outside it, press Esc, or click + again to close it." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
         // The PRESS point, in Root() coordinates: the card's corner sits where the user clicked. Read on the press, not
         // in Click: a Click carries no position, and the Button raises it from its own release handling, before an
         // instance PointerReleased handler would run. handledEventsToo, because the Button marks its presses handled.
@@ -6399,7 +6410,8 @@ namespace winrt::TerminalApp::implementation
         // The "+" launcher card (SIDE_PANEL.md §2e) stays open across a settings broadcast — the user may be typing in
         // it while another window saves — unless the broadcast MOVED the dock: its "+" button then sits on the other
         // side of the window, away from the card it opened.
-        if (_SidePanelLaunchCardOpen() && _sidePanelLaunchCardDockLeft != _appSettings.sidePanelOnLeft)
+        // A card the TAB STRIP's "+" opened is not the side panel's: a dock move leaves its "+" where it was.
+        if (_SidePanelLaunchCardOpen() && !_launcherFromTabStrip && _sidePanelLaunchCardDockLeft != _appSettings.sidePanelOnLeft)
         {
             _SidePanelCloseLaunchCard(L"dock moved by a settings change");
         }
@@ -6439,15 +6451,18 @@ namespace winrt::TerminalApp::implementation
     // ======================================================================================
     // WHAT: a click on "+" opens a CARD at the click point — its corner at the cursor, extending toward the window's
     // center (AgentMaster/PointerCardPlacement.h), the user's tooltip-like rule — holding the Agent Manager's own
-    // launch row: [● Claude] [ box ] [Launch Claude] [Fork]. The row IS the Manager's code (the shared AgentLaunchBar,
+    // launch row: [kind ⌄] [ box ] [Launch Claude] [Fork]. The row IS the Manager's code (the shared AgentLaunchBar,
     // moved out of AgentManagerContent.Launch.cpp verbatim): the same box, validation underline, path-picker drop-down
-    // (Browse…, RECENT, GIT WORKTREES, MATCHES / SUBFOLDERS), Launch hover menu (models, Specify…, presets) and the
-    // same launch / resume / fork / "Create & Launch" — reaching the very page seams the Manager's handlers call. Two
-    // differences, both the user's: no "launch a" / "session in" words, and Claude only (a fixed "● Claude" chip;
-    // Codex launches from here are planned).
-    // THE BOX IS THE MANAGER'S: the card opens on the Manager box's text, mirrors every edit into it live, and writes
-    // its last text back when it closes — so the two boxes always read the same ("keep the last, same one we have in
-    // agent manager tab"). Both bars push into ONE recent-folders list (AgentManagerContent::LaunchRecentDirs).
+    // (Browse…, RECENT, GIT WORKTREES, MATCHES / SUBFOLDERS) and the same launch / resume / fork / "Create & Launch" —
+    // reaching the very page seams the Manager's handlers call. No "launch a" / "session in" words (the user's).
+    // SINCE 2026-11-14 IT IS THE LAUNCHER PANEL (the block "THE LAUNCHER PANEL" below has the user's picks): the tab
+    // strip's "+" opens this same card under itself; the agent element is the KIND CHIP (Claude, Codex, every Windows
+    // Terminal profile — it was a fixed "● Claude" chip, Codex "planned"); the models and presets are pills of the card
+    // (Launch has no hover menu here); a footer reaches Sessions and the settings; Enter in the box launches.
+    // THE BOX: it opens on the FOCUSED TAB's folder (the user's pick of 2026-11-14; the Agent Manager box's text is the
+    // fallback — it was the rule before, "keep the last, same one we have in agent manager tab"), mirrors every edit into
+    // the Agent Manager's box live, and writes its last text back when it closes, so the two boxes still read the same.
+    // Both bars push into ONE recent-folders list (AgentManagerContent::LaunchRecentDirs).
     // THE FOLDER LIST OPENS WITH THE CARD (the user's rule, 2026-10-19): right under the box, once a layout pass has put
     // the card at its place (_SidePanelFinishLaunchCardOpen) — never at the card's previous place, over the box and
     // Launch (the 2026-10-12 report). Esc closes the list first, a second Esc the card.
@@ -6476,10 +6491,16 @@ namespace winrt::TerminalApp::implementation
         _sidePanelLaunchAnchorFromPress = false;
         if (_SidePanelLaunchCardOpen())
         {
-            // The "+" press itself is exempt from the outside-press close (_SidePanelLaunchPressIsInside), so a click on
-            // "+" with the card open lands here: a toggle, like a second click on any button that opened a pane.
-            _SidePanelCloseLaunchCard(L"+ again");
-            return;
+            if (!_launcherFromTabStrip)
+            {
+                // The "+" press itself is exempt from the outside-press close (_SidePanelLaunchPressIsInside), so a click on
+                // "+" with the card open lands here: a toggle, like a second click on any button that opened a pane.
+                _SidePanelCloseLaunchCard(L"+ again");
+                return;
+            }
+            // The card is open under the TAB STRIP's "+" (a click from UI Automation, which has no press to close it first):
+            // move it here — close it there, open it at this "+".
+            _SidePanelCloseLaunchCard(L"reopened at the side panel's +");
         }
         _SidePanelOpenLaunchCard(fromPress);
     }
@@ -6513,9 +6534,14 @@ namespace winrt::TerminalApp::implementation
             // ButtonBackground* brushes resolve to null, and Launch / Fork would be hit-testable only on their text.
             AgentLaunchBar::SeedButtonStateBrushes(card.Resources());
 
-            // The launch bar: the Agent Manager's launch code, hosted Claude-only.
+            // The launch bar: the Agent Manager's launch code. Since the user's picks of 2026-11-14 ("Chip opens a menu" on all
+            // launchers; "One + panel, no ▾") it is no longer Claude-only: its agent element is the KIND CHIP (Claude, Codex,
+            // every Windows Terminal profile), and the models and presets are this card's own pills (below), not Launch's
+            // hover menu. The tab strip's "+" opens this same card (TAB_STRIP.md "The + button: the launcher").
             AgentLaunchBarHost host;
-            host.codexToggle = false; // Claude only (the user's call): the "● Claude" chip, no Codex mode, no spawnCodex
+            host.codexToggle = false; // the old two-way toggle is not this card's: the kind chip below replaces the fixed "● Claude" chip
+            host.kindMenu = true;
+            host.hoverModelMenu = false; // the MODEL / PRESET pills show every choice; a hover menu over Launch would repeat them
             // ONE recent-folders list per window — the Manager's — so a folder launched from either bar tops both
             // drop-downs. Without a Manager (the page builds it at first layout, before the side panel, so this is a
             // belt), a private list read from disk keeps the drop-down's RECENT section useful.
@@ -6536,6 +6562,9 @@ namespace winrt::TerminalApp::implementation
             host.popupHost = root;
             host.popupRowSpan = 3;
             host.dialogAnchor = card; // a "Couldn't create folder" dialog takes the forced-Dark card's island and theme
+            // The folder list hangs under the whole CARD, not right under the box: the MODEL / PRESET pills and the footer sit
+            // below the box, and the list — open with the card — must leave them visible and clickable.
+            host.pickerAnchorBelow = card;
             host.dispatcher = winrt::Windows::System::DispatcherQueue::GetForCurrentThread();
             // Read at call time, like the Manager's host: a cog Save or a settings broadcast replaces _appSettings.
             host.registry = [weakThis]() -> std::shared_ptr<::Agentmaster::SessionRegistry> {
@@ -6613,6 +6642,52 @@ namespace winrt::TerminalApp::implementation
                     self->_PromptClaudeMissing(); // the page-level "Claude Code (native) not found" notice
                 }
             };
+            // CODEX from the card (the kind chip's second entry; "planned" until 2026-11-14): the Agent Manager's own Codex seam,
+            // through the same page-launch wrapper as a Claude launch — over the page the session starts behind it and is
+            // selected there; over a tab its tab opens in front.
+            host.spawnCodex = [weakThis](const std::wstring& dir) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_SidePanelCloseLaunchCard(L"launch");
+                    self->_LaunchFromManagerPage(L"plus-card codex", [&]() {
+                        self->_SpawnCodexSession(winrt::hstring{ dir }, winrt::hstring{});
+                        return std::wstring{}; // a Codex seam returns no id: _LaunchCodexSession records the tab itself
+                    });
+                }
+            };
+            // THE SHELLS (the kind chip's profiles): Windows Terminal's new-tab menu, read at each menu open, and its icons.
+            host.shellChoices = [weakThis]() -> std::vector<::Agentmaster::LaunchShellChoice> {
+                if (const auto self = weakThis.get())
+                {
+                    return self->_LauncherShellChoices(); // never throws
+                }
+                return {};
+            };
+            host.makeIcon = [weakThis](const std::wstring& icon) -> IconElement {
+                if (const auto self = weakThis.get())
+                {
+                    return self->_CreateNewTabFlyoutIcon(winrt::hstring{ icon }); // Windows Terminal's own converter: the icons its menu wore
+                }
+                return nullptr;
+            };
+            host.spawnShell = [weakThis](const std::wstring& dir, const std::wstring& profileGuid, const std::wstring& profileName) {
+                if (const auto self = weakThis.get())
+                {
+                    // Close first (the card must not sit over the new tab), then a plain new tab with that profile: over the
+                    // Agent Manager page the shell shows (no card on the page to select it by).
+                    self->_SidePanelCloseLaunchCard(L"launch");
+                    self->_LauncherSpawnShell(dir, profileGuid, profileName, L"launcher card"); // never throws
+                }
+            };
+            // A USER's pick on the kind chip: remember it for the next open (any window), and show / hide the MODEL / PRESET
+            // rows (the card's re-placement follows from its SizeChanged).
+            host.kindChanged = [weakThis]() {
+                if (const auto self = weakThis.get())
+                {
+                    self->_LauncherRememberKind(); // never throws
+                    self->_LauncherUpdateRows(); // never throws
+                }
+            };
             // The page's "Specify a model" opener (a Root() popup — _SidePanelLaunchPressIsInside keeps the card open
             // while it is up, so its pick can still finish this card's launch).
             host.specifyModel = _ModelSpecifyOpener();
@@ -6630,6 +6705,10 @@ namespace winrt::TerminalApp::implementation
                     // Launch's label or Fork's visibility changed the row's width: re-fit the box and re-place the card,
                     // on a later tick (this can run inside a TextChanged; the card's SizeChanged follows anyway).
                     self->_SidePanelQueueLaunchCardPlacement();
+                    // The bar re-judged its box or its kind (it calls this at the end of every validation): a session id typed
+                    // in, or a kind that is not Claude, hides the MODEL / PRESET rows. Visibility writes only (no Popup move), on
+                    // a change only — safe in a TextChanged.
+                    self->_LauncherUpdateRows(); // never throws
                 }
             };
             host.launched = [weakThis]() {
@@ -6660,7 +6739,7 @@ namespace winrt::TerminalApp::implementation
             };
             auto bar = AgentLaunchBar::Create(std::move(host));
 
-            // [● Claude] [ box / underline ] [Launch Claude] [Fork] — the Manager's row minus its words.
+            // [kind ⌄] [ box / underline ] [Launch Claude] [Fork] — the Manager's row minus its words.
             StackPanel row{};
             row.Orientation(Orientation::Horizontal);
             row.Spacing(kSidePanelLaunchRowSpacingPx);
@@ -6669,7 +6748,147 @@ namespace winrt::TerminalApp::implementation
             row.Children().Append(bar->CwdColumn());
             row.Children().Append(bar->LaunchButton());
             row.Children().Append(bar->ForkButton());
-            card.Child(row);
+            AgentSetAutomationId(bar->AgentElement(), L"am.launcher.kind");
+
+            // THE PANEL (the user's pick of 2026-11-14, "One + panel, no ▾"): the row on top, then — for a new Claude session
+            // only — the MODEL and PRESET rows of pills, every choice one click and visible, and the footer line. The rows'
+            // widths are pinned to the row's by _SidePanelFitLaunchBox (a wrap panel inside a Popup is measured with no width
+            // limit and would put every pill on one line).
+            StackPanel panel{};
+            panel.Orientation(Orientation::Vertical);
+            panel.Spacing(kLauncherRowGapPx);
+            panel.Children().Append(row);
+            const auto makePillRow = [](const wchar_t* label, Panel& pills, const wchar_t* automationId) {
+                Grid line{};
+                ColumnDefinition labelColumn{};
+                labelColumn.Width(GridLengthHelper::FromPixels(kLauncherLabelColumnPx));
+                line.ColumnDefinitions().Append(labelColumn);
+                line.ColumnDefinitions().Append(ColumnDefinition{});
+                auto caption = Text(label, 10.5, false, 0.6);
+                caption.VerticalAlignment(VerticalAlignment::Top);
+                caption.Margin(ThicknessHelper::FromLengths(2, 5, 0, 0)); // level with the first pill line's text
+                caption.CharacterSpacing(60);
+                line.Children().Append(caption);
+                pills = winrt::make<AgentSidePanelWrapPanel>();
+                pills.HorizontalAlignment(HorizontalAlignment::Left);
+                Grid::SetColumn(pills, 1);
+                line.Children().Append(pills);
+                AgentSetAutomationId(line, automationId);
+                return line;
+            };
+            _launcherModelRow = makePillRow(L"MODEL", _launcherModelPills, L"am.launcher.models");
+            _launcherPresetRow = makePillRow(L"PRESET", _launcherPresetPills, L"am.launcher.presets");
+            // Fresh, empty panels: whatever an earlier (failed) build filled and measured says nothing about them, so the next
+            // open must fill and size them whatever its inputs are.
+            _launcherPillsSignature.clear();
+            _launcherPillsWidth = 0.0;
+            panel.Children().Append(_launcherModelRow);
+            panel.Children().Append(_launcherPresetRow);
+
+            // THE FOOTER: what the strip's old ▾ menu also reached — the Sessions browser, the Agentmaster settings (the cog on the
+            // Agent Manager page) and Windows Terminal's own Settings / Command palette / About. Each closes the card first; none
+            // takes the keyboard (IsTabStop false: an Enter on one would close the card on the key-down and hand its CR to a
+            // terminal).
+            {
+                StackPanel links{};
+                links.Orientation(Orientation::Horizontal);
+                links.Spacing(14);
+                const auto makeLink = [](const wchar_t* glyph, const wchar_t* words, const wchar_t* automationId) {
+                    Button link{};
+                    link.Padding(ThicknessHelper::FromLengths(4, 2, 4, 2));
+                    link.IsTabStop(false);
+                    link.FontSize(12);
+                    StackPanel face{};
+                    face.Orientation(Orientation::Horizontal);
+                    face.Spacing(6);
+                    auto icon = SidePanelFluentGlyph(glyph, 12, 0.85);
+                    icon.VerticalAlignment(VerticalAlignment::Center);
+                    winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetAccessibilityView(icon, winrt::Windows::UI::Xaml::Automation::Peers::AccessibilityView::Raw);
+                    face.Children().Append(icon);
+                    auto text = Text(words, 12, false, 0.9);
+                    text.VerticalAlignment(VerticalAlignment::Center);
+                    face.Children().Append(text);
+                    link.Content(face);
+                    AgentSetAutomationId(link, automationId);
+                    return link;
+                };
+                auto sessions = makeLink(L"\xE81C", L"Sessions\x2026", L"am.launcher.sessions"); // History
+                AgentSetTip(sessions, L"Open the Sessions browser: every Claude Code session on disk, to resume or fork a closed one.");
+                sessions.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+                    if (const auto self = weakThis.get())
+                    {
+                        self->_SidePanelCloseLaunchCard(L"sessions");
+                        self->_ShowSessionsPage(); // deferred inside (the page-open crash class)
+                    }
+                });
+                links.Children().Append(sessions);
+                auto settings = makeLink(L"\xE713", L"Agentmaster settings", L"am.launcher.settings"); // Setting
+                AgentSetTip(settings, L"Open Agentmaster's settings (the \x2699 of the Agent Manager page): sessions, presets, the Prompt Queue Runner, tabs, messaging\x2026");
+                settings.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+                    if (const auto self = weakThis.get())
+                    {
+                        self->_SidePanelCloseLaunchCard(L"agentmaster settings");
+                        // The cog lives on the Agent Manager page: show the page, then open the cog over it.
+                        self->_ShowManagerPage(L"launcher: agentmaster settings");
+                        if (const auto ipc = self->_agentManagerContent.get())
+                        {
+                            if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+                            {
+                                mgr->ShowSettingsOverlay();
+                            }
+                        }
+                    }
+                });
+                links.Children().Append(settings);
+                auto terminal = makeLink(L"\xE756", L"Windows Terminal", L"am.launcher.terminal"); // CommandPrompt
+                AgentSetTip(terminal, L"Windows Terminal's own settings (profiles, color schemes, keys), its command palette and About.");
+                {
+                    // Single-action picks, so a plain MenuFlyout (it closes on a click, which is right here). Filled once: its
+                    // three items never change. Each handler reaches the page weakly, never the menu.
+                    MenuFlyout terminalMenu{};
+                    terminalMenu.Placement(winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
+                    MenuFlyoutItem openSettings{};
+                    openSettings.Text(L"Settings");
+                    openSettings.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+                        if (const auto self = weakThis.get())
+                        {
+                            self->_SidePanelCloseLaunchCard(L"terminal settings");
+                            self->_SettingsButtonOnClick(nullptr, nullptr); // Windows Terminal's settings UI (Alt / Shift: its JSON files)
+                        }
+                    });
+                    terminalMenu.Items().Append(openSettings);
+                    MenuFlyoutItem palette{};
+                    palette.Text(L"Command palette");
+                    palette.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+                        if (const auto self = weakThis.get())
+                        {
+                            self->_SidePanelCloseLaunchCard(L"command palette");
+                            self->_CommandPaletteButtonOnClick(nullptr, nullptr);
+                        }
+                    });
+                    terminalMenu.Items().Append(palette);
+                    MenuFlyoutItem about{};
+                    about.Text(L"About");
+                    about.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+                        if (const auto self = weakThis.get())
+                        {
+                            self->_SidePanelCloseLaunchCard(L"about");
+                            self->_AboutButtonOnClick(nullptr, nullptr);
+                        }
+                    });
+                    terminalMenu.Items().Append(about);
+                    terminal.Flyout(terminalMenu);
+                }
+                links.Children().Append(terminal);
+                Border footer{};
+                footer.BorderBrush(Fill(0xFF, 0x3A, 0x3A, 0x3A));
+                footer.BorderThickness(ThicknessHelper::FromLengths(0, 1, 0, 0));
+                footer.Padding(ThicknessHelper::FromLengths(0, 6, 0, 0));
+                footer.Child(links);
+                _launcherFooter = footer;
+                panel.Children().Append(footer);
+            }
+            card.Child(panel);
 
             // Enter / Escape, acted on at the KEY-UP — the AgentModelPrompt.h rule. Closing the card (or launching,
             // which closes it) moves focus to a terminal, and Windows still delivers the rest of the keystroke — the
@@ -6679,8 +6898,10 @@ namespace winrt::TerminalApp::implementation
             // the buttons, and marking the key handled there keeps them from acting on it:
             //   - Escape with the drop-down CLOSED closes the card. With the drop-down open the box takes its own
             //     Escape (it closes the list, as on the Agent Manager page) and the card stays.
-            //   - Enter on the focused Launch / Fork button runs what its click runs. Enter in the BOX stays the box's own
-            //     commit (close the drop-down, normalize the path — the Agent Manager page's Enter), never a launch.
+            //   - Enter on the focused Launch / Fork button runs what its click runs. Enter in the BOX LAUNCHES too since the
+            //     launcher panel (the user's pick of 2026-11-14, "One + panel": "Enter launches with what is lit"), so
+            //     "+, Enter" starts the lit kind in the focused tab's folder; while Launch is disabled (a red box) the box keeps
+            //     its own commit (close the drop-down, normalize the path — the Agent Manager page's Enter).
             //   - Never for a Ctrl / Alt chord (Alt+Enter is Terminal's full-screen toggle).
             card.PreviewKeyDown([weakThis](const IInspectable&, const KeyRoutedEventArgs& e) {
                 const auto self = weakThis.get();
@@ -6727,9 +6948,15 @@ namespace winrt::TerminalApp::implementation
                         {
                             action = SidePanelLaunchKeyAction::Fork;
                         }
+                        else if (source && source == SidePanelLaunchIdentity(bar->CwdBox()) && bar->LaunchButton() && bar->LaunchButton().IsEnabled())
+                        {
+                            // Enter in the BOX launches what is lit (the launcher panel's rule); ClickLaunch normalizes the box
+                            // and closes its list itself.
+                            action = SidePanelLaunchKeyAction::Launch;
+                        }
                         else
                         {
-                            return; // Enter in the box: its own commit, as on the Agent Manager page
+                            return; // Enter in the box with Launch disabled, or on the kind chip (it opens its menu): theirs
                         }
                     }
                     self->_sidePanelLaunchArmedKey = key;
@@ -6890,35 +7117,62 @@ namespace winrt::TerminalApp::implementation
                 _sidePanelLaunchAnchor = _sidePanelLaunchBtn.TransformToVisual(Root()).TransformPoint(bottomCenter);
             }
             _sidePanelLaunchCardDockLeft = _appSettings.sidePanelOnLeft; // a broadcast that moves the dock closes the card
+            _launcherFromTabStrip = false; // this card belongs to the side panel's "+": its dock and collapse rules apply
+        }
+        catch (...)
+        {
+            // The anchor stays where the last open left it (the card still opens, near the panel). Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"side panel launcher: anchor");
+        }
+        // The box opens on the FOCUSED TAB's folder since the user's pick of 2026-11-14 ("Focused tab's folder", for both
+        // "+"); before, it opened on the Agent Manager box's text (the user's "keep the last, same one we have in agent manager
+        // tab" of 2026-10-06), which stays the fallback when the focused tab names no folder.
+        _LauncherShowCard(fromPress ? L"sidepanel launcher open (at the click)" : L"sidepanel launcher open (under the + button)", std::wstring{});
+    }
+
+    void TerminalPage::_LauncherShowCard(std::wstring_view navLine, const std::wstring& folder)
+    {
+        if (!_sidePanelLaunchBar || !_sidePanelLaunchPopup)
+        {
+            return; // the card was never built (the caller's build failed and logged)
+        }
+        try
+        {
             _sidePanelLaunchArmedKey = VirtualKey::None;
             _sidePanelLaunchArmedAction = SidePanelLaunchKeyAction::None;
-            // The box opens on the Agent Manager box's text — the user's "keep the last, same one we have in agent
-            // manager tab". SetBoxText re-validates explicitly either way: the folder may be gone since, an id may have a
-            // transcript now, and the closed card was off the live tree where TextChanged is unreliable.
-            bool copied = false;
-            if (const auto ipc = _agentManagerContent.get())
+            // 1. THE FOLDER: the caller's (a folder dropped on the strip's "+"), else the focused tab's
+            //    (_LauncherFolderForFocusedTab: its session's effective folder, a shell's folder, else the Agent Manager's box).
+            //    SetBoxText re-validates explicitly either way: the folder may be gone since, an id may have a transcript now,
+            //    and the closed card was off the live tree where TextChanged is unreliable. A programmatic write: its late
+            //    TextChanged re-lists an open list and opens nothing.
+            const std::wstring boxText = folder.empty() ? _LauncherFolderForFocusedTab() : folder;
+            if (!boxText.empty())
             {
-                if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
-                {
-                    _sidePanelLaunchBar->SetBoxText(mgr->LaunchBoxText());
-                    copied = true;
-                }
+                _sidePanelLaunchBar->SetBoxText(boxText);
             }
-            if (!copied)
+            else
             {
-                _sidePanelLaunchBar->ValidateLaunchBox(); // no Manager: keep the card's own text, re-judged now
+                _sidePanelLaunchBar->ValidateLaunchBox(); // nothing names a folder: keep the card's own text, re-judged now
             }
+            // 2. THE KIND: the last one the user picked on this card, in any window (AppSettings::launcherKind, read fresh from
+            //    disk — another window may have picked since). A remembered profile that is gone now falls back to Claude.
+            _sidePanelLaunchBar->ApplyLaunchKindPick(::Agentmaster::ParseLaunchKindToken(::Agentmaster::LoadAppSettings().launcherKind)); // noexcept
+            // 3. THE TARGET: every open starts on Default (a preset never sticks unseen); the pills are rebuilt when the models,
+            //    the presets or the lit pill changed since the last open.
+            _launcherCustomModel.clear();
+            _sidePanelLaunchBar->SetLaunchTarget(std::wstring{});
+            _LauncherRebuildPills(); // never throws
+            _LauncherUpdateRows(); // never throws
             _SidePanelFitLaunchBox();
             _sidePanelLaunchPopup.IsOpen(true);
             // Place it NOW, in this tick, at its real size (_SidePanelPlaceLaunchCard measures the card): a card placed
             // a tick later would show for a frame at the previous spot first.
             _SidePanelPlaceLaunchCard();
-            ::Agentmaster::LogNav(fromPress ? L"sidepanel launcher open (at the click)" : L"sidepanel launcher open (under the + button)");
+            ::Agentmaster::LogNav(std::wstring{ navLine } + L" kind=" + ::Agentmaster::FormatLaunchKindToken(_sidePanelLaunchBar->LaunchKindPick()));
             // The rest one tick later: on the FIRST open the card was only just realized, and a same-tick Focus on a
             // TextBox that has not been laid out can do nothing (the tag editor's lesson). That tick lays the card out at
             // its place, focuses its box and opens the box's folder list right under it — the list shows whenever the
-            // card does (the user's rule, 2026-10-19; _SidePanelFinishLaunchCardOpen has the steps and their order). The
-            // text copied above is a programmatic write: its late TextChanged re-lists an open list and opens nothing.
+            // card does (the user's rule, 2026-10-19; _SidePanelFinishLaunchCardOpen has the steps and their order).
             Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis = get_weak()]() {
                 if (const auto self = weakThis.get())
                 {
@@ -7096,6 +7350,14 @@ namespace winrt::TerminalApp::implementation
                 }
                 self->_SidePanelFitLaunchBox(); // never throws
                 self->_SidePanelPlaceLaunchCard(); // never throws
+                // The folder list hangs under the card's BOTTOM (host.pickerAnchorBelow): a card that grew or shrank in place
+                // (the MODEL / PRESET rows shown or hidden by a kind pick) moved that edge without moving the card, so the
+                // placement above saw no move. Re-anchor after the next layout pass (noexcept; a no-op while the list is closed;
+                // the bar writes offsets only on a real move).
+                if (self->_sidePanelLaunchBar)
+                {
+                    self->_sidePanelLaunchBar->ReanchorPathPickerAfterLayout();
+                }
             });
         }
         catch (...)
@@ -7170,30 +7432,30 @@ namespace winrt::TerminalApp::implementation
             const auto root = Root();
             const double rootW = root ? root.ActualWidth() : 0.0;
             double width = kSidePanelLaunchBoxMaxPx; // an unmeasured window: the comfortable width, re-fitted on its first SizeChanged
+            // The natural width of each other part of the row (0 when collapsed — Fork usually is), the _ReflowLaunchBar
+            // measure. Read on every fit since the launcher panel: the pill rows below are as wide as the whole row.
+            const auto natural = [](const FrameworkElement& el) -> double {
+                if (!el || el.Visibility() == Visibility::Collapsed)
+                {
+                    return 0.0;
+                }
+                el.Measure(winrt::Windows::Foundation::Size{ kSidePanelLaunchMeasureBound, kSidePanelLaunchMeasureBound });
+                return static_cast<double>(el.DesiredSize().Width);
+            };
+            const FrameworkElement others[] = { _sidePanelLaunchBar->AgentElement(), _sidePanelLaunchBar->LaunchButton(), _sidePanelLaunchBar->ForkButton() };
+            double othersW = 0.0;
+            double gaps = 0.0; // one row gap per visible part beside the box
+            for (const auto& el : others)
+            {
+                const double w = natural(el);
+                if (w > 0.0)
+                {
+                    othersW += w;
+                    gaps += kSidePanelLaunchRowSpacingPx;
+                }
+            }
             if (rootW > 0.0)
             {
-                // The natural width of each other part of the row (0 when collapsed — Fork usually is), the
-                // _ReflowLaunchBar measure.
-                const auto natural = [](const FrameworkElement& el) -> double {
-                    if (!el || el.Visibility() == Visibility::Collapsed)
-                    {
-                        return 0.0;
-                    }
-                    el.Measure(winrt::Windows::Foundation::Size{ kSidePanelLaunchMeasureBound, kSidePanelLaunchMeasureBound });
-                    return static_cast<double>(el.DesiredSize().Width);
-                };
-                const FrameworkElement others[] = { _sidePanelLaunchBar->AgentElement(), _sidePanelLaunchBar->LaunchButton(), _sidePanelLaunchBar->ForkButton() };
-                double othersW = 0.0;
-                double gaps = 0.0; // one row gap per visible part beside the box
-                for (const auto& el : others)
-                {
-                    const double w = natural(el);
-                    if (w > 0.0)
-                    {
-                        othersW += w;
-                        gaps += kSidePanelLaunchRowSpacingPx;
-                    }
-                }
                 const auto pad = _sidePanelLaunchCard.Padding();
                 const auto edge = _sidePanelLaunchCard.BorderThickness();
                 const double chrome = pad.Left + pad.Right + edge.Left + edge.Right;
@@ -7201,6 +7463,21 @@ namespace winrt::TerminalApp::implementation
                 // chrome, the row's gaps and the other parts.
                 const double room = rootW - 2.0 * ::Agentmaster::kPointerCardMarginDips - chrome - gaps - othersW;
                 width = std::clamp(room, kSidePanelLaunchBoxMinPx, kSidePanelLaunchBoxMaxPx);
+            }
+            // THE PILL ROWS (the launcher panel): as wide as the row above less their caption column, so their wrap panels —
+            // measured with no width limit inside the card's Popup — wrap where the row ends instead of widening the card.
+            // Written on a change only (a width write invalidates the rows' measure).
+            const double pillsWidth = std::max(0.0, othersW + gaps + width - kLauncherLabelColumnPx);
+            if (std::abs(pillsWidth - _launcherPillsWidth) >= 0.5)
+            {
+                _launcherPillsWidth = pillsWidth;
+                for (const auto& pills : { _launcherModelPills, _launcherPresetPills })
+                {
+                    if (pills)
+                    {
+                        pills.Width(pillsWidth);
+                    }
+                }
             }
             if (std::abs(width - _sidePanelLaunchBoxWidth) < 0.5)
             {
@@ -7253,7 +7530,16 @@ namespace winrt::TerminalApp::implementation
             std::vector<void*> inside;
             inside.reserve(8);
             inside.push_back(SidePanelLaunchIdentity(_sidePanelLaunchCard));
-            inside.push_back(SidePanelLaunchIdentity(_sidePanelLaunchBtn));
+            // The "+" that OPENED the card is inside (its Click toggles it closed); the OTHER "+" is outside, so its press closes
+            // the card here and its Click then reopens it at that "+" (TAB_STRIP.md "The + button: the launcher").
+            if (_launcherFromTabStrip)
+            {
+                inside.push_back(SidePanelLaunchIdentity(_newTabButton));
+            }
+            else
+            {
+                inside.push_back(SidePanelLaunchIdentity(_sidePanelLaunchBtn));
+            }
             if (_sidePanelLaunchBar)
             {
                 inside.push_back(SidePanelLaunchIdentity(_sidePanelLaunchBar->PathPanel()));
@@ -7297,6 +7583,622 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::AgentLogCaughtException(L"side panel launcher: press walk"); // an unreadable press counts as outside: the card closes
         }
         return false;
+    }
+
+    // ======================================================================================
+    // THE LAUNCHER PANEL (TAB_STRIP.md "The + button: the launcher", SIDE_PANEL.md §2e)
+    // ======================================================================================
+    // WHAT (the user's request of 2026-11-14: "Lets discuss the + and downarrow. We have a + in side menu but thats also supposed
+    // to support powershell. Then we also have model picking menu. I need this integrated into something for agentmaster and not
+    // old windows terminal functionality") and their four picks the same day (design-ask with mockups):
+    //   1. "One + panel, no ▾" — the tab strip's "+" opens THIS card (the ▾ beside it is gone), with every choice one click and
+    //      visible: the kind, the folder ("The dropmenu of FOLDER is same like the + of sidemenu": the launch bar's own box and
+    //      drop-down), the models and presets as pills, Launch; Sessions and the settings in the footer. The side panel's "+"
+    //      opens the same panel.
+    //   2. "Chip opens a menu" — "on all menus of this kind": the kind chip (Claude, Codex, every Windows Terminal profile) on
+    //      this card AND on the Agent Manager's launch row (AgentLaunchBarHost::kindMenu).
+    //   3. "Focused tab's folder" — a "+" opens on the folder of the tab you are on (_LauncherFolderForFocusedTab).
+    //   4. "Follows the new +" — Ctrl+Shift+T opens this card too (defaults.json binds it to openNewTabDropdown, which opens it).
+    // KEPT FROM WINDOWS TERMINAL: Alt+click "+" splits the focused pane, Shift+click opens a new window, Ctrl+click an elevated
+    // one (_LauncherNewTabModifiersHeld routes those clicks to Windows Terminal's own path); Ctrl+Shift+1…9 open profile 1…9.
+
+    void TerminalPage::_LauncherOpenFromTabStrip(std::wstring_view origin, const std::wstring& folder, bool toggle) noexcept
+    {
+        try
+        {
+            if (_SidePanelLaunchCardOpen())
+            {
+                if (_launcherFromTabStrip && toggle)
+                {
+                    // A second click on the strip's "+": its press counts as inside the card (_SidePanelLaunchPressIsInside), so
+                    // the card is still open here — a toggle, like a second click on any button that opened a pane.
+                    _SidePanelCloseLaunchCard(L"+ again (tab strip)");
+                    return;
+                }
+                // Open at the side panel's "+" (or re-asked by the keys, or a drop): move it here, with this call's folder.
+                _SidePanelCloseLaunchCard(L"reopened at the tab strip's +");
+            }
+            if (!_SidePanelEnsureLaunchCard())
+            {
+                return; // the build failed (logged); the next "+" tries again
+            }
+            // THE ANCHOR: the strip's "+" bottom center, so the card hangs under the button toward the window's center (the
+            // placement every launcher card uses, PlacePointerCard). A strip that is not on screen (focus mode hides the tab
+            // row; the button then has no size) anchors at the window's top center instead.
+            bool anchored = false;
+            try
+            {
+                if (_newTabButton && _newTabButton.ActualWidth() > 0.0 && _newTabButton.ActualHeight() > 0.0 && _newTabButton.IsLoaded())
+                {
+                    const winrt::Windows::Foundation::Point bottomCenter{ static_cast<float>(_newTabButton.ActualWidth() / 2.0), static_cast<float>(_newTabButton.ActualHeight()) };
+                    _sidePanelLaunchAnchor = _newTabButton.TransformToVisual(Root()).TransformPoint(bottomCenter);
+                    anchored = true;
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"tab strip launcher: anchor under +"); // the window's top center below
+            }
+            if (!anchored)
+            {
+                const auto root = Root();
+                _sidePanelLaunchAnchor = winrt::Windows::Foundation::Point{ static_cast<float>((root ? root.ActualWidth() : 0.0) / 2.0), 40.0f };
+            }
+            _launcherFromTabStrip = true;
+            _LauncherShowCard(L"tab strip launcher open (" + std::wstring{ origin } + L")", folder);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"tab strip launcher: open"); // the card stays as it was; the next "+" tries again
+        }
+    }
+
+    std::wstring TerminalPage::_LauncherFolderForFocusedTab() noexcept
+    {
+        std::wstring sessionFolder;
+        std::wstring oscCwd;
+        std::wstring observedCwd;
+        std::wstring shared;
+        try
+        {
+            // The Agent Manager page has no focused tab (_GetFocusedTab answers null while it shows): its launch box speaks
+            // for it below — the box the page pre-aims at the session selected there.
+            if (const auto tab = _GetFocusedTab())
+            {
+                // A managed Claude / Codex tab: its session's EFFECTIVE folder (the inferred one while it infers), the folder
+                // every session surface names for it — a claude emits no OSC cwd, so its control would report nothing.
+                if (const auto sid = _ClaudeSessionForTab(tab); !sid.empty() && _sessionRegistry)
+                {
+                    if (const auto s = _sessionRegistry->GetWithoutQueue(sid))
+                    {
+                        sessionFolder = ::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, *s);
+                    }
+                }
+                if (sessionFolder.empty())
+                {
+                    // A shell: the folder its shell integration reported (OSC 9;9), else the one the Fleet Observer read out of
+                    // band for this tab's WT_SESSION (cmd's own PEB, a pwsh's newest native child — the window restore's source).
+                    if (const auto impl = _GetFocusedTabImpl())
+                    {
+                        if (const auto ctrl = impl->GetActiveTerminalControl())
+                        {
+                            if (const auto wd = ctrl.WorkingDirectory(); !wd.empty() && ::Microsoft::Console::Utils::IsValidDirectory(wd.c_str()))
+                            {
+                                oscCwd = std::wstring{ wd };
+                            }
+                            if (oscCwd.empty() && _observer)
+                            {
+                                if (const auto conn = ctrl.Connection())
+                                {
+                                    std::wstring key = ::Microsoft::Console::Utils::GuidToPlainString(conn.SessionId());
+                                    for (auto& c : key)
+                                    {
+                                        c = static_cast<wchar_t>(::towlower(c)); // the observer keys its rows lower-case
+                                    }
+                                    for (const auto& row : _observer->Activity())
+                                    {
+                                        if (row.wtSession == key && !row.cwd.empty() && ::Microsoft::Console::Utils::IsValidDirectory(row.cwd.c_str()))
+                                        {
+                                            observedCwd = row.cwd;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        catch (...)
+        {
+            // The tab's sources are skipped (the shared box below still answers). Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"launcher: the focused tab's folder");
+        }
+        try
+        {
+            if (const auto ipc = _agentManagerContent.get())
+            {
+                if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+                {
+                    shared = mgr->LaunchBoxText();
+                }
+            }
+            return ::Agentmaster::PickLauncherFolder(sessionFolder, oscCwd, observedCwd, shared);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"launcher: pick the folder"); // the card keeps the text it has
+            return {};
+        }
+    }
+
+    std::vector<::Agentmaster::LaunchShellChoice> TerminalPage::_LauncherShellChoices() noexcept
+    {
+        std::vector<::Agentmaster::LaunchShellChoice> out;
+        try
+        {
+            if (_settings)
+            {
+                _LauncherAppendShellChoices(out, _settings.GlobalSettings().NewTabMenu());
+            }
+            // A folder or an action left out can leave a separator at an end, or two in a row: drop those, as a menu would
+            // never draw them.
+            std::vector<::Agentmaster::LaunchShellChoice> tidy;
+            tidy.reserve(out.size());
+            for (auto& choice : out)
+            {
+                const bool separator = choice.type == ::Agentmaster::LaunchShellChoice::Type::Separator;
+                if (separator && (tidy.empty() || tidy.back().type == ::Agentmaster::LaunchShellChoice::Type::Separator))
+                {
+                    continue;
+                }
+                tidy.push_back(std::move(choice));
+            }
+            while (!tidy.empty() && tidy.back().type == ::Agentmaster::LaunchShellChoice::Type::Separator)
+            {
+                tidy.pop_back();
+            }
+            return tidy;
+        }
+        catch (...)
+        {
+            // The kind chip then lists Claude and Codex only (and a remembered shell falls back to Claude). Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"launcher: the new-tab menu's shells");
+            return {};
+        }
+    }
+
+    void TerminalPage::_LauncherAppendShellChoices(std::vector<::Agentmaster::LaunchShellChoice>& out,
+                                                   const winrt::Windows::Foundation::Collections::IVector<NewTabMenuEntry>& entries)
+    {
+        if (!entries)
+        {
+            return;
+        }
+        const auto defaultGuid = _settings.GlobalSettings().DefaultProfile();
+        // One profile entry: its name, its GUID in the braced form NewTerminalArgs::Profile takes, the icon its menu entry
+        // wore (an entry's own icon wins over the profile's, as in _CreateNewTabFlyoutProfile), and whether it is the default.
+        const auto pushProfile = [&out, &defaultGuid](const Profile& profile, const winrt::hstring& iconOverride) {
+            ::Agentmaster::LaunchShellChoice choice;
+            choice.type = ::Agentmaster::LaunchShellChoice::Type::Profile;
+            choice.name = std::wstring{ profile.Name() };
+            choice.profileGuid = std::wstring{ ::Microsoft::Console::Utils::GuidToString(profile.Guid()) };
+            choice.icon = std::wstring{ iconOverride.empty() ? profile.Icon().Resolved() : iconOverride };
+            choice.isDefault = profile.Guid() == defaultGuid;
+            out.push_back(std::move(choice));
+        };
+        for (const auto& entry : entries)
+        {
+            if (!entry)
+            {
+                continue;
+            }
+            switch (entry.Type())
+            {
+            case NewTabMenuEntryType::Separator:
+            {
+                ::Agentmaster::LaunchShellChoice separator;
+                separator.type = ::Agentmaster::LaunchShellChoice::Type::Separator;
+                out.push_back(std::move(separator));
+                break;
+            }
+            case NewTabMenuEntryType::Folder:
+            {
+                // A folder (the user's "SSH" one) stays a submenu. One that holds no profile is dropped — Windows Terminal draws
+                // an empty folder only to say it is empty, and a launcher has nothing to start there — and an auto-inline folder
+                // of ONE entry is inlined, exactly as _CreateNewTabFlyoutItems does.
+                const auto folderEntry = entry.as<FolderEntry>();
+                std::vector<::Agentmaster::LaunchShellChoice> inner;
+                _LauncherAppendShellChoices(inner, folderEntry.Entries());
+                if (::Agentmaster::CountLaunchShellProfiles(inner) == 0)
+                {
+                    break;
+                }
+                if (folderEntry.Inlining() == FolderEntryInlining::Auto && inner.size() == 1)
+                {
+                    out.push_back(std::move(inner.front()));
+                    break;
+                }
+                ::Agentmaster::LaunchShellChoice folder;
+                folder.type = ::Agentmaster::LaunchShellChoice::Type::Folder;
+                folder.name = std::wstring{ folderEntry.Name() };
+                folder.icon = std::wstring{ folderEntry.Icon().Resolved() };
+                folder.children = std::move(inner);
+                out.push_back(std::move(folder));
+                break;
+            }
+            case NewTabMenuEntryType::RemainingProfiles:
+            case NewTabMenuEntryType::MatchProfiles:
+            {
+                // Every profile of the collection, in its order (hidden profiles are not in it).
+                const auto collection = entry.as<ProfileCollectionEntry>();
+                if (const auto profiles = collection.Profiles())
+                {
+                    for (auto&& [profileIndex, profile] : profiles)
+                    {
+                        (void)profileIndex; // the launcher names a profile by its GUID, never by its index
+                        if (profile)
+                        {
+                            pushProfile(profile, winrt::hstring{});
+                        }
+                    }
+                }
+                break;
+            }
+            case NewTabMenuEntryType::Profile:
+            {
+                const auto profileEntry = entry.as<ProfileEntry>();
+                if (const auto profile = profileEntry.Profile())
+                {
+                    pushProfile(profile, profileEntry.Icon().Resolved());
+                }
+                break;
+            }
+            default:
+                break; // an Action entry starts no shell: left out
+            }
+        }
+    }
+
+    void TerminalPage::_LauncherSpawnShell(const std::wstring& dir, const std::wstring& profileGuid, const std::wstring& profileName, std::wstring_view origin) noexcept
+    {
+        try
+        {
+            ::Agentmaster::LogNav(L"launcher shell begin (" + std::wstring{ origin } + L"): " + profileName + L" in " + (dir.empty() ? std::wstring{ L"its own starting directory" } : dir));
+            // Exactly what Windows Terminal's new-tab menu opened for this profile, with the folder as its starting directory:
+            // the same pane factory and the same tab placement (the end of the strip, the tab selected — which also takes the
+            // Agent Manager page down, so a shell launched from the page shows).
+            NewTerminalArgs args;
+            if (!profileGuid.empty())
+            {
+                args.Profile(winrt::hstring{ profileGuid });
+            }
+            if (!dir.empty())
+            {
+                args.StartingDirectory(winrt::hstring{ dir });
+            }
+            const auto pane = _MakePane(args);
+            if (!pane)
+            {
+                // A profile that elevates opened an elevated window instead, or the pane was refused: _MakePane said why.
+                ::Agentmaster::LogNav(L"launcher shell end (" + std::wstring{ origin } + L"): no tab here");
+                return;
+            }
+            _CreateNewTabFromPane(pane);
+            ::Agentmaster::LogNav(L"launcher shell end (" + std::wstring{ origin } + L"): " + profileName);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"launcher: open a shell"); // nothing opened; the launcher can be used again
+        }
+    }
+
+    void TerminalPage::_LauncherRebuildPills() noexcept
+    {
+        if (!_launcherModelPills || !_launcherPresetPills || !_sidePanelLaunchBar)
+        {
+            return;
+        }
+        try
+        {
+            // The pills' inputs: the launch models + the visible presets (one list, the presets' ids are "@<id>"), whether
+            // "Add presets…" takes the presets' place, the Specify… pick and the lit target. Unchanged inputs: nothing to do.
+            const auto entries = ::Agentmaster::LaunchMenuEntries(_appSettings.launchModels);
+            const bool offerAddPresets = ::Agentmaster::ShouldOfferAddPresets();
+            const std::wstring target = _sidePanelLaunchBar->LaunchTarget();
+            std::wstring signature = std::wstring{ offerAddPresets ? L"A" : L"-" } + L"\x1f" + _launcherCustomModel + L"\x1f" + target;
+            for (const auto& [name, id] : entries)
+            {
+                signature += L"\x1e" + name + L"\x1f" + id;
+            }
+            if (signature == _launcherPillsSignature)
+            {
+                return;
+            }
+            _launcherPillsSignature = signature;
+            _launcherModelPills.Children().Clear();
+            _launcherPresetPills.Children().Clear();
+
+            const auto weakThis = get_weak();
+            // One pill: a Button that never takes focus (the caret stays in the box, so Enter still launches) and wears its
+            // lit / unlit colors through ITS OWN resources as well as its properties — set before it enters the tree, so the
+            // template's hover and press states keep the pill's colors instead of the card's generic hover lift.
+            const auto makePill = [](const std::wstring& label, bool lit) {
+                Button pill{};
+                pill.Content(winrt::box_value(winrt::hstring{ label }));
+                pill.FontSize(12);
+                pill.MinWidth(0);
+                pill.MinHeight(0);
+                pill.Padding(ThicknessHelper::FromLengths(10, 2, 10, 3));
+                pill.CornerRadius(CornerRadiusHelper::FromUniformRadius(12));
+                pill.BorderThickness(ThicknessHelper::FromUniformLength(1));
+                pill.Margin(ThicknessHelper::FromLengths(0, 0, kLauncherPillGapRightPx, kLauncherPillGapBottomPx));
+                pill.IsTabStop(false);
+                pill.AllowFocusOnInteraction(false);
+                const auto rest = lit ? Fill(0xFF, 0x2A, 0x4D, 0x66) : Fill(0xFF, 0x2F, 0x2F, 0x2F);
+                const auto over = lit ? Fill(0xFF, 0x33, 0x60, 0x7F) : Fill(0xFF, 0x3A, 0x3A, 0x3A);
+                const auto down = lit ? Fill(0xFF, 0x22, 0x40, 0x5A) : Fill(0xFF, 0x45, 0x45, 0x45);
+                const auto edge = lit ? Fill(0xFF, 0x60, 0xCD, 0xFF) : Fill(0xFF, 0x4A, 0x4A, 0x4A);
+                const auto ink = lit ? Fill(0xFF, 0xFF, 0xFF, 0xFF) : Fill(0xFF, 0xE6, 0xE6, 0xE6);
+                pill.Background(rest);
+                pill.BorderBrush(edge);
+                pill.Foreground(ink);
+                const auto res = pill.Resources();
+                res.Insert(winrt::box_value(L"ButtonBackground"), rest);
+                res.Insert(winrt::box_value(L"ButtonBackgroundPointerOver"), over);
+                res.Insert(winrt::box_value(L"ButtonBackgroundPressed"), down);
+                res.Insert(winrt::box_value(L"ButtonBorderBrush"), edge);
+                res.Insert(winrt::box_value(L"ButtonBorderBrushPointerOver"), edge);
+                res.Insert(winrt::box_value(L"ButtonBorderBrushPressed"), edge);
+                res.Insert(winrt::box_value(L"ButtonForeground"), ink);
+                res.Insert(winrt::box_value(L"ButtonForegroundPointerOver"), Fill(0xFF, 0xFF, 0xFF, 0xFF));
+                res.Insert(winrt::box_value(L"ButtonForegroundPressed"), Fill(0xFF, 0xFF, 0xFF, 0xFF));
+                AgentSetItemStatus(pill, lit ? kAgentStatusSelected : std::wstring_view{});
+                return pill;
+            };
+            // A pill that picks a TARGET: its click lights it and makes it what Launch starts. Weak page, never the pill.
+            const auto addTargetPill = [&](const Panel& host, const std::wstring& label, const std::wstring& pillTarget, const std::wstring& tip, const std::wstring& automationKey) {
+                auto pill = makePill(label, pillTarget == target);
+                AgentSetTip(pill, winrt::hstring{ tip });
+                AgentSetAutomationId(pill, L"am.launcher." + automationKey);
+                pill.Click([weakThis, pillTarget](const IInspectable&, const RoutedEventArgs&) {
+                    if (const auto self = weakThis.get())
+                    {
+                        self->_LauncherSelectTarget(pillTarget); // never throws
+                    }
+                });
+                host.Children().Append(pill);
+            };
+
+            // MODEL: Default · each launch model · (the Specify… pick) · Specify…
+            addTargetPill(_launcherModelPills, L"Default", std::wstring{},
+                          L"No model or preset pick: the new session uses the Settings model (blank there = Claude's own default).", L"model.default");
+            bool anyPreset = false;
+            for (const auto& [name, id] : entries)
+            {
+                if (::Agentmaster::IsPresetToken(id))
+                {
+                    anyPreset = true;
+                    addTargetPill(_launcherPresetPills, name, id,
+                                  L"Start the session with the \x201C" + name + L"\x201D preset \x2014 its provider, models, limits and arguments. Resume, restart, fork and /handover keep it. Edit presets in the Manager's Settings (\x2699) \x2192 Presets.",
+                                  L"preset." + id.substr(1));
+                }
+                else
+                {
+                    addTargetPill(_launcherModelPills, name, id,
+                                  L"Start the session on --model " + id + L". Resume, restart, fork and /handover keep that model. Edit this list in the Manager's Settings (\x2699) \x2192 Sessions \x2192 Launch models.",
+                                  L"model." + id);
+                }
+            }
+            if (!_launcherCustomModel.empty())
+            {
+                // The model typed into Specify… (this open only): its own pill, so what Launch starts stays visible.
+                addTargetPill(_launcherModelPills, L"\x270E " + _launcherCustomModel, _launcherCustomModel,
+                              L"The model you typed into Specify\x2026, for this launch only.", L"model.custom");
+            }
+            {
+                auto specify = makePill(L"Specify\x2026", false);
+                AgentSetTip(specify, L"Type any model id for this ONE session \x2014 e.g. a model newer than your list, or a pinned version. The prompt remembers what you type.");
+                AgentSetAutomationId(specify, L"am.launcher.model.specify");
+                specify.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+                    const auto self = weakThis.get();
+                    if (!self)
+                    {
+                        return;
+                    }
+                    try
+                    {
+                        // The page's own prompt (a Root() popup the card counts as inside, so it stays open meanwhile). A commit
+                        // lights the typed id as its own pill; a cancel (never calling back, or "") changes nothing.
+                        const auto opener = self->_ModelSpecifyOpener();
+                        if (opener)
+                        {
+                            opener([weakThis](winrt::hstring model) {
+                                const auto page = weakThis.get();
+                                if (!page || model.empty())
+                                {
+                                    return;
+                                }
+                                page->_launcherCustomModel = std::wstring{ model };
+                                page->_LauncherSelectTarget(std::wstring{ model }); // never throws
+                            });
+                        }
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"launcher: Specify\x2026"); // nothing picked; the pills stay
+                    }
+                });
+                _launcherModelPills.Children().Append(specify);
+            }
+            // PRESET: the visible presets above, or — while the user has none at all — one "Add presets…" that says where they
+            // are made (the help every model menu's "Add presets…" opens).
+            if (!anyPreset && offerAddPresets)
+            {
+                auto add = makePill(std::wstring{ ::Agentmaster::kAddPresetsMenuText }, false);
+                AgentSetTip(add, winrt::hstring{ ::Agentmaster::kAddPresetsMenuTip });
+                AgentSetAutomationId(add, L"am.launcher.preset.add");
+                add.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+                    if (const auto self = weakThis.get())
+                    {
+                        self->_PromptAddPresets();
+                    }
+                });
+                _launcherPresetPills.Children().Append(add);
+            }
+        }
+        catch (...)
+        {
+            // The pills stay as the failure left them; the next open rebuilds from scratch (the signature is cleared).
+            _launcherPillsSignature.clear();
+            ::Agentmaster::AgentLogCaughtException(L"launcher: build the pills");
+        }
+    }
+
+    void TerminalPage::_LauncherSelectTarget(const std::wstring& target) noexcept
+    {
+        try
+        {
+            if (!_sidePanelLaunchBar)
+            {
+                return;
+            }
+            // The target NOW (an Enter right after the click launches with it); the pills re-light one tick later — the
+            // rebuild replaces every pill, and this usually runs inside the clicked pill's own Click, which should finish
+            // on a pill still in the tree.
+            _sidePanelLaunchBar->SetLaunchTarget(target);
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[launcher] target " + (target.empty() ? std::wstring{ L"Default" } : target) + L"\n");
+            Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis = get_weak()]() {
+                if (const auto self = weakThis.get())
+                {
+                    self->_LauncherRebuildPills(); // never throws; a no-op when nothing changed since
+                }
+            });
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"launcher: pick a target"); // Launch keeps the previous target
+        }
+    }
+
+    void TerminalPage::_LauncherUpdateRows() noexcept
+    {
+        try
+        {
+            if (!_sidePanelLaunchBar || !_launcherModelRow || !_launcherPresetRow)
+            {
+                return;
+            }
+            const bool show = ::Agentmaster::LauncherShowsModelRows(_sidePanelLaunchBar->LaunchKind(), _sidePanelLaunchBar->BoxHoldsSessionId());
+            const auto modelVisibility = show ? Visibility::Visible : Visibility::Collapsed;
+            // The PRESET row also steps aside when it has no pill (presets all hidden, and no "Add presets…" to offer).
+            const bool presetPills = _launcherPresetPills && _launcherPresetPills.Children().Size() > 0;
+            const auto presetVisibility = (show && presetPills) ? Visibility::Visible : Visibility::Collapsed;
+            if (_launcherModelRow.Visibility() != modelVisibility)
+            {
+                _launcherModelRow.Visibility(modelVisibility);
+            }
+            if (_launcherPresetRow.Visibility() != presetVisibility)
+            {
+                _launcherPresetRow.Visibility(presetVisibility);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"launcher: show / hide the rows"); // the rows keep their previous state
+        }
+    }
+
+    void TerminalPage::_LauncherRememberKind() noexcept
+    {
+        try
+        {
+            if (!_sidePanelLaunchBar)
+            {
+                return;
+            }
+            const std::wstring token = ::Agentmaster::FormatLaunchKindToken(_sidePanelLaunchBar->LaunchKindPick());
+            // FRESHEST disk, one field (the transcript overlay's idiom): never write a stale in-memory copy over a cog Save or
+            // another window's settings change. The cog's Save keeps it (both preserve blocks copy it from disk).
+            auto settings = ::Agentmaster::LoadAppSettings();
+            if (settings.launcherKind != token)
+            {
+                settings.launcherKind = token;
+                ::Agentmaster::SaveAppSettings(settings);
+            }
+            _appSettings.launcherKind = token;
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"launcher: remember the kind"); // the pick applies to this card; the next open starts on the old one
+        }
+    }
+
+    void TerminalPage::_LauncherDecorateNewTabButton() noexcept
+    {
+        try
+        {
+            if (!_newTabButton)
+            {
+                return;
+            }
+            AgentSetAutomationId(_newTabButton, L"am.strip.new");
+            AgentSetTitledTip(_newTabButton, L"New tab", L"Opens the launcher under +: a Claude session (any model or preset), a Codex session or any Windows Terminal shell, in the focused tab's folder. Enter launches. Ctrl+Shift+T opens it too.\nAlt+click: split the pane (default profile) \x00B7 Shift+click: a new window \x00B7 Ctrl+click: an elevated window \x00B7 a folder dropped here: the launcher on that folder.");
+            // The split button opens its flyout on Alt+Down and F4 (MUX SplitButton::OnKeyDown) — Windows Terminal's profile menu,
+            // still attached for the upstream code that reads it. PreviewKeyDown tunnels first; marking the key handled keeps
+            // the button's own KeyDown from running, and the launcher opens instead. The handler holds the page weakly and never
+            // the button (a self-capture would keep it alive forever).
+            _newTabButton.PreviewKeyDown([weakThis = get_weak()](const IInspectable&, const KeyRoutedEventArgs& e) {
+                const auto self = weakThis.get();
+                if (!self)
+                {
+                    return;
+                }
+                try
+                {
+                    const auto key = e.Key();
+                    const bool alt = (::GetKeyState(VK_MENU) & 0x8000) != 0;
+                    if (key == VirtualKey::F4 || (alt && key == VirtualKey::Down))
+                    {
+                        e.Handled(true);
+                        self->_LauncherOpenFromTabStrip(L"keys on +", std::wstring{}, false); // never throws
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"tab strip launcher: + keys"); // the key does what the button does with it
+                }
+            });
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"tab strip launcher: dress +"); // + still opens the launcher; only its tip / id / keys are missing
+        }
+    }
+
+    bool TerminalPage::_LauncherNewTabModifiersHeld() noexcept
+    {
+        try
+        {
+            // The keys _OpenNewTerminalViaDropdown reads, the same way (the core window's key state, both sides of each key).
+            const auto window = CoreWindow::GetForCurrentThread();
+            if (!window)
+            {
+                return false;
+            }
+            const auto down = [&window](VirtualKey key) {
+                return WI_IsFlagSet(window.GetKeyState(key), winrt::Windows::UI::Core::CoreVirtualKeyStates::Down);
+            };
+            return down(VirtualKey::Menu) || down(VirtualKey::LeftMenu) || down(VirtualKey::RightMenu) ||
+                   down(VirtualKey::Shift) || down(VirtualKey::LeftShift) || down(VirtualKey::RightShift) ||
+                   down(VirtualKey::Control) || down(VirtualKey::LeftControl) || down(VirtualKey::RightControl);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"launcher: read the modifier keys"); // read as none: the launcher opens
+            return false;
+        }
     }
 
     // ======================================================================================

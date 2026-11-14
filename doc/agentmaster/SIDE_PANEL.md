@@ -533,6 +533,23 @@ width (the 320 px `ToolTip` cap above); no `[exc] Side-panel card …` lines in 
 
 ### 2e. The "+" launcher — the Agent Manager's launch box, at the click
 
+> **Since 2026-11-14 (NOT BUILT yet; the next build must PURGE) this card is THE LAUNCHER PANEL**, which the tab strip's
+> `+` opens too — TAB_STRIP.md *The + button: the launcher* has the user's four picks and the whole design. What changed
+> here, against the items below:
+> - **Item 3 (what it shows):** the row's agent element is the **kind chip** (`#am.launcher.kind`, "What to launch:
+>   <kind>") — a click opens Claude, Codex and every Windows Terminal profile (item 6's "Claude only" is gone: Codex and
+>   the shells launch from here). Under the row, for a new Claude session only, the **MODEL** and **PRESET** pills
+>   (Default lit at every open), then a footer (Sessions… · Agentmaster settings · Windows Terminal ⌄). Launch has no
+>   hover menu in this card (item 8's hover menu stays the Agent Manager row's).
+> - **Item 4 (the text):** the box opens on the **focused tab's folder** (the user's pick "Focused tab's folder", for both
+>   `+`); the Agent Manager box's text is the fallback when the focused tab names none. Edits still mirror into it.
+> - **Item 5 (the list):** still open with the card, but it hangs under the whole CARD (`AgentLaunchBarHost::
+>   pickerAnchorBelow`), so the pills and the footer stay visible and clickable.
+> - **E3 (Enter):** Enter in the box LAUNCHES what is lit (while Launch is enabled), on the key-up; it only committed the
+>   path before.
+> - **Item 7 (closing):** the `+` that opened the card is inside (its click toggles); the OTHER `+` is outside, so its
+>   press closes the card and its click reopens it there. A dock move closes only a card the side panel's `+` opened.
+
 Built 2026-10-06 (commit f73481af7); in production 0.6.8.19 since 2026-10-12 and in the v0.7.9
 pre-release. The fix of item 5 below (2026-10-12, commit bd9ba2eae) is in dev since 0.0.1.6 and in
 production since 0.6.8.20. The folder list opening WITH the card (item 5, 2026-10-19) and the
@@ -706,7 +723,8 @@ Manager's own launch row, so a session starts from the side panel without leavin
        (`… armed for its release (the button is down, point from the press message)`), but in the card NO release
        reaches Launch, and the watch completes the click (`… no release reached Launch; the release watch completed
        the click`); on the Agent Manager page the release does reach Launch (`… its release on Launch completed the
-       click`). Checked by `e2e/suites/test_side_panel.py` `test_plus_card_launch_takes_one_click_with_its_menu_open`
+       click`). Checked by `e2e/suites/test_side_panel.py` `test_plus_card_launch_takes_one_click_with_its_menu_open` (until the
+       launcher panel of 2026-11-14 took the card's hover menu away: now `test_plus_card_launch_has_no_hover_menu_and_takes_one_click`)
        (flows/02 SP-05 phase 5).
 9. **Over the Agent Manager page, a launch from the card stays behind the page** (MGR-K1's fix,
    2026-10-23, NOT BUILT yet; flows/01 MGR-07): the card's spawn / resume / fork go through the page's

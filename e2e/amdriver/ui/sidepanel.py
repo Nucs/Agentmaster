@@ -13,6 +13,16 @@ window's content element (after the page's, when the page shows):
 The + card is an in-window Popup holding '●' 'Claude', the folder box and 'Launch Claude'; its folder list is a
 second Popup whose rows include 'Browse…' and section headers ('RECENT', 'SUBFOLDERS OF …', 'MATCHES …').
 
+THE LAUNCHER PANEL (TAB_STRIP.md "The + button: the launcher", SIDE_PANEL.md §2e; a build of 2026-11-14 or later): the
+same card, opened by this + AND by the tab strip's + (tabstrip.TabStrip.open_launcher). Its agent element is the KIND CHIP,
+a button `#am.launcher.kind` named "What to launch: Claude" (or Codex, or the picked profile) whose click opens a MenuFlyout
+of Claude, Codex and the Windows Terminal profiles; below the row, for a new Claude session only, the MODEL pills
+(`#am.launcher.models` row; pills `#am.launcher.model.default`, `…model.<model id>`, `…model.specify`) and the PRESET pills
+(`#am.launcher.presets`; `…preset.<preset id>` or `…preset.add`), the lit pill's ItemStatus "selected"; then the footer
+(`#am.launcher.sessions`, `#am.launcher.settings`, `#am.launcher.terminal`). The folder list hangs under the whole card. The
+box opens on the FOCUSED TAB's folder, and Enter in the box launches (no longer only commits the path). Launch has no hover
+menu in this card (the models are the pills).
+
 Accessibility metadata (E2E_TESTING.md §6.3; a build of 2026-10-23 or later — NOT in 0.8.0): the header's controls
 have AutomationIds (am.side.launch / filter / sum / scope / sort / scrollToTab / dock / collapse, the strip's
 am.side.expand), and the glyph-only ones NAMES instead of their glyphs (⌖ "Scroll to the selected tab", ⇄ "Dock side",
@@ -886,9 +896,76 @@ class LauncherCard:
         if card is None:
             raise LookupError("the + card is closed")
         for el in card.find_all(role="button", max_depth=3):
-            if el.name in LAUNCH_NAMES:
+            # The launcher panel's shells read "Open <profile>" / "Create & Open <profile>" (LaunchButtonLabel).
+            if el.name in LAUNCH_NAMES or el.name.startswith("Open ") or el.name.startswith("Create & Open "):
                 return el
         raise LookupError("the + card has no Launch button")
+
+    # ---- the launcher panel (a build of 2026-11-14 or later) ----------------------------------------------------------
+
+    def kind_chip(self) -> uia.Element:
+        """The kind chip (`#am.launcher.kind`): its name says what Launch starts ("What to launch: Claude").
+
+        Returns:
+            The button.
+        Raises:
+            LookupError: When the card is closed or has no chip (a build before the launcher panel).
+        """
+        card = self.element()
+        if card is None:
+            raise LookupError("the + card is closed")
+        chip = card.find(aid="am.launcher.kind", max_depth=4)
+        if chip is None:
+            raise LookupError("the card has no kind chip (a build before the launcher panel?)")
+        return chip
+
+    def kind(self) -> str:
+        """What the kind chip names ("Claude", "Codex", or a profile's name).
+
+        Returns:
+            The words after "What to launch: " ("" when the chip has another name).
+        """
+        name = self.kind_chip().name
+        prefix = "What to launch: "
+        return name[len(prefix):] if name.startswith(prefix) else ""
+
+    def pick_kind(self, name: str) -> None:
+        """Open the kind chip's menu and pick an entry (a profile inside a folder: pick the folder's entries yourself).
+
+        Args:
+            name: The entry ("Claude", "Codex", "Windows PowerShell", …).
+        Returns:
+            None (the chip names the pick when this returns).
+        Raises:
+            WaitTimeout: When the menu did not open or the chip did not change.
+        """
+        from .menus import Menu
+        before = Menu.open_hwnds(self.window.app)
+        self.kind_chip().click()
+        menu = Menu.wait_new(self.window.app, before)
+        menu.choose(name)
+        wait_until(lambda: self.kind() == name, 5.0, what=f"the kind chip to name {name!r}")
+
+    def pills(self) -> list[uia.Element]:
+        """Every MODEL / PRESET pill on screen, in order (buttons whose AutomationId starts with am.launcher.model. or
+        am.launcher.preset.).
+
+        Returns:
+            The pills ([] while the rows are hidden: Codex, a shell, or a session id in the box).
+        """
+        card = self.element()
+        if card is None:
+            return []
+        return [el for el in card.find_all(role="button", max_depth=4)
+                if el.automation_id.startswith("am.launcher.model.") or el.automation_id.startswith("am.launcher.preset.")]
+
+    def lit_pill(self) -> Optional[uia.Element]:
+        """The lit pill (ItemStatus "selected"): what a plain Launch starts a new Claude session with.
+
+        Returns:
+            It, or None (no pill on screen).
+        """
+        return next((p for p in self.pills() if p.item_status == "selected"), None)
 
     def folder_list(self) -> Optional[uia.Element]:
         """The folder list under the box.

@@ -17,10 +17,11 @@
 // ★ AgentManagerContent.Launch.cpp      - the Launch bar's HOST half: _MakeLaunchBarHost, the forwarders, LaunchBoxText / SetLaunchBoxText (the bar itself: AgentLaunchBar.{h,cpp})
 // ======================================================================================
 //
-// Agentmaster Manager tab: the LAUNCH bar's HOST half. The bar itself — the Claude/Codex agent toggle, the cwd box
-// validation, launch / create / fork and the focus-triggered path-picker drop-down (recent dirs + subfolders +
-// worktrees) — is the shared AgentLaunchBar (AgentLaunchBar.{h,cpp}); its code moved there VERBATIM from this file, so
-// the side panel's "+" launcher card (SIDE_PANEL.md §2e) runs exactly the same code. What stays here is what only the
+// Agentmaster Manager tab: the LAUNCH bar's HOST half. The bar itself — the kind chip (Claude / Codex / every Windows
+// Terminal shell, since 2026-11-14; the Claude/Codex agent toggle before), the cwd box validation, launch / create / fork and
+// the focus-triggered path-picker drop-down (recent dirs + subfolders + worktrees) — is the shared AgentLaunchBar
+// (AgentLaunchBar.{h,cpp}); its code moved there VERBATIM from this file, so the launcher card (the side panel's "+" and the
+// tab strip's "+", SIDE_PANEL.md §2e, TAB_STRIP.md "The + button: the launcher") runs exactly the same code. What stays here is what only the
 // Agent Manager content can answer: the host callbacks (_MakeLaunchBarHost), the three forwarders the content's other
 // TUs call, and the box-text accessors the side panel's card mirrors the two boxes through. Partial TU of
 // AgentManagerContent.cpp.
@@ -35,8 +36,11 @@ namespace winrt::TerminalApp::implementation
     AgentLaunchBarHost AgentManagerContent::_MakeLaunchBarHost()
     {
         AgentLaunchBarHost host;
-        // The Agent Manager keeps its Claude <-> Codex toggle (the side panel's card is the Claude-only host).
+        // The Agent Manager's agent element is the KIND CHIP (the user's picks of 2026-11-14: "Chip opens a menu", "on all
+        // menus of this kind"): a click opens Claude / Codex / every Windows Terminal profile. codexToggle stays set — it is
+        // what this row was before, and the bar falls back to that two-way toggle if the chip were ever turned off here.
         host.codexToggle = true;
+        host.kindMenu = true;
         // The window's ONE recent-folders list (loaded by the constructor before _BuildLayout calls this).
         host.recentDirs = _launchRecentDirs;
         // The drop-down's parent and coordinate space: this content's root, top-left aligned in row 0 (the toolbar's
@@ -108,6 +112,32 @@ namespace winrt::TerminalApp::implementation
                 self->_codexLaunchHandler(0, winrt::hstring{ dir }, false, false);
             }
         };
+        // The kind chip's SHELLS (AGENT_MANAGER.md "The launch row"): the page's three hooks, read when they run. A shell launch
+        // from this row is a plain new tab in front — a shell has no card on the board for the page to select (the page's
+        // _LauncherSpawnShell decides; the row only names the profile and the folder).
+        host.spawnShell = [weak](const std::wstring& dir, const std::wstring& profileGuid, const std::wstring& profileName) {
+            const auto self = weak.get();
+            if (self && self->_shellLaunchHandler)
+            {
+                self->_shellLaunchHandler(winrt::hstring{ dir }, winrt::hstring{ profileGuid }, winrt::hstring{ profileName });
+            }
+        };
+        host.shellChoices = [weak]() -> std::vector<::Agentmaster::LaunchShellChoice> {
+            const auto self = weak.get();
+            if (self && self->_shellChoicesProvider)
+            {
+                return self->_shellChoicesProvider();
+            }
+            return {}; // not wired (or the content is gone): the chip lists Claude and Codex only
+        };
+        host.makeIcon = [weak](const std::wstring& icon) -> winrt::Windows::UI::Xaml::Controls::IconElement {
+            const auto self = weak.get();
+            if (self && self->_launchIconFactory)
+            {
+                return self->_launchIconFactory(icon);
+            }
+            return nullptr; // no icon: the entry shows its name alone
+        };
         host.claudeMissing = [weak]() {
             if (const auto self = weak.get())
             {
@@ -163,6 +193,12 @@ namespace winrt::TerminalApp::implementation
     std::wstring AgentManagerContent::LaunchBoxText() const
     {
         return _launch ? _launch->BoxText() : std::wstring{};
+    }
+
+    void AgentManagerContent::ShowSettingsOverlay()
+    {
+        // The ⚙ button's own path (its Click calls _ShowSettings), reached from the launcher panel's footer.
+        _ShowSettings();
     }
 
     void AgentManagerContent::SetLaunchBoxText(const std::wstring& text)

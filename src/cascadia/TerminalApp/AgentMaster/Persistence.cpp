@@ -943,6 +943,7 @@ namespace Agentmaster
         o.Set(L"tabColorPickerAdvancedOpen", json::Value::MkBool(s.tabColorPickerAdvancedOpen));
         o.Set(L"transcriptOverlayLevel", json::Value::MkStr(s.transcriptOverlayLevel)); // the level the transcript overlay opens at (the overlay's own RMW)
         o.Set(L"transcriptOverlayWrapLines", json::Value::MkBool(s.transcriptOverlayWrapLines)); // the transcript overlay's ↵ line-wrap toggle (the overlay's own RMW)
+        o.Set(L"launcherKind", json::Value::MkStr(s.launcherKind)); // the kind the launcher card opens on (the card's own RMW; TAB_STRIP.md "The + button: the launcher")
         o.Set(L"sessionsAiThinkingLevel", json::Value::MkStr(s.sessionsAiThinkingLevel)); // the Sessions AI search's thinking level (the page's own RMW)
         // The AI search's park delay (the cog's SESSIONS tab, "AI SEARCH"): written clamped, so the file never holds a value
         // the loader would read differently.
@@ -1214,6 +1215,10 @@ namespace Agentmaster
         // The transcript overlay's ↵ line-wrap toggle (absent => ON: long lines wrap, the view as it was
         // before the toggle existed).
         s.transcriptOverlayWrapLines = v.BoolAt(L"transcriptOverlayWrapLines", true);
+        // The launcher card's remembered kind, kept verbatim: the card parses the word (ParseLaunchKindToken) and opens an
+        // unknown one, or a profile that is gone, on Claude — so a hand-edited value can never break an open (absent =>
+        // "claude", what every launcher opened on before the kind chip).
+        s.launcherKind = v.StrAt(L"launcherKind", L"claude");
         // The Sessions AI search's thinking level, kept verbatim: the agent parses the word and reads
         // an unknown one as "low", so a hand-edited value can never break a request (absent => "low",
         // the fastest level that works). A stored "off" — the default until 2026-11-01 — is kept as

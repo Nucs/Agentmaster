@@ -188,8 +188,9 @@ def test_sum_off_lets_the_cards_fill_the_panel(am, s1):
 @pytest.mark.flow("SP-05")
 def test_plus_launcher_card(am, s1, mock):
     """SP-05 phases 1, 3 and 4 (+ E3): + opens the launch row in a card with its folder list open; Esc closes the
-    list, a second Esc the card (no ESC reaches claude); Enter in the box commits the path only; Enter on the Launch
-    button starts exactly one session and closes the card (no CR reaches claude).
+    list, a second Esc the card (no ESC reaches claude); Enter in the BOX launches (the launcher panel's rule since
+    2026-11-14 — it only committed the path before) and so does Enter on the focused Launch button: each starts exactly
+    one session and closes the card, on the key-up (no CR reaches claude).
 
     Args:
         am: The app.
@@ -211,18 +212,13 @@ def test_plus_launcher_card(am, s1, mock):
     inputs.keys("esc")
     wait_until(lambda: not card.is_open(), 5, what="a second Esc closes the card")
     assert s1.state == "WaitingForInput" and s1.claude_pids()  # no ESC reached claude (no interrupt)
-    # 4 (E3). Launch from the keyboard: Enter in the BOX only commits the path (the folder list closes, nothing
-    # launches); Enter on the focused Launch button launches, on the key-up, so no CR reaches the terminal.
+    # 4 (E3). Launch from the keyboard. Enter in the BOX launches what is lit (the launcher panel, 2026-11-14: "+, Enter"
+    # starts a session), on the key-up, so no CR reaches the terminal that takes focus next.
     folder = am.iso.folder("t2")
     card = panel.open_launcher()
     card.type_folder(str(folder))
     sessions_before = {s.id for s in am.profile.sessions()}
     mark = am.profile.hooks.mark()
-    inputs.keys("enter")
-    wait_until(lambda: card.folder_list() is None, 5, what="Enter in the box closes the folder list")
-    time.sleep(1.0)  # the box's Enter must not launch: give a wrong launch its chance to show
-    assert not am.profile.hooks.find(r"\[nav\] open-new claude", since=mark) and card.is_open()
-    card.launch_button().focus()
     inputs.keys("enter")
     new = wait_new_session(am, mark, pattern=r"\[nav\] open-new claude done new=([0-9a-f]{8})", mock=mock)
     wait_until(lambda: not card.is_open(), 5, what="the card closes after the launch")
@@ -230,19 +226,30 @@ def test_plus_launcher_card(am, s1, mock):
     time.sleep(2)
     assert {s.id for s in am.profile.sessions()} - sessions_before == {new.id}  # exactly one new session
     assert s1.state == "WaitingForInput"  # t1 got no stray Enter
+    # ...and Enter on the focused Launch button does the same (its own key-up path).
+    folder3 = am.iso.folder("t3")
+    card = panel.open_launcher()
+    card.type_folder(str(folder3))
+    sessions_before = {s.id for s in am.profile.sessions()}
+    mark = am.profile.hooks.mark()
+    card.launch_button().focus()
+    inputs.keys("enter")
+    new3 = wait_new_session(am, mark, pattern=r"\[nav\] open-new claude done new=([0-9a-f]{8})", mock=mock)
+    wait_until(lambda: not card.is_open(), 5, what="the card closes after the launch")
+    w.tabs.wait_selected("t3")
+    time.sleep(2)
+    assert {s.id for s in am.profile.sessions()} - sessions_before == {new3.id}  # exactly one new session
+    assert s1.state == "WaitingForInput"
 
 
 @pytest.mark.p0
 @pytest.mark.flow("SP-05")
-@pytest.mark.needs_fix("SP-K1")
-def test_plus_card_launch_takes_one_click_with_its_menu_open(am, s1, mock):
-    """SP-05 phase 5 (SP-K1's fix, 2026-10-23): in the + card, with Launch's presets menu open (a hover opens it at
-    once), ONE click on Launch launches — exactly one session — as on the Agent Manager page's own row. On 0.8.0 the
-    click only closed the menu and a second click launched (SP-K1).
-
-    The app completes such a click itself (the menu's light dismiss eats the press): hooks.log says how, either
-    "its release on Launch completed the click" or "the release watch completed the click" — printed for the record,
-    since which of the two paths answers in a popup-hosted card is exactly what the fix had to cover.
+@pytest.mark.needs_fix("TAB-12")
+def test_plus_card_launch_has_no_hover_menu_and_takes_one_click(am, s1, mock):
+    """SP-05 phase 5 (the launcher panel, 2026-11-14; SP-K1's fix before): in the + card, Launch has NO hover menu any
+    more — its models and presets are the card's own pills — so resting on Launch opens nothing, and ONE click launches
+    exactly one session on the lit pill (Default). The Agent Manager page's own row keeps its hover menu and SP-K1's
+    one-click completion (MGR flows).
 
     Args:
         am: The app.
@@ -253,17 +260,19 @@ def test_plus_card_launch_takes_one_click_with_its_menu_open(am, s1, mock):
     panel = w.side_panel
     card = panel.open_launcher()
     card.type_folder(str(am.iso.folder("t2")))
+    lit = card.lit_pill()
+    assert lit is not None and lit.automation_id == "am.launcher.model.default", lit  # every open starts on Default
     sessions_before = {s.id for s in am.profile.sessions()}
+    before = Menu.open_hwnds(am)
     card.launch_button().hover()
-    wait_until(lambda: Menu.open_menus(am), 5, what="Launch's presets menu (it opens on hover)")
+    time.sleep(1.0)  # a hover menu opened at once before; give one its chance to show
+    assert Menu.open_hwnds(am) == before, "Launch opened a hover menu in the launcher card"
     mark = am.profile.hooks.mark()
-    card.launch_button().click()  # ONE click, held like a finger's (the driver's 60 ms)
+    card.launch_button().click()  # ONE click
     new = wait_new_session(am, mark, pattern=r"\[nav\] open-new claude done new=([0-9a-f]{8})", mock=mock,
                            timeout_s=20)
     wait_until(lambda: not card.is_open(), 5, what="the card closes after the launch")
     w.tabs.wait_selected("t2")  # over a tab, the new tab opens in front
-    how = am.profile.hooks.find(r"\[launchbar\] Launch clicked while its hover menu was up: (.*)", since=mark)
-    print("SP-05 phase 5: " + (how[0].group(1) if how else "no [launchbar] completion line (a real Click: the press reached Launch)"))
     time.sleep(2)
     assert {s.id for s in am.profile.sessions()} - sessions_before == {new.id}  # exactly one new session
     assert not am.profile.hooks.find(r"\[launchbar\] a second Launch click within the double-click time", since=mark)

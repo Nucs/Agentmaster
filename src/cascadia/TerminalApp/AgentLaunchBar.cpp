@@ -15,6 +15,7 @@
 #include "AgentLaunchBar.h"
 
 #include "AgentTipHelpers.h" // AgentSetTip / AgentSetTitledTip — hover tooltips with working dismissal (XAML Islands)
+#include "AgentAutomation.h" // AgentSetAccessibleName — the kind chip's name says what it launches (E2E_TESTING.md §6.3)
 #include "AgentCatchLog.h" // AgentLogCaughtException — every guarded step (Rule #18: never a bare catch)
 #include "AgentStatusColors.h" // AgentAnimationsEnabled — required BY AgentManagerContent.Internal.h's BuildPendingDots (every Internal.h TU includes it first)
 #include "AgentModelMenu.h" // AgentFillModelPickItems — the hover menu IS the "Open New Session Here" picker
@@ -226,7 +227,25 @@ namespace winrt::TerminalApp::implementation
         // managed Codex launches exactly the way a Claude does ("do what we do for Claude"). A Codex
         // launch is directory-only — Codex has no typed-id resume/fork here (Codex resume is reached via
         // the Archive page / window-restore / EXTERNAL Adopt), so _ValidateLaunchBox suppresses those.
-        if (_host.codexToggle)
+        if (_host.kindMenu && !_PickMode())
+        {
+            // THE KIND CHIP (the user's picks of 2026-11-14, "Chip opens a menu" — "on all menus of this kind"): the toggle's
+            // place and look, but a click OPENS A MENU of every kind this host can start — Claude, Codex, then the Windows
+            // Terminal profiles — instead of flipping between two. The menu is built at each click (_ShowKindMenu), so a
+            // profile added in Windows Terminal meanwhile shows at once. The handler reaches the bar through its weak_ptr,
+            // never the button (a self-capture would keep the element alive forever — the islands leak class).
+            _launchAgentBtn = Button{};
+            _launchAgentBtn.FontSize(11);
+            _launchAgentBtn.Padding(Thickness{ 8, 1, 6, 1 });
+            AgentSetTitledTip(_launchAgentBtn, L"What to launch", L"Click to choose what Launch starts: a Claude session, a Codex session, or any shell of Windows Terminal (PowerShell, Command Prompt, WSL, SSH\x2026) in the folder in the box.\nCodex and the shells take a folder only (no session id to resume or fork).");
+            _launchAgentBtn.Click([weak](const IInspectable&, const RoutedEventArgs&) {
+                if (const auto self = weak.lock())
+                {
+                    self->_ShowKindMenu(); // noexcept: a failed open is logged inside
+                }
+            });
+        }
+        else if (_host.codexToggle)
         {
             _launchAgentBtn = Button{};
             _launchAgentBtn.FontSize(11);
@@ -238,7 +257,8 @@ namespace winrt::TerminalApp::implementation
                 {
                     return;
                 }
-                self->_launchCodex = !self->_launchCodex;
+                // The two-way toggle (a host that asked for it without the kind chip): Claude <-> Codex only.
+                self->_launchKind = self->_launchKind == ::Agentmaster::LaunchKind::Codex ? ::Agentmaster::LaunchKind::Claude : ::Agentmaster::LaunchKind::Codex;
                 self->_UpdateLaunchAgentButton();
                 self->_ValidateLaunchBox(); // repaint the Launch button text + resume/fork affordances for the new agent
             });
@@ -481,10 +501,17 @@ namespace winrt::TerminalApp::implementation
             _launchBtn.Content(winrt::box_value(winrt::hstring{ _host.pickLabel.empty() ? std::wstring{ L"Pick" } : _host.pickLabel }));
             AgentSetTip(_launchBtn, winrt::hstring{ _host.pickTip.empty() ? std::wstring{ L"Use the folder in the box." } : _host.pickTip });
         }
-        else
+        else if (_host.hoverModelMenu)
         {
             _launchBtn.Content(winrt::box_value(L"Launch Claude"));
             AgentSetTip(_launchBtn, L"Start the selected agent in the working directory above \x2014 or resume the conversation when a session id is entered. Hover to pick a model or a preset for the new session.");
+        }
+        else
+        {
+            // The launcher card (TAB_STRIP.md "The + button: the launcher"): its own MODEL / PRESET pills pick what a new
+            // Claude session starts on, so Launch has no hover menu there — and its tip says where the pick is.
+            _launchBtn.Content(winrt::box_value(L"Launch Claude"));
+            AgentSetTip(_launchBtn, L"Start what the chip on the left names, in the folder in the box \x2014 a new Claude session on the model or preset lit below, a Codex session, or a shell \x2014 or resume the conversation when a session id is entered. Enter in the box does the same.");
         }
         _launchBtn.Click([weak](const IInspectable&, const RoutedEventArgs&) {
             if (const auto self = weak.lock())
@@ -544,6 +571,10 @@ namespace winrt::TerminalApp::implementation
             if (self->_PickMode())
             {
                 return; // FOLDER-PICK MODE (SIDE_PANEL.md §2l): no models to offer, so no hover menu and no hold timer either
+            }
+            if (!self->_host.hoverModelMenu)
+            {
+                return; // the launcher card shows its models as pills of its own: no hover menu and no hold timer either
             }
             if (self->_launchMenu)
             {
@@ -677,6 +708,75 @@ namespace winrt::TerminalApp::implementation
         _UpdateLaunchAgentButton();
     }
 
+    ::Agentmaster::LaunchKindPick AgentLaunchBar::LaunchKindPick() const
+    {
+        ::Agentmaster::LaunchKindPick pick;
+        pick.kind = _launchKind;
+        if (_launchKind == ::Agentmaster::LaunchKind::Shell)
+        {
+            pick.profileGuid = _shellGuid; // the token names the profile, never its (renamable) name
+        }
+        return pick;
+    }
+
+    void AgentLaunchBar::ApplyLaunchKindPick(const ::Agentmaster::LaunchKindPick& pick) noexcept
+    {
+        try
+        {
+            if (!_host.kindMenu || _PickMode() || _shutDown)
+            {
+                return; // only the kind chip has kinds to apply; a bar going away keeps what it has
+            }
+            // Checked against what the host offers NOW: a remembered profile deleted or hidden in Windows Terminal since, or a
+            // kind this host cannot start, falls back to Claude (LauncherRules.h) — never to some other shell.
+            const auto choices = _ShellChoices();
+            const auto resolved = ::Agentmaster::ResolveLaunchKindPick(pick, choices, static_cast<bool>(_host.spawnCodex), static_cast<bool>(_host.spawnShell));
+            const auto* const profile = resolved.kind == ::Agentmaster::LaunchKind::Shell ? ::Agentmaster::FindLaunchShellProfile(choices, resolved.profileGuid) : nullptr;
+            _SetLaunchKind(resolved.kind, profile);
+            _UpdateLaunchAgentButton();
+            _ValidateLaunchBox(); // the Launch label and the box's rules follow the kind (a shell / Codex: folders only)
+        }
+        catch (...)
+        {
+            // The bar keeps the kind it had (the chip shows it), and a click on the chip still picks one. Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar::ApplyLaunchKindPick");
+        }
+    }
+
+    void AgentLaunchBar::SetLaunchTarget(const std::wstring& target)
+    {
+        _launchTarget = target;
+    }
+
+    bool AgentLaunchBar::BoxHoldsSessionId() const noexcept
+    {
+        try
+        {
+            if (!_cwdBox)
+            {
+                return false;
+            }
+            std::wstring trimmed{ _cwdBox.Text() };
+            const auto isws = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n'; };
+            while (!trimmed.empty() && isws(trimmed.front()))
+            {
+                trimmed.erase(trimmed.begin());
+            }
+            while (!trimmed.empty() && isws(trimmed.back()))
+            {
+                trimmed.pop_back();
+            }
+            // The rule _ValidateLaunchBox reads the box by (a Claude bar resumes such an id); Codex and shells never do, but
+            // the question here is only what the text IS — the card asks LauncherShowsModelRows with the kind as well.
+            return LooksLikeSessionId(trimmed).has_value();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar::BoxHoldsSessionId"); // read as "no id": the rows then show
+            return false;
+        }
+    }
+
     void AgentLaunchBar::ClickLaunch()
     {
         if (_launchHoverTimer)
@@ -706,7 +806,9 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         _lastClickLaunchTick = now;
-        _OnLaunch();
+        // The launcher card's MODEL / PRESET pick (SetLaunchTarget; "" = Default, every other host's value): a plain click
+        // starts the new Claude session with it. _OnLaunch ignores it for Codex, a shell and a session id in the box.
+        _OnLaunch(_launchTarget);
     }
 
     void AgentLaunchBar::ClickFork()
@@ -867,6 +969,15 @@ namespace winrt::TerminalApp::implementation
         // An open Launch hover menu must not outlive the bar either (a pick would launch through a host that is going
         // away). Noexcept and guarded inside, for the same off-thread teardown exposure.
         _CloseLaunchMenu();
+        // Nor the kind chip's menu: a pick would retarget a bar that no longer answers. Its Closed handler clears the member.
+        if (_kindMenu)
+        {
+            try
+            {
+                _kindMenu.Hide();
+            }
+            CATCH_LOG(); // the same off-thread teardown exposure as the timer above
+        }
         // Nor a drop-down re-anchor hook: it is a LayoutUpdated registration, called after every layout pass of the UI
         // thread while it lives. Noexcept (the revoker ignores the remove's result, also off the UI thread).
         _DisarmPathPickerReanchor();
@@ -984,14 +1095,21 @@ namespace winrt::TerminalApp::implementation
 
     // ---- The agent element + the launch actions (moved from AgentManagerContent.Launch.cpp) -------------------------
 
-    // Agentmaster (Codex-launch): repaint the launch-bar agent toggle from _launchCodex. Codex wears the
+    // Agentmaster (Codex-launch): repaint the launch-bar agent toggle from _launchKind. Codex wears the
     // SAME teal (0xFF4EC9B0) as every other codex surface (the EXTERNAL pill, the managed Board/tree pill),
     // so the agent reads one color everywhere; Claude is a neutral blue accent (the default, unchanged).
-    // A Claude-only host's chip gets the same content (it is never Codex).
+    // A Claude-only host's chip gets the same content (it is never Codex). The kind chip (kindMenu) has a
+    // face of its own, with a shell's profile icon and the chevron that says it opens a menu.
     void AgentLaunchBar::_UpdateLaunchAgentButton()
     {
         if (!_launchAgentBtn && !_agentChip)
         {
+            return;
+        }
+        if (_host.kindMenu && _launchAgentBtn && !_PickMode())
+        {
+            _UpdateKindChipFace();
+            _NotifyLayoutChanged(); // the chip's width follows its label: the host re-fits its row
             return;
         }
         if (_PickMode() && _agentChip)
@@ -1012,7 +1130,7 @@ namespace winrt::TerminalApp::implementation
             _NotifyLayoutChanged(); // the chip's width is new: the host re-fits its row
             return;
         }
-        const bool codex = _launchCodex;
+        const bool codex = _launchKind == ::Agentmaster::LaunchKind::Codex;
         auto row = StackPanel{};
         row.Orientation(Orientation::Horizontal);
         row.Spacing(6);
@@ -1036,6 +1154,301 @@ namespace winrt::TerminalApp::implementation
         _NotifyLayoutChanged(); // the toggle width changed (Claude<->Codex) -> the host re-fits the row
     }
 
+    // ---- THE KIND CHIP (the user's picks of 2026-11-14, "Chip opens a menu", "on all menus of this kind") ----------------
+
+    void AgentLaunchBar::_UpdateKindChipFace()
+    {
+        if (!_launchAgentBtn)
+        {
+            return;
+        }
+        auto row = StackPanel{};
+        row.Orientation(Orientation::Horizontal);
+        row.Spacing(6);
+        row.VerticalAlignment(VerticalAlignment::Center);
+        std::wstring label;
+        if (_launchKind == ::Agentmaster::LaunchKind::Shell)
+        {
+            // The profile's own icon (Windows Terminal's converter, host.makeIcon) — the face of the entry the user picked.
+            if (auto icon = _MakeKindIcon(_shellIcon))
+            {
+                icon.Width(14);
+                icon.Height(14);
+                icon.VerticalAlignment(VerticalAlignment::Center);
+                row.Children().Append(icon);
+            }
+            else
+            {
+                // A profile without an icon: Segoe Fluent Icons' CommandPrompt glyph stands for "a shell".
+                auto glyph = Text(L"\xE756", 11, false, 0.95);
+                glyph.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+                glyph.VerticalAlignment(VerticalAlignment::Center);
+                row.Children().Append(glyph);
+            }
+            label = _shellName.empty() ? std::wstring{ L"Shell" } : _shellName;
+        }
+        else
+        {
+            // The toggle's own dot and colors: Claude's blue, Codex's teal (the color every codex surface wears).
+            const bool codex = _launchKind == ::Agentmaster::LaunchKind::Codex;
+            auto dot = Text(L"\x25CF", 11, true, 1.0); // ●
+            dot.Foreground(SolidColorBrush{ codex ? Color{ 0xFF, 0x4E, 0xC9, 0xB0 } : Color{ 0xFF, 0x4F, 0x9C, 0xFF } });
+            row.Children().Append(dot);
+            label = codex ? L"Codex" : L"Claude";
+        }
+        auto text = Text(winrt::hstring{ label }, 11, false, 0.95);
+        // Capped, so a long profile name ("Developer Command Prompt for VS 2022 (2)") never pushes Launch off a narrow row;
+        // the full name is in the menu and in the chip's accessible name.
+        text.MaxWidth(180);
+        text.TextTrimming(TextTrimming::CharacterEllipsis);
+        text.VerticalAlignment(VerticalAlignment::Center);
+        row.Children().Append(text);
+        // The chevron says "this opens a menu" (Segoe Fluent Icons' ChevronDown, small, like the split buttons' arrow).
+        auto chevron = Text(L"\xE70D", 8, false, 0.8);
+        chevron.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+        chevron.VerticalAlignment(VerticalAlignment::Center);
+        winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetAccessibilityView(chevron, winrt::Windows::UI::Xaml::Automation::Peers::AccessibilityView::Raw);
+        row.Children().Append(chevron);
+        _launchAgentBtn.Content(row);
+        // A screen reader (and the e2e driver) reads WHAT the chip launches, not a glyph: the button's content is a panel of
+        // a dot / an icon, a word and a chevron, which gives it no name of its own. Change-gated (AgentAutomation.h).
+        AgentSetAccessibleName(_launchAgentBtn, L"What to launch: " + label);
+    }
+
+    void AgentLaunchBar::_ShowKindMenu() noexcept
+    {
+        try
+        {
+            if (_shutDown || !_launchAgentBtn || _kindMenu)
+            {
+                return; // going away, or the menu shows already (a second click while it is open)
+            }
+            const auto weak = weak_from_this();
+            MenuFlyout menu;
+            // CLAUDE: always (every launcher starts Claude). A check marks the current kind; the dot is the chip's.
+            {
+                ToggleMenuFlyoutItem claude;
+                claude.Text(L"Claude");
+                claude.IsChecked(_launchKind == ::Agentmaster::LaunchKind::Claude);
+                FontIcon dot;
+                dot.FontFamily(FontFamily{ L"Segoe UI Symbol" });
+                dot.Glyph(L"\x25CF");
+                dot.Foreground(SolidColorBrush{ Color{ 0xFF, 0x4F, 0x9C, 0xFF } });
+                claude.Icon(dot);
+                claude.Click([weak](const IInspectable&, const RoutedEventArgs&) {
+                    if (const auto self = weak.lock())
+                    {
+                        self->_PickLaunchKind(::Agentmaster::LaunchKind::Claude, nullptr); // noexcept
+                    }
+                });
+                menu.Items().Append(claude);
+            }
+            // CODEX: only where the host can start it (the Agent Manager's and the launcher card's hosts can).
+            if (_host.spawnCodex)
+            {
+                ToggleMenuFlyoutItem codex;
+                codex.Text(L"Codex");
+                codex.IsChecked(_launchKind == ::Agentmaster::LaunchKind::Codex);
+                FontIcon dot;
+                dot.FontFamily(FontFamily{ L"Segoe UI Symbol" });
+                dot.Glyph(L"\x25CF");
+                dot.Foreground(SolidColorBrush{ Color{ 0xFF, 0x4E, 0xC9, 0xB0 } });
+                codex.Icon(dot);
+                codex.Click([weak](const IInspectable&, const RoutedEventArgs&) {
+                    if (const auto self = weak.lock())
+                    {
+                        self->_PickLaunchKind(::Agentmaster::LaunchKind::Codex, nullptr); // noexcept
+                    }
+                });
+                menu.Items().Append(codex);
+            }
+            // THE SHELLS: Windows Terminal's new-tab menu, read now (a profile added since the last open shows).
+            if (_host.spawnShell)
+            {
+                const auto choices = _ShellChoices();
+                if (!choices.empty())
+                {
+                    menu.Items().Append(MenuFlyoutSeparator{});
+                    _AppendShellChoiceItems(menu.Items(), choices);
+                }
+            }
+            // Forget the menu when it closes (the next click builds a fresh one), and hand the keyboard back to the box after
+            // a PICK — the chip would otherwise keep it, and the Enter meant to launch would reopen this menu.
+            menu.Closed([weak](const IInspectable&, const IInspectable&) {
+                const auto self = weak.lock();
+                if (!self)
+                {
+                    return;
+                }
+                self->_kindMenu = nullptr;
+                if (std::exchange(self->_kindPickFocusBox, false) && self->_cwdBox && !self->_shutDown)
+                {
+                    try
+                    {
+                        // Programmatic: the bar's GettingFocus reads it as such, so no drop-down opens from it.
+                        self->_cwdBox.Focus(FocusState::Programmatic);
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: kind menu - focus back to the box"); // a click in the box focuses it
+                    }
+                }
+            });
+            _kindMenu = menu;
+            Primitives::FlyoutShowOptions opts;
+            opts.Placement(Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
+            menu.ShowAt(_launchAgentBtn, opts);
+        }
+        catch (...)
+        {
+            _kindMenu = nullptr; // a failed open must not block every later click
+            ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar::_ShowKindMenu");
+        }
+    }
+
+    void AgentLaunchBar::_AppendShellChoiceItems(const winrt::Windows::Foundation::Collections::IVector<MenuFlyoutItemBase>& items,
+                                                 const std::vector<::Agentmaster::LaunchShellChoice>& choices)
+    {
+        const auto weak = weak_from_this();
+        for (const auto& choice : choices)
+        {
+            switch (choice.type)
+            {
+            case ::Agentmaster::LaunchShellChoice::Type::Separator:
+                items.Append(MenuFlyoutSeparator{});
+                break;
+            case ::Agentmaster::LaunchShellChoice::Type::Folder:
+            {
+                // A folder of the new-tab menu (the user's "SSH" one) stays a submenu, as Windows Terminal's menu drew it.
+                MenuFlyoutSubItem folder;
+                folder.Text(winrt::hstring{ choice.name });
+                if (auto icon = _MakeKindIcon(choice.icon))
+                {
+                    folder.Icon(icon);
+                }
+                _AppendShellChoiceItems(folder.Items(), choice.children);
+                items.Append(folder);
+                break;
+            }
+            case ::Agentmaster::LaunchShellChoice::Type::Profile:
+            default:
+            {
+                ToggleMenuFlyoutItem item;
+                item.Text(winrt::hstring{ choice.name });
+                if (auto icon = _MakeKindIcon(choice.icon))
+                {
+                    item.Icon(icon);
+                }
+                if (choice.isDefault)
+                {
+                    // Windows Terminal's own menu contrasts the default profile in weight: kept, so it reads the same here.
+                    item.FontWeight(FontWeights::Bold());
+                }
+                item.IsChecked(_launchKind == ::Agentmaster::LaunchKind::Shell && ::Agentmaster::LaunchGuidEquals(_shellGuid, choice.profileGuid));
+                // The pick carries its own copy of the profile (no children: a profile has none), so the handler needs no tree.
+                ::Agentmaster::LaunchShellChoice picked = choice;
+                picked.children.clear();
+                item.Click([weak, picked](const IInspectable&, const RoutedEventArgs&) {
+                    if (const auto self = weak.lock())
+                    {
+                        self->_PickLaunchKind(::Agentmaster::LaunchKind::Shell, &picked); // noexcept
+                    }
+                });
+                items.Append(item);
+                break;
+            }
+            }
+        }
+    }
+
+    winrt::Windows::UI::Xaml::Controls::IconElement AgentLaunchBar::_MakeKindIcon(const std::wstring& icon) const noexcept
+    {
+        if (icon.empty() || !_host.makeIcon)
+        {
+            return nullptr;
+        }
+        try
+        {
+            return _host.makeIcon(icon);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: a profile icon"); // the entry shows without its icon
+            return nullptr;
+        }
+    }
+
+    void AgentLaunchBar::_PickLaunchKind(::Agentmaster::LaunchKind kind, const ::Agentmaster::LaunchShellChoice* profile) noexcept
+    {
+        try
+        {
+            _SetLaunchKind(kind, profile);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: take the picked kind"); // the bar keeps its previous kind
+            return;
+        }
+        try
+        {
+            _UpdateLaunchAgentButton();
+            _ValidateLaunchBox(); // the Launch label and the box's rules follow the kind (Codex and shells: folders only)
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: repaint after a kind pick"); // the next edit repaints
+        }
+        // A hover menu still up would offer the previous kind's models (noexcept).
+        _CloseLaunchMenu();
+        _kindPickFocusBox = true; // the menu's Closed hands the keyboard back to the box
+        try
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[launchbar] kind picked: " + ::Agentmaster::FormatLaunchKindToken(LaunchKindPick()) +
+                                                            (_launchKind == ::Agentmaster::LaunchKind::Shell ? L" (" + _shellName + L")" : std::wstring{}) + L"\n");
+            if (_host.kindChanged)
+            {
+                _host.kindChanged();
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: kindChanged"); // the pick took; only the host's follow-up was lost
+        }
+    }
+
+    void AgentLaunchBar::_SetLaunchKind(::Agentmaster::LaunchKind kind, const ::Agentmaster::LaunchShellChoice* profile)
+    {
+        if (kind == ::Agentmaster::LaunchKind::Shell && profile && !profile->profileGuid.empty())
+        {
+            _launchKind = kind;
+            _shellGuid = profile->profileGuid;
+            _shellName = profile->name;
+            _shellIcon = profile->icon;
+            return;
+        }
+        // Claude or Codex — or a shell with no profile to name, which can only be a caller's slip: Claude, the default.
+        _launchKind = kind == ::Agentmaster::LaunchKind::Shell ? ::Agentmaster::LaunchKind::Claude : kind;
+        _shellGuid.clear();
+        _shellName.clear();
+        _shellIcon.clear();
+    }
+
+    std::vector<::Agentmaster::LaunchShellChoice> AgentLaunchBar::_ShellChoices() const noexcept
+    {
+        try
+        {
+            if (_host.shellChoices)
+            {
+                return _host.shellChoices();
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: the host's shell choices"); // the menu lists no shells this time
+        }
+        return {};
+    }
+
     void AgentLaunchBar::_ShowLaunchMenu()
     {
         // Offered only while the button starts a NEW Claude session: Codex has no presets yet, a session id
@@ -1044,7 +1457,10 @@ namespace winrt::TerminalApp::implementation
         // PointerEntered now, and an element can still be under the pointer while its host goes away.
         // FOLDER-PICK MODE (SIDE_PANEL.md §2l) has no models to offer: its button only picks (a belt — its PointerEntered
         // never asks for the menu).
-        if (_shutDown || _PickMode() || !_launchBtn || !_cwdBox || _launchMenu || _launchCodex || !_launchBtn.IsEnabled())
+        // Only for a new CLAUDE session (Codex and the shells have no models here), and never on a host that shows its models
+        // as pills of its own (the launcher card: hoverModelMenu false).
+        if (_shutDown || _PickMode() || !_host.hoverModelMenu || !_launchBtn || !_cwdBox || _launchMenu ||
+            _launchKind != ::Agentmaster::LaunchKind::Claude || !_launchBtn.IsEnabled())
         {
             return;
         }
@@ -1449,8 +1865,8 @@ namespace winrt::TerminalApp::implementation
         // Codex is selected _ValidateLaunchBox keeps the box in directory semantics. Spawn a managed codex in
         // that dir, mirroring the EXTERNAL menu's "Open New Codex Session Here" (pid 0 = no source external,
         // adopt=false = a fresh independent session). _LaunchCodexSession registers the card immediately.
-        // (A Claude-only host never sets _launchCodex, so this branch is the toggle hosts' alone.)
-        if (_launchCodex)
+        // (A Claude-only host never leaves LaunchKind::Claude, so this branch is the toggle / kind-chip hosts' alone.)
+        if (_launchKind == ::Agentmaster::LaunchKind::Codex)
         {
             if (_host.spawnCodex)
             {
@@ -1461,6 +1877,29 @@ namespace winrt::TerminalApp::implementation
                 _PushRecentDir(text); // remember it as "recently selected" (shared MRU with Claude launches)
                 _ClosePathPicker();
                 _host.spawnCodex(text); // fresh launch: adopt=false, fork=false
+                _NotifyLaunched();
+            }
+            return;
+        }
+        // A SHELL (the kind chip picked a Windows Terminal profile; the user's picks of 2026-11-14): directory-only like Codex
+        // — a session id is no folder (_ValidateLaunchBox disables Launch for one). The folder is made first when the box names
+        // one that does not exist yet ("Create & Open …"), and joins the recent folders like any launch's; an EMPTY box opens
+        // the profile in its own starting directory (the host passes no folder then). Not gated on claude.exe: a shell needs
+        // none.
+        if (_launchKind == ::Agentmaster::LaunchKind::Shell)
+        {
+            if (_host.spawnShell && !_shellGuid.empty())
+            {
+                if (!text.empty())
+                {
+                    if (!_EnsureLaunchDirExists(text))
+                    {
+                        return; // creation failed (already warned) — don't open a shell in a missing dir
+                    }
+                    _PushRecentDir(text);
+                }
+                _ClosePathPicker();
+                _host.spawnShell(text, _shellGuid, _shellName);
                 _NotifyLaunched();
             }
             return;
@@ -1650,25 +2089,29 @@ namespace winrt::TerminalApp::implementation
         // has no --session-id, so there is no typed-id resume (the green found-id state) and no Fork. Empty
         // or an existing dir => enabled "Launch Codex" (neutral underline); a not-yet-existing absolute path
         // => amber + "Create & Launch Codex"; a malformed / relative path => red + disabled.
-        if (_launchCodex)
+        // A SHELL (the kind chip, 2026-11-14) follows the very same rules with its own words — "Open PowerShell",
+        // "Create & Open PowerShell" (LaunchButtonLabel) — since a shell takes a folder and nothing else; an empty
+        // box opens the profile in its own starting directory.
+        if (_launchKind != ::Agentmaster::LaunchKind::Claude)
         {
             showFork(false);
             if (trimmed.empty())
             {
                 paint(0);
                 _launchBtn.IsEnabled(true);
-                _launchBtn.Content(winrt::box_value(L"Launch Codex"));
+                _launchBtn.Content(winrt::box_value(winrt::hstring{ ::Agentmaster::LaunchButtonLabel(_launchKind, _shellName, false) }));
             }
             else
             {
                 // An existing dir launches as-is; a not-yet-existing absolute path flips to amber +
-                // "Create & Launch Codex" (made on launch); a malformed/relative path stays red+disabled.
+                // "Create & Launch Codex" / "Create & Open <shell>" (made on launch); a malformed/relative path (a
+                // session id included: it is no folder) stays red+disabled.
                 const std::wstring norm = NormPath(trimmed);
                 const bool exists = IsDir(norm);
                 const bool creatable = !exists && LooksLikeCreatableDir(norm);
                 paint(exists ? 0 : (creatable ? 3 : 2));
                 _launchBtn.IsEnabled(exists || creatable);
-                _launchBtn.Content(winrt::box_value(creatable ? L"Create & Launch Codex" : L"Launch Codex"));
+                _launchBtn.Content(winrt::box_value(winrt::hstring{ ::Agentmaster::LaunchButtonLabel(_launchKind, _shellName, creatable) }));
             }
             return;
         }
@@ -2521,7 +2964,14 @@ namespace winrt::TerminalApp::implementation
             const auto xform = _cwdBox.TransformToVisual(layoutRoot);
             const auto pt = xform.TransformPoint(Point{ 0.0f, static_cast<float>(_cwdBox.ActualHeight()) });
             leftInRoot = static_cast<double>(pt.X);
-            const double top = static_cast<double>(pt.Y) + kAnchorGapDips;
+            double top = static_cast<double>(pt.Y) + kAnchorGapDips;
+            // The launcher card's anchor (host.pickerAnchorBelow): the list hangs under the WHOLE card, so the pills and the
+            // footer below the box stay visible and clickable while it is open; still left-aligned with the box.
+            if (const auto below = _host.pickerAnchorBelow)
+            {
+                const auto belowPt = below.TransformToVisual(layoutRoot).TransformPoint(Point{ 0.0f, static_cast<float>(below.ActualHeight()) });
+                top = static_cast<double>(belowPt.Y) + kAnchorGapDips;
+            }
             // Written only on a real move: an offset write invalidates the popup root's arrange even when the value is
             // the same, and the re-anchor rounds read "moved" from these writes.
             const double moveX = leftInRoot - _pathPopup.HorizontalOffset();
@@ -2593,7 +3043,9 @@ namespace winrt::TerminalApp::implementation
                 const double windowHeight = xamlRoot ? static_cast<double>(xamlRoot.Size().Height) : 0.0;
                 if (windowHeight > 0.0)
                 {
-                    const auto boxBottom = _cwdBox.TransformToVisual(nullptr).TransformPoint(Point{ 0.0f, static_cast<float>(_cwdBox.ActualHeight()) });
+                    // Where the panel starts: under the box, or under the host's anchor element (step 1's rule).
+                    const auto anchorElement = _host.pickerAnchorBelow ? _host.pickerAnchorBelow : _cwdBox.as<FrameworkElement>();
+                    const auto boxBottom = anchorElement.TransformToVisual(nullptr).TransformPoint(Point{ 0.0f, static_cast<float>(anchorElement.ActualHeight()) });
                     const double panelTop = static_cast<double>(boxBottom.Y) + kAnchorGapDips;
                     // Both limits, the tighter wins: 90% of the window, and the room left below the box.
                     // The room limit matters because the popup is CLIPPED at the window edge, and a clipped

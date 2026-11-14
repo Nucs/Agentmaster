@@ -343,6 +343,10 @@ Every color surface — tabs, board bands, Sessions chips, the pending dots — 
   `summaryPanelTruncate` (true), `summaryPanelShowHistory` (true), `summaryPanelWidthFraction` /
   `summaryPanelHeightFraction` (0 = the default size).
 - The transcript view: `transcriptOverlayLevel` (`default`), `transcriptOverlayWrapLines` (true).
+- `launcherKind` (`claude`): the kind the launcher card (the tab strip's and the side panel's `+`) opens on — the last
+  kind picked on its kind chip, in any window: `claude`, `codex` or `profile:{guid}` (a Windows Terminal profile). Written
+  by the card itself (a freshest-disk RMW; both cog-Save preserve blocks keep it); a profile gone since, or an unknown
+  word, opens on Claude (TAB_STRIP.md *The + button: the launcher*).
 - `sessionsAiThinkingLevel` (`low`): the AI search's thinking level, `low` to `max` (the strip's and the side panel's
   toggle write it). No `off`: every request at off fails on Claude Code 2.1.310; a stored `off` (the default until
   2026-11-01) runs as `low` until the next click writes a level (SESSIONS.md 9.1).

@@ -71,7 +71,9 @@ namespace winrt::TerminalApp::implementation
         }
         else
         {
-            e.DragUIOverride().Caption(RS_(L"DropPathTabRun/Text"));
+            // Agentmaster (TAB_STRIP.md "The + button: the launcher"): a plain drop opens the launcher on the folder
+            // (TerminalPage::_NewTerminalByDrop), not a tab with the default profile — the caption says so.
+            e.DragUIOverride().Caption(L"Open the launcher on this folder");
         }
 
         // Sets if the caption is visible

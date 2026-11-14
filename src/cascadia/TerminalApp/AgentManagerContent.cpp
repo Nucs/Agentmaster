@@ -421,6 +421,21 @@ namespace winrt::TerminalApp::implementation
     {
         _codexLaunchHandler = std::move(handler);
     }
+    // Agentmaster (the launch row's kind chip): the three shell hooks. Stored only — the bar's host reads each one when it
+    // runs (AgentManagerContent.Launch.cpp), so wiring them after the bar was built (the page wires after construction) is
+    // what they are for.
+    void AgentManagerContent::SetShellLaunchHandler(std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> handler)
+    {
+        _shellLaunchHandler = std::move(handler);
+    }
+    void AgentManagerContent::SetShellChoicesProvider(std::function<std::vector<::Agentmaster::LaunchShellChoice>()> provider)
+    {
+        _shellChoicesProvider = std::move(provider);
+    }
+    void AgentManagerContent::SetLaunchIconFactory(std::function<winrt::Windows::UI::Xaml::Controls::IconElement(const std::wstring&)> factory)
+    {
+        _launchIconFactory = std::move(factory);
+    }
     void AgentManagerContent::SetLocalScopeProvider(std::function<std::unordered_set<std::wstring>()> provider)
     {
         _localScopeProvider = std::move(provider);

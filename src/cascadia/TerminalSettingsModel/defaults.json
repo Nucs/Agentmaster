@@ -748,7 +748,11 @@
         // Tab Management
         // "command": "closeTab" is unbound by default.
         //   The closeTab command closes a tab without confirmation, even if it has multiple panes.
-        { "keys": "ctrl+shift+t", "id": "Terminal.OpenNewTab" },
+        // Agentmaster (TAB_STRIP.md "The + button: the launcher" - the user's pick of 2026-11-14, "Follows the new +"):
+        // Ctrl+Shift+T does what the tab strip's + does - it opens Agentmaster's launcher (Claude on any model or preset,
+        // Codex, any shell, in the focused tab's folder), through the openNewTabDropdown action that + now opens too.
+        // "New tab" (newTab, the default profile) keeps its command palette entry; Ctrl+Shift+1...9 keep opening profile 1...9.
+        { "keys": "ctrl+shift+t", "id": "Terminal.OpenNewTabDropdown" },
         { "keys": "ctrl+shift+n", "id": "Terminal.OpenNewWindow" },
         { "keys": "ctrl+shift+1", "id": "Terminal.OpenNewTabProfile0" },
         { "keys": "ctrl+shift+2", "id": "Terminal.OpenNewTabProfile1" },

@@ -446,17 +446,25 @@ tags, queue and runner mode, and the conversation resumes when the tab is entere
 
 ## The launch row
 
-- `AgentLaunchBar` (shared with the side panel's "+" card): the agent element (the Claude⇄Codex toggle,
-  or a fixed `● Claude` chip for a Claude-only host), the working-folder box with its validation
-  underline and folder picker, Launch (with the PRESETS hover menu) and Fork. A host
-  (`AgentLaunchBarHost`) supplies the callbacks, the picker's parent panel, the dialog anchor and the
-  window's one recent-folders list (`AgentLaunchRecentDirs`, `AgentManagerContent::LaunchRecentDirs`);
-  `Shutdown()` stops the hover timer and closes an open menu and picker.
+- `AgentLaunchBar` (shared with the launcher card — the side panel's "+" and the tab strip's "+", TAB_STRIP.md *The
+  + button: the launcher*): the agent element, the working-folder box with its validation underline and folder
+  picker, Launch (with the PRESETS hover menu here) and Fork. A host (`AgentLaunchBarHost`) supplies the callbacks, the
+  picker's parent panel, the dialog anchor and the window's one recent-folders list (`AgentLaunchRecentDirs`,
+  `AgentManagerContent::LaunchRecentDirs`); `Shutdown()` stops the hover timer and closes an open menu and picker.
+- **The kind chip** (the user's picks of 2026-11-14, "Chip opens a menu" — "on all menus of this kind"; NOT BUILT yet):
+  the agent element is a chip, `● Claude ⌄`, whose click opens a menu of **Claude**, **Codex** and **every Windows
+  Terminal profile** of the new-tab menu (folders as submenus, the default bold, each with its icon); it replaced the
+  Claude ⇄ Codex toggle (`AgentLaunchBarHost::kindMenu`; `codexToggle` stays set as the fallback). Picking a shell turns
+  Launch into **Open \<profile\>** and opens that profile as a new tab in the box's folder, in front (a shell has no card
+  on the page to select): the page's `_LauncherSpawnShell`, wired by `SetShellLaunchHandler` /
+  `SetShellChoicesProvider` / `SetLaunchIconFactory`. This row's kind is its own per window (it starts on Claude, as the
+  toggle did); only the launcher card remembers its last pick (`launcherKind`).
 - **Live validation** (`_ValidateLaunchBox`): an existing folder → neutral, "Launch Claude"; a session
   id with a transcript on disk (`LooksLikeSessionId`, `ClaudeConversationExists`) → green,
   "Resume session" + Fork (`_ResumeSessionFromDisk` / `_ForkSessionFromDisk`); a creatable absolute path
   → amber, "Create & Launch Claude" (`_EnsureLaunchDirExists`); a missing id or malformed path → red,
-  disabled. With the toggle on Codex the box takes folders only ("Launch Codex", "Create & Launch Codex").
+  disabled. With the kind on Codex the box takes folders only ("Launch Codex", "Create & Launch Codex"), and on a shell
+  likewise ("Open PowerShell", "Create & Open PowerShell"; an empty box opens the profile's own starting directory).
 - **The folder picker** (`Primitives::Popup`, opened by a pointer or keyboard focus, never a
   programmatic one): Browse…, RECENT (up to `recentDirsLimit`, default 10, the current folder excluded),
   RECENT MATCHES (fuzzy-ranked while typing), GIT WORKTREES, MATCHES / SUBFOLDERS (leaf-prefix

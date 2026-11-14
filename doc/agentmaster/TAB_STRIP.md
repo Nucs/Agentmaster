@@ -1,9 +1,102 @@
 # The tab strip
 
 How Agentmaster draws and drives Windows Terminal's tab strip: the indicators on each tab header, the
-tab menu, tab size, revealing a tab, and dragging tabs. Code: `TabHeaderControl.{xaml,h,cpp}`,
-`TerminalTabStatus.{h,idl}`, `Tab.{h,cpp}`, `TabManagement.cpp`, `TerminalPage.AgentEngine.cpp` (the
-drag gesture), `AgentMaster/TabDragMath.h` (the pure placement math).
+tab menu, tab size, revealing a tab, dragging tabs, the `+` button (Agentmaster's launcher) and the scroll
+arrows. Code: `TabHeaderControl.{xaml,h,cpp}`, `TerminalTabStatus.{h,idl}`, `Tab.{h,cpp}`, `TabManagement.cpp`,
+`TerminalPage.AgentEngine.cpp` (the drag gesture, the scroll arrows), `AgentMaster/TabDragMath.h` (the pure placement
+math), `TabRowControl.xaml` + `TerminalPage.AgentSidePanel.cpp` + `AgentLaunchBar.{h,cpp}` +
+`AgentMaster/LauncherRules.h` (the launcher).
+
+## The + button: the launcher
+
+Built 2026-11-14, NOT BUILT yet (the next build must PURGE: `SessionModels.h`, `TerminalPage.h` and
+`AgentManagerContent.h` changed). The user's request: "Lets discuss the + and downarrow. We have a + in side menu but
+thats also supposed to support powershell. Then we also have model picking menu. I need this integrated into something
+for agentmaster and not old windows terminal functionality". Their four picks the same day (design-ask with mockups of
+their own models, presets, profiles and folders):
+
+| Question | Their pick |
+|---|---|
+| What + and ▾ do | **One + panel, no ▾** — "The dropmenu of FOLDER is same like the + of sidemenu" |
+| How a launcher picks Claude / Codex / a shell | **The kind chip opens a menu** — "on all menus of this kind" |
+| The folder a + opens on | **The focused tab's folder** (the side panel's + too) |
+| Ctrl+Shift+T | **Follows the new +** |
+
+**What the strip shows.** The split button keeps its control (Windows Terminal's code that themes it, attaches its
+profile flyout and reads it runs unchanged) but its ▾ part is gone: `SplitButtonSecondaryButtonSize` 0 and a transparent
+`SplitButtonBorderBrushDivider` in `TabRowControl.xaml`. `#am.strip.new`; an Agentmaster tooltip
+(`_LauncherDecorateNewTabButton`; the XAML tooltip was removed — the shared tip replaces and then clears one).
+
+**What opens it** (`TerminalPage::_LauncherOpenFromTabStrip`):
+
+- a click on `+` (a second click closes the card it opened: its press counts as inside the card);
+- the `openNewTabDropdown` action — **Ctrl+Shift+Space**, and **Ctrl+Shift+T** (Agentmaster's `defaults.json` binds it
+  to `Terminal.OpenNewTabDropdown`; `newTab` keeps its palette entry, Ctrl+Shift+1…9 keep opening profile 1…9);
+- the split button's own drop-down keys, Alt+Down and F4 (a `PreviewKeyDown` turns them into the launcher);
+- a **folder dropped** on `+` (the card opens on that folder; a drop of several items opens it on the first).
+
+**What stays Windows Terminal's:** Alt+click `+` splits the focused pane, Shift+click opens a new window, Ctrl+click an
+elevated one — all with the default profile (`_LauncherNewTabModifiersHeld` → `_OpenNewTerminalViaDropdown`), and the
+same modifiers on a drop. Windows Terminal's profile menu is still built (`_CreateNewTabFlyout`), no longer opened.
+
+**The card** is the side panel's `+` card (SIDE_PANEL.md §2e), anchored under `+`'s bottom center (the window's top
+center when the strip is hidden), placed by `PlacePointerCard` toward the window's center:
+
+```
+ [● Claude ⌄] [ K:\source\Agentmaster        ] [Launch Claude]     ← the kind chip, the folder box, Launch (Fork for an id)
+ MODEL   (Default) (Fable) (Opus) (Sonnet) (Astra) (Sol) (Sol 6.1) (Specify…)
+ PRESET  (MiMo Flash Abliterated · NanoGPT) (GLM-5.3 Flash Uncensored · NanoGPT) (Apex …)
+ ─────────────────────────────────────────────────────────────
+ ⟲ Sessions…    ⚙ Agentmaster settings    ▭ Windows Terminal ⌄
+   └ the folder list (Browse…, RECENT, GIT WORKTREES, SUBFOLDERS) opens with the card, UNDER the card
+```
+
+- **The kind chip** (`#am.launcher.kind`, named "What to launch: <kind>"): a click opens a menu — **Claude**, **Codex**,
+  then **every profile of Windows Terminal's new-tab menu** in its order (`_LauncherShellChoices`, which reads
+  `GlobalSettings().NewTabMenu()` the way `_CreateNewTabFlyoutItems` does: folders such as the user's "SSH" stay
+  submenus, an empty folder is dropped, an auto-inline folder of one entry is inlined, actions are left out; the default
+  profile is bold; each entry wears its profile's icon through `_CreateNewTabFlyoutIcon`). The same chip is on the Agent
+  Manager's launch row (AGENT_MANAGER.md *The launch row*). A pick hands the keyboard back to the box.
+- **A shell** is directory-only, like Codex: Launch reads **Open \<profile\>** / **Create & Open \<profile\>**
+  (`LaunchButtonLabel`); a session id turns the box red; an empty box opens the profile in its own starting directory.
+  `_LauncherSpawnShell`: `NewTerminalArgs` with the profile's GUID and the folder → `_MakePane` → `_CreateNewTabFromPane`
+  (the tab Windows Terminal's menu opened; over the Agent Manager page it shows). Logs `[nav] launcher shell begin / end`.
+- **The pills** (MODEL and PRESET, only for a NEW Claude session: `LauncherShowsModelRows` hides them for Codex, a shell
+  and a session id): Default · each launch model (AppSettings `launchModels`) · Specify… (the page's model prompt; the
+  typed id becomes a lit pill of its own) · each visible preset, or one **Add presets…** while there is none. One is lit
+  (ItemStatus "selected"); every open starts on **Default** (a preset never sticks unseen). A pill never takes focus, so
+  Enter still launches. Launch has **no hover menu** here (`AgentLaunchBarHost::hoverModelMenu` false); the Agent
+  Manager's row keeps its own.
+- **The folder** (`_LauncherFolderForFocusedTab`, `PickLauncherFolder`): a managed session's effective folder; else a
+  shell's OSC 9;9 folder; else the folder the Fleet Observer read for that shell (the window restore's source); else the
+  Agent Manager's box text (the page is up). The box still mirrors into the Agent Manager's box.
+- **The remembered kind:** a user's pick on the chip is written to `settings.json` `launcherKind` ("claude" / "codex" /
+  "profile:{guid}"; a freshest-disk RMW, `_LauncherRememberKind`) and every open of the card starts on it
+  (`ApplyLaunchKindPick`: a profile gone since, or a kind the host cannot start, falls back to Claude). The Agent
+  Manager's row keeps its own kind per window.
+- **Keys:** Enter in the box launches what is lit (it only committed the path before), on the KEY-UP; Esc closes the
+  folder list, then the card.
+- **The footer:** Sessions… (the Sessions browser) · Agentmaster settings (shows the Agent Manager page and opens its ⚙,
+  `ShowSettingsOverlay`) · Windows Terminal ⌄ (Settings, Command palette, About — what the old ▾ menu held). None takes
+  the keyboard.
+- **Logs:** `[nav] tab strip launcher open (+ click | keys | keys on + | folder dropped) kind=<token>`, `[launchbar] kind
+  picked: <token>`, `[launcher] target <model>`.
+- **Tests:** `TestLauncherRules` (the m5 harness: the token, the lookups, the fallback, the rows, the folder, the
+  labels), `tests_persistence` (`launcherKind`); e2e `test_launcher.py` (TAB-12) and `test_side_panel.py` SP-05.
+
+## The scroll arrows
+
+- **The user's report (2026-11-14): "The < and > needs to be vertically centered with the + and V down arrow."** MUX
+  2.8's `TabScrollViewerStyle` wraps each scroll `RepeatButton` in a Border (`ScrollDecreaseButtonContainer` /
+  `ScrollIncreaseButtonContainer`) with `VerticalAlignment="Bottom"` and a vertical padding of its own, while `+` is
+  centred in the row (`Height 24` in a stretched slot). On a row taller than a button plus that padding — a taller tab
+  (the cog's tab min height, a larger title font) — the arrows sat below `+`.
+- **Now** `_EnsureTabStripScrollArrowsCentered` (from `_EnsureTabStripScrollViewer`, which `_UpdateManagerNavButtons`
+  runs on every tab add / remove / switch) finds both Borders in the strip's ScrollViewer template once it is applied,
+  sets `VerticalAlignment Center` and drops their top / bottom padding (left / right kept, so the strip's horizontal
+  layout and `TabDragMath` are unchanged), then latches; `[strip] scroll arrows centred on the tab row (level with +)`
+  once per window. The walk visits the template only (it skips the `ScrollContentPresenter`, which holds every tab).
+  NOT BUILT yet.
 
 ## The header
 

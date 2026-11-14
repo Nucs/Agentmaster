@@ -537,6 +537,10 @@ differs from the plan above, and why:
   `am.mgr.queue.row.<promptKey>`, `am.tab.<key>` (the `TabViewItem`; cleared when the tab stops hosting a session),
   `am.badge.<key>.{mode,up,down,folder,mail,copy,pencil}`,
   `am.side.{launch,filter,sum,scope,sort,scrollToTab,dock,collapse,expand}`, `am.side.card.<key>` (the card's title);
+  the launcher (TAB_STRIP.md *The + button: the launcher*, 2026-11-14, NOT BUILT): `am.strip.new` (the tab strip's `+`),
+  `am.launcher.kind` (the kind chip, named "What to launch: <kind>"), `am.launcher.{models,presets}` (the pill rows),
+  `am.launcher.model.{default,specify,custom,<model id>}`, `am.launcher.preset.{add,<preset id>}` (the lit pill's ItemStatus
+  "selected"), `am.launcher.{sessions,settings,terminal}` (the footer);
   a card's session menu adds `am.side.pin` ("Pin to Top", right under Jump to Tab) and `am.side.unpin` ("Unpin", on a
   pinned card only) — SIDE_PANEL.md §2j, 2026-11-06, NOT BUILT; a menu item exists only while its menu is open;
   the side panel's `⋯` menu (SIDE_PANEL.md §2i; in dev 0.0.1.42 and production 0.8.0.9): `am.side.more` (the header's

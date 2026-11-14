@@ -997,6 +997,9 @@ namespace winrt::TerminalApp::implementation
     {
         if (_tabStripScrollViewer || !_tabView)
         {
+            // Bound already: the `<` / `>` centering may still wait for the ScrollViewer's own template (a one-bool no-op once
+            // it latched; TAB_STRIP.md "The scroll arrows").
+            _EnsureTabStripScrollArrowsCentered();
             return;
         }
 
@@ -1017,6 +1020,83 @@ namespace winrt::TerminalApp::implementation
         catch (...)
         {
             ::Agentmaster::AgentLogCaughtException(L"_EnsureTabStripScrollViewer BringIntoViewOnFocusChange");
+        }
+        _EnsureTabStripScrollArrowsCentered(); // noexcept; retried by every later call until the template is there
+    }
+
+    // Agentmaster (TAB_STRIP.md "The scroll arrows" — the user's report of 2026-11-14: "The < and > needs to be vertically
+    // centered with the + and V down arrow") — see TerminalPage.h. WHY they sat low: MUX 2.8's TabScrollViewerStyle (Generic.xaml)
+    // wraps each RepeatButton in a Border (ScrollDecreaseButtonContainer / ScrollIncreaseButtonContainer) with
+    // VerticalAlignment="Bottom" and a top / bottom padding (TabViewItemLeft/RightScrollButtonContainerPadding), while the tab
+    // row's "+" (TabRowControl.xaml: Height 24 in a stretched slot) is CENTRED in the row. Whenever the row is taller than a
+    // button plus that padding — a taller tab (the cog's tab min height, a larger title font) — the arrows dropped below "+".
+    // Centred here, with their vertical padding dropped (their left / right padding kept, so the strip's horizontal layout and
+    // the drag math that reads it — TabDragMath.h — do not move), both arrows sit on the row's middle line, where "+" sits.
+    // The walk visits only the ScrollViewer's own template (a few elements), never the ScrollContentPresenter's subtree,
+    // which holds every tab.
+    void TerminalPage::_EnsureTabStripScrollArrowsCentered() noexcept
+    {
+        if (_tabStripScrollArrowsCentered || !_tabStripScrollViewer)
+        {
+            return;
+        }
+        try
+        {
+            winrt::WUX::Controls::Border decrease{ nullptr };
+            winrt::WUX::Controls::Border increase{ nullptr };
+            // A bounded walk of the template: Root (Border) → Grid → the two containers sit at depth 3; 5 levels cover a
+            // template that nests one or two more panels, and the tabs' subtree is skipped by name.
+            std::vector<std::pair<winrt::WUX::DependencyObject, int>> pending{ { _tabStripScrollViewer.as<winrt::WUX::DependencyObject>(), 0 } };
+            while (!pending.empty() && !(decrease && increase))
+            {
+                const auto [node, depth] = pending.back();
+                pending.pop_back();
+                const auto count = winrt::WUX::Media::VisualTreeHelper::GetChildrenCount(node);
+                for (int32_t i = 0; i < count; ++i)
+                {
+                    const auto child = winrt::WUX::Media::VisualTreeHelper::GetChild(node, i);
+                    if (const auto fe = child.try_as<winrt::WUX::FrameworkElement>())
+                    {
+                        const auto name = fe.Name();
+                        if (name == L"ScrollDecreaseButtonContainer")
+                        {
+                            decrease = child.try_as<winrt::WUX::Controls::Border>();
+                            continue;
+                        }
+                        if (name == L"ScrollIncreaseButtonContainer")
+                        {
+                            increase = child.try_as<winrt::WUX::Controls::Border>();
+                            continue;
+                        }
+                        if (name == L"ScrollContentPresenter")
+                        {
+                            continue; // the tabs live below it: nothing of the arrows, and up to hundreds of elements
+                        }
+                    }
+                    if (depth + 1 < 5)
+                    {
+                        pending.emplace_back(child, depth + 1);
+                    }
+                }
+            }
+            if (!decrease || !increase)
+            {
+                return; // the ScrollViewer's template is not applied yet (or a future MUX renamed the parts): retried later
+            }
+            for (const auto& container : { decrease, increase })
+            {
+                container.VerticalAlignment(winrt::WUX::VerticalAlignment::Center);
+                const auto padding = container.Padding();
+                container.Padding(winrt::WUX::Thickness{ padding.Left, 0.0, padding.Right, 0.0 });
+            }
+            _tabStripScrollArrowsCentered = true;
+            // Once per window: the line that shows a running build carries this fix.
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[strip] scroll arrows centred on the tab row (level with +)\n");
+        }
+        catch (...)
+        {
+            // The arrows keep MUX's bottom alignment (as before); the next call tries again. Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"_EnsureTabStripScrollArrowsCentered");
         }
     }
 
@@ -2412,6 +2492,30 @@ namespace winrt::TerminalApp::implementation
                 });
             }
         });
+        // Agentmaster (the launch row's KIND CHIP, AGENT_MANAGER.md "The launch row" — the user's picks of 2026-11-14): the chip's
+        // SHELLS. The row opens a Windows Terminal profile through the page's own seam (a plain new tab in front: a shell has no
+        // card on the page to select), lists the profiles of Windows Terminal's new-tab menu, and wears their icons — the three
+        // the launcher card uses too.
+        content->SetShellLaunchHandler([weakThis](winrt::hstring dir, winrt::hstring profileGuid, winrt::hstring profileName) {
+            if (auto self = weakThis.get())
+            {
+                self->_LauncherSpawnShell(std::wstring{ dir }, std::wstring{ profileGuid }, std::wstring{ profileName }, L"agent manager row"); // never throws
+            }
+        });
+        content->SetShellChoicesProvider([weakThis]() -> std::vector<::Agentmaster::LaunchShellChoice> {
+            if (auto self = weakThis.get())
+            {
+                return self->_LauncherShellChoices(); // never throws
+            }
+            return {};
+        });
+        content->SetLaunchIconFactory([weakThis](const std::wstring& icon) -> winrt::WUX::Controls::IconElement {
+            if (auto self = weakThis.get())
+            {
+                return self->_CreateNewTabFlyoutIcon(winrt::hstring{ icon });
+            }
+            return nullptr;
+        });
         // Agentmaster: the Explorer Tree's refresh button — force the Fleet Observer to re-survey NOW
         // (re-enrich the registry + recompute the External census) and redraw, instead of waiting for
         // the next observer/scanner tick. Covers every scope (LOCAL/GLOBAL re-pull + EXTERNAL census).
@@ -2507,6 +2611,9 @@ namespace winrt::TerminalApp::implementation
                     // form — a Save must not reset them.
                     s.transcriptOverlayLevel = disk.transcriptOverlayLevel;
                     s.transcriptOverlayWrapLines = disk.transcriptOverlayWrapLines;
+                    // The launcher card's remembered kind (TAB_STRIP.md "The + button: the launcher"): written by the card's
+                    // own RMW on a pick on its kind chip, never by this form — a Save must not reset it.
+                    s.launcherKind = disk.launcherKind;
                     // The Sessions AI search's thinking level: written by the page's strip toggle
                     // (freshest-disk RMW), never by this form — a Save must not reset it.
                     s.sessionsAiThinkingLevel = disk.sessionsAiThinkingLevel;

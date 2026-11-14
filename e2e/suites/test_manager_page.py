@@ -256,7 +256,8 @@ def test_a_plus_card_launch_follows_where_the_user_looks(am, s1, mock):
     session, because the launch selected the new tab before the tab was mapped to its session).
 
     Launch is pressed with Enter (focused, on the key-up): this test is about where the launch goes; one CLICK with
-    the presets menu open is SP-05's test_plus_card_launch_takes_one_click_with_its_menu_open.
+    the presets menu open was SP-05's test_plus_card_launch_takes_one_click_with_its_menu_open (since the launcher panel of
+    2026-11-14 the card has no hover menu: test_plus_card_launch_has_no_hover_menu_and_takes_one_click).
 
     Args:
         am: The app.

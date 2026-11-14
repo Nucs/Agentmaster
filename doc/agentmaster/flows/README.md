@@ -32,7 +32,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [04-drafts-and-delivery.md](04-drafts-and-delivery.md) | Unsent drafts, the draft swap, the mail button, the fork carry (DRF) | 9 | 5 / 3 / 1 | 33 | 42 | — |
 | [05-session-state.md](05-session-state.md) | Session state on every surface, through Claude Code's own events (STA) | 16 | 8 / 7 / 1 | 42 | 52 | 2 (STA-K2–K4 reclassified as accepted delays) |
 | [06-interrupted-work.md](06-interrupted-work.md) | API-error rewinds, the restore wake, interrupted turns (INT) | 11 | 2 / 2 / 0 (+7 NOT BUILT) | 44 | 63 | — |
-| [07-tabs-park-close-dock.md](07-tabs-park-close-dock.md) | Deactivate, Close, drag / dock, the strip, quitting, several windows at start (TAB) | 11 | 5 / 2 / 3 (+1 NOT BUILT) | 44 | 33 | 4 (3 fixed in code; TAB-K2 reclassified as a feature) |
+| [07-tabs-park-close-dock.md](07-tabs-park-close-dock.md) | Deactivate, Close, drag / dock, the strip, the + launcher, quitting, several windows at start (TAB) | 12 | 5 / 2 / 3 (+2 NOT BUILT) | 52 | 38 | 4 (3 fixed in code; TAB-K2 reclassified as a feature) |
 | [08-telegram-topics.md](08-telegram-topics.md) | Telegram: setup, topics, history, the mirror (TGT) | 11 | 4 / 6 / 1 | 37 | 25 | 2 |
 | [09-telegram-card-and-control.md](09-telegram-card-and-control.md) | Telegram: the card, prompts, /steer, /enter, /commands, the screen (TGC) | 7 | 4 / 2 / 0 (+1 NOT BUILT) | 30 | 31 | 2 |
 | [10-telegram-questions-and-menus.md](10-telegram-questions-and-menus.md) | Telegram: question cards, /add-dir menu cards (TGQ) | 6 | 3 / 3 / 0 | 24 | 21 | — |
@@ -408,7 +408,8 @@ stalled the app's UI thread) — reruns `pqr6`–`pqr8`.
 | SP-01 | phases 1, 3, 4 | `test_side_panel.py::test_panel_lists_this_windows_sessions` |
 | SP-02 | phases 1–5 | `…::test_follow_peek_and_jump`, `…::test_card_context_menu` |
 | SP-04 | phases 1–2 (phase 2: no rich card on a card's hover — SP-K2, a feature since 2026-10-24) | `…::test_sum_off_lets_the_cards_fill_the_panel`, `…::test_sum_off_card_hover_opens_no_rich_card` |
-| SP-05 | phases 1, 3, 4, 5, E2, E3 (phase 5: `needs_fix`, a build with SP-K1's fix) | `…::test_plus_launcher_card`, `…::test_plus_card_launch_takes_one_click_with_its_menu_open` |
+| SP-05 | phases 1, 3, 4, 5, E3 (phase 5: `needs_fix`, a build with the launcher panel — TAB-12; its SP-K1 test of the card's old hover menu was replaced 2026-11-14) | `…::test_plus_launcher_card`, `…::test_plus_card_launch_has_no_hover_menu_and_takes_one_click` |
+| TAB-12 | phases 1–6 (`needs_fix`: a build with the launcher, 2026-11-14; written then, never run) | `test_launcher.py::test_strip_plus_opens_the_launcher_on_the_focused_tab`, `…::test_ctrl_shift_t_opens_the_launcher`, `…::test_kind_chip_opens_a_shell_and_is_remembered` |
 | SP-06 | phases 3–5 (through the ⋯ menu on a build that has it, the 0.8.x buttons otherwise) | `…::test_collapse_and_dock`, `…::test_panel_state_survives_a_restart` |
 | SP-10 | phases 1–7, E4 (`needs_fix`: a build with the ⋯ menu's 2026-11-04 shape — the mirrored line, the menu on ⋯'s outer edge, the dock below the separator — SP-F1; a 2026-11-03 build fails phases 1, 2 and 6) | `…::test_more_menu_holds_the_header_controls` |
 | SP-11 | phases 1–5 (`needs_fix`: a build with Pin to Top — SP-F2; written 2026-11-06, never run) | `…::test_pin_to_top` |

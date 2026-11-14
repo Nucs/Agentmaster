@@ -15,18 +15,33 @@
 // fork and "Create & Launch" paths.
 //
 // THE TWO HOSTS (AgentLaunchBarHost):
-//   - the Agent Manager page: the Claude <-> Codex toggle, the drop-down parented into the page's own root, its
-//     "Claude not detected" modal, its staged toolbar reflow on every width change (layoutChanged), and the recent
-//     folders loaded once per window (AgentManagerContent::LaunchRecentDirs hands the SAME list to the side panel);
-//   - the side panel's "+" card: Claude only (a fixed "● Claude" chip — Codex launches from there are planned), the
-//     drop-down parented into the page Root(), the page's own "Claude not detected" dialog, and three extra hooks the
-//     Manager does not need: launched (the card closes after a launch), textEdited (the card's box mirrors the
-//     Manager's box) and the dialog anchor (the card, so a "Couldn't create folder" dialog is dark).
+//   - the Agent Manager page: the kind chip (Claude / Codex / the shells; the Claude <-> Codex toggle before 2026-11-14),
+//     the drop-down parented into the page's own root, its "Claude not detected" modal, its staged toolbar reflow on every
+//     width change (layoutChanged), Launch's model / preset hover menu, and the recent folders loaded once per window
+//     (AgentManagerContent::LaunchRecentDirs hands the SAME list to the side panel);
+//   - the LAUNCHER CARD — the side panel's "+" card, which the tab strip's "+" opens too (TAB_STRIP.md "The + button: the
+//     launcher"): the same kind chip (it was a fixed "● Claude" chip, Codex "planned"), no hover menu (the card's own
+//     MODEL / PRESET pills call SetLaunchTarget), the drop-down parented into the page Root() and hung under the whole
+//     card (pickerAnchorBelow), the page's own "Claude not detected" dialog, and the extra hooks the Manager does not need:
+//     launched (the card closes after a launch), textEdited (the card's box mirrors the Manager's box), kindChanged (the
+//     card remembers the pick) and the dialog anchor (the card, so a "Couldn't create folder" dialog is dark).
 //   - the side panel's FOLDER FILTER card (SIDE_PANEL.md §2l, the user's "By Folder -> <the picker of +>"): the same bar in
 //     FOLDER-PICK MODE (AgentLaunchBarHost::pickFolder) — a "Folder" chip, the same box and drop-down with one more section
 //     (the folders the panel's sessions work in), and a "Filter" button that hands the folder to the host instead of
 //     launching anything. Every launch-only path (the hover menu, resume, fork, "Create & Launch", Browse…'s recent push)
 //     stands aside in that mode (_PickMode()); with pickFolder empty the bar is the launch bar, byte for byte in behavior.
+//
+// THE KIND CHIP (the user's picks of 2026-11-14: "Chip opens a menu", "on all menus of this kind"): a host that sets
+// AgentLaunchBarHost::kindMenu gets, in the agent element's place, a chip whose CLICK opens a menu — Claude, Codex, then
+// every Windows Terminal profile of the new-tab menu (PowerShell, Command Prompt, WSL, the SSH folder, ...). The pick
+// retargets the same box and Launch button: a shell is directory-only like Codex and its Launch reads "Open <profile>"
+// (LaunchButtonLabel, AgentMaster/LauncherRules.h); Launch then calls host.spawnShell with the profile's GUID. The Agent
+// Manager's row and the launcher card (the tab strip's + and the side panel's +, TAB_STRIP.md "The + button: the
+// launcher") both set it; the old Claude <-> Codex toggle (codexToggle without kindMenu) and the fixed chip stay for any
+// host that asks for them.
+// THE LAUNCH TARGET: the launcher card picks a model or a preset on its own MODEL / PRESET pills instead of Launch's hover
+// menu (host.hoverModelMenu false); it hands the pick to SetLaunchTarget, and a click on Launch starts the new Claude session
+// with it. A host that never sets one launches Default, as before.
 //
 // THE RULES THIS CLASS KEEPS (each one has a comment at its code):
 //   - The drop-down opens on a USER focus (Pointer / Keyboard), a tap, a keystroke, or when the HOST asks for it
@@ -79,6 +94,8 @@
 #include <string> // paths, ids, titles
 #include <vector> // the recent-folders list
 
+#include "AgentMaster/LauncherRules.h" // LaunchKind / LaunchShellChoice / LaunchKindPick — the kind chip's model (pure, std-only)
+
 namespace Agentmaster
 {
     class SessionRegistry; // the shared fleet (session id -> working dir + title); complete in the .cpp
@@ -112,9 +129,10 @@ namespace winrt::TerminalApp::implementation
     // missing callback). Every callback must capture its host weakly (see OWNERSHIP in the file header).
     struct AgentLaunchBarHost
     {
-        // True: the agent element is the Claude <-> Codex toggle BUTTON (the Agent Manager). False: a fixed
-        // "● Claude" chip, not clickable, with a tooltip that says Codex launches from this surface are planned
-        // (the side panel's card). With false the bar never enters Codex mode, so spawnCodex is never called.
+        // True: the agent element is the Claude <-> Codex toggle BUTTON. False: a fixed "● Claude" chip, not clickable (the
+        // folder-pick card's "Folder" chip). With false the bar never enters Codex mode, so spawnCodex is never called.
+        // kindMenu (below) WINS over both: the Agent Manager's row and the launcher card set it (and leave this as it was),
+        // so the toggle and the fixed Claude chip serve only a host that asks for neither.
         bool codexToggle{ true };
         // The window's shared recent-folders list. Null is allowed: the bar then makes its own empty list (nothing is
         // offered as RECENT until the first launch, and each push still saves the file).
@@ -191,6 +209,38 @@ namespace winrt::TerminalApp::implementation
         std::function<std::vector<AgentLaunchFolderChoice>()> folderChoices;
         // Pick mode only: that section's header ("FOLDERS OF THIS WINDOW'S SESSIONS"). Empty = "SESSION FOLDERS".
         std::wstring folderChoicesLabel;
+
+        // --- THE KIND CHIP (the user's picks of 2026-11-14; see the file header) ---
+        // True: the agent element is the KIND CHIP — a Button reading "● Claude ⌄" / "● Codex ⌄" / "<profile icon> PowerShell ⌄"
+        // whose click opens a menu of Claude, Codex (when spawnCodex is set) and the shells (when spawnShell is set). It wins
+        // over codexToggle. Never with pickFolder (the folder card keeps its fixed "Folder" chip). A pick changes the kind of
+        // the very box and Launch button beside it and calls kindChanged.
+        bool kindMenu{ false };
+        // The shells the chip's menu lists, built by the host from Windows Terminal's new-tab menu at every menu open (and
+        // when a remembered pick is applied, ApplyLaunchKindPick), so a profile added in Windows Terminal shows at once.
+        // Empty callback or an empty tree: the menu lists no shells. Must not throw (a throw is logged; no shells then).
+        std::function<std::vector<::Agentmaster::LaunchShellChoice>()> shellChoices;
+        // Makes the icon element of a profile or folder from its resolved icon source (LaunchShellChoice::icon) — Windows
+        // Terminal's own icon converter (TerminalPage::_CreateNewTabFlyoutIcon), so the menu and the chip wear the icons the
+        // new-tab menu wore. Called for EVERY element (an element has one parent). Empty callback, an empty source or a null
+        // result: no icon. Must not throw (a throw is logged; no icon then).
+        std::function<winrt::Windows::UI::Xaml::Controls::IconElement(const std::wstring& icon)> makeIcon;
+        // Open the shell profile `profileGuid` (named `profileName`, for the host's log) as a new tab starting in `dir` ("" =
+        // the profile's own starting directory). The folder already exists (a "Create & Open" created it) and is in the
+        // recent list when this runs. Empty = no shells in the chip's menu.
+        std::function<void(const std::wstring& dir, const std::wstring& profileGuid, const std::wstring& profileName)> spawnShell;
+        // The USER picked a kind on the chip's menu (never called for a programmatic ApplyLaunchKindPick). The launcher card
+        // remembers the pick (AppSettings::launcherKind) and shows or hides its MODEL / PRESET rows; the Agent Manager needs
+        // nothing (its row re-fits through layoutChanged, as for any label change).
+        std::function<void()> kindChanged;
+        // True (the default): hovering Launch opens the model / preset menu (PRESETS, HARNESSES.md §8.2). The launcher card
+        // sets false: it shows the models and presets as pills of its own, and a hover menu over them would only repeat them.
+        bool hoverModelMenu{ true };
+        // Where the drop-down's TOP goes: null (the default) = right under the box, as on the Agent Manager page; set = right
+        // under THIS element's bottom edge (still left-aligned with the box). The launcher card passes itself: its MODEL /
+        // PRESET pills and its footer sit below the box, and the folder list — open with the card, the user's rule of
+        // 2026-10-19 — must not cover them. The height cap measures the room below from there too.
+        winrt::Windows::UI::Xaml::FrameworkElement pickerAnchorBelow{ nullptr };
     };
 
     // ONE launch bar: build it with Create, put its parts into the host's layout (AgentElement, CwdColumn, LaunchButton,
@@ -237,6 +287,31 @@ namespace winrt::TerminalApp::implementation
         // _ValidateLaunchBox). Call after any programmatic Text write. Throws what a XAML property write throws on
         // the UI thread (never in practice; the hosts' callers are contained).
         void ValidateLaunchBox();
+
+        // --- THE KIND CHIP and THE LAUNCH TARGET (see the file header) ---
+        // What a click on Launch starts now (Claude, Codex or a shell). Never throws.
+        ::Agentmaster::LaunchKind LaunchKind() const noexcept { return _launchKind; }
+        // The current kind as a pick (the shell's GUID for a shell): what the launcher card persists after a user's pick
+        // (FormatLaunchKindToken). Throws std::bad_alloc only.
+        ::Agentmaster::LaunchKindPick LaunchKindPick() const;
+        // Apply a pick made elsewhere — the launcher card's remembered one at its open — WITHOUT calling host.kindChanged: the
+        // pick is checked against what the host offers now (ResolveLaunchKindPick: a gone profile, Codex or a shell on a host
+        // that cannot start them, all fall back to Claude), then the chip and the Launch button are repainted and the box is
+        // re-validated (a shell or Codex take folders only). A no-op on a bar without the kind chip. Never throws: a failure
+        // is logged (Rule #18) and the bar keeps its previous kind.
+        //   pick - the wanted kind (and profile).
+        void ApplyLaunchKindPick(const ::Agentmaster::LaunchKindPick& pick) noexcept;
+        // The Claude TARGET a plain Launch click starts a new session with: "" = Default (the Settings model), a model id, or
+        // "@<presetId>" — the launcher card's MODEL / PRESET pills write it. Ignored for Codex, a shell, and a session id in
+        // the box (a resume keeps its own snapshot). The hover menu's pick still launches with ITS target. Never throws
+        // (std::wstring assignment aside: std::bad_alloc).
+        //   target - the target ("" = Default).
+        void SetLaunchTarget(const std::wstring& target);
+        // The target set above ("" = Default). Never throws.
+        const std::wstring& LaunchTarget() const noexcept { return _launchTarget; }
+        // True when the box's trimmed text is a session id (Launch then reads "Resume session"): the launcher card hides its
+        // MODEL / PRESET rows (LauncherShowsModelRows). Never throws (a failed read answers false).
+        bool BoxHoldsSessionId() const noexcept;
         // Repaint the agent element (● Claude / ● Codex). Throws as ValidateLaunchBox.
         void UpdateLaunchAgentButton();
         // Exactly what a click on Launch does: stop the hover-menu timer and close an open hover menu (a click is a
@@ -317,6 +392,38 @@ namespace winrt::TerminalApp::implementation
 
         // --- The agent element + the launch actions (moved from AgentManagerContent.Launch.cpp) ---
         void _UpdateLaunchAgentButton();
+        // THE KIND CHIP's face (kindMenu hosts; _UpdateLaunchAgentButton calls it): "● Claude ⌄" (the toggle's blue dot), "●
+        // Codex ⌄" (the codex teal) or "<profile icon> <profile name> ⌄" — the name capped with an ellipsis, so a long profile
+        // ("Developer Command Prompt for VS 2022 (2)") cannot push Launch off a narrow row. Throws what XAML element creation
+        // throws (the callers are contained).
+        void _UpdateKindChipFace();
+        // Open THE KIND CHIP's menu under the chip: Claude and Codex (Codex only while host.spawnCodex is set), a separator,
+        // then the shells of host.shellChoices (only while host.spawnShell is set) in Windows Terminal's new-tab menu order —
+        // folders as submenus, the default profile bold, a check on the current kind. A fresh MenuFlyout per open (the list
+        // can change between opens: a profile added in Windows Terminal). A pick goes to _PickLaunchKind. Never throws (a
+        // failed open is logged; the chip stays as it was).
+        void _ShowKindMenu() noexcept;
+        // Append the shell entries of `choices` to `items` (one level; folders recurse into their submenu's items). Profiles
+        // become check items; a pick calls _PickLaunchKind(Shell, the profile). Throws what XAML element creation throws
+        // (contained by _ShowKindMenu).
+        //   items   - the menu's or a submenu's item collection.
+        //   choices - one level of the tree.
+        void _AppendShellChoiceItems(const winrt::Windows::Foundation::Collections::IVector<winrt::Windows::UI::Xaml::Controls::MenuFlyoutItemBase>& items,
+                                     const std::vector<::Agentmaster::LaunchShellChoice>& choices);
+        // The kind chip's icon for a profile or folder (host.makeIcon), or null. Never throws (a host failure is logged).
+        //   icon - the resolved icon source; "" = none.
+        winrt::Windows::UI::Xaml::Controls::IconElement _MakeKindIcon(const std::wstring& icon) const noexcept;
+        // A kind picked BY THE USER on the chip's menu: take it (_SetLaunchKind), repaint the chip, re-validate the box (the
+        // Launch label and the session-id rules follow the kind), close a hover menu that offered the previous kind's models,
+        // and tell the host (host.kindChanged). Never throws (each step logged on its own).
+        //   kind    - the picked kind.
+        //   profile - the picked profile (Shell only; null otherwise).
+        void _PickLaunchKind(::Agentmaster::LaunchKind kind, const ::Agentmaster::LaunchShellChoice* profile) noexcept;
+        // Take a kind: the kind, and for a shell its GUID, name and icon source (cleared for Claude / Codex). No repaint, no
+        // notification (the callers do what their path needs). Throws std::bad_alloc only.
+        void _SetLaunchKind(::Agentmaster::LaunchKind kind, const ::Agentmaster::LaunchShellChoice* profile);
+        // The shells the host offers now (host.shellChoices), or an empty tree. Never throws (a host failure is logged).
+        std::vector<::Agentmaster::LaunchShellChoice> _ShellChoices() const noexcept;
         // PRESETS (HARNESSES.md §8.2): the Launch button's hover menu — exactly the "Open New Session Here" picker
         // (Default, Specify…, the launch models, then the visible presets). A HOVER opens it at once (2026-10-10; it
         // waited 450 ms before): the Launch button's PointerEntered calls this directly for a pointer that is not in
@@ -527,13 +634,25 @@ namespace winrt::TerminalApp::implementation
         std::shared_ptr<AgentLaunchRecentDirs> _recentDirs; // MRU of launched working dirs (persisted) — the host's shared list, or a private one
         winrt::Windows::System::DispatcherQueue _dispatcher{ nullptr }; // host.dispatcher, or the creating thread's
 
-        // The Claude<->Codex agent toggle before the box (codexToggle hosts; null otherwise).
+        // The agent element before the box when it is a BUTTON: the kind chip (kindMenu hosts — its click opens the kind
+        // menu) or the Claude<->Codex toggle (codexToggle hosts without kindMenu); null otherwise.
         winrt::Windows::UI::Xaml::Controls::Button _launchAgentBtn{ nullptr };
-        // The fixed "● Claude" chip (codexToggle=false hosts; null otherwise).
+        // The fixed "● Claude" chip (hosts with neither kindMenu nor codexToggle; the folder card's "Folder" chip); null otherwise.
         winrt::Windows::UI::Xaml::Controls::Border _agentChip{ nullptr };
-        // false = launch a Claude (default, unchanged); true = launch a managed Codex in the typed dir. Only the
-        // toggle flips it, so a chip bar stays false for its whole life.
-        bool _launchCodex{ false };
+        // What Launch starts. Claude (the default, as before). Codex: the toggle flips to it, or the kind chip picks it — a
+        // managed Codex in the typed dir. Shell: the kind chip picked a Windows Terminal profile (_shellGuid / _shellName /
+        // _shellIcon). A fixed-chip bar stays Claude for its whole life.
+        ::Agentmaster::LaunchKind _launchKind{ ::Agentmaster::LaunchKind::Claude };
+        std::wstring _shellGuid; // Shell: the profile's braced GUID (host.spawnShell's argument); empty otherwise
+        std::wstring _shellName; // Shell: the profile's name (the chip's label and Launch's "Open <name>"); empty otherwise
+        std::wstring _shellIcon; // Shell: the profile's icon source (the chip's icon, through host.makeIcon); empty otherwise
+        // The Claude target a plain Launch click starts a new session with (SetLaunchTarget): "" = Default.
+        std::wstring _launchTarget;
+        // The kind chip's menu while it is open (null otherwise): a second click on the chip while it shows opens nothing new.
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout _kindMenu{ nullptr };
+        // Set by a PICK on the kind menu, consumed by the menu's Closed: the keyboard goes back to the box (the chip would keep
+        // it, and the Enter meant to launch would open the menu again). A menu dismissed without a pick leaves focus alone.
+        bool _kindPickFocusBox{ false };
         winrt::Windows::UI::Xaml::Controls::TextBox _cwdBox{ nullptr }; // the working dir / session id box
         winrt::Windows::UI::Xaml::Controls::StackPanel _cwdCol{ nullptr }; // [box / underline], the element a host places
         winrt::Windows::UI::Xaml::Controls::Border _cwdUnderline{ nullptr }; // validation underline (green=found session id, red=missing dir / unknown id, amber=will create, transparent=neutral)

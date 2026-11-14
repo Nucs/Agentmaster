@@ -46,6 +46,7 @@ namespace winrt::Microsoft::Terminal::Settings
 #include "AgentMaster/HeldTabRefs.h" // Agentmaster (PERSISTENCE.md §16): HeldTabRef — the saved tabs a restore could not bring back (by-value member)
 #include "AgentMaster/InterruptedTurns.h" // Agentmaster (HOOKS.md "Interrupted turns"): RestartTurnChoice / ForkTurnChoice / the fork stop watch's pure decision (by-value members + parameters)
 #include "AgentMaster/LaunchPresets.h" // Agentmaster (PRESETS, HARNESSES.md): LaunchArgs / CompiledClaudeLaunch — the launch seams' by-value snapshot + compile
+#include "AgentMaster/LauncherRules.h" // Agentmaster (TAB_STRIP.md "The + button: the launcher"): LaunchShellChoice — the kind chip's shells (pure, std-only)
 #include "AgentMaster/RemoteLaunch.h" // Agentmaster (MESSAGING.md §8.2): RemoteLaunchRequest — what the Telegram bot's launch sink asks this window to open
 #include "AgentMaster/RestoreWake.h" // Agentmaster (PERSISTENCE.md §14): RestoreWakeWindowJob — the restore wake's per-window job (by-value member)
 #include "AgentMaster/SessionModels.h"
@@ -905,10 +906,12 @@ namespace winrt::TerminalApp::implementation
         uint64_t _sidePanelNextTimingMs{ 0 }; // next GetTickCount64 at/after which the in-place timing-text refresh runs (~30s cadence)
         // --- The header's "+" LAUNCHER (SIDE_PANEL.md §2e) ---
         // A click on "+" opens a CARD at the click point holding the Agent Manager's own launch row — the shared
-        // AgentLaunchBar, Claude only: [● Claude] [ box ] [Launch Claude] [Fork] — so a session starts from the side
-        // panel without leaving the tab. The card is built on the FIRST click (_SidePanelEnsureLaunchCard) and kept for
-        // the window's life; a window that never opens it pays nothing. Closed by a press outside it, Esc, "+" again,
-        // a launch, a tab switch, a collapse and a dock flip. UI-thread-only, like every side panel member.
+        // AgentLaunchBar: [kind ⌄] [ box ] [Launch Claude] [Fork] — so a session starts from the side panel without leaving
+        // the tab. Since 2026-11-14 it is THE LAUNCHER PANEL (the members below it): the tab strip's "+" opens the same card,
+        // the kind chip starts Claude, Codex or any Windows Terminal shell, and the models / presets are pills of the card.
+        // The card is built on the FIRST open (_SidePanelEnsureLaunchCard) and kept for the window's life; a window that never
+        // opens it pays nothing. Closed by a press outside it, Esc, the "+" that opened it again, a launch, a tab switch, a
+        // collapse and a dock flip. UI-thread-only, like every side panel member.
         // The "+" header button (line 1: the innermost button, on the terminal's side of the funnel — the user's swap of
         // 2026-11-10 — column 1 docked right, column 3 docked left: the line mirrors, _SidePanelApplyHeaderOrder). Its face
         // is Segoe Fluent Icons' Add over an invisible "+" (SidePanelIconButtonFace), the funnel's face: one size for both.
@@ -919,8 +922,9 @@ namespace winrt::TerminalApp::implementation
         // The card itself (dark, the tag editor's look): the outside-press boundary, the key handlers' owner, the
         // placement's measured size, and the focus-restore test ("was focus inside the card when it closed?").
         winrt::Windows::UI::Xaml::Controls::Border _sidePanelLaunchCard{ nullptr };
-        // The card's launch bar: the Agent Manager's launch code verbatim (AgentLaunchBar.h), a Claude-only host whose
-        // drop-down lives in Root(). Shut down in ~TerminalPage (its hover timer is UI-affine).
+        // The card's launch bar: the Agent Manager's launch code verbatim (AgentLaunchBar.h) — a kind-chip host (Claude, Codex,
+        // the shells) without Launch's hover menu, whose drop-down lives in Root() under the card. Shut down in ~TerminalPage
+        // (its timers and menus are UI-affine).
         std::shared_ptr<AgentLaunchBar> _sidePanelLaunchBar;
         // Where the card's corner sits, in Root() coordinates: the "+" press point (the tooltip-like placement the user
         // asked for), else the "+" button's bottom center. Kept while open, so a re-placement after a size change
@@ -947,6 +951,34 @@ namespace winrt::TerminalApp::implementation
             Fork, // Enter on the focused Fork button: what its click does
         };
         SidePanelLaunchKeyAction _sidePanelLaunchArmedAction{ SidePanelLaunchKeyAction::None };
+        // --- THE LAUNCHER PANEL (TAB_STRIP.md "The + button: the launcher", SIDE_PANEL.md §2e) ---
+        // The user's picks of 2026-11-14: the tab strip's "+" opens THIS card too (its ▾ is gone), and the card grew from one
+        // row into a panel — the row ([kind ⌄] [ box ] [Launch] [Fork]: the kind chip opens Claude / Codex / every Windows
+        // Terminal profile), then, for a new Claude session only, a MODEL row and a PRESET row of pills (every choice one click
+        // and visible: "One + panel, no ▾"), then a footer (Sessions… · Agentmaster settings · Windows Terminal ⌄). Built with
+        // the card (_SidePanelEnsureLaunchCard), kept for the window's life; UI-thread-only.
+        winrt::Windows::UI::Xaml::Controls::Grid _launcherModelRow{ nullptr }; // "MODEL" + its pills; collapsed unless a new Claude session (LauncherShowsModelRows)
+        winrt::Windows::UI::Xaml::Controls::Panel _launcherModelPills{ nullptr }; // the MODEL pills' wrap panel (Default · the launch models · Specify… · a Specify… pick)
+        winrt::Windows::UI::Xaml::Controls::Grid _launcherPresetRow{ nullptr }; // "PRESET" + its pills; collapsed with the MODEL row, and while there is nothing to show
+        winrt::Windows::UI::Xaml::Controls::Panel _launcherPresetPills{ nullptr }; // the PRESET pills' wrap panel (the visible presets, or one "Add presets…")
+        winrt::Windows::UI::Xaml::Controls::Border _launcherFooter{ nullptr }; // the footer line: Sessions… · Agentmaster settings · Windows Terminal ⌄
+        // A model id typed into "Specify…" while the card is open: shown as its own lit pill (with Default's place unchanged),
+        // so what Launch starts is always visible. Cleared at every open (the card opens on Default).
+        std::wstring _launcherCustomModel;
+        // True while the OPEN card came from the TAB STRIP's "+" (its click, Ctrl+Shift+T / Ctrl+Shift+Space, a folder dropped on
+        // it): its press counts as inside the card (a second click closes it), and a side-panel-only close (a dock flip, a
+        // collapse) does not apply to it. False for the side panel's "+".
+        bool _launcherFromTabStrip{ false };
+        // The pill rows' width as last fitted (_SidePanelFitLaunchBox): the row above's width less the label column, so the
+        // wrap panels — measured with no width limit inside the card's Popup — wrap where the row ends. Written on a change only.
+        double _launcherPillsWidth{ 0.0 };
+        // The pills' inputs at their last build (_LauncherRebuildPills): the launch models, the preset entries, the custom pick
+        // and the lit target, joined. An open whose inputs are unchanged rebuilds nothing.
+        std::wstring _launcherPillsSignature;
+        // --- The tab strip's scroll arrows (TAB_STRIP.md "The scroll arrows") ---
+        // True once the `<` / `>` buttons' containers were found in the strip's ScrollViewer template and centred on the row
+        // (_EnsureTabStripScrollArrowsCentered): later calls then cost one bool test.
+        bool _tabStripScrollArrowsCentered{ false };
         // --- The side panel's FILTERS (SIDE_PANEL.md §2l) ---
         // The user's request of 2026-11-08: a FILTER button "like the +" whose click opens a menu — By Folder (the "+" card's
         // picker), By State, By Tag, four flags, Active within — that stays open while you pick, and a row under the filter box,
@@ -3877,6 +3909,87 @@ namespace winrt::TerminalApp::implementation
         bool _SidePanelLaunchPressIsInside(const winrt::Windows::UI::Xaml::DependencyObject& source);
         // True while the card's Popup is open. Never throws (a failed read answers false).
         bool _SidePanelLaunchCardOpen() const noexcept;
+        // --- THE LAUNCHER PANEL (TAB_STRIP.md "The + button: the launcher", SIDE_PANEL.md §2e) ---
+        // The shared second half of every open of the launcher card, after the caller set the anchor
+        // (_sidePanelLaunchAnchor) and _launcherFromTabStrip: drop an armed key; put the folder in the box (`folder`, else the
+        // focused tab's — _LauncherFolderForFocusedTab, the user's pick "Focused tab's folder"); apply the remembered kind
+        // (AppSettings::launcherKind); light Default and rebuild the pills; show or hide the MODEL / PRESET rows; fit the box;
+        // open the Popup; place it at its real size now; log `[nav] <navLine>`; and queue _SidePanelFinishLaunchCardOpen (the
+        // layout pass, the caret in the box, the folder list open under it). Never throws: a failure is logged and the card is
+        // closed again.
+        //   navLine - the [nav] words ("sidepanel launcher open (at the click)", "tab strip launcher open (+ click)", ...).
+        //   folder  - the folder the box opens on; "" = the focused tab's.
+        void _LauncherShowCard(std::wstring_view navLine, const std::wstring& folder);
+        // Open the launcher card from the TAB STRIP: under the strip's "+" (its bottom center — the window's top center when the
+        // strip is hidden, focus mode), toggled closed when it is open from the strip already and `toggle` is set (a second
+        // click on "+"), otherwise re-opened here. Called by the "+" click (no Alt / Shift / Ctrl: those keep Windows
+        // Terminal's split pane / new window / elevated), by the openNewTabDropdown action (Ctrl+Shift+T and Ctrl+Shift+Space in
+        // Agentmaster's defaults) and by a folder dropped on "+". Never throws (logged).
+        //   origin - why, for the [nav] line ("+ click", "keys", "folder dropped").
+        //   folder - the folder the box opens on ("" = the focused tab's; a drop names the dropped one).
+        //   toggle - a second click closes an open strip card instead of reopening it.
+        void _LauncherOpenFromTabStrip(std::wstring_view origin, const std::wstring& folder, bool toggle) noexcept;
+        // The folder a "+" opens the launcher on — the focused tab's (LauncherRules.h PickLauncherFolder): a managed session's
+        // effective working folder, else a shell's OSC 9;9 folder, else the folder the Fleet Observer read for that shell, else
+        // the Agent Manager's launch box text (the page is up, or a fresh shell). Only existing folders are taken from the tab.
+        // Never throws (a failed read skips that source; logged).
+        //   returns - the folder, or "" when nothing names one.
+        std::wstring _LauncherFolderForFocusedTab() noexcept;
+        // The kind chip's SHELLS: Windows Terminal's new-tab menu (GlobalSettings().NewTabMenu(): remaining profiles, matched
+        // profiles, folders, separators) flattened into LaunchShellChoice entries, the way _CreateNewTabFlyoutItems reads it
+        // (an empty folder dropped, an auto-inline folder of one entry inlined; actions left out — they start no shell). Read
+        // fresh at every call, so a profile added in the settings shows at once. Never throws (logged; an empty list then).
+        std::vector<::Agentmaster::LaunchShellChoice> _LauncherShellChoices() noexcept;
+        // One level of that walk (recursive for folders). Throws what the settings model's accessors throw (contained by the
+        // caller).
+        //   out     - where the entries go.
+        //   entries - one level of the new-tab menu.
+        void _LauncherAppendShellChoices(std::vector<::Agentmaster::LaunchShellChoice>& out,
+                                         const winrt::Windows::Foundation::Collections::IVector<Microsoft::Terminal::Settings::Model::NewTabMenuEntry>& entries);
+        // Open a Windows Terminal profile as a new tab — the kind chip's shell launch from any launcher: NewTerminalArgs with the
+        // profile's GUID and `dir` as the starting directory ("" = the profile's own), through _MakePane + _CreateNewTabFromPane,
+        // so the tab is exactly the one Windows Terminal's new-tab menu opened. Over the Agent Manager page the new tab shows
+        // (a shell has no card on the page to select). Logs `[nav] launcher shell …`. Never throws (logged).
+        //   dir         - the folder ("" = the profile's starting directory).
+        //   profileGuid - the profile's braced GUID.
+        //   profileName - its name (the log only).
+        //   origin      - which launcher ("launcher card", "agent manager row").
+        void _LauncherSpawnShell(const std::wstring& dir, const std::wstring& profileGuid, const std::wstring& profileName, std::wstring_view origin) noexcept;
+        // Rebuild the MODEL / PRESET pills when their inputs changed (the launch models, the visible presets, the custom pick,
+        // the lit target): Default · each launch model · Specify… (· the custom pick) and each visible preset, or one "Add
+        // presets…" while there is none. The lit pill is the bar's LaunchTarget. Pills never take focus (the caret stays in the
+        // box). Never throws (logged; the previous pills stay).
+        void _LauncherRebuildPills() noexcept;
+        // A pill's pick: the bar's target becomes `target` ("" = Default, a model id, "@<presetId>") and the pills re-light.
+        // Never throws (logged).
+        //   target - the pick.
+        void _LauncherSelectTarget(const std::wstring& target) noexcept;
+        // Show the MODEL / PRESET rows only while Launch starts a NEW Claude session (LauncherShowsModelRows: not for Codex, a
+        // shell, or a session id in the box); a PRESET row with no pill stays collapsed. Called at every open and on every
+        // change of the bar (its layoutChanged). Writes Visibility only on a change. Never throws (logged).
+        void _LauncherUpdateRows() noexcept;
+        // Remember the bar's kind as the GLOBAL launcherKind (a freshest-disk read-modify-write of settings.json, the
+        // transcript overlay's idiom), so the next open — in any window — starts on it. Called on a USER's pick only. Never
+        // throws (logged; the pick still applies to this card).
+        void _LauncherRememberKind() noexcept;
+        // Dress the tab strip's "+" as Agentmaster's (called once, right after the page takes the button from the tab row): its
+        // AutomationId (am.strip.new), a tooltip saying what it opens and what the modifier clicks keep (AgentSetTitledTip — the
+        // XAML one was removed: the shared tip would replace and then clear it), and a PreviewKeyDown that turns the split
+        // button's own "open the drop-down" keys (Alt+Down, F4 — Windows Terminal's profile flyout, still attached) into the
+        // launcher. Never throws (logged).
+        void _LauncherDecorateNewTabButton() noexcept;
+        // True while Alt, Shift or Ctrl is held: a "+" click (or a drop) then keeps Windows Terminal's meaning — Alt splits the
+        // focused pane, Shift opens a new window, Ctrl an elevated one (_OpenNewTerminalViaDropdown) — instead of opening the
+        // launcher. Never throws (a failed read answers false: the launcher opens).
+        bool _LauncherNewTabModifiersHeld() noexcept;
+        // Centre the tab strip's `<` / `>` scroll buttons on the row, level with "+" (the user's report of 2026-11-14: "The < and
+        // > needs to be vertically centered with the + and V down arrow"). MUX 2.8's TabScrollViewerStyle pins both buttons'
+        // containers (ScrollDecreaseButtonContainer / ScrollIncreaseButtonContainer) to VerticalAlignment Bottom with a
+        // vertical padding of their own, while "+" is centred in the row — so on any row taller than the buttons they sat low.
+        // This finds the two Borders in the strip's ScrollViewer (_tabStripScrollViewer) once its template is applied, sets
+        // VerticalAlignment Center and drops their top / bottom padding (left / right kept), then latches. A no-op before the
+        // template exists (a later call retries) and after the latch. Never throws (logged).
+        void _EnsureTabStripScrollArrowsCentered() noexcept;
         // --- The side panel's FILTERS (SIDE_PANEL.md §2l) ---
         // THE ONE WRITER of this window's filters: apply the "a pick resumes" rule to `next` (SidePanelFiltersAfterPick: a
         // change that ADDS a filter switches its chip on and resumes a paused row), normalize it (NormalizeSidePanelFilters),

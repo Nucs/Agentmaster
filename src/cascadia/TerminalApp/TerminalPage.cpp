@@ -396,6 +396,7 @@ namespace winrt::TerminalApp::implementation
 
         auto tabRowImpl = winrt::get_self<implementation::TabRowControl>(_tabRow);
         _newTabButton = tabRowImpl->NewTabButton();
+        _LauncherDecorateNewTabButton(); // Agentmaster (TAB_STRIP.md "The + button: the launcher"): its id, tooltip and keys
 
         // Agentmaster: the tab-strip Home button (TabStripHeader, immediately left of the `<` scroll arrow),
         // hidden in XAML and driven by _UpdateManagerNavButtons. It is the Agent Manager's place in the
@@ -488,6 +489,15 @@ namespace winrt::TerminalApp::implementation
                     TraceLoggingKeyword(MICROSOFT_KEYWORD_MEASURES),
                     TelemetryPrivacyDataTag(PDT_ProductAndServiceUsage));
 
+                // Agentmaster (TAB_STRIP.md "The + button: the launcher" — the user's picks of 2026-11-14): a plain click opens
+                // the LAUNCHER card under "+" (Claude on any model or preset, Codex, any Windows Terminal shell, in the focused
+                // tab's folder); a second click closes it. Alt / Shift / Ctrl keep Windows Terminal's own click — split the
+                // focused pane, a new window, an elevated window — with the default profile.
+                if (!page->_LauncherNewTabModifiersHeld())
+                {
+                    page->_LauncherOpenFromTabStrip(L"+ click", std::wstring{}, true);
+                    return;
+                }
                 page->_OpenNewTerminalViaDropdown(NewTerminalArgs());
             }
         });
@@ -678,6 +688,12 @@ namespace winrt::TerminalApp::implementation
             TraceLoggingKeyword(MICROSOFT_KEYWORD_MEASURES),
             TelemetryPrivacyDataTag(PDT_ProductAndServiceUsage));
 
+        // Agentmaster (TAB_STRIP.md "The + button: the launcher"): a PLAIN drop opens the launcher card with the dropped folder
+        // in its box — pick what to start there (Claude, Codex or a shell) and press Enter. The launcher shows ONE folder, so a
+        // drop of several items opens it on the first and leaves the others. Alt / Shift / Ctrl keep Windows Terminal's drop
+        // (a split pane, a new window, an elevated window — one per item).
+        const bool launcher = !_LauncherNewTabModifiersHeld();
+        bool first = true;
         for (const auto& item : items)
         {
             auto directory = item.Path();
@@ -686,6 +702,16 @@ namespace winrt::TerminalApp::implementation
             if (!std::filesystem::is_directory(path))
             {
                 directory = winrt::hstring{ path.parent_path().native() };
+            }
+
+            if (launcher)
+            {
+                if (first)
+                {
+                    _LauncherOpenFromTabStrip(L"folder dropped", std::wstring{ directory }, false);
+                }
+                first = false;
+                continue;
             }
 
             NewTerminalArgs args;
@@ -1825,7 +1851,12 @@ namespace winrt::TerminalApp::implementation
     // Shows the dropdown flyout.
     void TerminalPage::_OpenNewTabDropdown()
     {
-        _newTabButton.Flyout().ShowAt(_newTabButton);
+        // Agentmaster (TAB_STRIP.md "The + button: the launcher"): the ▾ beside "+" is gone — "+" opens the launcher card,
+        // and so does this action (Ctrl+Shift+Space, and Ctrl+Shift+T in Agentmaster's defaults: the user's pick "Follows the
+        // new +"). It re-opens the card under "+" even when it is open elsewhere (the side panel's "+"); keys never toggle it
+        // closed (Esc does). Windows Terminal's profile menu is still built and attached (_CreateNewTabFlyout), only no
+        // longer opened from here.
+        _LauncherOpenFromTabStrip(L"keys", std::wstring{}, false);
     }
 
     void TerminalPage::_OpenNewTerminalViaDropdown(const NewTerminalArgs newTerminalArgs)

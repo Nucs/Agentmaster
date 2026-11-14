@@ -3105,6 +3105,14 @@ namespace Agentmaster
         // every open re-reads it, so a flip in one window decides the next open in every window (an
         // overlay already open in another window keeps its state until it is opened again). Default true.
         bool transcriptOverlayWrapLines{ true };
+        // Agentmaster (TAB_STRIP.md "The + button: the launcher", SIDE_PANEL.md §2e): the KIND the launcher card OPENS on — the
+        // last kind the user picked on its kind chip, in any window: "claude", "codex", or "profile:{guid}" (a Windows Terminal
+        // profile; LauncherRules.h FormatLaunchKindToken / ParseLaunchKindToken — a word, never an enum number, so a reorder
+        // can never remap it). GLOBAL + persisted like transcriptOverlayLevel: each pick is a freshest-disk RMW written by the
+        // card itself (never the cog form — so both cog-Save preserve blocks restore it), and every open re-reads it from
+        // disk. A profile that is gone by then, or an unknown word, opens on Claude. The Agent Manager's launch row keeps its
+        // own kind per window (it starts on Claude) and never writes this. Default "claude".
+        std::wstring launcherKind{ L"claude" };
         // Agentmaster (SESSIONS.md §9.1): the THINKING LEVEL of the Sessions page's AI search — the
         // strip's "thinking <level>" toggle, left of "ctx N / M" (the user's request of 2026-10-14).
         // The word of an AgentHarnessCore HarnessThinkingLevel: adaptive thinking at "low" /

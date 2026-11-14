@@ -23,6 +23,14 @@
 // larger than the window pinned to the near margin, an unmeasured window never clamped, and every NaN / infinity /
 // negative input neutralized; plus a seeded sweep of the invariants over random clicks, cards and windows.
 //
+// TestLauncherRules pins the LAUNCHER's pure rules (AgentMaster/LauncherRules.h; TAB_STRIP.md "The + button: the
+// launcher", SIDE_PANEL.md section 2e): the persisted kind token both ways (case, blanks, damaged and future values all
+// read as Claude; a shell pick without a GUID is written as Claude), the GUID compare (case, braces, empties), the
+// profile lookups over a new-tab menu tree with a folder (found anywhere, the default first, the first profile when none
+// is the default), a remembered pick checked against what the host offers now (a gone profile, a host without Codex or
+// shells: Claude), which card rows show, the folder a + opens on (the focused tab's, in its order of sources), and the
+// Launch button's words per kind.
+//
 // TestSubmenuCardPlacement pins where the funnel panel's "By Folder..." row opens its hover SUBMENU (PlaceSubmenuCard, the
 // same header, SIDE_PANEL.md section 2l "The By Folder submenu"): beside the panel's right edge when the whole card fits
 // there, else beside its left edge, else on the roomier side clamped into the window; its top level with the row and
@@ -98,6 +106,7 @@
 #include "m5_tests.h"
 
 #include "../KeyedListDiff.h"
+#include "../LauncherRules.h" // the launcher's kind token, shell choices, rows, folder and labels (TestLauncherRules)
 #include "../PointerCardPlacement.h" // the "+" launcher card's tooltip-like placement (TestPointerCardPlacement)
 #include "../SessionTimingText.h" // the cards' and rows' "created 4d1h, active 2m4s ago" (TestSessionTimingText)
 #include "../SidePanelAiList.h" // the AI view's list rule: only a request's end or a reset changes it (TestSidePanelAiList)
@@ -3293,4 +3302,156 @@ void TestSidePanelStripReveal()
         static_assert(kSidePanelStripCollapseLingerMs >= 1000 && kSidePanelStripCollapseLingerMs <= 3000,
                       "the after-collapse linger is long enough to be seen (1 s) and short enough not to read as stuck (3 s)");
     }
+}
+
+// ---- TestLauncherRules (AgentMaster/LauncherRules.h) ----------------------------------------------------------------
+// The launcher's pure rules (TAB_STRIP.md "The + button: the launcher", SIDE_PANEL.md section 2e, AGENT_MANAGER.md "The
+// launch row"): the kind token, the GUID compare, the shell-choice lookups, the remembered pick's fallback, the card's rows,
+// the folder a + opens on and the Launch button's words. See the file header for what each group pins.
+namespace
+{
+    // A new-tab menu tree shaped like the owner's (2026-11-14): profiles in list order (the default third), a separator, and
+    // an "SSH" folder holding two more profiles.
+    //   returns - the tree.
+    //   throws  - std::bad_alloc.
+    std::vector<LaunchShellChoice> LauncherTestChoices()
+    {
+        const auto profile = [](const wchar_t* name, const wchar_t* guid, bool isDefault = false) {
+            LaunchShellChoice c;
+            c.type = LaunchShellChoice::Type::Profile;
+            c.name = name;
+            c.profileGuid = guid;
+            c.isDefault = isDefault;
+            return c;
+        };
+        std::vector<LaunchShellChoice> tree;
+        tree.push_back(profile(L"Windows PowerShell", L"{61c54bbd-c2c6-5271-96e7-009a87ff44bf}"));
+        tree.push_back(profile(L"Command Prompt", L"{0caa0dad-35be-5f56-a8ff-afceeeaa6101}"));
+        tree.push_back(profile(L"PowerShell", L"{574E775E-4F2A-5B96-AC1E-A2962A402336}", true));
+        LaunchShellChoice sep;
+        sep.type = LaunchShellChoice::Type::Separator;
+        tree.push_back(sep);
+        LaunchShellChoice ssh;
+        ssh.type = LaunchShellChoice::Type::Folder;
+        ssh.name = L"SSH";
+        ssh.children.push_back(profile(L"SSH - worker", L"{f976fd97-c2b9-537a-9ce4-6965df31d753}"));
+        ssh.children.push_back(profile(L"SSH - worker-lan", L"{121e1557-cb02-5a71-a7d7-7004b1a59e05}"));
+        tree.push_back(ssh);
+        return tree;
+    }
+}
+
+void TestLauncherRules()
+{
+    std::wprintf(L"\n[TestLauncherRules]\n");
+
+    // --- the kind token, both ways ---
+    {
+        LaunchKindPick claude;
+        CHECK(FormatLaunchKindToken(claude) == L"claude", "launcher token: Claude is written \"claude\"");
+        LaunchKindPick codex;
+        codex.kind = LaunchKind::Codex;
+        CHECK(FormatLaunchKindToken(codex) == L"codex", "launcher token: Codex is written \"codex\"");
+        LaunchKindPick shell;
+        shell.kind = LaunchKind::Shell;
+        shell.profileGuid = L"{574e775e-4f2a-5b96-ac1e-a2962a402336}";
+        CHECK(FormatLaunchKindToken(shell) == L"profile:{574e775e-4f2a-5b96-ac1e-a2962a402336}", "launcher token: a shell is \"profile:\" + its GUID");
+        LaunchKindPick emptyShell;
+        emptyShell.kind = LaunchKind::Shell;
+        CHECK(FormatLaunchKindToken(emptyShell) == L"claude", "launcher token: a shell pick without a GUID is written as Claude (a token never names an empty profile)");
+
+        CHECK(ParseLaunchKindToken(L"claude").kind == LaunchKind::Claude, "launcher token: \"claude\" reads Claude");
+        CHECK(ParseLaunchKindToken(L"CODEX").kind == LaunchKind::Codex, "launcher token: the words are case-insensitive");
+        CHECK(ParseLaunchKindToken(L"  codex \r\n").kind == LaunchKind::Codex, "launcher token: surrounding blanks are ignored");
+        const auto parsed = ParseLaunchKindToken(L"Profile: {0caa0dad-35be-5f56-a8ff-afceeeaa6101} ");
+        CHECK(parsed.kind == LaunchKind::Shell && parsed.profileGuid == L"{0caa0dad-35be-5f56-a8ff-afceeeaa6101}",
+              "launcher token: \"profile:\" (any case) reads a shell, its GUID trimmed and kept as written");
+        CHECK(ParseLaunchKindToken(L"").kind == LaunchKind::Claude, "launcher token: an empty value reads Claude (a fresh profile)");
+        CHECK(ParseLaunchKindToken(L"profile:").kind == LaunchKind::Claude && ParseLaunchKindToken(L"profile:   ").profileGuid.empty(),
+              "launcher token: \"profile:\" with nothing after it reads Claude");
+        CHECK(ParseLaunchKindToken(L"codexx").kind == LaunchKind::Claude && ParseLaunchKindToken(L"gemini").kind == LaunchKind::Claude,
+              "launcher token: an unknown or future word reads Claude");
+        for (const auto& pick : { claude, codex, shell })
+        {
+            const auto back = ParseLaunchKindToken(FormatLaunchKindToken(pick));
+            CHECK(back.kind == pick.kind && back.profileGuid == pick.profileGuid, "launcher token: every pick survives a write and a read");
+        }
+    }
+
+    // --- the GUID compare ---
+    CHECK(LaunchGuidEquals(L"{574e775e-4f2a-5b96-ac1e-a2962a402336}", L"{574E775E-4F2A-5B96-AC1E-A2962A402336}"), "launcher GUID: case-insensitive");
+    CHECK(LaunchGuidEquals(L"574e775e-4f2a-5b96-ac1e-a2962a402336", L"{574e775e-4f2a-5b96-ac1e-a2962a402336}"), "launcher GUID: the braces are optional on either side");
+    CHECK(!LaunchGuidEquals(L"", L""), "launcher GUID: two empty strings name no profile");
+    CHECK(!LaunchGuidEquals(L"{}", L""), "launcher GUID: empty braces name no profile either");
+    CHECK(!LaunchGuidEquals(L"{574e775e-4f2a-5b96-ac1e-a2962a402336}", L"{574e775e-4f2a-5b96-ac1e-a2962a402337}"), "launcher GUID: one digit apart is another profile");
+
+    // --- the lookups over a new-tab menu tree ---
+    {
+        const auto tree = LauncherTestChoices();
+        const auto* const found = FindLaunchShellProfile(tree, L"{f976fd97-C2B9-537a-9ce4-6965df31d753}");
+        CHECK(found && found->name == L"SSH - worker", "launcher choices: a profile inside a folder is found (GUID case-insensitive)");
+        CHECK(FindLaunchShellProfile(tree, L"{00000000-0000-0000-0000-000000000000}") == nullptr, "launcher choices: an unknown GUID finds nothing");
+        CHECK(FindLaunchShellProfile(tree, L"") == nullptr, "launcher choices: an empty GUID finds nothing (the separator and the folder have none)");
+        const auto* const def = DefaultLaunchShellProfile(tree);
+        CHECK(def && def->name == L"PowerShell", "launcher choices: the default profile is the one marked default, wherever it stands");
+        auto noDefault = tree;
+        noDefault[2].isDefault = false;
+        const auto* const first = DefaultLaunchShellProfile(noDefault);
+        CHECK(first && first->name == L"Windows PowerShell", "launcher choices: with no default marked, the first profile in menu order");
+        std::vector<LaunchShellChoice> folderOnly;
+        folderOnly.push_back(tree[4]);
+        folderOnly[0].children[1].isDefault = true;
+        const auto* const inFolder = DefaultLaunchShellProfile(folderOnly);
+        CHECK(inFolder && inFolder->name == L"SSH - worker-lan", "launcher choices: a default inside a folder is found");
+        CHECK(DefaultLaunchShellProfile({}) == nullptr, "launcher choices: an empty tree has no default");
+        CHECK(CountLaunchShellProfiles(tree) == 5, "launcher choices: five profiles, counted through the folder (the separator and the folder are no profile)");
+    }
+
+    // --- a remembered pick checked against what the host offers now ---
+    {
+        const auto tree = LauncherTestChoices();
+        LaunchKindPick wantShell;
+        wantShell.kind = LaunchKind::Shell;
+        wantShell.profileGuid = L"574e775e-4f2a-5b96-ac1e-a2962a402336";
+        const auto resolved = ResolveLaunchKindPick(wantShell, tree, true, true);
+        CHECK(resolved.kind == LaunchKind::Shell && resolved.profileGuid == L"{574E775E-4F2A-5B96-AC1E-A2962A402336}",
+              "launcher pick: a remembered profile that still exists is kept, its GUID respelled as the menu has it");
+        LaunchKindPick gone = wantShell;
+        gone.profileGuid = L"{deadbeef-0000-0000-0000-000000000000}";
+        CHECK(ResolveLaunchKindPick(gone, tree, true, true).kind == LaunchKind::Claude,
+              "launcher pick: a remembered profile that is gone falls back to Claude, never to another shell");
+        CHECK(ResolveLaunchKindPick(wantShell, tree, true, false).kind == LaunchKind::Claude,
+              "launcher pick: a shell pick on a host that cannot start shells falls back to Claude");
+        LaunchKindPick wantCodex;
+        wantCodex.kind = LaunchKind::Codex;
+        CHECK(ResolveLaunchKindPick(wantCodex, tree, true, true).kind == LaunchKind::Codex, "launcher pick: Codex stays Codex where Codex can start");
+        CHECK(ResolveLaunchKindPick(wantCodex, tree, false, true).kind == LaunchKind::Claude, "launcher pick: Codex on a host without Codex falls back to Claude");
+        CHECK(ResolveLaunchKindPick(LaunchKindPick{}, {}, false, false).kind == LaunchKind::Claude, "launcher pick: Claude is always Claude");
+    }
+
+    // --- which rows of the card show ---
+    CHECK(LauncherShowsModelRows(LaunchKind::Claude, false), "launcher rows: a new Claude session shows the MODEL and PRESET rows");
+    CHECK(!LauncherShowsModelRows(LaunchKind::Claude, true), "launcher rows: a session id in the box (Resume / Fork on its own snapshot) hides them");
+    CHECK(!LauncherShowsModelRows(LaunchKind::Codex, false), "launcher rows: Codex hides them");
+    CHECK(!LauncherShowsModelRows(LaunchKind::Shell, false), "launcher rows: a shell hides them");
+
+    // --- the folder a + opens on: the focused tab's ---
+    CHECK(PickLauncherFolder(L"K:\\source\\Agentmaster", L"C:\\x", L"C:\\y", L"K:\\z") == L"K:\\source\\Agentmaster",
+          "launcher folder: a managed session's effective folder comes first");
+    CHECK(PickLauncherFolder(L"", L"K:\\source\\proxmox\\scripts", L"K:\\source\\proxmox", L"K:\\source\\Agentmaster") == L"K:\\source\\proxmox\\scripts",
+          "launcher folder: a shell's reported folder (OSC 9;9) before its observed one");
+    CHECK(PickLauncherFolder(L"  ", L"", L"K:\\source\\proxmox", L"K:\\source\\Agentmaster") == L"K:\\source\\proxmox",
+          "launcher folder: the observed folder when the shell reports none (blank candidates are skipped)");
+    CHECK(PickLauncherFolder(L"", L"", L"", L"K:\\source\\Agentmaster") == L"K:\\source\\Agentmaster",
+          "launcher folder: the shared launch box when the focused tab names no folder (the Agent Manager page is up)");
+    CHECK(PickLauncherFolder(L"", L"\t", L"", L"").empty(), "launcher folder: nothing at all reads empty (the launch seam then uses its own default)");
+
+    // --- the Launch button's words ---
+    CHECK(LaunchButtonLabel(LaunchKind::Claude, L"", false) == L"Launch Claude" && LaunchButtonLabel(LaunchKind::Claude, L"", true) == L"Create & Launch Claude",
+          "launcher label: Claude keeps its words");
+    CHECK(LaunchButtonLabel(LaunchKind::Codex, L"", false) == L"Launch Codex" && LaunchButtonLabel(LaunchKind::Codex, L"", true) == L"Create & Launch Codex",
+          "launcher label: Codex keeps its words");
+    CHECK(LaunchButtonLabel(LaunchKind::Shell, L"PowerShell", false) == L"Open PowerShell", "launcher label: a shell OPENS");
+    CHECK(LaunchButtonLabel(LaunchKind::Shell, L"Command Prompt", true) == L"Create & Open Command Prompt", "launcher label: a shell in a folder to create");
+    CHECK(LaunchButtonLabel(LaunchKind::Shell, L"", false) == L"Open shell", "launcher label: a nameless profile reads \"shell\"");
 }

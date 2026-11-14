@@ -835,6 +835,7 @@ void TestAppSettings()
         in.tabColorPickerAdvancedOpen = false; // non-default (default true = ... and its More/Less "advanced" inputs expanded)
         in.transcriptOverlayLevel = L"compact"; // non-default (default "default") — the transcript overlay's last-picked level tab
         in.transcriptOverlayWrapLines = false; // non-default (default true = long lines wrap) — the transcript overlay's line-wrap toggle
+        in.launcherKind = L"profile:{574e775e-4f2a-5b96-ac1e-a2962a402336}"; // non-default (default "claude") — the launcher card's remembered kind (a shell)
         in.sessionsAiThinkingLevel = L"xhigh"; // non-default (default "low") — the Sessions AI search's strip toggle
         in.sessionsAiParkMinutes = 45; // non-default (default 120) — the AI search's park delay (the cog's SESSIONS tab, "AI SEARCH")
         in.showTabCloseButton = false; // non-default (default true = show the X / theme-driven)
@@ -952,6 +953,7 @@ void TestAppSettings()
         CHECK(out.tabColorPickerAdvancedOpen == false, "settings tabColorPickerAdvancedOpen round-trip");
         CHECK(out.transcriptOverlayLevel == L"compact", "settings transcriptOverlayLevel round-trip (the remembered level name)");
         CHECK(out.transcriptOverlayWrapLines == false, "settings transcriptOverlayWrapLines round-trip (the transcript overlay's line-wrap toggle)");
+        CHECK(out.launcherKind == L"profile:{574e775e-4f2a-5b96-ac1e-a2962a402336}", "settings launcherKind round-trip (the launcher card's remembered kind, kept verbatim)");
         CHECK(out.sessionsAiThinkingLevel == L"xhigh", "settings sessionsAiThinkingLevel round-trip (the AI search's thinking level word)");
         CHECK(out.sessionsAiParkMinutes == 45, "settings sessionsAiParkMinutes round-trip (the AI search's park delay)");
         CHECK(out.showTabCloseButton == false, "settings showTabCloseButton round-trip");
@@ -1068,6 +1070,7 @@ void TestAppSettings()
         CHECK(out.tabColorPickerCustomOpen == true && out.tabColorPickerAdvancedOpen == true, "settings tab color picker opens with Custom + advanced expanded by default on empty");
         CHECK(out.transcriptOverlayLevel == L"default", "settings transcriptOverlayLevel default \"default\" (the overlay opens at Default) on empty");
         CHECK(out.transcriptOverlayWrapLines == true, "settings transcriptOverlayWrapLines default true (long lines wrap) on empty");
+        CHECK(out.launcherKind == L"claude", "settings launcherKind default \"claude\" (every launcher opened on Claude before the kind chip) on empty");
         CHECK(out.sessionsAiThinkingLevel == L"low", "settings sessionsAiThinkingLevel default \"low\" (the fastest level that works: off fails every request on Claude Code 2.1.310) on empty");
         CHECK(out.sessionsAiParkMinutes == 120, "settings sessionsAiParkMinutes default 120 (2 hours) on empty");
         CHECK(out.showTabCloseButton == true, "settings showTabCloseButton default true (show X) on empty");
