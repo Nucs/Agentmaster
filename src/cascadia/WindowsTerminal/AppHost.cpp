@@ -139,6 +139,34 @@ void AppHost::_TaskbarUnreadFrameChanged(const winrt::Windows::Foundation::IInsp
     }
 }
 
+// Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): the page's auto-hide setting or hold changed — re-read both (the
+// event carries none, the SetTaskbarProgress idiom) and hand them to the NonClientIslandWindow, which owns the title bar
+// that floats and hides. Only a window with tabs in the title bar has one: with the system title bar (showTabsInTitlebar
+// off, decided at this window's creation) the setting does nothing. UI thread (the page raises it from its dispatcher);
+// SetTitlebarAutoHide makes XAML and Win32 calls on this window only and never calls back into the page.
+// Arguments: both unused.
+void AppHost::_TabRowAutoHideChanged(const winrt::Windows::Foundation::IInspectable& /*sender*/,
+                                     const winrt::Windows::Foundation::IInspectable& /*args*/)
+{
+    if (_useNonClientArea && _windowLogic && _window)
+    {
+        static_cast<NonClientIslandWindow*>(_window.get())->SetTitlebarAutoHide(_windowLogic.TabRowAutoHide(), _windowLogic.TabRowAutoHideHold());
+    }
+}
+
+// Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): the page asked for a peek — re-read its length and whether it must
+// be placed at once (the launcher measures + right after), and let the NonClientIslandWindow bring the row out. A no-op
+// for a window with the system title bar, and (inside PeekTitlebar) while auto-hide is off. UI thread.
+// Arguments: both unused.
+void AppHost::_TabRowPeekRequested(const winrt::Windows::Foundation::IInspectable& /*sender*/,
+                                   const winrt::Windows::Foundation::IInspectable& /*args*/)
+{
+    if (_useNonClientArea && _windowLogic && _window)
+    {
+        static_cast<NonClientIslandWindow*>(_window.get())->PeekTitlebar(_windowLogic.TabRowPeekMs(), _windowLogic.TabRowPeekInstant());
+    }
+}
+
 // Method Description:
 // - Retrieve any commandline args passed on the commandline, and pass them to
 //   the WindowManager, to ask if we should become a window process.
@@ -284,6 +312,12 @@ void AppHost::Initialize()
     _revokers.SetTaskbarProgress = _windowLogic.SetTaskbarProgress(winrt::auto_revoke, { this, &AppHost::SetTaskbarProgress });
     _revokers.TaskbarUnreadCountChanged = _windowLogic.TaskbarUnreadCountChanged(winrt::auto_revoke, { this, &AppHost::_TaskbarUnreadCountChanged }); // Agentmaster (taskbar unread badge)
     _revokers.TaskbarUnreadFrameChanged = _windowLogic.TaskbarUnreadFrameChanged(winrt::auto_revoke, { this, &AppHost::_TaskbarUnreadFrameChanged }); // Agentmaster (taskbar preview frame)
+    // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): the page decides auto-hide (the setting, the hold) and peeks; the
+    // title bar is this window's. Subscribed after Create; the page first raises it at its first layout (engine init), which
+    // comes later, so nothing is missed — and the explicit read below covers a page that decided earlier.
+    _revokers.TabRowAutoHideChanged = _windowLogic.TabRowAutoHideChanged(winrt::auto_revoke, { this, &AppHost::_TabRowAutoHideChanged });
+    _revokers.TabRowPeekRequested = _windowLogic.TabRowPeekRequested(winrt::auto_revoke, { this, &AppHost::_TabRowPeekRequested });
+    _TabRowAutoHideChanged(nullptr, nullptr);
     _revokers.IdentifyWindowsRequested = _windowLogic.IdentifyWindowsRequested(winrt::auto_revoke, { this, &AppHost::_IdentifyWindowsRequested });
     _revokers.WindowSizeChanged = _windowLogic.WindowSizeChanged(winrt::auto_revoke, { this, &AppHost::_WindowSizeChanged });
 

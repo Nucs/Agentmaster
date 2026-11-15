@@ -21,6 +21,7 @@
 //   tests_turns.cpp           - the Copy > Transcript levels: TranscriptTurns (the C++ port of the am-agentmaster-cli skill's transcript_turns.py v11) vs the reference's own goldens in turns\expected, byte for byte; + the summary's whole-conversation chain (CollectConversationUpstream / BuildSummaryConversation)
 //   tests_markdown.cpp        - the transcript overlay's Markdown flattener (MarkdownBlocks — cmark -> flat render blocks); compiled only when the vcpkg cmark of a full build is present (AM_HAVE_CMARK), else it reports a skip
 //   tests_sidepanel.cpp       - SIDE_PANEL.md §2c: the side panel's in-place card list — the order planner (KeyedListDiff.h): reaches the target, indexes in range, minimal; + the cards' and rows' timing line (SessionTimingText.h); + §2j the cards' Pin to Top (SidePanelPins.h)
+//   tests_tabrow.cpp          - TAB_STRIP.md "Auto-hiding the tab row": WHEN the auto-hiding title bar row shows (TabRowAutoHide.h) — the screen bands, the rest at the top edge, the hide delay, drags, the hold, peeks, the keyboard, popups, a finger, an exhaustive sweep against a second statement of the rule
 //   tests_harness.cpp         - SDK_HARNESS.md + SESSIONS.md section 9: the agent harness's model-free half (AgentHarnessCore — the record, the digest, the --settings text, the child's environment, the readers of Claude Code's lines) and the Sessions page's AI search tools (SessionSearchTools — arguments, one search, the result text, the two tool handlers, the stepwise catalog gather)
 //   tests_presets.cpp         - HARNESSES.md: PRESETS (LaunchPresets.h, pure) — the empty initial list + "Add presets…", the one-click template adds, the 0.6.8.18 cleanup, launch-presets.json, the value tiers, the session snapshot (launchArgs), every OpenRouter template's compile vs its launcher profile (MiMo, Kimi, Qwen, GLM), effort, top_k / require_parameters, refusals, the menus, the /handover hint's preset rule
 //   tests_tabtools.cpp        - SESSIONS.md 9.14: the AI search's window and tab tools (the window choice, list / resume / fork / deactivate on fake windows, the per-request caps, the engine's answered fan-out) and the system prompts' structure
@@ -319,6 +320,14 @@ void TestSidePanelFilters();
 // beside the button keep it away until the pointer has left; a press on the button; a finger's taps; the watch that only
 // hides; the after-collapse linger), all 288 input combinations against a second statement of it (tests_sidepanel.cpp)
 void TestSidePanelStripReveal();
+// TabRowAutoHide.h (TAB_STRIP.md "Auto-hiding the tab row"; the user's request of 2026-11-15 and their picks: the Windows
+// taskbar's behavior with no line left behind, a 1.5 s peek on a keyboard tab switch, the row out on the Agent Manager page):
+// the screen bands (the top edge band, a finger's band, the stay band; DIPs to pixels at every scale and for broken inputs),
+// the rule's named cases (a rest, a crossing, a drag from the terminal and from elsewhere, a tab drag, the hold, the peeks,
+// the keyboard, the popups, a window that cannot show the row, a finger's taps, clocks in the future), every input
+// combination over the reachable states against a second statement of the rule plus its invariants, and one user's visit
+// event by event (tests_tabrow.cpp)
+void TestTabRowAutoHide();
 // LauncherRules.h (TAB_STRIP.md "The + button: the launcher", SIDE_PANEL.md §2e, AGENT_MANAGER.md "The launch row"): the
 // launcher's persisted kind token both ways (damaged / future values read Claude), the GUID compare, the new-tab menu
 // lookups (a folder searched, the default first), a remembered pick checked against what the host offers now, which card

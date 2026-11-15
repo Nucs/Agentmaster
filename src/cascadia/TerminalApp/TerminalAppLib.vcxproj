@@ -317,6 +317,10 @@
          (within 40 DIPs of the strip) and the strip's next state for one pointer event (pure, header-only;
          TestSidePanelStripReveal). -->
     <ClInclude Include="AgentMaster\SidePanelStripReveal.h" />
+    <!-- Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): WHEN the auto-hiding title bar row shows - the top edge band,
+         the rest before it comes out, the hide delay, drags, the hold, peeks, the keyboard, popups, a finger (pure,
+         header-only; TestTabRowAutoHide). WindowsTerminal.exe's NonClientIslandWindow applies it; the page reads its peeks. -->
+    <ClInclude Include="AgentMaster\TabRowAutoHide.h" />
     <!-- Agentmaster (HOOKS.md "Question tools"): the tools that, like AskUserQuestion, wait for the user - the glob a line of the
          cog's QUESTION TOOLS box matches by, the box's lexer, and the process-wide list the scanner judges a pending call by
          (header-only, std only; TestQuestionTools). -->
@@ -416,6 +420,12 @@
     </ClCompile>
     <!-- Agentmaster (HOOKS.md "Interrupted turns"): the restart and fork questions + the fork stop watch. -->
     <ClCompile Include="TerminalPage.AgentTurns.cpp">
+      <DependentUpon>TerminalPage.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
+    <!-- Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): the auto-hiding tab row's page half (the setting's one writer,
+         the hold while the Agent Manager page shows, the peeks) and the strip's ▾ menu button. -->
+    <ClCompile Include="TerminalPage.AgentTabRow.cpp">
       <DependentUpon>TerminalPage.xaml</DependentUpon>
       <SubType>Code</SubType>
     </ClCompile>

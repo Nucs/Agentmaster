@@ -854,6 +854,9 @@ namespace winrt::TerminalApp::implementation
         }
         _ScheduleWindowRecordSave();
         _UpdateManagerNavButtons();
+        // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): an auto-hiding row stays out while the page is on screen (the
+        // user's pick, "Stay out on the Manager page": no terminal to make room for, Home's jump-back in reach).
+        _ApplyTabRowAutoHide();
         ::Agentmaster::LogNav(L"manager-page show (" + std::wstring{ reason } + L")" + (leaving ? (L" from " + _DescribeTabForLog(leaving)) : std::wstring{}));
     }
 
@@ -885,6 +888,9 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::AgentLogCaughtException(L"_HideManagerPage lens");
         }
         _UpdateManagerNavButtons();
+        // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): back on a tab, the hold ends — the row leaves 0.6 s after the
+        // pointer is elsewhere (or at a keyboard switch's peek end).
+        _ApplyTabRowAutoHide();
         ::Agentmaster::LogNav(L"manager-page hide -> " + (toTab ? _DescribeTabForLog(toTab) : std::wstring{ L"(no tab)" }));
     }
 
@@ -1381,6 +1387,9 @@ namespace winrt::TerminalApp::implementation
         // title font) BEFORE this window builds its first tab, so the strip's first layout already uses
         // them. No forced relayout — no tab exists yet; every tab later gets its share in _InitializeTab.
         _ApplyTabSizingSettings(false);
+        // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): tell the window host whether this window auto-hides its title
+        // bar (the GLOBAL setting just loaded). Its AppHost subscribed when the page was created, before this first layout.
+        _ApplyTabRowAutoHide();
 
         // M9: consume the ONE process-wide engine. v1.24 WT is a WindowEmperor — every window
         // lives in a single process — so the SessionRegistry (single source of truth), the
@@ -2584,6 +2593,15 @@ namespace winrt::TerminalApp::implementation
         // Seed the button from the scheduler: a window opened while the runner is already paused (the
         // pause was set from another window) must not read "Pause". The listener covers every later change.
         content->SetGlobalPauseShown(_scheduler && _scheduler->GlobalPaused());
+        // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): the cog's "Auto-hide the tab row" switch is INSTANT-APPLY — a flip
+        // goes straight to the setting's one writer (the strip's ▾ menu item is the other caller), which saves, applies and
+        // broadcasts it, and re-syncs the switch. The switch never waits for Save, so the cog and the menu cannot disagree.
+        content->SetTabRowAutoHideHandler([weakThis](bool on) {
+            if (auto self = weakThis.get())
+            {
+                self->_SetTabRowAutoHide(on, L"cog");
+            }
+        });
         // Settings cog: seed the dialog with the loaded settings, and persist + apply on Save.
         content->SetSettings(_appSettings);
         content->SetSettingsHandler([weakThis](::Agentmaster::AppSettings s) {
@@ -2650,6 +2668,11 @@ namespace winrt::TerminalApp::implementation
                     // page; the content only hears other windows' broadcasts) — without this line, the next
                     // sort click in this window would silently turn the toggle back.
                     s.sidePanelScrollToSelectedTab = disk.sidePanelScrollToSelectedTab;
+                    // ...and the auto-hiding tab row (TAB_STRIP.md "Auto-hiding the tab row"): its two writers, the strip's ▾
+                    // menu item and the cog's switch, are both INSTANT-APPLY RMWs (_SetTabRowAutoHide), never this form — a
+                    // stale form copy (or the board-sort cycle's content copy, which never learns of this window's own flip)
+                    // must not undo a flip made since the cog opened.
+                    s.autoHideTabRow = disk.autoHideTabRow;
 
                 }
                 // Inferred-workdir inputs (mode / "Use .git folder to infer") — capture the change
@@ -2705,6 +2728,9 @@ namespace winrt::TerminalApp::implementation
                 // re-read just above) are GLOBAL — unframe / reframe / recolor this window's preview now; other windows
                 // follow via the broadcast.
                 self->_ApplyTaskbarUnreadFrame();
+                // The auto-hiding tab row (TAB_STRIP.md "Auto-hiding the tab row"): the value was preserved from disk above,
+                // so this only re-asserts it (a no-op unless disk and this window disagreed); other windows via the broadcast.
+                self->_ApplyTabRowAutoHide();
                 // Per-tab overlay rest/hover opacities are GLOBAL (TAB_OVERLAY.md) — push the (possibly
                 // changed) pair to every hosted overlay so the badge/summary dim<->bright updates live; other
                 // windows pick it up via the broadcast below.
@@ -3282,6 +3308,10 @@ namespace winrt::TerminalApp::implementation
         // Taskbar preview frame (NOTIFICATIONS.md section 9): the switch and the flash-ring color are GLOBAL — a change
         // made in another window unframes / recolors THIS window's preview too.
         _ApplyTaskbarUnreadFrame();
+        // The auto-hiding tab row (TAB_STRIP.md "Auto-hiding the tab row") is GLOBAL: a flip of the ▾ menu item or the cog's
+        // switch in another window floats (or brings back) THIS window's row too. Its cog's switch follows through the
+        // content's ApplyExternalSettings below.
+        _ApplyTabRowAutoHide();
         // Per-tab overlay rest/hover opacities are GLOBAL (TAB_OVERLAY.md) — apply a change made in another
         // window to this window's overlays live too.
         _RefreshOverlayOpacities();

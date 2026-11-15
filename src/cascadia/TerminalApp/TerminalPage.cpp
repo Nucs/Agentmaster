@@ -397,6 +397,10 @@ namespace winrt::TerminalApp::implementation
         auto tabRowImpl = winrt::get_self<implementation::TabRowControl>(_tabRow);
         _newTabButton = tabRowImpl->NewTabButton();
         _LauncherDecorateNewTabButton(); // Agentmaster (TAB_STRIP.md "The + button: the launcher"): its id, tooltip and keys
+        // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): the ▾ menu button right of "+" — its id, tooltip and menu
+        // (Auto-hide the tab row, Sessions…, Agentmaster settings, Windows Terminal ▸), filled at every open.
+        _tabRowMenuButton = tabRowImpl->TabRowMenuButton();
+        _TabRowMenuDecorate();
 
         // Agentmaster: the tab-strip Home button (TabStripHeader, immediately left of the `<` scroll arrow),
         // hidden in XAML and driven by _UpdateManagerNavButtons. It is the Agent Manager's place in the
@@ -5768,6 +5772,10 @@ namespace winrt::TerminalApp::implementation
         // the resources.
         VisualStateManager::GoToState(_newTabButton, L"FlyoutOpen", true);
         VisualStateManager::GoToState(_newTabButton, L"Normal", true);
+
+        // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): the ▾ menu button beside "+" wears the same colors, so the
+        // pair reads as one control (the old ▾ was this SplitButton's own part).
+        _TabRowMenuButtonApplyColors(backgroundBrush, backgroundHoverBrush, backgroundPressedBrush, foregroundBrush);
     }
 
     // Method Description:
@@ -5837,6 +5845,9 @@ namespace winrt::TerminalApp::implementation
 
         _newTabButton.Background(backgroundBrush);
         _newTabButton.Foreground(foregroundBrush);
+
+        // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): the ▾ menu button follows "+" back to the theme's colors.
+        _TabRowMenuButtonClearColors(backgroundBrush, foregroundBrush);
     }
 
     // Function Description:

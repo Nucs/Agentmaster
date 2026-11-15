@@ -264,6 +264,15 @@ namespace winrt::TerminalApp::implementation
         void SetGlobalPauseShown(bool paused);
         void SetSettings(const ::Agentmaster::AppSettings& settings); // seed the cog dialog's current values
         void SetSettingsHandler(std::function<void(::Agentmaster::AppSettings)> handler); // persist on Save
+        // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): the cog's "Auto-hide the tab row" switch is INSTANT-APPLY — a
+        // user's flip calls `handler(on)` at once (TerminalPage::_SetTabRowAutoHide: save, apply, broadcast); the cog's Save
+        // never writes the field. An empty handler leaves the switch inert (logged on a flip).
+        void SetTabRowAutoHideHandler(std::function<void(bool)> handler);
+        // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): show `on` on the cog's switch without firing its handler —
+        // the value changed elsewhere (the strip's ▾ menu item in this window, or a broadcast from another), and an open cog
+        // must not show a stale state. Also updates this content's copy of the setting. No-op before the cog is built.
+        // Never throws (a refused write is logged; the switch re-seeds from disk at the next cog open).
+        void SyncTabRowAutoHideSwitch(bool on) noexcept;
         // Agentmaster (cross-window settings broadcast): adopt GLOBAL settings that were changed in
         // ANOTHER window (the cog Save, or the Explorer-Tree / Triage-Board sort toggle) and re-apply the
         // bits THIS window renders live — refresh _appSettings (so future spawns use the latest globals)
@@ -1775,6 +1784,9 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setShowTabCloseButton{ nullptr }; // TABS: show the close (x) button on tabs (OFF => force every tab to "Never"); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setCloseTabOnMiddleClick{ nullptr }; // TABS: close a tab on middle-mouse click (OFF => disable both the manual hook + WinUI's native middle-close); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setShowTabIcon{ nullptr }; // TABS: show the profile icon on tabs (OFF, the default => IconStyle::Hidden, takes no strip space); GLOBAL
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setAutoHideTabRow{ nullptr }; // TAB STRIP: auto-hide the tab row (TAB_STRIP.md "Auto-hiding the tab row"; OFF by default; GLOBAL; INSTANT-APPLY through _tabRowAutoHideHandler — the strip's ▾ menu item is the other writer, never this form's Save)
+        bool _seedingAutoHideTabRow{ false }; // latch: a programmatic IsOn (the cog-open seed, SyncTabRowAutoHideSwitch) must not re-fire the switch's instant-apply handler
+        std::function<void(bool)> _tabRowAutoHideHandler; // the page's _SetTabRowAutoHide, set by SetTabRowAutoHideHandler
         // TABS — the TAB SIZE section (AppSettings::tabWidthMode / tabMinWidth / tabMaxWidth /
         // tabTitleFontSize / tabTitleFontWeight / tabMinHeight). GLOBAL; the page applies them live on Save
         // (TerminalPage::_ApplyTabSizingSettings). The four sliders show their value in their Header

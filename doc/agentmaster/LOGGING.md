@@ -9,7 +9,8 @@ with a local-time `[HH:MM:SS.mmm]` stamp (only at a line boundary, so a partial 
 - **`hooks.log`:** the hook event stream (`[SessionStart]`, `[UserPromptSubmit]`, `[Stop]`, …), the
   engine's mechanism tags, and the `[nav]` user-intent trail. The EXE-side writers — the updater's
   `[update]`, the portable installer's `[install]`, the startup notes `[path-guard]`, `[taskbar-badge]`,
-  `[taskbar-frame]`, `[startup-hang]` — append here too.
+  `[taskbar-frame]`, `[startup-hang]`, and the auto-hiding tab row's `[tabrow]` (on / off, held out / released, each
+  reveal with its reason, each hide, a caught failure: TAB_STRIP.md *Auto-hiding the tab row*) — append here too.
 - **`autorunner.log`:** the Prompt Queue Runner's scheduler — `[send]` (accepted for delivery, not yet
   delivered), `[send-deferred]`, `[advance-skip]` (why the queue did not move; change-deduped per
   session), `[plan-done]`, `[stop-on-error]`, `[pause-all] on|off`, `[enter-retry] <id> press k/3`,

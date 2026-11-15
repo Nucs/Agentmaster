@@ -841,6 +841,7 @@ void TestAppSettings()
         in.showTabCloseButton = false; // non-default (default true = show the X / theme-driven)
         in.closeTabOnMiddleClick = false; // non-default (default true = middle-click closes a tab)
         in.showTabIcon = true; // non-default (default false = tab icons HIDDEN)
+        in.autoHideTabRow = true; // non-default (default false = the row always shown) - TAB_STRIP.md "Auto-hiding the tab row"
         // Tab sizing (the cog's TAB SIZE section): every field non-default AND in-band, so a lossy
         // (de)serializer or an over-eager clamp would show up as a mismatch below.
         in.tabWidthMode = TabStripWidthMode::TitleLength; // non-default (default Terminal = follow Terminal's own tabWidthMode)
@@ -959,6 +960,7 @@ void TestAppSettings()
         CHECK(out.showTabCloseButton == false, "settings showTabCloseButton round-trip");
         CHECK(out.closeTabOnMiddleClick == false, "settings closeTabOnMiddleClick round-trip");
         CHECK(out.showTabIcon == true, "settings showTabIcon round-trip");
+        CHECK(out.autoHideTabRow == true, "settings autoHideTabRow round-trip (the strip menu item / cog switch ON, kept)");
         CHECK(out.tabWidthMode == TabStripWidthMode::TitleLength, "settings tabWidthMode round-trip (fit to title)");
         CHECK(out.tabMinWidth == 90u && out.tabMaxWidth == 400u, "settings tabMinWidth / tabMaxWidth round-trip");
         CHECK(out.tabTitleFontSize == 15u, "settings tabTitleFontSize round-trip");
@@ -1057,6 +1059,20 @@ void TestAppSettings()
         CHECK(on.sidePanelScrollToSelectedTab == true, "settings sidePanelScrollToSelectedTab PRESENT true -> ON");
     }
 
+    // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): the setting is OFF on both load paths - the struct default (a
+    // missing file, the empty block below) AND the absent-key fallback (a VALID settings.json from before the setting
+    // existed). If they disagreed, an upgrade would hide every existing user's tab row. A PRESENT true is the user's ON.
+    {
+        const auto preSetting = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"model\":\"opus\",\"showTabIcon\":true}}");
+        CHECK(preSetting.model == L"opus" && preSetting.autoHideTabRow == false, "settings autoHideTabRow ABSENT key (a pre-setting settings.json) -> OFF (the row always shown)");
+        const auto on = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"autoHideTabRow\":true}}");
+        CHECK(on.autoHideTabRow == true, "settings autoHideTabRow PRESENT true == the user's ON -> kept");
+        const auto off = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"autoHideTabRow\":false}}");
+        CHECK(off.autoHideTabRow == false, "settings autoHideTabRow PRESENT false -> OFF");
+        const auto wrongType = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"autoHideTabRow\":\"yes\"}}");
+        CHECK(wrongType.autoHideTabRow == false, "settings autoHideTabRow of the wrong type (a hand edit) -> OFF, never a guess");
+    }
+
     // Empty / garbage -> all defaults (a missing settings.json must change nothing).
     {
         const auto out = DeserializeAppSettings(L"");
@@ -1076,6 +1092,7 @@ void TestAppSettings()
         CHECK(out.showTabCloseButton == true, "settings showTabCloseButton default true (show X) on empty");
         CHECK(out.closeTabOnMiddleClick == true, "settings closeTabOnMiddleClick default true (middle-click closes) on empty");
         CHECK(out.showTabIcon == false, "settings showTabIcon default false (tab icons HIDDEN) on empty");
+        CHECK(out.autoHideTabRow == false, "settings autoHideTabRow default false (the tab row always shown) on empty");
         // Tab sizing: a missing settings.json must leave the strip exactly as it was before the TAB SIZE
         // section existed — Terminal's own width mode, App.xaml's 130 px floor, MUX's 240 px cap, its
         // 12 pt Normal title and its 32 px minimum height.

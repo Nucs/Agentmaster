@@ -111,6 +111,7 @@
 #include "AgentMaster/SidePanelPins.h" // CompareSidePanelPins / NextSidePanelPinStamp / IsSidePanelPinStamp — Pin to Top: pinned cards first, the newest pin on top (SIDE_PANEL.md §2j)
 #include "AgentMaster/SidePanelFilters.h" // the funnel's FILTERS: the facets, the matcher, the chips, the record's edits (SIDE_PANEL.md §2l)
 #include "AgentMaster/SidePanelStripReveal.h" // SidePanelStripPointerNear / NextSidePanelStripReveal — when the collapsed panel's floating strip shows (SIDE_PANEL.md §2m)
+#include "AgentMaster/TabRowAutoHide.h" // kTabRowLauncherPeekMs — the auto-hidden tab row comes out before the launcher anchors under + (TAB_STRIP.md "Auto-hiding the tab row")
 #include "AgentMaster/SessionFolderFilter.h" // CollectSessionFolders / SortFoldersByUse — the folder card's "folders of the sessions" section (SIDE_PANEL.md §2l)
 #include "AgentMaster/SessionStore.h" // GetSessionTags / LoadAllTagColors / SessionTagsEpoch — the cards' bookmark-tag strip (cached per card until a tag changes)
 
@@ -7622,6 +7623,11 @@ namespace winrt::TerminalApp::implementation
             {
                 return; // the build failed (logged); the next "+" tries again
             }
+            // An AUTO-HIDDEN tab row (TAB_STRIP.md "Auto-hiding the tab row") comes out first, placed at once (no slide), so "+"
+            // is where the anchor below measures it and the card hangs under a visible button. Ctrl+Shift+T while the row is
+            // hidden is the case this is for; a "+" click finds the row out already. The peek is short: the card itself keeps
+            // the row out while it is open (the keyboard is inside a popup), and the row leaves once it closes.
+            _PeekTabRow(static_cast<uint32_t>(::Agentmaster::kTabRowLauncherPeekMs), true);
             // THE ANCHOR: the strip's "+" bottom center, so the card hangs under the button toward the window's center (the
             // placement every launcher card uses, PlacePointerCard). A strip that is not on screen (focus mode hides the tab
             // row; the button then has no size) anchors at the window's top center instead.

@@ -1,11 +1,13 @@
 # The tab strip
 
 How Agentmaster draws and drives Windows Terminal's tab strip: the indicators on each tab header, the
-tab menu, tab size, revealing a tab, dragging tabs, the `+` button (Agentmaster's launcher) and the scroll
-arrows. Code: `TabHeaderControl.{xaml,h,cpp}`, `TerminalTabStatus.{h,idl}`, `Tab.{h,cpp}`, `TabManagement.cpp`,
-`TerminalPage.AgentEngine.cpp` (the drag gesture, the scroll arrows), `AgentMaster/TabDragMath.h` (the pure placement
-math), `TabRowControl.xaml` + `TerminalPage.AgentSidePanel.cpp` + `AgentLaunchBar.{h,cpp}` +
-`AgentMaster/LauncherRules.h` (the launcher).
+tab menu, tab size, revealing a tab, dragging tabs, the `+` button (Agentmaster's launcher), the `▾` menu button, the
+scroll arrows and the auto-hiding tab row. Code: `TabHeaderControl.{xaml,h,cpp}`, `TerminalTabStatus.{h,idl}`,
+`Tab.{h,cpp}`, `TabManagement.cpp`, `TerminalPage.AgentEngine.cpp` (the drag gesture, the scroll arrows),
+`AgentMaster/TabDragMath.h` (the pure placement math), `TabRowControl.xaml` + `TerminalPage.AgentSidePanel.cpp` +
+`AgentLaunchBar.{h,cpp}` + `AgentMaster/LauncherRules.h` (the launcher), `TerminalPage.AgentTabRow.cpp` +
+`AgentMaster/TabRowAutoHide.h` + `src/cascadia/WindowsTerminal/NonClientIslandWindow.{h,cpp}` (the auto-hiding row and
+the `▾` menu).
 
 ## The + button: the launcher
 
@@ -25,7 +27,9 @@ their own models, presets, profiles and folders):
 **What the strip shows.** The split button keeps its control (Windows Terminal's code that themes it, attaches its
 profile flyout and reads it runs unchanged) but its ▾ part is gone: `SplitButtonSecondaryButtonSize` 0 and a transparent
 `SplitButtonBorderBrushDivider` in `TabRowControl.xaml`. `#am.strip.new`; an Agentmaster tooltip
-(`_LauncherDecorateNewTabButton`; the XAML tooltip was removed — the shared tip replaces and then clears one).
+(`_LauncherDecorateNewTabButton`; the XAML tooltip was removed — the shared tip replaces and then clears one). A
+separate `▾` MENU button now stands right of `+` (the user's pick of 2026-11-15 for the auto-hide toggle: *Auto-hiding
+the tab row*, below); it opens a menu, never Windows Terminal's profile list.
 
 **What opens it** (`TerminalPage::_LauncherOpenFromTabStrip`):
 
@@ -97,6 +101,128 @@ center when the strip is hidden), placed by `PlacePointerCard` toward the window
   layout and `TabDragMath` are unchanged), then latches; `[strip] scroll arrows centred on the tab row (level with +)`
   once per window. The walk visits the template only (it skips the `ScrollContentPresenter`, which holds every tab).
   NOT BUILT yet.
+
+## Auto-hiding the tab row
+
+Built 2026-11-15, NOT BUILT yet (the next build must PURGE: `SessionModels.h`, `TerminalPage.h`,
+`AgentManagerContent.h`, `TerminalPage.idl`, `TerminalWindow.idl` and `TabRowControl.xaml` changed). The user's request:
+"I want to add a autohide of the top row with tabs row and home button and + and V and minimize, maximize, close
+buttons. This row needs to be autohiding and functioning similar to windows taskbar autohide. Add a new configuration in
+settings too, default false. synced to the V menu item. It should bo toggleable via the V icon". Their picks the same day
+(design-ask with live demos):
+
+| Question | Their pick |
+|---|---|
+| Where the toggle lives (777ce6b25 had removed the ▾ on their "One + panel, no ▾") | **▾ beside + again** — a menu button |
+| How the row hides and comes back | **Like the taskbar** — "but no 2px line stays, 0" |
+| What else brings it out | **Peek on keyboard tab switch** and **Stay out on the Manager page** |
+
+**What hides.** The whole title bar — the tab row (Home, the tabs, `<` `>`, `+`, `▾`), the drag bar and the minimize /
+maximize / close buttons: Windows Terminal's `TitlebarControl`, owned by the window host (`NonClientIslandWindow`,
+WindowsTerminal.exe). With the setting on, the bar leaves its own grid row and lies OVER the top of the content (the
+content row, `Canvas.ZIndex` 1): the content gains the row's height once, and the terminal never resizes for the row again
+(a resize would make every Claude Code session redraw). Away, the bar is parked exactly its own height above the island
+(its `Translation`), where the island clips it, and takes no input (`IsHitTestVisible` false) — never `Visibility`, which
+would re-measure the whole tab strip at every reveal. Nothing of it stays on screen (the user's "no 2px line").
+
+**The rule** (pure: `AgentMaster/TabRowAutoHide.h`; pinned by `TestTabRowAutoHide`, `tests_tabrow.cpp`):
+
+- **Comes out** when the pointer RESTS 0.15 s (`kTabRowRevealDelayMs`) in the window's top 4 DIPs (`kTabRowEdgeDip`,
+  measured from the client area's top: a restored window's one-pixel frame border row, a maximized window's screen edge).
+  A pointer that only crosses the edge, leaving the window upward, never brings it.
+- **A drag from the terminal** (a selection pulled to the top row) never brings it, and it stays away until the pointer
+  has left the edge band (the side panel strip's rule). A drag that started elsewhere (a folder dragged from Explorer onto
+  `+`) brings it like a plain approach.
+- **At once** for the HOLD (the window shows its Agent Manager page), a PEEK, and the keyboard moving into the row (a tab
+  rename started by its key, Tab navigation). While HELD the bar is DOCKED: it takes its own row again, above the page
+  (`_AutoHidePlace`), so the Manager page's own toolbar never lies under it; leaving the page for a tab floats it again
+  (the content's height changes then, but no terminal is on screen while the page is).
+- **Stays** while: the pointer is in the row or 8 DIPs below it (`kTabRowStayBelowDip`); the pointer is over any popup of
+  the window (a menu hanging below it, the `+` card, a tooltip); the keyboard is in the row by the keyboard or in its text
+  box, or inside an open popup (the `▾` menu, a tab's menu, the `+` card's box); a button is held from a press in the row
+  (a tab drag); the hold; a peek; a finger.
+- **Goes** 0.6 s (`kTabRowHideDelayMs`) after the last reason ended; a reason coming back meanwhile cancels the wait. A
+  peek that was the last reason ends with itself (out for 1.5 s, not 1.5 + 0.6).
+- **A finger** cannot rest: a tap in the top 16 DIPs (`kTabRowTouchEdgeDip`) brings the row out until a tap elsewhere
+  (or a mouse move, which hands it back to the cursor's rule).
+- A window that cannot show its title bar (minimized, focus mode, full screen without tabs) forgets everything: the row is
+  hidden at once and nothing stays pending. Full screen WITH tabs (`showTabsFullscreen`) auto-hides against the screen's
+  top edge.
+
+**The motion:** a 0.15 s composition slide of the bar's `Translation` (`UIElement::StartAnimation`, eased out coming, in
+going), placed at once while Windows' "Animation effects" are off (`SPI_GETCLIENTAREAANIMATION`). It is one-shot: XAML
+follows the Translation for hit testing during those 0.15 s only — not the ambient loops `AgentAmbientAnimation.h` keeps
+off XAML elements. A slide reversed midway leaves from where it got to; at its end (a one-shot `WM_TIMER`) the static
+Translation is pinned, which ends the animation for good.
+
+**The window host's half** (`NonClientIslandWindow`: `SetTitlebarAutoHide(enabled, hold)`, `PeekTitlebar(ms, instant)`):
+
+- **When it looks:** every 100 ms (`kTabRowWatchMs`, a `WM_TIMER`) while the row is out and not held — the pointer can
+  leave through the drag bar window (an HWND) without any XAML event — and exactly at the end of a rest, a hide delay or a
+  peek. A hidden row with nothing pending runs no timer; events start its looks: a pointer move near the top
+  (handledEventsToo on the island's root grid; every other move costs one coordinate read), a move over the frame border
+  row (`WM_NCMOUSEMOVE` / `WM_MOUSEMOVE` on the window itself), a press, a size / maximize / DPI / mode change, the
+  title bar getting focus, the page's calls.
+- **What it reads:** `GetCursorPos` + `WindowFromPoint` (another window covering ours never counts; a windowed popup
+  ours owns does), the client area's top and width, the island's rectangle, `GetAsyncKeyState` for the buttons, where the
+  held button went down (a XAML press: the row or the content), the focus (`FocusManager::GetFocusedElement`) walked up to
+  the bar or to an open popup's child, and each open popup's rectangle (`GetOpenPopupsForXamlRoot`).
+- **What follows the row:** the drag bar window (the caption buttons, the window drag, the top resize band, Snap Layouts)
+  is hidden while the row is away and comes back at the slide's end; `_OnNcHitTest` stops calling the band under an away
+  row a caption; `GetTotalNonClientExclusiveSize` stops counting the bar's height (window sizing, snap to grid).
+- **An opaque bar:** floating over the terminal, the bar wears `TabRowOpaqueBrush` of the app's brush — a translucent solid
+  gets full alpha, a fully transparent one (Mica) or none gets the theme's tab-row color (`#2E2E2E` dark, `#F3F3F3`
+  light); acrylic and other brushes stay. Turning the setting off gives back the app's brush unchanged.
+- A hidden row re-parks at its new height when its height changes (a DPI change, the cog's tab height).
+- **Logs** (hooks.log, through the EXE-safe `Startup::Note`): `[tabrow] auto-hide on` / `off`, `held out` / `hold
+  released`, `reveal (<why>)`, `hide`, and every caught failure as `[tabrow] <context> threw (0x…)`.
+
+**The page's half** (`TerminalPage.AgentTabRow.cpp`): `_ApplyTabRowAutoHide` decides on (the setting AND tabs in the
+title bar) and held (on AND the Agent Manager page on screen) and raises `TabRowAutoHideChanged` → `TerminalWindow` →
+AppHost → `SetTitlebarAutoHide`; `_PeekTabRow` raises `TabRowPeekRequested` → `PeekTitlebar`. Applied at engine init,
+by the setting's writer, by the cross-window broadcast, and by `_ShowManagerPage` / `_HideManagerPage`. Peeks: `nextTab`,
+`prevTab` and `switchToTab` (Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+Alt+1…9: `kTabRowPeekMs`, 1.5 s, sliding); the launcher opened
+from the strip (`_LauncherOpenFromTabStrip`: `kTabRowLauncherPeekMs`, placed at once, so `+` is where the card's anchor
+measures it — Ctrl+Shift+T on a hidden row; the card's own keyboard then holds the row while it is open).
+
+**The setting** `autoHideTabRow` (default off, GLOBAL; SETTINGS.md *Tabs & Overlay*): two INSTANT writers of one field —
+the `▾` menu's item and the cog's switch (Tabs & Overlay › TAB STRIP, `#am.settings.autoHideTabRow`) — both through
+`_SetTabRowAutoHide`: a freshest-disk RMW of the field, applied here, broadcast to every other window, and the cog's switch
+re-synced (`SyncTabRowAutoHideSwitch`, behind a latch so a programmatic set never re-fires it; an open cog in another
+window follows through `ApplyExternalSettings`). The switch re-seeds from disk at every cog open, and both cog-Save
+preserve blocks keep the field. Turning it on starts the row OUT: it leaves 0.6 s after the pointer is elsewhere, so the
+user sees where it went. With the system title bar (Windows Terminal's `showTabsInTitlebar` off) there is no row the window
+can slide: the page tells the host "off" and the menu item is disabled with that reason.
+
+**The ▾ menu button** (`TabRowMenuButton` in `TabRowControl.xaml`, `#am.strip.menu`): a plain Button right of `+`, in the
+old ▾'s look (the TabView button colors, the SplitButton template's fallback chevron E96E at 8). Its MenuFlyout is filled
+at every open (`_TabRowMenuFill`), so its check is never stale:
+
+```
+ ⌃ Auto-hide the tab row        ✓     #am.strip.menu.autoHide
+ ─────────────────────────────
+ ⟲ Sessions…                            #am.strip.menu.sessions
+ ⚙ Agentmaster settings                 #am.strip.menu.settings
+ ▭ Windows Terminal               ▸     #am.strip.menu.terminal  (Settings · Command palette · About)
+```
+
+Each command runs one dispatcher tick after its click (`_TabRowRunMenuCommand`), the toggle first re-checking the state
+its item showed (a menu left open while another window flipped the setting never inverts it); Windows Terminal's Settings
+runs at the click, because it reads the click's Alt / Shift.
+
+**Open:** with the system title bar nothing auto-hides (a page-side overlay of the tab row alone is not built); Windows' own
+auto-hide taskbar at the top edge keeps its 2-pixel strip above a maximized window (`_OnNcCalcSize`), so the row's band
+starts below it; whether the slide reads as smooth on the user's machine, and the timings, are owed to a build (live checks
+below).
+
+**Tests:** `TestTabRowAutoHide` (the m5 harness: the bands at every scale and for broken inputs, every named case, all
+40,960 input combinations over the reachable states against a second statement of the rule, one visit event by event);
+`tests_persistence` (`autoHideTabRow`: round trip, default, absent key, wrong type). E2E: flows TAB-13 (spec only).
+**Owed after a build (PURGED):** the rest at the top of a restored and of a maximized window; the slide both ways and
+with animation effects off; the row staying under the `▾` menu, a tab's menu, the `+` card, a tab drag and a rename; a
+selection pulled to the top row; Ctrl+Tab's peek; the Agent Manager page's hold; the caption buttons, Snap Layouts, the
+window drag and the top resize band on an out row, and none of them on an away one; the cog's switch and the menu item in
+step across two windows; the terminal's size unchanged by every reveal.
 
 ## The header
 

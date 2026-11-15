@@ -104,6 +104,13 @@ namespace TerminalApp
         // Agentmaster (taskbar preview frame, NOTIFICATIONS.md section 9): forwarded from TerminalPage; the AppHost hands
         // it to IslandWindow::SetTaskbarUnreadFrame whenever TaskbarUnreadFrameChanged fires. 0 = no frame.
         UInt32 TaskbarUnreadFrameArgb { get; };
+        // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): forwarded from TerminalPage; the AppHost hands them to
+        // NonClientIslandWindow::SetTitlebarAutoHide whenever TabRowAutoHideChanged fires (the setting as this window applies
+        // it, and the hold while its Agent Manager page is shown), and to PeekTitlebar whenever TabRowPeekRequested fires.
+        Boolean TabRowAutoHide { get; };
+        Boolean TabRowAutoHideHold { get; };
+        UInt32 TabRowPeekMs { get; };
+        Boolean TabRowPeekInstant { get; };
         Windows.UI.Xaml.Media.Brush TitlebarBrush { get; };
         Windows.UI.Xaml.Media.Brush FrameBrush { get; };
         void WindowActivated(Boolean activated);
@@ -137,6 +144,8 @@ namespace TerminalApp
         event Windows.Foundation.TypedEventHandler<Object, Object> SetTaskbarProgress;
         event Windows.Foundation.TypedEventHandler<Object, Object> TaskbarUnreadCountChanged; // Agentmaster: re-read TaskbarUnreadCount
         event Windows.Foundation.TypedEventHandler<Object, Object> TaskbarUnreadFrameChanged; // Agentmaster: re-read TaskbarUnreadFrameArgb
+        event Windows.Foundation.TypedEventHandler<Object, Object> TabRowAutoHideChanged; // Agentmaster: re-read TabRowAutoHide + TabRowAutoHideHold
+        event Windows.Foundation.TypedEventHandler<Object, Object> TabRowPeekRequested; // Agentmaster: re-read TabRowPeekMs + TabRowPeekInstant
         event Windows.Foundation.TypedEventHandler<Object, Object> IdentifyWindowsRequested;
         event Windows.Foundation.TypedEventHandler<Object, Object> IsQuakeWindowChanged;
         event Windows.Foundation.TypedEventHandler<Object, Object> SummonWindowRequested;

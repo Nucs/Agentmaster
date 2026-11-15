@@ -108,94 +108,177 @@
                         VerticalAlignment="Bottom"
                         Background="{ThemeResource CardStrokeColorDefaultBrush}" />
 
-                <mux:SplitButton x:Name="NewTabButton"
-                                 x:Uid="NewTabSplitButton"
-                                 Height="24"
-                                 Margin="0,4"
-                                 Padding="0"
-                                 HorizontalAlignment="Left"
-                                 VerticalAlignment="Stretch"
-                                 AllowDrop="True"
-                                 AutomationProperties.AccessibilityView="Control"
-                                 BorderThickness="0"
-                                 Click="OnNewTabButtonClick"
-                                 Content="&#xE710;"
-                                 DragOver="OnNewTabButtonDragOver"
-                                 Drop="OnNewTabButtonDrop"
-                                 FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                                 FontSize="12">
+                <!--
+                    Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): "+" and the ▾ menu button sit side by side in this
+                    horizontal panel, left-aligned over the footer's bottom line like "+" alone was.
+                -->
+                <StackPanel HorizontalAlignment="Left"
+                            VerticalAlignment="Stretch"
+                            Orientation="Horizontal">
+                    <mux:SplitButton x:Name="NewTabButton"
+                                     x:Uid="NewTabSplitButton"
+                                     Height="24"
+                                     Margin="0,4"
+                                     Padding="0"
+                                     HorizontalAlignment="Left"
+                                     VerticalAlignment="Stretch"
+                                     AllowDrop="True"
+                                     AutomationProperties.AccessibilityView="Control"
+                                     BorderThickness="0"
+                                     Click="OnNewTabButtonClick"
+                                     Content="&#xE710;"
+                                     DragOver="OnNewTabButtonDragOver"
+                                     Drop="OnNewTabButtonDrop"
+                                     FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                                     FontSize="12">
+                        <!--
+                            Agentmaster (TAB_STRIP.md "The + button: the launcher", the user's picks of 2026-11-14 - "One + panel,
+                            no ▾"): "+" opens Agentmaster's launcher card (TerminalPage::_LauncherOpenFromTabStrip), so the split
+                            button shows "+" ALONE - its ▾ part is sized to nothing and its divider is transparent (the resources
+                            below). The control stays a SplitButton, so Windows Terminal's own code that themes it, attaches the
+                            profile flyout and reads it keeps working unchanged. No XAML tooltip: TerminalPage sets an
+                            Agentmaster one from code (AgentSetTitledTip), and a XAML ToolTip here would be replaced and then
+                            cleared by it.
+                        -->
+                        <!--  U+E710 is the fancy plus icon.  -->
+                        <mux:SplitButton.Resources>
+                            <!--  Override the SplitButton* resources to match the tab view's button's styles.  -->
+                            <ResourceDictionary>
+                                <ResourceDictionary.ThemeDictionaries>
+                                    <ResourceDictionary x:Key="Light">
+                                        <!--  Agentmaster: no divider - the ▾ part beside "+" is gone (see above).  -->
+                                        <SolidColorBrush x:Key="SplitButtonBorderBrushDivider"
+                                                         Color="Transparent" />
+                                        <StaticResource x:Key="SplitButtonBackground"
+                                                        ResourceKey="TabViewButtonBackground" />
+                                        <StaticResource x:Key="SplitButtonForeground"
+                                                        ResourceKey="TabViewButtonForeground" />
+                                        <StaticResource x:Key="SplitButtonBackgroundPressed"
+                                                        ResourceKey="TabViewButtonBackgroundPressed" />
+                                        <StaticResource x:Key="SplitButtonForegroundPressed"
+                                                        ResourceKey="TabViewButtonForegroundPressed" />
+                                        <StaticResource x:Key="SplitButtonBackgroundPointerOver"
+                                                        ResourceKey="TabViewButtonBackgroundPointerOver" />
+                                        <StaticResource x:Key="SplitButtonForegroundPointerOver"
+                                                        ResourceKey="TabViewButtonForegroundPointerOver" />
+                                    </ResourceDictionary>
+                                    <ResourceDictionary x:Key="Dark">
+                                        <!--  Agentmaster: no divider - the ▾ part beside "+" is gone (see above).  -->
+                                        <SolidColorBrush x:Key="SplitButtonBorderBrushDivider"
+                                                         Color="Transparent" />
+                                        <StaticResource x:Key="SplitButtonBackground"
+                                                        ResourceKey="TabViewButtonBackground" />
+                                        <StaticResource x:Key="SplitButtonForeground"
+                                                        ResourceKey="TabViewButtonForeground" />
+                                        <StaticResource x:Key="SplitButtonBackgroundPressed"
+                                                        ResourceKey="TabViewButtonBackgroundPressed" />
+                                        <StaticResource x:Key="SplitButtonForegroundPressed"
+                                                        ResourceKey="TabViewButtonForegroundPressed" />
+                                        <StaticResource x:Key="SplitButtonBackgroundPointerOver"
+                                                        ResourceKey="TabViewButtonBackgroundPointerOver" />
+                                        <StaticResource x:Key="SplitButtonForegroundPointerOver"
+                                                        ResourceKey="TabViewButtonForegroundPointerOver" />
+                                    </ResourceDictionary>
+                                    <ResourceDictionary x:Key="HighContrast">
+                                        <!--  Agentmaster: no divider - the ▾ part beside "+" is gone (see above).  -->
+                                        <SolidColorBrush x:Key="SplitButtonBorderBrushDivider"
+                                                         Color="Transparent" />
+                                        <StaticResource x:Key="SplitButtonBackground"
+                                                        ResourceKey="TabViewButtonBackground" />
+                                        <StaticResource x:Key="SplitButtonForeground"
+                                                        ResourceKey="TabViewButtonForeground" />
+                                        <StaticResource x:Key="SplitButtonBackgroundPressed"
+                                                        ResourceKey="TabViewButtonBackgroundPressed" />
+                                        <StaticResource x:Key="SplitButtonForegroundPressed"
+                                                        ResourceKey="TabViewButtonForegroundPressed" />
+                                        <StaticResource x:Key="SplitButtonBackgroundPointerOver"
+                                                        ResourceKey="TabViewButtonBackgroundPointerOver" />
+                                        <StaticResource x:Key="SplitButtonForegroundPointerOver"
+                                                        ResourceKey="TabViewButtonForegroundPointerOver" />
+                                    </ResourceDictionary>
+                                </ResourceDictionary.ThemeDictionaries>
+                                <x:Double x:Key="SplitButtonPrimaryButtonSize">31</x:Double>
+                                <!--  Agentmaster: 0 (was 31) - the ▾ part takes no room and gets no click; "+" alone opens the launcher.  -->
+                                <x:Double x:Key="SplitButtonSecondaryButtonSize">0</x:Double>
+                            </ResourceDictionary>
+                        </mux:SplitButton.Resources>
+                    </mux:SplitButton>
+
                     <!--
-                        Agentmaster (TAB_STRIP.md "The + button: the launcher", the user's picks of 2026-11-14 - "One + panel,
-                        no ▾"): "+" opens Agentmaster's launcher card (TerminalPage::_LauncherOpenFromTabStrip), so the split
-                        button shows "+" ALONE - its ▾ part is sized to nothing and its divider is transparent (the resources
-                        below). The control stays a SplitButton, so Windows Terminal's own code that themes it, attaches the
-                        profile flyout and reads it keeps working unchanged. No XAML tooltip: TerminalPage sets an
-                        Agentmaster one from code (AgentSetTitledTip), and a XAML ToolTip here would be replaced and then
-                        cleared by it.
+                        Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"; the user's pick of 2026-11-15, "▾ beside + again"): the
+                        ▾ MENU BUTTON. Not the SplitButton's old ▾ part (that stays sized to nothing: "+" opens the launcher) but a
+                        plain Button whose MenuFlyout TerminalPage attaches and fills at every open (_TabRowMenuDecorate /
+                        _TabRowMenuFill): Auto-hide the tab row (checked while the setting is on), Sessions..., Agentmaster settings,
+                        Windows Terminal (Settings, Command palette, About). It wears the old ▾'s look: the TabView button colors
+                        (the resources below, the SplitButton's own mapping) and the SplitButton template's fallback chevron
+                        (E96E ChevronDownSmall at 8). No XAML tooltip and no AutomationId here: TerminalPage sets both from code
+                        (AgentSetTitledTip would replace and then clear a XAML tooltip; the id is am.strip.menu).
                     -->
-                    <!--  U+E710 is the fancy plus icon.  -->
-                    <mux:SplitButton.Resources>
-                        <!--  Override the SplitButton* resources to match the tab view's button's styles.  -->
-                        <ResourceDictionary>
-                            <ResourceDictionary.ThemeDictionaries>
-                                <ResourceDictionary x:Key="Light">
-                                    <!--  Agentmaster: no divider - the ▾ part beside "+" is gone (see above).  -->
-                                    <SolidColorBrush x:Key="SplitButtonBorderBrushDivider"
-                                                     Color="Transparent" />
-                                    <StaticResource x:Key="SplitButtonBackground"
-                                                    ResourceKey="TabViewButtonBackground" />
-                                    <StaticResource x:Key="SplitButtonForeground"
-                                                    ResourceKey="TabViewButtonForeground" />
-                                    <StaticResource x:Key="SplitButtonBackgroundPressed"
-                                                    ResourceKey="TabViewButtonBackgroundPressed" />
-                                    <StaticResource x:Key="SplitButtonForegroundPressed"
-                                                    ResourceKey="TabViewButtonForegroundPressed" />
-                                    <StaticResource x:Key="SplitButtonBackgroundPointerOver"
-                                                    ResourceKey="TabViewButtonBackgroundPointerOver" />
-                                    <StaticResource x:Key="SplitButtonForegroundPointerOver"
-                                                    ResourceKey="TabViewButtonForegroundPointerOver" />
-                                </ResourceDictionary>
-                                <ResourceDictionary x:Key="Dark">
-                                    <!--  Agentmaster: no divider - the ▾ part beside "+" is gone (see above).  -->
-                                    <SolidColorBrush x:Key="SplitButtonBorderBrushDivider"
-                                                     Color="Transparent" />
-                                    <StaticResource x:Key="SplitButtonBackground"
-                                                    ResourceKey="TabViewButtonBackground" />
-                                    <StaticResource x:Key="SplitButtonForeground"
-                                                    ResourceKey="TabViewButtonForeground" />
-                                    <StaticResource x:Key="SplitButtonBackgroundPressed"
-                                                    ResourceKey="TabViewButtonBackgroundPressed" />
-                                    <StaticResource x:Key="SplitButtonForegroundPressed"
-                                                    ResourceKey="TabViewButtonForegroundPressed" />
-                                    <StaticResource x:Key="SplitButtonBackgroundPointerOver"
-                                                    ResourceKey="TabViewButtonBackgroundPointerOver" />
-                                    <StaticResource x:Key="SplitButtonForegroundPointerOver"
-                                                    ResourceKey="TabViewButtonForegroundPointerOver" />
-                                </ResourceDictionary>
-                                <ResourceDictionary x:Key="HighContrast">
-                                    <!--  Agentmaster: no divider - the ▾ part beside "+" is gone (see above).  -->
-                                    <SolidColorBrush x:Key="SplitButtonBorderBrushDivider"
-                                                     Color="Transparent" />
-                                    <StaticResource x:Key="SplitButtonBackground"
-                                                    ResourceKey="TabViewButtonBackground" />
-                                    <StaticResource x:Key="SplitButtonForeground"
-                                                    ResourceKey="TabViewButtonForeground" />
-                                    <StaticResource x:Key="SplitButtonBackgroundPressed"
-                                                    ResourceKey="TabViewButtonBackgroundPressed" />
-                                    <StaticResource x:Key="SplitButtonForegroundPressed"
-                                                    ResourceKey="TabViewButtonForegroundPressed" />
-                                    <StaticResource x:Key="SplitButtonBackgroundPointerOver"
-                                                    ResourceKey="TabViewButtonBackgroundPointerOver" />
-                                    <StaticResource x:Key="SplitButtonForegroundPointerOver"
-                                                    ResourceKey="TabViewButtonForegroundPointerOver" />
-                                </ResourceDictionary>
-                            </ResourceDictionary.ThemeDictionaries>
-                            <x:Double x:Key="SplitButtonPrimaryButtonSize">31</x:Double>
-                            <!--  Agentmaster: 0 (was 31) - the ▾ part takes no room and gets no click; "+" alone opens the launcher.  -->
-                            <x:Double x:Key="SplitButtonSecondaryButtonSize">0</x:Double>
-                        </ResourceDictionary>
-                    </mux:SplitButton.Resources>
-                </mux:SplitButton>
+                    <Button x:Name="TabRowMenuButton"
+                            Width="26"
+                            Height="24"
+                            MinWidth="0"
+                            Margin="0,4"
+                            Padding="0"
+                            HorizontalContentAlignment="Center"
+                            VerticalAlignment="Stretch"
+                            VerticalContentAlignment="Center"
+                            AutomationProperties.Name="Tab row menu"
+                            BorderThickness="0">
+                        <Button.Resources>
+                            <ResourceDictionary>
+                                <ResourceDictionary.ThemeDictionaries>
+                                    <ResourceDictionary x:Key="Light">
+                                        <StaticResource x:Key="ButtonBackground"
+                                                        ResourceKey="TabViewButtonBackground" />
+                                        <StaticResource x:Key="ButtonForeground"
+                                                        ResourceKey="TabViewButtonForeground" />
+                                        <StaticResource x:Key="ButtonBackgroundPressed"
+                                                        ResourceKey="TabViewButtonBackgroundPressed" />
+                                        <StaticResource x:Key="ButtonForegroundPressed"
+                                                        ResourceKey="TabViewButtonForegroundPressed" />
+                                        <StaticResource x:Key="ButtonBackgroundPointerOver"
+                                                        ResourceKey="TabViewButtonBackgroundPointerOver" />
+                                        <StaticResource x:Key="ButtonForegroundPointerOver"
+                                                        ResourceKey="TabViewButtonForegroundPointerOver" />
+                                    </ResourceDictionary>
+                                    <ResourceDictionary x:Key="Dark">
+                                        <StaticResource x:Key="ButtonBackground"
+                                                        ResourceKey="TabViewButtonBackground" />
+                                        <StaticResource x:Key="ButtonForeground"
+                                                        ResourceKey="TabViewButtonForeground" />
+                                        <StaticResource x:Key="ButtonBackgroundPressed"
+                                                        ResourceKey="TabViewButtonBackgroundPressed" />
+                                        <StaticResource x:Key="ButtonForegroundPressed"
+                                                        ResourceKey="TabViewButtonForegroundPressed" />
+                                        <StaticResource x:Key="ButtonBackgroundPointerOver"
+                                                        ResourceKey="TabViewButtonBackgroundPointerOver" />
+                                        <StaticResource x:Key="ButtonForegroundPointerOver"
+                                                        ResourceKey="TabViewButtonForegroundPointerOver" />
+                                    </ResourceDictionary>
+                                    <ResourceDictionary x:Key="HighContrast">
+                                        <StaticResource x:Key="ButtonBackground"
+                                                        ResourceKey="TabViewButtonBackground" />
+                                        <StaticResource x:Key="ButtonForeground"
+                                                        ResourceKey="TabViewButtonForeground" />
+                                        <StaticResource x:Key="ButtonBackgroundPressed"
+                                                        ResourceKey="TabViewButtonBackgroundPressed" />
+                                        <StaticResource x:Key="ButtonForegroundPressed"
+                                                        ResourceKey="TabViewButtonForegroundPressed" />
+                                        <StaticResource x:Key="ButtonBackgroundPointerOver"
+                                                        ResourceKey="TabViewButtonBackgroundPointerOver" />
+                                        <StaticResource x:Key="ButtonForegroundPointerOver"
+                                                        ResourceKey="TabViewButtonForegroundPointerOver" />
+                                    </ResourceDictionary>
+                                </ResourceDictionary.ThemeDictionaries>
+                            </ResourceDictionary>
+                        </Button.Resources>
+                        <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                                  FontSize="8"
+                                  Glyph="&#xE96E;"
+                                  IsTextScaleFactorEnabled="False" />
+                    </Button>
+                </StackPanel>
             </Grid>
         </mux:TabView.TabStripFooter>
 

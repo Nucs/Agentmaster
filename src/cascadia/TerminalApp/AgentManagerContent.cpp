@@ -959,6 +959,40 @@ namespace winrt::TerminalApp::implementation
         _settingsSink = std::move(handler);
     }
 
+    // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): see AgentManagerContent.h.
+    //   handler - called with the switch's new value on every USER flip (never for a seed or a sync).
+    void AgentManagerContent::SetTabRowAutoHideHandler(std::function<void(bool)> handler)
+    {
+        _tabRowAutoHideHandler = std::move(handler);
+    }
+
+    // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): see AgentManagerContent.h. The latch keeps the programmatic IsOn
+    // from re-firing the instant-apply handler, and it is cleared on EVERY path: a latch stuck true would silently ignore
+    // every later flip (the switch would look alive and change nothing — the allowUpdatePrerelease switch's lesson).
+    //   on - the value to show.
+    void AgentManagerContent::SyncTabRowAutoHideSwitch(const bool on) noexcept
+    {
+        _appSettings.autoHideTabRow = on;
+        if (!_setAutoHideTabRow)
+        {
+            return; // the cog was never built: its first open seeds from disk
+        }
+        try
+        {
+            if (_setAutoHideTabRow.IsOn() != on)
+            {
+                _seedingAutoHideTabRow = true;
+                _setAutoHideTabRow.IsOn(on);
+            }
+        }
+        catch (...)
+        {
+            // The switch shows a stale state until the cog's next open re-seeds it from disk (Rule #18: logged).
+            ::Agentmaster::AgentLogCaughtException(L"SyncTabRowAutoHideSwitch");
+        }
+        _seedingAutoHideTabRow = false;
+    }
+
     // Agentmaster (cross-window settings broadcast): a GLOBAL setting changed in ANOTHER window — adopt
     // the merged settings and re-apply what this window renders live. Runs on THIS window's UI thread
     // (the engine sink marshals here). We do NOT push these back through _settingsSink (that would loop
@@ -972,6 +1006,9 @@ namespace winrt::TerminalApp::implementation
         _UpdateTreeSortButton();
         _UpdateBoardSortButton();
         _UpdatePlanPaneTab(); // adopt another window's Prompt Queue pane tab choice (GLOBAL setting)
+        // The auto-hiding tab row (TAB_STRIP.md "Auto-hiding the tab row") flipped in another window: an open cog here shows it
+        // at once (its switch is instant-apply, so a stale switch would read as the setting's state).
+        SyncTabRowAutoHideSwitch(settings.autoHideTabRow);
         _Refresh();
     }
 

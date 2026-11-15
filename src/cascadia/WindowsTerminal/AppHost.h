@@ -83,6 +83,13 @@ private:
     // last one, or the frame setting / color changed — re-read the frame color and hand it to the IslandWindow, which
     // frames (or unframes) the window's taskbar / Alt+Tab preview. Both args are unused.
     void _TaskbarUnreadFrameChanged(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::IInspectable& args);
+    // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): the page's auto-hide setting or its hold (the Agent Manager page
+    // on screen) changed — re-read both and hand them to the NonClientIslandWindow, which floats and hides its title bar.
+    // A no-op for a window with the system title bar (showTabsInTitlebar off). Both args are unused.
+    void _TabRowAutoHideChanged(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::IInspectable& args);
+    // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): the page asked for a PEEK (a keyboard tab switch, the launcher
+    // opened by its keys) — re-read its length and placement and hand them to the NonClientIslandWindow. Both args unused.
+    void _TabRowPeekRequested(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::IInspectable& args);
 
     void _IdentifyWindowsRequested(winrt::Windows::Foundation::IInspectable sender,
                                    winrt::Windows::Foundation::IInspectable args);
@@ -160,6 +167,8 @@ private:
         winrt::TerminalApp::TerminalWindow::SetTaskbarProgress_revoker SetTaskbarProgress;
         winrt::TerminalApp::TerminalWindow::TaskbarUnreadCountChanged_revoker TaskbarUnreadCountChanged; // Agentmaster (taskbar unread badge)
         winrt::TerminalApp::TerminalWindow::TaskbarUnreadFrameChanged_revoker TaskbarUnreadFrameChanged; // Agentmaster (taskbar preview frame)
+        winrt::TerminalApp::TerminalWindow::TabRowAutoHideChanged_revoker TabRowAutoHideChanged; // Agentmaster (the auto-hiding tab row)
+        winrt::TerminalApp::TerminalWindow::TabRowPeekRequested_revoker TabRowPeekRequested; // Agentmaster (the auto-hiding tab row's peek)
         winrt::TerminalApp::TerminalWindow::IdentifyWindowsRequested_revoker IdentifyWindowsRequested;
         winrt::TerminalApp::TerminalWindow::IsQuakeWindowChanged_revoker IsQuakeWindowChanged;
         winrt::TerminalApp::TerminalWindow::SummonWindowRequested_revoker SummonWindowRequested;

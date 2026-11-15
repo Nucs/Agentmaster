@@ -400,6 +400,10 @@ namespace winrt::TerminalApp::implementation
         winrt::TerminalApp::TaskbarState TaskbarState() const;
         uint32_t TaskbarUnreadCount() const noexcept; // Agentmaster (taskbar unread badge, NOTIFICATIONS.md section 8): the PROCESS-WIDE unread-session count to paint on this window's taskbar button, already gated by AppSettings::taskbarUnreadBadge (0 = no badge); re-read by the AppHost on every TaskbarUnreadCountChanged
         uint32_t TaskbarUnreadFrameArgb() const noexcept; // Agentmaster (taskbar preview frame, NOTIFICATIONS.md section 9): THIS window's preview-frame color (0xAARRGGBB, the flash-ring color with its alpha raised to at least 50%) while any of its tabs is unread and AppSettings::taskbarUnreadThumbnailFrame is on; 0 = no frame. Re-read by the AppHost on every TaskbarUnreadFrameChanged
+        bool TabRowAutoHide() const noexcept; // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): THIS window auto-hides its title bar — AppSettings::autoHideTabRow, when tabs are in the title bar (showTabsInTitlebar). Cached by _ApplyTabRowAutoHide; re-read by the AppHost on every TabRowAutoHideChanged
+        bool TabRowAutoHideHold() const noexcept; // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): the auto-hidden row is held out — this window shows its Agent Manager page (the user's pick, "Stay out on the Manager page"). Only with TabRowAutoHide(); re-read on every TabRowAutoHideChanged
+        uint32_t TabRowPeekMs() const noexcept; // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): the last peek's length, ms (TabRowAutoHide.h kTabRowPeekMs for a keyboard tab switch); re-read on every TabRowPeekRequested
+        bool TabRowPeekInstant() const noexcept; // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): the last peek places the row at once, no slide (the launcher measures + right after); re-read on every TabRowPeekRequested
 
         void ShowKeyboardServiceWarning() const;
         winrt::hstring KeyboardServiceDisabledText();
@@ -454,6 +458,8 @@ namespace winrt::TerminalApp::implementation
         til::typed_event<IInspectable, IInspectable> SetTaskbarProgress;
         til::typed_event<IInspectable, IInspectable> TaskbarUnreadCountChanged; // Agentmaster (taskbar unread badge): raised only when TaskbarUnreadCount() changes
         til::typed_event<IInspectable, IInspectable> TaskbarUnreadFrameChanged; // Agentmaster (taskbar preview frame): raised only when TaskbarUnreadFrameArgb() changes
+        til::typed_event<IInspectable, IInspectable> TabRowAutoHideChanged; // Agentmaster (the auto-hiding tab row): raised only when TabRowAutoHide() or TabRowAutoHideHold() changes
+        til::typed_event<IInspectable, IInspectable> TabRowPeekRequested; // Agentmaster (the auto-hiding tab row): raised for every peek while TabRowAutoHide() is on
         til::typed_event<IInspectable, IInspectable> Initialized;
         til::typed_event<IInspectable, IInspectable> IdentifyWindowsRequested;
         til::typed_event<IInspectable, winrt::TerminalApp::RenameWindowRequestedArgs> RenameWindowRequested;
@@ -516,6 +522,20 @@ namespace winrt::TerminalApp::implementation
         // second click lands on the jump-back face), and a double-click on the arrow would jump back and
         // reopen the page.
         uint64_t _managerHomeButtonFlipTick{ 0 };
+        // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"; the user's pick of 2026-11-15, "▾ beside + again"): the strip's
+        // ▾ MENU BUTTON right of "+" (TabRowControl.xaml's TabRowMenuButton). A plain menu button, not the SplitButton's old ▾
+        // part: its MenuFlyout is filled at every open (_TabRowMenuFill) — Auto-hide the tab row (checked from the live
+        // setting), Sessions…, Agentmaster settings, Windows Terminal ▸ (Settings, Command palette, About). Wired once by
+        // _TabRowMenuDecorate; null when the XAML has no such button (never in this build).
+        Windows::UI::Xaml::Controls::Button _tabRowMenuButton{ nullptr };
+        // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): what this window last told the AppHost through
+        // TabRowAutoHideChanged — auto-hide on (AppSettings::autoHideTabRow with tabs in the title bar) and the hold (the Agent
+        // Manager page on screen) — so _ApplyTabRowAutoHide raises only on a real change. And the last peek's length / placement,
+        // read back by the AppHost on TabRowPeekRequested.
+        bool _tabRowAutoHideApplied{ false };
+        bool _tabRowAutoHideHoldApplied{ false };
+        uint32_t _tabRowPeekMs{ 0 };
+        bool _tabRowPeekInstant{ false };
         Windows::UI::Xaml::Controls::ScrollViewer _tabStripScrollViewer{ nullptr };
         // Agentmaster: the POINTER-OWNED tab reorder/tear-out gesture's state (native MUX drag is
         // permanently OFF — the drag-AV resolution; TerminalPage.AgentEngine.cpp). One gesture at a
@@ -3978,6 +3998,47 @@ namespace winrt::TerminalApp::implementation
         // button's own "open the drop-down" keys (Alt+Down, F4 — Windows Terminal's profile flyout, still attached) into the
         // launcher. Never throws (logged).
         void _LauncherDecorateNewTabButton() noexcept;
+
+        // ---- Agentmaster: the AUTO-HIDING TAB ROW and the strip's ▾ menu (TerminalPage.AgentTabRow.cpp; TAB_STRIP.md
+        // "Auto-hiding the tab row"). The window host (NonClientIslandWindow) floats and hides the title bar by the pure rule
+        // AgentMaster/TabRowAutoHide.h; the page owns the setting, the hold, the peeks and the ▾ menu. UI thread, all.
+        // Decide what THIS window tells the AppHost — auto-hide on (AppSettings::autoHideTabRow, when tabs are in the title bar)
+        // and held out (the Agent Manager page on screen, the user's "Stay out on the Manager page") — and raise
+        // TabRowAutoHideChanged when either changed. Called at engine init, after every flip of the setting (this window's or a
+        // broadcast), and whenever the Agent Manager page shows or hides. Never throws (logged).
+        void _ApplyTabRowAutoHide() noexcept;
+        // THE ONE WRITER of AppSettings::autoHideTabRow (the ▾ menu item, the cog's switch): a freshest-disk read-modify-write
+        // of that one field, adopted here, applied to this window, broadcast to every other (each applies it live), and the
+        // cog's switch re-synced. `source` names the writer in the [nav] line. No-op when the value is already `on`. Never
+        // throws (a failed broadcast is logged; the others then adopt it at their next broadcast or launch).
+        void _SetTabRowAutoHide(bool on, std::wstring_view source) noexcept;
+        // PEEK: ask the window host to bring the auto-hidden row out for `durationMs` (TabRowAutoHide.h kTabRowPeekMs after a
+        // keyboard tab switch; kTabRowLauncherPeekMs, `instant`, before the launcher anchors under +). A no-op while this
+        // window does not auto-hide its row. The window host logs the reveal ("[tabrow] reveal (peek)"). Never throws.
+        void _PeekTabRow(uint32_t durationMs, bool instant) noexcept;
+        // Dress the strip's ▾ menu button (called once, right after the page takes it from the tab row): its AutomationId
+        // (am.strip.menu), its tooltip, and its MenuFlyout, emptied and refilled by _TabRowMenuFill at every open. Never throws.
+        void _TabRowMenuDecorate() noexcept;
+        // Fill the ▾ menu from the live state (every open): ✓ Auto-hide the tab row (checked from AppSettings::autoHideTabRow;
+        // disabled with the reason while tabs are not in the title bar), Sessions…, Agentmaster settings, Windows Terminal ▸
+        // (Settings, Command palette, About). Throws what creating the XAML items throws; the Opening handler contains it.
+        void _TabRowMenuFill(const winrt::Windows::UI::Xaml::Controls::MenuFlyout& menu);
+        // Give the ▾ menu button the colors "+" just got from the tab row's color (_SetNewTabButtonColor, every theme pass
+        // with a change): its background, pointer-over and pressed brushes, and its foreground — as the Button's own
+        // resource keys, then a visual-state toggle so the template re-reads them. Never throws (logged: the ▾ keeps its
+        // previous colors). The brushes may be null (XAML then draws none).
+        void _TabRowMenuButtonApplyColors(const winrt::Windows::UI::Xaml::Media::SolidColorBrush& background,
+                                          const winrt::Windows::UI::Xaml::Media::SolidColorBrush& hover,
+                                          const winrt::Windows::UI::Xaml::Media::SolidColorBrush& pressed,
+                                          const winrt::Windows::UI::Xaml::Media::SolidColorBrush& foreground) noexcept;
+        // The ▾ menu button back to the theme's colors with "+" (_ClearNewTabButtonColor): the six resource keys removed,
+        // `background` / `foreground` set like "+" gets them (either may be null). Never throws (logged).
+        void _TabRowMenuButtonClearColors(const winrt::Windows::UI::Xaml::Media::SolidColorBrush& background,
+                                          const winrt::Windows::UI::Xaml::Media::SolidColorBrush& foreground) noexcept;
+        // Run a ▾ menu command one dispatcher tick after its click — the menu is still closing, and a command that opens a
+        // page or moves the keyboard must not run inside the click — on this page if it still exists, its failure logged
+        // under `what` (Rule #18). Never throws (a refused hop loses the click, logged).
+        void _TabRowRunMenuCommand(std::wstring_view what, std::function<void(TerminalPage&)> command) noexcept;
         // True while Alt, Shift or Ctrl is held: a "+" click (or a drop) then keeps Windows Terminal's meaning — Alt splits the
         // focused pane, Shift opens a new window, Ctrl an elevated one (_OpenNewTerminalViaDropdown) — instead of opening the
         // launcher. Never throws (a failed read answers false: the launcher opens).

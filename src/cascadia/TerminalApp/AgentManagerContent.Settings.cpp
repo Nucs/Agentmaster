@@ -22,6 +22,7 @@
 #include "AgentManagerContent.h"
 
 #include "AgentTipHelpers.h" // AgentSetTip — hover tooltips with working dismissal (XAML Islands)
+#include "AgentAutomation.h" // AgentSetAutomationId — the "Auto-hide the tab row" switch's am.settings.autoHideTabRow (E2E_TESTING.md §6.3)
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
 #include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor — the cog's "status flashing color" picker <-> AppSettings::flashRingColor
 #include "AgentModelPrompt.h" // AgentBuildSpecifyModelCard — the shared "Specify a model..." prompt this content hosts
@@ -2265,6 +2266,44 @@ namespace winrt::TerminalApp::implementation
         _setShowTabIcon.Header(winrt::box_value(L"Show icons on tabs"));
         AgentSetTip(_setShowTabIcon, L"Show the profile icon at the left of each tab (before the status dot and title). When off (the default), the icon is hidden entirely and takes no space \x2014 the tab reads on its status dot + title. Default off.");
         panel.Children().Append(_setShowTabIcon);
+        // TAB STRIP: AUTO-HIDE the tab row (TAB_STRIP.md "Auto-hiding the tab row"; AppSettings::autoHideTabRow, GLOBAL, default
+        // OFF). The user's request of 2026-11-15: "Add a new configuration in settings too, default false. synced to the V menu
+        // item". INSTANT-APPLY like the update opt-ins: a flip goes straight to the page's one writer (_tabRowAutoHideHandler ->
+        // TerminalPage::_SetTabRowAutoHide), which saves, applies and broadcasts it — the strip's ▾ menu item calls the same
+        // writer, so the two can never disagree, and this form's Save never writes the field (both Save preserve blocks keep
+        // it from disk). The switch re-seeds from DISK at every cog open, and SyncTabRowAutoHideSwitch moves it while the cog
+        // is open (a flip from the ▾ menu, a broadcast), each behind _seedingAutoHideTabRow so a programmatic IsOn never
+        // re-fires the handler.
+        _setAutoHideTabRow = ToggleSwitch{};
+        _setAutoHideTabRow.Header(winrt::box_value(L"Auto-hide the tab row"));
+        AgentSetAutomationId(_setAutoHideTabRow, L"am.settings.autoHideTabRow");
+        AgentSetTip(_setAutoHideTabRow, L"Hide the window's top row \x2014 the tabs, Home, + and \x25BE, and the minimize / maximize / close buttons \x2014 like the Windows taskbar's auto-hide. Rest the pointer at the window's top edge and it slides out over the terminal, which never resizes; it slides away 0.6 s after the pointer leaves it. It stays while a menu from it is open and while the Agent Manager page is shown; Ctrl+Tab, Ctrl+Shift+Tab and Ctrl+Alt+1\x2026" L"9 show it for a moment. The same switch as the \x25BE menu's \x201C" L"Auto-hide the tab row\x201D. Needs Windows Terminal's tabs in the title bar (its default). Applies at once in every window \x2014 no Save needed. Default off.");
+        _setAutoHideTabRow.Toggled([this](const IInspectable&, const RoutedEventArgs&) {
+            if (_seedingAutoHideTabRow)
+            {
+                return; // a seed or a sync, not a user flip
+            }
+            // Guarded: this runs straight off a XAML event, where an escape would fail-fast the app over a settings write. A
+            // failed flip is logged and harmless: the switch re-seeds from disk at the next cog open.
+            try
+            {
+                const bool on = _setAutoHideTabRow.IsOn();
+                _appSettings.autoHideTabRow = on;
+                if (_tabRowAutoHideHandler)
+                {
+                    _tabRowAutoHideHandler(on);
+                }
+                else
+                {
+                    ::Agentmaster::LogNav(L"tab row auto-hide switch flipped with no handler wired (nothing saved)");
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"cog: the Auto-hide the tab row switch");
+            }
+        });
+        panel.Children().Append(_setAutoHideTabRow);
 
         // Agentmaster (tab sizing): the TAB SIZE section — how wide and tall every tab is and how its title
         // reads (AppSettings::tabWidthMode / tabMinWidth / tabMaxWidth / tabTitleFontSize /
@@ -3753,6 +3792,22 @@ namespace winrt::TerminalApp::implementation
         {
             _setShowTabIcon.IsOn(_appSettings.showTabIcon);
         }
+        // The auto-hiding tab row's switch (TAB_STRIP.md "Auto-hiding the tab row"): seeded from DISK, not the in-memory copy —
+        // it is INSTANT-APPLY, and the strip's ▾ menu (in this or another window) may have flipped it since this copy was
+        // made. Behind the latch, cleared on every path (SyncTabRowAutoHideSwitch's contract); a failed read keeps the copy.
+        if (_setAutoHideTabRow)
+        {
+            bool diskOn = _appSettings.autoHideTabRow;
+            try
+            {
+                diskOn = ::Agentmaster::LoadAppSettings().autoHideTabRow;
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"cog open: reading the tab row auto-hide setting");
+            }
+            SyncTabRowAutoHideSwitch(diskOn);
+        }
         // TAB SIZE: seed the two combos + the four sliders from the saved values — clamped / normalized the
         // way the page applies them (TerminalPage::_ApplyTabSizingSettings), so the form never shows a value
         // the strip isn't actually using (e.g. a hand-edited crossed width pair).
@@ -4859,6 +4914,7 @@ namespace winrt::TerminalApp::implementation
             _appSettings.sidePanelSummaryHidden = disk.sidePanelSummaryHidden; // the header "Sum" toggle's own RMW — this form never edits it
             _appSettings.sidePanelAiMode = disk.sidePanelAiMode; // the filter box's "AI" toggle's own RMW (SIDE_PANEL.md §2h) — this form never edits it
             _appSettings.sidePanelScrollToSelectedTab = disk.sidePanelScrollToSelectedTab; // the header ⌖ toggle's own RMW — this form never edits it
+            _appSettings.autoHideTabRow = disk.autoHideTabRow; // the auto-hiding tab row: its switch here and the strip's ▾ menu item are instant-apply writers (TerminalPage::_SetTabRowAutoHide) — this form's Save never writes it
         }
         // MESSAGING.md: commit the bot token to Windows Credential Manager BEFORE the sink runs, so the engine
         // service's Apply (called by the page's settings handler) finds the new token. A typed token replaces the

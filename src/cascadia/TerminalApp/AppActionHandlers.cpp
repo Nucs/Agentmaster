@@ -13,6 +13,7 @@
 #include "Utils.h"
 #include "AgentMaster/Engine.h" // Agentmaster (M10): RecoverableWindows (the "Reopen Windows" recover button)
 #include "AgentMaster/ClaudeSpawn.h" // Agentmaster (M10): AppendStateLog (reopen diagnostics)
+#include "AgentMaster/TabRowAutoHide.h" // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): kTabRowPeekMs — a keyboard tab switch's peek
 
 using namespace winrt::Windows::ApplicationModel::DataTransfer;
 using namespace winrt::Windows::UI::Xaml;
@@ -180,6 +181,9 @@ namespace winrt::TerminalApp::implementation
         {
             _SelectNextTab(true, realArgs.SwitcherMode());
             args.Handled(true);
+            // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"; the user's pick "Peek on keyboard tab switch"): an
+            // auto-hidden row comes out for 1.5 s, so the user sees which tab they landed on. No-op without auto-hide.
+            _PeekTabRow(static_cast<uint32_t>(::Agentmaster::kTabRowPeekMs), false);
         }
     }
 
@@ -191,6 +195,8 @@ namespace winrt::TerminalApp::implementation
         {
             _SelectNextTab(false, realArgs.SwitcherMode());
             args.Handled(true);
+            // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): the keyboard switch's 1.5 s peek (see _HandleNextTab).
+            _PeekTabRow(static_cast<uint32_t>(::Agentmaster::kTabRowPeekMs), false);
         }
     }
 
@@ -504,6 +510,8 @@ namespace winrt::TerminalApp::implementation
         {
             _SelectTab({ realArgs.TabIndex() });
             args.Handled(true);
+            // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): Ctrl+Alt+1…9's 1.5 s peek (see _HandleNextTab).
+            _PeekTabRow(static_cast<uint32_t>(::Agentmaster::kTabRowPeekMs), false);
         }
     }
 

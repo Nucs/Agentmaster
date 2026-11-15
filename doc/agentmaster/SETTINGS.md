@@ -239,6 +239,12 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
 - **The strip:** `showTabCloseButton` (true), `closeTabOnMiddleClick` (true), `showTabIcon` (false: tab
   icons hidden, `IconStyle::Hidden`), the tab size (`tabWidthMode`, `tabMinWidth`, `tabMaxWidth`,
   `tabTitleFontSize`, `tabTitleFontWeight`, `tabMinHeight`: [TAB_STRIP.md](TAB_STRIP.md) *Size*).
+- `autoHideTabRow` (false): **Auto-hide the tab row** — the window's top row (the tabs, Home, `+` and `▾`, the minimize /
+  maximize / close buttons) hides like the Windows taskbar and slides out over the terminal when the pointer rests at the
+  window's top edge ([TAB_STRIP.md](TAB_STRIP.md) *Auto-hiding the tab row*). GLOBAL. **Instant-apply**: the switch here
+  and the strip's `▾` menu item are the two writers of the one field (`TerminalPage::_SetTabRowAutoHide`: a
+  freshest-disk RMW, then a broadcast), so both stay in step and the cog's Save never writes it (both Save preserve blocks
+  restore it from disk). Needs Windows Terminal's tabs in the title bar (`showTabsInTitlebar`, its default).
 - `tabRenameCommitMode` (`ClickAwayOrShiftEnter`, or `Enter`): the rename box's commit key.
 - **Title naming** (how an untitled session's default title derives from its folder; applied by
   `DeriveSessionTitle` at the next launch, adopt or fork-from-disk of an untitled session; an existing or

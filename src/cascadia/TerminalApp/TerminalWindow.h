@@ -125,6 +125,10 @@ namespace winrt::TerminalApp::implementation
         winrt::TerminalApp::TaskbarState TaskbarState();
         uint32_t TaskbarUnreadCount(); // Agentmaster (taskbar unread badge): the page's count, 0 before the page exists
         uint32_t TaskbarUnreadFrameArgb(); // Agentmaster (taskbar preview frame): the page's frame color, 0 (no frame) before the page exists
+        bool TabRowAutoHide(); // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): the page's auto-hide as this window applies it; false before the page exists
+        bool TabRowAutoHideHold(); // Agentmaster: the page holds the auto-hidden row out (its Agent Manager page is shown); false before the page exists
+        uint32_t TabRowPeekMs(); // Agentmaster: the length of the page's last peek request, ms; 0 before the page exists
+        bool TabRowPeekInstant(); // Agentmaster: whether that peek places the row at once (no slide); false before the page exists
         winrt::Windows::UI::Xaml::Media::Brush TitlebarBrush();
         winrt::Windows::UI::Xaml::Media::Brush FrameBrush();
         void WindowActivated(const bool activated);
@@ -240,6 +244,8 @@ namespace winrt::TerminalApp::implementation
         FORWARDED_TYPED_EVENT(SetTaskbarProgress, winrt::Windows::Foundation::IInspectable, winrt::Windows::Foundation::IInspectable, _root, SetTaskbarProgress);
         FORWARDED_TYPED_EVENT(TaskbarUnreadCountChanged, winrt::Windows::Foundation::IInspectable, winrt::Windows::Foundation::IInspectable, _root, TaskbarUnreadCountChanged); // Agentmaster (taskbar unread badge)
         FORWARDED_TYPED_EVENT(TaskbarUnreadFrameChanged, winrt::Windows::Foundation::IInspectable, winrt::Windows::Foundation::IInspectable, _root, TaskbarUnreadFrameChanged); // Agentmaster (taskbar preview frame)
+        FORWARDED_TYPED_EVENT(TabRowAutoHideChanged, winrt::Windows::Foundation::IInspectable, winrt::Windows::Foundation::IInspectable, _root, TabRowAutoHideChanged); // Agentmaster (the auto-hiding tab row)
+        FORWARDED_TYPED_EVENT(TabRowPeekRequested, winrt::Windows::Foundation::IInspectable, winrt::Windows::Foundation::IInspectable, _root, TabRowPeekRequested); // Agentmaster (the auto-hiding tab row's peek)
         FORWARDED_TYPED_EVENT(IdentifyWindowsRequested, Windows::Foundation::IInspectable, Windows::Foundation::IInspectable, _root, IdentifyWindowsRequested);
         FORWARDED_TYPED_EVENT(SummonWindowRequested, Windows::Foundation::IInspectable, Windows::Foundation::IInspectable, _root, SummonWindowRequested);
         FORWARDED_TYPED_EVENT(FocusTabRequested, Windows::Foundation::IInspectable, winrt::TerminalApp::Tab, _root, FocusTabRequested);

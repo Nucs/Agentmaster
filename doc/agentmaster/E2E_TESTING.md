@@ -541,6 +541,11 @@ differs from the plan above, and why:
   `am.launcher.kind` (the kind chip, named "What to launch: <kind>"), `am.launcher.{models,presets}` (the pill rows),
   `am.launcher.model.{default,specify,custom,<model id>}`, `am.launcher.preset.{add,<preset id>}` (the lit pill's ItemStatus
   "selected"), `am.launcher.{sessions,settings,terminal}` (the footer);
+  the auto-hiding tab row (TAB_STRIP.md *Auto-hiding the tab row*, 2026-11-15, NOT BUILT): `am.strip.menu` (the `▾` menu
+  button right of `+`, named "Tab row menu"), its menu's `am.strip.menu.{autoHide,sessions,settings,terminal}` (the
+  auto-hide item is a check item: its toggle state is the setting) and `am.strip.menu.terminal.{settings,palette,about}`
+  (a menu item exists only while its menu is open), and the cog's switch `am.settings.autoHideTabRow` (Tabs & Overlay ›
+  TAB STRIP);
   a card's session menu adds `am.side.pin` ("Pin to Top", right under Jump to Tab) and `am.side.unpin` ("Unpin", on a
   pinned card only) — SIDE_PANEL.md §2j, 2026-11-06, NOT BUILT; a menu item exists only while its menu is open;
   the side panel's `⋯` menu (SIDE_PANEL.md §2i; in dev 0.0.1.42 and production 0.8.0.9): `am.side.more` (the header's

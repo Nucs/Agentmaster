@@ -1159,6 +1159,30 @@ namespace winrt::TerminalApp::implementation
         return _root ? _root->TaskbarUnreadFrameArgb() : 0u;
     }
 
+    // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): the four values the AppHost re-reads on TabRowAutoHideChanged /
+    // TabRowPeekRequested, forwarded from the page. Before the page exists each answers "off" (no auto-hide, no hold, no
+    // peek): the page raises its event once it decides, at its first layout, so nothing is lost by answering early.
+    // Returns: the page's value, or false / 0 without a page. Never throws (member loads on the page).
+    bool TerminalWindow::TabRowAutoHide()
+    {
+        return _root ? _root->TabRowAutoHide() : false;
+    }
+
+    bool TerminalWindow::TabRowAutoHideHold()
+    {
+        return _root ? _root->TabRowAutoHideHold() : false;
+    }
+
+    uint32_t TerminalWindow::TabRowPeekMs()
+    {
+        return _root ? _root->TabRowPeekMs() : 0u;
+    }
+
+    bool TerminalWindow::TabRowPeekInstant()
+    {
+        return _root ? _root->TabRowPeekInstant() : false;
+    }
+
     winrt::Windows::UI::Xaml::Media::Brush TerminalWindow::TitlebarBrush()
     {
         return _root ? _root->TitlebarBrush() : nullptr;

@@ -407,6 +407,67 @@ remembered. Alt / Shift / Ctrl + click keep Windows Terminal's `+`. The `<` / `>
 - **E4 A remembered profile deleted in Windows Terminal** → the card opens on Claude.
 - **E5 Alt+Down / F4 on the focused +** → the card, never Windows Terminal's profile menu.
 
+### TAB-13 · The tab row auto-hides like the taskbar
+
+> **Since** NOT BUILT (2026-11-15) · **P1** · **Needs** F-S, the real pointer, keys · **Spec** TAB_STRIP.md *Auto-hiding
+> the tab row*; SETTINGS.md *Tabs & Overlay* (`autoHideTabRow`); `AgentMaster/TabRowAutoHide.h`
+
+**Promise.** With **Auto-hide the tab row** on (the `▾` menu right of `+`, or the cog's Tabs & Overlay › TAB STRIP switch —
+one setting, every window), the window's top row (the tabs, Home, `+`, `▾`, minimize / maximize / close) is gone, nothing
+left of it on screen. Resting the pointer 0.15 s at the window's top edge slides it out OVER the terminal in 0.15 s; 0.6 s
+after the pointer leaves it slides away. The terminal never changes size for it. It stays while a menu or the `+` card
+from it is open, while the window shows its Agent Manager page, and through a tab drag or a rename; Ctrl+Tab /
+Ctrl+Shift+Tab / Ctrl+Alt+1…9 bring it out for 1.5 s; a selection pulled to the top row never brings it out.
+
+**Phases**
+1. **Turn it on from ▾.** *Do:* F-S; click `▾`; click **Auto-hide the tab row**. *Expect:* the menu closes; the row stays
+   while the pointer is on it, then slides away 0.6 s after the pointer moves into the terminal; the terminal's rows grow
+   once (by the row's height). *Check:* [UIA] `#am.strip.menu.autoHide` toggle state on at the next open;
+   `settings.json` `autoHideTabRow` true; [LOG] `[nav] tab row auto-hide -> on (strip menu)`, `[tabrow] auto-hide on`,
+   `[tabrow] hide`.
+2. **Rest at the top.** *Do:* move the pointer to the window's top edge (within 4 px) and hold still. *Expect:* after
+   ~0.15 s the row slides down over the terminal's first rows; the terminal does not resize (its column / row count in
+   the badge's size or claude's own redraws unchanged). *Check:* [LOG] `[tabrow] reveal (the pointer rested at the top
+   edge)`; [UIA] `#am.strip.new` on screen.
+3. **Cross the edge.** *Do:* move the pointer up through the top edge and out of the window without stopping. *Expect:*
+   the row does not come out.
+4. **Leave.** *Do:* from the revealed row, move the pointer into the terminal. *Expect:* the row slides away ~0.6 s
+   later; coming back within the 0.6 s keeps it.
+5. **Menus hold it.** *Do:* reveal; right-click a tab (its menu hangs over the terminal); move the pointer over the
+   menu, then off it, wait 2 s. *Expect:* the row stays while the menu is open; it leaves 0.6 s after the menu closes with
+   the pointer elsewhere. The same for `▾`'s menu and for the `+` card.
+6. **The window buttons.** *Do:* reveal; hover maximize (Snap Layouts flyout), click maximize, then restore by
+   double-clicking the drag bar, then drag the window by it. *Expect:* each works on the revealed row; with the row away,
+   the same spots act on the terminal (no window drag, no resize cursor below the frame border).
+7. **Ctrl+Tab peeks.** *Do:* with the row away, press Ctrl+Tab. *Expect:* the row slides out for ~1.5 s showing the new
+   tab selected, then slides away. *Check:* [LOG] `[tabrow] reveal (peek)`.
+8. **The Agent Manager page holds it.** *Do:* reveal; click Home. *Expect:* the row stays out while the page shows,
+   DOCKED above the page (the page's toolbar fully visible below it, not under it; no hide with the pointer elsewhere);
+   Home's ↶ returns to the tab, the row floats again and leaves 0.6 s later. *Check:* [LOG] `[tabrow] held out, docked (the
+   Agent Manager page is shown)`, `[tabrow] hold released, floating again (a tab is shown)`.
+9. **A selection never brings it.** *Do:* press in the terminal and drag the selection to the top row; hold there 1 s;
+   release; hold still. *Expect:* the row stays away throughout; moving the pointer down and back up to the edge then
+   brings it.
+10. **Synced, every window.** *Do:* with a second window open, turn the cog's switch off (Agent Manager page › ⚙ › Tabs &
+    Overlay). *Expect:* both windows' rows are back in place at once (the terminals shrink once); `▾`'s item reads
+    unchecked; the switch needed no Save. *Check:* [LOG] `[nav] tab row auto-hide -> off (cog)`, `[tabrow] auto-hide off` in
+    both windows.
+
+**Edge cases**
+- **E1 Maximized** → the screen's top edge is the trigger (the pointer stops there); with Windows' own auto-hide taskbar on
+  the top edge, its 2-pixel strip stays the taskbar's and the row's band starts below it.
+- **E2 Animation effects off** (Windows Settings › Accessibility › Visual effects) → the row appears and disappears without
+  the slide, same timings.
+- **E3 Ctrl+Shift+T on a hidden row** → the row comes out at once and the `+` card hangs under `+`; the row stays while
+  the card is open.
+- **E4 A tab rename by its key** (`renameTab`) on a hidden row → the row comes out with the rename box and stays until the
+  rename ends.
+- **E5 Focus mode / full screen** → the title bar is hidden as before; leaving them, the row starts hidden. Full screen with
+  tabs (`showTabsFullscreen`) auto-hides against the screen's top.
+- **E6 The system title bar** (Windows Terminal's `showTabsInTitlebar` off) → nothing auto-hides; `▾`'s item is disabled
+  and its tooltip says why.
+- **E7 A finger** → a tap in the top 16 px brings the row out; a tap in the terminal lets it go.
+
 ---
 
 ## Known defects (expected failures until fixed)

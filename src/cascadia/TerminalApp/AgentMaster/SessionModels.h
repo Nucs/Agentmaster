@@ -2933,6 +2933,19 @@ namespace Agentmaster
         // hides tab icons by default so the strip reads on the status dot + title. Flip it on to restore
         // the profile icons. The pinned Manager tab follows this like any other tab.
         bool showTabIcon{ false };
+        // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"; the user's request of 2026-11-15, "default false. synced to
+        // the V menu item"): AUTO-HIDE the window's top row — the tab row with Home, the tabs, + and ▾, the drag bar and the
+        // minimize / maximize / close buttons. ON = the row floats over the top of the content and hides like the Windows
+        // taskbar: it slides out when the pointer rests at the window's top edge (TabRowAutoHide.h has the numbers), stays
+        // while the pointer, a menu or the keyboard is in it, and slides away 0.6 s after; the terminal never resizes for it.
+        // OFF (the DEFAULT) = the row is always shown, exactly as without the setting.
+        // GLOBAL across windows and written OUTSIDE the cog form: the strip's ▾ menu item and the cog's switch are both
+        // INSTANT-APPLY writers of this one field (a freshest-disk RMW, TerminalPage::_SetTabRowAutoHide, then a broadcast),
+        // so BOTH cog-Save preserve blocks restore it from disk (a stale form copy must never undo a flip made since the cog
+        // opened). Applies only with tabs in the title bar (Windows Terminal's showTabsInTitlebar, its default): without it
+        // the window keeps the system title bar, which cannot slide away, and the setting does nothing.
+        // A missing key => false (the row always shown) — the absent-key fallback of AppSettingsFromJson must agree.
+        bool autoHideTabRow{ false };
         // Agentmaster (tab sizing — the cog's Tabs & Overlay "TAB SIZE" section): how wide and tall every
         // tab is and how its title reads. GLOBAL across windows; applied LIVE on cog Save + the
         // cross-window broadcast by TerminalPage::_ApplyTabSizingSettings (and at engine init, before

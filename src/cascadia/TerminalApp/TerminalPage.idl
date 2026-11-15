@@ -83,6 +83,14 @@ namespace TerminalApp
         // Agentmaster (taskbar preview frame, NOTIFICATIONS.md section 9): THIS window's preview-frame color, 0xAARRGGBB,
         // while one of its tabs is unread; 0 = no frame (also while the Settings switch is off).
         UInt32 TaskbarUnreadFrameArgb { get; };
+        // Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): whether THIS window auto-hides its title bar (the GLOBAL
+        // setting, applied when tabs are in the title bar), whether it holds the row out (its Agent Manager page is on
+        // screen), and the last peek's length (ms) and placement (true = at once, no slide). Re-read by the AppHost on
+        // TabRowAutoHideChanged / TabRowPeekRequested.
+        Boolean TabRowAutoHide { get; };
+        Boolean TabRowAutoHideHold { get; };
+        UInt32 TabRowPeekMs { get; };
+        Boolean TabRowPeekInstant { get; };
 
         Windows.UI.Xaml.Media.Brush TitlebarBrush { get; };
         void WindowActivated(Boolean activated);
@@ -98,6 +106,8 @@ namespace TerminalApp
         event Windows.Foundation.TypedEventHandler<Object, Object> SetTaskbarProgress;
         event Windows.Foundation.TypedEventHandler<Object, Object> TaskbarUnreadCountChanged; // Agentmaster: re-read TaskbarUnreadCount
         event Windows.Foundation.TypedEventHandler<Object, Object> TaskbarUnreadFrameChanged; // Agentmaster: re-read TaskbarUnreadFrameArgb
+        event Windows.Foundation.TypedEventHandler<Object, Object> TabRowAutoHideChanged; // Agentmaster: re-read TabRowAutoHide + TabRowAutoHideHold
+        event Windows.Foundation.TypedEventHandler<Object, Object> TabRowPeekRequested; // Agentmaster: re-read TabRowPeekMs + TabRowPeekInstant
         event Windows.Foundation.TypedEventHandler<Object, Object> IdentifyWindowsRequested;
         event Windows.Foundation.TypedEventHandler<Object, RenameWindowRequestedArgs> RenameWindowRequested;
         event Windows.Foundation.TypedEventHandler<Object, Object> SummonWindowRequested;

@@ -915,6 +915,7 @@ namespace Agentmaster
         o.Set(L"closeTabOnMiddleClick", json::Value::MkBool(s.closeTabOnMiddleClick));
         o.Set(L"alwaysShowHomeButton", json::Value::MkBool(s.alwaysShowHomeButton)); // RETIRED (nothing reads it — Home is the Agent Manager's only entry point, always shown); round-tripped so older settings stay byte-stable
         o.Set(L"showTabIcon", json::Value::MkBool(s.showTabIcon));
+        o.Set(L"autoHideTabRow", json::Value::MkBool(s.autoHideTabRow)); // TAB_STRIP.md "Auto-hiding the tab row" — written by the ▾ menu item's / cog switch's own RMW
         // Tab sizing (the cog's Tabs & Overlay "TAB SIZE" section) — the width mode + px bounds, the title
         // font, and the tab's minimum height. Written already clamped (the cog Save + the load both clamp).
         o.Set(L"tabWidthMode", json::Value::MkStr(ToString(s.tabWidthMode)));
@@ -1151,6 +1152,7 @@ namespace Agentmaster
         s.closeTabOnMiddleClick = v.BoolAt(L"closeTabOnMiddleClick", true); // absent => ON (close on middle click, the prior behavior)
         s.alwaysShowHomeButton = v.BoolAt(L"alwaysShowHomeButton", true); // RETIRED — read only to round-trip; the Home button is always shown now (absent => ON)
         s.showTabIcon = v.BoolAt(L"showTabIcon", false); // absent => OFF (tab icons HIDDEN by default — an Agentmaster override of stock WT, which shows them)
+        s.autoHideTabRow = v.BoolAt(L"autoHideTabRow", false); // TAB_STRIP.md "Auto-hiding the tab row": absent => OFF (the row always shown, the behavior without the setting)
         // Tab sizing: every absent key lands its default (== the strip before these settings existed:
         // follow Terminal's own width mode, 130..240 px, a 12 pt Normal title, 32 px tall). The numbers
         // are band-clamped (0/garbage -> the default) and the width pair normalized (max >= min), so a
