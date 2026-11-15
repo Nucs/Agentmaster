@@ -237,8 +237,9 @@ python buildserver/image/images.py list
   register-bootstrap.ps1, which registers the `AmbBootstrap` task → bootstrap.ps1 at every logon, and again every minute
   while it does not run: Z: = the slot's share, amb-guest copied from it and run). A new guest agent therefore needs no
   new image: each slot gets the coordinator's copy. `images.py retask --base X --name Y` gives an image made before
-  2026-11-12 (logon only) the repetition, as a new image over it (the worker site's own `am-base` is that, over
-  `am-base-0`: never delete a base another image is made over).
+  2026-11-12 (logon only) the repetition, as a new image over it (never delete a base another image is made over).
+  The worker site's `am-base` was such a layer over `am-base-0` until its drive 2 was replaced; since 2026-11-15
+  it is one full install again (DESIGN.md §16.19).
 - **`am-e2e`:** a qcow2 layer over `am-base`: CPython 3.13.9, then `e2e/guest/provision.ps1 -Pwsh -Cache C:\e2e\cache`
   (Claude Code, PortableGit, PowerShell 7, the venv, the hosts guard, the mock's environment, crash dumps), then
   `image/steps/trims.ps1`. An e2e run calls provision.ps1 again with the same cache, so only the build under test is
@@ -413,6 +414,12 @@ python buildserver/image/images.py --site worker base | e2e | build-image | chec
 - **Drive 2's controller cache** was found off on 2026-11-12 (the Smart Array's SSD Smart Path on drive 2's array
   bypasses the flash-backed write cache): podman's first writes ran at ~3 MB/s. With Smart Path off and the controller's
   cache on, drive 2 writes 222 MB/s and reads 395 MB/s (the drives' own write caches stay off, for power safety).
+- **Drive 2 replaced, the site rebuilt** (2026-11-15; DESIGN.md §16.19): the provider pulled the Crucial on
+  2026-11-13, taking the whole site with it. On the new SSD (same controller settings) it was made again with this
+  section's commands: `provision`, `deploy`, `images.py --site worker base`, `e2e`, `build-image` (12.1, 4.3 and
+  22.4 min; on the Crucial 88.1, 2.5 and 89.5) and both checks. The coordinator's admin token was put back from
+  `%LOCALAPPDATA%\amb\token-worker` before its first start, so no cached copy went stale. The store's history and
+  the git mirrors are gone: the next build pushes the whole source again.
 
 ## What exists
 

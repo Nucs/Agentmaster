@@ -1152,6 +1152,38 @@ the e2e run `test_smoke.py`, `test_cli.py` and `test_manager_page.py::test_open_
   drive 2; (2) the package step's three zips at once (~2.5 → ~1 min a build); (3) the commit hash in one small unit
   instead of five large ones (~50 s a build); (4) e2e waits that tolerate a slow disk, or no e2e while a build writes.
 
+### 16.19 The worker site rebuilt on a new drive 2 (2026-11-15)
+
+On 2026-11-13 at 15:30 the provider pulled the worker machine's drive 2, the Crucial BX500 holding the whole site
+(`/mnt/drive2/data/buildserver`: images, slots, the store, the git mirrors, the records, podman's storage, the
+coordinator and its admin token). A Silicon Power SSD replaced it on 2026-11-15; the worker machine's side is in
+`K:\source\proxmox\workermachine` (README.md, State; install/README.md, "Replacing drive 2"). The owner then asked
+for everything as it was ("revert them and return everything to normal"; for this site "Rebuild both"), so the new
+drive got the Crucial's controller settings (Smart Path off, the 1 GB flash-backed cache on) and the site was made
+again from nothing with its own tools, from the proxmox repository's session:
+
+1. The site's folder on the new drive, and the coordinator's admin token put back as `coordinator/admin.token` (mode
+   0600, through ssh's stdin, never printed) from the workstation's cache `%LOCALAPPDATA%\amb\token-worker`, before the
+   coordinator's first start: it keeps an existing token (`AdminAccess.LoadOrCreate`), so no cached copy went stale.
+2. `worker.py provision` (the packages were still on CT 803's root disk, on drive 1), `worker.py deploy` (68 s), then
+   `images.py --site worker base`, `e2e` and `build-image` (the last two at once), and `check` of both layers.
+
+| | On the Crucial (2026-11-12, §16.17) | On the new drive (2026-11-15) |
+|---|---|---|
+| base install (`am-base`, Tiny11 Core, ISO download included) | 88.1 min (`am-base-0`), then a 3.4-min `retask` layer as `am-base` | **12.1 min**, one full image (9.1 GiB); the bootstrap's repetition is in the recipe since 2026-11-12, so no `retask` layer |
+| the e2e layer (`am-e2e`) | 2.5 min | 4.3 min, beside the build layer |
+| the build layer (`am-build`) | 89.5 min (the Build Tools 87.4) | **22.4 min** (homepc: 22.4), 20.6 GiB |
+| `check --image am-e2e` | guests ready in 29-30 s over the retask layer | ready in 70 s; Python, Claude Code, Git, PowerShell 7.7.0, the hosts guard, 1600x900 |
+| `check --image am-build` | - | ready in 83 s; MSBuild, cl 14.44.35207, the Windows SDKs and vcpkg, PowerShell 7.6.8, Git 2.56.0.windows.3, VSSetup, servicing idle |
+
+- **What is gone for good:** the store's history (build ids `w20261112-*` and `w20261113-*` and their records and
+  artifacts) and the git mirrors. The next build pushes the whole source again (174 MB in 50 s on 2026-11-12).
+- **The drives while it ran** (`ssd-watch`, the proxmox repository's `workermachine/ssd-watch/results/2026-11-15-restore/`,
+  80 minutes, 84.3 GB written to drive 2, the same cache settings as the Crucial had): drive 2 never stalled a read
+  (worst read second 77 ms; the Crucial's were 1-5 s, and its guests then took 534-1182 s to say hello, §16.18), and
+  drive 1 was OK in 79 minutes and BUSY in one (its writes averaging 61 ms, the worst second 0.7 s, while drive 2
+  took ~40 MB/s at 93-98 % busy). The Crucial had slowed drive 1's writes to 120-420 ms in 15 of 35 minutes.
+
 ## 17. Evidence
 
 - **The scripts:** [`measure/README.md`](measure/README.md), one per measurement.
