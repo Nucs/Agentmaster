@@ -506,7 +506,9 @@ tags, queue and runner mode, and the conversation resumes when the tab is entere
 - ⚠ Never add per-card disk, registry or syscall work (resolve once per rebuild, or cache by file
   stamp), never attach an eagerly built flyout to a rebuilt element, and never call `Snapshot()` on a
   periodic path that needs only live sessions (use the narrowest lean read: `LiveTabBindings`,
-  `GetTabToken`, `GetWithoutQueue`, `SnapshotLiveForScan`, `SnapshotLiveForCards`, `HeadlinesOf`).
+  `GetTabToken`, `GetKind`, `GetForCards`, `GetWithoutQueue`, `SnapshotLiveForScan`, `SnapshotLiveForCards`,
+  `HeadlinesOf`). A loop over a window's tabs that asks which session each one hosts builds one
+  `AgentClaudeTabIndex` for the pass, never a `_ClaudeSessionForTab` per tab (UI_THREAD.md §19).
 - A tab switch logs `[tab-switch-slow]` (a 4-lap breakdown when it takes ≥ 250 ms) and
   `[tab-switch-settle]` (when the UI thread is not idle again within 750 ms). A terminal's ticket lock
   (`til::recursive_ticket_lock`) held for seconds by its output or render thread blocks the UI thread's

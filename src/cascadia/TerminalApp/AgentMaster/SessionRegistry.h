@@ -182,6 +182,32 @@ namespace Agentmaster
         //   throws  — std::bad_alloc on allocation failure; the stored record is left intact.
         std::optional<SessionInfo> GetWithoutQueue(const std::wstring& id) const;
 
+        // One record copied the way the side panel's card list copies each of its records (SnapshotLiveForCards): the
+        // prompt queue, lastAssistantText, recap and pendingPasteRefs come back EMPTY, and every other field, the
+        // unsent draft (pendingInput) included, is copied as Get copies it. Use it in a periodic per-tab pass that reads
+        // a session's state, turn stamps, draft or color fields: the UI lanes behind the ~2.5 s liveness probe (the
+        // pending-input scan, the cache-warm scan, the inferred-color candidate pass) and the dots' contrast refresh on
+        // a tab switch (UI_THREAD.md §19). Those passes run for every tab of every window, and GetWithoutQueue still
+        // copied the transcript texts, which can be kilobytes per session. Unlike the card snapshot, it answers an
+        // archived record too, as Get does.
+        // ⚠ An empty queue or an empty one of the three texts here means "not copied", never "nothing there": a caller
+        // that reads any of the four, or anything derived from them (a pending count, the last reply), must use Get.
+        //   id      — the session id.
+        //   returns — the lean record, or nullopt for an unknown id.
+        //   throws  — std::bad_alloc on allocation failure; the stored record is left intact (the parked members
+        //             are put back by the parking guard's destructor during the unwind).
+        std::optional<SessionInfo> GetForCards(const std::wstring& id) const;
+
+        // The session's agent kind (SessionInfo::kind) alone, with no copy of the record around it. The window-record
+        // capture reads it for every managed tab of the window on each save (the kind decides whether a reopen replays
+        // `claude --resume` or `codex resume`), and a save follows every tab switch: a full Get there copied each
+        // tab's whole queue history (UI_THREAD.md §19).
+        //   id      — the session id.
+        //   returns — the kind, or nullopt for an unknown id. Live and archived records answer alike.
+        //   throws  — nothing in practice: no allocation; only what locking the registry mutex can throw
+        //             (std::system_error).
+        std::optional<AgentKind> GetKind(const std::wstring& id) const;
+
         // The session's host token (SessionInfo::tabToken) alone — the one field the ~2.5 s liveness sweep
         // reads per tab, without a copy of the record around it.
         //   id      — the session id.

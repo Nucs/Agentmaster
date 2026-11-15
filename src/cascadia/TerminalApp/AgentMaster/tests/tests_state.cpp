@@ -2352,12 +2352,37 @@ void TestRegistryLeanReads()
     }
     CHECK(!cardsHoldArchived, "SnapshotLiveForCards: archived records are left out");
 
+    // --- GetForCards (UI_THREAD.md §19): ONE record, copied the way the card list copies each of its records ---
+    const auto oneCard = reg.GetForCards(L"live-a");
+    CHECK(oneCard && oneCard->queue.empty(), "GetForCards: the queue comes back empty");
+    CHECK(oneCard && oneCard->lastAssistantText.empty() && oneCard->recap.empty() && oneCard->pendingPasteRefs.empty(),
+          "GetForCards: lastAssistantText, recap and pendingPasteRefs come back empty");
+    CHECK(oneCard && oneCard->pendingInput == L"an unsent draft",
+          "GetForCards: pendingInput is KEPT (the pending-input scan reads the draft from it)");
+    CHECK(oneCard && cardA && oneCard->title == cardA->title && oneCard->workingDir == cardA->workingDir &&
+              oneCard->tabToken == cardA->tabToken && oneCard->state == cardA->state && oneCard->started == cardA->started &&
+              oneCard->pid == cardA->pid && oneCard->pendingInputUnixMs == cardA->pendingInputUnixMs &&
+              oneCard->presenceStatus == cardA->presenceStatus && oneCard->kind == cardA->kind,
+          "GetForCards: the same copy the card list makes of that session");
+    const auto archivedCard = reg.GetForCards(L"arch");
+    CHECK(archivedCard && archivedCard->tabToken == L"TOK-ARCH" && archivedCard->queue.empty(),
+          "GetForCards: an archived record is answered (as Get answers it), still without its queue");
+    CHECK(!reg.GetForCards(L"nope").has_value(), "GetForCards: unknown id -> nullopt");
+
+    // --- GetKind (UI_THREAD.md §19): the kind alone, live and archived records alike ---
+    CHECK(reg.GetKind(L"live-a") == AgentKind::Claude, "GetKind: a Claude record");
+    CHECK(reg.GetKind(L"codex-managed") == AgentKind::Codex, "GetKind: a Codex record");
+    CHECK(reg.GetKind(L"codex-archived") == AgentKind::Codex, "GetKind: an archived record still answers");
+    CHECK(!reg.GetKind(L"nope").has_value(), "GetKind: unknown id -> nullopt");
+
     // --- every lean read leaves the stored record intact ---
     for (int i = 0; i < 3; ++i)
     {
         (void)reg.SnapshotLiveForScan();
         (void)reg.SnapshotLiveForCards();
         (void)reg.GetWithoutQueue(L"live-a");
+        (void)reg.GetForCards(L"live-a");
+        (void)reg.GetKind(L"live-a");
     }
     const auto afterA = reg.Get(L"live-a");
     bool queueIntact = afterA && fullA && afterA->queue.size() == fullA->queue.size();

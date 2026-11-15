@@ -1233,7 +1233,7 @@ parents at +0x38):
 | 5 | Bot: no full `Get` per topic (the tick's own `SnapshotLiveForCards` map), follow a transcript only when the watcher's sequence moved, refresh a card only when its inputs changed. **Part done in code 2026-10-20, in production since 0.6.8.23 and dev since 0.0.1.32** (MESSAGING.md §21.35): one `Get` per topic instead of two, and a transcript opened only when it grew (a stat first); the rest is open | most of the bot's ~55 ms/s, and ~300 transcript opens a second | Medium |
 | 6 | Observer: a longer full-survey interval while the roster and the correlated pids did not change (§10a #5, a product decision); cache `ResolveCodexSessionIn` | ~25–40 ms/s | Easy code, product decision |
 | 7 | Scanner: keep each session's resolved path and keys; visit only sessions whose watcher sequence moved | ~20–30 ms/s | Medium |
-| 8 | UI lanes: `_ObserverProbeImpl` by map lookups, not comparisons over every tab; a lean read in `_ScanPendingInputImpl` | ~25 ms/s | Easy to medium |
+| 8 | UI lanes: `_ObserverProbeImpl` by map lookups, not comparisons over every tab; a lean read in `_ScanPendingInputImpl`. **Done in code 2026-11-15, not built** (§19: `AgentClaudeTabIndex`, `GetForCards`, one folder-color snapshot per pass; the window-record capture too) | ~25 ms/s (~41 ms/s at 980 tabs, §19a) | Easy to medium |
 | 9 | The Agent Manager rebuild with 47 cards: find why it takes 1–2.7 s (profile it while the page is shown) | up to seconds of UI thread per registry burst | Investigation first |
 
 Estimate, not measured: fixes 1, 3, 5, 6, 7 and 8 together would roughly halve the night-time cost, to about
@@ -1648,3 +1648,122 @@ rebuilds in windows they WERE looking at.
   window keeps the 1–2.5 s rebuilds at fleet scale, and so does the one catch-up on activation.
 - A page on screen in a visible but not active window (side by side, a second monitor) now goes stale until
   clicked; making rebuilds cheap is what would let it update live again.
+
+## 19. Typing waited behind the observer lane: a scan of the bound-tab map for every tab (2026-11-15)
+
+The report: "Why my mouse moves laggy, and keyboard delays input" (production 0.8.0.13, pid 18812, up since 2026-11-13
+13:58; 4 windows of 745 + 181 + 47 + 7 tabs, 969 live sessions, ONE UI thread for all four). Measured read-only from
+another session; nothing was suspended. The pointer itself is not Agentmaster's: Windows moves it on its raw input
+thread, and Agentmaster is in no input hook chain. Everything the UI thread handles is: keys, clicks, scrolling, hover,
+tab switches.
+
+### 19a. The evidence
+
+- **The stalls as the user feels them** (`tools/uistalls.cs`: `WM_NULL` to the largest window every 20 ms, 60 s, 1,836
+  sends): p50 0.9 ms, p90 5 ms, p99 65 ms, max 166 ms; 54 sends over 16 ms, 20 over 50 ms, 5 over 100 ms; 2.0 s of the 60
+  inside stalls over 50 ms. The worst came back about every 8 s (21.9, 29.9, 37.9, 46.1, 54.1 s into the run).
+- **Where the UI thread's time went** (`stacksnap sample 18812 70 5 <uiTid>`: 4,445 samples, 952 busy, 223 ms/s):
+
+  | Activity | Busy samples | Share of busy |
+  |---|---|---|
+  | XAML's frame tick (`CXcpDispatcher::Tick` → `NWDrawMainTree`: the composition-tree walk of all four windows) | 360 | 37.8 % |
+  | The liveness probe's UI lanes (`dispatcher_handler` → `coroutine_handle::resume`) | 264 | 27.7 % |
+  | – `_ObserverProbeImpl`: 63 `weak_ref<Tab>::get`, 40 `operator==`, 32 `IUnknown` dtor, 14 `Release`, 10 `Resolve` | 175 | 18.4 % |
+  | – `_ScanPendingInputImpl`: 13 the full `SessionRegistry::Get`, 13 the dots color (`ResolveSessionColorHex` → `GetDirColor`) | 31 | 3.3 % |
+  | – `_ReconcileClaudeTabsImpl`: 13 `LiveTabBindings`, 10 hash lookups | 29 | 3.0 % |
+  | – `_ScanCacheWarmTabsImpl`: 13 `GetWithoutQueue` | 14 | 1.5 % |
+  | – `_SweepClaudeLivenessImpl` 6, `_ScanInferredTabColorsImpl` 5, `_SidePanelPeriodicTickImpl` 3, `_PumpDraftRestoresImpl` 1 | 15 | 1.6 % |
+  | `AgentManagerContent` | ~34 | 3.6 % |
+
+  (`AboutDialog`'s factory `Release` in a stack is the identical `Release` body that COMDAT folding named after it.)
+- **A second sample at 20:50** (20 s, the same pid): the same shape — `_ObserverProbeImpl` 46 of 259 busy samples (18 %),
+  the frame tick 43 % — while `uistalls` read p50 11 ms and p99 456 ms with the machine's CPU at ~50 %: a UI thread busy a
+  quarter of the time that answers in 11 ms at the median is waiting for a core, the machine-wide part the rundown of that
+  day kept apart from Agentmaster's own.
+- **hooks.log, 11-13 13:58 → 11-15 19:44:** one `[ui-stall]` (~32 s, all four windows, 11-15 13:17; nothing sampled it),
+  20 `[tab-switch-settle]` (idle again 0.75–4.3 s after a switch; 23 s once, at the restore), 5 `[tab-switch-slow]`
+  (259–465 ms), one 1,063 ms `[manager] slow rebuild` (181 cards).
+
+### 19b. Why
+
+- **`_claudeTabs` maps session → weak tab**, so "which session does this tab host?" (`_ClaudeSessionForTab`, and the
+  same loop inlined) walks the whole map: per entry a weak reference resolved, two COM objects compared (a
+  QueryInterface on each side when the pointers differ) and both released.
+- **`_ObserverProbeImpl` asked it for every tab of its window, twice per sweep:** PASS 1 for the roster, PASS 2 after
+  the 300 ms settle, every ~2.5 s, in every window. The 745-tab window, with ~700 bound tabs, made ~745 × ~370 ≈ 275,000
+  resolve-and-compare steps per pass (~170 ns each from the profile), so each pass was one dispatcher item of roughly
+  45–50 ms, and every window's input waited behind it. §13g #8 named this fix on 2026-10-20 at ~700 tabs (then
+  ~24 ms/s); at 980 tabs it cost ~41 ms/s.
+- **The same per-tab scan ran in the window-record capture** (`_CaptureWindowRecord`), which follows EVERY tab switch by
+  750 ms (`_OnTabSelectionChanged` → `_ScheduleWindowRecordSave`), plus a full `Get` per managed tab to read its kind and
+  a copy of the observer's whole activity table for each shell tab without an OSC cwd. Estimated, not measured: ~50 ms
+  per save in the 745-tab window, inside the busy time `[tab-switch-settle]` reports.
+- **Smaller per-tab costs on the same thread:** `_ScanPendingInputImpl` made a full `Get` (the whole queue history) per
+  tab, and its dots color, like the cache-warm scan's spark color, resolved through `GetDirColor`: a `dir-colors.json`
+  stat and a copy of the whole color list per tab. `_RefreshPendingDotsContrast` made a full `Get` per bound tab on
+  every tab switch.
+
+### 19c. The fix (`AgentClaudeTabIndex.h`, `TerminalPage.AgentObserver.cpp`, `TerminalPage.AgentWindowRecord.cpp`, `SessionRegistry`; not built)
+
+- **`AgentClaudeTabIndex`** (`AgentClaudeTabIndex.h`, header-only): a snapshot of `_claudeTabs` keyed by each tab's COM
+  identity (its `IUnknown`), built in one pass. Each question costs one QueryInterface and one hash lookup. A tab listed
+  under two ids answers with the first in the map's iteration order: the scan's answer. ⚠ A snapshot: a pass that
+  changes `_claudeTabs` drops it after the change. It holds a reference to every keyed tab (so no freed address can
+  answer for another tab), so it never lives across a `co_await`.
+- **`_ObserverProbeImpl`:** PASS 1 builds one and resets it before the settle. PASS 2 builds one at its first question
+  and drops it after `_BindClaudeSessionToTab` and `_ReconcileManagedCodex`, the two calls in the loop that can change
+  `_claudeTabs`, so every answer equals the old scan's.
+- **`_CaptureWindowRecord`:** one index; the kind through `SessionRegistry::GetKind` (new: the kind alone) instead of a
+  full `Get`; the observer's shell cwds copied once per capture into a WT_SESSION → cwd map, the first row with a cwd
+  winning as before.
+- **`SessionRegistry::GetForCards`** (new): one record copied like the side panel's card list copies each of its records
+  (no queue, no `lastAssistantText` / `recap` / `pendingPasteRefs`; `pendingInput` kept). `_ScanPendingInputImpl` and
+  `_RefreshPendingDotsContrast` use it instead of `Get`, `_ScanCacheWarmTabsImpl` and the inferred-color candidate pass
+  instead of `GetWithoutQueue`.
+- **One folder-color snapshot per pass:** `_PendingDotsColorForTab` and `_CacheWarmSparkColorForTab` take a
+  `LoadDirColorIndex()` snapshot as a new last parameter (null keeps the per-call read for a one-off pick); each pass
+  reads it at the first tab that needs a color.
+- **Expected, to be measured after a build:** `_ObserverProbeImpl` from ~41 ms/s to a few ms/s, and its two items per
+  sweep in the 745-tab window from ~45–50 ms each to a few ms; the 50–166 ms stalls that came with the sweeps should
+  mostly go. What stays is §19d.
+- **Checked without a build:** `cl /Zs` against the release worktree's PCH (`Q:\tmp\am-release-wt`, ad89700e3) of
+  `TerminalPage.AgentObserver.cpp`, `TerminalPage.AgentWindowRecord.cpp`, `TerminalPage.AgentSidePanel.cpp`,
+  `TerminalPage.AgentEngine.cpp` and `SessionRegistry.cpp`: PASS; `SessionRegistry.cpp` with agentmaster-cli's `/W4 /WX`
+  line: PASS. Six planted defects fail at their line (PASS 1, PASS 2, a coroutine of another lane, a plain function, file
+  scope, the registry). The m5 harness, isolated: 13,268 checks, the 3 known `TestTaskbarBadge` failures; the new
+  `GetForCards` / `GetKind` checks pass (`TestRegistryLeanReads`).
+
+### 19d. What is left
+
+- **XAML's frame tick, ~84 ms/s** (37.8 % of busy): any property change in any window starts a frame that walks all four
+  windows' composition trees; the sources of the changes are not identified (§13b).
+- **`_ReconcileClaudeTabsImpl`:** every window copies every live session's binding (`LiveTabBindings`: id, folder,
+  token) each sweep and lowercases each token, to keep the few its own tabs host; a registry read that returns only the
+  bindings of the window's tokens would cut it.
+- **The Agent Manager rebuild** in the window you work in (§15e, §18d).
+- **Stalls under 20 s leave no line in hooks.log** (the `[ui-stall]` watchdog's threshold): a `WM_NULL` latency probe in
+  the engine (one sent message every 100–200 ms, one summary line in a minute that held a stall over 100 ms) would make
+  them visible in the field. Not built.
+- **The ~8 s period of the worst stalls** is not explained (a sweep runs every ~2.5 s, and some lanes throttle inside).
+- **`_ClaudeSessionForTab` per tab remains** in loops a user starts: Close All's two loops (`TabManagement.cpp`),
+  Deactivate's batch (`TerminalPage.AgentSessions.cpp`) and `_ReapplyManagedTabColors` (a color-mode change), one
+  quadratic pass per action; and the first sweep after a restore asks it once per newly armed tab tooltip
+  (`_ArmTabAgentToolTipHover`'s `justWired`), once per window.
+
+### 19e. Check after the build
+
+- `stacksnap sample <pid> 60 5 <uiTid>`: `_ObserverProbeImpl` well under 1 % of busy samples (was 18.4 %), and no
+  `weak_ref<Tab>::get` beneath it.
+- `dotnet run tools/uistalls.cs -- <pid> 60 20` at a quiet moment (machine CPU low) in the same fleet: compare p99, max
+  and the sends over 50 ms with 19a.
+- `rg -n "tab-switch-settle" <profile>/hooks.log` after a few switches in the biggest window: shorter than 19a's.
+
+### 19f. How it was measured
+
+```bash
+# The UI thread: the process's first thread
+pwsh -NoProfile -Command "(Get-Process -Id <pid>).Threads | Sort-Object StartTime | Select -First 1 Id"
+dotnet run tools/uistalls.cs -- <pid> 60 20        # the stalls a key press waits behind (read-only)
+./stacksnap.exe sample <pid> 70 5 <uiTid>          # §13h for the setup; never suspends a thread
+rg -n "ui-stall|tab-switch-settle|tab-switch-slow|slow rebuild" <profile>/hooks.log
+```

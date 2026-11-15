@@ -77,7 +77,7 @@ namespace
     {
         WithoutQueue, // GetWithoutQueue: the prompt queue only
         Scan, // SnapshotLiveForScan: the queue (refilled with its OPEN prompts) + all four display texts
-        Cards, // SnapshotLiveForCards: the queue + lastAssistantText, recap and pendingPasteRefs; pendingInput KEPT
+        Cards, // SnapshotLiveForCards and GetForCards: the queue + lastAssistantText, recap and pendingPasteRefs; pendingInput KEPT
     };
 
     // Agentmaster (UI_THREAD.md §10a #4): moves the members a lean copy must not copy OUT of a stored session
@@ -160,8 +160,8 @@ namespace
     // Agentmaster (UI_THREAD.md §10a #4): a copy of a stored record that never copies its prompt queue — the
     // shared body of SessionRegistry::GetWithoutQueue (WithoutQueue), SnapshotLiveForScan (Scan: the four
     // display texts are not copied either, and the copy's queue is refilled with the stored record's OPEN
-    // prompts, IsOpenScanPrompt, in their order) and SnapshotLiveForCards (Cards: lastAssistantText, recap and
-    // pendingPasteRefs are not copied, pendingInput is; the queue stays empty).
+    // prompts, IsOpenScanPrompt, in their order) and SnapshotLiveForCards + GetForCards (Cards: lastAssistantText,
+    // recap and pendingPasteRefs are not copied, pendingInput is; the queue stays empty).
     // The caller must hold the registry mutex: the stored record is a non-const element of the registry's map,
     // reached through a const accessor, and the const_cast lets the parking guard move its members out and
     // back. Every reader of a stored record takes that same mutex, so no thread can observe the parked state.
@@ -394,6 +394,31 @@ namespace Agentmaster
             return std::nullopt;
         }
         return CopyLeanSessionLocked(it->second, LeanCopyKind::WithoutQueue);
+    }
+
+    std::optional<SessionInfo> SessionRegistry::GetForCards(const std::wstring& id) const
+    {
+        std::lock_guard guard{ _mtx };
+        const auto it = _sessions.find(id);
+        if (it == _sessions.end())
+        {
+            return std::nullopt;
+        }
+        // The card list's copy kind (LeanCopyKind::Cards), for one record: the parking guard inside
+        // CopyLeanSessionLocked moves the queue and the three transcript texts out of the stored record for the
+        // length of the copy and puts them back, also when the copy throws.
+        return CopyLeanSessionLocked(it->second, LeanCopyKind::Cards);
+    }
+
+    std::optional<AgentKind> SessionRegistry::GetKind(const std::wstring& id) const
+    {
+        std::lock_guard guard{ _mtx };
+        const auto it = _sessions.find(id);
+        if (it == _sessions.end())
+        {
+            return std::nullopt;
+        }
+        return it->second.kind;
     }
 
     std::wstring SessionRegistry::GetTabToken(const std::wstring& id) const

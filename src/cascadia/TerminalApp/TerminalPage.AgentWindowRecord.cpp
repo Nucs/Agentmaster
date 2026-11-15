@@ -38,6 +38,7 @@
 
 #include "../../types/inc/utils.hpp" // IsValidDirectory + GuidToPlainString (shell-tab cwd capture)
 #include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
+#include "AgentClaudeTabIndex.h" // AgentClaudeTabIndex — the capture's tab -> session answers from ONE pass over _claudeTabs (UI_THREAD.md §19)
 #include "AgentManagerContent.h" // THE WINDOW NAME: _managerPage->SetWindowName (the header follows every rename)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog
 #include "AgentMaster/Engine.h" // RecoverableWindows (the reopen dispatch)
@@ -242,6 +243,18 @@ namespace winrt::TerminalApp::implementation
         {
             focusedTab = _tabs.GetAt(*fi);
         }
+        // UI_THREAD.md §19: a capture runs ~750 ms after every tab switch (and after each resize, lens or color change),
+        // on the UI thread every window shares. Which session each tab hosts comes from ONE pass over _claudeTabs: a
+        // _ClaudeSessionForTab per tab scanned the whole map each time, quadratic in the tab count (a few hundred
+        // thousand weak-reference resolves and COM compares per save in a 745-tab window). Nothing below changes
+        // _claudeTabs, and the capture never awaits, so one snapshot answers every tab and holds its tab references
+        // only for this call.
+        const AgentClaudeTabIndex boundSessions{ _claudeTabs };
+        // The observer's out-of-band shell cwds by WT_SESSION, read at most once per capture and only when a shell tab
+        // has no OSC cwd of its own: Activity() copies the observer's whole table (one row per tab of every window), and
+        // it used to be called once per such shell tab. Built in table order with the first row of a tab winning — the
+        // row the per-tab scan picked (the first one with a cwd).
+        std::optional<std::unordered_map<std::wstring, std::wstring>> observedShellCwds;
         for (const auto& tab : _tabs)
         {
             if (_settingsTab && tab == _settingsTab)
@@ -249,19 +262,17 @@ namespace winrt::TerminalApp::implementation
                 continue; // the Settings tab is transient (the Agent Manager is a page — never in _tabs)
             }
             ::Agentmaster::TabEntry entry;
-            const auto sessionId = _ClaudeSessionForTab(tab);
+            const auto sessionId = boundSessions.SessionFor(tab);
             if (!sessionId.empty())
             {
                 // A managed session tab — Claude OR Codex (Codex-launch). A REFERENCE: the record (incl.
                 // a Codex resume uuid on SessionInfo.codexSessionId) lives in sessions.json. Record the
                 // KIND so _RestoreWindowTabs replays the right CLI (`claude --resume` vs `codex resume`).
+                // The kind alone is read (GetKind): a full Get here copied each tab's whole queue history.
                 entry.kind = ::Agentmaster::TabKind::Claude;
-                if (_sessionRegistry)
+                if (_sessionRegistry && _sessionRegistry->GetKind(sessionId) == ::Agentmaster::AgentKind::Codex)
                 {
-                    if (const auto s = _sessionRegistry->Get(sessionId); s && s->kind == ::Agentmaster::AgentKind::Codex)
-                    {
-                        entry.kind = ::Agentmaster::TabKind::Codex;
-                    }
+                    entry.kind = ::Agentmaster::TabKind::Codex;
                 }
                 entry.sessionId = sessionId;
                 // Agentmaster: do NOT capture a per-tab color here. A Claude tab's color is ONE value per
@@ -297,13 +308,26 @@ namespace winrt::TerminalApp::implementation
                             std::wstring realCwd = ident.oscCwd;
                             if (realCwd.empty() && _observer && !ident.wtSession.empty())
                             {
-                                for (const auto& a : _observer->Activity())
+                                if (!observedShellCwds)
                                 {
-                                    if (a.wtSession == ident.wtSession && !a.cwd.empty())
+                                    // First shell tab of this capture without an OSC cwd: copy the table once (see
+                                    // where observedShellCwds is declared). Rows without a cwd are left out, so a
+                                    // tab's first row WITH one wins, as in the scan this replaced. Built aside and
+                                    // published whole: a throw midway (this tab's CATCH_LOG takes it) leaves the slot
+                                    // empty, so the next shell tab reads the table again instead of a partial map.
+                                    std::unordered_map<std::wstring, std::wstring> byWt;
+                                    for (auto& a : _observer->Activity())
                                     {
-                                        realCwd = a.cwd;
-                                        break;
+                                        if (!a.cwd.empty())
+                                        {
+                                            byWt.emplace(std::move(a.wtSession), std::move(a.cwd));
+                                        }
                                     }
+                                    observedShellCwds = std::move(byWt);
+                                }
+                                if (const auto it = observedShellCwds->find(ident.wtSession); it != observedShellCwds->end())
+                                {
+                                    realCwd = it->second;
                                 }
                             }
                             if (!realCwd.empty() && tabActions[0].Action() == ShortcutAction::NewTab)

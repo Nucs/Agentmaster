@@ -36,6 +36,7 @@
 
 #include "AgentAutomation.h" // AgentStateWord — the tab item's accessible state word (_SetTabAgentDot, E2E_TESTING.md §6.3)
 #include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
+#include "AgentClaudeTabIndex.h" // AgentClaudeTabIndex — tab -> bound session from ONE pass over _claudeTabs (the observer lane's two passes, UI_THREAD.md §19)
 #include "AgentManagerContent.h" // push the External census / RefreshNow
 #include "AgentPanelFocus.h" // Agentmaster (TCM-K2): who holds the keyboard while the Tags panel is up, and where it goes when the panel closes
 #include "AgentStatusColors.h" // AgentStatusColorFor — the shared state->color palette (tab dot); TagColorFor (bookmark tags)
@@ -824,9 +825,19 @@ namespace winrt::TerminalApp::implementation
     // color in the default mode, the session's own color under Individual, the inferred dir's under
     // InferredWorkingDirectory; the same precedence the board card uses) is the source/fallback. Shared
     // by the per-tick scan and the focus-change refresh so both pick the same way. UI thread.
-    winrt::Windows::UI::Color TerminalPage::_PendingDotsColorForTab(const TerminalApp::Tab& tab, const ::Agentmaster::SessionInfo& info)
+    //
+    // Parameters:
+    //   tab       - the session's tab in this window (its header background is read).
+    //   info      - the session; only its color fields are read (any lean registry copy that keeps them will do).
+    //   dirColors - the calling pass's folder-color snapshot (LoadDirColorIndex), or null for a one-off pick. A pass over
+    //               many tabs must pass one: without it every call stats dir-colors.json and copies its whole color list
+    //               (GetDirColor), which the ~2.5 s pending-input scan paid for every tab showing dots (UI_THREAD.md §19).
+    // Returns: the dots' color. Exceptions: what the color resolve and the tab read throw (std::bad_alloc,
+    //   winrt::hresult_error); the per-tick callers contain them.
+    winrt::Windows::UI::Color TerminalPage::_PendingDotsColorForTab(const TerminalApp::Tab& tab, const ::Agentmaster::SessionInfo& info, const ::Agentmaster::DirColorIndex* dirColors)
     {
-        const std::wstring hex = ::Agentmaster::ResolveSessionColorHex(_appSettings.tabColorMode, info);
+        const std::wstring hex = dirColors ? ::Agentmaster::ResolveSessionColorHex(_appSettings.tabColorMode, info, *dirColors) :
+                                             ::Agentmaster::ResolveSessionColorHex(_appSettings.tabColorMode, info);
         const auto dirColor = ParseArgbHexColor(hex, winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x2E, 0x2E, 0x2E));
         const auto bg = winrt::get_self<Tab>(tab)->CurrentEffectiveTabBackground(dirColor);
         return PendingDotsColorFor(bg, _appSettings.pendingDotsLightColor, _appSettings.pendingDotsDarkColor);
@@ -866,9 +877,18 @@ namespace winrt::TerminalApp::implementation
     // use (the session's mode-aware tab color, resolved to how the header is CURRENTLY rendered, since an
     // unfocused colored tab draws much darker than its full color), fed through the fire palette instead
     // of the pending pair. UI thread.
-    winrt::Windows::UI::Color TerminalPage::_CacheWarmSparkColorForTab(const TerminalApp::Tab& tab, const ::Agentmaster::SessionInfo& info)
+    //
+    // Parameters:
+    //   tab       - the session's tab in this window (its header background is read).
+    //   info      - the session; only its color fields are read (any lean registry copy that keeps them will do).
+    //   dirColors - the calling pass's folder-color snapshot (LoadDirColorIndex), or null for a one-off pick: the
+    //               _PendingDotsColorForTab rule (a pass over many tabs passes one; UI_THREAD.md §19).
+    // Returns: the ember/glow color. Exceptions: what the color resolve and the tab read throw (std::bad_alloc,
+    //   winrt::hresult_error); the per-tick caller contains them.
+    winrt::Windows::UI::Color TerminalPage::_CacheWarmSparkColorForTab(const TerminalApp::Tab& tab, const ::Agentmaster::SessionInfo& info, const ::Agentmaster::DirColorIndex* dirColors)
     {
-        const std::wstring hex = ::Agentmaster::ResolveSessionColorHex(_appSettings.tabColorMode, info);
+        const std::wstring hex = dirColors ? ::Agentmaster::ResolveSessionColorHex(_appSettings.tabColorMode, info, *dirColors) :
+                                             ::Agentmaster::ResolveSessionColorHex(_appSettings.tabColorMode, info);
         const auto dirColor = ParseArgbHexColor(hex, winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x2E, 0x2E, 0x2E));
         const auto bg = winrt::get_self<Tab>(tab)->CurrentEffectiveTabBackground(dirColor);
         return CacheWarmSparkColorFor(bg);
@@ -892,9 +912,14 @@ namespace winrt::TerminalApp::implementation
         {
             ids.push_back(id);
         }
+        // UI_THREAD.md §19: this runs on every tab switch, over every bound tab. One folder-color snapshot for the pass,
+        // read only once a tab actually shows the dots (most switches recolor none, and the snapshot costs a stat).
+        std::optional<::Agentmaster::DirColorIndex> dirColors;
         for (const auto& id : ids)
         {
-            const auto info = _sessionRegistry->Get(id);
+            // The card list's lean copy (UI_THREAD.md §19): kind, the draft and the color fields are all this reads; the
+            // queue history and the transcript texts a full Get copied for every tab are not.
+            const auto info = _sessionRegistry->GetForCards(id);
             if (!info || info->kind != ::Agentmaster::AgentKind::Claude || info->pendingInput.empty())
             {
                 continue; // only tabs actually showing the dots need re-contrast
@@ -906,7 +931,11 @@ namespace winrt::TerminalApp::implementation
             }
             if (hostTab)
             {
-                _SetTabPending(hostTab, true, _PendingDotsColorForTab(hostTab, *info));
+                if (!dirColors)
+                {
+                    dirColors = ::Agentmaster::LoadDirColorIndex();
+                }
+                _SetTabPending(hostTab, true, _PendingDotsColorForTab(hostTab, *info, &*dirColors));
             }
         }
     }
@@ -8974,11 +9003,15 @@ namespace winrt::TerminalApp::implementation
         {
             ids.push_back(id);
         }
+        // UI_THREAD.md §19: one folder-color snapshot for the whole pass, read at the first warm tab (most passes have
+        // few or none), instead of a dir-colors.json stat and a copy of its whole color list per warm tab.
+        std::optional<::Agentmaster::DirColorIndex> dirColors;
         for (const auto& id : ids)
         {
-            // Without the prompt queue (UI_THREAD.md §10a #4): ServerCacheStillWarm and the spark color read the
-            // state, the turn stamps and the color fields, never the queue — the costliest part of a Get.
-            const auto info = _sessionRegistry->GetWithoutQueue(id);
+            // The card list's lean copy (UI_THREAD.md §10a #4, §19): ServerCacheStillWarm reads live, kind, state and the
+            // turn stamps, the spark color the color fields — never the queue or the transcript texts, the costliest
+            // parts of a copy (GetWithoutQueue still copied the texts for every tab, every ~2.5 s).
+            const auto info = _sessionRegistry->GetForCards(id);
             if (!info)
             {
                 continue;
@@ -8999,7 +9032,11 @@ namespace winrt::TerminalApp::implementation
             std::optional<winrt::Windows::UI::Color> sparkColor;
             if (warm)
             {
-                sparkColor = _CacheWarmSparkColorForTab(hostTab, *info);
+                if (!dirColors)
+                {
+                    dirColors = ::Agentmaster::LoadDirColorIndex();
+                }
+                sparkColor = _CacheWarmSparkColorForTab(hostTab, *info, &*dirColors);
             }
             _SetTabCacheWarm(hostTab, warm, sparkColor);
         }
@@ -9040,9 +9077,22 @@ namespace winrt::TerminalApp::implementation
             ids.push_back(id);
         }
         constexpr int kPendingClearConfirmTicks = 2; // consecutive empty reads required to CLEAR (anti-flicker)
+        // UI_THREAD.md §19: one folder-color snapshot for the whole pass, read at the first tab that shows the dots,
+        // instead of a dir-colors.json stat and a copy of its whole color list for every such tab (GetDirColor).
+        std::optional<::Agentmaster::DirColorIndex> dirColors;
+        const auto passDirColors = [&dirColors]() -> const ::Agentmaster::DirColorIndex* {
+            if (!dirColors)
+            {
+                dirColors = ::Agentmaster::LoadDirColorIndex();
+            }
+            return &*dirColors;
+        };
         for (const auto& id : ids)
         {
-            const auto info = _sessionRegistry->Get(id);
+            // The card list's lean copy (UI_THREAD.md §19): this pass reads kind, the draft (pendingInput, kept) and the
+            // color fields, never the queue or the transcript texts. The full Get it made for every tab of every window,
+            // every ~2.5 s, copied each session's whole queue history.
+            const auto info = _sessionRegistry->GetForCards(id);
             if (!info || info->kind != ::Agentmaster::AgentKind::Claude)
             {
                 _pendingClearStreak.erase(id);
@@ -9081,7 +9131,7 @@ namespace winrt::TerminalApp::implementation
                     std::optional<winrt::Windows::UI::Color> dotsColor;
                     if (restoredPending)
                     {
-                        dotsColor = _PendingDotsColorForTab(hostTab, *info);
+                        dotsColor = _PendingDotsColorForTab(hostTab, *info, passDirColors());
                     }
                     _SetTabPending(hostTab, restoredPending, dotsColor);
                 }
@@ -9107,7 +9157,7 @@ namespace winrt::TerminalApp::implementation
                     std::optional<winrt::Windows::UI::Color> dotsColor;
                     if (restoredPending)
                     {
-                        dotsColor = _PendingDotsColorForTab(hostTab, *info);
+                        dotsColor = _PendingDotsColorForTab(hostTab, *info, passDirColors());
                     }
                     _SetTabPending(hostTab, restoredPending, dotsColor);
                 }
@@ -9235,7 +9285,7 @@ namespace winrt::TerminalApp::implementation
                 std::optional<winrt::Windows::UI::Color> dotsColor;
                 if (hasPending)
                 {
-                    dotsColor = _PendingDotsColorForTab(hostTab, *info);
+                    dotsColor = _PendingDotsColorForTab(hostTab, *info, passDirColors());
                 }
                 _SetTabPending(hostTab, hasPending, dotsColor);
             }
@@ -10686,9 +10736,10 @@ namespace winrt::TerminalApp::implementation
             {
                 continue;
             }
-            // Without the prompt queue (UI_THREAD.md §10a #4): this candidate pass reads live, kind, the
-            // working-dir fields and forkParentId, never the queue — the costliest part of a Get.
-            const auto info = _sessionRegistry->GetWithoutQueue(id);
+            // The card list's lean copy (UI_THREAD.md §10a #4, §19): this candidate pass reads live, kind, the
+            // working-dir fields and forkParentId, never the queue or the transcript texts — the costliest parts of a
+            // copy, which GetWithoutQueue still made of the texts for every tab, every ~2.5 s, mostly to skip the tab.
+            const auto info = _sessionRegistry->GetForCards(id);
             if (!info || !info->live || info->kind != ::Agentmaster::AgentKind::Claude)
             {
                 continue; // Codex rollouts aren't path-parsed — its color keys on the cwd
@@ -11064,6 +11115,14 @@ namespace winrt::TerminalApp::implementation
         };
         std::vector<ProbeTab> probeTabs;
         std::vector<::Agentmaster::TabRosterEntry> roster;
+        // Which session each tab is bound to, from ONE pass over _claudeTabs (UI_THREAD.md §19). A scan of the whole map
+        // for every tab was quadratic: 18 % of the shared UI thread's busy time at 980 tabs on 2026-11-15, the main part
+        // of the stalls that delayed typing in every window. Nothing in this pass changes _claudeTabs, so one snapshot
+        // answers every tab. It is reset right after the loop: it holds a reference to every bound tab, and this
+        // coroutine frame lives through the 300 ms settle below, which must never delay a tab's teardown. PASS 2 builds
+        // its own in the same slot after the settle.
+        std::optional<AgentClaudeTabIndex> boundSessions;
+        boundSessions.emplace(_claudeTabs);
         for (const auto& projectedTab : _tabs)
         {
             // (No Manager tab to skip any more — a non-terminal tab just yields no connection below.)
@@ -11111,17 +11170,11 @@ namespace winrt::TerminalApp::implementation
                     shellPid = ::GetProcessId(h);
                 }
             }
-            bool bound = false;
-            std::wstring boundSessionId; // which session this window binds to the tab (OBSERVER.md §20)
-            for (const auto& [boundId, weakBound] : _claudeTabs)
-            {
-                if (const auto t = weakBound.get(); t && t == projectedTab)
-                {
-                    bound = true;
-                    boundSessionId = boundId;
-                    break;
-                }
-            }
+            // Which session this window binds to the tab (OBSERVER.md §20), if any: the index's answer is the one the old
+            // per-tab scan of _claudeTabs gave (the first match in the map's order).
+            const std::wstring* const boundSession = boundSessions->Find(projectedTab);
+            const bool bound = boundSession != nullptr;
+            std::wstring boundSessionId = bound ? *boundSession : std::wstring{};
             ::Agentmaster::TabRosterEntry e;
             e.wtSession = wt;
             e.shellPid = shellPid;
@@ -11133,6 +11186,7 @@ namespace winrt::TerminalApp::implementation
             roster.push_back(std::move(e));
             probeTabs.push_back({ winrt::make_weak(projectedTab), conn, wt });
         }
+        boundSessions.reset(); // drop its tab references BEFORE the settle (see where it is built)
 
         // PUBLISH (the observer diffs + Wake()s its survey when this roster changed).
         _observer->PublishRoster(_windowId, std::move(roster));
@@ -11173,6 +11227,12 @@ namespace winrt::TerminalApp::implementation
         // "<session id>|<WT_SESSION>" of every tab this tick left unbound because another tab hosts its
         // conversation (OBSERVER.md §20) — keeps their _duplicateConversationLogged entries alive below.
         std::unordered_set<std::wstring> duplicateSkipsNow;
+        // Which session each tab is bound to (UI_THREAD.md §19): PASS 1's index slot again, empty since the settle. Unlike
+        // PASS 1, this pass CHANGES _claudeTabs while it walks the tabs: a bind gives a session a tab (and can take it from
+        // another), and a Codex reconcile updates a record whose observers run now. The old per-tab scan saw each change
+        // at the next tab, so the index is dropped after either call and built again before the next question: binds are
+        // rare and Codex tabs few, so the pass stays linear. Nothing below awaits, so the tab references it holds last
+        // only as long as this synchronous loop and delay no teardown.
         for (const auto& pt : probeTabs)
         {
             rosterWts.insert(pt.wt);
@@ -11182,15 +11242,11 @@ namespace winrt::TerminalApp::implementation
                 continue; // tab torn down during the settle
             }
             // One session per tab; is this tab already bound (has a real overlay)?
-            std::wstring boundId;
-            for (const auto& [bid, weakBound] : _claudeTabs)
+            if (!boundSessions)
             {
-                if (const auto t = weakBound.get(); t && t == hostTab)
-                {
-                    boundId = bid;
-                    break;
-                }
+                boundSessions.emplace(_claudeTabs);
             }
+            const std::wstring boundId = boundSessions->SessionFor(hostTab);
             if (!boundId.empty())
             {
                 _DropPendingOverlay(pt.wt); // bound -> the real overlay owns the slot now
@@ -11201,6 +11257,7 @@ namespace winrt::TerminalApp::implementation
                 if (const auto ait = actByWt.find(pt.wt); ait != actByWt.end() && ait->second.activity == ::Agentmaster::TabActivity::Codex)
                 {
                     _ReconcileManagedCodex(boundId, ait->second);
+                    boundSessions.reset(); // the registry update's observers ran just now: ask _claudeTabs afresh
                 }
                 continue;
             }
@@ -11283,6 +11340,7 @@ namespace winrt::TerminalApp::implementation
                 const std::wstring why = (moved ? L"observer re-home (moved) wt=" : L"observer wt=") + pt.wt;
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[discover] " + it->second.sessionId + L" cwd=" + it->second.cwd + L" (" + why + L")\n");
                 _BindClaudeSessionToTab(hostTab, pt.conn, it->second.sessionId, it->second.cwd, why);
+                boundSessions.reset(); // the bind changed _claudeTabs: the next tab asks a fresh index
                 continue;
             }
 
