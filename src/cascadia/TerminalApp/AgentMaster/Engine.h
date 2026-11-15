@@ -36,6 +36,7 @@
 #include "InterruptedTurns.h" // RestartTurnChoice — what a restart does about a turn the user interrupted (HOOKS.md "Interrupted turns")
 #include "RemoteLaunch.h" // RemoteLaunchRequest — what a remote surface asks a window to open (MESSAGING.md)
 #include "SessionModels.h" // WindowRecord (M10 window-record claiming)
+#include "UiLatency.h" // UiPingResult — what one check of a UI thread answers (the latency monitor, UI_THREAD.md §19)
 #include "WindowTabTools.h" // WindowToolRequest / WindowToolOutcome / WindowCensus — the AI search's window and tab tools (SESSIONS.md §9.14)
 
 namespace Agentmaster
@@ -696,6 +697,39 @@ namespace Agentmaster
     void RegisterUiStallRescuer(const std::wstring& windowId, std::function<UiRescueOutcome()> rescuer);
     void UnregisterUiStallRescuer(const std::wstring& windowId);
     void SetUiStallRestartHandler(std::function<void(const std::wstring& reason)> handler);
+
+    // Agentmaster (UI_THREAD.md §19, LOGGING.md "[ui-latency]"): the LATENCY monitor, the watchdog's fine-grained sibling.
+    // The watchdog above sees only stalls of 20 s or more (its beats ride the ~2.5 s sweep); the stalls a key press feels
+    // last 50 ms to a few seconds, and on 2026-11-15 they left no line in hooks.log. A window registers a PING here — a
+    // sent no-op message to a window its UI thread owns (the per-window rescue window) — and one engine thread checks
+    // each UI thread every kUiLatencyCheckGapMs, times the round trip on a clock that skips sleep, and writes a
+    // [ui-latency] summary for each minute that kept input waiting kUiLatencyStallMs or more, plus a line of its own
+    // for each wait of kUiLatencyLongStallMs or more (UiLatency.h). Windows that share a UI thread are checked once.
+    // Lazy like the watchdog: the thread starts at the first registration, so the harness and the CLI, which link this
+    // TU and host no UI, never start it.
+    //   The ping: called on the monitor thread with the timeout to wait. It must SEND (never post) to a window of the
+    //   registering UI thread and answer Answered, TimedOut (no answer within the timeout: SendMessageTimeoutW fails
+    //   with ERROR_TIMEOUT) or Failed (no measurement: the window is gone, ERROR_INVALID_WINDOW_HANDLE). Send with
+    //   SMTO_NORMAL alone: SMTO_ABORTIFHUNG is documented to give up early on a thread that appears hung, which would
+    //   hide the long stalls this measures. (A probe on Windows 11, 2026-11-15: to a message-only window whose thread
+    //   IsHungAppWindow called hung, ABORTIFHUNG and ERRORONEXIT still waited for the answer, so that early return is
+    //   not reliable either way; SMTO_NORMAL waits by definition.)
+    using UiLatencyPing = std::function<UiPingResult(uint32_t timeoutMs)>;
+
+    // Registers (or replaces) a window's latency ping and starts the monitor thread at the first registration.
+    // Parameters:
+    //   windowId   - the window's id (the key the watchdog uses too); empty is ignored.
+    //   uiThreadId - GetCurrentThreadId() of the UI thread that owns the pinged window: windows that share a UI thread
+    //                are checked once per round, through any one of their pings.
+    //   ping       - the check (see UiLatencyPing). Held until UnregisterUiLatencyPing or DropUiHeartbeat.
+    // Exceptions: std::bad_alloc while storing it. A thread that cannot be started is logged (Rule #18) and retried at
+    //   the next registration; nothing is thrown.
+    void RegisterUiLatencyPing(const std::wstring& windowId, uint32_t uiThreadId, UiLatencyPing ping);
+
+    // Removes a window's latency ping. Call it BEFORE the pinged window is destroyed; a check already copied may still
+    // send once to the destroyed window, which fails at once and counts as no measurement.
+    // Parameters: windowId - the window's id. Never throws in practice (a map erase under a mutex).
+    void UnregisterUiLatencyPing(const std::wstring& windowId);
 
     // Agentmaster (discard Manager-only windows): race-safe "may THIS window self-close because it is
     // now Manager-only?" Returns true (and reserves the close) iff more than one live Agentmaster window

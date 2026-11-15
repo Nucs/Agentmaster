@@ -51,6 +51,15 @@ with a local-time `[HH:MM:SS.mmm]` stamp (only at a line boundary, so a partial 
    automatic restart after a cut-off response or a temporary API failure: its gates, a temporary failure's back-off, the
    restart, healed / not healed — HOOKS.md *Connection lost mid-response — the automatic restart*), `[notify-release]` (a
    toast that restart held, shown after all);
+   - **the UI thread's health** (every window shares one UI thread, so these speak for all of them): `[ui-stall]` (the
+     watchdog: a window's UI lane silent for 20 s or more, its rescue and restart ladder — Engine.h) and `[ui-latency]`
+     (the latency monitor, UI_THREAD.md §19, `UiLatency.h`: an engine thread sends a no-op message to each UI thread every
+     50 ms and times the answer, which is about the least a key press waited then. A minute that kept input waiting
+     100 ms or more writes one line — `[ui-latency] UI thread <tid>, the last 60 s: input waited 100 ms or more N times
+     (250 ms or more: …, 1 s or more: …), <sum> s in all, the longest <ms> ms; each wait in ms @ seconds before this
+     line: <ms>@<s> …; <n> checks` — and a wait of 1 s or more also writes `… kept input waiting <ms> ms (answered just
+     now)` at once (10 a minute at most; `did not answer for 10000 ms or more` for a check that timed out). A quiet minute
+     writes nothing, and `monitor armed` marks its start. The waits' offsets show a periodic stall as a period);
    - **delivery forensics:** `[ups]` (one per UserPromptSubmit: echo consumed / recorded as Typed / noise
      / EMPTY), `[pull-echo]`, `[gate]`, `[draft-swap]`, `[draft-fork]`, `[draft-restore]`,
      `[send-verify]`, the verified presser's `[enter-retry]`, `[delivered]` (bytes that reached the

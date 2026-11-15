@@ -713,6 +713,7 @@ namespace winrt::TerminalApp::implementation
         // direct DestroyWindow would fail. A timed-out send leaks one message-only window, which is
         // harmless (it dies with the process; its wndproc guards a null context).
         ::Agentmaster::UnregisterUiStallRescuer(_windowId);
+        ::Agentmaster::UnregisterUiLatencyPing(_windowId); // UI_THREAD.md §19: its ping sends to the rescue window destroyed next
         if (_uiRescueWnd)
         {
             DWORD_PTR ignored = 0;
@@ -1580,6 +1581,23 @@ namespace winrt::TerminalApp::implementation
                         o.drainRan = (res == 2);
                     }
                     return o;
+                });
+                // Agentmaster (UI_THREAD.md §19, LOGGING.md "[ui-latency]"): the latency monitor's check of this window's
+                // UI thread — a WM_NULL SENT to the same message-only window (the rescue window's proc hands WM_NULL to
+                // DefWindowProc: a no-op). A sent message is dispatched the next time the thread pumps, which is when a
+                // key press would get through, so the round trip is the wait the user feels. GetCurrentThreadId() here
+                // IS the UI thread (this init runs on it, and it created the rescue window). SMTO_NORMAL alone, on
+                // purpose: SMTO_ABORTIFHUNG is documented to give up early on a thread that appears hung, which would hide
+                // exactly the long stalls this measures; SMTO_NORMAL waits for the answer or the timeout (Engine.h).
+                ::Agentmaster::RegisterUiLatencyPing(_windowId, ::GetCurrentThreadId(), [rescue](const uint32_t timeoutMs) {
+                    DWORD_PTR ignored = 0;
+                    if (::SendMessageTimeoutW(rescue, WM_NULL, 0, 0, SMTO_NORMAL, timeoutMs, &ignored))
+                    {
+                        return ::Agentmaster::UiPingResult::Answered;
+                    }
+                    // ERROR_TIMEOUT = the thread did not pump within the timeout (a stall at least that long); anything
+                    // else = the window is gone (closed between the monitor's copy and its send): no measurement.
+                    return ::GetLastError() == ERROR_TIMEOUT ? ::Agentmaster::UiPingResult::TimedOut : ::Agentmaster::UiPingResult::Failed;
                 });
             }
             else

@@ -1706,7 +1706,7 @@ tab switches.
   stat and a copy of the whole color list per tab. `_RefreshPendingDotsContrast` made a full `Get` per bound tab on
   every tab switch.
 
-### 19c. The fix (`AgentClaudeTabIndex.h`, `TerminalPage.AgentObserver.cpp`, `TerminalPage.AgentWindowRecord.cpp`, `AgentManagerContent.cpp`, `SessionRegistry`; not built)
+### 19c. The fix (`AgentClaudeTabIndex.h`, `TerminalPage.AgentObserver.cpp`, `TerminalPage.AgentWindowRecord.cpp`, `AgentManagerContent.cpp`, `SessionRegistry`, the latency monitor; not built)
 
 - **`AgentClaudeTabIndex`** (`AgentClaudeTabIndex.h`, header-only): a snapshot of `_claudeTabs` keyed by each tab's COM
   identity (its `IUnknown`), built in one pass. Each question costs one QueryInterface and one hash lookup. A tab listed
@@ -1731,15 +1731,32 @@ tab switches.
   whose page is its content): `SnapshotLiveForCards` instead of `SnapshotLive`. The tick reads the ids, the activity and
   creation stamps and `ServerCacheStillWarm`'s fields, all kept by the card list's copy; the full copy of every live
   session's queue history and texts was all of its 7 samples, ~40–50 ms per tick.
+- **The latency monitor (the rundown's code fix #5): the stalls a key press feels, in hooks.log** (`UiLatency.h`, pure;
+  `Engine.cpp` `RegisterUiLatencyPing` and its thread; `TerminalPage.AgentEngine.cpp` registers each window's ping beside
+  its rescuer; LOGGING.md *hooks.log's three layers*). The `[ui-stall]` watchdog sees only 20 s or more, because its
+  beats ride the ~2.5 s sweep. Now one engine thread SENDS a `WM_NULL` to each UI thread's message-only rescue window
+  every 50 ms (`SMTO_NORMAL`) and times the answer on `QueryUnbiasedInterruptTime`. That clock skips sleep, so a check
+  across a sleep never reads as a stall; it moves in timer ticks of ~15.6 ms, plenty for a 100 ms threshold. A minute
+  that kept input waiting 100 ms or more writes one `[ui-latency]` line: the counts, the sum, the longest and each wait
+  with its seconds before the line, so a periodic stall such as 19a's ~8 s reads as a period in the field. A wait of 1 s
+  or more also writes its own line at once. A quiet minute writes nothing; windows that share a UI thread are checked
+  once; the thread starts at the first window's registration (never in the harness or the CLI). A probe of the send
+  (scratch, real window thread): a prompt answer read 0 ms, a 300 ms busy item 281 ms, a timeout `ERROR_TIMEOUT`, a
+  destroyed window `ERROR_INVALID_WINDOW_HANDLE` at once. To a message-only window whose thread `IsHungAppWindow` called
+  hung, `SMTO_ABORTIFHUNG` and `SMTO_ERRORONEXIT` still waited for the answer, so the documented early return of the
+  former is not reliable either way.
 - **Expected, to be measured after a build:** `_ObserverProbeImpl` from ~41 ms/s to a few ms/s, and its two items per
   sweep in the 745-tab window from ~45–50 ms each to a few ms; the 50–166 ms stalls that came with the sweeps should
   mostly go. What stays is §19d.
 - **Checked without a build:** `cl /Zs` against the release worktree's PCH (`Q:\tmp\am-release-wt`, ad89700e3) of
   `TerminalPage.AgentObserver.cpp`, `TerminalPage.AgentWindowRecord.cpp`, `TerminalPage.AgentSidePanel.cpp`,
   `TerminalPage.AgentEngine.cpp`, `AgentManagerContent.cpp` and `SessionRegistry.cpp`: PASS; `SessionRegistry.cpp` with
-  agentmaster-cli's `/W4 /WX` line: PASS. Seven planted defects fail at their line (PASS 1, PASS 2, a coroutine of another
-  lane, a plain function, file scope, the registry, the Manager page's timing tick). The m5 harness, isolated: 13,268 checks, the 3 known `TestTaskbarBadge` failures; the new
-  `GetForCards` / `GetKind` checks pass (`TestRegistryLeanReads`).
+  agentmaster-cli's `/W4 /WX` line: PASS; for the latency monitor, `AgentMaster\Engine.cpp` too (PASS). Nine planted
+  defects fail at their line (PASS 1, PASS 2, a coroutine of another lane, a plain function, file scope, the registry, the
+  Manager page's timing tick, the monitor's tally call, the window's ping). The m5 harness, isolated: 13,285 checks, the 3
+  known `TestTaskbarBadge` failures; the new `GetForCards` / `GetKind` checks pass (`TestRegistryLeanReads`), and so do the
+  17 of `TestUiLatencyTally` (the exact summary line, the 1 s line, "<timeout>+", both caps, a clock that goes back).
+  `UiLatency.h` also compiled clean at `/W4 /WX` with the `/we` list in the scratch probe.
 
 ### 19d. What is left
 
@@ -1756,10 +1773,9 @@ tab switches.
 - **The engine threads** (`stacksnap top`, 10 s: `SessionScanner` 84 ms/s, the Telegram bot's tick 59 ms/s,
   `ProcessObserver` 56 ms/s) never block input, but they take CPU from a machine whose load already lengthens every
   wait (19a's second sample); their per-session copies are §13g #5–#7.
-- **Stalls under 20 s leave no line in hooks.log** (the `[ui-stall]` watchdog's threshold): a `WM_NULL` latency probe in
-  the engine (one sent message every 100–200 ms, one summary line in a minute that held a stall over 100 ms) would make
-  them visible in the field. Not built.
-- **The ~8 s period of the worst stalls** is not explained (a sweep runs every ~2.5 s, and some lanes throttle inside).
+- **The ~8 s period of the worst stalls** is not explained (a sweep runs every ~2.5 s, and some lanes throttle inside;
+  no timer in the code has that period, and the 20 s taskbar-preview capture runs on a worker). The `[ui-latency]` lines'
+  offsets will show whether a period survives the build; if one does, a timed trace (ETW) of the UI thread is next.
 - **`_ClaudeSessionForTab` per tab remains** in loops a user starts: Close All's two loops (`TabManagement.cpp`),
   Deactivate's batch (`TerminalPage.AgentSessions.cpp`) and `_ReapplyManagedTabColors` (a color-mode change), one
   quadratic pass per action; and the first sweep after a restore asks it once per newly armed tab tooltip
@@ -1772,6 +1788,8 @@ tab switches.
 - `dotnet run tools/uistalls.cs -- <pid> 60 20` at a quiet moment (machine CPU low) in the same fleet: compare p99, max
   and the sends over 50 ms with 19a.
 - `rg -n "tab-switch-settle" <profile>/hooks.log` after a few switches in the biggest window: shorter than 19a's.
+- `rg -n "ui-latency" <profile>/hooks.log`: one `monitor armed` line per start, then a line only for a minute that kept
+  input waiting 100 ms or more; their counts and offsets are the field version of 19a's numbers (and of its ~8 s period).
 
 ### 19f. How it was measured
 
@@ -1780,5 +1798,5 @@ tab switches.
 pwsh -NoProfile -Command "(Get-Process -Id <pid>).Threads | Sort-Object StartTime | Select -First 1 Id"
 dotnet run tools/uistalls.cs -- <pid> 60 20        # the stalls a key press waits behind (read-only)
 ./stacksnap.exe sample <pid> 70 5 <uiTid>          # §13h for the setup; never suspends a thread
-rg -n "ui-stall|tab-switch-settle|tab-switch-slow|slow rebuild" <profile>/hooks.log
+rg -n "ui-latency|ui-stall|tab-switch-settle|tab-switch-slow|slow rebuild" <profile>/hooks.log   # [ui-latency]: once built
 ```

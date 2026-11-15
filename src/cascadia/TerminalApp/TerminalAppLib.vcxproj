@@ -195,6 +195,7 @@
     <ClInclude Include="AgentMaster\Json.h" />
     <ClInclude Include="AgentMaster\Persistence.h" />
     <ClInclude Include="AgentMaster\Engine.h" />
+    <ClInclude Include="AgentMaster\UiLatency.h" />
     <ClInclude Include="AgentMaster\SessionScanner.h" />
     <ClInclude Include="AgentMaster\TranscriptWatcher.h" />
     <ClInclude Include="AgentMaster\CommandWatch.h" />

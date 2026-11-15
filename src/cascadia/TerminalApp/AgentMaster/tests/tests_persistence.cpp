@@ -2268,6 +2268,120 @@ void TestUiStallEscalation()
     }
 }
 
+// Agentmaster (UI_THREAD.md §19, LOGGING.md "[ui-latency]"): the latency monitor's pure tally (UiLatency.h). The monitor
+// thread itself only sends WM_NULL and times it; WHAT reaches hooks.log is decided here, so these checks pin it: a quiet
+// minute writes nothing, a minute with stalls writes ONE summary at the check that closes it (counts, the sum, the
+// longest, each stall with its seconds before the line), a wait of 1 s or more also writes its own line at once (capped
+// per minute), a timed-out check reads "<timeout>+", the list is capped with "+N more", and a clock that goes backwards
+// closes the window without negative numbers. The clock is a plain counter: the tally never reads time itself.
+void TestUiLatencyTally()
+{
+    std::wprintf(L"UI latency tally (UI_THREAD.md 19, LOGGING.md [ui-latency]):\n");
+
+    // A quiet minute: 1,200 prompt answers every 50 ms, then the closing check — not one line.
+    {
+        UiLatencyTally quiet{ L"UI thread 7" };
+        size_t lines = 0;
+        int64_t t = 1000;
+        for (int i = 0; i < 1200; ++i, t += 50)
+        {
+            lines += quiet.Note(2, t, false).size();
+        }
+        lines += quiet.Note(3, 1000 + kUiLatencyWindowMs, false).size();
+        CHECK(lines == 0, "ui-latency: a minute with no wait of 100 ms or more writes no line, its closing check included");
+        CHECK(quiet.Checks() == 1 && quiet.Stalls() == 0, "ui-latency: the closing check opens the next window and is counted in it");
+    }
+
+    // A minute with stalls: the exact summary line at the closing check, and nothing before it.
+    {
+        UiLatencyTally tally{ L"UI thread 7" };
+        size_t early = 0;
+        early += tally.Note(2, 0, false).size(); // opens the window at 0
+        early += tally.Note(104, 7900, false).size();
+        early += tally.Note(166, 15900, false).size();
+        early += tally.Note(300, 23900, false).size();
+        early += tally.Note(121, 31900, false).size();
+        early += tally.Note(3, 59999, false).size(); // still inside the window (59,999 < 60,000)
+        CHECK(early == 0, "ui-latency: stalls under 1 s write nothing until the window closes");
+        CHECK(tally.Checks() == 6 && tally.Stalls() == 4, "ui-latency: every check counts; 4 of them waited 100 ms or more");
+        const auto closing = tally.Note(2, 60000, false);
+        CHECK(closing.size() == 1, "ui-latency: the check that closes a window with stalls writes exactly one line");
+        CHECK(closing.size() == 1 &&
+                  closing[0] == L"[ui-latency] UI thread 7, the last 60 s: input waited 100 ms or more 4 times (250 ms or more: 1, 1 s or more: 0), "
+                                L"0.7 s in all, the longest 300 ms; each wait in ms @ seconds before this line: 104@52.1 166@44.1 300@36.1 121@28.1; "
+                                L"6 checks\n",
+              "ui-latency: the summary line, word for word (counts, the sum, the longest, each stall's seconds before the line)");
+        CHECK(tally.Checks() == 1 && tally.Stalls() == 0, "ui-latency: a new window opens at the closing check");
+    }
+
+    // A wait of 1 s or more writes its own line at once; a single stall reads "1 time".
+    {
+        UiLatencyTally tally{ L"UI thread 7" };
+        (void)tally.Note(2, 0, false);
+        const auto longOne = tally.Note(1842, 5000, false);
+        CHECK(longOne.size() == 1 && longOne[0] == L"[ui-latency] UI thread 7 kept input waiting 1842 ms (answered just now)\n",
+              "ui-latency: a wait of 1 s or more writes its own line at once");
+        const auto closing = tally.Note(2, 60000, false);
+        CHECK(closing.size() == 1 && closing[0].find(L"input waited 100 ms or more 1 time (250 ms or more: 1, 1 s or more: 1)") != std::wstring::npos &&
+                  closing[0].find(L"the longest 1842 ms") != std::wstring::npos && closing[0].find(L" 1842@55.0;") != std::wstring::npos,
+              "ui-latency: one stall reads \"1 time\", and the long one is in the summary too");
+    }
+
+    // A timed-out check: its own line names the timeout; the summary writes it "<timeout>+".
+    {
+        UiLatencyTally tally{ L"UI thread 7" };
+        (void)tally.Note(2, 0, false);
+        const auto timedOut = tally.Note(kUiLatencyCheckTimeoutMs, 20000, true);
+        CHECK(timedOut.size() == 1 &&
+                  timedOut[0] == L"[ui-latency] UI thread 7 did not answer for 10000 ms or more; past 20 s the [ui-stall] watchdog takes over\n",
+              "ui-latency: a timed-out check's own line");
+        const auto closing = tally.Note(2, 60000, false);
+        CHECK(closing.size() == 1 && closing[0].find(L"the longest 10000+ ms") != std::wstring::npos &&
+                  closing[0].find(L" 10000+@40.0;") != std::wstring::npos && closing[0].find(L"10.0 s in all") != std::wstring::npos,
+              "ui-latency: the summary writes a timed-out wait as \"10000+\" (at least that long)");
+    }
+
+    // The caps: at most kUiLatencyLongLinesPerWindow long-stall lines per window, at most kUiLatencyListedStalls listed.
+    {
+        UiLatencyTally tally{ L"T" };
+        (void)tally.Note(1, 0, false);
+        size_t longLines = 0;
+        for (int i = 1; i <= 15; ++i)
+        {
+            longLines += tally.Note(1500, i * 1000, false).size();
+        }
+        CHECK(longLines == static_cast<size_t>(kUiLatencyLongLinesPerWindow), "ui-latency: a window writes at most 10 long-stall lines");
+        const auto closing = tally.Note(1, 60000, false);
+        CHECK(closing.size() == 1 && closing[0].find(L"15 times (250 ms or more: 15, 1 s or more: 15), 22.5 s in all") != std::wstring::npos,
+              "ui-latency: the summary still counts and sums every stall past the line cap");
+        CHECK(closing.size() == 1 && closing[0].find(L" 1500@59.0 ") != std::wstring::npos && closing[0].find(L" 1500@48.0 +3 more; 16 checks\n") != std::wstring::npos,
+              "ui-latency: the first 12 stalls are listed, the rest counted as \"+N more\"");
+    }
+
+    // A clock that goes backwards closes the window; no negative span or offset is written.
+    {
+        UiLatencyTally tally{ L"B" };
+        (void)tally.Note(1, 100000, false);
+        (void)tally.Note(200, 100100, false);
+        const auto back = tally.Note(1, 50000, false);
+        CHECK(back.size() == 1 && back[0].find(L"[ui-latency] B, the last 0 s: input waited 100 ms or more 1 time") == 0 &&
+                  back[0].find(L" 200@0.0;") != std::wstring::npos,
+              "ui-latency: a clock that went back closes the window, written with 0 s, never a negative number");
+    }
+
+    // A window's summary and the closing check's own long line come in that order, from one check.
+    {
+        UiLatencyTally tally{ L"T" };
+        (void)tally.Note(1, 0, false);
+        (void)tally.Note(150, 1000, false);
+        const auto both = tally.Note(2500, 61000, false);
+        CHECK(both.size() == 2 && both[0].find(L"[ui-latency] T, the last 61 s: input waited 100 ms or more 1 time") == 0 &&
+                  both[1] == L"[ui-latency] T kept input waiting 2500 ms (answered just now)\n",
+              "ui-latency: the closed window's summary first, then the closing check's own long-stall line");
+        CHECK(tally.Stalls() == 1 && tally.Checks() == 1, "ui-latency: the closing long stall belongs to the new window");
+    }
+}
+
 // Agentmaster (PERSISTENCE.md "Unreadable state files", 2026-10-26): every loader fails OPEN — a state file that cannot
 // be read or parsed loads as "nothing saved" — and the 2026-10-26 report of a profile that looked "reset" after an install
 // is where that leads at startup: an empty fleet re-homes no tab, Manager-only windows delete their records, and the next

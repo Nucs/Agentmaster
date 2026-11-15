@@ -1172,12 +1172,124 @@ namespace Agentmaster
             bool restartFired = false; // once per process — the handler terminates us, a second decision is meaningless
             uint64_t lastRestartVetoLogMs = 0; // "restart decided but vetoed" re-log throttle (covers BOTH the deep-stall and limp paths)
             bool checkerStarted = false;
+            // The LATENCY monitor's pings (Engine.h, UI_THREAD.md §19): windowId -> the UI thread it runs on + its check.
+            struct LatencyPing
+            {
+                uint32_t uiThreadId = 0;
+                UiLatencyPing ping;
+            };
+            std::unordered_map<std::wstring, LatencyPing> latencyPings;
+            bool latencyMonitorStarted = false; // the monitor thread runs (set before the spawn, cleared if it fails)
         };
 
         UiBeatState& UiBeats()
         {
             static UiBeatState* s = new UiBeatState(); // deliberately leaked (see the block comment above)
             return *s;
+        }
+
+        // The latency monitor's clock (UI_THREAD.md §19): QueryUnbiasedInterruptTime counts only the time the machine is
+        // awake, so a check that spans a sleep or a hibernation never reads as a stall of that length. It moves in timer
+        // ticks (~15.6 ms unless something raised the timer resolution), so a wait reads to within one tick: plenty for
+        // the 100 ms threshold, and the price of a clock that skips sleep and links from kernel32 alone (the Precise
+        // variant would need mincore.lib).
+        // Returns: milliseconds since boot, sleep excluded. Never throws.
+        int64_t UiLatencyClockMs() noexcept
+        {
+            ULONGLONG ticks = 0; // 100 ns units
+            ::QueryUnbiasedInterruptTime(&ticks);
+            return static_cast<int64_t>(ticks / 10000);
+        }
+
+        // The latency monitor's thread body (Engine.h RegisterUiLatencyPing): forever, one check per UI thread, then a
+        // pause of kUiLatencyCheckGapMs (1 s while no window is registered). Each check's ping runs OUTSIDE the state's
+        // lock (a send waits for the UI thread, which may itself be waiting on code that takes the lock). One tally per UI
+        // thread, owned by this thread alone; its lines go to hooks.log as they come.
+        // Never returns. Inside the loop nothing escapes: a ping that throws is logged (Rule #18) and counts as no
+        // measurement, and any other failure of a round is logged and the loop goes on after the pause.
+        // Exceptions: std::bad_alloc only when the tally map itself cannot be created, before the loop starts; the
+        //   spawning lambda catches and logs it (the monitor then stays off for the process).
+        void UiLatencyMonitorLoop()
+        {
+            auto& s = UiBeats();
+            std::unordered_map<uint32_t, UiLatencyTally> tallies; // UI thread id -> its tally (this thread only)
+            for (;;)
+            {
+                try
+                {
+                    // One ping per UI thread: every window of one thread answers on the same message pump, so a second
+                    // check would only measure the same wait again.
+                    std::vector<std::pair<uint32_t, UiLatencyPing>> round;
+                    {
+                        std::lock_guard<std::mutex> lk(s.m);
+                        for (const auto& registered : s.latencyPings)
+                        {
+                            const uint32_t uiThreadId = registered.second.uiThreadId;
+                            const bool threadAlreadyIn = std::any_of(round.begin(), round.end(), [uiThreadId](const auto& r) {
+                                return r.first == uiThreadId;
+                            });
+                            if (!threadAlreadyIn && registered.second.ping)
+                            {
+                                round.emplace_back(uiThreadId, registered.second.ping);
+                            }
+                        }
+                    }
+                    if (round.empty())
+                    {
+                        tallies.clear(); // no UI thread left to check (every window closed): start afresh with the next one
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                        continue;
+                    }
+                    // A thread none of this round's pings runs on lost its last window: drop its tally (a closed
+                    // window's thread never answers again, and its unfinished window has no closing check to write it).
+                    for (auto it = tallies.begin(); it != tallies.end();)
+                    {
+                        const bool stillChecked = std::any_of(round.begin(), round.end(), [&it](const auto& r) {
+                            return r.first == it->first;
+                        });
+                        it = stillChecked ? std::next(it) : tallies.erase(it);
+                    }
+                    for (auto& [threadId, ping] : round)
+                    {
+                        auto result = UiPingResult::Failed;
+                        const int64_t startedMs = UiLatencyClockMs();
+                        try
+                        {
+                            result = ping(kUiLatencyCheckTimeoutMs);
+                        }
+                        catch (...)
+                        {
+                            LogSwallowedException(L"UiLatencyPing"); // Rule #18. Recovery: no measurement this round
+                        }
+                        const int64_t endedMs = UiLatencyClockMs();
+                        if (result == UiPingResult::Failed)
+                        {
+                            continue; // the window went away between the copy and the send: nothing was measured
+                        }
+                        const bool timedOut = result == UiPingResult::TimedOut;
+                        // The measured span, never negative, and never more than the timeout (an answer can land a hair
+                        // after it); a timed-out check counts as exactly the timeout, written "<timeout>+" in the lines.
+                        // (std::min): the windows.h min macro (no NOMINMAX in this pch-less engine TU).
+                        const int64_t spanMs = endedMs > startedMs ? endedMs - startedMs : 0;
+                        const uint32_t waitedMs = timedOut ? kUiLatencyCheckTimeoutMs :
+                                                             static_cast<uint32_t>((std::min)(spanMs, static_cast<int64_t>(kUiLatencyCheckTimeoutMs)));
+                        auto tally = tallies.find(threadId);
+                        if (tally == tallies.end())
+                        {
+                            tally = tallies.emplace(threadId, UiLatencyTally{ L"UI thread " + std::to_wstring(threadId) }).first;
+                        }
+                        for (const auto& line : tally->second.Note(waitedMs, endedMs, timedOut))
+                        {
+                            AppendStateLog(L"hooks.log", line);
+                        }
+                    }
+                }
+                catch (...)
+                {
+                    LogSwallowedException(L"UiLatencyMonitorLoop"); // Rule #18. Recovery: the next round after the pause
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(kUiLatencyCheckGapMs));
+            }
         }
 
         void UiStallCheckerPass(UiBeatState& s)
@@ -1459,6 +1571,7 @@ namespace Agentmaster
         s.stalled.erase(windowId);
         s.episodes.erase(windowId);
         s.rescuers.erase(windowId); // belt — the page unregisters explicitly, but a dropped window must never be rescued
+        s.latencyPings.erase(windowId); // belt — likewise: a dropped window's rescue window is about to be destroyed
     }
 
     // Agentmaster: the LIMP guard's counting rule (Engine.h). PURE mutation of the caller-owned
@@ -1516,6 +1629,65 @@ namespace Agentmaster
         auto& s = UiBeats();
         std::lock_guard<std::mutex> lk(s.m);
         s.rescuers.erase(windowId);
+    }
+
+    void RegisterUiLatencyPing(const std::wstring& windowId, const uint32_t uiThreadId, UiLatencyPing ping)
+    {
+        if (windowId.empty() || !ping)
+        {
+            return;
+        }
+        auto& s = UiBeats();
+        bool startMonitor = false;
+        {
+            std::lock_guard<std::mutex> lk(s.m);
+            s.latencyPings[windowId] = UiBeatState::LatencyPing{ uiThreadId, std::move(ping) };
+            if (!s.latencyMonitorStarted)
+            {
+                s.latencyMonitorStarted = true; // latched before the spawn, so two first registrations start one thread
+                startMonitor = true;
+            }
+        }
+        if (!startMonitor)
+        {
+            return;
+        }
+        try
+        {
+            // Detached and never joined, like the watchdog's checker: the state it reads is leaked, so the process can end
+            // at any point of its loop. The lambda catches what the loop's setup can throw (a thread function that lets an
+            // exception escape ends the process).
+            std::thread([]() {
+                try
+                {
+                    UiLatencyMonitorLoop();
+                }
+                catch (...)
+                {
+                    LogSwallowedException(L"UiLatencyMonitorLoop: the latency monitor stopped"); // Rule #18; stays off
+                }
+            }).detach();
+            AppendStateLog(L"hooks.log", L"[ui-latency] monitor armed (each UI thread checked every " + std::to_wstring(kUiLatencyCheckGapMs) +
+                                             L" ms; a line for each minute that kept input waiting " + std::to_wstring(kUiLatencyStallMs) +
+                                             L" ms or more, and one for each wait of " + std::to_wstring(kUiLatencyLongStallMs) + L" ms or more)\n");
+        }
+        catch (...)
+        {
+            // The thread could not be started (std::system_error): un-latch, so the next window's registration tries
+            // again instead of leaving the process without a monitor and without saying so twice.
+            {
+                std::lock_guard<std::mutex> lk(s.m);
+                s.latencyMonitorStarted = false;
+            }
+            LogSwallowedException(L"RegisterUiLatencyPing spawn monitor");
+        }
+    }
+
+    void UnregisterUiLatencyPing(const std::wstring& windowId)
+    {
+        auto& s = UiBeats();
+        std::lock_guard<std::mutex> lk(s.m);
+        s.latencyPings.erase(windowId);
     }
 
     void SetUiStallRestartHandler(std::function<void(const std::wstring& reason)> handler)
