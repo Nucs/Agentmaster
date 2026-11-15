@@ -1673,9 +1673,12 @@ tab switches.
   | – `_ReconcileClaudeTabsImpl`: 13 `LiveTabBindings`, 10 hash lookups | 29 | 3.0 % |
   | – `_ScanCacheWarmTabsImpl`: 13 `GetWithoutQueue` | 14 | 1.5 % |
   | – `_SweepClaudeLivenessImpl` 6, `_ScanInferredTabColorsImpl` 5, `_SidePanelPeriodicTickImpl` 3, `_PumpDraftRestoresImpl` 1 | 15 | 1.6 % |
-  | `AgentManagerContent` | ~34 | 3.6 % |
+  | `AgentManagerContent`'s own methods: `_RefreshTimingTexts` 7 (all of it the `SnapshotLive` copy), `_UpdateCardProgress` 4 (each bar's `RenderTransform` read), its 1 s timer 3 | ~14 | ~1.5 % |
 
-  (`AboutDialog`'s factory `Release` in a stack is the identical `Release` body that COMDAT folding named after it.)
+  The linker folds identical function bodies, so a frame can carry another class's name: `AboutDialog`'s factory
+  `Release` is the tabs' `Release`, and `implements<AgentManagerContent, IPaneContent>::QueryInterface` (23 samples) is
+  the tabs' `QueryInterface` — 18 of its samples ran inside `_ObserverProbeImpl`, from `weak_ref::Resolve` and
+  `operator==`. The first rundown's "AgentManagerContent 3.6 %" counted those, so most of it was the observer lane too.
 - **A second sample at 20:50** (20 s, the same pid): the same shape — `_ObserverProbeImpl` 46 of 259 busy samples (18 %),
   the frame tick 43 % — while `uistalls` read p50 11 ms and p99 456 ms with the machine's CPU at ~50 %: a UI thread busy a
   quarter of the time that answers in 11 ms at the median is waiting for a core, the machine-wide part the rundown of that
@@ -1703,7 +1706,7 @@ tab switches.
   stat and a copy of the whole color list per tab. `_RefreshPendingDotsContrast` made a full `Get` per bound tab on
   every tab switch.
 
-### 19c. The fix (`AgentClaudeTabIndex.h`, `TerminalPage.AgentObserver.cpp`, `TerminalPage.AgentWindowRecord.cpp`, `SessionRegistry`; not built)
+### 19c. The fix (`AgentClaudeTabIndex.h`, `TerminalPage.AgentObserver.cpp`, `TerminalPage.AgentWindowRecord.cpp`, `AgentManagerContent.cpp`, `SessionRegistry`; not built)
 
 - **`AgentClaudeTabIndex`** (`AgentClaudeTabIndex.h`, header-only): a snapshot of `_claudeTabs` keyed by each tab's COM
   identity (its `IUnknown`), built in one pass. Each question costs one QueryInterface and one hash lookup. A tab listed
@@ -1722,15 +1725,20 @@ tab switches.
   instead of `GetWithoutQueue`.
 - **One folder-color snapshot per pass:** `_PendingDotsColorForTab` and `_CacheWarmSparkColorForTab` take a
   `LoadDirColorIndex()` snapshot as a new last parameter (null keeps the per-call read for a one-off pick); each pass
-  reads it at the first tab that needs a color.
+  reads it at the first tab that needs a color. All 9 `DirColorsFileStamp` samples of 19a came from
+  `_PendingDotsColorForTab`.
+- **The Agent Manager page's 30 s timing tick** (`AgentManagerContent::_RefreshTimingTexts`, which runs in every window
+  whose page is its content): `SnapshotLiveForCards` instead of `SnapshotLive`. The tick reads the ids, the activity and
+  creation stamps and `ServerCacheStillWarm`'s fields, all kept by the card list's copy; the full copy of every live
+  session's queue history and texts was all of its 7 samples, ~40–50 ms per tick.
 - **Expected, to be measured after a build:** `_ObserverProbeImpl` from ~41 ms/s to a few ms/s, and its two items per
   sweep in the 745-tab window from ~45–50 ms each to a few ms; the 50–166 ms stalls that came with the sweeps should
   mostly go. What stays is §19d.
 - **Checked without a build:** `cl /Zs` against the release worktree's PCH (`Q:\tmp\am-release-wt`, ad89700e3) of
   `TerminalPage.AgentObserver.cpp`, `TerminalPage.AgentWindowRecord.cpp`, `TerminalPage.AgentSidePanel.cpp`,
-  `TerminalPage.AgentEngine.cpp` and `SessionRegistry.cpp`: PASS; `SessionRegistry.cpp` with agentmaster-cli's `/W4 /WX`
-  line: PASS. Six planted defects fail at their line (PASS 1, PASS 2, a coroutine of another lane, a plain function, file
-  scope, the registry). The m5 harness, isolated: 13,268 checks, the 3 known `TestTaskbarBadge` failures; the new
+  `TerminalPage.AgentEngine.cpp`, `AgentManagerContent.cpp` and `SessionRegistry.cpp`: PASS; `SessionRegistry.cpp` with
+  agentmaster-cli's `/W4 /WX` line: PASS. Seven planted defects fail at their line (PASS 1, PASS 2, a coroutine of another
+  lane, a plain function, file scope, the registry, the Manager page's timing tick). The m5 harness, isolated: 13,268 checks, the 3 known `TestTaskbarBadge` failures; the new
   `GetForCards` / `GetKind` checks pass (`TestRegistryLeanReads`).
 
 ### 19d. What is left
@@ -1741,6 +1749,13 @@ tab switches.
   token) each sweep and lowercases each token, to keep the few its own tabs host; a registry read that returns only the
   bindings of the window's tokens would cut it.
 - **The Agent Manager rebuild** in the window you work in (§15e, §18d).
+- **The Agent Manager page's two timers ignore where the page is seen:** the Waiting-for-you countdown
+  (`_UpdateCardProgress`, every 1 s) reads and scales each bar even while the page is hidden (4 samples in 19a; a
+  `_lensVisible` gate would skip it), and the 30 s timing tick runs for a page in a background or minimized window
+  (§18's foreground gate covers `_Refresh` only). Each is small now; neither was changed.
+- **The engine threads** (`stacksnap top`, 10 s: `SessionScanner` 84 ms/s, the Telegram bot's tick 59 ms/s,
+  `ProcessObserver` 56 ms/s) never block input, but they take CPU from a machine whose load already lengthens every
+  wait (19a's second sample); their per-session copies are §13g #5–#7.
 - **Stalls under 20 s leave no line in hooks.log** (the `[ui-stall]` watchdog's threshold): a `WM_NULL` latency probe in
   the engine (one sent message every 100–200 ms, one summary line in a minute that held a stall over 100 ms) would make
   them visible in the field. Not built.

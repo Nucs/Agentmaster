@@ -799,7 +799,12 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        const auto live = _registry->SnapshotLive();
+        // The card list's lean snapshot (UI_THREAD.md §19): this tick reads the id, the activity and creation stamps
+        // and ServerCacheStillWarm's fields (live, kind, state, the turn stamps), never a queue or a transcript text.
+        // SnapshotLive copied every live session's whole queue history and texts here — all of this tick's cost on the
+        // 2026-11-15 profile (~40–50 ms every 30 s at 969 live sessions, on the UI thread every window shares, in each
+        // window whose page is up). Same live set, same order.
+        const auto live = _registry->SnapshotLiveForCards();
         std::unordered_map<std::wstring, const SessionInfo*> byId;
         byId.reserve(live.size());
         for (const auto& s : live)
