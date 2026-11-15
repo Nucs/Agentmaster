@@ -46,6 +46,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set> // §21.56: the sessions with a side question running (_btwRunning)
 #include <string>
 #include <string_view>
 #include <thread>
@@ -4310,5 +4311,79 @@ namespace Agentmaster::Msg
         /// own failures are contained the same way and end with a line in the thread.
         /// </remarks>
         const wchar_t* _startClaudeStatusReport(const std::wstring& sessionId, int64_t threadId, int64_t replyTo) noexcept;
+
+        // ----- §21.56: /btw — a side question about the session, answered in its topic while it works (Messaging.Btw.cpp;
+        //       the pure half is MessagingBtw.h + SideQuestion.h, the asking SideQuestion.cpp, the session link SessionLink.h) -----
+
+        /// <summary>One side question waiting for, or running on, a worker.</summary>
+        struct BtwJob
+        {
+            std::wstring sessionId; // the session asked about
+            std::wstring question; // the question
+            int64_t messageId{ 0 }; // the user's message (the answer replies to it; its reaction shows the progress)
+            int64_t threadId{ 0 }; // the session's topic
+            int64_t askedAtMs{ 0 }; // when it was asked (Unix ms)
+        };
+
+        /// <summary>
+        /// Takes a message of a session's topic when it is a /btw (MessagingBtw.h ParseBtwMessage) — checked FIRST in
+        /// _handleTopicMessage, before a question card's text and before any command reading, because "/clear btw" must never
+        /// reach Claude Code's /clear. Answers the usage and the clear at once; a question goes to _askBtw. Poll thread (the
+        /// voice thread for a voice note's transcript).
+        /// </summary>
+        /// <param name="sessionId">The topic's session.</param>
+        /// <param name="msg">The message.</param>
+        /// <param name="threadId">The topic.</param>
+        /// <param name="held">A new thread held it (written before its session existed): only a typed /btw counts then.</param>
+        /// <returns>True when the message was a /btw (handled here); false for any other message.</returns>
+        /// <exception cref="std::bad_alloc">If a reply cannot be queued.</exception>
+        bool _takeBtwMessage(const std::wstring& sessionId, const json::Value& msg, int64_t threadId, bool held);
+
+        /// <summary>
+        /// A side question, checked before it is asked: a Codex session and a session with no conversation get one line; a
+        /// session whose prompt cache most likely expired (SideQuestionCacheLikelyWarm) is ASKED first — [☁️ Ask anyway] /
+        /// [Cancel] — because the fork would pay for the whole conversation again (the user's "so we don't waste tokens");
+        /// otherwise, or once confirmed, the question is queued for a worker (_startBtw).
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="question">The question.</param>
+        /// <param name="messageId">The user's message.</param>
+        /// <param name="threadId">The topic.</param>
+        /// <param name="confirmed">The user already chose "Ask anyway" (no cache check).</param>
+        /// <exception cref="std::bad_alloc">If a reply or the job cannot be queued.</exception>
+        void _askBtw(const std::wstring& sessionId, const std::wstring& question, int64_t messageId, int64_t threadId, bool confirmed);
+
+        /// <summary>
+        /// Queues a side question for a worker and starts what may run now: one question per session at a time (its btw thread
+        /// grows in order), at most kBtwMaxRunning across the fleet (each may be a headless claude for a few seconds). Reacts 🤔 on
+        /// the question. Any thread; takes `_btwMtx` (a leaf lock: no other lock is taken under it).
+        /// </summary>
+        /// <param name="job">The question.</param>
+        /// <exception cref="std::bad_alloc">If the job cannot be queued.</exception>
+        void _startBtw(BtwJob job);
+
+        /// <summary>
+        /// Starts a worker for every queued question that may run now (its session runs none, fewer than kBtwMaxRunning run).
+        /// Called after a question is queued and when one ends. Never throws (a worker that cannot start is logged, its
+        /// question answered with the failure).
+        /// </summary>
+        void _pumpBtw() noexcept;
+
+        /// <summary>
+        /// A worker's body: reads the btw thread, asks the question (SideQuestion.cpp AskSideQuestion: in the session through
+        /// the link, else a headless fork), keeps the exchange in the thread file, replies to the question — the header
+        /// "☁️ /btw · 14:02 · #n", the session's title row, the answer (Claude's Markdown, a rich message), a footer saying how it
+        /// was answered and what it read from the cache — and clears the 🤔. Runs on the worker's own thread.
+        /// </summary>
+        /// <param name="job">The question.</param>
+        /// <param name="claudeExe">The engine's claude.exe (read on the poll thread; "" = not found: no headless way).</param>
+        void _runBtw(const BtwJob& job, const std::wstring& claudeExe) noexcept;
+
+        /// <summary>At most this many side questions run at once across the fleet (each may hold a headless claude briefly).</summary>
+        static constexpr size_t kBtwMaxRunning = 2;
+
+        std::mutex _btwMtx; // guards _btwQueue and _btwRunning (a LEAF lock: nothing else is locked under it, no reply sent)
+        std::deque<BtwJob> _btwQueue; // questions waiting, oldest first
+        std::set<std::wstring> _btwRunning; // the sessions with a question running now
     };
 }

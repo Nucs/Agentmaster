@@ -21,7 +21,9 @@
 #include "ApiErrorRewind.h" // HOOKS.md "Interrupted turns": PlanInterruptRewindForSession, AssessForkContinuation, AssessRestartContinuation (the restart and fork questions)
 #include "ClaudeSpawn.h" // LogNav, ShortId, ResolveClaudeTranscriptPath, NewSessionId, LogSwallowedException, ClaudeConversationExists
 #include "FolderProbe.h" // §21.17.4: SharedFolderProber — the poll thread's folder checks wait a bounded time
+#include "MessagingBtw.h" // §21.56: the /btw command words and the usage text (the session command dispatcher's belt)
 #include "MessagingVoice.h" // §21.43: IsVoiceNoteMessage (a just-bound thread's voice note goes to the voice path)
+#include "SideQuestion.h" // §21.56: LoadSideQuestionThread (the usage's thread length)
 #include "Persistence.h" // DeriveSessionTitle
 #include "ProcessInspect.h" // AnalyzeSessionTranscript, ReadGitBranchForDir
 #include "ProfileBootstrap.h" // Profiles::detail::WideToUtf8
@@ -1096,6 +1098,13 @@ namespace Agentmaster::Msg
         _registry->UpdateQuiet(sessionId, [](SessionInfo& s) { s.readUnixMs = WallMs(); });
         // The user's own message is now the bottom of the topic: the sticky card follows it (§21.5).
         _noteTopicPosted(threadId);
+        // §21.56: a SIDE QUESTION (/btw <question>, "btw …", "by the way …", and its clear and usage forms) is taken FIRST: it is
+        // never the session's next prompt, never a question card's answer, and "/clear btw" must never reach Claude Code's /clear
+        // (which would clear the session itself). A message a new thread held counts only as a typed /btw.
+        if (_takeBtwMessage(sessionId, msg, threadId, held))
+        {
+            return;
+        }
         // §21.30: while the session's QUESTION CARD is open, a plain message is the card's — the answer or the note the user asked
         // to write (✍️ / 📝) or replied to the card with, else asked about (the answer, or the next prompt?). A /command stays a
         // command; a message a new thread held was written before any question.
@@ -2204,6 +2213,18 @@ namespace Agentmaster::Msg
             _runSearchCommand(cmd, msg, threadId); // the fleet commands work in any topic
             return;
         }
+        if (name == kBtwCommand || name == kBtwClearCommand || name == kClearBtwCommand)
+        {
+            // §21.56: _handleTopicMessage takes /btw before any command reading; this is the belt for a path that reaches a session
+            // command without it. A message whose text is not one (a command rebuilt from a button) gets the usage.
+            if (!_takeBtwMessage(sessionId, msg, threadId, false))
+            {
+                bool readable = true;
+                _reply(threadId, BtwUsageHtml(LoadSideQuestionThread(sessionId, readable).exchanges.size()), false, json::Value{}, msgId);
+            }
+            done(L"btw");
+            return;
+        }
         _reply(threadId, L"Unknown command here: /" + TgEscapeHtml(name) + L". /help lists them.", false);
     }
 
@@ -3172,6 +3193,28 @@ namespace Agentmaster::Msg
             else if (k == L"backlog-drop")
             {
                 _reply(threadId, L"Dropped.", false);
+            }
+            else if (k == L"btw-ask")
+            {
+                // §21.56: "Ask anyway" under the cold-cache question: the side question goes, the cache check skipped. The payload is
+                // "<the question's message id>|<the question>" (the answer replies to the user's own message).
+                const size_t bar = tok.payload.find(L'|');
+                int64_t questionId = 0;
+                try
+                {
+                    questionId = std::stoll(tok.payload.substr(0, bar));
+                }
+                catch (...)
+                {
+                    // Rule #18 (std::invalid_argument / std::out_of_range from stoll). Recovery: a payload without its id — the
+                    // answer then quotes nothing, the question still goes.
+                    LogSwallowedException(L"MessagingService btw-ask (the question's id)");
+                    questionId = 0;
+                }
+                if (bar != std::wstring::npos)
+                {
+                    _askBtw(tok.sessionId, tok.payload.substr(bar + 1), questionId, threadId, true);
+                }
             }
             else if (k == L"backlog-queue")
             {
@@ -7033,6 +7076,8 @@ namespace Agentmaster::Msg
             // §21.33: /steer is the one way into a running turn, so the first line names it beside the rule it is the exception to.
             html = L"<b>In a session's topic</b>\nAny text is queued as the session's next prompt (never typed into a running turn \x2014 /steer &lt;text&gt; does that: it sends the words NOW, like Send now at the PC). Claude Code commands (/compact, /model x, your skills) are queued the same way; commands that leave no record are refused.\n"
                    L"/add-dir &lt;path&gt; adds a folder to the workspace: Claude Code's question comes here as buttons, and \x201CYes, for this session\x201D is picked by itself after 60 s.\n"
+                   // §21.56: the side question, Claude Code's /btw asked from here (no tools, nothing added to the session).
+                   L"/btw &lt;question&gt; (or a message that starts with \x201C" L"btw\x201D / \x201C" L"by the way\x201D) \x2014 a side question about the session, answered here while it keeps working: no tools, nothing added to it; each /btw sees the earlier ones, /btw_clear starts over\n"
                    // §21.32.4: the file links (on in the settings' FILE LINKS section).
                    L"/download &lt;path&gt; \x2014 a file's download link (absolute, or relative to the session's folder), with \U0001F4E4 Send as file\n"
                    // §21.47: /enter submits what already sits in the box at the PC (one Enter, read back; never into a menu or dialog).

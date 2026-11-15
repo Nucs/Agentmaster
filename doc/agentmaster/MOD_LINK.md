@@ -14,6 +14,12 @@
 > open, hands it to the mod's helper and words Claude's result "in Telegram". That slice needs §4.1's LinkServer (hello,
 > events, one held route) and §4.2's spawn wiring, not the status, queue or draft features.
 >
+> **2026-11-15 — the first slice is WRITTEN (source only, NOT BUILT): the link for Telegram's `/btw`** (§14,
+> [`MESSAGING.md`](MESSAGING.md) §21.56). A loopback server in Agentmaster, `AM_LINK` + a per-launch `AM_LINK_TOKEN`
+> on every managed launch, and the bundled `agentmaster-link` mod polling it, with one command: `fork`, a side question
+> answered by Claude Code's `$.model.fork` from the session's prompt cache. It differs from §4 where §14 says so (TCP
+> only, no events, no setting of its own). The AskUserHtmlQuestion slice above builds on it.
+>
 > **The user's ask (2026-10-16):** "design a new integration between agentmaster to claude code sessions via
 > mods. Supporting 100+ sessions on a machine efficiently and low-cost. Features like queue and the status can
 > all be done through mods. We will ensure claude sessions running in agentmaster are loaded with mods and are
@@ -503,3 +509,77 @@ Transcripts and everything that reads them; the Sessions page, summaries and the
 database; the observer's census, External rows and the orphan reaper; launch, presets, resume, fork, restart,
 windows and persistence; Codex; the CLI's offline reads; and every unlinked session, which keeps exactly today's
 hooks, scanner and typed delivery.
+
+## 14. The first slice: the link for `/btw` (2026-11-15; written, NOT BUILT)
+
+> The user's pick (2026-11-15), after asking to "learn how claude code does /btw and if we can have mods replicate 1-to-1
+> but not UI": **"Link mod + fallback"** — Telegram's `/btw` is answered inside the session's own claude through this
+> link, a headless fork when the link cannot — "confirm it forks cache hit so we dont waste tokens" (MESSAGING.md
+> §21.56.2 has the measurements).
+
+### 14.1 What exists
+
+```
+Agentmaster.exe ── SessionLinkServer (one per process; 127.0.0.1:<ephemeral port>; WSAPoll; ≤ 512 connections)
+ │                   LinkHub: token → {launch session, current session, mod + Claude Code versions, last seen, parked,
+ │                   queued commands}; waiters: command id → the asking thread
+ │   ▲ POST /v1/hello {protocol: 1, mod, claude, session}           → {protocol, hold}   (404 unknown token, 409 protocol)
+ │   ▲ GET  /v1/commands?hold=5000&session=<id>                      → {commands: [...]} at once, else {commands: []} at 5 s
+ │   ▲ POST /v1/results {results: [{id, …}]}                         → {ok, taken}
+claude.exe ── agentmaster-link 0.1.0 (bundled; Claude Code 2.1.322+): hooks session.start only, then a detached loop
+```
+
+- **The launch** (`ClaudeSpawn.cpp` `AppendSessionLinkEnv`, through `SetSessionLinkEnvProvider` →
+  `Link::SessionLinkLaunchEnv`): every managed launch — new, resume, fork, restore, Restart, /handover, preset — gets
+  `AM_LINK=http://127.0.0.1:<port>` and `AM_LINK_TOKEN=<32 hex digits>` (BCryptGenRandom, minted per launch and
+  registered with the launch's session id), appended after the cog's env so no user entry can replace them. The token is
+  never logged, persisted or put on a command line. The provider is set only by the app, and only when the server
+  started; the CLI, the session database, the m5 harness and the probes compile `ClaudeSpawn.cpp` without it. At start
+  the app drops an `AM_LINK` / `AM_LINK_TOKEN` it inherited (an instance started from a linked tab of another), and the
+  harness children's environment (`BuildHarnessEnvironment`) drops both too.
+- **The mod** (`AgentMaster/mods/agentmaster-link/`, its README): with both variables present and well formed
+  (`http://127.0.0.1:<port>`, 32 hex digits) it says hello, then keeps one poll open; each command runs on its own
+  (`void runCommand`), so the poll — the link's heartbeat — never waits for a fork. It stops for good on a 404 or 409,
+  on `{release: true}`, or after 20 failures in a row (backoff 1, 2, 4 … 30 s; a failure says hello again). It names its
+  CURRENT conversation in every poll (`$.session.id()`), so a `/clear` or an in-session `/resume` moves the hub's record
+  to the new id with no message of its own (`LinkHub::Poll`).
+- **Liveness:** a link is LIVE while a poll is parked, or one was answered within its hold + 3 s (`kLinkLiveGraceMs`).
+  One parked poll per token: a newer one answers the older empty first. Tokens whose link was not seen for a while are
+  forgotten every 60 s (`LinkHub::Forget`); an idle connection closes after 120 s.
+- **A command** (`SessionLinkServer::Run`, blocking, a worker thread): queued for the session's live link, the loop woken
+  through a loopback socket pair, the parked poll answered at once; the caller waits in 1 s slices, checking the link
+  (`Lost` when it stopped polling) and the deadline (`TimedOut`). Only the token the command went to can answer it.
+- **The one command:** `{id, kind: "fork", prompt, effort?}` → the mod runs `$.model.fork({prompt, effort?})` and posts
+  the result as Claude Code resolved it (`isAnswered`, `text`, `usage`, `effort`, or `reason`: `nothing-to-fork`,
+  `aborted`, `api-error`, `empty-reply`), with the command's `id` and the time it took (`ms`); its own failure is a
+  result too (`mod-error`, `unknown-command`), so the wait always ends.
+
+### 14.2 Where it differs from §4
+
+| §4 | The slice | Why |
+|---|---|---|
+| AF_UNIX socket in the profile, TCP fallback (D1) | TCP loopback only | No path-length fallback to keep; F1 measured 3–4 ms a request. The socket file can come later. |
+| `<profile>\link\link.json`, `LinkServer.{h,cpp}` | The endpoint reaches a tab only through its launch env; `SessionLink.{h,cpp}` | Nothing outside a launch needs to find the server yet (D3's `claim` is not built). |
+| Events (`/v1/events`), commands piggybacked on replies | No events; commands only on the held poll; results on `/v1/results` | `/btw` needs a request and an answer, nothing pushed. |
+| Settings: Off / Shadow / On (D12) | No switch of its own: the server always runs; the cog's bundled-mods switch turns the mod off (then `/btw` goes headless) | The link changes no state and no delivery yet; it only adds a way to ask. |
+| `[link]` lines for every event | `[link] listening on 127.0.0.1:<port> (protocol 1)`, `hello from <sid8> [(launched as <sid8>)]: mod 0.1.0, Claude Code 2.1.322`, `not started: …`, `a mod of protocol N said hello …`, `no token for <sid8> …`, `WSAPoll failed …`, `stopped` | |
+
+### 14.3 What it costs
+
+- **Idle:** one held request per linked claude, answered empty every 5 s and asked again at once: ~0.2 requests a
+  second per linked tab, kept-alive on one loopback connection (Bun keeps it, F1). A dormant tab runs no claude and no
+  poll. Not measured at fleet scale yet (§11 Q2, Q8).
+- **An exit:** an open poll holds a headless session's end until it answers (F9): at most the 5 s hold.
+- **A side question:** what MESSAGING.md §21.56.2 measured — the conversation read from the cache, ~0.9–2.6k tokens
+  written.
+
+### 14.4 Code, tests
+
+- `AgentMaster/SessionLink.{h,cpp}` (`Link::` namespace: the HTTP request reader `TakeLinkHttpRequest`, the response
+  writer, `LinkHub`, `SessionLinkServer`, `SharedSessionLink`, `SessionLinkLaunchEnv`); `ClaudeSpawn.{h,cpp}` (the env
+  seam); `TerminalPage.AgentEngine.cpp` (the start, the providers); `AgentHarnessCore.cpp` (the two variables dropped
+  from harness children); `AgentMaster/mods/agentmaster-link/` (`hooks/register.ts`, `hooks/link.ts`, `tests/`).
+- `TestSideQuestion` (`tests_side_question.cpp`, the m5 harness): the request reader (split reads, keep-alive, bad and
+  missing lengths, too large), the hub (tokens, liveness, the session move, one parked poll), a REAL loopback server
+  driven by a scripted mod (hello, a held poll answered by a command, the result completing the waiter, a foreign token
+  refused, `Lost` and `TimedOut`). The mod's own kit: `claude plugin test` (11 tests), `claude plugin validate --strict`.

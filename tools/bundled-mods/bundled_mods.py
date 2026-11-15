@@ -11,6 +11,8 @@ Subcommands:
   sync   Copy each listed mod from its source folder into the vendored folder, file for file with LF line ends, leaving
          out what Claude Code writes into a plugin folder it loads (``.claude-plugin/types/``) and development leftovers
          (``dev/``, ``__pycache__/``, ``node_modules/``). Files the source no longer has are removed from the vendored copy.
+         A mod whose manifest entry says ``"source": "repo"`` (Agentmaster's own agentmaster-link) is skipped: its folder in
+         the repository is its source.
   gen    Write BundledModsData.h from the vendored folders: each mod's RUNTIME files (``.claude-plugin/plugin.json`` and
          every file under ``hooks/`` that is not a test), with its name and version (read from its plugin.json), its
          minimum Claude Code version and summary (from the manifest), and a SHA-256 over the files (the engine names the
@@ -158,6 +160,11 @@ def sync(manifest: dict, override: str | None) -> int:
     root = source_root(manifest, override)
     for entry in manifest["mods"]:
         name = entry["name"]
+        if entry.get("source") == "repo":
+            # Agentmaster's own mod (agentmaster-link): its folder here IS its source, so there is nothing to copy, and a
+            # mirror of an outside folder would delete it.
+            print(f"skipped {name}: its source is this repository")
+            continue
         src = root / name
         if not (src / ".claude-plugin" / "plugin.json").is_file():
             raise SystemExit(f"{src} holds no .claude-plugin/plugin.json: is the source folder right?")

@@ -248,6 +248,24 @@ namespace Agentmaster
     // Never throws.
     void SetBundledModArgsProvider(BundledModArgsProvider provider) noexcept;
 
+    /// <summary>
+    /// Agentmaster (MOD_LINK.md, MESSAGING.md §21.56): what gives one managed Claude launch its SESSION LINK — the
+    /// environment variables AM_LINK (the link server's endpoint) and AM_LINK_TOKEN (a token minted and registered for this
+    /// launch), which the bundled agentmaster-link mod reads to dial in. BuildClaudeSpawn and BuildClaudeRestartSpec append
+    /// its answer to the spec's env after the managed variables. The app sets it to Link::SessionLinkLaunchEnv once per
+    /// process (TerminalPage.AgentEngine.cpp, after the server started); every other program that compiles this file leaves
+    /// it unset, so its launches carry no link. It must not throw: a launch that cannot get a link goes on without one.
+    /// </summary>
+    /// <param name="sessionId">The launch's session id (the token is registered for it).</param>
+    /// <returns>The variables to add (none when the server is not running).</returns>
+    using SessionLinkEnvProvider = std::vector<std::pair<std::wstring, std::wstring>> (*)(const std::wstring& sessionId) noexcept;
+
+    /// <summary>
+    /// Sets (or clears, with nullptr) the session link's env provider; later launches use it. Thread-safe (an atomic pointer).
+    /// </summary>
+    /// <param name="provider">Link::SessionLinkLaunchEnv, or nullptr for no link.</param>
+    void SetSessionLinkEnvProvider(SessionLinkEnvProvider provider) noexcept;
+
     // Agentmaster (PRESETS): render a compiled launch's command-line additions — `--effort <level>`, then
     // `--append-system-prompt "<note>"` (PsDoubleQuote: the managed command line runs under the pwsh host's
     // `&` operator, so PowerShell parses it), then the preset's extra arguments verbatim. --model is NOT

@@ -30,6 +30,7 @@
 #include "ClaudeStatus.h"
 
 #include <algorithm>
+#include <atomic> // RunClaudeStreamJson's done flag (shared by its reader and the waiting caller)
 #include <chrono>
 #include <map>
 #include <thread>
@@ -553,6 +554,308 @@ namespace Agentmaster
         {
             // Rule #18. Recovery: the run reads as failed; the RAII guards above closed every handle and ended the child.
             LogSwallowedException(L"RunClaudeCapture");
+            if (r.error.empty())
+            {
+                r.error = L"it failed (hooks.log says why)";
+            }
+        }
+        r.tookMs = TickMs() - startedTick;
+        return r;
+    }
+
+    std::wstring QuoteClaudeArgument(std::wstring_view arg)
+    {
+        return QuoteArg(arg);
+    }
+
+    ClaudeStreamResult RunClaudeStreamJson(const ClaudeStreamRun& run) noexcept
+    {
+        ClaudeStreamResult r;
+        const int64_t startedTick = TickMs();
+        try
+        {
+            // The environment: the harness's (every variable of a parent Claude Code session or terminal tab removed, AM_HARNESS),
+            // the two switches that keep a child from changing anything (the file header), then the caller's changes (a preset's
+            // provider values ride here).
+            std::map<std::string, std::string> changes = BuildHarnessEnvironment(run.harnessName.empty() ? std::wstring_view{ L"claude-stream" } : std::wstring_view{ run.harnessName });
+            changes["DISABLE_AUTOUPDATER"] = "1";
+            changes["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1";
+            for (const auto& [k, v] : run.envChanges)
+            {
+                changes[k] = v;
+            }
+            std::vector<wchar_t> environment = BuildChildEnvironment(changes);
+
+            // Three pipes: our ends never inherited (a child holding one would keep it from ever reaching its end).
+            SECURITY_ATTRIBUTES inheritable{ sizeof(inheritable), nullptr, TRUE };
+            HANDLE inRead = nullptr;
+            HANDLE inWrite = nullptr;
+            HANDLE outRead = nullptr;
+            HANDLE outWrite = nullptr;
+            HANDLE errRead = nullptr;
+            HANDLE errWrite = nullptr;
+            if (!::CreatePipe(&inRead, &inWrite, &inheritable, 0))
+            {
+                r.error = Win32ErrorText(::GetLastError());
+                return r;
+            }
+            OwnedHandle inReadOwned{ inRead };
+            OwnedHandle inWriteOwned{ inWrite };
+            if (!::CreatePipe(&outRead, &outWrite, &inheritable, 0))
+            {
+                r.error = Win32ErrorText(::GetLastError());
+                return r;
+            }
+            OwnedHandle outReadOwned{ outRead };
+            OwnedHandle outWriteOwned{ outWrite };
+            if (!::CreatePipe(&errRead, &errWrite, &inheritable, 0))
+            {
+                r.error = Win32ErrorText(::GetLastError());
+                return r;
+            }
+            OwnedHandle errReadOwned{ errRead };
+            OwnedHandle errWriteOwned{ errWrite };
+            ::SetHandleInformation(inWrite, HANDLE_FLAG_INHERIT, 0);
+            ::SetHandleInformation(outRead, HANDLE_FLAG_INHERIT, 0);
+            ::SetHandleInformation(errRead, HANDLE_FLAG_INHERIT, 0);
+
+            // Only the child's three ends are inherited (PROC_THREAD_ATTRIBUTE_HANDLE_LIST, RunClaudeCapture's reason).
+            SIZE_T attributeBytes = 0;
+            ::InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeBytes);
+            std::vector<unsigned char> attributeBuffer(attributeBytes);
+            auto* attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributeBuffer.data());
+            if (!::InitializeProcThreadAttributeList(attributes, 1, 0, &attributeBytes))
+            {
+                r.error = Win32ErrorText(::GetLastError());
+                return r;
+            }
+            HANDLE inherited[3] = { inRead, outWrite, errWrite };
+            const BOOL listed = ::UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited), nullptr, nullptr);
+            STARTUPINFOEXW si{};
+            si.StartupInfo.cb = static_cast<DWORD>(listed ? sizeof(si) : sizeof(si.StartupInfo));
+            si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            si.StartupInfo.hStdInput = inRead;
+            si.StartupInfo.hStdOutput = outWrite;
+            si.StartupInfo.hStdError = errWrite;
+            si.lpAttributeList = listed ? attributes : nullptr;
+            std::wstring commandLine = QuoteArg(run.exe) + L" " + run.args; // CreateProcessW may write into this buffer
+            PROCESS_INFORMATION pi{};
+            // SUSPENDED: into the kill-on-close job before it runs an instruction, so nothing it starts (MCP servers) escapes.
+            const DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | (listed ? EXTENDED_STARTUPINFO_PRESENT : 0);
+            const BOOL created = ::CreateProcessW(run.exe.c_str(), commandLine.data(), nullptr, nullptr, TRUE, flags, environment.data(),
+                                                  run.workDir.empty() ? nullptr : run.workDir.c_str(), &si.StartupInfo, &pi);
+            const DWORD createError = created ? ERROR_SUCCESS : ::GetLastError();
+            ::DeleteProcThreadAttributeList(attributes);
+            // The child holds its own copies now (or never will).
+            inReadOwned.reset();
+            outWriteOwned.reset();
+            errWriteOwned.reset();
+            if (!created)
+            {
+                r.error = Win32ErrorText(createError);
+                return r;
+            }
+            r.started = true;
+            OwnedHandle process{ pi.hProcess };
+            OwnedHandle mainThread{ pi.hThread };
+            OwnedHandle job{ ::CreateJobObjectW(nullptr, nullptr) };
+            if (job.h)
+            {
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                ::SetInformationJobObject(job.h, JobObjectExtendedLimitInformation, &info, sizeof(info));
+                if (!::AssignProcessToJobObject(job.h, process.h))
+                {
+                    LogStatus(L"a stream child could not join its job (" + Win32ErrorText(::GetLastError()) + L"); a timeout ends only the child itself");
+                    job.reset();
+                }
+            }
+            const auto endChild = [&](UINT code) noexcept {
+                if (job.h)
+                {
+                    ::TerminateJobObject(job.h, code);
+                }
+                ::TerminateProcess(process.h, code);
+                ::WaitForSingleObject(process.h, 5000);
+            };
+            // Set by the reader when onLine says the conversation is over (or throws): the waits below end on it.
+            OwnedHandle doneEvent{ ::CreateEventW(nullptr, TRUE, FALSE, nullptr) };
+            if (!doneEvent.h)
+            {
+                endChild(1);
+                r.error = Win32ErrorText(::GetLastError());
+                return r;
+            }
+            std::atomic<bool> done{ false };
+            std::string errBytes;
+            std::thread outReader;
+            std::thread errReader;
+            std::thread inWriter;
+            // Every thread is joined on every path out (a joinable std::thread's destructor would end the process); each ends once
+            // its pipe reaches its end, which ending the child guarantees.
+            const auto joinAll = [&]() noexcept {
+                for (std::thread* t : { &inWriter, &outReader, &errReader })
+                {
+                    try
+                    {
+                        if (t->joinable())
+                        {
+                            t->join();
+                        }
+                    }
+                    catch (...)
+                    {
+                        LogSwallowedException(L"RunClaudeStreamJson (join)");
+                        if (t->joinable())
+                        {
+                            t->detach();
+                        }
+                    }
+                }
+            };
+            try
+            {
+                outReader = std::thread([&, pipe = outRead]() noexcept {
+                    try
+                    {
+                        std::string pending;
+                        std::vector<char> buffer(kReadChunkBytes);
+                        for (;;)
+                        {
+                            DWORD got = 0;
+                            if (!::ReadFile(pipe, buffer.data(), static_cast<DWORD>(buffer.size()), &got, nullptr) || got == 0)
+                            {
+                                return; // every writer is gone
+                            }
+                            if (done.load())
+                            {
+                                continue; // over: drain the rest so the child never blocks on a full pipe
+                            }
+                            pending.append(buffer.data(), got);
+                            size_t start = 0;
+                            for (;;)
+                            {
+                                const size_t nl = pending.find('\n', start);
+                                if (nl == std::string::npos)
+                                {
+                                    break;
+                                }
+                                std::string_view line{ pending.data() + start, nl - start };
+                                if (!line.empty() && line.back() == '\r')
+                                {
+                                    line.remove_suffix(1);
+                                }
+                                start = nl + 1;
+                                if (!done.load() && run.onLine && run.onLine(line))
+                                {
+                                    done.store(true);
+                                    ::SetEvent(doneEvent.h);
+                                }
+                            }
+                            pending.erase(0, start);
+                            if (pending.size() > 64 * 1024 * 1024)
+                            {
+                                pending.clear(); // a runaway line with no end: dropped, never an unbounded buffer
+                            }
+                        }
+                    }
+                    catch (...)
+                    {
+                        // Rule #18. Recovery: the conversation reads as over (its answer, if any, was already taken); the child ends.
+                        LogSwallowedException(L"RunClaudeStreamJson (stdout reader)");
+                        done.store(true);
+                        ::SetEvent(doneEvent.h);
+                    }
+                });
+                errReader = std::thread([&, pipe = errRead]() noexcept { DrainPipe(pipe, errBytes); });
+            }
+            catch (...)
+            {
+                // A reader could not start (std::system_error): the suspended child is ended, so a started reader reaches its end.
+                LogSwallowedException(L"RunClaudeStreamJson (readers)");
+                endChild(1);
+                joinAll();
+                r.error = L"its output could not be read";
+                return r;
+            }
+            ::ResumeThread(mainThread.h);
+            mainThread.reset();
+            try
+            {
+                // The input on a thread of its own: a child that never reads would block a plain write, and the timeout below
+                // must still end it. The write end stays open after the write (a closed input ends a stream-json claude).
+                inWriter = std::thread([&, pipe = inWrite]() noexcept {
+                    size_t offset = 0;
+                    while (offset < run.stdinUtf8.size())
+                    {
+                        DWORD wrote = 0;
+                        const DWORD chunk = static_cast<DWORD>(std::min<size_t>(run.stdinUtf8.size() - offset, 1 << 20));
+                        if (!::WriteFile(pipe, run.stdinUtf8.data() + offset, chunk, &wrote, nullptr) || wrote == 0)
+                        {
+                            return; // the child ended or closed its input
+                        }
+                        offset += wrote;
+                    }
+                });
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"RunClaudeStreamJson (writer)");
+                endChild(1);
+                joinAll();
+                r.error = L"its input could not be written";
+                return r;
+            }
+            HANDLE waits[2] = { doneEvent.h, process.h };
+            const DWORD waited = ::WaitForMultipleObjects(2, waits, FALSE, run.timeoutMs);
+            if (waited == WAIT_OBJECT_0)
+            {
+                r.done = true;
+                // Over: the input closes, so the child ends by itself (its session-end work) within the grace, else it is ended.
+                inWriteOwned.reset();
+                if (::WaitForSingleObject(process.h, run.exitGraceMs) == WAIT_OBJECT_0)
+                {
+                    DWORD code = 0;
+                    ::GetExitCodeProcess(process.h, &code);
+                    r.exitCode = code;
+                    r.exitedByItself = true;
+                }
+                if (job.h)
+                {
+                    ::TerminateJobObject(job.h, 0); // anything it started (MCP servers) ends with it
+                }
+                if (!r.exitedByItself)
+                {
+                    endChild(0);
+                }
+            }
+            else if (waited == WAIT_OBJECT_0 + 1)
+            {
+                // It ended before the conversation was over (a refusal at start, an unknown flag, a crash).
+                DWORD code = 0;
+                ::GetExitCodeProcess(process.h, &code);
+                r.exitCode = code;
+                r.exitedByItself = true;
+                if (job.h)
+                {
+                    ::TerminateJobObject(job.h, 0);
+                }
+            }
+            else
+            {
+                r.timedOut = true;
+                endChild(1);
+            }
+            inWriteOwned.reset(); // a writer still blocked returns once its pipe is broken (the child is gone)
+            joinAll();
+            r.done = r.done || done.load();
+            const std::wstring err = Utf8ToWideText(errBytes);
+            r.errTail = err.size() > 4096 ? err.substr(err.size() - 4096) : err;
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the run reads as failed; the RAII guards above closed every handle and ended the child.
+            LogSwallowedException(L"RunClaudeStreamJson");
             if (r.error.empty())
             {
                 r.error = L"it failed (hooks.log says why)";

@@ -4205,13 +4205,17 @@ namespace Agentmaster::Msg
         L"search", // §21.19: /search <words> asks the Search topic's agent from any topic; a bare /search jumps (kSearchCommand)
         L"steer", // §21.33: /steer <message> sends the words NOW, into a running turn too (kSteerCommand, MessagingSteer.h)
         L"download", // §21.32.4: /download <path>, a file's download link and "📤 Send as file" (Messaging.Files.cpp)
-        L"enter" // §21.47: /enter presses ONE Enter in the terminal, submitting the prompt that sits in its box (kEnterCommand, MessagingEnter.h)
+        L"enter", // §21.47: /enter presses ONE Enter in the terminal, submitting the prompt that sits in its box (kEnterCommand, MessagingEnter.h)
+        // §21.56: /btw <question> — a side question answered in the topic (MessagingBtw.h; the service takes it before this list is
+        // read, so these entries matter where a message is classified without it: the 🔎 Search topic refuses them as a session's).
+        L"btw", L"btw_clear", L"clear_btw"
     };
 
     // Claude Code commands that leave NO record in the session (§7.2, provisional until P0-19): run at
     // the PC. Reopening the session would show nothing of them, so they are not sent from a topic.
+    // /btw is not in this list: the topic answers it itself (§21.56, MessagingBtw.h), as a side question out of band.
     inline constexpr std::wstring_view kClaudeNoRecordCommands[] = {
-        L"reload-plugins", L"reload-skills", L"btw", L"config", L"status", L"help", L"hooks", L"permissions", L"memory",
+        L"reload-plugins", L"reload-skills", L"config", L"status", L"help", L"hooks", L"permissions", L"memory",
         L"mcp", L"tasks", L"workflows", L"diff", L"rewind", L"release-notes", L"skills", L"theme", L"tui", L"keybindings",
         L"scroll-speed", L"terminal-setup", L"voice", L"export", L"copy", L"heapdump", L"ide", L"chrome", L"login",
         L"logout", L"upgrade", L"usage-credits", L"privacy-settings", L"bug", L"feedback", L"install-github-app",

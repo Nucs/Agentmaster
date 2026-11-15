@@ -29,6 +29,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cwctype>
+#include <functional> // ClaudeStreamRun::onLine (MESSAGING.md §21.56)
 #include <mutex>
 #include <optional>
 #include <set>
@@ -922,6 +923,61 @@ namespace Agentmaster
     /// <param name="timeoutMs">How long it may run before it is ended.</param>
     /// <returns>What happened; never throws (a failure is in `error`).</returns>
     ClaudeCaptureResult RunClaudeCapture(const std::wstring& exe, const std::wstring& args, const std::wstring& workDir, uint32_t timeoutMs) noexcept;
+
+    /// <summary>
+    /// One CONVERSATION with a short-lived headless claude in stream-json mode (RunClaudeStreamJson; MESSAGING.md §21.56's
+    /// headless side question): what to start, what to write to its standard input, and when the conversation is over.
+    /// </summary>
+    struct ClaudeStreamRun
+    {
+        std::wstring exe; // the executable's full path (the engine's claude.exe)
+        std::wstring args; // the arguments, already quoted for a command line (QuoteClaudeArgument)
+        std::wstring workDir; // the child's working folder ("" = Agentmaster's own)
+        std::wstring harnessName; // the child's AM_HARNESS value (the Fleet Observer and the CLI skip it)
+        // Changes to the child's environment on top of BuildHarnessEnvironment's (UTF-8 name → value; an EMPTY value removes
+        // the variable). A provider key rides here: never log these.
+        std::vector<std::pair<std::string, std::string>> envChanges;
+        std::string stdinUtf8; // written to the child's standard input as soon as it runs; the input stays OPEN until the end
+        // Called on the reader thread with each complete line of standard output (UTF-8, without its line break); returns
+        // true when the conversation is over (the child is then asked to end). Must not throw (a throw ends the run).
+        std::function<bool(std::string_view line)> onLine;
+        uint32_t timeoutMs{ 60000 }; // how long the conversation may take before the child is ended
+        uint32_t exitGraceMs{ 8000 }; // after `onLine` said done: how long the child gets to end by itself once its input closes
+    };
+
+    /// <summary>What RunClaudeStreamJson saw.</summary>
+    struct ClaudeStreamResult
+    {
+        bool started{ false }; // CreateProcessW succeeded
+        bool done{ false }; // `onLine` said the conversation was over
+        bool timedOut{ false }; // it ran past timeoutMs and was ended (with everything it started)
+        bool exitedByItself{ false }; // the child ended on its own (before or within the grace after done)
+        uint32_t exitCode{ 0 }; // its exit code when it ended on its own
+        std::wstring errTail; // the last ~4 KB of its standard error (for a log line that names a cause)
+        std::wstring error; // why it did not start or run ("" otherwise)
+        int64_t tookMs{ 0 }; // from the start to the end (or to the kill)
+    };
+
+    /// <summary>
+    /// Runs a hidden headless claude for one stream-json conversation (ClaudeStatus.cpp): the same child as RunClaudeCapture —
+    /// hidden, in a kill-on-close job, only its three standard handles inherited, the harness environment (AM_HARNESS,
+    /// DISABLE_AUTOUPDATER=1, CLAUDE_CODE_DISABLE_AUTO_MEMORY=1) plus `envChanges` — but with its standard input a PIPE:
+    /// `stdinUtf8` is written at once (on a writer thread, so a child that never reads cannot block the caller), each line of
+    /// standard output goes to `onLine` as it arrives, and when `onLine` says done the input is closed, so the child ends by
+    /// itself within `exitGraceMs` (its SessionEnd work) or is ended with everything it started.
+    /// </summary>
+    /// <param name="run">What to run and when it is over.</param>
+    /// <returns>What happened; never throws (a failure is in `error`).</returns>
+    ClaudeStreamResult RunClaudeStreamJson(const ClaudeStreamRun& run) noexcept;
+
+    /// <summary>
+    /// Quotes one argument so the Microsoft C runtime's parser gives the child exactly `arg` (RunClaudeCapture's own rule:
+    /// backslashes are literal unless a quote follows them; an empty argument becomes "").
+    /// </summary>
+    /// <param name="arg">The argument's exact text.</param>
+    /// <returns>The text to put on the command line.</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    std::wstring QuoteClaudeArgument(std::wstring_view arg);
 
     /// <summary>
     /// Reads a transcript FILE into its status facts: the file is read in chunks while claude may append to it (shared read),

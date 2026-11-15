@@ -8142,6 +8142,201 @@ read `after an error`, `after an approval request`.
 8. The cog's switch off: no `owed` lines; on again: the next turn's end brings a picture.
 9. Several sessions ending within seconds: their reads go 10 s apart (the `reading the screen` stamps), and each picture lands.
 
+### 21.56 /btw — a side question about a session, answered in its topic while it works (2026-11-15; NOT BUILT — the next build must purge: `Messaging.h`'s `MessagingService` gained members)
+
+> The user's request (2026-11-15): "I need us to support /btw. Usually /btw and then there's a question, and in essence it
+> begins a sort of a fork that runs in the background and, bottom line, it yields an answer without any tools [...] /btw can
+> run while your session is running [...] it's enough to send a message with a /btw or just "by the way" at the beginning
+> [...] it should begin as it should be quoting the /btw question that I sent. The user can also /clear btw, /btw clear [...]
+> clearing the /btw conversation [...] it's very important when you do /btw it's probably going to write it somewhere to a
+> file, so look for a file [...] because it has some persistence I think."
+
+#### 21.56.1 What Claude Code's /btw is (2.1.322, read from its bundle and measured on this PC)
+
+- **An immediate local command** (it runs while a turn runs; its runner is `Rhn` in the bundle). It sends ONE side request:
+  the main thread's LAST request again (`cacheSafeParams`: its system prompt, tools, model and messages), then this
+  session's earlier btw exchanges as user / assistant message pairs, then one user message: a fixed `<system-reminder>`
+  ("This is a side question from the user. You must answer this question directly in a single response. [...] You have NO
+  tools available [...]") and the question. Every tool is denied (`canUseTool`), `maxTurns: 1`, its own tail is never
+  cached (`skipCacheWrite`) and nothing is written to the transcript (`skipTranscript`). Because the request repeats the
+  main thread's, the API serves the whole conversation from the prompt cache.
+- **Its persistence: none on disk.** The exchanges (the "btw thread") live in the running claude's memory,
+  `session.btwHistory`, the last 20. The CLI writes no file for them; `~/.claude/history.jsonl` records the typed
+  `/btw …` line the way it records every typed prompt, and the VS Code extension keeps its own copy. A restart forgets
+  the thread. So Agentmaster keeps Telegram's thread itself (§21.56.4).
+- **Two ways in from outside the TUI**, both Claude Code's own:
+  - the SDK's stream-json **`side_question` control request** `{question, history: [{question, response,
+    fallback_notice?}]}` — the same runner, the history turned into the same message pairs (its deadline: 660 s);
+  - the mod API's **`$.model.fork({prompt, effort?})`** — the same snapshot (the main thread's last request) plus one user
+    message, tools denied, its tail not cached, nothing in the transcript (`maxTurns` 2). It answers `nothing-to-fork`
+    until that claude has finished a request of its own (a resumed tab not yet prompted), and it takes ONE prompt, so the
+    earlier exchanges are folded into it instead of sent as message pairs. A mod cannot read the PC panel's own btw thread.
+
+#### 21.56.2 The cache, measured (the user's "confirm it forks cache hit so we dont waste tokens")
+
+| Way | Conversation | Read from the cache | Written | Time |
+|---|---|---|---|---|
+| In the session: `$.model.fork` through a probe mod | 548k tokens (a live session) | **548,147** | 899 | 8.3 s |
+| Headless: `claude -p --resume --fork-session` + `side_question` | 335k tokens (a live session, mid-turn) | **334,769** | 2,590 | 6 s |
+| In the session, a small conversation | a few k | — | — | 1.0 s |
+
+- Across processes, a fork of a TINY conversation reads only the tools + system prefix from the cache (~17.7k tokens) and
+  pays the rest as new input; repeating the identical request then hits fully. Trivial either way.
+- **The cache lives an hour** (the main thread writes its entries with `ttl: "1h"` on a subscription login; every
+  `api-request` line of 2.1.322 here carries it). Past that, a side question writes the WHOLE conversation again — so the
+  bot asks first (§21.56.4, the cost guard).
+- **A hazard found and closed:** the user's Claude Code settings set `CLAUDE_CODE_RESUME_INTERRUPTED_TURN` (and
+  Agentmaster's Global env ships it ON for tabs, ENV_VARS.md §8). With it, a headless `--resume --fork-session` of a BUSY
+  session CONTINUED the unfinished turn before answering — a read-only Bash call ran in the fork. The headless child now
+  runs with `--settings {"disableAllHooks": true, "env": {"CLAUDE_CODE_RESUME_INTERRUPTED_TURN": "0",
+  "CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS": "1", …}}` (a `--settings` value beats the settings files; a preset can
+  never override the two) and `--permission-mode dontAsk`.
+
+#### 21.56.3 The decisions (the user's, 2026-11-15)
+
+- First: "Learn how claude code does /btw and if we can have mods replicate 1-to-1 but not UI. Then suggest again." Then
+  **"Link mod + fallback"**: the session's own claude answers through the bundled `agentmaster-link` mod (the session
+  link's first slice, MOD_LINK.md §14), and a headless fork answers when the link cannot.
+- **The answer's look:** a reply to the question (Telegram quotes it) led by the header **`☁️ /btw · 14:02 · #2`** (the
+  number from the thread's second exchange on), the session's title row on line 2 (§21.54), then the answer.
+
+#### 21.56.4 How it works
+
+- **Reading a message** (`ParseBtwMessage`, `MessagingBtw.h`), FIRST in `_handleTopicMessage` — before a question card's
+  text and before any command reading, so a side question is never the session's next prompt and `/clear btw` never
+  reaches Claude Code's `/clear` (which would clear the session itself):
+  - `/btw <question>` (any case, a `@bot` suffix dropped, the question may span lines) → Ask;
+  - `/btw` alone → the usage (what it does, and how many exchanges this topic's thread holds);
+  - `/btw clear`, `/btw reset`, `/btw_clear`, `/clear_btw`, `/clear btw` → Clear (the whole rest must be the word:
+    `/btw clear up why X failed` is a question; `/clear` with anything else stays Claude Code's);
+  - a message that starts with the WORDS `btw` or `by the way`, followed by the end or a separator (`btw, …`, `By the way:
+    …`, `BTW — …`) → the same Ask / Usage / Clear (`btwhat …` and `by the wayside` are not);
+  - a message a new thread HELD (§21.25, written before its session existed) counts only as a typed `/btw`: its words
+    were meant for the session.
+  `btw`, `btw_clear` and `clear_btw` are in `kAgentmasterCommands` (never forwarded to Claude Code; `btw` left
+  `kClaudeNoRecordCommands`), `_runSessionCommand` has a belt for them, and the "/" menu lists `/btw` and `/btw_clear`.
+- **Refusals:** a Codex session ("this session runs Codex"); a session with no conversation yet ("Send it a message
+  first"). A fork that has no message of its own forks its SOURCE's transcript (the same conversation;
+  `ResolveClaudeDisplayTranscript`'s rule).
+- **The cost guard** (`SideQuestionCacheLikelyWarm`, `SideQuestion.h`): the cache is taken as warm while the session is
+  Running, or when the newer of its last parent request (`convApiActivityUnixMs`) and its last turn hook
+  (`lastTurnUnixMs`) is under an hour old; unknown timing reads as warm (no refusal on a guess). Cold: the bot asks
+  "This session's prompt cache has most likely expired: its last request was 2 h ago […]. This /btw would pay for the
+  whole conversation again (~548.1k tokens). Ask anyway?" with **☁️ Ask anyway** / **Cancel** (tokens valid 2 hours; the
+  question rides the button's payload with its message id, `btw-ask`).
+- **The queue** (`_startBtw`, `_pumpBtw`): the question gets 🤔 while it is answered; one question per session at a time
+  (its thread grows in order), at most two across the fleet (`kBtwMaxRunning`: each may be a headless claude); each runs
+  on a worker thread of its own; an Ask anyway tap's button stays busy until the answer (§21.28's tap hold).
+- **The asking** (`AskSideQuestion`, `SideQuestion.cpp`):
+  1. **In the session**, when its link is LIVE (MOD_LINK.md §14): the command `{kind: "fork", prompt}`, where the prompt is
+     the earlier exchanges folded into a `<system-reminder>` (numbered `<side_question>` / `<side_answer>` pairs, oldest
+     first, Claude Code's own substitutions applied: an answer that wrote tool calls as text, or one cut off, is replaced
+     by its stand-in), then Claude Code's side-question note VERBATIM (`kClaudeSideQuestionReminder`), then the question;
+     with no earlier exchange the message is exactly what `/btw` sends. The wait: up to 11 minutes (Claude Code's 660 s).
+     - answered → the answer;
+     - `nothing-to-fork` (no request of its own since it started), `aborted`, the mod's own failure, the link lost or not
+       there when the command went → the headless way;
+     - `api-error`, an empty reply → the error (the headless way would meet the same refusal, at the cost of a start);
+     - no answer within 11 minutes → the error, NOT the headless way (the fork may still run in the session: a second
+       would pay twice).
+  2. **Headless** (`AskHeadless`): a hidden child (`AM_HARNESS=claude-btw`, the harness environment, `DISABLE_AUTOUPDATER`,
+     `CLAUDE_CODE_DISABLE_AUTO_MEMORY`) — `claude -p --input-format stream-json --output-format stream-json --verbose
+     --resume <id> --fork-session --no-session-persistence --permission-mode dontAsk [--model <the transcript's
+     requestedModel, else the API's model>] [the preset's --effort, --append-system-prompt, extra args] --settings <§21.56.2>`
+     — sent the SDK's `initialize` and then the `side_question` request with the thread as `history`. The answer is its
+     `control_response`; an `api_retry` progress line is logged. Once answered its stdin closes and it gets 8 s to end by
+     itself; a child with no answer is ended at 12 minutes. A PRESET session's child gets the preset's settings env and
+     key (as `ANTHROPIC_AUTH_TOKEN`), so it reaches the same endpoint and model; a preset that cannot launch refuses the
+     question, never sends it to the Claude login.
+- **The reply** (`_runBtw`): a REPLY to the question (`SendPriority::Final`, a rich message with its HTML fallback):
+  - line 1, the header: **☁️ /btw** · `HH:MM` · `#n` (the `/btw` is written with a word joiner after the slash,
+    `kBtwWritten`, so Telegram draws text, never a tappable command that would send a bare `/btw`);
+  - line 2, the session's title row (`MarkdownTitleRowAfterHeader`, `WithTopicTitleRowAfterHeader`);
+  - a ⚠️ line with Claude Code's notice when a refusal fallback answered (another model);
+  - the answer, Claude's Markdown (cut at 30,000 characters with a note);
+  - the footer in italics — how it was answered and what it cost, on every answer: `in the session · 548.1k tokens from
+    the cache, 1.3k new · 8 s`, or `a headless fork (the session's claude has run no turn since it started …) · 6 s`
+    (the headless way reports no token counts), plus `· Claude Code's placeholder, not kept in the btw thread` for a
+    synthetic answer.
+  A failure answers `⚠️ /btw got no answer: <why>.` under the question.
+- **The btw thread** (`<profile>\btw\<session id>.json`, `SideQuestionThread*`): `{"version": 1, "sessionId", "exchanges":
+  [{question, response, fallbackNotice, askedAtMs, answeredAtMs, via: "link" | "headless", cacheReadTokens,
+  cacheWriteTokens}]}`, the last 20 (Claude Code's cap). Each answer is added by a read-modify-write of the freshest file
+  through `WriteStateDocument` (the state-file guard, the residue, the shadow: PERSISTENCE.md §15–§17); a file that cannot
+  be read is asked without and never written over (Rule #16); a synthetic answer is shown, never kept. A clear deletes the
+  file (`ClearSideQuestionThread`, `ForgetStateDocument`) and says how many exchanges went. The thread survives a restart
+  (Claude Code's own does not). It is Telegram's alone: the PC's `/btw` panel keeps its own thread in that claude's
+  memory, and neither sees the other's.
+- **The link's env** reaches every managed launch (MOD_LINK.md §14). With agentmaster-link switched off in the cog
+  (BUNDLED_MODS.md §5), or a Claude Code older than 2.1.322, every question goes the headless way.
+
+#### 21.56.5 What it costs
+
+- **A side question:** the conversation read from the cache and ~1–3k tokens written (§21.56.2); the headless way adds a
+  claude start (a few seconds, ~0.4 GB while it runs). Past the cache's hour: the whole conversation written again, which
+  the cost guard asks about first.
+- **The link, idle:** one held loopback request per linked claude, answered empty every 5 s (MOD_LINK.md §14.3).
+- **Telegram:** one reply per question (and the usage, clear and cold-cache answers), at an answer's priority.
+
+#### 21.56.6 Logs
+
+- `[nav] remote telegram /btw <sid8> chars=N -> queued | queued (asked anyway) | asked:cold-cache | refused:unknown |
+  refused:not-claude | refused:no-conversation | answered:link | answered:headless | failed`, `… -> usage (N in the
+  thread)`, `remote telegram /btw clear <sid8> -> cleared N | failed`.
+- `[msg] <sid8> btw from topic (message N) answered via link | headless in N ms (N chars, #n[; cache read N, written N][;
+  not in the session: <why>])` · `[msg] <sid8> btw from topic (message N): no answer via … in N ms: <why>` · `[msg] <sid8>
+  btw thread cleared from topic (N exchange(s) | failed)` · `[msg] <sid8> btw answer not kept in the btw thread (…)`.
+- `[btw] in-session fork of <sid8>: answered | timed-out | lost | … in N ms[, N chars][; cache read N, cache write N,
+  input N, output N[, effort E]][; <why not>]` · `[btw] headless fork of <sid8> [(its source <sid8>)]: N chars | no
+  answer, <why> in N ms; model M[, preset]; child ended by itself | ended by us` · `[btw] headless fork of <sid8>: API
+  retry N (HTTP S)` · the thread file's `could not be read`, `does not parse`, `could not be deleted`.
+- `[link] listening on 127.0.0.1:<port> (protocol 1)` · `hello from <sid8> [(launched as <sid8>)]: mod 0.1.0, Claude Code
+  2.1.322` · `not started: …` (MOD_LINK.md §14.2).
+
+#### 21.56.7 The code, the tests, what was checked
+
+- **Code.** `MessagingBtw.h` (pure: `ParseBtwMessage`, the texts, `kBtwWritten`); `Messaging.Btw.cpp` (`_takeBtwMessage`,
+  `_askBtw`, `_startBtw`, `_pumpBtw`, `_runBtw`) with `Messaging.h`'s `BtwJob`, `_btwMtx`, `_btwQueue`, `_btwRunning`,
+  `kBtwMaxRunning`; `Messaging.Inbound.cpp` (the take in `_handleTopicMessage`, the `btw-ask` button, the command belt, the
+  `/help` line); `Messaging.cpp` (the "/" menu); `MessagingModels.h` (the command lists); `SideQuestion.h` (pure: the
+  thread and its document, Claude Code's framing, the fork prompt, the headless lines and their reader, the `--settings`
+  value, the cost guard, the fork result's reading) + `SideQuestion.cpp` (the files, the headless way, the router);
+  `ClaudeStatus.{h,cpp}` (`RunClaudeStreamJson`: a hidden claude fed on stdin, read line by line until done;
+  `QuoteClaudeArgument`); the session link (MOD_LINK.md §14.4); `TerminalPage.AgentEngine.cpp` (the preset lookup for a
+  headless fork).
+- **Tests.** `TestSideQuestion` (`tests_side_question.cpp`): the thread's cap and its file's round trip; the fork prompt
+  (Claude Code's note verbatim, the folded history, the stand-ins); the headless stdin lines and the reader of every
+  stdout line kind; the `--settings` value (the two switches win over a preset); the cost guard; the fork result's
+  outcomes and which fall back; every form of `/btw` and the held-message rule; the texts (the header with no command
+  link, the footers, the token counts, the cold-cache question, escaping); the session link for real over loopback (see
+  MOD_LINK.md §14.4); the stream runner with Windows PowerShell (stdin written, lines read until done, the child ending by
+  itself) and cmd.exe (a child that never answers is ended at its timeout). `TestBundledMods` expects the third mod. The
+  mod: `claude plugin test` (11 tests), `claude plugin validate --strict`.
+- **Checked** (2026-11-15, HEAD 8c6f00ce8 + this change, nothing built): the isolated m5 suite — 13,428 checks, only the
+  3 known `TestTaskbarBadge` failures; `cl /Zs` with TerminalAppLib's recorded Release line (/W3 /WX + the `/we` list) on the ten
+  units this change touches (`SessionLink.cpp`, `SideQuestion.cpp`, `Messaging.Btw.cpp` with a sibling's line,
+  `ClaudeStatus.cpp`, `ClaudeSpawn.cpp`, `AgentHarnessCore.cpp`, `Messaging.Inbound.cpp`, `Messaging.cpp`,
+  `BundledMods.cpp`, the PCH unit `TerminalPage.AgentEngine.cpp`): all pass; `ClaudeSpawn.cpp` and `SessionRegistry.cpp`
+  with the CLI's line, and `ClaudeSpawn.cpp` with the session database's (both /W4 /WX): pass; controls fail as they must
+  (a probe on the new `kSideQuestionThreadMax` passes when right and fails C2338 when wrong; an unused parameter and an
+  unused local → C4100 + C4189). The cache figures of §21.56.2 come from live probes against Claude Code 2.1.322 on this
+  PC (a probe mod and headless runs on real sessions); nothing was tried through Telegram.
+
+**Check after the build** (the dev bot; `hooks.log`):
+1. In a running session's topic: `/btw what are you working on?` — 🤔 on the message, then a reply quoting it, headed
+   `☁️ /btw · HH:MM`, the title row, the answer, the footer `in the session · …k tokens from the cache, … new · N s`; the
+   session's turn goes on (its transcript gains nothing).
+2. `btw, which file was it?` and `By the way: …` — the same; `#2`, `#3` in the header; the answer knows the earlier ones.
+3. `/btw` alone — the usage with the thread's count; `/btw clear` or `/clear btw` — "cleared (N exchanges forgotten)", and
+   the session is NOT cleared; the next `/btw` has no number.
+4. A tab resumed and not yet prompted: the footer says `a headless fork (the session's claude has run no turn since it
+   started …)`.
+5. A session idle for more than an hour: the cold-cache question; Cancel; then Ask anyway answers.
+6. The cog's agentmaster-link switch off, restart the tab: answers come `a headless fork (no live link …)`.
+7. A preset session: the headless answer comes from the preset's model (`[btw] … model …, preset`).
+8. Restart Agentmaster: the thread survives (`#n` continues).
+9. `hooks.log`: `[link] listening …`, a `hello from <sid8>` per started tab, and no token in any line.
+
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
 > The user's questions (2026-10-17, session 0b1f8635): "Lets discover how can we make forums/groups to: Can you make groups

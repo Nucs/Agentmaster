@@ -262,6 +262,13 @@
          layout (MessagingStatus.h, header-only, pure). -->
     <ClInclude Include="AgentMaster\ClaudeStatus.h" />
     <ClInclude Include="AgentMaster\MessagingStatus.h" />
+    <!-- Agentmaster (MESSAGING.md section 21.56, MOD_LINK.md): /btw, a side question about a session answered in its topic -
+         the side question's pure half (SideQuestion.h: the btw thread, Claude Code's framing, the headless lines, the cost
+         guard; + the OS half's declarations), the session link's protocol and hub (SessionLink.h; + the server's declarations)
+         and the topic's forms and texts (MessagingBtw.h, header-only, pure). -->
+    <ClInclude Include="AgentMaster\SideQuestion.h" />
+    <ClInclude Include="AgentMaster\SessionLink.h" />
+    <ClInclude Include="AgentMaster\MessagingBtw.h" />
     <!-- Agentmaster (MESSAGING.md section 21.32.4): the Telegram FILE LINKS - the pure rules (the link, the session key, the
          linked set, the request parsing; header-only) and the server's interface (no Windows header). -->
     <ClInclude Include="AgentMaster\MessagingFileLinks.h" />
@@ -654,6 +661,18 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\ClaudeStatus.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <!-- Agentmaster (MESSAGING.md section 21.56, MOD_LINK.md): /btw - the service's side-question workers (Messaging.Btw.cpp),
+         the asking and the btw thread files (SideQuestion.cpp: the session's own claude through the link, else a headless
+         fork), and the session link's loopback server (SessionLink.cpp: Winsock, 127.0.0.1 only). Plain C++, no PCH. -->
+    <ClCompile Include="AgentMaster\Messaging.Btw.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\SideQuestion.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\SessionLink.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <!-- Agentmaster (MESSAGING.md section 21.32.4): the service's FILE LINKS - the linked set, the session keys, the server's

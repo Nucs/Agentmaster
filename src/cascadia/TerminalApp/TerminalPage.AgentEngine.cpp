@@ -53,6 +53,8 @@
 #include "AgentMaster/LaunchPresetsOs.h" // MESSAGING.md §21.25 — LaunchMenuEntries / ShouldOfferAddPresets: the bot wizard's model step
 #include "AgentMaster/Persistence.h" // Load/SaveAppSettings
 #include "AgentMaster/ProcessObserver.h" // UnpublishWindow (teardown; Rule #10)
+#include "AgentMaster/SessionLink.h" // MOD_LINK.md — the session link's server and its launch env provider (started below)
+#include "AgentMaster/SideQuestion.h" // MESSAGING.md §21.56 — the side question's preset lookup (set below)
 #include "AgentMaster/Scheduler.h" // SetGlobalPause / GlobalPaused + the global-pause observer (the Manager's Pause button, DELIVERY.md §17)
 #include "AgentMaster/SessionRegistry.h" // adoption-handler + registry-observer tokens
 #include "AgentMaster/SessionScanner.h" // liveness-probe token
@@ -1454,6 +1456,74 @@ namespace winrt::TerminalApp::implementation
         {
             static std::once_flag bundledModsOnce;
             std::call_once(bundledModsOnce, [] { ::Agentmaster::SetBundledModArgsProvider(&::Agentmaster::BundledModPluginArgs); });
+        }
+
+        // Agentmaster (MOD_LINK.md, MESSAGING.md §21.56): the SESSION LINK — the loopback server the bundled agentmaster-link
+        // mod in each Claude tab polls, so Agentmaster can ask a session's own claude for things (first: Telegram's /btw, a
+        // side question answered from the session's prompt cache). Started before any tab launches (the window restore runs
+        // after this init), so every launch from here on carries AM_LINK + its token; a server that cannot start leaves the
+        // provider unset and every side question goes the headless way. Also the side question's preset lookup: the headless
+        // fork of a preset session must reach the preset's endpoint with its key (LaunchPresetsOs.h is this layer's alone).
+        // Once per process: the server and both providers are process-wide.
+        {
+            static std::once_flag sessionLinkOnce;
+            std::call_once(sessionLinkOnce, [] {
+                try
+                {
+                    // An Agentmaster started from a LINKED tab (a dev instance run from a production tab's shell) inherits that
+                    // tab's AM_LINK + AM_LINK_TOKEN: the other instance's server, and a token registered there for another
+                    // session. Dropped from this process's environment before anything here launches, so no tab, harness or
+                    // worker this process starts can reach the other instance's link (and move its record to one of our
+                    // session ids, the hub's /clear rule): a launch of ours carries its own link, or none when the server
+                    // below cannot start. SetEnvironmentVariableW with nullptr deletes; a missing variable is no error.
+                    ::SetEnvironmentVariableW(std::wstring{ ::Agentmaster::Link::kLinkEndpointEnv }.c_str(), nullptr);
+                    ::SetEnvironmentVariableW(std::wstring{ ::Agentmaster::Link::kLinkTokenEnv }.c_str(), nullptr);
+                    std::wstring error;
+                    if (::Agentmaster::Link::SharedSessionLink().Start(error))
+                    {
+                        ::Agentmaster::SetSessionLinkEnvProvider(&::Agentmaster::Link::SessionLinkLaunchEnv);
+                    }
+                    ::Agentmaster::SetSideQuestionLaunchProvider([](const std::wstring& sessionId, const std::wstring& workDir) noexcept {
+                        ::Agentmaster::SideQuestionLaunchExtras extras;
+                        try
+                        {
+                            const auto stored = ::Agentmaster::LoadStoredLaunchArgs(sessionId);
+                            if (!stored)
+                            {
+                                return extras; // launched on Default: the Claude login, no preset
+                            }
+                            ::Agentmaster::CompiledClaudeLaunch compiled;
+                            std::wstring error;
+                            extras.hasPreset = true;
+                            if (!::Agentmaster::CompileLaunchForSpawn(*stored, ::Agentmaster::LoadAppSettings(), workDir, compiled, error))
+                            {
+                                extras.error = error.empty() ? std::wstring{ L"the preset could not be compiled" } : error;
+                                return extras;
+                            }
+                            extras.model = compiled.model;
+                            extras.effort = compiled.effort;
+                            extras.appendSystemPrompt = compiled.appendSystemPrompt;
+                            extras.extraArgs = compiled.extraArgs;
+                            extras.settingsEnv = compiled.settingsEnv;
+                            extras.processEnv = compiled.processEnv;
+                            extras.authTokenEnv = compiled.authTokenEnv;
+                        }
+                        catch (...)
+                        {
+                            // Rule #18. Recovery: refuse rather than guess — a preset session's side question must never go to
+                            // the Claude login by mistake.
+                            ::Agentmaster::AgentLogCaughtException(L"side question: the session's preset");
+                            extras.hasPreset = true;
+                            extras.error = L"the session's preset could not be read (hooks.log says why)";
+                        }
+                        return extras;
+                    });
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"session link: start");
+                }
+            });
         }
 
         // Agentmaster (System notifications; NOTIFICATIONS.md §4a): register the TOAST COM ACTIVATOR

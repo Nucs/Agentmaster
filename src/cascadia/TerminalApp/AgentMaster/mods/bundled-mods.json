@@ -1,5 +1,5 @@
 {
-  "$comment": "The Claude Code mods Agentmaster ships inside TerminalApp.dll and loads into every Claude tab it launches (doc/agentmaster/BUNDLED_MODS.md). Listed in --plugin-dir order. After editing a mod here, or this file, run `python tools/bundled-mods/bundled_mods.py gen`; to take a newer copy from the source folder, `sync` first. minClaudeCode is the oldest Claude Code that runs the mod (Agentmaster passes it only to a claude.exe at least that new); summary is the line the cog's Claude tab shows.",
+  "$comment": "The Claude Code mods Agentmaster ships inside TerminalApp.dll and loads into every Claude tab it launches (doc/agentmaster/BUNDLED_MODS.md). Listed in --plugin-dir order. After editing a mod here, or this file, run `python tools/bundled-mods/bundled_mods.py gen`; to take a newer copy from the source folder, `sync` first. minClaudeCode is the oldest Claude Code that runs the mod (Agentmaster passes it only to a claude.exe at least that new); summary is the line the cog's Claude tab shows. A mod whose \"source\" is \"repo\" is Agentmaster's own: its folder here IS its source, and `sync` leaves it alone.",
   "source": "~/.claude/mods",
   "mods": [
     {
@@ -11,6 +11,12 @@
       "name": "better-verbose-bash",
       "minClaudeCode": "2.1.308",
       "summary": "In verbose views (--verbose, Verbose output, ctrl+o), the reason given for a shell call becomes its row's header."
+    },
+    {
+      "name": "agentmaster-link",
+      "source": "repo",
+      "minClaudeCode": "2.1.322",
+      "summary": "Links the tab to Agentmaster so Telegram's /btw is answered inside the session from its prompt cache (off: a headless fork answers)."
     }
   ]
 }

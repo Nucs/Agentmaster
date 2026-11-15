@@ -1,0 +1,6 @@
+{
+  "name": "agentmaster-link",
+  "version": "0.1.0",
+  "author": { "name": "Eli Belash" },
+  "description": "Links a Claude Code session that Agentmaster launched back to Agentmaster, so Agentmaster can ask the session's own claude a side question (Telegram's /btw) answered from its prompt cache, exactly the way Claude Code's /btw forks the conversation: every tool denied, nothing written to the transcript. Draws nothing, hooks no tool or keystroke, and does nothing at all in a session Agentmaster did not launch."
+}

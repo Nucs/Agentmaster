@@ -5260,6 +5260,8 @@ namespace Agentmaster::Msg
                     { L"queue", L"the queued prompts (session topic)" },
                     { L"sendnow", L"send the next queued prompt now" },
                     { L"steer", L"send a message NOW, into a running turn too: /steer <text>" }, // §21.33
+                    { L"btw", L"a side question about the session, answered here while it works: /btw <question>" }, // §21.56
+                    { L"btw_clear", L"start the /btw thread over" }, // §21.56
                     { L"enter", L"press Enter at the PC: submit the prompt waiting in the input box" }, // §21.47
                     { L"runner", L"runner auto|paused" },
                     { L"pin", L"never idle: keep this topic" },

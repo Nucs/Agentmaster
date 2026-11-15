@@ -157,8 +157,11 @@ void TestBundledMods()
 
     // ---- the embedded catalog against its own bytes ----
     const auto& catalog = BundledModCatalog();
-    CHECK(catalog.size() == 2, "bundled: two mods ship");
-    CHECK(catalog.size() == 2 && catalog[0].name == L"file-links" && catalog[1].name == L"better-verbose-bash", "bundled: file-links, then better-verbose-bash (the --plugin-dir order)");
+    // MESSAGING.md §21.56: agentmaster-link (Agentmaster's own mod, the session link's end in each tab) joined the two vendored ones.
+    CHECK(catalog.size() == 3, "bundled: three mods ship");
+    CHECK(catalog.size() == 3 && catalog[0].name == L"file-links" && catalog[1].name == L"better-verbose-bash" && catalog[2].name == L"agentmaster-link",
+          "bundled: file-links, better-verbose-bash, then agentmaster-link (the --plugin-dir order)");
+    CHECK(catalog.size() == 3 && catalog[2].minClaudeCode == L"2.1.322", "bundled: the link needs Claude Code 2.1.322 (the $.model.fork it was measured on)");
     for (const auto& mod : catalog)
     {
         const auto files = BundledModFiles(mod.name);
@@ -309,7 +312,7 @@ void TestBundledMods()
             CHECK(exact, "disk: every file holds the embedded bytes");
             CHECK(CountNamed(std::filesystem::path{ stateDir } / L"mods" / mod.name, L".tmp-") == 0, "disk: no temporary folder is left behind");
         }
-        if (first.size() == 2)
+        if (first.size() == catalog.size() && first.size() >= 2)
         {
             const std::filesystem::path fileLinks = first[0].folder;
             const auto registerTs = fileLinks / L"hooks" / L"register.ts";
@@ -317,7 +320,7 @@ void TestBundledMods()
             // Claude Code writes its types into a folder it loads: a file of its own must not count as damage.
             CHECK(WriteText(fileLinks / L".claude-plugin" / L"types" / L"claude-code" / L"index.d.ts", "declare module 'claude-code' {}"), "disk: (setup) a types file of Claude Code's");
             const auto again = MaterializeBundledModsIn(stateDir);
-            CHECK(again.size() == 2 && again[0].folder == first[0].folder && again[1].folder == first[1].folder, "disk: a second run answers the same folders");
+            CHECK(again.size() == first.size() && again[0].folder == first[0].folder && again[1].folder == first[1].folder, "disk: a second run answers the same folders");
             CHECK(std::filesystem::last_write_time(registerTs, ec) == before, "disk: an intact folder is not rewritten");
             CHECK(std::filesystem::exists(fileLinks / L".claude-plugin" / L"types" / L"claude-code" / L"index.d.ts"), "disk: Claude Code's own files are left alone");
             // Damage: one file changed, one deleted.
@@ -330,7 +333,7 @@ void TestBundledMods()
             {
                 restored = restored && ReadText(fileLinks / std::filesystem::path{ f.path }.make_preferred()) == f.bytes;
             }
-            CHECK(repaired.size() == 2 && repaired[0].folder == first[0].folder && restored, "disk: a changed file and a deleted one are written back");
+            CHECK(repaired.size() == first.size() && repaired[0].folder == first[0].folder && restored, "disk: a changed file and a deleted one are written back");
         }
         // A profile whose mods folder cannot be made (a FILE sits where it would go) leaves every folder "".
         const std::wstring blocked = (scratch / L"blocked").wstring();
@@ -371,7 +374,9 @@ void TestBundledMods()
 
         useConfig(L"none", "");
         auto c = ChooseBundledMods(stateDir, settings, claude, (scratch / L"project-none").wstring(), false);
-        CHECK(c.size() == 2 && ChoiceFor(c, L"file-links").verdict == BundledModVerdict::Loads && ChoiceFor(c, L"better-verbose-bash").verdict == BundledModVerdict::Loads, "choose: nothing of the user's -> both load");
+        CHECK(c.size() == catalog.size() && ChoiceFor(c, L"file-links").verdict == BundledModVerdict::Loads && ChoiceFor(c, L"better-verbose-bash").verdict == BundledModVerdict::Loads &&
+                  ChoiceFor(c, L"agentmaster-link").verdict == BundledModVerdict::Loads,
+              "choose: nothing of the user's -> every mod loads");
         CHECK(ChoiceFor(c, L"file-links").folder.empty(), "choose: a preview names no folder and writes none");
         CHECK(DescribeBundledModChoice(ChoiceFor(c, L"better-verbose-bash")) == L"better-verbose-bash " + catalog[1].version + L" loads", "choose: the loaded sentence");
 
@@ -444,12 +449,12 @@ void TestBundledMods()
         CHECK(fakeClaude.commandline.find(L"--plugin-dir") == std::wstring::npos, "seam: the provider with an unreadable claude version -> no --plugin-dir (the pinned command lines elsewhere stay byte-identical)");
         const auto withMods = BuildClaudeRestartSpec(L"K:/work/api", L"api", L"\\\\.\\pipe\\agentmaster.42", rid, rst, claude);
         const auto& folders = EnsureBundledModsMaterialized(AgentmasterStateDir());
-        bool both = folders.size() == 2;
+        bool both = folders.size() == catalog.size();
         for (const auto& m : folders)
         {
             both = both && !m.folder.empty() && withMods.commandline.find(L"--plugin-dir \"" + ToForwardSlashes(m.folder) + L"\"") != std::wstring::npos;
         }
-        CHECK(both, "seam: the app's provider puts both folders on a restart's command line");
+        CHECK(both, "seam: the app's provider puts every mod's folder on a restart's command line");
         const auto settingsAt = withMods.commandline.find(L"--settings \"");
         CHECK(settingsAt != std::wstring::npos && withMods.commandline.find(L"--plugin-dir") > settingsAt, "seam: after the base form");
         const std::string log = ReadText(std::filesystem::path{ AgentmasterStateDir() } / L"hooks.log");

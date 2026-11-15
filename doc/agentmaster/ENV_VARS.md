@@ -24,7 +24,9 @@ We don't fight Windows env inheritance — **we ride it**:
 2. Our **per-spawn overrides** are layered on top (`environment.set_user_environment_var(...)`), so a
    variable we set **wins** over an inherited same-named one. WT also injects `WT_SESSION` /
    `WT_PROFILE_ID`; we add `AM_SESSION` (ownership stamp) and, for Claude, `CCMGR_SESSION_ID` /
-   `CCMGR_HOOK_PIPE` (hook correlation).
+   `CCMGR_HOOK_PIPE` (hook correlation) and, while the session link's server runs, `AM_LINK` (its
+   `http://127.0.0.1:<port>`) / `AM_LINK_TOKEN` (32 hex digits minted for that launch; never logged or saved) for
+   the bundled agentmaster-link mod ([`MOD_LINK.md`](./MOD_LINK.md) §14).
 3. The direct child is **pwsh**; `claude`/`codex` run as its **descendants** and inherit the block by
    normal process-tree inheritance. So the merged env reaches the agent unchanged.
 
@@ -46,8 +48,13 @@ process block, and ConPTY lets us layer per-spawn overrides on top of it. No reg
 Effective env for a session spawned in `dir`, most-specific wins:
 
 ```
-Agentmaster process block  →  Global (AppSettings.env)  →  Per-dir (dir-env.json[NormDirKey(dir)])  →  CCMGR_*/AM_SESSION (ours)
+Agentmaster process block  →  Global (AppSettings.env)  →  Per-dir (dir-env.json[NormDirKey(dir)])  →  CCMGR_*/AM_SESSION (ours)  →  AM_LINK/AM_LINK_TOKEN (ours, last)
 ```
+
+- `AM_LINK` / `AM_LINK_TOKEN` are appended after everything else (`AppendSessionLinkEnv`), so a Global or
+  Per-directory entry of the same name never replaces a launch's own token. Agentmaster drops an inherited pair from
+  its own process block at start (an instance started from another instance's linked tab), so a launch carries its
+  own link or none.
 
 - Per-dir entries **override** a global entry of the same name (Windows env names are
   case-**insensitive**, so the match is too). Within one block, the **last** assignment of a name wins.

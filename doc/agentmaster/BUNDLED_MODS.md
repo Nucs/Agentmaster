@@ -8,9 +8,12 @@ Claude Code session; Agentmaster ships them so its tabs have them without an ins
 |---|---|---|---|
 | **file-links** | 0.4.1 | Claude Code 2.1.287 | Draws the file paths and file names in Claude's replies as clickable `file:///` links (OSC 8; Windows Terminal draws them), only for names it finds: on disk, among the files the session touched, in its scratchpad, in its git index. Display only. `/file-links` reports what it knows. |
 | **better-verbose-bash** | 0.1.1 | Claude Code 2.1.308 | In the views that draw a shell call in full (`--verbose`, Verbose output in `/config`, ctrl+o), the reason the model gave for the call becomes the row's bulleted header, over `Bash(command)`. Display only. |
+| **agentmaster-link** | 0.1.0 | Claude Code 2.1.322 | The tab's end of the **session link** ([`MOD_LINK.md`](MOD_LINK.md) §14): it polls Agentmaster's loopback server (`AM_LINK`, `AM_LINK_TOKEN`, set per launch) and runs what Agentmaster asks of the session's own claude — so far Telegram's `/btw` side question, through Claude Code's `$.model.fork` (MESSAGING.md §21.56). Draws nothing; hooks only `session.start`; does nothing in a claude Agentmaster did not launch. |
 
-Their source is the owner's mods folder (`~/.claude/mods/<name>`, a git repository of its own, where each one's
-README is the full reference); the repository keeps a vendored copy (§7).
+The first two come from the owner's mods folder (`~/.claude/mods/<name>`, a git repository of its own, where each
+one's README is the full reference); the repository keeps a vendored copy (§7). **agentmaster-link** is Agentmaster's
+own: its source IS the repository's copy (`"source": "repo"` in the manifest, which `sync` leaves alone), with its
+README beside it.
 
 ## 1. What a launch does
 
@@ -23,8 +26,14 @@ fresh / resume / fork form:
 ```
 "<claude.exe>" --dangerously-skip-permissions --resume <id> --settings "<hooks file>"
     --plugin-dir "C:/Users/me/.agentmaster/mods/file-links/0.4.1-8d36d97c"
-    --plugin-dir "C:/Users/me/.agentmaster/mods/better-verbose-bash/0.1.1-ddeb9b00" [--model …] [preset args] ["prompt"]
+    --plugin-dir "C:/Users/me/.agentmaster/mods/better-verbose-bash/0.1.1-ddeb9b00"
+    --plugin-dir "C:/Users/me/.agentmaster/mods/agentmaster-link/0.1.0-8c83784b" [--model …] [preset args] ["prompt"]
 ```
+
+The same builders add the session link's two variables to the launch's environment (`AppendSessionLinkEnv`, through
+the link's own provider, `SetSessionLinkEnvProvider`): `AM_LINK` and a token minted for that launch, `AM_LINK_TOKEN`.
+Every launch gets them while the link's server runs, whether agentmaster-link loads or not; without the mod nothing
+reads them (MOD_LINK.md §14).
 
 The decision is made per launch and per mod (`ChooseBundledMods`), never stored with the session, so a resume always
 gets the current build's mods. In order:
@@ -41,7 +50,7 @@ gets the current build's mods. In order:
 Each launch writes one line to `hooks.log`:
 
 ```
-[mods] 5b0c3d1e file-links 0.4.1 stands aside: Claude Code loads your own file-links@claude-mods (user settings); better-verbose-bash 0.1.1 loads
+[mods] 5b0c3d1e file-links 0.4.1 stands aside: Claude Code loads your own file-links@claude-mods (user settings); better-verbose-bash 0.1.1 loads; agentmaster-link 0.1.0 loads
 ```
 
 Only the app sets the provider. The other programs that compile `ClaudeSpawn.cpp` (the CLI, the session database, the
@@ -111,7 +120,9 @@ what the next launch does with each (a preview from the switches' positions: the
 `claude.exe`; nothing is written). `AppSettings::bundledModsOff` holds the names switched off; empty — the default, and
 every `settings.json` from before the feature — loads them all. A name this build does not ship is kept on Save, so a
 newer build's mod turned off stays off. A Save applies to the next launch, resume or restart; an open tab keeps the
-mods it started with.
+mods it started with. With **agentmaster-link** off (or not loaded: a Claude Code older than 2.1.322, the user's own
+copy), a tab still gets its link variables, nothing answers them, and Telegram's `/btw` is answered by a headless fork
+instead of the session's own claude (MESSAGING.md §21.56).
 
 ## 6. Measured (Claude Code 2.1.310, 2026-11-02)
 
@@ -142,7 +153,10 @@ python tools/bundled-mods/bundled_mods.py gen     # write BundledModsData.h (C++
 python tools/bundled-mods/bundled_mods.py check   # exit 1 when the header is stale
 ```
 
-- Test a mod itself with its own kit: `claude plugin test <mod folder>` and `claude plugin validate --strict <mod folder>`.
+- **agentmaster-link** is edited where it is (`mods/agentmaster-link/`), then `gen`: `sync` skips a mod whose manifest
+  entry says `"source": "repo"`.
+- Test a mod itself with its own kit: `claude plugin test <mod folder>` and `claude plugin validate --strict <mod folder>`
+  (agentmaster-link: 11 tests, and `--strict` passes).
 - `TestBundledMods` (the m5 harness, `tests_bundled_mods.cpp`) recomputes each embedded mod's hash, so a header that no
   longer matches its recorded hash fails there.
 - To ship another mod: add it to the manifest with its minimum Claude Code and summary, `sync`, `gen`, and give it a
@@ -154,9 +168,10 @@ python tools/bundled-mods/bundled_mods.py check   # exit 1 when the header is st
 |---|---|
 | `AgentMaster/BundledMods.{h,cpp}` | The catalog, the embedded files, the pure rules (versions, `enabledPlugins`, `CLAUDE_CODE_PLUGIN_DIRS`, the arguments), the folders, the per-launch choice, the provider. |
 | `AgentMaster/BundledModsData.h` | GENERATED: every runtime file of each mod as C++ literals, with its name, version, minimum, summary and hash. |
-| `AgentMaster/mods/` | The vendored mods and `bundled-mods.json`. |
-| `tools/bundled-mods/bundled_mods.py` | `sync`, `gen`, `check`. |
-| `ClaudeSpawn.{h,cpp}` | `BuildClaudeCommandline`'s `pluginArgs`, the provider seam (`BundledModArgsProvider`, `SetBundledModArgsProvider`), its call in both builders. |
-| `TerminalPage.AgentEngine.cpp` | Sets the provider once per process. |
+| `AgentMaster/mods/` | The vendored mods, agentmaster-link's own source, and `bundled-mods.json`. |
+| `tools/bundled-mods/bundled_mods.py` | `sync` (skips `"source": "repo"`), `gen`, `check`. |
+| `ClaudeSpawn.{h,cpp}` | `BuildClaudeCommandline`'s `pluginArgs`, the provider seam (`BundledModArgsProvider`, `SetBundledModArgsProvider`), its call in both builders; the session link's env seam (`SessionLinkEnvProvider`, `SetSessionLinkEnvProvider`, `AppendSessionLinkEnv`). |
+| `AgentMaster/SessionLink.{h,cpp}` | The server agentmaster-link polls (MOD_LINK.md §14). |
+| `TerminalPage.AgentEngine.cpp` | Sets the providers once per process; starts the link's server. |
 | `AgentManagerContent.Settings.cpp` | The Claude tab's switches and status line. |
 | `tests/tests_bundled_mods.cpp` | `TestBundledMods`. |

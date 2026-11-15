@@ -50,7 +50,10 @@ with a local-time `[HH:MM:SS.mmm]` stamp (only at a line boundary, so a partial 
    `[retired-host]`, `[restore-wake]`, `[api-error-rewind]`, `[interrupt-rewind]`, `[fork-stop]`, `[auto-restart]` (the
    automatic restart after a cut-off response or a temporary API failure: its gates, a temporary failure's back-off, the
    restart, healed / not healed — HOOKS.md *Connection lost mid-response — the automatic restart*), `[notify-release]` (a
-   toast that restart held, shown after all);
+   toast that restart held, shown after all), `[link]` (the session link's server: `listening on 127.0.0.1:<port>`, each
+   tab's mod saying `hello`, `not started: …`; MOD_LINK.md §14 — a link's token is never written), `[btw]` (a side
+   question's way: the in-session fork's outcome with its cache use, or the headless fork's answer, model and child;
+   MESSAGING.md §21.56.6);
    - **the UI thread's health** (every window shares one UI thread, so these speak for all of them): `[ui-stall]` (the
      watchdog: a window's UI lane silent for 20 s or more, its rescue and restart ladder — Engine.h) and `[ui-latency]`
      (the latency monitor, UI_THREAD.md §19, `UiLatency.h`: an engine thread sends a no-op message to each UI thread every

@@ -4895,6 +4895,40 @@ send - nothing is submitted until the user presses Enter in that tab.
         g_bundledModArgsProvider.store(provider);
     }
 
+    // Agentmaster (MOD_LINK.md, MESSAGING.md §21.56): the session link's env provider, set once per process by the app
+    // (nullptr in every other program that compiles this file: their launches carry no link). Atomic like the mods' provider.
+    static std::atomic<SessionLinkEnvProvider> g_sessionLinkEnvProvider{ nullptr };
+
+    void SetSessionLinkEnvProvider(SessionLinkEnvProvider provider) noexcept
+    {
+        g_sessionLinkEnvProvider.store(provider);
+    }
+
+    // The session link's variables for one launch (AM_LINK + AM_LINK_TOKEN), appended to the spec's env AFTER the managed
+    // variables and the cog's env, so a user entry can never replace the launch's own token. Nothing when no provider is set
+    // or the server is not running. Never throws (the provider must not either).
+    //   spec - the spec (its sessionId names the launch; its env is extended).
+    static void AppendSessionLinkEnv(ClaudeSpawnSpec& spec) noexcept
+    {
+        const auto provider = g_sessionLinkEnvProvider.load();
+        if (!provider)
+        {
+            return;
+        }
+        try
+        {
+            for (auto& kv : provider(spec.sessionId))
+            {
+                spec.env.push_back(std::move(kv));
+            }
+        }
+        catch (...)
+        {
+            // std::bad_alloc growing the env: the launch goes on without its link (the headless way serves its side questions).
+            LogSwallowedException(L"AppendSessionLinkEnv");
+        }
+    }
+
     // The bundled mods' --plugin-dir arguments for one launch: the provider's answer, or "" when none is set.
     //   stateDir       - the ACTIVE profile folder (where the mods' folders live).
     //   settings       - the launch's cog settings (a mod turned off there does not load).
@@ -4977,6 +5011,10 @@ send - nothing is submitted until the user presses Enter in that tab.
         {
             ApplyCompiledLaunch(spec, stateDir, settings, claudeLauncher, *launch); // may swap settingsPath for the launch file
         }
+        // MOD_LINK.md: the session link's endpoint and this launch's token (the agentmaster-link mod dials in with them). Its
+        // only side effect is the token's registration in the link server's memory: a spec built and never launched leaves a
+        // token nobody presents, forgotten a day later.
+        AppendSessionLinkEnv(spec);
 
         const auto settingsFwd = ToForwardSlashes(spec.settingsPath);
         // BUNDLED_MODS.md: decided per launch (the cog's switches, the claude version, the user's own copies in this
@@ -5036,6 +5074,8 @@ send - nothing is submitted until the user presses Enter in that tab.
         {
             ApplyCompiledLaunch(spec, stateDir, settings, claudeLauncher, *launch); // the session's own preset/model, again
         }
+        // MOD_LINK.md: a restarted claude is a new launch, with a token of its own (the old claude's link goes stale with it).
+        AppendSessionLinkEnv(spec);
         const auto settingsFwd = ToForwardSlashes(spec.settingsPath);
         // BUNDLED_MODS.md: the restart decides its mods afresh, exactly like the first launch (BuildClaudeSpawn).
         const std::wstring modArgs = BundledModArgsFor(stateDir, settings, claudeLauncher, spec.workingDir, spec.sessionId);

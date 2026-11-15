@@ -955,6 +955,10 @@ namespace Agentmaster
             "AM_SESSION",
             "CCMGR_HOOK_PIPE",
             "CCMGR_SESSION_ID",
+            // the session link (MOD_LINK.md): an Agentmaster started from a linked tab's tool call carries that tab's endpoint
+            // and token, and a child that kept them could dial in AS that tab (the headless side question's fork included)
+            "AM_LINK",
+            "AM_LINK_TOKEN",
             // settings a variable would override: effort, thinking, the compaction window, retries
             "CLAUDE_CODE_EFFORT_LEVEL",
             "CLAUDE_EFFORT",
