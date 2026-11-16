@@ -1,3 +1,12 @@
+<!-- ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
+     GitHub published it, saved before the one-row rewrite of every release replaced it there. The
+     body this file held until then differed from the published one (a draft revised after, or never
+     applied as written); it is this file at the commit before this note.
+     Agentmaster 0.6.1 release notes — STABLE patch (becomes Latest; NOT a pre-release).
+     Range: v0.6.0..8ea00ecc = 8 commits (3 user-facing + docs). Last stable is 0.6.0, so this IS
+     the full changelog since last stable. RELEASING from the pinned commit 8ea00ecc5d88ac01449214c5c261b569b04f45f1.
+     Tag v0.6.1 -> 0.6.1.0. STABLE mechanics: publish --draft=false --latest (REPLACES 0.6.0 as Latest; no --prerelease).
+     Assets: Agentmaster_0.6.1.0.msixbundle, _x64.zip, _arm64.zip, Agentmaster.cer. -->
 <!-- Agentmaster 0.6.1 release notes — STABLE patch (becomes Latest; NOT a pre-release).
      Range: v0.6.0..8ea00ecc = 8 commits (3 user-facing + docs). Last stable is 0.6.0, so this IS
      the full changelog since last stable. RELEASING from the pinned commit 8ea00ecc5d88ac01449214c5c261b569b04f45f1.

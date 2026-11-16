@@ -1,4 +1,8 @@
-<!-- Agentmaster 0.5.2 release notes. Tag v0.5.2 -> d63cf610b (the user-specified release commit).
+<!-- ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
+     GitHub published it, saved before the one-row rewrite of every release replaced it there. The
+     body this file held until then differed from the published one (a draft revised after, or never
+     applied as written); it is this file at the commit before this note.
+     Agentmaster 0.5.2 release notes. Tag v0.5.2 -> d63cf610b (the user-specified release commit).
      Range v0.5.1..d63cf610b — 13 commits (12 feat/fix below + 1 docs-only: 777746b13 summary-jump v2 plan, omitted).
      DEFERRED to a later release (NOT in 0.5.2, committed/WIP after d63cf610b):
        * 17f3ed30f fix(autopilot): drive ADOPTED sessions on toggle/idle-start.
@@ -7,7 +11,7 @@
      Asset names: tag v0.5.2 -> 0.5.2.0. -->
 ## Agentmaster 0.5.2
 
-A fork of **Windows Terminal** that turns it into a manager for multiple **AI coding agents** (**Claude Code** + **Codex**). **0.5.2** is a polish-and-control release: the Manager UI now renders **fully dark** on any theme, you can **navigate between your sent prompts from the keyboard**, the Sessions search gains a **Title scope**, the Launch box gets a **Browse…** dialog, and the Triage Board tidies itself up.
+**0.5.2** is a polish-and-control release: the Manager UI now renders **fully dark** on any theme, you can **navigate between your sent prompts from the keyboard**, the Sessions search gains a **Title scope**, the Launch box gets a **Browse…** dialog, and the Triage Board tidies itself up.
 
 ## New in 0.5.2
 
@@ -23,16 +27,6 @@ A fork of **Windows Terminal** that turns it into a manager for multiple **AI co
 
 - **Triage cards no longer shift on hover.** The hover/selection outline is now drawn as a non-layout overlay ring, so hovering or selecting a card no longer reflows the board or nudges the title band — and every card is the same size regardless of hover/selected state.
 - **Calmer card tooltips.** Triage-Board card tooltips now open after a deliberate **4 s** (instead of the fast global delay), so panning the mouse across the board no longer flashes a tip over every card; the redundant whole-card tooltip was removed (the title band and per-element tips already cover it).
-
-## Capabilities
-
-- **Real sessions, real control** — each session is a live agent (`claude.exe` / Codex) on a ConPTY with shared stdin; state comes from hooks + an out-of-band observer, never screen-scraping.
-- **Manager tab** (pinned, leftmost) — a **sortable Triage Board** (color-coded cards), an **Explorer Tree** (LOCAL · GLOBAL · EXTERNAL scopes + sorting), and a **Flight Plan** (per-session prompt queue + history). **Autopilot** auto-sends queued prompts on turn-complete with backstops (max sends, stop-on-error, pause, question-guard, Enter-retry).
-- **Per-tab lens** — every classified tab carries a top-right link badge (status · `model · effort · kind` · workdir/branch) with always-on actions (Open Path, Copy menu, summary pencil) and a toggleable **summary panel** (plan · tasks · messages · files · live times) with **per-prompt Jump** + keyboard prompt navigation; the terminal search box docks into the same HUD.
-- **Fleet Observer** — detects and manages **every** session, including a hand-typed `claude`/Codex in any tab (no hooks needed), and observes external ones read-only, with **Adopt** (fork-a-copy or resume).
-- **Sessions & Archive pages** — full-window browsers over every on-disk conversation and every archived session: indexed + ripgrep search (title · dir · branch · prompts · content), time range, Resume / **Fork** / Jump / bulk-open / reopen-whole-window, hide-from-list.
-- **Workspace persistence** — windows reopen at their geometry with sessions resumed and shell tabs replayed at their cwd; permanent per-directory tab colors; the `agentmaster <verb>` CLI introspects the fleet from any shell.
-- **Coexists with Windows Terminal** — installs side-by-side under its own package identity; your real Windows Terminal install is left untouched.
 
 ## Install
 

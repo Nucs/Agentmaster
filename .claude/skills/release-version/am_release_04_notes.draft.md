@@ -1,11 +1,15 @@
-<!-- Agentmaster 0.4.0 release notes. Cumulative since the last PUBLIC release (v0.3.0, the
+<!-- ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
+     GitHub published it, saved before the one-row rewrite of every release replaced it there. The
+     body this file held until then differed from the published one (a draft revised after, or never
+     applied as written); it is this file at the commit before this note.
+     Agentmaster 0.4.0 release notes. Cumulative since the last PUBLIC release (v0.3.0, the
      current "Latest" on GitHub). Format matches the v0.3.0 notes: flat "- **Title.** desc."
      changelog bullets — now with a dedicated Fixes section. Asset names assume tag v0.4.0 -> 0.4.0.0.
      Drafted from a one-by-one read of every commit in v0.3.0..HEAD (~52; docs-only CLAUDE.md
      commits omitted as internal) cross-checked against the dev-session transcripts. -->
 ## Agentmaster 0.4.0
 
-A fork of **Windows Terminal** that turns it into a manager for multiple **AI coding agents** (**Claude Code** + **Codex**). 0.4.0 deepens the per-session *here-and-now* lens and hardens the engine: every tab now carries a live **summary panel** and a hover **action row** over its link badge, the Manager selection **follows your tab both ways**, keyboard navigation lands (**F2** rename, **Alt+arrows** to the Manager), folder tab colors become **permanent**, externals can be **adopted by forking a safe copy** — and a batch of reliability fixes squashes the `/clear` title-flood, makes Claude/Codex launch robust on npm-only installs, recovers Autopilot's eaten submit-Enter, and reads delegating (subagent) turns as **Running**.
+0.4.0 deepens the per-session *here-and-now* lens and hardens the engine: every tab now carries a live **summary panel** and a hover **action row** over its link badge, the Manager selection **follows your tab both ways**, keyboard navigation lands (**F2** rename, **Alt+arrows** to the Manager), folder tab colors become **permanent**, externals can be **adopted by forking a safe copy** — and a batch of reliability fixes squashes the `/clear` title-flood, makes Claude/Codex launch robust on npm-only installs, recovers Autopilot's eaten submit-Enter, and reads delegating (subagent) turns as **Running**.
 
 ## New in 0.4.0
 
@@ -40,19 +44,19 @@ A fork of **Windows Terminal** that turns it into a manager for multiple **AI co
 - **Empty summary box flash.** The summary panel could briefly show a bare empty box for a never-prompted session; it now stays hidden until there's real content.
 - **Codex resume targeting under PID reuse.** A reused process id could momentarily map a Codex tab to the wrong rollout; the resolver now validates process start time before reusing a cached id.
 
-## Capabilities
-
-- **Real sessions, real control** — each session is a live agent (`claude.exe` / Codex) on a ConPTY with shared stdin (you and the orchestrator drive the same terminal); state comes from hooks + an out-of-band observer, never screen-scraping.
-- **Manager tab** (pinned, leftmost) — a **Triage Board** (Running · Waiting · Needs-approval · Error · Done columns), an **Explorer Tree** (working dirs → sessions; LOCAL · GLOBAL · EXTERNAL scopes + sorting), and a **Flight Plan** (per-session prompt queue + full sent/typed history).
-- **Per-tab lens** — every classified tab carries a top-right **link badge** (status · `model · effort · kind` · Autopilot · queue · workdir/branch) with a hover **action row** (Open Path + copy Id/path/branch/launch-CLI/summary/transcript) and a toggleable **summary panel** (plan · tasks · messages · files · live times), complementing the Manager's fleet view; the tab strip shows a matching state dot.
-- **Autopilot** — queue prompts; on turn-complete the next auto-sends (Full) or one-click confirms (Semi), with an Enter-retry backstop. Backstops: max auto-sends, stop-on-error, global pause, question-guard.
-- **Fleet Observer** — detects and manages **every** session, including a hand-typed `claude`/Codex in any tab (no hooks needed), and observes external ones (real Windows Terminal, consoles) read-only, with **Adopt** (fork-a-copy or resume).
-- **Sessions & Archive pages** — full-window browsers over every on-disk conversation and every archived session: two-phase indexed + ripgrep search with scope filters and time range, Resume / **Fork** / Jump / bulk-restore / reopen-whole-window, and **hide-from-list**.
-- **Workspace persistence** — windows reopen at their geometry with sessions resumed and shell tabs replayed at their cwd; per-window Manager lens (selection, scopes, splitters) restored. Permanent per-directory tab colors, smart session naming.
-- **Command line** — `agentmaster <verb>` introspects the fleet from any shell (`show` / `list` / `sessions` / `tabs` / `windows` / `external`, `--self`, `--json`), app running or not.
-- **Coexists with Windows Terminal** — installs side-by-side under its own package identity; your real Windows Terminal / Dev install is left untouched.
-
 ## Install
+
+Paste into PowerShell — installs **v0.4.0** (one UAC prompt, only to trust the signing cert):
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version 0.4.0
+```
+
+Add `-Portable` for a cert-free, no-admin install, and/or `-Launch` to start it right after:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version 0.4.0 -Portable -Launch
+```
 
 **Portable (recommended, no cert):** download `Agentmaster_0.4.0.0_x64.zip` (or `_arm64`), unzip anywhere, run `agentmaster.exe`. Fully self-contained.
 

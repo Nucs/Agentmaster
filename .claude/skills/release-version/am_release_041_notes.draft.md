@@ -1,10 +1,14 @@
-<!-- Agentmaster 0.4.1 release notes. Cumulative since v0.4.0. A fixes-and-polish point release.
+<!-- ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
+     GitHub published it, saved before the one-row rewrite of every release replaced it there. The
+     body this file held until then differed from the published one (a draft revised after, or never
+     applied as written); it is this file at the commit before this note.
+     Agentmaster 0.4.1 release notes. Cumulative since v0.4.0. A fixes-and-polish point release.
      Format matches prior notes: flat "- **Title.** desc." bullets, New + Fixes sections.
      Drafted from a one-by-one read of all 15 commits in v0.4.0..HEAD (docs-only commits omitted).
      Asset names assume tag v0.4.1 -> 0.4.1.0. -->
 ## Agentmaster 0.4.1
 
-A fork of **Windows Terminal** that turns it into a manager for multiple **AI coding agents** (**Claude Code** + **Codex**). **0.4.1** is a fixes-and-polish release on top of 0.4.0: **Restart session** now resumes the conversation, tab-navigation keys work from the Manager tab, the Triage Board keeps its scroll position across refreshes, and the per-tab summary panel gains a truncate toggle — plus a **one-command installer** and a build-identity line in Settings.
+**0.4.1** is a fixes-and-polish release on top of 0.4.0: **Restart session** now resumes the conversation, tab-navigation keys work from the Manager tab, the Triage Board keeps its scroll position across refreshes, and the per-tab summary panel gains a truncate toggle — plus a **one-command installer** and a build-identity line in Settings.
 
 ## New in 0.4.1
 
@@ -20,16 +24,6 @@ A fork of **Windows Terminal** that turns it into a manager for multiple **AI co
 - **Triage Board snapped to the top on every refresh.** A board rebuild (a selection, a state/title change, an observer enrichment) reset each column's scroll to 0 — losing the card you'd clicked near the bottom of a tall column (e.g. a large External census). Columns now preserve their scroll position across rebuilds.
 - **Sessions From/To range popup mis-anchored.** After the header cluster moved next to the title, the date-range popup opened over the window buttons; it's re-anchored to open under its own button.
 - **Selection pill looked like a tight box.** The hovered/selected tab pill now has padding and rounded corners — a proper pill — without shifting the tab's icon or title.
-
-## Capabilities
-
-- **Real sessions, real control** — each session is a live agent (`claude.exe` / Codex) on a ConPTY with shared stdin (you and the orchestrator drive the same terminal); state comes from hooks + an out-of-band observer, never screen-scraping.
-- **Manager tab** (pinned, leftmost) — a **Triage Board**, an **Explorer Tree** (working dirs → sessions; LOCAL · GLOBAL · EXTERNAL scopes + sorting), and a **Flight Plan** (per-session prompt queue + full history). **Autopilot** auto-sends queued prompts on turn-complete with backstops (max sends, stop-on-error, pause, question-guard, Enter-retry).
-- **Per-tab lens** — every classified tab carries a top-right link badge (status · `model · effort · kind` · workdir/branch) with a hover action row (Open Path + copy Id/path/branch/launch-CLI/summary/transcript) and a toggleable **summary panel** (plan · tasks · messages · files · live times).
-- **Fleet Observer** — detects and manages **every** session, including a hand-typed `claude`/Codex in any tab (no hooks needed), and observes external ones read-only, with **Adopt** (fork-a-copy or resume).
-- **Sessions & Archive pages** — full-window browsers over every on-disk conversation and every archived session: indexed + ripgrep search, time range, Resume / **Fork** / Jump / bulk-restore / reopen-whole-window, hide-from-list.
-- **Workspace persistence** — windows reopen at their geometry with sessions resumed and shell tabs replayed at their cwd; permanent per-directory tab colors; the `agentmaster <verb>` CLI introspects the fleet from any shell.
-- **Coexists with Windows Terminal** — installs side-by-side under its own package identity; your real Windows Terminal install is left untouched.
 
 ## Install
 

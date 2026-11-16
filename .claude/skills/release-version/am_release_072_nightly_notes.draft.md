@@ -1,4 +1,8 @@
-<!-- Agentmaster 0.7.2-prerelease-nightly release notes — NIGHTLY (the tier BELOW pre-release).
+<!-- ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
+     GitHub published it, saved before the one-row rewrite of every release replaced it there. The
+     body this file held until then differed from the published one (a draft revised after, or never
+     applied as written); it is this file at the commit before this note.
+     Agentmaster 0.7.2-prerelease-nightly release notes — NIGHTLY (the tier BELOW pre-release).
      Range: v0.7.1-prerelease-nightly..2446db123 = 12 commits (7 docs/skill, 5 user-facing). Baseline = the
      previous release of ANY kind = the 0.7.1 nightly (release-notes §2 — a nightly's own notes may baseline
      off the previous release of any kind). RELEASING from 2446db123 (= origin/agentmaster tip).
@@ -11,8 +15,6 @@
      Publish: gh release edit v0.7.2-prerelease-nightly -R Nucs/Agentmaster --draft=false --prerelease --latest=false
        (NEVER --latest; the stable 0.7.0 stays Latest).
      Assets: Agentmaster_0.7.2.0.msixbundle, _x64.zip, _arm64.zip, Agentmaster.cer. -->
-## Agentmaster 0.7.2-prerelease-nightly (nightly)
-
 > ⚠️ **NIGHTLY build** — an unstable development version. It may have memory leaks, CPU issues, and crashes. Install it only to help test, and be willing to have your work interrupted.
 
 **The tab-drag crash is finally dead.** The headline of this nightly is the elimination of the WinUI tab-strip drag crash — a null-dereference deep inside Microsoft's tab control that could take the whole app down when you reordered or tore out a tab on a busy strip, dump-proven four separate times and unguarded even upstream. Native tab-drag is now permanently off and reorder / tear-out are re-implemented as a pointer-owned gesture, so dragging a tab still works but can no longer reach the broken code path. Nightlies are **not** offered to pre-release users — enable **Settings → Updates → "Allow updating to nightly builds (unstable)"** (a warning confirm gates it) or install from the assets below. The stable **0.7.0** remains Latest for everyone else.

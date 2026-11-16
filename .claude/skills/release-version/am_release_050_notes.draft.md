@@ -1,4 +1,8 @@
-<!-- Agentmaster 0.5.0 release notes. Cumulative since v0.4.1 (last published).
+<!-- ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
+     GitHub published it, saved before the one-row rewrite of every release replaced it there. The
+     body this file held until then differed from the published one (a draft revised after, or never
+     applied as written); it is this file at the commit before this note.
+     Agentmaster 0.5.0 release notes. Cumulative since v0.4.1 (last published).
      Format matches prior notes: flat "- **Title.** desc." bullets, New + Fixes sections.
      REWRITTEN from a full read of ALL 99 commits in v0.4.1..HEAD (HEAD d2dfde801) cross-referenced
      against am_release_050_qa.md — the prior draft only covered the first ~43 commits and missed
@@ -8,7 +12,7 @@
      tooltip-polish WIP (62 lines) folds into "Tooltips sharpened". Asset names assume tag v0.5.0 -> 0.5.0.0. -->
 ## Agentmaster 0.5.0
 
-A fork of **Windows Terminal** that turns it into a manager for multiple **AI coding agents** (**Claude Code** + **Codex**). **0.5.0** is a big one: an **in-app updater** so you stay current automatically, **agent sessions that no longer dead-end** (quitting an agent drops you to a live shell prompt instead of a dead pane), a **sortable, color-coded Triage Board**, a redesigned per-tab badge with a clickable Autopilot, a terminal **search box restyled into the HUD**, and a deep sweep of tab-strip, Sessions-browser, and lifecycle improvements — on top of a large batch of crash and correctness fixes.
+**0.5.0** is a big one: an **in-app updater** so you stay current automatically, **agent sessions that no longer dead-end** (quitting an agent drops you to a live shell prompt instead of a dead pane), a **sortable, color-coded Triage Board**, a redesigned per-tab badge with a clickable Autopilot, a terminal **search box restyled into the HUD**, and a deep sweep of tab-strip, Sessions-browser, and lifecycle improvements — on top of a large batch of crash and correctness fixes.
 
 ## New in 0.5.0
 
@@ -31,29 +35,19 @@ A fork of **Windows Terminal** that turns it into a manager for multiple **AI co
 - **Flight Plan — compose focus + prompt history.** Focus returns to the compose box after you queue or send (fire several in a row without re-clicking), and **Up-arrow recalls previously-sent prompts** (newest-first, shell-history style, dup-collapsed; Esc cancels back to your draft). Modified arrows (Shift/Ctrl) pass through untouched. *(Plain Enter is a newline; the `!` button sends.)*
 - **Tab options honored + more legible tabs.** The **"Show close (×) button"** and **"Close with middle-click"** settings now apply to tabs, the minimum tab width is raised to a fixed **130px** (a full strip scrolls instead of shrinking tabs unreadably), and the summary panel's title is shown as its top row.
 - **Silent profile on first launch.** First run now **auto-selects** the per-install default profile (release → Production, dev → Development) instead of prompting — still changeable any time from **Settings → Change profile folder**.
-- **Tooltips sharpened across the board.** Audited and (re)wrote the hover tooltips on the Manager toolbar, the Settings cog, tab context-menu, per-tab badge, summary-panel resize grips, board/tree cards, and the Archive + Sessions pages so each says, on hover, exactly what the control does — and filled in the many that had none.
+- **Tooltips sharpened across the board.** Audited and (re)wrote the hover tooltips on the Manager toolbar, the Settings cog, tab context-menu, per-tab badge, summary-panel resize grips, board/tree cards, tab-strip status dot + nav buttons, and the Archive + Sessions pages so each says, on hover, exactly what the control does — and filled in the many that had none.
 
 ## Fixes
 
 - **State no longer flaps idle↔running.** A long-running tool (a multi-minute build) or a "No response from API · retrying" backoff used to make the tab dot oscillate Running↔Waiting every few seconds (and spuriously trigger the red flash). The dot now stays **blue (Running)** through a paused/retrying turn, while a genuinely finished turn still settles to Waiting.
 - **Content clicks no longer drag the window.** The caption/drag hit-test is now restricted to the actual titlebar band, so left-dragging on Manager gaps, the margins between cards, or page bodies no longer **moves the window** (or pops the system menu on right-click); the Manager pane was also made opaque so clicks land inert instead of falling through.
 - **Tab tear-out fixes.** Tearing a tab into a new window no longer **crashes** when the tab was never focused (a never-initialized control), and a torn-out window now **hosts the moved tab** instead of adopting a leftover saved-window layout and orphaning the dragged session. A fast drag-reorder also no longer **loses the tab**.
-- **"Restart session" crash on a restored-but-never-shown tab.** Right-clicking → Restart on a tab restored on relaunch but never activated used to AV (its terminal was never initialized); it's now a safe no-op (the session starts cleanly when first shown).
+- **"Restart session" crash on a restored-but-never-shown tab.** Right-clicking → Restart on a tab restored on relaunch but never activated used to crash (its terminal was never initialized); it's now a safe no-op (the session starts cleanly when first shown).
 - **Summary panel.** No longer **crashes** ("Layout cycle detected") when you drag-resize vigorously over wrapping content; no longer **empty** when a session's only message begins with a newline; and dragging a resize grip on a short-transcript tab now grows past its own content and snaps back on release (the shared size is preserved for fuller tabs).
 - **A complete Ctrl+F passthrough.** The Ctrl+F double-delivery now sends both key-down **and** key-up, so an app in raw-input mode (Claude's TUI) sees a full press+release instead of a stuck key.
 - **"Launch Claude" stuck disabled after switching tabs.** Selecting a session drops its working dir into the Launch box programmatically; validation now re-runs on every such set (selection sync, resume/fork clear, settings re-seed) so the red "missing dir" underline + disabled button no longer freeze on a stale value.
 - **Install/upgrade over a conflicting registration (`0x80073CFB`).** When an unpackaged/registered install of the same identity blocked the MSIX, the installer/updater now detects it, removes it (your profile data lives outside the package, so sessions/settings are preserved), and retries automatically — and auto-fetches a missing VCLibs dependency.
 - **Smaller fixes.** The pinned Manager tab can no longer be renamed (all gestures disabled, menu greyed); "Close tabs to the left/other" are disabled when the Manager is the only target; the Sessions time-window range popup dismisses on hover-leave; the summary-panel toggle draws as a pencil-with-a-line and its Files Read/Created/Edited bullets are flush-left.
-
-## Capabilities
-
-- **Real sessions, real control** — each session is a live agent (`claude.exe` / Codex) on a ConPTY with shared stdin; state comes from hooks + an out-of-band observer, never screen-scraping.
-- **Manager tab** (pinned, leftmost) — a **sortable Triage Board** (color-coded cards), an **Explorer Tree** (LOCAL · GLOBAL · EXTERNAL scopes + sorting), and a **Flight Plan** (per-session prompt queue + history). **Autopilot** auto-sends queued prompts on turn-complete with backstops (max sends, stop-on-error, pause, question-guard, Enter-retry).
-- **Per-tab lens** — every classified tab carries a top-right link badge (status · `model · effort · kind` · workdir/branch) with always-on actions (Open Path, Copy menu, summary pencil) and a toggleable **summary panel** (plan · tasks · messages · files · live times); the terminal search box docks into the same HUD.
-- **Fleet Observer** — detects and manages **every** session, including a hand-typed `claude`/Codex in any tab (no hooks needed), and observes external ones read-only, with **Adopt** (fork-a-copy or resume).
-- **Sessions & Archive pages** — full-window browsers over every on-disk conversation and every archived session: indexed + ripgrep search, time range, Resume / **Fork** / Jump / bulk-open / reopen-whole-window, hide-from-list.
-- **Workspace persistence** — windows reopen at their geometry with sessions resumed and shell tabs replayed at their cwd; permanent per-directory tab colors; the `agentmaster <verb>` CLI introspects the fleet from any shell.
-- **Coexists with Windows Terminal** — installs side-by-side under its own package identity; your real Windows Terminal install is left untouched.
 
 ## Install
 

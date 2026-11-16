@@ -1,4 +1,8 @@
-<!-- Agentmaster 0.5.4 release notes — PRE-RELEASE. Tag v0.5.4 -> b6c756c19 (HEAD).
+<!-- ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
+     GitHub published it, saved before the one-row rewrite of every release replaced it there. The
+     body this file held until then differed from the published one (a draft revised after, or never
+     applied as written); it is this file at the commit before this note.
+     Agentmaster 0.5.4 release notes — PRE-RELEASE. Tag v0.5.4 -> b6c756c19 (HEAD).
      Supersedes the never-published 0.5.3 (tagged then cancelled/deleted before any draft existed).
      Cumulative since v0.5.2 (the last PUBLISHED/stable release) — 27 commits = the 0.5.3 feature set
      + 4 new: durable per-session title store (b6c756c19), Triage-Board refresh button (bff9c6eb3),
@@ -7,7 +11,7 @@
      Asset names: tag v0.5.4 -> 0.5.4.0. -->
 ## Agentmaster 0.5.4 (pre-release)
 
-A fork of **Windows Terminal** that turns it into a manager for multiple **AI coding agents** (**Claude Code** + **Codex**). **0.5.4 is a pre-release** — a large feature drop for early adopters: rich tab-strip hover tooltips, Claude's idle **recap** surfaced across the UI, a Waiting-for-you **"unread inbox"** model, an **updater overhaul** (with one-click uninstall), **durable session titles**, per-tab prompt navigation, and more. Enable **Settings → Updates → Allow pre-release versions** to receive it automatically, or install from the assets below. The stable **0.5.2** remains the default for everyone else.
+**0.5.4 is a pre-release** — a large feature drop for early adopters: rich tab-strip hover tooltips, Claude's idle **recap** surfaced across the UI, a Waiting-for-you **"unread inbox"** model, an **updater overhaul** (with one-click uninstall), **durable session titles**, per-tab prompt navigation, and more. Enable **Settings → Updates → Allow pre-release versions** to receive it automatically, or install from the assets below. The stable **0.5.2** remains the default for everyone else.
 
 ## New in 0.5.4
 
@@ -25,16 +29,6 @@ A fork of **Windows Terminal** that turns it into a manager for multiple **AI co
 ## Fixes
 
 - **No more hover flicker on cards or rows.** Triage-Board cards/rows no longer flicker their hover ring (and the linked tab-strip pill) as the pointer crosses inner labels, and the **Sessions / Archive** page rows no longer flicker tooltips or swallow a click — each row is now one clean hit target with a single consolidated tooltip (every field still shown on hover).
-
-## Capabilities
-
-- **Real sessions, real control** — each session is a live agent (`claude.exe` / Codex) on a ConPTY with shared stdin; state comes from hooks + an out-of-band observer, never screen-scraping.
-- **Manager tab** (pinned, leftmost) — a **sortable, refreshable Triage Board** (color-coded cards, recap-on-hover, Waiting-for-you countdowns), an **Explorer Tree** (LOCAL · GLOBAL · EXTERNAL scopes + sorting), and a **Flight Plan** (per-session prompt queue + history). **Autopilot** auto-sends queued prompts on turn-complete with backstops (max sends, stop-on-error, pause, question-guard, Enter-retry) and drives **adopted** sessions too.
-- **Per-tab lens** — every classified tab carries a top-right link badge (status · `model · effort · kind` · workdir/branch · **next queued prompt**) with always-on actions (Open Path, Copy menu, prompt ↑/↓, summary pencil) and a toggleable **summary panel** (recap · plan · tasks · messages · files · live times) with per-prompt **Jump**; a rich session card appears on tab-strip hover.
-- **Fleet Observer** — detects and manages **every** session, including a hand-typed `claude`/Codex in any tab (no hooks needed), and observes external ones read-only, with **Adopt** (fork-a-copy or resume).
-- **Sessions & Archive pages** — full-window browsers over every on-disk conversation and every archived session: indexed + ripgrep search (title · dir · branch · prompts · content), time range, Resume / **Fork** / Jump / bulk-open / reopen-whole-window, hide/unhide. Session titles persist across runs.
-- **Workspace persistence** — windows reopen at their geometry with sessions resumed and shell tabs replayed at their cwd; permanent per-directory tab colors; the `agentmaster <verb>` CLI introspects the fleet from any shell.
-- **Coexists with Windows Terminal** — installs side-by-side under its own package identity; your real Windows Terminal install is left untouched.
 
 ## Install (pre-release)
 

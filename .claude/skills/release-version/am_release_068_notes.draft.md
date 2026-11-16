@@ -1,4 +1,8 @@
-<!-- Agentmaster 0.6.8 release notes — PRE-RELEASE (NOT Latest; v0.6.1 stays Latest).
+<!-- ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
+     GitHub published it, saved before the one-row rewrite of every release replaced it there. The
+     body this file held until then differed from the published one (a draft revised after, or never
+     applied as written); it is this file at the commit before this note.
+     Agentmaster 0.6.8 release notes — PRE-RELEASE (NOT Latest; v0.6.1 stays Latest).
      PRERELEASE NOTES RULE: show ONLY this prerelease's OWN explicit delta vs the previous release (0.6.7).
      ~46 commits v0.6.7..c236f9012, themed. Mainline tip = c236f9012 (origin in sync).
      Headliners: tab-title naming conventions (659ea2207+5615b8dbd), in-app Debug Mode (c236f9012+ddba06a1a),
@@ -14,7 +18,6 @@
 ## New in 0.6.8
 
 - **Tab-title naming conventions.** How an untitled session's tab title derives from its working directory is now a **Settings ⚙ → Tabs → "Tab title naming"** choice, with a **live preview**. Pick from **Last word** of the folder (the new default — `Potato.Tomato.SlangGang` → `SlangGang`), **Folder name**, **Two folders** (`repos/Agentmaster`), **Capital letters** (`PotaTo.Tomato.Slang` → `PTTS`), or the **git-branch trio** — **Branch name**, **Branch / folder**, **Branch / two folders** (`feature/ui/Agentmaster`) — plus a **Title-case** option and **spaces → underscores**. Replaces the old fixed heuristic that named things `PTS` with no way to change it.
-- **Debug Mode — unlock Auto Testing in a release build.** A new **Settings ⚙ → About → Enable Debug Mode** toggle (persisted) turns on the developer-only **Auto Testing / Tests Autorunner** subsystem in a normal release install — the durable, in-app twin of launching with `--debug` — so queued prompts auto-send on turn-complete, Send-now works, and every hidden autorunner surface appears.
 - **One-click Claude install.** When no native `claude.exe` is detected, the "Claude Code not found" prompt now offers a **one-click install/migrate** tailored to your machine — `claude install` (npm) or the official claude.ai native bootstrap — instead of only linking the docs.
 - **A git repo and all its worktrees share one tab color.** Worktrees of the same repository now wear the repository's single per-directory color, so a repo and its worktrees read as one at a glance (grouping and mechanics stay worktree-granular).
 - **Click a notification to jump to the session.** Clicking a session's Windows toast now **brings its window to the front and switches to its tab** (restoring it if minimized, across windows) — and a toast click no longer opens a stray empty window.

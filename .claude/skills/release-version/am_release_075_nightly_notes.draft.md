@@ -1,4 +1,8 @@
-<!-- Agentmaster 0.7.5-prerelease-nightly release notes — NIGHTLY (the tier BELOW pre-release).
+<!-- ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
+     GitHub published it, saved before the one-row rewrite of every release replaced it there. The
+     body this file held until then differed from the published one (a draft revised after, or never
+     applied as written); it is this file at the commit before this note.
+     Agentmaster 0.7.5-prerelease-nightly release notes — NIGHTLY (the tier BELOW pre-release).
      Range: v0.7.4-prerelease-nightly..23b9f02f1 = 11 commits (1 the 0.7.4 notes archive; 10 user-facing).
      Baseline = the previous release of ANY kind = the 0.7.4 nightly (release-notes §2). RELEASING from
      23b9f02f1 (= origin/agentmaster tip after push).
@@ -15,8 +19,6 @@
      Publish: gh release edit v0.7.5-prerelease-nightly -R Nucs/Agentmaster --draft=false --prerelease --latest=false
        (NEVER --latest; the stable 0.7.0 stays Latest).
      Assets: Agentmaster_0.7.5.0.msixbundle, _x64.zip, _arm64.zip, Agentmaster.cer. -->
-## Agentmaster 0.7.5-prerelease-nightly (nightly)
-
 > ⚠️ **NIGHTLY build** — an unstable development version. It may have memory leaks, CPU issues, and crashes. Install it only to help test, and be willing to have your work interrupted.
 
 **The RDP freeze is fixed, the app binary is now `Agentmaster.exe`, and portable copies gained real profile support.** The headline is a stability fix: connecting or disconnecting over Remote Desktop flips the system theme, which on a busy window (42 tabs, measured) sent the UI thread into a settings-reload × tabs theme storm that pegged a core at 100% for 20+ minutes with the window frozen — now killed, with staggered theme application, per-tab fail-open guards, and a UI-stall watchdog behind it. This build also renames the shipped GUI binary from `WindowsTerminal.exe` to `Agentmaster.exe` (a forwarding shim keeps old shortcuts working) and lets a portable copy choose its profile folder and self-update in place. Nightlies are **not** offered to pre-release users — enable **Settings → Updates → "Allow updating to nightly builds (unstable)"** (a warning confirm gates it) or install from the assets below. The stable **0.7.0** remains Latest for everyone else.

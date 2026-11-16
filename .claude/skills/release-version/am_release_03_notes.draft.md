@@ -1,10 +1,13 @@
-<!-- Agentmaster 0.3.0 release notes. Cumulative since the last PUBLIC release (v0.1.1):
+<!-- ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
+     GitHub published it, saved before the one-row rewrite of every release replaced it there. The
+     body this file held until then differed from the published one (a draft revised after, or never
+     applied as written); it is this file at the commit before this note.
+     Agentmaster 0.3.0 release notes. Cumulative since the last PUBLIC release (v0.1.1):
      v0.2.0 was built but never published, so its line is folded into "New in 0.3.0".
      Format matches the v0.2.0 / v0.1.1 notes: flat "- **Title.** desc." changelog bullets.
      Asset names assume tag v0.3.0 -> 0.3.0.0. -->
 ## Agentmaster 0.3.0
 
-A fork of **Windows Terminal** that turns it into a manager for multiple **AI coding agents** — it now drives **Codex** alongside **Claude Code** — with a Triage Board, per-session Flight Plans + Autopilot, full-fleet observability, per-install profiles, and a new `agentmaster` command line.
 
 ## New in 0.3.0
 
@@ -19,17 +22,19 @@ A fork of **Windows Terminal** that turns it into a manager for multiple **AI co
 - **Ordered hook state machine** *(0.2.0 line)*. Hook events carry a fire-time `ts` + per-turn identity, so a slow `Stop` landing after the next prompt can't paint a stale state — fixes the "second turn never shows Running" bug; type-ahead prompts keep the session correctly Running.
 - **Sessions search grammar + cross-window actions** *(0.2.0 line)*. `"quoted phrases"` match exactly and a bare session-id GUID finds that session *and its forks*; the 📁/📄 directory/file scopes are on by default and answered from the index. Triage-Board cards gain the full right-click menu and a LOCAL/GLOBAL scope toggle shared with the tree; **Activate** and **Rename** work on a session hosted in *any* window.
 
-## Capabilities
-
-- **Real sessions, real control** — each session is a live agent (`claude.exe` / Codex) on a ConPTY with shared stdin (you and the orchestrator drive the same terminal); state comes from hooks + an out-of-band observer, never screen-scraping.
-- **Manager tab** (pinned, leftmost) — a **Triage Board** (Running · Waiting · Needs-approval · Error · Done columns), an **Explorer Tree** (working dirs → sessions; LOCAL · GLOBAL · EXTERNAL scopes + sorting), and a **Flight Plan** (per-session prompt queue + full sent/typed history).
-- **Autopilot** — queue prompts; on turn-complete the next auto-sends (Full) or one-click confirms (Semi). Backstops: max auto-sends, stop-on-error, global pause, question-guard.
-- **Fleet Observer** — detects and manages **every** session, including a hand-typed `claude`/Codex in any tab (no hooks needed), and observes external ones (real Windows Terminal, consoles) read-only, with Adopt.
-- **Sessions & Archive pages** — full-window browsers over every on-disk conversation and every archived session: two-phase indexed + ripgrep search with scope filters, time range, and Resume / **Fork** / Jump / bulk-restore / reopen-whole-window.
-- **Workspace persistence** — windows reopen at their geometry with sessions resumed and shell tabs replayed at their cwd; per-window Manager lens (selection, scopes, splitters) restored. Per-directory tab colors, smart session naming, per-tab badge + tab-strip state dot.
-- **Coexists with Windows Terminal** — installs side-by-side under its own package identity; your real Windows Terminal / Dev install is left untouched.
-
 ## Install
+
+Paste into PowerShell — installs **v0.3.0** (one UAC prompt, only to trust the signing cert):
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version 0.3.0
+```
+
+Add `-Portable` for a cert-free, no-admin install, and/or `-Launch` to start it right after:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version 0.3.0 -Portable -Launch
+```
 
 **Portable (recommended, no cert):** download `Agentmaster_0.3.0.0_x64.zip` (or `_arm64`), unzip anywhere, run `agentmaster.exe`. Fully self-contained.
 
