@@ -1,20 +1,23 @@
 ---
 name: release-notes
 description: |
-  Author and assemble Agentmaster GitHub release notes — the house format (tight intro +
-  "New"/"Fixes" + "Install" with the exact asset names), turning a commit delta into dense
-  themed bullets, and the three framings: NIGHTLY vs PRE-RELEASE vs STABLE. Encodes the
+  Author and assemble Agentmaster GitHub release notes — the house format (a 1-2 sentence
+  intro, then ONE-ROW changes under "What's new" / "What's fixed" — a bold lead and about a
+  sentence each, nothing long-form below them — then "Worth knowing" and "Install" with the
+  exact asset names), turning a commit delta into one row per user-visible change, and the
+  three framings: NIGHTLY vs PRE-RELEASE vs STABLE. Encodes the
   mechanics done repeatedly: derive the changelog since the right baseline (nightlies are
   INVISIBLE to baselines), the copy-paste Install block, the "comprehensive changelog since
   last stable" MERGE (a stable release merges every intervening pre-release's notes into ONE
-  changelog — one New, one Fixes, one "Worth knowing" — that names no pre-release version;
-  never nightlies), stripping the draft's HTML-comment header before publishing,
-  applying via `gh release edit --notes-file`, and CONVERTING a live release between stable
+  changelog — one What's new, one What's fixed, one "Worth knowing" — that names no pre-release
+  version; never nightlies), stripping the draft's HTML-comment header before publishing,
+  applying via `gh release edit --notes-file` (an OLDER release's notes with an explicit
+  make_latest=false), and CONVERTING a live release between stable
   and pre-release — including the gotcha that `--latest=false` does NOT move the Latest
   badge (you must explicitly `--latest` the release you want as Latest). Use when writing
   or updating a release's notes, choosing nightly/stable/pre-release framing, assembling
   the full changelog for a version, or flipping a published release's stable/pre-release status.
-keywords: release notes, changelog, notes-file, gh release edit, pre-release, stable, nightly, latest badge, New in, Fixes, Install, asset names, msixbundle, portable zip, since last stable, draft notes, Agentmaster
+keywords: release notes, changelog, notes-file, gh release edit, pre-release, stable, nightly, latest badge, What's new, What's fixed, one-row, one row per change, Worth knowing, Install, asset names, msixbundle, portable zip, since last stable, draft notes, make_latest, Agentmaster
 ---
 
 # Agentmaster — authoring & assembling release notes
@@ -37,6 +40,9 @@ fall back to the plain table form (`gh release view vX.Y.Z -R Nucs/Agentmaster`)
   before publishing**. Commit it (the project keeps a per-version notes archive).
 - **Published body (temp):** the draft minus the comment header → applied to the GitHub release
   with `gh release edit … --notes-file`.
+- **A published body that is REPLACED** gets a dated note at the top of its draft's comment header:
+  the owner's words, what changed, and the commit whose draft still holds the old body (the
+  v0.8.0–v0.9.0 drafts carry the 2026-11-16 one-row rewrite's note; v0.9.0's also the 11-13 merge).
 
 The `<NNN>` file name and the committed archive are the convention — match it.
 
@@ -53,7 +59,7 @@ The `<NNN>` file name and the committed archive are the convention — match it.
   explicitly."*)
 - A **STABLE** vX.Y.Z → notes = the **complete changelog since the last stable**, written as **ONE
   merged changelog**: every intervening pre-release's items **merged into the stable's own sections**
-  (one New, one Fixes, one "Worth knowing when you upgrade"), each item in its final state, and **no
+  (one What's new, one What's fixed, one "Worth knowing when you upgrade"), each item in its final state, and **no
   pre-release version named anywhere** (§6). **The accumulation happens ONLY at the prerelease→stable
   promotion** — that is *when we actually take care of accumulating all prerelease notes into the same
   release.* The owner's rule of 2026-11-13, after v0.9.0 first shipped with 0.8.2-prerelease's body
@@ -87,15 +93,36 @@ the one-line subject rarely captures the user-facing story.
 
 ---
 
-## 3. Turn commits into notes
+## 3. Turn commits into notes — ONE ROW PER CHANGE
 
-- **Synthesize into THEMES, not a commit dump.** Group related commits (e.g. all the pending-input
-  commits → one "3 dots" bullet). A 74-commit release becomes ~6–10 "New" bullets + ~5 "Fixes".
+**The owner's rule of 2026-11-16**, after the 0.8.0–0.9.0 bodies had grown into walls of text: *"one-row
+changes in the release notes, like we do in the head of all release notes … sentences that start with a
+bold and then, essentially a sentence, maybe a sentence and a half, or a bit more if you really have
+to"*. Shown three layouts of v0.9.0 rendered by GitHub (the rows on top with the long details kept
+open, folded behind a `<details>` line, or removed), the owner picked **"Head only"**: the rows ARE the
+notes. v0.8.0, v0.8.1, v0.8.2-prerelease and v0.9.0 were rewritten that way the same day; their drafts
+(`.claude/skills/release-version/am_release_0{80,81,82,90}_notes.draft.md`) are the models — read one
+before writing.
+
+- **One row = one user-visible change:** `- **Lead.** One sentence.` The sentence says what the change
+  does for the user: a sentence and a half at most, a bit more only when the reader cannot act without
+  it (the Settings path of an opt-in feature, or of the switch that turns a default-on change off).
+  No sub-bullets, no second paragraph, no "see above / below" (nothing is above or below a row).
+- **The lead:** a feature row names the feature (**Pin to Top.**, **Name a window.**); a fix row states
+  the outcome in the present (**Long prompts are delivered again.**, **Window switches no longer freeze
+  big workspaces.**). **Bold only the lead:** an inner bold competes with the leads the eye scans, so a
+  Settings path or a UI name inside the sentence stays plain (code spans for commands are fine).
+- **A change, not a commit.** Group the commits behind one change into its row (all the pending-input
+  commits → one "unsent draft" row); split a feature that does several things a user looks for
+  separately (the side panel's filters, Pin to Top and ⋯ menu are three rows). A big stable release
+  can carry 20+ "What's new" rows and 10+ "What's fixed" rows: fine, each is still one row.
 - **Omit** pure `docs`/`refactor`/`chore`/`test`/merge commits (internal; no user-visible change).
-- **Voice:** capability-first, bolded feature name, one dense sentence of what+why. Match the prior
-  drafts (`am_release_057_notes.draft.md` etc.) — read one before writing.
-- **Sections:** `## New in X.Y.Z` (or `## New`) then `## Fixes`. A tiny hotfix can be just `## Fixes`
-  + `## New`. Flag anything users MUST know (a license change, a feature now dev-only, a removal).
+- **Sections:** `## What's new`, then `## What's fixed` (a tiny hotfix can have `## What's fixed`
+  alone), then `## Worth knowing when you upgrade` for anything users MUST know (a default that changes
+  behavior, a new switch that ships on, a license change, a removal, data that moves), then `## Install`.
+  **Never a long-form section below the rows:** no "New in X.Y.Z" prose, no per-version changelog, no
+  `<details>` fold. A feature's detail lives in its doc under `doc/agentmaster/`. (The in-app update
+  prompt renders these same bodies, minus `## Install`: the rows read well there too.)
 
 ---
 
@@ -110,31 +137,40 @@ the one-line subject rarely captures the user-facing story.
      Agentmaster.cer. -->
 ## Agentmaster X.Y.Z<  (pre-release)>
 
-< PRE-RELEASE: >**X.Y.Z is a pre-release** building on <prev>. <one-paragraph headline of its own themes>.
-Enable **Settings → Updates → "Allow pre-release versions"** to receive it
-automatically, or install from the assets below. The stable **<prevstable>** remains the default for everyone else.
-< STABLE: >**X.Y.Z is a stable release** and the new default **Latest**. <one-paragraph headline of every
-theme since the last stable — no other Agentmaster version named (§6)>. Agentmaster offers it as an update
+< PRE-RELEASE: >**X.Y.Z is a pre-release** building on <prev>. Enable **Settings → About → "Allow updating to
+pre-release versions"** to receive it automatically, or install from the assets below. The stable
+**<prevstable>** remains the default Latest for everyone else.
+< STABLE: >**X.Y.Z is a stable release** and the new default **Latest**. Agentmaster offers it as an update
 by itself, or install it from the assets below.
+<The intro is framing only: no summary of the themes (the rows below ARE the summary, §3), and a STABLE
+names no other Agentmaster version (§6).>
 
-## New in X.Y.Z
-- **Feature.** …
+## What's new
 
-## Fixes
-- **Fix.** …
+- **The feature's name.** What it does for you, in about one sentence (with the Settings path when you must turn it on).
+- …
+
+## What's fixed
+
+- **The outcome, in the present tense.** What went wrong and what happens now, in about one sentence.
+- …
+
+## Worth knowing when you upgrade< from <prev>>
+
+- ⚠️ **What changes for you.** What to do about it, with the Settings path.
 
 ## Install< (pre-release)>
 
 < PRE-RELEASE only: >> **This is a pre-release.** It is **not** offered as an automatic update
-unless you enable **Settings → Updates → "Allow pre-release versions."** The stable **<prevstable>** stays the default Latest.
+unless you enable **Settings → About → "Allow updating to pre-release versions."** The stable **<prevstable>** stays the default Latest.
 
-**One command (PowerShell)** — installs X.Y.Z (admin not required: as admin it trusts the self-signed cert silently; otherwise it asks — elevate once (UAC), a no-admin per-user portable install, or cancel):
+**One command (PowerShell)** — installs X.Y.Z (administrator rights not needed; it asks where Agentmaster should live: just for you, for all users of this PC, or as the app package):
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version X.Y.Z
 ```
-Add `-Portable` (cert-free, no admin) or `-Launch` (start after install).< STABLE: > X.Y.Z is now the default **Latest**, so a plain run (no `-Version`) also picks it up.
+Add `-Scope User` (or `Machine` / `Package`) to skip the question, and/or `-Launch` to start it right after.< STABLE: > X.Y.Z is now the default **Latest**, so a plain run (no `-Version`) also picks it up.
 
-**Portable (no cert):** download `Agentmaster_X.Y.Z.0_x64.zip` (or `_arm64`), unzip anywhere, run `agentmaster.exe`. Fully self-contained.
+**Portable (no cert):** download `Agentmaster_X.Y.Z.0_x64.zip` (or `_arm64`), unzip anywhere, run `Agentmaster.exe`. Its first launch offers a per-user install, or stays portable.
 
 **MSIX bundle (self-signed):** download `Agentmaster.cer` + `Agentmaster_X.Y.Z.0.msixbundle`, trust the cert once (`Import-Certificate -FilePath Agentmaster.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople`, admin), then `Add-AppxPackage .\Agentmaster_X.Y.Z.0.msixbundle`.
 
@@ -151,7 +187,7 @@ The `< … >` markers above are placeholders, not literal — keep the STABLE **
 **NIGHTLY variant** (see §5 for the framing block): title `## Agentmaster X.Y.Z-prerelease-nightly
 (nightly)`; the intro/Install blockquote becomes the NIGHTLY warning (`> ⚠️ **NIGHTLY build** — an
 unstable development version. It may have memory leaks, CPU issues, and crashes. Install it only to
-help test.`) and the enable path is **Settings → Updates → "Allow updating to nightly builds
+help test.`) and the enable path is **Settings → About → "Allow updating to nightly builds
 (unstable)"** (a warning confirm gates it; even pre-release-opted users skip nightlies otherwise).
 Asset names STAY numeric (`Agentmaster_X.Y.Z.0.*` — prep strips the tag suffix for ver4), but the
 one-command installer must pass the **FULL suffixed version**: `-Version X.Y.Z-prerelease-nightly`
@@ -213,16 +249,16 @@ SC=<scratchpad>; for V in 0.8.2-prerelease; do   # every pre-release since the l
     | grep -v '^\* Request' > "$SC/pub_$V.md"
 done
 ```
-**The merge** — one intro, `## New in X.Y.Z`, `## Fixes`, `## Worth knowing when you upgrade`, one
-`## Install`:
+**The merge** — one intro, `## What's new`, `## What's fixed`, `## Worth knowing when you upgrade`, one
+`## Install`, every item ONE row (§3):
 - **Every item in its FINAL state, measured against the last stable.** An item a later change reworked
-  becomes ONE item (v0.9.0: 0.8.2's "a turn cut by Connection lost restarts by itself" + 0.9.0's widening
-  = one "A session restarts by itself …" item; the side panel's header described as it ends). An item a
+  becomes ONE row (v0.9.0: 0.8.2's "a turn cut by Connection lost restarts by itself" + 0.9.0's widening
+  = one "Sessions restart by themselves." row; the side panel's ⋯ menu described as it ends). An item a
   later change REMOVED is left out (v0.9.0: 0.8.2's "The card's screen follows the status", undone by the
   screenshot-on-tap change). Check "no longer / now / used to" wording against the last stable's own
   code: `git merge-base --is-ancestor <commit> v<laststable>`.
-- **Group by theme, not by origin:** a pre-release's sub-items and the stable's additions to the same
-  feature sit together (the filters, the AI search, Telegram).
+- **Group by theme, not by origin:** a pre-release's row and the stable's additions to the same feature
+  become one row in its final state, and related rows sit next to each other (the side panel's, Telegram's).
 - **No other Agentmaster version in the body** — no pre-release version, no "pre-release" / "folded in",
   and no previous version as a reference point: "0.8.1 asked only …" → "Agentmaster used to ask only …";
   "You will see it at the first update offered after 0.8.2" → "… from the next update on"; the intro is
@@ -235,8 +271,11 @@ done
 **Checks before applying** (the published body = the draft minus its comment, §7):
 ```bash
 B=$SC/body.md; P=$SC/pub_<V>.md; S=$SC/stable_delta.md   # the merged body, a pre-release body, your delta draft
-grep -c '^## Install' "$B"                                  # want 1 (and one each of New / Fixes / Worth knowing)
+grep -c '^## Install' "$B"                                  # want 1 (and one each of What's new / What's fixed / Worth knowing)
 grep -noiE 'pre-?release|nightly|\b0\.[0-9]+\.[0-9]+' "$B" | grep -v 'X\.Y\.Z'   # want only the release's own X.Y.Z
+# every row is ONE row (§3): no sub-bullet under What's new / What's fixed; a long row needs a reason
+awk "/^## What's (new|fixed)/{f=1;next} /^## /{f=0} f&&/^ +- /" "$B"             # want nothing
+awk "/^## What's (new|fixed)/{f=1;next} /^## /{f=0} f&&/^- /&&length>240" "$B"   # each one: trim, or keep on purpose
 # every lead item of the inputs is present, or merged / left out ON PURPOSE (say which in the comment header):
 grep -ohE '^ *- (⚠️ )?\*\*[^*]+\*\*' "$P" "$S" | sed -E 's/^ *- //' | sort -u > $SC/old.txt
 grep -ohE '^ *- (⚠️ )?\*\*[^*]+\*\*' "$B" | sed -E 's/^ *- //' | sort -u > $SC/new.txt
@@ -249,15 +288,25 @@ comm -23 $SC/old.txt $SC/new.txt                            # each line here nee
 
 Strip the draft's HTML-comment header, then apply and publish (per §5 flags):
 ```bash
-awk 'f{print} /^## Agentmaster X.Y.Z/{f=1; print}' draft.md > /tmp/body.md   # drop the <!-- … --> header
-grep -c '<!--' /tmp/body.md        # want 0
-gh release edit vX.Y.Z -R Nucs/Agentmaster --notes-file /tmp/body.md
+awk 'f{print} /^## Agentmaster X.Y.Z/{f=1; print}' draft.md > "$SC/body.md"   # drop the <!-- … --> header
+grep -c '<!--' "$SC/body.md"        # want 0
+gh release edit vX.Y.Z -R Nucs/Agentmaster --notes-file "$SC/body.md"
 # then the stable OR pre-release publish line from §5, then verify:
 gh release view vX.Y.Z -R Nucs/Agentmaster | grep -iE '^draft:|^prerelease:'
 gh release list -R Nucs/Agentmaster --limit 4 | grep -vE '^\*'
 ```
 `softprops/action-gh-release` writes a **terse default body** — always override it with `--notes-file`.
-Verify the markers landed (`gh release view … --json body --jq '.body' | grep -c '<your headline phrase>'`).
+Verify what landed by reading it back: `diff -B <(env -u GH_TOKEN -u GITHUB_TOKEN gh api
+repos/Nucs/Agentmaster/releases/tags/vX.Y.Z --jq .body 2>/dev/null) "$SC/body.md" && echo same` (a draft:
+`releases?per_page=6`, selected by `tag_name`).
+
+**Re-applying the notes of an OLDER release** (one that is not the Latest — the 2026-11-16 rewrite of
+v0.8.0, v0.8.1 and v0.8.2-prerelease): the update endpoint documents `make_latest` with a default of
+`true`, so never leave it out. Use `gh release edit v<old> -R Nucs/Agentmaster --notes-file "$SC/body.md"
+--latest=false`, or what the rewrite used, `gh api -X PATCH repos/Nucs/Agentmaster/releases/<id> -F
+body=@body.md -f make_latest=false` (`-F …=@file` reads the file; Git Bash rewrites a leading `/` into a
+Windows path, so write `repos/…`, never `/repos/…`). Edit the Latest release LAST, with `make_latest=true`,
+then check `gh api repos/Nucs/Agentmaster/releases/latest --jq .tag_name` and each release's flags.
 
 Finally, commit the draft archive (single `git add` + `git commit`, extensive message, **no**
 `Co-Authored-By`/"Generated with" trailers).
@@ -268,9 +317,12 @@ Finally, commit the draft archive (single `git add` + `git commit`, extensive me
 - `-R Nucs/Agentmaster` on **every** `gh` call; `--jq` exiting 1 empty ⇒ use the plain form.
 - A **PRE-RELEASE**'s notes show ONLY its OWN delta (vs the immediately-previous release) — never fold
   in earlier prereleases, never re-list an already-shipped change; each prerelease stands alone (§2).
+- **One row per change** (§3): `- **Lead.** about one sentence` under `## What's new` / `## What's
+  fixed`, bold only on the lead, and nothing long-form below the rows (no "New in X.Y.Z" prose, no
+  per-version changelog, no `<details>` fold): the owner's "Head only" pick of 2026-11-16.
 - A **STABLE** release's notes must carry the **whole** changelog since the last stable as ONE merged
-  changelog — the intervening pre-releases' items merged into the stable's own New / Fixes / Worth
-  knowing, each in its final state, no pre-release (or other Agentmaster) version named (§6) — never a
+  changelog — the intervening pre-releases' items merged into the stable's own What's new / What's
+  fixed / Worth knowing, each in its final state, no pre-release (or other Agentmaster) version named (§6) — never a
   recap, never per-version sections. This merge is the ONLY place accumulation happens (the
   prerelease→stable moment).
 - A **NIGHTLY** is invisible to baselining in both directions (§2): its own notes may be terse, the
@@ -280,6 +332,8 @@ Finally, commit the draft archive (single `git add` + `git commit`, extensive me
 - Flip framing **and** flags together; `--latest=false` alone won't move the badge — `--latest` the
   release you want (§5).
 - Strip the `<!-- … -->` draft header before `--notes-file`.
+- Re-applying an OLDER release's notes: pass `make_latest=false` (`--latest=false`) explicitly, and
+  edit the Latest release last (§7).
 - Asset names are `Agentmaster_X.Y.Z.0.*` (ver4) + `Agentmaster.cer`; the one-command installer uses
   `-Version X.Y.Z` (ver3) — **except a nightly, whose `-Version` is the FULL suffixed
   `X.Y.Z-prerelease-nightly`** (it maps to the tag; the assets stay numeric ver4).

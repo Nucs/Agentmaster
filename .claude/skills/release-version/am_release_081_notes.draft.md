@@ -1,4 +1,11 @@
-<!-- Agentmaster 0.8.1 release notes — STABLE (becomes Latest, replacing 0.8.0).
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request: "I want you to create a more one-row changes in the
+     release notes, like we do in the head of all release notes ... sentences that start with a bold and then,
+     essentially a sentence, maybe a sentence and a half, or a bit more if you really have to", and the layout the
+     owner picked from three previews rendered by GitHub: "Head only". The body is a 1-2 sentence intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the unchanged Worth
+     knowing and Install sections. The long body published until 2026-11-16 is this file at 89cbb9e26; none of it is
+     on GitHub any more. Besides the head: the intro's "Telegram gains" list became rows; the card-screen row names its off switch.
+     Agentmaster 0.8.1 release notes — STABLE (becomes Latest, replacing 0.8.0).
      Range: v0.8.0..605e314dc = 84 commits. 37 user-facing: 30 feat + 17 fix, minus 11 dev-tooling ones, plus the
      71a585d81 refactor that changes a Telegram menu. 47 internal: 21 docs, 14 test, 1 tools, 9 build-server feats,
      1 swap-script feat, 1 e2e-host feat. No pre-release since 0.8.0, so there is nothing to fold (release-notes §6):
@@ -46,90 +53,42 @@
          assets. -->
 ## Agentmaster 0.8.1
 
-**0.8.1 is a stable release building on 0.8.0. Its theme: your workspace survives everything.** No install, update or uninstall deletes Agentmaster's state any more. A state file that cannot be read is kept instead of saved over, and a window holds on to the tabs it could not bring back. Every save keeps what another version of Agentmaster wrote, and each new version first copies your state files into `backups\`.
+**0.8.1 is a stable release building on 0.8.0. Its theme: your workspace survives everything.** This build becomes the new default **Latest**.
 
-Telegram gains:
-- 🎤 **voice notes**, read as prompts;
-- 📜 **All Screen**, the whole conversation as tall pictures;
-- the terminal's **screen on every session's card**;
-- ⎋ **Esc** and 🌙 **Deactivate** buttons;
-- a `/status` with Claude Code's own facts and your plan usage.
+## What's new
 
-On the PC, each session keeps its **Prompt Queue Runner mode** across a restart. Restart and Fork ask before continuing an **interrupted turn**, and **Deactivate All Idle Tabs** parks every idle tab. Eight defects that the new end-to-end suite found in 0.8.0 are fixed, among them a window close that brought its Claude tabs back as plain shells. Releases now ship **debugging symbols**. This build becomes the new default **Latest**.
+- **State files that survive every version.** Every save keeps what another version of Agentmaster wrote, and each new version first copies your state files into `backups\`.
+- **🎤 Voice notes in Telegram.** A voice note in a session's topic becomes its next prompt, transcribed with the session's vocabulary by the engine you set under Settings → Messaging → VOICE NOTES, then corrected by Claude.
+- **📜 All Screen.** A session's card (or `/allscreen`) sends the whole conversation as tall pictures in Claude Code's own look, at a level you pick, since a fullscreen Claude Code keeps no scrollback.
+- **The terminal's screen on every card.** A session's Telegram card ends with a picture of its terminal, taken again whenever the card updates; Settings → Messaging → "Show the screen in each session's card" turns it off.
+- **⎋ Esc and 🌙 Deactivate from your phone.** The card's ⚙️ Session page presses Esc in the session or parks its tab, each checked again by the window that hosts it.
+- **`/status` like Claude Code's own.** In a session's topic it shows what Claude Code's `/status` dialog shows, plus your account and plan usage, without typing anything into the session.
+- **A queued message shows where its turn starts.** A message sent while the session was busy is posted again where its turn really begins, and your own message gets 🫡.
+- **The Search topic's pick menu follows the session.** It offers Activate for a parked tab, Wake for an idle one and Go to topic, and Resume only for a closed session.
+- **Continue or keep an interrupted turn.** Restarting a session whose last turn you interrupted asks whether to continue it, and a fork made mid-turn asks whether it runs that turn or waits for you.
+- **Deactivate All Idle Tabs.** The last item of every Deactivate ▸ menu parks every idle tab, in this window or in all of them.
+- **Card and tree menus match the tab's menu.** Side panel cards, board cards and tree rows get the tab menu's Deactivate ▸ and Close ▸ scopes, each run in the window that hosts the tab.
+- **Side panel cards wear the tab's status icon.** A card's dot shows the unsent-draft dots, the blinking unread ring and the spark crown, like its tab's.
+- **The AI search sees your tabs.** Two new tools list every window's tabs by folder and say what up to 32 sessions are doing now, and why a queued prompt waits.
+- **Startup dialogs show in the command that started Agentmaster.** Each dialog at startup is also written to that command's console or pipe, with its choices and its answer.
+- **Screen readers and UI Automation.** More dialogs can be read, glyph-only buttons have names, and tabs, cards and rows report their state, unread and unsent draft.
+- **Debugging symbols in every release.** The portable zips carry public PDBs, and new `_symbols.zip` assets hold the full PDBs, Source-Linked to the release's commit.
+- **"Delete the downloaded copy?"** A portable copy that installed itself elsewhere offers to move the folder you unzipped into the Recycle Bin.
 
-## New in 0.8.1
+## What's fixed
 
-- **State files that survive every version.** Every save now keeps what another version of Agentmaster wrote: settings, fields and records this version does not know stay in the file, and a file in a newer format is never written. Each state file names the version that wrote it. If you run an older version on the same profile and come back, 0.8.1's next start puts back what the older one dropped. The first start of each new version copies every state file into `<profile>\backups\`, with a README (the newest 12 copies are kept).
-- **🎤 Voice notes in Telegram.** A voice note in a session's topic becomes that session's next prompt.
-  - It is transcribed with the session's own vocabulary: its folder's name, the names in its CLAUDE.md, a developer glossary and your own dictionary.
-  - Claude then corrects it, weighing what each speech engine heard (Sonnet 5.5 by default, through the PC's Claude Code login).
-  - The text is echoed under the note, and a note sent in a new thread starts a session like a typed message.
-
-  It needs a speech engine you choose under **Settings → Messaging → VOICE NOTES**: an OpenAI-compatible transcription endpoint (OpenAI's `whisper-1` or `gpt-4o-transcribe`, Groq's `whisper-large-v3-turbo`), or a local voice worker such as the repository's `tools/voice-poc` (Whisper with Parakeet). Until one is set, a note is answered with where to set it.
-- **📜 All Screen: the whole conversation as pictures.** A fullscreen Claude Code keeps no scrollback, so **⚙️ Session → 📜 All Screen ▸** on a session's card draws the conversation from its transcript, in Claude Code's own look.
-  - The pictures are tall, come in up to 10 parts, and are sent as documents so Telegram keeps them sharp.
-  - You pick a level: Minimal, Compact, Default, Full or Max. Full is the default; **Settings → Messaging** sets another.
-  - The **File diffs** box adds every file change as Claude Code's numbered diff, on green and red bands, at any level.
-
-  `/allscreen [level] [diffs]` does the same.
-- **The terminal's screen on every card.** A session's status card now ends with a picture of its terminal, taken again whenever the card updates; a parked tab keeps its last picture. It costs no extra Telegram calls. **Settings → Messaging → "Show the screen in each session's card"** turns it off.
-- **⎋ Esc and 🌙 Deactivate from your phone.** While the session's claude runs, the card's ⚙️ Session page has two new buttons:
-  - **⎋ Esc** presses Esc once in the session, as at the PC: a running turn stops, and a waiting permission or question is turned down.
-  - **🌙 Deactivate** parks the tab, asking first while a turn runs.
-
-  The window that hosts the tab checks each request again and answers with what happened. An Esc never lands while a delivery holds the input box, and never twice within 3 s (two quick Escs open Claude Code's Rewind menu). `/interrupt` and `/deactivate` work the same way.
-- **`/status` like Claude Code's own.** In a session's topic, `/status` now sends what Claude Code's `/status` dialog shows:
-  - the version, model, effort, permission mode, context, MCP servers (with why one failed) and memory files;
-  - your account and plan usage, with bars;
-  - this conversation's tokens.
-
-  Nothing is typed into the session. The facts come from the transcript, Claude Code's heartbeat, `claude auth status`, and `claude -p /usage` (a local command with no model call; it needs Claude Code 2.1.310+). In the 🔎 Search topic and the main view, `/status` gives the account and plan usage.
-- **A queued message shows where its turn starts.** A message you sent while the session was busy is posted again when the queue sends it, where its turn really begins: "👤 You · … · 📱 from the phone · 📤 sent from the queue". Your own message gets 🫡.
-- **The Search topic's pick menu follows the session's state.** It offers ▶ Activate for a deactivated tab, ⏰ Wake for an idle one, and 💬 Go to topic; ▶ Resume shows only for a closed session.
-- **Continue or keep an interrupted turn.** Restarting a session whose last turn you interrupted asks **"Continue the interrupted turn?"** (Keep it interrupted is the default). Forking a session in the middle of a turn asks whether the fork runs that turn on its own or waits for you; for a fork that waits, Agentmaster presses Esc in it the moment it starts running. Telegram asks the same in the topic.
-- **Deactivate All Idle Tabs.** The last item of every **Deactivate ▸** menu parks every tab whose session is Idle and leaves the rest running. It is grayed out while no tab is idle. When other windows hold idle tabs too, it asks **This window** or **All windows**.
-- **Card and tree menus match the tab's menu.** A side-panel card, a Triage Board card and an Explorer Tree row now have **Deactivate ▸** above **Close ▸**. Both submenus list the tab menu's scopes, row for row: this tab, left, right, others, same folder, other of same folder and all, plus ★ Favorite & Close All Tabs under Close. Each item runs on the session's own tab, in the window that hosts it.
-- **Side-panel cards wear the tab's status icon.** A card's dot is now the tab strip's, with its three indicators:
-  - the 3 dots of an unsent prompt;
-  - the red unread ring, blinking in step with the tab's;
-  - the spark crown while the server cache is warm.
-- **The AI search sees your tabs.** Two new tools let it answer "what runs in my tabs" and "what needs me":
-  - **overview** lists every window's tabs on one page, grouped by working folder, with status, age, turns, context, model and queue;
-  - **status** says what up to 32 sessions are doing now, and why a queued prompt waits.
-
-  Every search row now gives its session's status and age.
-- **Startup dialogs show up in the command that started Agentmaster.** Each dialog Agentmaster.exe opens at startup is also written to that command's console or pipe, with its choices and then its answer, so a script or a Claude session sees a dialog it caused. That covers:
-  - the profile and install questions, and "profile in use";
-  - the update prompt and "Reopen your windows?";
-  - `--help`.
-- **Screen readers and UI Automation.** The quit confirmation, About, and the paste and link warnings can now be read by UI Automation. Buttons that show only a glyph have names. Tabs, board cards, tree rows and side-panel cards report their state, their selection, unread, and an unsent draft.
-- **Debugging symbols in every release.** The portable zips carry a public PDB beside each binary. New `_symbols.zip` assets hold the full PDBs, Source-Linked to the release's commit (see Install).
-- **"Delete the downloaded copy?"** A portable copy that installed itself somewhere else now offers to move the folder you unzipped into the Recycle Bin. It asks only when that folder holds nothing but the download's own files.
-
-## Fixes
-
-- **Closing a window could turn its Claude tabs into plain shells.** An autosave still pending at **Close Window** ran after the close and saved every Claude tab as a PowerShell tab, so the next start (or **Reopen Windows**) opened shells. The close is now the window's last save.
-- **A start without Claude Code wiped every window's tabs.** When Claude Code was not found, or a preset's key was missing, a reopened window dropped the tabs it could not open at its next save. A window left with no tab deleted its record, and the Telegram bot then deleted those sessions' topics. Such tabs are now held in the window's record and come back at the next start, and their topics stay.
-- **An unreadable state file was saved over.** A `sessions.json` could load as an empty fleet, and the next save then wrote that emptiness over it. That happened when the file started with a byte-order mark, held NUL bytes, ended torn, or was locked at the wrong moment. Such files are now read correctly, retried, or kept as `<name>.could-not-read-<time>` before anything replaces them. A start that cannot use `sessions.json` first copies the workspace into `<profile>\recovery\`, with a README. The same guard now covers:
-  - the tag files;
-  - the Telegram bot's `state.json`;
-  - the update prompt's Skip and Postpone;
-  - the profile map, `~\.agentmaster.profiles`.
-- **A restored tab could lose its session record.** A restore that did not find the transcript (an unmounted drive, a working folder past MAX_PATH) gave the session a new id and dropped the old record, with its tags, favorite and Telegram topic. It now keeps the id, and transcripts past MAX_PATH are found.
-- **Installs never delete your data.** Every delete that the installer, the updater or an uninstall makes now refuses a folder that is or holds Agentmaster state. A destination folder that holds someone else's files is renamed aside (`<folder>.before-install-<time>`) instead of being mixed into. Removing the app package first copies the package's own files into your profile.
-- **The runner mode reset at every restart.** A session left Paused came back on Auto after a window reopen or a **Resume here**, and its queue then went by itself. Each session now keeps its own mode across a restart, including an Esc's interrupt hold.
-- **Tags from the tab menu typed into Claude.** The Tags panel lost the keyboard to the closing menu, so a tag name landed in Claude's input box and Esc interrupted the running turn. The panel now keeps the keyboard, and Esc closes only the panel. The "Specify a model" prompt got the same fix.
-- **Shift+Click on a tab switched to it.** It now starts a parked tab's session in place and keeps you where you are, as the tab menu says. Also, a middle-click released off a tab no longer makes the next ✕ click count as a middle click.
-- **Launches from the Agent Manager page left the page.** A launch there now stays on the page and selects the new session, and Home jumps to it. In the side panel's **+** card, Launch works with one click while its presets menu is open.
-- **The side panel jumped to the top.** Closing a card's right-click menu, or picking an item on it such as Move to Idle/Done, selected the focused tab's card and scrolled away from the card you clicked. The selection now stays.
-- **`agentmaster <verb>` could start the app.** In a per-user, all-users or portable install, the `agentmaster` command found Agentmaster.exe itself. A CLI call from a script or a Claude session could therefore start the app and put a "profile in use" dialog on the screen. A CLI call now goes to agentmaster-cli.exe before anything else runs, and the release CLI no longer reads the dev install's profile.
-- **The one-command installer, hardened.**
-  - Typed into a tab of the Agentmaster it upgrades, it goes on in a window of its own (closing the app used to end it halfway).
-  - `irm | iex` no longer changes the PowerShell you ran it in.
-  - It asks before closing a running Agentmaster, and starts it again afterwards. It also closes the app package's own instances itself, since `Add-AppxPackage` cannot.
-  - `-Version 0.7.10` finds a pre-release tag, and `-ZipPath` installs a zip you downloaded.
-  - A refused GitHub token is dropped and the call retried.
-  - Ctrl+C in the middle of an upgrade puts the old version back.
+- **A window close no longer turns its Claude tabs into shells.** An autosave still pending at Close Window saved every Claude tab as a PowerShell tab; the close is now the window's last save.
+- **A start without Claude Code no longer wipes a window's tabs.** Tabs a reopened window could not open now stay in its record and come back at the next start, and their Telegram topics stay.
+- **An unreadable state file is never saved over.** A `sessions.json` that read as empty (a byte-order mark, NUL bytes, a torn end, a lock) is now read correctly, retried or kept aside before anything replaces it.
+- **A restored tab keeps its session record.** A restore that missed the transcript no longer gives the session a new id and drops its tags, favorite and Telegram topic.
+- **Installs never delete your data.** Every delete an install, update or uninstall makes refuses a folder that holds Agentmaster state, and a destination holding someone else's files is renamed aside.
+- **Each session keeps its runner mode.** A session left Paused no longer comes back on Auto after a window reopen or Resume here.
+- **Tags from the tab menu no longer type into Claude.** The Tags panel keeps the keyboard, and Esc closes only the panel instead of interrupting the running turn.
+- **Shift+Click on a tab starts it in place.** It starts a parked tab's session and keeps you where you are, as the tab menu says.
+- **Launches from the Agent Manager page stay on the page.** A launch there selects the new session on the page, and the side panel's + card launches with one click even while its presets menu is open.
+- **The side panel no longer jumps to the top.** Closing or using a card's right-click menu keeps the card you clicked selected.
+- **`agentmaster <verb>` no longer starts the app.** A CLI call goes to agentmaster-cli.exe before anything else runs, so a script can no longer open the app or a "profile in use" dialog.
+- **The one-command installer, hardened.** It goes on in its own window when run inside the Agentmaster it upgrades, asks before closing the app, and puts the old version back on Ctrl+C.
 
 ## Worth knowing when you upgrade from 0.8.0
 

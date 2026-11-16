@@ -306,11 +306,14 @@ carry the `-prerelease-nightly` suffix but the asset names do NOT (prep strips c
 digits), so verify assets by the numeric ver4, not the tag.
 
 ### B6. Apply curated release notes
-Write dense, capability-focused notes to a temp `.md` (sections: a one-line intro · **New in
-X.Y.Z** `-` list · **Capabilities** · **Install** — portable zip + MSIX/cert steps with the exact
-asset names). Then:
+Write the notes in the `release-notes` skill's house format (§3–§4) to a `.md` in the session
+scratchpad: a 1–2 sentence intro (framing only) · **What's new** and **What's fixed**, ONE ROW per
+change (a bold lead and about a sentence; nothing long-form below the rows, the owner's rule of
+2026-11-16) · **Worth knowing when you upgrade** · **Install** — the one-command installer,
+portable zip + MSIX/cert steps with the exact asset names. Then:
 ```bash
-gh release edit vX.Y.Z -R Nucs/Agentmaster --notes-file /tmp/am_release_notes.md
+SC=<the session scratchpad>   # never /tmp, never the checkout
+gh release edit vX.Y.Z -R Nucs/Agentmaster --notes-file "$SC/am_release_notes.md"
 ```
 (`softprops/action-gh-release` writes a terse default body; override it.)
 

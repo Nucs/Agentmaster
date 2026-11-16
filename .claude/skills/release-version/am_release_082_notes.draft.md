@@ -1,4 +1,11 @@
-<!-- RELEASED 2026-11-10 13:14:43Z as a PRE-RELEASE (the owner: "Release as 0.8.2 prerelease"), from 29b683148:
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request: "I want you to create a more one-row changes in the
+     release notes, like we do in the head of all release notes ... sentences that start with a bold and then,
+     essentially a sentence, maybe a sentence and a half, or a bit more if you really have to", and the layout the
+     owner picked from three previews rendered by GitHub: "Head only". The body is a 1-2 sentence intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the unchanged Worth
+     knowing and Install sections. The long body published until 2026-11-16 is this file at f2854acd6; none of it is
+     on GitHub any more. Besides the head: nothing else changed.
+     RELEASED 2026-11-10 13:14:43Z as a PRE-RELEASE (the owner: "Release as 0.8.2 prerelease"), from 29b683148:
      https://github.com/Nucs/Agentmaster/releases/tag/v0.8.2-prerelease (release id 440382543; the stable 0.8.1 stays
      Latest). release.yml run 42818285009: prep, build x64, build arm64, bundle, release all green (~29.5 min); ci.yml
      run 42818279628 on the same push (the from-scratch x64 Release build + the symbols check, the clean-build gate in
@@ -33,58 +40,42 @@
      Assets: Agentmaster_0.8.2.0.msixbundle, _x64.zip, _arm64.zip, _x64_symbols.zip, _arm64_symbols.zip, Agentmaster.cer. -->
 ## Agentmaster 0.8.2-prerelease
 
-**0.8.2 is a pre-release** building on 0.8.1. Two Claude Code mods now ship inside Agentmaster and load into every Claude tab it starts: **file-links** (file paths in Claude's replies become clickable links) and **better-verbose-bash** (a shell call's reason heads its row in the verbose views). The side panel gets **filters**, **Pin to Top**, a **⋯ menu** and the **AI search**. **Restart and Fork ask** whether a cut-off turn should go on, and a turn cut by a lost connection **restarts by itself**. You can **name a window**, the update prompt **shows the release notes**, and Telegram gains **/enter**, **voice searches** and **more folders for a new session**. Long prompts are **delivered again**, and Show Transcript no longer **freezes every window** when a screen reader or another accessibility tool searches it. Enable **Settings → About → "Allow updating to pre-release versions"** to receive it automatically, or install from the assets below. The stable **0.8.1** remains the default Latest for everyone else.
+**0.8.2 is a pre-release** building on 0.8.1. Enable **Settings → About → "Allow updating to pre-release versions"** to receive it automatically, or install from the assets below. The stable **0.8.1** remains the default Latest for everyone else.
 
-## New in 0.8.2
+## What's new
 
-- **Claude Code mods ship with Agentmaster.** Every Claude tab Agentmaster starts (a new tab, a resume, a fork, a restart, a handover, a preset) loads two mods:
-  - **file-links**: file paths and names in Claude's replies become clickable `file:///` links, for files that exist (Claude Code 2.1.287 or later).
-  - **better-verbose-bash**: in the views that show a shell call in full (`--verbose`, ctrl+o), the reason Claude gave for the call heads its row (Claude Code 2.1.308 or later).
+- **Claude Code mods ship with Agentmaster.** Every Claude tab it starts turns file paths in Claude's replies into clickable links (file-links) and heads each shell call with its reason in the verbose views (better-verbose-bash).
+- **Side panel filters.** A funnel beside + narrows the cards by folder, state, tag, recent activity or a flag such as Unread, and each window keeps its own filters.
+- **Pin to Top.** A card's right-click menu pins it at the top of the side panel, with a pushpin, until you unpin it.
+- **The side panel's ⋯ menu.** The header is now + · Sum · ⋯, and docking, scrolling to the selected tab, the card scope and order, and Collapse live in its ⋯ menu.
+- **New tabs open next to their card's tab.** Open New Session Here and Fork session on a side panel card open the new tab right after the card's own tab, in the window that hosts it.
+- **AI search in the side panel.** An AI toggle in the side panel's filter box takes a request in plain words and lists the sessions it finds as cards, each with the reason it fits.
+- **Restart and Fork ask whether the turn goes on.** Restarting a session mid-turn or after an API error, or forking a turn you interrupted, asks "interrupted / uninterrupted", on the PC and in Telegram.
+- **A turn cut by "Connection lost mid-response" restarts by itself.** Its session restarts as Restart uninterrupted, with no question and no tab switch, and the turn goes on.
+- **Deactivate All Waiting-for-you.** The last item of every Deactivate ▸ menu parks every tab whose session is waiting for you, in this window or in all of them.
+- **The reopen question can remember.** "Reopen your N previous Agentmaster windows?" gets a Remember my choice box, and Settings → Behavior → STARTUP answers it for good.
+- **Name a window.** Rename window… gives a window a name that its caption, taskbar preview and Alt+Tab entry show, and that comes back when the window reopens.
+- **Release notes in the update prompt.** The update prompt is now a window of its own that shows the notes of every release on your channel, with your version marked and the updates in green.
+- **Show Transcript draws tables.** Markdown tables in Claude's replies render as real grids, an (i) guide compares the five levels, and Compact gives each tool call the reason Claude stated for it.
+- **`/enter` in Telegram.** It presses Enter at the PC on the prompt already waiting in a session's input box, never into a menu, a dialog or an empty box, and says whether the prompt went out.
+- **Voice searches in Telegram.** A voice note in the 🔎 Search topic runs as a search, transcribed with your sessions' folder and tab names as its vocabulary.
+- **More folders for a new Telegram session.** A new thread's ➕ message adds folders before the session starts, each passed to Claude Code as `/add-dir` ahead of the first prompt.
+- **New Telegram topic icons.** Running topics wear ✍️, Waiting-for-you topics 🔥, and the Search topic 🔎.
+- **Last Turn in 📜 All Screen.** A Last Turn box draws only the conversation's newest turn, at any level, and `/allscreen … last` does the same.
+- **The card's screen follows the status.** A Telegram card takes a fresh picture of the screen when its session comes to rest, and a tab that starts gets one once Claude Code's screen shows, never a black one.
+- **File links through your own address.** The hosted file-link mode no longer points at the author's site, and Copy AI Impl Instructions (Settings → Messaging → FILE LINKS) hands an AI agent on your PC the steps to set up yours.
 
-  A mod stands aside when you run your own copy of it (enabled in your Claude Code settings, or listed in `CLAUDE_CODE_PLUGIN_DIRS`), and when the tab's claude.exe is older than the mod needs. **Settings → Claude → MODS IN CLAUDE TABS** has a switch for each and says what the next tab will do with it.
-- **The side panel: filters, Pin to Top and a ⋯ menu.**
-  - **Filters.** A funnel button beside **+** opens a panel that stays open while you pick: **By Folder** (the **+** card's folder picker, with or without subfolders), **By State**, **By Tag**, **Active within**, and four flags (Unsent draft · Unread · Pinned to top · Favorite). A card shows when it matches every filter in use, and any one of the picks inside each. While a filter is on, a row under the filter box shows the count, a chip per pick and **Clear**. Each window keeps its own filters, and they come back when the window reopens.
-  - **Pin to Top.** A card's right-click menu, right under Jump to Tab, pins the card at the top of the list with a pushpin. Pinning it again brings it back to the top; **Unpin** lets it go. It is separate from Telegram's `/pin`.
-  - **The ⋯ menu.** The header is now **+ · Sum · ⋯**: Dock on the left / right, ⌖ Scroll to the selected tab, Card scope ▸, Card order ▸ and Collapse are the ⋯ menu's items. The header mirrors with the dock: docked left, it reads **⋯ Sum +** from the window's edge.
-  - **Open New Session Here** and **Fork session** on a card open the new tab right after the card's own tab, in the window that hosts it, as the tab menu's own items do.
-- **The AI search in the side panel.** An **AI** toggle inside the side panel's filter box turns the box into the AI search's request line, and the card list into its answer: the sessions it found, as side panel cards, each with the model's full reason.
-  - A click selects a session and peeks its summary; a double-click jumps to its tab, or resumes a closed session as a new tab; a right-click opens the session menu.
-  - While the assistant works, a loading icon shows, and the list changes only when the request ends: the last answer's cards stay dimmed until then. Both AI strips (here and on the Sessions page) show a breathing dot and a sweeping light while it works.
-  - It is the same conversation as the Sessions page's AI search. Its hidden Claude Code process starts only when you click into the box or send a request, and stops 120 minutes after its last use (**Settings → Sessions → AI SEARCH**).
-- **Restart and Fork ask whether the turn goes on.** 0.8.1 asked only when you restarted a turn you had interrupted, and when a fork would continue its source's turn. Now:
-  - **Restarting a session in the middle of a turn** asks **Restart interrupted / uninterrupted**, on the PC and in Telegram. Uninterrupted lets the restarted session continue the turn; interrupted stops it with a regular interrupt.
-  - **A turn that died on an API error** is part of the same choice: uninterrupted takes the error back and the new session continues the turn by itself; interrupted replaces the error with a regular interrupt. A fork of a turn you interrupted asks too, and every such question reads "interrupted / uninterrupted".
-  - The AI search assistant (on the Sessions page, in the side panel and in Telegram's Search topic) asks before it forks a running session.
-  - **A turn cut by "API Error: Connection lost mid-response" restarts by itself**, as Restart uninterrupted: no question, no tab switch, and the turn goes on.
-- **Deactivate All Waiting-for-you.** The last item of every Deactivate ▸ menu (the tab menu, and a card's or tree row's session menu) parks every tab whose session is waiting for you, asking **This window / All windows** like Deactivate All Idle Tabs.
-- **The reopen question can remember.** "Reopen your N previous Agentmaster windows?" gets a **Remember my choice** box, and **Settings → Behavior → STARTUP** answers it for good: Ask every time, Reopen them all, or Start with a single window.
-- **Name a window.** Use **Rename window…** in the window menu (right-click a taskbar preview or the title bar's empty strip, or press Alt+Space), or the name in the Agent Manager header. A named window's caption is its name alone, so its taskbar preview, its Alt+Tab entry and its taskbar button show it. The name is saved, and comes back when the window reopens. In Telegram, the new-thread wizard's window step shows each named window by its name and accepts the name typed like the number; the AI search names windows the same way.
-- **The update prompt shows the release notes.** The update prompt becomes a dark window of its own, with the release notes on the left: a tab per release on your channel, the version you run under a "▲ you" arrow, the updates in green, older releases dimmed. The choices on the right are the ones you know. Without WebView2 the notes show as plain text. You will see it at the first update offered after 0.8.2.
-- **Show Transcript, improved.**
-  - GitHub-style **Markdown tables** in Claude's replies draw as real tables: a framed grid, a header band, striped rows, selectable cells, each column's alignment.
-  - An **(i)** after the level tabs opens a guide comparing what each level shows, and each level's tab has a tooltip that sums it up.
-  - **Compact** lists every tool call on one line with the reason Claude gave for it (`Bash: Count lines of transcript sources`), else what it acted on (`Read: app.cfg`).
-  - The separators the view writes itself are a plain hyphen instead of an em dash, in **Copy ▸ Transcript** too; Claude's own text is untouched.
-- **Telegram.**
-  - **`/enter`** presses one Enter at the PC on the prompt already waiting in a session's input box, never into a menu, a dialog or an empty box, and answers whether the prompt was submitted, kept, or why not.
-  - **A voice note in the 🔎 Search topic is a search**: it is transcribed with your sessions' folder and tab names as its vocabulary, and read like a typed request.
-  - **More folders for a new session.** A new thread's **➕** message adds folders before the session starts. Each reaches Claude Code as `/add-dir` before the first prompt, its answer chosen in the wizard: for this session, remember it (asked to confirm first), or no. Claude Code also reads each added folder's CLAUDE.md.
-  - **New topic icons:** Running ✍️ and Waiting for you 🔥 (existing topics change quietly), and the Search topic wears 🔎.
-  - **📜 All Screen ▸ gets a Last Turn box:** checked, any level draws only the conversation's newest turn, numbered as in the whole conversation. It combines with File Diffs. `/allscreen [level] [diffs] [last]` does the same.
-  - **The card's screen follows the status.** The card looks at its screen again after a change into a state at rest, and after its window was too busy to answer in time; only a changed picture is uploaded. A tab that starts (activated, launched or restarted) gets one picture once Claude Code's screen shows, never a black one.
-- **File links through your own address.** The hosted mode's address no longer defaults to the author's site: it is the placeholder `https://example.com` until you enter yours, and the cog warns while the placeholder is in effect. **Settings → Messaging → FILE LINKS → Copy AI Impl Instructions** copies a brief, with your install's facts filled in, that an AI agent on your PC follows to set that address up (a Cloudflare Tunnel, Tailscale Funnel or a reverse proxy) and to test it.
+## What's fixed
 
-## Fixes
-
-- **Long prompts are delivered again.** Claude Code shows a paste of over 800 characters, or one with more than two line breaks, as a placeholder: `[Pasted text #N +M lines]`, or a bare `[Pasted text #N]` when it has no line break. The verified send took the bare form for foreign text, so every long one-line queued prompt (a long Telegram message, every voice note's transcript) failed as "not delivered" and left the placeholder in the input box; and a long prompt's send could lose track of its own placeholder after the Enter, then type the prompt again or leave it in the box. The send now recognizes the placeholder Claude Code drew for it, presses Enter into it, and gives a slow redraw 3 seconds before filling the box again. Telegram's 👎 reply on a failed prompt also states the runner's real mode, instead of always "the runner paused".
-- **Show Transcript froze every window.** With a very long transcript level open (tens of thousands of blocks), a search by an accessibility client (a screen reader, or a clipboard or assistant tool that reads apps) kept Agentmaster's UI busy for 40 minutes and more, while the terminals went on drawing. The view now hands such a client one item per chunk, and the search stays quick.
-- **A new Telegram session from anywhere.** On Telegram for Android, the message that opens a new thread from "All" arrives without its thread, so the thread's wizard never started; it starts now. `/newsession` also works in the main view, the Search topic and every new thread.
-- **A dim suggestion counted as a draft.** A guess that Claude Code draws dim in an empty input box (its own, or a mod's such as next-prompt) showed the 3 dots of an unsent draft. It was remembered, carried into forks and typed back after a restart. Dim text no longer counts as a draft.
-- **Closing a "Waiting for you" tab leaves the session Idle.** Every close you make (the tab's ✕, the batch closes, a pane close) moves a Waiting-for-you session to Idle and clears its Mark Unread. A later resume no longer brings it back as Waiting, and its Telegram topic leaves as closed. A window close or a quit keeps the state.
-- **The AI search failed at "thinking off".** On Claude Code 2.1.310 every request at off fails. The thinking toggle now rotates low → medium → high → xhigh → max, the default is low, and a stored off runs as low.
-- **The Sessions search box keeps its text.** Turning AI on or off, and the ⊘ reset, no longer empty the box. With AI on, the typed text waits as the unsent request; with AI off, it filters the list.
-- **No message box from the command line.** `agentmaster --help` (`-h`, `-?`, `/?`) and `--version` (`-v`), typed in a console or run by a script that reads the output, print there instead of opening the app's message box. `--version` adds the app's version.
-- **The side panel's unread ring** sits centered on a card's status dot, 2 px wide on every side, instead of a pixel off.
+- **Long prompts are delivered again.** A long one-line prompt, such as a long Telegram message or a voice note's transcript, no longer fails as "not delivered" or gets typed into the box twice.
+- **Show Transcript no longer freezes every window.** A screen reader or another accessibility tool searching a very long transcript kept the UI busy for 40 minutes and more; the search now stays quick.
+- **New sessions from Telegram for Android.** A thread opened from "All" on Telegram for Android now starts its new-session wizard, and `/newsession` also works in the main view and the Search topic.
+- **A dim suggestion is no longer a draft.** A dim guess in an empty input box no longer shows the 3 dots of an unsent draft, travels into forks or gets typed back after a restart.
+- **Closing a Waiting-for-you tab leaves it Idle.** A later resume no longer brings it back as Waiting, and its Telegram topic leaves as closed.
+- **The AI search no longer fails at "thinking off".** Every request at off failed on Claude Code 2.1.310, so the thinking level now starts at low, and a stored off runs as low.
+- **The Sessions search box keeps its text.** Turning AI on or off, or starting over with ⊘, no longer empties it.
+- **`--help` and `--version` answer in the console.** Typed in a console or run by a script, they print there instead of opening the app's message box.
+- **The side panel's unread ring is centered.** It sits evenly on a card's status dot instead of a pixel off.
 
 ## Worth knowing when you upgrade from 0.8.1
 
