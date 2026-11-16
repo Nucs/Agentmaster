@@ -724,8 +724,10 @@ in the session's queue with the origin `Remote`, sanitized like any paste (DELIV
 - **Editing** your message while it is still queued replaces the queued text (`edited_message`); once
   sent, the bot answers "already sent — send the change as a new message".
 - Removing a queued message: `/unqueue <n>` (Telegram tells a bot nothing about a deleted message). *(2026-11-16: §21.57
-  designs a ticket under each waiting message, with ⚡ Steer, 🗑 Delete, ⏫ Move Up and 🔗 Merge on it, plus ↩ Undo, a
-  reply of ❌ or ➕, a deleted message left out at its send, and left-over messages that wait for the runner. Not built.)*
+  adds a ticket under each waiting message, with ⚡ Steer, 🗑 Delete, ⏫ Move Up and 🔗 Merge on it, plus ↩ Undo, a
+  reply of ❌ or ➕, a deleted message left out at its send (checked just before it goes), a live `/queue`, 🔁 Retry ·
+  🗑 Dismiss on a failure in place of the 👎 reply, an edit read like a typed message, and left-over messages that wait for
+  the runner. The code is in, not built.)*
 
 ### 7.2 Claude Code's slash commands (D22)
 
@@ -8339,11 +8341,17 @@ read `after an error`, `after an approval request`.
 8. Restart Agentmaster: the thread survives (`#n` continues).
 9. `hooks.log`: `[link] listening …`, a `hello from <sid8>` per started tab, and no token in any line.
 
-### 21.57 Queue management from a topic: a ticket under each waiting message — ⚡ Steer, 🗑 Delete, ⏫ Move Up, 🔗 Merge, ↩ Undo — the ❌ and ➕ replies, a deleted message left out, left-over messages (2026-11-16; DESIGN ONLY, NOT BUILT)
+### 21.57 Queue management from a topic: a ticket under each waiting message — ⚡ Steer, 🗑 Delete, ⏫ Move Up, 🔗 Merge, ↩ Undo — the ❌ and ➕ replies, a deleted message left out, left-over messages (2026-11-16; the code is in, 3c3424572, NOT BUILT — the next build must purge: `SessionModels.h`'s `QueuedPrompt` and `Messaging.h`'s `MessagingService` changed)
 
 > The user's request (2026-11-16): "I want on telegram, queued messages should maybe get a Steer button and Delete button,
 > what else is necessary for queue management lifecycle on telegram". The decisions came from two rounds of questions with
-> mockups (§21.57.3).
+> mockups (§21.57.3); then "Lets implement". This section describes the code as built; where it differs from the design the
+> user approved, §21.57.14 says how and why.
+
+It WRAPS the one queue: no second queue, no scheduler of its own, no new send path. Every control is an operation the PC's
+Prompt Queue already has (Send now, Delete, Move up) or a plain queueing, and a ticket is a VIEW of the queue the tick rebuilds
+— a change at the PC shows in Telegram at the next tick, and a tap here shows in the PC's queue at once. The engine gained three
+small things: the merge's part bookkeeping, the left-over mark, and the optional check before a send.
 
 #### 21.57.1 What exists, and what is missing (read from the code at c47132641)
 
@@ -8431,72 +8439,96 @@ read `after an error`, `after an approval request`.
     the prompt is left over (§21.57.8).
   - A message that goes at a ready moment gets none: it is sent within ~5 s, as today.
   - A message that starts to wait later (a turn typed at the PC in between) gets its ticket at the next tick.
-  - Tickets are posted by the tick, a beat after the queueing, so a message the queue takes at once never flashes one.
+  - Tickets are posted by the tick at least 2.5 s after the queueing (`kTicketPostDelayMs`), so a message the queue takes
+    at once never flashes one.
+  - A prompt the service wrote itself (a new thread's `/add-dir` of its extra folders, §21.25.9: message 0) gets none: it has
+    no message to sit under.
 - **Where it goes.**
-  - Normally, as a reply to the user's message (Telegram quotes it).
-  - For a voice note whose 🎤 echo is on, the ECHO is its ticket: the echo's text, then the ticket's line and buttons, with
-    no second message.
+  - Normally, as a reply to the user's message (Telegram quotes it). A voice note's ticket is a reply under the NOTE like a
+    typed message's; its 🎤 echo stays as it is (a ❌ or ➕ reply to the echo still acts on the note, §21.57.7).
   - For a ➕ re-queue, the bot's own post is its ticket (§21.57.7).
+  - For a waiting prompt whose message went with an OLDER topic (`QueuedPrompt::remoteThreadId` ≠ the topic's thread: a
+    closed tab's topic is deleted with its messages, a /recreate makes a new one), the ticket is a post of its words
+    (`RepostedPromptHtml`), and once it is in, the prompt's `remoteSource` moves to that post (§21.57.8).
   - With the secretary on (§21.11.4), a ticket is still the bot's own message: buttons need one.
+  - A ticket never makes the sticky card chase it (`movesCard` false), and its title row is in its own text (an edit adds
+    none, §21.54), under its first line.
 - **Its line:** `<keycap> Queued · <why>`.
   - The keycap is the prompt's place among the session's waiting prompts: the same number `/queue` shows and
     `/unqueue n` takes (1️⃣ … 🔟, then `#11` …).
   - Phone prompts lead the queue (D30), so they hold places 1…k.
   - The why is the first row of this table that matches:
 
-  | The facts | The why |
+  | The facts (`DecideTicketWhy`) | The why (`TicketWhyWords`) |
   |---|---|
+  | the session is closed (a /clear or /resume moved the tab on: its old conversation keeps its queue) | waits in a closed conversation: it goes if that conversation is resumed with its runner on |
   | Needs approval (a question or permission prompt is open) | waits: a question is open at the PC — answer it first |
-  | Error | waits: the session is in Error — 🔄 Restart Session on the card |
-  | Done (claude exited) | waits: claude ended — ▶ Reactivate on the card |
-  | the tab is starting (dormant; the queue started it) | waits for the tab to start |
-  | left over, the runner Paused | waits for the runner (Paused): ⚡ Steer sends it now |
-  | left over, the runner Auto | goes once the session has been ready for 40 s |
+  | Error, and the prompt is LEFT OVER (a fresh one is the Error's retry, §21.5, and goes) | waits: the session is in Error — 🔄 Restart Session on the card |
+  | Done (claude exited) | waits: claude ended in the tab — ▶ Reactivate on the card |
+  | the tab is not running (not an adopted one): a fresh prompt started it / a left-over one waits for the user | waits for the tab to start / waits until the tab is active again (▶ Reactivate on the card) |
+  | left over, the runner Paused or Pause all on | waits for the runner (Paused): ⚡ Steer sends it now |
   | not the first waiting prompt | after `<the keycap of the one above>` |
   | first, a turn runs | waits for the running turn |
   | first, a prompt just sent has not started its turn | waits for the prompt just sent |
+  | first, left over, the runner Auto | goes once the session has been ready for 40 s |
   | anything else (first, at rest, nothing in flight) | no ticket: it goes at the next ready moment (an existing ticket is left as it is until the pickup ends it) |
 
-  - After the why, the line notes `· ✏️ edited HH:MM` after an edit, `· 🔗 with 2️⃣` after a merge, and `· ↩ back` after
-    an Undo.
+  - After the why, the line notes `· 🔗 N messages` for a merged prompt and `· ✏️ edited HH:MM` after an edit of its
+    message.
 - **Its buttons** each carry the keycap (decision 1). Telegram splits a row equally, so there are at most two per row.
   - Row 1: `N ⚡ Steer` · `N 🗑 Delete`.
   - Row 2, only when N ≥ 2: `N ⏫ Move Up` · `N 🔗 Merge ↑`. Merge shows only when the prompt above is a phone prompt as
     well: a runner prompt is never merged into.
-- **Its callback data** is `q:<verb>:<the prompt id's first 12 hex>` (under 64 bytes; the session is the topic's).
+  - A closed conversation's ticket offers 🗑 Delete only (nothing can be steered, moved or merged there).
+- **Its callback data** is `pq:<verb>:<the prompt's full id>` ("phone queue"; `q:` is the question card's, §21.30). A GUID
+  fits: the longest, ✅ Merge's `pq:mok:<id>:<the upper id's first 8>`, is 52 bytes of Telegram's 64.
   - It is never an expiring token: a prompt can wait for hours (a dormant tab, an Error).
-  - A tap on a ticket whose prompt has left the queue answers with what became of it ("already sent at 14:07",
-    "removed").
-- **Kept up to date:** the tick hashes each live ticket's text and buttons (as it does for the cards) and edits a ticket
-  only when that hash changes (a number moved, a why changed).
-  - Edits go at the cards' priority.
-  - A burst (five tickets renumbered by one Delete) is spread out by the send loop like any other edits.
+  - A tap acts on the queue as it is NOW; a prompt that has left the queue answers so ("Already sent, or no longer in the
+    queue.").
+  - The session comes from the ticket's record, an Undo's record, or the thread (`_sessionOfThread`).
+- **Kept up to date:** every render is hashed (`TicketViewHash`, as the cards are) and a ticket is edited only when that
+  hash changes (a number moved, a why changed).
+  - The tick posts at `New`, edits and deletes at `CardEdit`; a tap's renders go at `Final` (its button spins until they
+    are in, §21.28).
+  - A render is computed outside the lock and committed only when the record's generation (`_ticketGen`) is still the one
+    it read, so the tick and a tap never overwrite each other's newer render with an older one.
+  - A failed post or edit waits a minute before the tick tries again; an edit Telegram answers "message to edit not found"
+    means the user deleted the ticket — it is not posted again for that prompt this run (`_ticketSuppressed`).
 - **Its end:**
 
   | What happened | The ticket |
   |---|---|
-  | the prompt was picked up (its echo, or claude took it mid-turn) | deleted. Older than 48 h: edited to "📤 sent HH:MM" without buttons (§21.51). The "📤 sent from the queue" line and 🫡 (§21.44) take over, as today |
-  | failed (a lost send, a refused delivery) | it BECOMES the failure notice: "👎 not delivered — <why>; the runner stays Auto / is Paused", with `🔁 Retry` · `🗑 Dismiss`. A prompt that had no ticket gets today's 👎 reply, with the same two buttons |
-  | removed (🗑, a ❌ reply, ✖ in `/queue`, `/unqueue`, the PC's Delete) | "🗑 Removed from the queue" with `↩ Undo` for 2 minutes; then the button goes (one edit) |
+  | the prompt was picked up (its echo, or claude took it mid-turn) | a reply is deleted (older than 47 h: edited to "📤 Sent HH:MM" without buttons, §21.51); an own post keeps its words and gains "📤 Sent HH:MM". The "📤 sent from the queue" line and 🫡 (§21.44) take over, as before |
+  | failed (a lost send, a refused delivery) | it BECOMES the failure notice: "👎 Not delivered — the prompt never became a message (…); the runner stays Auto / is Paused", with `🔁 Retry` · `🗑 Dismiss`. A prompt that had no ticket gets the same notice as a new reply under its message (§21.57.9 fix 3) |
+  | removed (🗑, a ❌ reply, ✖ in `/queue`, `/unqueue`, the PC's Delete) | "🗑 Removed from the queue" with `↩ Undo` for 2 minutes; then the button goes (one edit). A removed prompt that had no ticket gets this one as a new reply, so Undo has a button to sit on |
   | merged into the one above | "🔗 Merged into 1️⃣", without buttons |
-  | the user deleted the message (§21.57.6) | deleted |
-  | the tab closed | gone with the topic (Telegram deletes a topic with its messages); see §21.57.8 |
+  | the user deleted the message (§21.57.6), or the session's record is gone | deleted (older than 47 h: "✖ No longer in the queue") |
+  | the tab closed | gone with the topic (Telegram deletes a topic with its messages): the tick forgets every ticket of a thread that is no topic's any more; see §21.57.8 |
 
-- **Persisted** in `state.json` (`MessagingState::tickets`: prompt id → message id, posted ms, last hash, Undo deadline).
-  A restart therefore edits and deletes the tickets of the run before, and a ticket whose prompt the registry no longer
-  knows is deleted.
+- **Persisted** in `state.json` (`MessagingState::queueTickets`, opaque there like `newThreads`; `QueueTicket` +
+  `QueueTicketsToJson` / `QueueTicketsFromJson`: prompt id → its session, thread, message, the message it replies to, its
+  kind and phase, the last hash, when it was posted, the Undo deadline, the edit stamp, the merge's place, the runner's mode,
+  when it was sent). A post still in flight is saved as "not posted" and goes again after a restart. A restart therefore
+  edits and deletes the tickets of the run before; the Undo snapshots are in memory only (a restart within the two minutes
+  loses Undo, and the ticket then says "Removed" without the button). `queueTickets` is volatile for the older-writer
+  repair (PERSISTENCE.md §17).
 
 #### 21.57.5 The controls
 
-- **⚡ Steer** is `/steer` for an EXISTING prompt: §21.33's path with the prompt's own id (`DecideSteer` on the session's
-  facts, the steer watch, the declined notice).
-  - It is typed into the running turn now, or starts a turn at rest.
-  - A menu on the terminal, a dormant tab or an ended claude keep the prompt waiting first, and the reply says why.
+- **⚡ Steer** is `/steer` for an EXISTING prompt (`_steerQueuedPrompt`): §21.33's path with the prompt's own id
+  (`DecideSteer` on the session's facts, the delete check of §21.57.6, the prompt moved FIRST — `SteerInsertIndex` — and
+  marked Sent, `SubmitPrompt`, the steer watch `_steers` whose `_sweepSteers` tells a later decline once).
+  - It is typed into the running turn now, or starts a turn at rest. A LEFT-OVER prompt may be steered too: it is the
+    user's explicit send, like Send now.
+  - A menu on the terminal, a dormant tab (which it starts) or an ended claude keep the prompt waiting first, and the toast
+    says why; a delivery gate held at once puts it back first ("Not sent now: another delivery is typing …").
   - Its message shows ⚡ while it is sent and 👨‍💻 when claude takes it; the ticket goes at the pickup.
 - **🗑 Delete:** the prompt leaves the queue, its ✍ comes off (an empty reaction), and the ticket reads "🗑 Removed" with
   ↩ Undo. A merged prompt takes the ✍ off every part's message.
-- **↩ Undo** (2 minutes; it also follows a ❌ reply) puts the prompt back where it was, keeping its id, text and stamps.
-  - "Where it was" means before the prompt that followed it; when that one is gone, first among the phone's.
+- **↩ Undo** (2 minutes; it also follows a ❌ reply) puts the prompt back where it was, keeping its id, its words and its
+  parts; its queue time is stamped again, so it waits its own settle (a fresh phone prompt's 5 s).
+  - "Where it was" means before the prompt that followed it; when that one is gone, first among the phone's (a left-over
+    prompt: last).
   - It is refused when the session closed meanwhile ("the session is closed").
 - **⏫ Move Up** swaps the prompt with the waiting prompt above it: one place, like the PC's Move up (with two waiting, that
   is the front). Both tickets are renumbered.
@@ -8504,10 +8536,12 @@ read `after an error`, `after an approval request`.
   - The preview: the ticket turns into "🔗 Merge 2️⃣ into 1️⃣? It becomes:", the merged text as a quote block, then
     `✅ Merge` · `✕ Cancel`.
   - The merged text is the upper prompt's text, a NEW LINE, then this prompt's text ("no just appending").
-  - ✅ first re-checks that both still wait (else: "1️⃣ has gone already"). Then the upper prompt takes the merged text and
-    keeps its place, and this prompt leaves the queue.
-  - Afterwards, this ticket reads "🔗 Merged into 1️⃣", this message's ✍ becomes 🤝, and the upper ticket gains
-    `· 🔗 with 2️⃣`.
+  - ✅ first re-checks that both still wait, one right under the other, and that the one above is still the prompt the
+    preview showed (its data carries that prompt's first 8 characters) — else "The queue changed since the preview: tap
+    🔗 Merge again." and the ticket goes back to its line. Then the upper prompt takes the merged text and keeps its place
+    (and the "waited" stamp of §21.44 when either part had it), and this prompt leaves the queue.
+  - Afterwards, this ticket reads "🔗 Merged into 1️⃣", this message's ✍ becomes 🤝 (`kMergedReaction`), and the upper ticket
+    gains `· 🔗 2 messages`. A preview the queue moved under (the one above changed) goes back to the line by itself.
   - When the merged prompt goes, every part's message gets 🫡, and the one "📤 sent from the queue" line shows the merged
     text.
   - ✕ puts the ticket back as it was.
@@ -8517,161 +8551,216 @@ read `after an error`, `after an approval request`.
     - the reactions reach every part;
     - a merged prompt can be merged again (parts 1, 2, 3).
 - **🔁 Retry · 🗑 Dismiss** (a failed prompt).
-  - Retry queues the failed prompt's text again as a new prompt, first among the phone's, with the same message as its
-    `remoteSource`, so its reactions and ticket come back. The failed record stays in the history.
-  - Dismiss takes the buttons off.
-- **`/queue`** stays the overview, with the tickets' keycaps and whys. It becomes LIVE: an action taken from it (✖,
-  ▶ Send next now) edits the list in place instead of answering below it, so its numbers stay right.
+  - Retry queues the failed prompt's text again as a NEW prompt (a new id; the same messages and parts, so its reactions and
+    its ticket come back), at the fresh insert point, with D30's pass and the question guard's; a dormant tab is started.
+    The failed record stays in the history (Rule #4); its notice reads "🔁 Queued again".
+  - Dismiss takes the buttons off ("👎 Not delivered").
+- **`/queue`** stays the overview (`BuildQueueListHtml` / `BuildQueueListButtons`): every waiting prompt with its keycap, the
+  phone's (📱) with what holds the SESSION (an "after 1️⃣" is the list's order already), the runner's (⚙); a ✖ per prompt
+  (the first eight, four to a row) and ▶ Send next now. It is LIVE: its own stateless buttons (`pq:x:<prompt>`,
+  `pq:next:<session>`) edit the list in place instead of answering below it, so its numbers stay right; its title row is
+  under its header line in its own text, so every edit keeps it. An older list's token ✖ still works (and answers below).
 
 #### 21.57.6 Deleting the message in Telegram drops its prompt
 
-- **The check before the send** (`Scheduler::SetRemotePreSendCheck`).
-  - The scheduler calls it on its own thread, after the throttle sleep and before the re-decide marks the prompt Sent. ⚡
-    Steer, `/sendnow` and the PC's Send now call it too, for a phone prompt.
-  - For a phone prompt, the service changes its message's reaction from ✍ to ⚡ with a DIRECT call (not through the
-    outbox) and reads Telegram's answer:
-    - `HeldMessageGone` ("message to react not found", `MESSAGE_ID_INVALID`) means the message was deleted. The prompt
-      leaves the queue, its ticket is deleted, the log says `[msg] <sid8> phone message N was deleted in Telegram before
-      its send; left out`, and the scheduler decides again (the next prompt may go).
-    - Any other answer, a flood pause on reactions, or no answer within 3 s: the prompt is SENT. A lost prompt costs more
-      than a stray one (§21.17.4's rule).
-  - A merged prompt checks every part (one call per part, in one pass) and drops only the deleted parts. When every part
-    is gone, the whole prompt goes.
+- **The check before the send** (`MessagingService::_remotePreSendCheck`, installed as `Scheduler::SetRemotePreSendCheck` at
+  the bot's start and cleared FIRST at its stop).
+  - The scheduler calls it on its own thread, outside every lock, after the throttle sleep and the re-decide, right before
+    it marks a REMOTE prompt (fresh or left over) Sent; after every check it decides again (the queue or the state may have
+    moved), and a plan that now names another remote prompt is checked in turn — each prompt once per pass, at most four
+    rounds (`kMaxRemotePreSendChecks`), then the plan goes as decided. ⚡ Steer and `/sendnow` call it too. The PC's Send now
+    does NOT: it runs on the UI thread, which must never wait on Telegram.
+  - For each message of the prompt (all its parts'), the service sets the ⚡ reaction with a DIRECT call (not through the
+    outbox; paced by `_awaitCallSlot`, at most `kPreSendCheckTimeoutMs` = 3 s) and reads Telegram's answer:
+    - `HeldMessageGone` ("message to react not found", `MESSAGE_ID_INVALID`) means the message was deleted: that part
+      leaves the merged prompt, or — the last part — the prompt leaves the queue; its ticket ends as Gone (deleted), and
+      the scheduler decides again (the next prompt may go).
+    - Any other answer, a flood pause on reactions (a 429 is noted and parked, never slept out on this thread), Stop under
+      way, or no answer within 3 s: the prompt is SENT. A lost prompt costs more than a stray one (§21.17.4's rule).
+    - A message found alive is taken as alive for `kPreSendCheckReuseMs` (20 s): a declined send retried a beat later costs
+      no second call.
+  - The ⚡ it set is remembered (`_sendingMarks`): when the send is then declined and the prompt is still Pending 20 s later
+    (`kSendingMarkRevertMs`), the reaction sync puts the ✍ back.
+  - Stop waits (bounded, 10 s) for a check in flight before it frees the Telegram client (`_preSendChecksInFlight`): the
+    check runs on a thread Stop does not join. A check that counts itself after the wait began sees `_stop` and never
+    touches the client.
 - **Voice notes are covered as they are:** their prompt's `remoteSource` is the NOTE's own message id (§21.43), so deleting
   the note drops its prompt the same way.
-- **The cost:** one reaction call per phone prompt sent. The ✍ → 👨‍💻 change happens anyway; it now starts one step
-  earlier. The scheduler has ONE worker thread, which waits at most 3 s for the answer, so other sessions' sends wait
-  behind it only when Telegram does not answer.
+- **The cost:** one more reaction call per phone prompt sent (✍ → ⚡ before the send; the pickup's 👨‍💻 or 🫡 follows as
+  before). The scheduler has ONE worker thread, which waits at most ~4 s (the call slot, then the call) for the answer, so
+  other sessions' sends wait behind it only while Telegram is slow.
 
 #### 21.57.7 The ❌ and ➕ replies
 
-- **A reply that is only an X** (❌ ✖ ✖️ ❎ 🚫 ⛔ 🗑 🗑️ `x` `X`; spaces around it ignored):
-  - To a waiting prompt's message, voice note, 🎤 echo or ticket: 🗑 Delete, with its Undo. The bot then deletes the ❌
-    reply.
-  - To a message whose prompt no longer waits: "already sent at 14:07", and the reply stays.
-  - Any other reply is an ordinary message: a new prompt, as today.
-- **A reply that is only a plus** (➕ `+` ✚) queues the replied message's PROMPT again as a new prompt.
-  - **What it takes:**
-    - the user's text message: its current text, from `reply_to_message`;
-    - a voice note: its transcript, from the queue's history by the note's `remoteSource`, else from its 🎤 echo's text;
-    - a 🎤 echo;
-    - a "👤 You" line: the prompt that line shows, looked up in the queue's history by the line's message id (recorded when
-      the line is posted);
-    - a ticket: its prompt;
-    - a part of a merged prompt: that part's text.
-  - **What it does:** the bot deletes the ➕ reply and POSTS the content below, "like my message was sent".
-    - The post reads `👤 You · HH:MM · ➕ again`, then the title row (§21.54), then the words.
-    - With the secretary working (§21.11.4), it is posted as the user's OWN message instead (`_sendAsUser`), and its
-      ticket is a reply to it.
-    - That post is the new prompt's message (`remoteSource` = the post). It is queued through `_queueRemotePrompt` with
-      every rule of a typed message.
-    - While it waits, its line carries the ticket (keycap, why, buttons). Afterwards it carries the turn's status, as the
-      "sent from the queue" line does (§21.44). A message that goes at once gets no ticket part, like any other.
-  - **Refused, with a line:**
-    - a reply to something that was never a prompt (an assistant reply, a card);
-    - a closed session;
-    - a command that would be refused if typed (§7.2): the content is read like a typed message.
+`_takeQueueReply`, called by `_handleTopicMessage` right after the /btw take and BEFORE a question card's text (a lone ❌ is
+never a question's answer); a message a new thread held is never a gesture. Only a REAL reply counts: in a topic, a message
+that replies to nothing still carries `reply_to_message` — the topic's creation message — which is ignored.
+
+- **A reply that is only an X** (`ClassifyQueueReply`: ❌ ✖ ❎ ⛔ × 🚫 🗑 or the letter x in either case; spaces and emoji
+  variation selectors around it ignored; anything longer is a message):
+  - To a waiting prompt's message (any part of a merged one), its voice note, the note's 🎤 echo (`_voiceEchoNotes`: the
+    echo's id → the note's, recorded when the echo is in) or its ticket: 🗑 Delete, with its Undo. The bot then deletes the
+    ❌ reply.
+  - To a message whose prompt was sent: "Already sent at 14:07 — nothing to remove."; to anything else: "That message is
+    not waiting in the queue — nothing to remove." The reply stays.
+- **A reply that is only a plus** (➕ `+` ✚ ＋) queues the replied message's PROMPT again as a new prompt.
+  - **What it takes** (the first that answers):
+    - a prompt of the queue's history the reply points at — through a ticket, a voice note's echo, or its own message; a
+      merged prompt's part when the reply points at that part's message;
+    - else the quoted message's own text: the user's words as they are, or a bot's "👤 You" line without its header and
+      title row (`PromptWordsFromBotLine`).
+  - **What it does:** the bot deletes the ➕ reply and POSTS the content below, "like my message was sent": `👤 You · HH:MM ·
+    ➕ again`, then the title row (§21.54), then the words (`AgainPostHtml`). When the post is in, the tick queues it through
+    `_queueRemotePrompt` with every rule of a typed message (the send thread never queues: `_againPending`), and the post IS
+    the new prompt's message and its ticket (an own post): while it waits it carries the ticket's line and buttons; when it
+    went, "📤 Sent HH:MM". A message that goes at once is left as it was posted until then.
+  - **Refused, with a line:** nothing to queue in the message; a command that would be refused if typed, or one of
+    Agentmaster's (the content is read like a typed message: `DecideQueuedEdit`).
 - Both replies work on voice notes ("voice recording support").
 
 #### 21.57.8 Left-over messages: "whatever Agentmaster already does"
 
-- **What makes a phone prompt left over.** It is still waiting when its session is either:
-  - DEACTIVATED: a park, from the PC or 🌙 (the `started` → false update in `_DeactivateManagedTab`); or
-  - CLOSED: any seam that archives it (`live` → false).
+- **What makes a phone prompt left over** (`MarkRemotePromptsLeftOver`, called in the SAME registry update as the user's
+  action, so one notify carries both): it still waits when the USER
+  - closes its session — the four seams that call `DemoteWaitingOnClose` (the tab's ✕ and its batch closes,
+    `_ArchiveAndCloseClaudeTab`; the Manager's / tree's / menu's Close of an exited session; the folder close; a pane close in
+    TabManagement.cpp);
+  - deactivates it — the park's update in `_DeactivateManagedTab` (from the PC or 🌙);
+  - or switches the tab's conversation with /clear or /resume — the re-home that archives the superseded conversation
+    (`_BindClaudeSessionToTab`): its queue stays with it (flows/03-prompt-queue-runner.md).
 
-  The prompt is then marked left over (`QueuedPrompt::remoteLeftOver`, persisted).
-- **What it changes.** A left-over prompt loses D30's pass and is a runner prompt from then on:
-  - it goes when the session is active again AND its runner is Auto, after the 40 s settle;
+  ⚠ Never a window close or an app quit (`_ArchiveWindowSessionsOnTeardown`): the window's record brings those tabs back,
+  and their messages keep their pass — the same line `DemoteWaitingOnClose` draws. A session archived because its agent
+  died (the liveness sweep) is not the user's action either. The mark is `QueuedPrompt::remoteLeftOver`, persisted.
+- **What it changes** (`IsFreshRemotePrompt` is the one question every D30 rule asks). A left-over prompt loses D30's pass
+  and is a runner prompt from then on:
+  - it goes when the session is active again AND its runner is Auto, after the full 40 s settle (`StateSettleRemainingMs`);
   - with the runner Paused, it waits for Send now, ⚡ Steer, or the runner turned to Auto;
-  - Pause all holds it, and `maxAutoSends` counts it;
-  - `NextPromptIsRemote` skips it;
-  - a NEW phone message is queued AHEAD of it (D30's place: before every prompt that is not a fresh phone prompt), so a
-    Paused left-over never blocks a fresh message.
+  - Pause all holds it, and `maxAutoSends` counts it (`NextPromptIsRemote` answers false for it);
+  - it no longer answers an open question by itself: the question guard holds it (its `guardPattern` is kept);
+  - in Error it waits (a fresh phone prompt is the Error's retry, a runner prompt is not);
+  - a NEW phone message is queued AHEAD of it (`FreshRemoteInsertIndex`: before every pending prompt that is not a fresh
+    phone prompt), so a Paused left-over never blocks a fresh message.
 - **An Agentmaster restart is not a deactivation.** Tabs that a reopened window restores dormant keep their phone prompts
   as they were (their claude starts when the tab is shown, or by the restore wake).
 - **Where they show.**
-  - A deactivated tab keeps its topic (a park alone does not make it idle), so its tickets stay. They say "waits for the
-    runner (Paused)" or "goes once the session has been ready for 40 s".
-  - A closed tab's topic is deleted by Telegram, together with the messages and their tickets. When the session comes
-    back (a Resume from 🔎 Search or the PC), its new topic POSTS each left-over prompt after the history replay:
-    `📱 from the phone · HH:MM (day) · waiting`, then the words, carrying its ticket. That line is the prompt's message
-    from then on (`remoteSource` moves to it).
-- **A `/clear` at the PC** moves the topic to the new conversation and leaves the queue with the old one, which is
-  archived (flows/03-prompt-queue-runner.md).
-  - Its waiting phone prompts are therefore left over.
-  - Their tickets say: "left in the conversation before /clear: it goes if that one is resumed with its runner on".
-  - They offer 🗑 Delete and ➕ (queue it here) instead of Steer.
+  - A deactivated tab keeps its topic while it is not idle; its tickets say "waits until the tab is active again
+    (▶ Reactivate on the card)", then, once the tab runs, "waits for the runner (Paused)" or "goes once the session has been
+    ready for 40 s".
+  - A closed tab's topic is deleted by Telegram, together with the messages and their tickets (the tick forgets those
+    tickets). When the session comes back (a Resume from 🔎 Search or the PC) and has a topic again, each left-over prompt's
+    ticket is a POST of its words (`📱 from the phone · waiting from before this topic`, then the words), and once that post
+    is in, the prompt's `remoteSource` moves to it (a merged prompt's parts become the one post): the reactions, an edit's
+    match and the delete check go there.
+  - A /clear's old conversation keeps its waiting phone prompts, and their tickets stay in the topic (now the new
+    conversation's): "waits in a closed conversation: it goes if that conversation is resumed with its runner on", with
+    🗑 Delete only. A ➕ reply to one queues it in the topic's session.
 
 #### 21.57.9 The fixes that come with it
 
-1. **A prompt removed from ANY surface clears its message's ✍ and ends its ticket.** The reaction sync also visits the
-   prompt ids it has recorded (`_reacted`) that the queue no longer holds: a Pending prompt that is gone was removed.
-2. **An edit is READ like a typed message,** through `ParseRemoteCommand` on the new text:
-   - a refused command (no record, leaves the tab), a bare `/add-dir`, an Agentmaster command (`/steer x`, `/queue`) or a
-     `/btw` refuses the edit with the line a typed one gets, and the queued text stays as it was;
-   - `/cc /x` queues `/x`;
-   - a Claude Code command that leaves a record replaces the text.
-
-   A voice note's edited CAPTION replaces its prompt's caption part (today an edited note is ignored).
-3. **🔁 Retry · 🗑 Dismiss on every failure** (§21.57.4), and the 👎 reply no longer points at `/sendnow`.
+1. **A prompt removed from ANY surface clears its message's ✍ and ends its ticket.** The reaction sync records where each
+   waiting phone prompt's ✍ is (`_reactedWhere`: its session and every message of it, also for a prompt queued before this
+   run) and visits the prompts of that session the queue no longer holds — a candidate is confirmed by one fresh registry
+   read, so a prompt queued after the tick's snapshot is never taken for removed — and takes their ✍ off. The ticket's
+   render sees the same removal and turns the ticket into "Removed" with Undo (from the last copy the tick saw,
+   `_ticketSeen`).
+2. **An edit is READ like a typed message** (`DecideQueuedEdit` on `ParseRemoteCommand` of the new text): a refused command
+   (no record, leaves the tab), `/add-dir` (its dialog is answered from the topic only for a message SENT as /add-dir), one
+   of Agentmaster's commands (`/steer x`, `/queue`, `/btw x`) or an empty text refuses the edit with its line
+   (`QueuedEditRefusalHtml`), and the queued words stay as they were; `/cc /x` queues `/x`; a Claude Code command that leaves
+   a record replaces the words. An edit of a merged prompt's part replaces that part and joins them again; an accepted edit
+   stamps the ticket ("✏️ edited HH:MM"). An edited voice note's caption is still ignored (as before).
+3. **🔁 Retry · 🗑 Dismiss on every failure** (§21.57.4), and the 👎 notice no longer points at `/sendnow` (which sent the
+   NEXT pending prompt, never the failed one): `_failTicket`, called by the reaction sync where the old line was posted.
 4. **`/queue` is live** (§21.57.5).
 
 #### 21.57.10 What it costs
 
 - **Telegram:**
-  - one ticket per message that waits (none for a voice note whose echo is on);
+  - one ticket per message that waits (a voice note's too);
   - an edit when its place or why changes, and a delete at the pickup;
   - one edit when an Undo window ends;
-  - the check reaction per phone prompt sent, which is moved earlier, not added.
+  - one more reaction call per phone prompt sent (the delete check's ⚡).
 
-  The ~18 calls a minute per chat (§6.6) carry it at the cards' priority.
-- **The engine:** two persisted members on `QueuedPrompt` (`remoteParts`, `remoteLeftOver`). `SessionModels.h` changes, so
-  the build that brings this must PURGE (HEAD needs one already).
+  The ~18 calls a minute per chat (§6.6) carry it at the cards' priority (a tap's renders at an answer's).
+- **The engine:** three persisted members on `QueuedPrompt` (`remoteThreadId`, `remoteParts`, `remoteLeftOver`, each omitted
+  at its default) and the scheduler's optional check. `SessionModels.h` changed, so the build that brings this must PURGE
+  (HEAD needed one already).
 
-#### 21.57.11 The code (planned)
+#### 21.57.11 The code
 
-- **Pure, harness-tested:** a new `AgentMaster/MessagingQueueTickets.h`:
-  - the keycap (`QueueKeycap`) and the why (`DecideTicketWhy`, over the session's facts and the prompt's place);
-  - the ticket's text and keyboard (`BuildTicketText`, `BuildTicketButtons`);
-  - the callback data (`EncodeQueueCallback` / `ParseQueueCallback`);
-  - the merge preview and text (`BuildMergePreview`, `MergedPromptText` over `remoteParts`);
-  - the replies (`ClassifyQueueReply`: Remove / Again / None) and the edit's reading (`DecideQueuedEdit`);
-  - the Undo window, the end of a ticket (`DecideTicketEnd`: delete or edit, by its age), and the ticket list's
-    state-file form.
+- **Pure, harness-tested:** `AgentMaster/MessagingQueueTickets.h` (namespace `Msg`):
+  - the button data (`kQueueCallbackPrefix` = `pq:`, the `kQueueVerb*` verbs, `EncodeQueueCallback` / `ParseQueueCallback`)
+    and the keycap (`QueueKeycap`: 1️⃣ … 9️⃣, 🔟, then `#11`, `#12`, …);
+  - a prompt's messages (`TopicMessageIdOf`, `PromptPartsOf`, `PromptMessageIds`, `PromptHasMessage`, `MergedRemoteText`:
+    each part on a line of its own) and its place (`PromptWaits`, `WaitingPosition`, `WaitingPromptAbove`,
+    `FreshRemoteInsertIndex`, `DeliveryInFlightOf`);
+  - the why (`TicketWhy`, `TicketWhyFactsFor`, `DecideTicketWhy` — read in the table's order — and `TicketWhyWords`);
+  - the ticket (`TicketKind`: a reply or an own post; `TicketPhase`; `BuildTicketView` over `TicketViewFacts`;
+    `TicketViewHash`);
+  - the replies (`ClassifyQueueReply`, `PromptWordsFromBotLine`, `AgainPostHtml`, `RepostedPromptHtml`);
+  - the edit's reading (`DecideQueuedEdit`, `QueuedEditRefusalHtml`);
+  - the /queue list (`BuildQueueListHtml`, `BuildQueueListButtons`);
+  - the ticket's record and its state-file form (`QueueTicket`, `QueueTicketsToJson` / `QueueTicketsFromJson`).
 - **Engine:**
-  - `SessionModels.h`: `QueuedPrompt::remoteParts` and `remoteLeftOver`, and `MarkRemotePromptsLeftOver` for the park and
-    close seams;
-  - `Persistence.cpp`: both keys, written only when set;
-  - `Scheduler.h/.cpp`: `NextPromptIsRemote` skips left-over prompts, plus the pre-send check hook;
-  - `_queueRemotePrompt`'s insert point (ahead of left-over prompts).
+  - `SessionModels.h`: `RemotePromptPart`; `QueuedPrompt::remoteThreadId`, `remoteParts`, `remoteLeftOver`;
+    `IsFreshRemotePrompt` (the one D30 question) and `MarkRemotePromptsLeftOver`;
+  - `Persistence.cpp`: the three keys, each written only when set, read back clamped (a negative id reads 0, an empty
+    part is dropped);
+  - `Scheduler.h/.cpp`: `StateSettleRemainingMs`, `NextPromptIsRemote` and the question guard ask `IsFreshRemotePrompt`;
+    `SetRemotePreSendCheck` (`RemotePreSendCheck`) and its call in `_process`;
+  - the left-over seams: `_ArchiveAndCloseClaudeTab`, `_ArchiveClaudeSession` (an exited session's Close),
+    `_CloseClaudeSessionsInFolder`, `_HandleClosePaneRequested` (TabManagement.cpp), `_DeactivateManagedTab`, and the
+    re-home in `_BindClaudeSessionToTab` (TerminalPage.AgentObserver.cpp).
 - **Service:**
-  - `Messaging.Queue.cpp` (new): `_syncTickets` on the tick after `_syncReactions`, the `q:*` callbacks, the replies, the
-    merge preview, Undo, Retry, and the pre-send check;
-  - `Messaging.Inbound.cpp`: the edit's reading, the entry for the reply gestures, the live `/queue`;
-  - `Messaging.Voice.cpp`: the echo as a ticket, and the caption edit;
-  - `Messaging.cpp`: the reaction sync's removed prompts, and the failure notice's buttons;
-  - `MessagingModels.h`: `MessagingState::tickets`;
+  - `Messaging.Queue.cpp` (new; no precompiled header): the tickets (`_syncTickets`, `_syncTicketsOf`, `_renderTicket`,
+    `_failTicket`), the taps (`_onQueueTap`), the controls (`_steerQueuedPrompt`, `_removeQueuedPrompt`,
+    `_undoQueuedRemove`, `_moveQueuedUp`, `_mergeQueued`, `_retryFailedPrompt`), the replies (`_takeQueueReply`), the
+    delete check (`_remotePreSendCheck`), the list (`_queueListParts`) and their helpers (`_sessionOfThread`,
+    `_noteReactedWhere`, `_deleteChatMessage`);
+  - `Messaging.Inbound.cpp`: the `pq:` callbacks, the replies' entry, the edit's reading, the live `/queue`,
+    `_queueRemotePrompt`'s insert point and thread, and Send now's delete check;
+  - `Messaging.Voice.cpp`: the 🎤 echo's id recorded for its note (`_voiceEchoNotes`);
+  - `Messaging.cpp`: the tick's call, the reaction sync's removed prompts and its failure tickets, the scheduler's check
+    installed at the start and removed at the Stop (which waits for a check in flight), the tickets saved and loaded;
+  - `MessagingModels.h`: `MessagingState::queueTickets` (read and written as it is, like `newThreads`; volatile for the
+    state repair);
   - `Messaging.h`.
-- **Tests:** `TestMessagingQueue` (`tests_messaging_queue.cpp`):
+- **Tests:** `TestMessagingQueue` (`tests_messaging_queue.cpp`, eleven sections):
+  - the keycaps and the button data (under 64 bytes, read back, foreign data refused);
+  - a prompt's messages and merged parts (a new line, never an append);
+  - where a prompt stands (its place, the prompt above, a delivery in flight, the fresh insert point);
   - every why, in its order;
-  - the keycaps past 10;
-  - the buttons, by place and kind;
-  - the callback data: under 64 bytes, and read back;
-  - the merge preview and text: a new line, never an append; parts in order; an edited part rebuilt;
-  - the replies: each X and plus form, spaces around them, and a longer text is no gesture;
-  - the edit's reading: each kind of refusal, `/cc`, a voice caption;
-  - the left-over rule in `DecideAdvance`: Paused holds it, Auto sends it after the settle, and a fresh message
-    overtakes it;
-  - the ticket's end by its age;
-  - the state file's round trip.
+  - the ticket's text and buttons in every phase (the keycap on the line and on every button, the title row);
+  - the X and plus replies (each form, spaces around them, a longer text is no gesture) and a bot line's words;
+  - the edit's reading (`/exit` refused, `/cc /x` queues `/x`) and its refusals;
+  - the /queue list and its buttons;
+  - the tickets' state-file round trip;
+  - the left-over rule in `DecideAdvance` (the runner's mode, the full settle, no question pass) and
+    `MarkRemotePromptsLeftOver`;
+  - the new prompt fields' round trip in sessions.json (omitted at their defaults).
 
-#### 21.57.12 Logs (planned)
+#### 21.57.12 Logs
 
-- `[msg] <sid8> ticket posted | edited | deleted for prompt <pid8> (#N, <why>)`
-- `[msg] <sid8> phone message N was deleted in Telegram before its send; left out`
-- `[msg] <sid8> left over: N phone prompt(s) wait for the runner (deactivated | closed)`
-- `[nav] remote telegram queue <verb> <sid8> #N -> done | refused:<why>`, for steer, delete, undo, move-up, merge
-  (asked / done / cancelled), retry, dismiss, the ❌ reply and the ➕ reply.
+All in hooks.log.
+
+- `[msg] <sid8> queued prompt removed (<how>; message <ids>, N chars)` — `how` names the way: the ticket's Delete, the
+  ❌ reply, the /queue list.
+- `[msg] <sid8> queued prompt put back by Undo (message <ids>)`
+- `[msg] <sid8> queued message <ids> merged into the one above (messages <ids>)`
+- `[msg] <sid8> queued message steered from its ticket (message <ids>, N chars): sent now`
+- `[msg] <sid8> a failed phone prompt was queued again by Retry (message <ids>)`
+- `[msg] <sid8> phone message <ids> was deleted in Telegram before its send; left out of the queue` (or "its part left
+  out of the merged prompt"); the scheduler's own line goes to autorunner.log: `[pre-send] <sid> a remote prompt's
+  message was deleted in Telegram: left out, the plan decided again`.
+- `[msg] <sid8> N phone prompt(s) left the queue: their ✍ came off`
+- `[msg] <sid8> a ➕ re-queue's post was refused (<description>): nothing queued`
+- `[msg] a delete check still ran 10 s after the stop began; the Telegram client is left allocated`
+- `[nav] remote telegram queue <verb> <sid8> -> <outcome>`: steer (`sent`, `queued:box-held` / `dormant` / `ended` /
+  `menu`, `left-out:deleted`, `refused:gone` / `closed`), remove (`removed (<how>)`, `refused:gone`), undo (`restored`,
+  `refused:too-late` / `closed`), move-up (`moved`, `refused`), merge (`asked`, `merged`, `cancelled`, `refused:gone` /
+  `order`), retry (`queued`), dismiss (`done`), deleted-message (`left out`, `part left out`), reply-x
+  (`refused:not-waiting`), reply-plus (`posted`, `refused:no-words` / `command`).
 
 #### 21.57.13 Open
 
@@ -8679,6 +8768,46 @@ read `after an error`, `after an approval request`.
   "📤 sent" line behind.
 - Holding a phone prompt so that the runner never sends it (`PromptGate::Manual`) was not asked for.
 - The PC's Prompt Queue shows a merged prompt as its merged text, with no parts and no 📱 mark.
+- An Undo window lives in memory only: a restart within its two minutes ends it (the ticket stays "Removed", without its
+  button).
+- The delete check runs where the RUNNER sends; the PC's Send now does not run it (§21.57.6).
+- An edited voice note's caption is still ignored (§21.57.9).
+
+#### 21.57.14 As built: where it differs from the design, and how it was checked
+
+Where the code differs from the design the user approved (474a16091), and why:
+
+1. **A voice note's 🎤 echo is not its ticket.** A voice note gets a regular reply ticket, as a typed message does; the echo
+   stays the transcript. A ❌ or ➕ reply to the echo still acts on the note (`_voiceEchoNotes`). Why: the echo is posted
+   once, by the voice lane, before the prompt is queued; making it the ticket would have meant re-routing the voice lane
+   through the ticket code for no visible gain.
+2. **➕ is always the bot's post** ("👤 You · HH:MM · ➕ again"), never the user's own message through the secretary
+   (§21.11.4). Why: the ticket needs buttons, and a message sent as the user can carry none; one shape keeps the post and
+   its ticket the same message.
+3. **No `· ↩ back` mark after an Undo, and `· 🔗 N messages` instead of `· 🔗 with 2️⃣`** after a merge: an Undo puts
+   the prompt back where it was, which its number already says, and a merged prompt's parts are counted, not named by a
+   place that moves.
+4. **The button data is `pq:<verb>:<the full prompt id>`**, not `q:` with the id's first 12 hex characters: `q:` is the
+   question card's (§21.30), and the full id is still 52 bytes, under Telegram's 64.
+5. **A /clear's old conversation's tickets show 🗑 Delete only**, without "➕ queue it here": a ➕ reply to the message does
+   that already (§21.57.8).
+6. **An edited voice note's caption is not read** (§21.57.9 fix 2): an edited note is still ignored, as before.
+
+How it was checked (nothing built, no live test):
+
+- **The m5 harness** (`run-m5-tests.bat`, compiled and run in an isolated copy with its own scratch profile): 13,536 checks,
+  3 failures — the known `TestTaskbarBadge` three (they fail at HEAD too).
+- **A syntax-only compile** (`cl /Zs`) with the command lines a clean Release build recorded (the app's `/W3 /WX` and its
+  `/we` list; the CLI's `/W4 /WX`; the precompiled-header units against that build's PCH) of every changed unit and every
+  unit that includes `Messaging.h`: `Messaging.Queue.cpp`, `Messaging.cpp`, `Messaging.Inbound.cpp`,
+  `Messaging.Voice.cpp`, `Messaging.Btw.cpp`, `Messaging.Files.cpp`, `Messaging.Menus.cpp`, `Messaging.Questions.cpp`,
+  `Messaging.Status.cpp`, `MessagingSearchBridge.cpp`, `Persistence.cpp`, `Scheduler.cpp`, `SessionRegistry.cpp`,
+  `AgentManagerContent.Settings.cpp`, `TerminalPage.AgentEngine.cpp`, `TerminalPage.AgentSessions.cpp`,
+  `TerminalPage.AgentObserver.cpp`, `TabManagement.cpp`, and the CLI's `ClaudeSpawn.cpp`, `Persistence.cpp`,
+  `SessionRegistry.cpp`. Each passed, and an error planted in a copy of `Messaging.Queue.cpp` and of `TabManagement.cpp`
+  failed (the method can fail).
+- **A scan of the added lines** for raw non-ASCII characters in string literals and narrow literals with a code past 0xFF:
+  none added.
 
 **Check after the build** (the dev bot):
 1. **Tickets and Move Up.** In a running session, send two messages. Each gets a reply ticket with its buttons:
@@ -8690,8 +8819,9 @@ read `after an error`, `after an approval request`.
 4. **Delete and Undo.** 🗑 Delete shows "Removed" with ↩ Undo, and the ✍ is gone. Undo within 2 minutes brings it back as
    1️⃣; after 2 minutes the button is gone.
 5. **The ❌ and ➕ replies.**
-   - Reply ❌ to a waiting voice note: it is removed, and the ❌ reply is deleted.
-   - Reply ➕ to an old message: the bot posts "👤 You · … · ➕ again" below, and it is queued.
+   - Reply ❌ to a waiting voice note (and, another time, to its 🎤 echo): it is removed, and the ❌ reply is deleted.
+   - Reply ➕ to an old message: the bot posts "👤 You · … · ➕ again" below, and it is queued; the post carries the
+     ticket's line and buttons while it waits.
 6. **Deleting a message.** Delete a waiting message in Telegram. When its turn comes it is left out (`hooks.log`), and the
    next one goes.
 7. **An edit into a command.** Edit a waiting message into `/exit`: refused with the leaves-the-tab line, and the queued
