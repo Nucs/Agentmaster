@@ -278,6 +278,11 @@ step across two windows; the terminal's size unchanged by every reveal.
   Agent Manager page shows and the session is hovered or selected there.
 - **Tag ribbons** hang ~70% below the tab's bottom edge from an always-open parented popup
   (`HeaderTagBookmarksPopup`; [TAGS.md](TAGS.md)).
+- **The note glyph** (2026-11-16, [SESSION_NOTES.md](SESSION_NOTES.md) §4b): a small QuickNote glyph after the title of a
+  tab whose session has a note (`HeaderAgentNoteGlyph`, the title row's third, Auto column, so the title trims before
+  it), x:Load-bound to `TerminalTabStatus.AgentNoteVisible` — an un-noted tab creates no element. Not hit-testable:
+  the tab's rich card shows the note right under its title. Set by `_SetTabAgentNote` / `_RefreshTabNote` (launch, bind,
+  a save here) and `_RefreshAllTabNotesIfChanged` (the notes epoch, from the liveness sweep).
 - **The rich tooltip** (a session-aware hover card) is `AgentSessionToolTipHost`
   ([HANDOVER_tab-tooltip.md](HANDOVER_tab-tooltip.md): its lifecycle, invariants and crash history);
   its tag row's opacity is `tooltipTagsOpacity` (0.9).
@@ -289,7 +294,9 @@ step across two windows; the terminal's size unchanged by every reveal.
 ## The tab menu
 
 Agentmaster's items in a tab's context menu (shown for a managed session unless noted; visibility set
-when the flyout opens): Activate Tab and Activate All Tabs (N) for dormant tabs, Mark Unread, Open In
+when the flyout opens): Activate Tab and Activate All Tabs (N) for dormant tabs, Set Note… (F3) / Edit Note… (F3) right
+under Rename tab (F2) ([SESSION_NOTES.md](SESSION_NOTES.md) §3a: the note editor card under the tab; F3 is the
+`agentOpenSessionNote` action, which passes the key through on a shell tab), Mark Unread, Open In
 Explorer (`OpenSessionFolder`: the effective folder), Copy ▸ (`CopySessionField`), Show Transcript, Tags,
 Filter ▸ right under Tags (the side panel card menu's Filter lines for the tab's session, filled at every open by
 `TerminalPage::_SidePanelFillTabFilterMenu`; a pick narrows this window's side panel and brings its cards on screen —

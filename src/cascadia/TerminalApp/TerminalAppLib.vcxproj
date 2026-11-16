@@ -442,6 +442,12 @@
       <DependentUpon>TerminalPage.xaml</DependentUpon>
       <SubType>Code</SubType>
     </ClCompile>
+    <!-- Agentmaster (SESSION_NOTES.md): the session note's editor card, F3 (agentOpenSessionNote), the save and its repaint, and
+         the tab markers. The side panel's note glyph and its hover card live in TerminalPage.AgentSidePanel.cpp. -->
+    <ClCompile Include="TerminalPage.AgentNotes.cpp">
+      <DependentUpon>TerminalPage.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
     <ClCompile Include="ActionPreviewHandlers.cpp">
       <DependentUpon>TerminalPage.xaml</DependentUpon>
       <SubType>Code</SubType>

@@ -72,6 +72,8 @@ namespace winrt::Microsoft::Terminal::Settings::Model::implementation
         static auto actionNames = []() {
             return std::unordered_map<ShortcutAction, wil::zwstring_view>{
                 { ShortcutAction::AddMark, USES_RESOURCE(L"AddMarkCommandKey") },
+                // Agentmaster (SESSION_NOTES.md §3b): the command palette's and the settings UI's name for F3's action.
+                { ShortcutAction::AgentOpenSessionNote, USES_RESOURCE(L"AgentOpenSessionNoteCommandKey") },
                 { ShortcutAction::AdjustFontSize, USES_RESOURCE(L"AdjustFontSizeCommandKey") },
                 { ShortcutAction::AdjustOpacity, USES_RESOURCE(L"AdjustOpacity") },
                 { ShortcutAction::BreakIntoDebugger, USES_RESOURCE(L"BreakIntoDebuggerCommandKey") },

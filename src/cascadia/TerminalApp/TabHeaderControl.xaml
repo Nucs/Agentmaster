@@ -65,6 +65,10 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
+                <!--  Agentmaster (SESSION_NOTES.md §4b): the NOTE marker's column, after the title's star column — Auto, so it
+                      is 0 wide on every tab whose session has no note (its glyph is not even loaded), and a noted tab's
+                      title trims with "…" in FRONT of the glyph instead of hiding it.  -->
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
         <StackPanel x:Name="HeaderStackPanel"
                 Orientation="Horizontal"
@@ -419,6 +423,23 @@
                    Text="{x:Bind Title, Mode=OneWay}"
                    TextTrimming="CharacterEllipsis"
                    Visibility="Visible" />
+        <!--  Agentmaster (SESSION_NOTES.md §4b — the user's pick of 2026-11-16, "Glyph after the title"): the NOTE marker, a
+              small QuickNote glyph after the title, before the close button, on a tab whose session has a note. x:Load-bound
+              to TabStatus.AgentNoteVisible, so the ~700 tabs of a large window pay no element for it until their session
+              gets a note (per-tab XAML is multiplied by the fleet). Not hit-testable: hovering it is hovering the tab, whose
+              rich card shows the note right under the title. No Foreground: it inherits the title's ink, like the bell and
+              lock icons, so it reads on every tab color.  -->
+        <FontIcon x:Name="HeaderAgentNoteGlyph"
+                  Grid.Column="2"
+                  Margin="5,0,0,0"
+                  VerticalAlignment="Center"
+                  x:Load="{x:Bind TabStatus.AgentNoteVisible, Mode=OneWay}"
+                  AutomationProperties.Name="Note"
+                  FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                  FontSize="11"
+                  Glyph="&#xE70B;"
+                  IsHitTestVisible="False"
+                  Opacity="0.85" />
         <!--  Agentmaster: AcceptsReturn makes this a MULTI-LINE rename box — a non-commit Return inserts
               a newline (titles can hold line breaks). Commit (accept + save, identical to clicking away)
               is by clicking away (LostFocus) ALWAYS, plus optionally Shift+Enter (default) or Enter, per

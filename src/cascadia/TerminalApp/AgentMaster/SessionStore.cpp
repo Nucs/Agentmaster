@@ -314,6 +314,20 @@ namespace Agentmaster
             return key == kSessionStoreTitleKey || key == kSessionStoreFavoriteKey || key == kSessionStoreTagsKey;
         }
 
+        // Agentmaster (SESSION_NOTES.md §2): the NOTE-CHANGE EPOCH behind SessionNotesEpoch (SessionStore.h). Atomic for the
+        // tag epoch's reason: a note is written from any window's UI thread and its caches are read from every other's.
+        std::atomic<uint64_t> g_notesEpoch{ 0 };
+
+        // Whether a session-store key is part of the NOTE fact (the text or its stamp). Both move the notes epoch: the
+        // stamp alone changing is a re-save, and the hover card's "edited … ago" line follows it.
+        //   key     - the field key.
+        //   returns - true for `note` and `noteAtUnixMs`.
+        //   throws  - nothing.
+        bool IsNoteKey(const std::wstring& key) noexcept
+        {
+            return key == kSessionStoreNoteKey || key == kSessionStoreNoteAtKey;
+        }
+
         // Agentmaster (tags perf, 2026-10-10): the stores of this process that had ONE complete
         // whole-directory read (VisitStoreDir) — the "warm" set behind SessionStoreScanIsWarmIn. Key: the
         // case-folded store directory (RecCacheKey). Guarded by g_recCacheMtx, like the cache it describes.
@@ -721,6 +735,11 @@ namespace Agentmaster
         {
             g_factsEpoch.fetch_add(1, std::memory_order_acq_rel);
         }
+        if (written && IsNoteKey(key))
+        {
+            // After the write and its record-cache update: the SessionNotesEpoch reader contract (SessionStore.h).
+            g_notesEpoch.fetch_add(1, std::memory_order_acq_rel);
+        }
         return written;
     }
 
@@ -740,6 +759,7 @@ namespace Agentmaster
         bool changed = false;
         bool tagsChanged = false; // the batch changed the `tags` key — moves the tag-change epoch once written
         bool factsChanged = false; // the batch changed a title, favorite or tags — moves the facts epoch once written
+        bool notesChanged = false; // the batch changed the note or its stamp — moves the note-change epoch once written
         for (const auto& [key, value] : fields)
         {
             if (key.empty())
@@ -756,6 +776,7 @@ namespace Agentmaster
                     changed = true;
                     tagsChanged = tagsChanged || key == kSessionStoreTagsKey;
                     factsChanged = factsChanged || IsFactKey(key);
+                    notesChanged = notesChanged || IsNoteKey(key);
                 }
                 continue; // absent already — nothing to remove
             }
@@ -767,6 +788,7 @@ namespace Agentmaster
             changed = true;
             tagsChanged = tagsChanged || key == kSessionStoreTagsKey;
             factsChanged = factsChanged || IsFactKey(key);
+            notesChanged = notesChanged || IsNoteKey(key);
         }
         if (!changed)
         {
@@ -781,6 +803,10 @@ namespace Agentmaster
         if (written && factsChanged)
         {
             g_factsEpoch.fetch_add(1, std::memory_order_acq_rel);
+        }
+        if (written && notesChanged)
+        {
+            g_notesEpoch.fetch_add(1, std::memory_order_acq_rel); // after the write — the SessionNotesEpoch reader contract
         }
         return written;
     }
@@ -954,6 +980,181 @@ namespace Agentmaster
     bool SetStoredSessionDraft(const std::wstring& sessionId, const std::wstring& text, int64_t atUnixMs)
     {
         return SetStoredSessionDraftIn(StoreDir(), sessionId, text, atUnixMs);
+    }
+
+    // ===== typed convenience: the NOTE (SESSION_NOTES.md) ====================================
+
+    namespace
+    {
+        // The whitespace a note's ends are trimmed of: the ASCII blanks, the line break the normalizer leaves, and the two
+        // wide blanks a paste from a document can bring (no-break space, ideographic space). The inside keeps all of them.
+        //   c       - one UTF-16 code unit.
+        //   returns - true when `c` is trimmable at an end of the note.
+        //   throws  - nothing.
+        bool IsNoteEdgeSpace(wchar_t c) noexcept
+        {
+            return c == L' ' || c == L'\t' || c == L'\n' || c == 0x00A0 || c == 0x3000;
+        }
+
+        // A stored stamp as unix ms: the decimal text SetSessionNoteIn wrote, else 0. Parsed by hand (digits only, an
+        // overflow-safe bound) so a hand-mangled value reads as "no stamp" without an exception: the stamp is a hint (how
+        // old the note is), never a correctness input.
+        //   raw     - the stored `noteAtUnixMs` value ("" when absent).
+        //   returns - the stamp, or 0 for an empty, non-numeric or absurd value.
+        //   throws  - nothing.
+        int64_t ParseNoteStamp(const std::wstring& raw) noexcept
+        {
+            if (raw.empty() || raw.size() > 15) // 15 digits = past year 33000 in ms: anything longer is not a stamp
+            {
+                return 0;
+            }
+            int64_t value = 0;
+            for (const wchar_t c : raw)
+            {
+                if (c < L'0' || c > L'9')
+                {
+                    return 0;
+                }
+                value = value * 10 + (c - L'0');
+            }
+            return value;
+        }
+    }
+
+    std::wstring NormalizeSessionNote(std::wstring_view raw)
+    {
+        std::wstring out;
+        out.reserve(raw.size() < kMaxSessionNoteLength + 1 ? raw.size() : kMaxSessionNoteLength + 1);
+        for (size_t i = 0; i < raw.size(); ++i)
+        {
+            const wchar_t c = raw[i];
+            if (c == L'\r')
+            {
+                // CRLF and a lone CR are ONE line break: XAML's box writes a lone CR for Enter, a paste may bring CRLF,
+                // and the hover card splits lines on LF only.
+                out.push_back(L'\n');
+                if (i + 1 < raw.size() && raw[i + 1] == L'\n')
+                {
+                    ++i;
+                }
+                continue;
+            }
+            if (c == L'\n' || c == L'\t')
+            {
+                out.push_back(c);
+                continue;
+            }
+            if (c < 0x20 || c == 0x7F || (c >= 0x80 && c <= 0x9F))
+            {
+                continue; // C0 / DEL / C1: drawn as garbage on the hover card, and never typeable back into the box
+            }
+            out.push_back(c);
+        }
+        // Trim the WHOLE note's ends; the inside — blank lines, indentation — stays as typed.
+        size_t begin = 0;
+        while (begin < out.size() && IsNoteEdgeSpace(out[begin]))
+        {
+            ++begin;
+        }
+        size_t end = out.size();
+        while (end > begin && IsNoteEdgeSpace(out[end - 1]))
+        {
+            --end;
+        }
+        out = out.substr(begin, end - begin);
+        if (out.size() > kMaxSessionNoteLength)
+        {
+            size_t cut = kMaxSessionNoteLength;
+            // Never split a surrogate pair: a high surrogate left last would be invalid UTF-16 (and draw as a box).
+            if (out[cut - 1] >= 0xD800 && out[cut - 1] <= 0xDBFF)
+            {
+                --cut;
+            }
+            out.resize(cut);
+            // The cut can leave blanks at the new end; the stored form never ends in whitespace.
+            while (!out.empty() && IsNoteEdgeSpace(out.back()))
+            {
+                out.pop_back();
+            }
+        }
+        return out;
+    }
+
+    StoredSessionNote GetSessionNoteIn(const std::wstring& storeDir, const std::wstring& sessionId)
+    {
+        if (storeDir.empty() || !ValidSid(sessionId))
+        {
+            return {};
+        }
+        // Both keys come out of ONE cached read (one stat), under the cache lock — the lambda only copies, as
+        // WithRecordCached requires. The stamp is parsed after the lock is released.
+        std::wstring stampRaw;
+        StoredSessionNote note = WithRecordCached(storeDir, sessionId, [&stampRaw](const SessionStoreRecord& rec) {
+            StoredSessionNote n;
+            if (const auto it = rec.find(kSessionStoreNoteKey); it != rec.end())
+            {
+                n.text = it->second;
+            }
+            if (const auto it = rec.find(kSessionStoreNoteAtKey); it != rec.end())
+            {
+                stampRaw = it->second;
+            }
+            return n;
+        });
+        // A stamp without a note is a leftover (a raw write, a half-edited file): no note means no stamp.
+        note.atUnixMs = note.text.empty() ? 0 : ParseNoteStamp(stampRaw);
+        return note;
+    }
+
+    bool SetSessionNoteIn(const std::wstring& storeDir, const std::wstring& sessionId, const std::wstring& text, int64_t atUnixMs)
+    {
+        const std::wstring normalized = NormalizeSessionNote(text);
+        // ONE write for both keys (the draft's recipe), so a note can never carry another save's stamp; a blank note
+        // removes both, and SetSessionStoreFieldsIn writes nothing when both already hold these values.
+        SessionStoreRecord fields;
+        fields[kSessionStoreNoteKey] = normalized;
+        fields[kSessionStoreNoteAtKey] = (normalized.empty() || atUnixMs <= 0) ? std::wstring{} : std::to_wstring(atUnixMs);
+        return SetSessionStoreFieldsIn(storeDir, sessionId, fields);
+    }
+
+    std::unordered_map<std::wstring, StoredSessionNote> LoadAllSessionNotesIn(const std::wstring& storeDir)
+    {
+        std::unordered_map<std::wstring, StoredSessionNote> out;
+        if (storeDir.empty())
+        {
+            return out;
+        }
+        // One pass of the scan cache (a directory listing; only new or changed records opened), copying both keys of each
+        // noted record — the per-field LoadAllSessionStoreFieldIn would cost two passes and could pair a text with the
+        // other pass's stamp if a write landed between them.
+        VisitStoreDir(storeDir, [&](const std::wstring& sid, const SessionStoreRecord& rec) {
+            const auto textIt = rec.find(kSessionStoreNoteKey);
+            if (textIt == rec.end() || textIt->second.empty())
+            {
+                return;
+            }
+            StoredSessionNote note;
+            note.text = textIt->second;
+            if (const auto stampIt = rec.find(kSessionStoreNoteAtKey); stampIt != rec.end())
+            {
+                note.atUnixMs = ParseNoteStamp(stampIt->second);
+            }
+            out.emplace(sid, std::move(note));
+        });
+        return out;
+    }
+
+    StoredSessionNote GetSessionNote(const std::wstring& sessionId)
+    {
+        return GetSessionNoteIn(StoreDir(), sessionId);
+    }
+    bool SetSessionNote(const std::wstring& sessionId, const std::wstring& text, int64_t atUnixMs)
+    {
+        return SetSessionNoteIn(StoreDir(), sessionId, text, atUnixMs);
+    }
+    std::unordered_map<std::wstring, StoredSessionNote> LoadAllSessionNotes()
+    {
+        return LoadAllSessionNotesIn(StoreDir());
     }
 
     // ===== typed convenience: the TAGS (bookmark tags on a session's tab) ====================
@@ -1525,6 +1726,11 @@ namespace Agentmaster
     uint64_t SessionTagsEpoch() noexcept
     {
         return g_tagsEpoch.load(std::memory_order_acquire);
+    }
+
+    uint64_t SessionNotesEpoch() noexcept
+    {
+        return g_notesEpoch.load(std::memory_order_acquire);
     }
 
     uint64_t SessionFactsEpoch() noexcept

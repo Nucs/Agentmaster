@@ -185,6 +185,7 @@ namespace winrt::TerminalApp::implementation
         std::vector<std::wstring> tags; // the bookmark tags, in the order they were added
         std::vector<uint32_t> tagArgb; // each tag's resolved display color (ResolveTagDisplayColor), 0xAARRGGBB, parallel to `tags`
         bool pinned{ false }; // SIDE_PANEL.md §2j: the card is pinned to the top (SessionInfo::sidePanelPinnedAtUnixMs > 0) — the band's pushpin, in the title's ink, right of the tag strip. The ORDER of the pins is the row order's business (_SidePanelRebuildCards), not the card's
+        bool hasNote{ false }; // SESSION_NOTES.md §4c: the session has a note — the band's NOTE GLYPH, left of the tag ribbons; resting on it opens the session's full rich card beside the panel. The note's text is never in the model (the card shows only the mark; the hover card reads the note fresh)
         std::wstring tipTitle; // the card tooltip's title (the raw session title)
         std::wstring tipText; // the card tooltip's text (full dir, branch, every tag, the gestures)
     };
@@ -210,7 +211,13 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBlock title{ nullptr }; // the title (bandArea's second child while untagged — the band padding as its margin — or bandGrid's column 0 while tagged)
         winrt::Windows::UI::Xaml::Controls::Grid bandGrid{ nullptr }; // [ title * ][ tag strip Auto ][ pushpin Auto ] while the session is tagged OR pinned (bandArea's second child, the band padding as its margin); null while neither — the band is then the title alone
         winrt::Windows::UI::Xaml::Controls::StackPanel tagStrip{ nullptr }; // the ribbons in the band's top-right corner (bandGrid's column 1); null untagged
-        winrt::Windows::UI::Xaml::Controls::FontIcon pinIcon{ nullptr }; // SIDE_PANEL.md §2j: the PIN TO TOP pushpin at the band's right end (bandGrid's column 2, right of the ribbons), in the title's ink; not hit-testable (a press selects the card, the card's tip covers it); null unpinned
+        winrt::Windows::UI::Xaml::Controls::FontIcon pinIcon{ nullptr }; // SIDE_PANEL.md §2j: the PIN TO TOP pushpin at the band's right end (bandGrid's column 3, right of the ribbons), in the title's ink; not hit-testable (a press selects the card, the card's tip covers it); null unpinned
+        // SESSION_NOTES.md §4c: the NOTE GLYPH in the band (bandGrid's column 1, left of the tag ribbons): a transparent,
+        // hit-testable Border (so the whole glyph box takes the hover, not only its ink) holding the QuickNote FontIcon in the
+        // title's ink. Its hover opens the session's full rich card beside the panel (_OnSidePanelNoteGlyphHoverBegin), and it
+        // keeps the card's own tip quiet while hovered (the ribbons' recipe). Childful but with NO corner radius, so it adds no
+        // composition node (SIDE_PANEL.md §2f). null while the session has no note.
+        winrt::Windows::UI::Xaml::Controls::Border noteGlyph{ nullptr };
         // The state line: a 2-column Grid, [ stateRow Auto ][ timing * ]. The timing sits in the STAR column, not in the
         // row's StackPanel, because a horizontal StackPanel offers its children unlimited width: there the "created 4d1h,
         // active 2m4s ago" line (twice the length of the old "-7h5m/7h6m/2m4s") was cut off mid-letter at the card's edge on
@@ -882,6 +889,11 @@ namespace winrt::TerminalApp::implementation
         std::map<std::wstring, std::wstring> _sidePanelTagColors; // one LoadAllTagColors() per epoch, read only once a rendered card is tagged
         bool _sidePanelTagColorsLoaded{ false }; // _sidePanelTagColors holds this epoch's read
         uint64_t _sidePanelTagsEpoch{ UINT64_MAX }; // the epoch the two caches were read at (UINT64_MAX = never read)
+        // SESSION_NOTES.md §4c: the cards' "has a note" flags, cached per session id like the tags above — a row reads its
+        // session's note (one record-cache stat) only when it is new to the list or ::Agentmaster::SessionNotesEpoch() moved
+        // (a note changed anywhere in this process), never per row per update. Pruned to the listed rows with the tags.
+        std::unordered_map<std::wstring, bool> _sidePanelNoteById;
+        uint64_t _sidePanelNotesEpoch{ UINT64_MAX }; // the notes epoch _sidePanelNoteById was read at (UINT64_MAX = never read)
         // Live layout state — the per-window truth _CaptureWindowRecord persists. Fractions are of the
         // CONTENT AREA width (vertical) / the panel body height (horizontal split); both stay inside
         // the load-time bands ((0.10,0.50] / (0.15,0.85)) because the drag clamps write them.
@@ -2267,6 +2279,37 @@ namespace winrt::TerminalApp::implementation
                                      bool swapWhileOpen,
                                      bool kickSummary,
                                      std::function<void()> rehost);
+        // Agentmaster (SESSION_NOTES.md §4c): WHERE a rich session card goes — the three questions the shared card push asks
+        // of its surface. A ToolTip host answers them for the tab and the "Sum" off side-panel card (_PushSessionToolTipCard
+        // builds this from its AgentSessionToolTipHost); the side panel's note glyph answers them for its hover POPUP
+        // (_UpdateNoteHoverCard), which is not a ToolTip — the "Sum" off ToolTip on a side-panel card never opened (SP-K2),
+        // while the tag hover panel's Popup recipe opens on those very cards. Every function is required.
+        struct _SessionCardSink
+        {
+            // Does the surface hold a card for this session right now? false makes the push rebuild even when the signature is
+            // unchanged (a ToolTip detached by a recycle; a popup showing another session's card, or none).
+            std::function<bool()> attached;
+            // Is the surface showing its card right now? A push that is not the open-swap grant never rebuilds while it is
+            // (invariant 3 of HANDOVER_tab-tooltip.md for a ToolTip; for the popup, the card under the reader stays put).
+            std::function<bool()> open;
+            // Host `card` (a fresh tree the push just built) with its signature; `swapWhileOpen` is the push's grant. Called on
+            // the UI thread; may throw what a XAML write throws — the push's callers contain it.
+            std::function<void(const winrt::Windows::UI::Xaml::UIElement& card, const winrt::hstring& sig, bool swapWhileOpen)> setContent;
+        };
+        // Agentmaster (SESSION_NOTES.md §4c): the SHARED card push behind _PushSessionToolTipCard, with the surface answered by
+        // `sink` instead of a ToolTip host — the same strings, note block, signature, budgets, scroll-piece adoption and
+        // summary kick, so the tab's card and the note glyph's card can never say different things. The parameters after
+        // `sink` are _PushSessionToolTipCard's (see there). UI thread; throws what the XAML build or the sink throws — every
+        // caller contains it.
+        void _PushSessionCard(const _SessionCardSink& sink,
+                              const std::wstring& surfaceKey,
+                              const ::Agentmaster::SessionInfo& s,
+                              const std::wstring& tagsSpec,
+                              const std::vector<std::pair<std::wstring, winrt::Windows::UI::Color>>& tagChips,
+                              std::optional<double> roomWidth,
+                              bool swapWhileOpen,
+                              bool kickSummary,
+                              std::function<void()> rehost);
         void _ArmTabAgentToolTipHover(const TerminalApp::Tab& tab); // Agentmaster (LAZY tab tooltip — the CPU fix): wire (once, idempotent + cheap when already armed) the tab's PointerEntered -> build-now hook so the rich card is built only when a human is about to see it, replacing the old every-sweep rebuild of EVERY tab's card; the first arm also builds once so ToolTipService has a hosted tip before the first hover; resolves the tab's CURRENT session at hover time (re-home safe); UI thread
         // Agentmaster (tab tooltip): the summary-box BODY (RenderSessionSummaryBox text, \x1F-separated)
         // backing the rich hover tooltip, cached per session + rebuilt off-thread by _EnsureTabTooltipSummary
@@ -2401,6 +2444,71 @@ namespace winrt::TerminalApp::implementation
         void _OpenTagEditorForElement(const std::wstring& sessionId, const winrt::Windows::UI::Xaml::FrameworkElement& anchor); // the Sessions-row / Triage-Board-card / Explorer-tree-row "Tags" items: open for ANY session id, anchored under the clicked element
         void _OpenTagEditorAt(const std::wstring& sessionId, double x, double y); // the shared open: place + show at root-relative (x, y), deferred past the invoking flyout's close (its refocus must not fight the name box); re-randomizes the color pre-pick
         void _EnsureTagEditorPopup(); // lazily build the panel ONCE (card + [name box | +] row + color-picker swatches + hint + tag list) and parent it into Root(); wires Esc / Enter / outside-press dismissal
+
+        // ==================================================================================================================
+        // Agentmaster (SESSION_NOTES.md): the SESSION NOTE — plain text the user writes about a session (the SessionStore
+        // `note` + `noteAtUnixMs` keys). Set from "Set Note… (F3)" (the tab menu, the session menu) or F3; shown under the
+        // title of the session's rich hover card (the tab's, and the side panel note glyph's), marked by a glyph after the
+        // tab's title and in the side-panel card's band. Defined in TerminalPage.AgentNotes.cpp.
+        // ==================================================================================================================
+
+        // Open the note editor for THIS tab's managed session, anchored under its TabViewItem (the tab menu's item; F3).
+        //   tab - the tab; a tab hosting no managed session opens nothing.
+        // Returns whether an editor was asked to open (false = no managed session here — F3 then passes the key through).
+        // UI thread only. Throws what Dispatcher().RunAsync throws (a closing window); the placement read is contained.
+        bool _OpenNoteEditorForTab(const TerminalApp::Tab& tab);
+        // Open the note editor for ANY session id, anchored just under `anchor` (the session menu of a side-panel card, a board
+        // card or a tree row; the tree row's F3). The anchor may have been recycled since the click: a failed transform keeps
+        // the default spot. UI thread only. Throws what Dispatcher().RunAsync throws.
+        //   sessionId - the session the note belongs to ("" opens nothing).
+        //   anchor    - the element to open under; null = the window's top-left default spot.
+        void _OpenNoteEditorForElement(const std::wstring& sessionId, const winrt::Windows::UI::Xaml::FrameworkElement& anchor);
+        // The shared open: place the card at root-relative (x, y), fill its box with the session's note and show it — one
+        // dispatcher tick later (the invoking menu's close returns the focus first), its box focused a tick after that (the
+        // Tags panel's recipe). An editor already open for ANOTHER session is saved and replaced. UI thread only.
+        //   sessionId - the session ("" does nothing).
+        //   x, y      - the anchor, root-relative; the card is kept inside the window.
+        // Throws what Dispatcher().RunAsync throws; the ticks' own work is contained and logged (Rule #18).
+        void _OpenNoteEditorAt(const std::wstring& sessionId, double x, double y);
+        // Build the editor card ONCE and parent its Popup into Root(): the header, the multi-line box (Enter = a line,
+        // Ctrl+Enter = save, Esc = cancel, both on the key-UP), the hint + count line, Remove note / Cancel / Save, and the
+        // Root() outside-press hook (a press outside SAVES, like a tab rename's click-away). UI thread only.
+        // Throws what XAML object creation throws (winrt::hresult_error) — its one caller (the open tick) contains it.
+        void _EnsureNoteEditorPopup();
+        // Close the editor. `save` = commit the box first when its text differs from what the editor opened with (the
+        // click-away, Ctrl+Enter, Save, a tab switch); false = drop the edit (Esc, Cancel). The keyboard goes back when the
+        // card held it (TCM-K2: _ReturnKeyboardAfterPanel). Idempotent. UI thread only. Never throws (each step is
+        // contained and logged; a failed save is reported in hooks.log and the card still closes).
+        //   save   - commit a changed text before closing.
+        //   reason - why it closes, for the one [note] line in hooks.log ("esc", "click outside", "tab switch", …).
+        void _CloseNoteEditorPopup(bool save, std::wstring_view reason) noexcept;
+        // Write a session's note (SetSessionNote, stamped now; a blank text removes it) and bring THIS window's surfaces up
+        // to date at once: the hosting tab's marker, the side-panel card's glyph, an open note hover card. Other windows
+        // follow through the notes epoch within a tick. UI thread only.
+        //   sessionId - the session.
+        //   text      - the note as typed (normalized by the store).
+        //   returns   - true when the store write succeeded (or changed nothing); false when the record could not be read or
+        //               written — nothing then changed, and hooks.log says why.
+        // Never throws (the write and the fan-out are contained and logged).
+        bool _SaveSessionNote(const std::wstring& sessionId, const std::wstring& text) noexcept;
+        // The editor's count line: "n / 2000" from the box's current text (and dimmed far from the cap). UI thread; never
+        // throws (a failed write is logged).
+        void _UpdateNoteEditorCount() noexcept;
+        // Low-level: show / hide a tab's NOTE marker (TabStatus.AgentNoteVisible — the header's glyph is x:Load-bound to it).
+        // Idempotent (the observable no-ops when unchanged). UI thread; never throws (CATCH_LOG — the marker is chrome).
+        void _SetTabAgentNote(const TerminalApp::Tab& tab, bool hasNote) noexcept;
+        // Re-read the session's note (one record-cache read) and (re)assert the marker on the tab THIS window hosts for it; a
+        // session hosted elsewhere is a map-miss no-op. Called where a managed tab is set up (launch, bind, adopt, re-home)
+        // and after an edit in this window. UI thread; never throws (logged).
+        void _RefreshTabNote(const std::wstring& sessionId) noexcept;
+        // The cross-window belt for the tab markers, run by the liveness sweep (~2.5 s): when the process-wide notes epoch
+        // moved since this window last applied it (a note edited in another window or on another surface) and the session
+        // store is WARM, ONE whole-store read (a directory listing through the scan cache) re-asserts every hosted tab's
+        // marker. One atomic load per tick while nothing changed; a cold store waits for the start-up warm-up (each tab
+        // already read its own note at bind). UI thread; never throws (logged).
+        void _RefreshAllTabNotesIfChanged() noexcept;
+        // The notes epoch this window's tab markers were last applied at (UINT64_MAX = never: the first sweep applies once).
+        uint64_t _tabNotesEpoch{ UINT64_MAX };
         // Agentmaster (launch-model picker -> "Specify..."): the type-any-model-id prompt, hosted in a
         // Root()-parented Popup (a ContentDialog text box gets no keypresses under XAML Islands). The
         // CARD comes from the shared AgentBuildSpecifyModelCard, so this and the Manager's prompt are
@@ -2541,6 +2649,60 @@ namespace winrt::TerminalApp::implementation
         winrt::hstring _tagHoverPendingTag; // the tag to show when the open timer fires
         winrt::Windows::UI::Xaml::UIElement _tagHoverPendingAnchor{ nullptr }; // the hovered badge (transformed into Root() space for placement)
         bool _tagHoverLoading{ false }; // Agentmaster (tags perf, 2026-10-10): the open hover panel shows "loading…" instead of its rows — the store was cold when it was filled. _OnTagStoreWarm refills it only while this is set; _CloseTagHoverPopup clears it, so a load that lands after the close fills nothing
+
+        // Agentmaster (SESSION_NOTES.md §3c): the NOTE EDITOR card — a Root()-parented Popup built once (a ContentDialog's or a
+        // Flyout's text box gets no keypresses under XAML Islands), re-filled for the session at every open.
+        winrt::Windows::UI::Xaml::Controls::Primitives::Popup _noteEditorPopup{ nullptr }; // the editor's popup (parented into Root(), top-left aligned so its offsets are root-relative)
+        winrt::Windows::UI::Xaml::Controls::Border _noteEditorCard{ nullptr }; // the card: the outside-press boundary, the key hooks' host, and the root _CloseNoteEditorPopup ends the tooltips under
+        winrt::Windows::UI::Xaml::Controls::TextBlock _noteEditorHeader{ nullptr }; // "Note · <session title>"
+        winrt::Windows::UI::Xaml::Controls::TextBox _noteEditorBox{ nullptr }; // the multi-line note box (MaxLength = kMaxSessionNoteLength)
+        winrt::Windows::UI::Xaml::Controls::TextBlock _noteEditorCount{ nullptr }; // the "n / 2000" count at the hint line's end
+        winrt::Windows::UI::Xaml::Controls::Button _noteEditorRemoveBtn{ nullptr }; // "Remove note" — enabled only while the session has a stored note
+        std::wstring _noteEditorSessionId; // the session the open editor edits ("" = closed)
+        std::wstring _noteEditorOpenedText; // the stored note the editor opened with — a close that saves writes only when the box differs (an unchanged click-away must not re-stamp the note)
+        bool _noteEditorOutsideHooked{ false }; // the Root() outside-press hook is registered (once per page; inert while the editor is closed)
+        // TCM-K2: the Control that held the keyboard when the editor opened (AgentCaptureFocusReturn), where the close gives it
+        // back when the card held it. Empty = the current tab gets it (the editor came from a tab's menu or F3). Weak: the
+        // target may be rebuilt while the editor is up. Cleared by every close.
+        winrt::weak_ref<winrt::Windows::UI::Xaml::Controls::Control> _noteEditorReturnFocus;
+        // An Escape / a Ctrl+Enter went DOWN inside the open card, so its key-UP closes the editor (Esc cancels, Ctrl+Enter
+        // saves): closing on the key-down would hand the rest of the keystroke — its ESC or CR — to what gets the keyboard
+        // next, and that is claude after a tab's menu (an interrupt, a submit). Set by the card's key-down hook, consumed by
+        // its key-up hook, disarmed by any other key-down and by every open and close.
+        bool _noteEditorEscArmed{ false };
+        bool _noteEditorSaveArmed{ false };
+
+        // Agentmaster (SESSION_NOTES.md §4c — the user's pick of 2026-11-16, "Full session card"): the side panel's NOTE GLYPH
+        // HOVER CARD — resting on a card's note glyph opens the session's FULL rich card (the tab's, the note under its title)
+        // beside the panel. The tag hover panel's recipe, not a ToolTip: a Root()-parented Popup, a ~160 ms open delay armed
+        // by the glyph's PointerEntered (no tree work inside pointer dispatch), a ~300 ms grace close on PointerExited that an
+        // entry into the card cancels. The card itself is built by the shared push (_PushSessionCard) under its own surface
+        // key, so its signature and wheel-scroll state never mix with the tab's.
+        void _OnSidePanelNoteGlyphHoverBegin(const std::wstring& sessionId, const winrt::Windows::UI::Xaml::FrameworkElement& glyph); // glyph enter: remember the session + the glyph, cancel a grace close, (re)arm the open delay
+        void _OnSidePanelNoteGlyphHoverEnd(); // glyph exit: cancel a pending open; an open card gets the grace close
+        void _EnsureNoteHoverPopup(); // build the popup, its host and the two timers ONCE (from the open tick — a clean dispatcher pass); throws what XAML creation throws
+        void _ShowNoteHoverCardNow(); // the open delay elapsed: build the pending session's card into the popup and place it beside the panel; contained (logged)
+        // Build (or re-host) the hover card for `sessionId` through the shared push with the popup's sink. A no-op unless the
+        // popup is being opened for this session or already shows it. Throws what the push throws — callers contain it.
+        //   sessionId     - the session.
+        //   swapWhileOpen - the open-swap grant (the summary body landing in the open card).
+        //   kickSummary   - false = no transcript analyze (the summary arrival's re-host).
+        void _UpdateNoteHoverCard(const std::wstring& sessionId, bool swapWhileOpen, bool kickSummary);
+        void _PlaceNoteHoverCard(); // put the open card beside the panel, centered on the glyph's card and kept inside the window (measures the card; writes only the popup's offsets); never throws (logged)
+        void _CloseNoteHoverCard() noexcept; // close the hover card and stop both timers (a grace close, a tab switch, the panel collapsing / its mode switching, its card leaving the list); idempotent
+        void _CloseNoteHoverCardFor(const std::wstring& sessionId) noexcept; // close it only when it shows (or is about to show) `sessionId` — a card leaving the side panel list
+        bool _ScrollNoteHoverCard(int wheelDelta); // a wheel notch over the glyph or the open card: scroll the card's summary one notch; true = the card took it (it has something to scroll); throws std::bad_alloc formatting the log line only (the handlers contain it)
+        winrt::Windows::UI::Xaml::Controls::Primitives::Popup _noteHoverPopup{ nullptr }; // the hover card's popup (parented into Root())
+        winrt::Windows::UI::Xaml::Controls::Border _noteHoverHost{ nullptr }; // the popup's child: holds the current card (replaced per build) and carries the keepalive + wheel handlers, wired once
+        winrt::Windows::UI::Xaml::DispatcherTimer _noteHoverOpenTimer{ nullptr }; // one-shot ~160 ms open delay
+        winrt::Windows::UI::Xaml::DispatcherTimer _noteHoverCloseTimer{ nullptr }; // one-shot ~300 ms grace close
+        std::wstring _noteHoverPendingId; // the session to show when the open timer fires
+        winrt::weak_ref<winrt::Windows::UI::Xaml::FrameworkElement> _noteHoverPendingGlyph; // the hovered glyph (placement anchor) — weak: its card can leave the list while the card is up
+        std::wstring _noteHoverShownId; // the session whose card the popup holds now ("" = none)
+        // The glyph the SHOWN card is placed beside — taken from the pending glyph when the card opens, so a summary landing
+        // in the open card re-places it beside ITS glyph even while the pointer already rests on another glyph (whose card
+        // waits out the open delay). Weak, like the pending one.
+        winrt::weak_ref<winrt::Windows::UI::Xaml::FrameworkElement> _noteHoverShownGlyph;
         void _UpdateManagerSelectionHighlight(); // Agentmaster (Linked Lenses): re-evaluate which tab (if any) wears the pill — the hovered-or-selected managed session, only while the Agent Manager page is on screen; called on lens change, hover, tab switch, and page show
         void _RevealTabInStrip(const winrt::TerminalApp::Tab& tab, bool leaveFullyVisibleInPlace = false); // Agentmaster (tab-strip reveal): THE way to scroll a tab into view — every tab selection (_UpdatedSelectedTab), an Activate of the already-selected tab, the Manager's lens + card clicks. Virtualization-aware: a derealized (scrolled-far-off) TabViewItem is realized via the TabListView's ScrollIntoView first, then fine-adjusted — a bare StartBringIntoView silently NO-OPS on it. leaveFullyVisibleInPlace (the selection funnel) leaves a tab that is already wholly on screen exactly where it is; false (the card clicks) always lands it inside the pads
         bool _AdjustStripToRevealItem(const Microsoft::UI::Xaml::Controls::TabViewItem& tvi, bool leaveFullyVisibleInPlace); // Agentmaster: the precise reveal pass — measures the header against the strip's scroll VIEWPORT and applies DecideTabStripRevealOffset (TabDragMath.h) with ONE instant ChangeView; returns false while the item has no realized layout (virtualized out / pre-arrange / strip not laid out) so the caller realizes it and retries, true otherwise (incl. "already placed, nothing to do")
@@ -3768,6 +3930,12 @@ namespace winrt::TerminalApp::implementation
         void _SidePanelScheduleRebuild(bool force); // coalesced rebuild: force==true rebuilds now (user action); otherwise a rebuild within the min-gap only marks _sidePanelDirty (the periodic tick catches up) — and a COLLAPSED panel always defers (no pixels to show)
         void _SidePanelNoteRegistryChange(); // the registry batch-drain hook (UI thread): a session changed somewhere -> schedule a non-forced rebuild
         void _SidePanelNoteTagsChanged(); // a bookmark tag changed from THIS window (the Tags panel's _ToggleSessionTag / _CommitTagEditorAdd, through the deferred _RunTagSurfacesRefresh since 2026-10-10): rebuild the cards NOW so their top-right ribbons follow (tags live in the SessionStore — no registry drain will report it); collapsed -> only marks dirty. Never throws (a failed rebuild is logged + left dirty for the periodic retry)
+        // Agentmaster (SESSION_NOTES.md §4c): a session NOTE was saved or removed from THIS window (_SaveSessionNote's deferred
+        // repaint): rebuild the cards NOW so the band's note glyph follows — notes live in the SessionStore, and no registry
+        // drain reports them. The rebuild drops the per-row note cache first (the notes epoch moved). Collapsed or under the AI
+        // view, only marks the list dirty (the expand / the view's close pays it). UI thread; never throws (a failed rebuild is
+        // logged and left dirty for the periodic tick).
+        void _SidePanelNoteSessionNoteChanged() noexcept;
         // Agentmaster (SIDE_PANEL.md §2g): the process-wide unread census changed its count — some window's tab started or
         // stopped flashing (a turn left Running unwatched, a visit, a Mark Unread, a window activation). Called from this
         // window's census-sink hop (TerminalPage.AgentEngine.cpp), so EVERY window's panel hears every window's change —
@@ -4410,8 +4578,20 @@ namespace winrt::TerminalApp::implementation
         void _SidePanelWireCardHandlers(AgentSidePanelCardView& v, const std::wstring& id);
         void _SidePanelApplyCardModel(AgentSidePanelCardView& view, AgentSidePanelCardModel model, const std::wstring& id, bool fresh); // write `model` into the card: with fresh==false only the values that differ from view.model (a text, a brush, a part added or dropped); fresh==true writes everything (a new card). Then view.model = model
         void _SidePanelApplyCardTags(AgentSidePanelCardView& view, const AgentSidePanelCardModel& model, const std::wstring& id); // give the band the layout `model.tags` needs: untagged = no strip (and the band is exactly the title unless the card is pinned, SIDE_PANEL.md §2j); tagged = [ title * ][ a NEW tag strip ][ pin ] (a changed tag list, tag color or ink replaces the strip; the title element is re-parented, never rebuilt); `id` = the card's session (the strip's ribbons suspend its rich tooltip in the "Sum" off mode)
+        // Agentmaster (SESSION_NOTES.md §4c): give the band the NOTE GLYPH `model.hasNote` asks for — the band grid's column 1,
+        // left of the tag strip — in the title's ink (`model.darkInk`). A noted card's band becomes the grid if it was the title
+        // alone; a card whose note was removed loses the glyph — and the glyph's hover card, if it is up or pending for this
+        // session, closes with it (the removed glyph may never raise its PointerExited) — and its band goes back to the title
+        // alone when nothing else is left in the grid (_SidePanelReleaseBandGridIfBare). The glyph is hit-testable: its hover
+        // opens the session's full rich card beside the panel, and it keeps the card's own tip quiet meanwhile (the tag
+        // ribbons' recipe, SIDE_PANEL.md §2b).
+        //   view   - the card (a session card or an AI result card: both share the skeleton).
+        //   model  - the values it must show: hasNote, darkInk.
+        //   id     - the card's session (the glyph's hover opens ITS card; captured by value, looked up again at hover time).
+        //   throws - winrt::hresult_error when XAML refuses an edit; the list update's catch resets the list.
+        void _SidePanelApplyCardNote(AgentSidePanelCardView& view, const AgentSidePanelCardModel& model, const std::wstring& id);
         // Agentmaster (SIDE_PANEL.md §2j — PIN TO TOP): give the band the pushpin `model.pinned` asks for, at its right end (the band
-        // grid's column 2, right of the tag strip), in the title's ink (`model.darkInk`). A pinned card's band becomes the grid if it
+        // grid's column 3, right of the tag strip), in the title's ink (`model.darkInk`). A pinned card's band becomes the grid if it
         // was the title alone; an unpinned card loses the pushpin, and its band goes back to the title alone when no tag strip is
         // left (_SidePanelReleaseBandGridIfBare). The pushpin is never hit-testable, so a press on it selects the card and the
         // card's tooltip (which names the pin) covers it.
@@ -4420,15 +4600,16 @@ namespace winrt::TerminalApp::implementation
         //   throws - winrt::hresult_error when XAML refuses an edit; the list update's catch resets the list (and the AI view's
         //            catch keeps the cards it had).
         void _SidePanelApplyCardPin(AgentSidePanelCardView& view, const AgentSidePanelCardModel& model);
-        // Agentmaster (SIDE_PANEL.md §2j): make the band the [ title * ][ tag strip Auto ][ pushpin Auto ] grid if it is still the
-        // title alone — the title is re-parented (never rebuilt) and the band padding moves from it to the grid; a no-op when the
-        // grid exists. The band itself stays CHILDLESS (the grid sits beside it in the band area): a rounded element with
-        // children would get its own composition node (UI_THREAD.md §10h).
+        // Agentmaster (SIDE_PANEL.md §2j; SESSION_NOTES.md §4c): make the band the [ title * ][ note glyph Auto ][ tag strip Auto ]
+        // [ pushpin Auto ] grid if it is still the title alone — the title is re-parented (never rebuilt) and the band padding
+        // moves from it to the grid; a no-op when the grid exists. The band itself stays CHILDLESS (the grid sits beside it in the
+        // band area): a rounded element with children would get its own composition node (UI_THREAD.md §10h).
         //   view   - the card.
         //   throws - winrt::hresult_error when XAML refuses an edit (the callers' catches handle it).
         void _SidePanelEnsureBandGrid(AgentSidePanelCardView& view);
-        // Agentmaster (SIDE_PANEL.md §2j): back to the plain band — the title alone over the band, the padding on it again —
-        // once the grid holds neither a tag strip nor a pushpin; a no-op while either remains, or without a grid.
+        // Agentmaster (SIDE_PANEL.md §2j; SESSION_NOTES.md §4c): back to the plain band — the title alone over the band, the
+        // padding on it again — once the grid holds no note glyph, no tag strip and no pushpin; a no-op while any remains, or
+        // without a grid.
         //   view   - the card.
         //   throws - winrt::hresult_error when XAML refuses an edit (the callers' catches handle it).
         void _SidePanelReleaseBandGridIfBare(AgentSidePanelCardView& view);

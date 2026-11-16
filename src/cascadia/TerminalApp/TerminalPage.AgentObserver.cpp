@@ -350,6 +350,115 @@ namespace
         winrt::Windows::UI::Xaml::Media::TranslateTransform thumbShift{ nullptr }; // thumb POSITION (scrolled fraction)
     };
 
+    // ---- THE NOTE BLOCK (SESSION_NOTES.md §4a — the user's pick of 2026-11-16: "Under the title") --------------------------
+    // A session's note is the second thing its rich card shows, right under the title, before the folder, state, model, tags
+    // and the summary — so it is always read, however long the summary below it is. The look is the mockup the user picked:
+    // a dark amber block with an amber left edge, a dim "NOTE · edited … ago" caption, then the text. One look on every
+    // surface of the shared card (the tab's, the side panel note glyph's, the "Sum" off card's).
+    constexpr uint8_t kTtNoteFill[3]{ 0x3A, 0x32, 0x20 }; // the block's dark amber background
+    constexpr uint8_t kTtNoteEdge[3]{ 0xE0, 0xB0, 0x4C }; // its amber left edge
+    constexpr uint8_t kTtNoteInk[3]{ 0xF3, 0xE6, 0xC4 }; // the note's text
+    constexpr uint8_t kTtNoteCaptionInk[3]{ 0xC9, 0xA8, 0x5F }; // the dim caption and the "shows the rest" hint
+    constexpr double kTtNoteEdgePx = 3.0; // the left edge's width
+    // A note longer than this many lines (after wrapping) ends in "…" on its last line, with a hint that the editor shows the
+    // rest: a card is a glance, and a paragraph-long note would push the summary off the card.
+    constexpr int kTtNoteMaxLines = 12;
+    // Height ESTIMATES for the body's budget (nothing is laid out at build time, the kTtChromeReserve rule): one line of the
+    // note text, and the block's own chrome (the caption line, its padding and margins). Generous on purpose — overshooting
+    // costs the summary a line, undershooting would let a long note push the card past its height budget.
+    constexpr double kTtNoteLinePx = 16.0;
+    constexpr double kTtNoteChromePx = 34.0;
+    // The estimated width of one Cascadia Mono character at the note's 11.5 px size, for the wrap estimate below.
+    constexpr double kTtNoteCharPx = 7.0;
+
+    // How many lines the note will take on a card `cardWidth` wide, wrapping included — an ESTIMATE from the character count
+    // (no layout exists at build time) that sizes the body's budget and decides the "shows the rest" hint.
+    //   text      - the note (LF line breaks).
+    //   cardWidth - the card's width budget (px).
+    //   returns   - the estimated line count, at least 1.
+    //   throws    - nothing.
+    int TtEstimateNoteLines(const std::wstring& text, double cardWidth) noexcept
+    {
+        // The text runs inside the card's padding (10 a side), the block's padding (8 a side) and its edge.
+        const double usable = std::max(80.0, cardWidth - 20.0 - 16.0 - kTtNoteEdgePx);
+        const size_t perLine = std::max<size_t>(8, static_cast<size_t>(usable / kTtNoteCharPx));
+        int lines = 0;
+        size_t run = 0; // characters on the current source line
+        const auto close = [&]() {
+            lines += 1 + static_cast<int>(run == 0 ? 0 : (run - 1) / perLine);
+            run = 0;
+        };
+        for (const wchar_t c : text)
+        {
+            if (c == L'\n')
+            {
+                close();
+            }
+            else
+            {
+                ++run;
+            }
+        }
+        close();
+        return lines;
+    }
+
+    // Build the note block (see the constants above): the caption over the wrapped text, and — when the estimate says the
+    // text runs past kTtNoteMaxLines — a dim hint that the editor holds the rest. Inert content only (TextBlocks, a Border,
+    // a StackPanel): HANDOVER_tab-tooltip.md invariant 6a.
+    //   noteText       - the note (non-empty).
+    //   noteCaption    - the caption ("NOTE  ·  edited 2h5m ago").
+    //   estimatedLines - TtEstimateNoteLines' answer for this card.
+    //   returns        - the unparented block.
+    //   throws         - winrt::hresult_error if XAML object creation fails (the card build's callers contain it).
+    winrt::Windows::UI::Xaml::Controls::Border TtBuildNoteBlock(const std::wstring& noteText, const std::wstring& noteCaption, int estimatedLines)
+    {
+        using namespace winrt::Windows::UI::Xaml;
+        using namespace winrt::Windows::UI::Xaml::Controls;
+
+        StackPanel inner;
+        inner.Orientation(Orientation::Vertical);
+        inner.Spacing(2);
+
+        TextBlock caption;
+        caption.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
+        caption.FontSize(9.5);
+        caption.CharacterSpacing(40); // the caption is a label, not prose: a little air between its capitals
+        caption.Foreground(TtFill(0xFF, kTtNoteCaptionInk[0], kTtNoteCaptionInk[1], kTtNoteCaptionInk[2]));
+        caption.Text(winrt::hstring{ noteCaption });
+        inner.Children().Append(caption);
+
+        TextBlock body;
+        body.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
+        body.FontSize(11.5);
+        body.Foreground(TtFill(0xFF, kTtNoteInk[0], kTtNoteInk[1], kTtNoteInk[2]));
+        body.TextWrapping(TextWrapping::Wrap);
+        body.MaxLines(kTtNoteMaxLines); // the last shown line ends in "…" when the note runs longer
+        body.TextTrimming(TextTrimming::CharacterEllipsis);
+        body.Text(winrt::hstring{ noteText });
+        inner.Children().Append(body);
+
+        if (estimatedLines > kTtNoteMaxLines)
+        {
+            TextBlock more;
+            more.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
+            more.FontSize(10);
+            more.Foreground(TtFill(0xFF, kTtNoteCaptionInk[0], kTtNoteCaptionInk[1], kTtNoteCaptionInk[2]));
+            more.Text(L"\x2026 Edit Note\x2026 (F3) shows the rest");
+            inner.Children().Append(more);
+        }
+
+        Border block;
+        block.Background(TtFill(0xFF, kTtNoteFill[0], kTtNoteFill[1], kTtNoteFill[2]));
+        block.BorderBrush(TtFill(0xFF, kTtNoteEdge[0], kTtNoteEdge[1], kTtNoteEdge[2]));
+        block.BorderThickness(ThicknessHelper::FromLengths(kTtNoteEdgePx, 0, 0, 0));
+        block.CornerRadius(CornerRadiusHelper::FromUniformRadius(3));
+        block.Padding(ThicknessHelper::FromLengths(8, 4, 8, 5));
+        block.Margin(ThicknessHelper::FromLengths(0, 5, 0, 4));
+        block.Child(inner);
+        return block;
+    }
+
     // Build the whole tab-tooltip card: a dark, rounded Border (summary-panel chrome) holding the header
     // (state dot + a wrapping title, which owns the full card width), then one dim line each for the
     // folder/branch and the state (colored to match the tab dot) and the kind/model/effort/perm, and --
@@ -374,8 +483,13 @@ namespace
     // up -- and the page merely shifts a RenderTransform (Tab::EnsureAgentToolTipHoverHook ->
     // TerminalPage::_ScrollTabAgentToolTip). Wheel-only is also the whole interaction budget: no drag, no
     // keyboard, no manipulation.
+    // SESSION_NOTES.md §4a: `noteText` (the session's note, "" = none) and `noteCaption` (its "NOTE · edited … ago" line) put
+    // the note block right under the title; a note also takes its estimated height out of the summary body's budget, so a
+    // long note shortens the summary's viewport instead of pushing the card past its height budget.
     winrt::Windows::UI::Xaml::Controls::Border TtBuildTooltipCard(winrt::Windows::UI::Color accent,
                                                                   const std::wstring& title,
+                                                                  const std::wstring& noteText,
+                                                                  const std::wstring& noteCaption,
                                                                   const std::wstring& folderBranch,
                                                                   const std::wstring& stateText,
                                                                   const std::wstring& metaText,
@@ -392,7 +506,11 @@ namespace
 
         const double cardHeight = maxCardHeight > 0.0 ? maxCardHeight : kTtCardFallbackHeight;
         const double cardWidth = maxCardWidth > 0.0 ? maxCardWidth : kTtCardMaxWidth;
-        const double bodyMaxHeight = std::max(kTtMinBodyHeight, cardHeight - kTtChromeReserve);
+        // The note's lines (wrapping estimated) and the block's chrome come out of the body's budget — capped at the lines the
+        // block can show — so the whole card keeps to its window-fraction height with a note on top.
+        const int noteLines = noteText.empty() ? 0 : TtEstimateNoteLines(noteText, cardWidth);
+        const double noteReserve = noteText.empty() ? 0.0 : kTtNoteChromePx + kTtNoteLinePx * static_cast<double>(std::min(noteLines, kTtNoteMaxLines + 1));
+        const double bodyMaxHeight = std::max(kTtMinBodyHeight, cardHeight - kTtChromeReserve - noteReserve);
 
         StackPanel col;
         col.Orientation(Orientation::Vertical);
@@ -442,6 +560,12 @@ namespace
             Grid::SetColumn(titleTb, 1);
             header.Children().Append(titleTb);
             col.Children().Append(header);
+        }
+
+        // SESSION_NOTES.md §4a: the session's NOTE, right under the title — the second thing the card says.
+        if (!noteText.empty())
+        {
+            col.Children().Append(TtBuildNoteBlock(noteText, noteCaption, noteLines));
         }
 
         // The leaf working-dir folder + "/" + git branch, on its OWN dim line UNDER the title (it used to
@@ -2842,6 +2966,9 @@ namespace winrt::TerminalApp::implementation
     //                   session's load; it must pass kickSummary=false). May be empty (no re-host wanted).
     //   throws        — whatever the XAML card build / host push throws (UI thread); every caller is contained
     //                   (the hover hook's catch, the arm paths' own try, the summary arrival's per-waiter catch).
+    // Agentmaster (SESSION_NOTES.md §4c): a thin forwarder since the note glyph's hover POPUP became a third surface — the
+    // body is _PushSessionCard, and a ToolTip host answers its three surface questions here, exactly as the body asked
+    // them of `host` before (Attached / Open / SetContent), so the tab's and the "Sum" off card's behavior is unchanged.
     void TerminalPage::_PushSessionToolTipCard(AgentSessionToolTipHost& host,
                                                const std::wstring& surfaceKey,
                                                const ::Agentmaster::SessionInfo& s,
@@ -2851,6 +2978,31 @@ namespace winrt::TerminalApp::implementation
                                                bool swapWhileOpen,
                                                bool kickSummary,
                                                std::function<void()> rehost)
+    {
+        // The sink holds the host by reference: it lives only for this call, inside which every caller keeps the host alive
+        // (the tab's own member; the side-panel card's local strong ref).
+        _SessionCardSink sink;
+        sink.attached = [&host]() { return host.Attached(); };
+        sink.open = [&host]() { return host.Open(); };
+        sink.setContent = [&host](const winrt::Windows::UI::Xaml::UIElement& card, const winrt::hstring& sig, bool grant) {
+            host.SetContent(card, sig, grant);
+        };
+        _PushSessionCard(sink, surfaceKey, s, tagsSpec, tagChips, roomWidth, swapWhileOpen, kickSummary, std::move(rehost));
+    }
+
+    // Agentmaster (SESSION_NOTES.md §4c): the SHARED card push — everything _PushSessionToolTipCard's doc above describes, with
+    // the surface answered by `sink` (TerminalPage.h, _SessionCardSink). The note (SESSION_NOTES.md §4a) is read HERE, once
+    // per push (one record-cache read: a stat), so every surface shows it the same way and its text and stamp ride the
+    // signature — an edit re-hosts the card at its next hover.
+    void TerminalPage::_PushSessionCard(const _SessionCardSink& sink,
+                                        const std::wstring& surfaceKey,
+                                        const ::Agentmaster::SessionInfo& s,
+                                        const std::wstring& tagsSpec,
+                                        const std::vector<std::pair<std::wstring, winrt::Windows::UI::Color>>& tagChips,
+                                        std::optional<double> roomWidth,
+                                        bool swapWhileOpen,
+                                        bool kickSummary,
+                                        std::function<void()> rehost)
     {
         const std::wstring& sessionId = s.id;
         using ::Agentmaster::SessionState;
@@ -2951,6 +3103,29 @@ namespace winrt::TerminalApp::implementation
 
         const std::wstring title = s.title.empty() ? std::wstring{ L"(untitled)" } : s.title;
 
+        // SESSION_NOTES.md §4a: the session's NOTE, under the title. One record-cache read per push (a stat once the record
+        // was read; a hover, never a tick). Contained (Rule #18): a failed read shows the card without its note, never no
+        // card. The caption names how old the note is — "just now" under a minute, so a fresh save never reads "0m ago".
+        ::Agentmaster::StoredSessionNote note;
+        try
+        {
+            note = ::Agentmaster::GetSessionNote(sessionId);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_PushSessionCard: read the session note");
+        }
+        std::wstring noteCaption;
+        if (!note.text.empty())
+        {
+            noteCaption = L"NOTE";
+            if (note.atUnixMs > 0)
+            {
+                const int64_t age = now - note.atUnixMs;
+                noteCaption += age < 60000 ? std::wstring{ L"  \x00B7  edited just now" } : (L"  \x00B7  edited " + TtSpan(age, false) + L" ago");
+            }
+        }
+
         // The Summary-box body (numbered messages + files), cached + loaded off-thread (see below). Keyed by
         // the SESSION, not the surface: a tab and a side-panel card of one session show the same transcript,
         // so they share one cache and one in-flight load.
@@ -2987,6 +3162,12 @@ namespace winrt::TerminalApp::implementation
             sig += L'\x1f';
         }
         sig += std::to_wstring(bodyMtime);
+        // SESSION_NOTES.md §4a: the note and its caption ride the signature (invariant 9: everything the card renders) — an
+        // edit, a removal or the caption's age moving re-hosts the card at the next hover.
+        sig += L'\x1f';
+        sig += note.text;
+        sig += L'\x1f';
+        sig += noteCaption;
         // The card's height budget: 80% of the window (== the screen when maximized, the normal case;
         // the tooltip renders in the island's popup root, so the window bounds it regardless). Measured
         // here because the builder is a free helper with no page. An unmeasured root (0) tells it to use
@@ -3022,10 +3203,10 @@ namespace winrt::TerminalApp::implementation
         // suspend — detached it). Attachment is what lets the framework open the card at all — ToolTipService
         // only starts watching the owner's hover when the tooltip is attached — so a same-signature surface with
         // nothing attached must still push, or it stays permanently tooltip-less until some unrelated field changes.
-        if ((sigChanged || !host.Attached()) && (!host.Open() || swapWhileOpen))
+        if ((sigChanged || !sink.attached()) && (!sink.open() || swapWhileOpen))
         {
             TtCardScrollParts scrollParts{};
-            host.SetContent(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, dirDetailLine, tagChips, tagsOpacity, bodyText, cardMaxHeight, cardMaxWidth, scrollParts), winrt::hstring{ sig }, swapWhileOpen);
+            sink.setContent(TtBuildTooltipCard(accent, title, note.text, noteCaption, folderBranch, stateText, metaText, dirDetailLine, tagChips, tagsOpacity, bodyText, cardMaxHeight, cardMaxWidth, scrollParts), winrt::hstring{ sig }, swapWhileOpen);
             _tabTooltipSig[surfaceKey] = sig;
 
             // Agentmaster (tab tooltip -- WHEEL SCROLL): adopt the fresh card's scroll pieces, replacing
@@ -8648,6 +8829,35 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[rehome] " + id + L" keeps the side panel pin of " + supersededForLog + L" (same tab)\n");
         }
 
+        // Agentmaster (SESSION_NOTES.md §5 — the NOTE carry): the user wrote the note about the work in THIS TAB, so when the tab
+        // switches conversation (a /clear, an in-session /resume, /handover-here's in-place successor — all land here) the
+        // successor keeps it: COPIED, text and stamp, when the successor has no note of its own (a /resume back to a
+        // conversation that has one keeps that one). The predecessor keeps its copy, so resuming it later from the Sessions
+        // page still shows its note. A new TAB (a fork, a /handover successor) starts without one — that is not this path.
+        // Contained (Rule #18): a failed copy costs the successor its note, never the bind.
+        if (reHomedFromOtherId && !supersededForLog.empty())
+        {
+            try
+            {
+                const auto previous = ::Agentmaster::GetSessionNote(supersededForLog);
+                if (!previous.text.empty() && ::Agentmaster::GetSessionNote(id).text.empty())
+                {
+                    if (::Agentmaster::SetSessionNote(id, previous.text, previous.atUnixMs))
+                    {
+                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[rehome] " + id + L" keeps the note of " + supersededForLog + L" (same tab)\n");
+                    }
+                    else
+                    {
+                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[rehome] " + id + L" could not take the note of " + supersededForLog + L" (the session store refused the write)\n");
+                    }
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"_BindClaudeSessionToTab: the note carry");
+            }
+        }
+
         // Give the card a readable title from its working dir if it has none.
         const std::wstring ttl = ::Agentmaster::DeriveSessionTitle(cwd);
         _sessionRegistry->Update(id, [&ttl](::Agentmaster::SessionInfo& s) {
@@ -8719,6 +8929,7 @@ namespace winrt::TerminalApp::implementation
         _TrackSessionStarted(id); // Agentmaster (eager-init): clear the dormant flag once this control's connection starts
         _RefreshTabFavoriteCrown(id); // FAVORITES.md: show the gold crown if this session is starred
         _RefreshTabTags(id); // bookmark tags: show the session's bookmark badges on bind/adopt/re-home
+        _RefreshTabNote(id); // SESSION_NOTES.md §4b: the note glyph after the title (a re-home's carried note included)
         _UpdateTabAgentToolTip(hostTab, id, /* swapWhileOpen */ false, /* kickSummary */ false); // tab tooltip: replace any "○ … unlinked" observe tooltip with the rich managed HEADER card (the transcript analyze waits for a real hover — a restore binding many tabs must not burst parses)
         _ArmTabAgentToolTipHover(hostTab); // LAZY tooltip: from here on the card rebuilds on hover, not per tick/notify
         ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
@@ -8762,6 +8973,11 @@ namespace winrt::TerminalApp::implementation
         {
             co_return;
         }
+
+        // Agentmaster (SESSION_NOTES.md §4b): the cross-window belt of the tab NOTE markers — a note edited in another window
+        // (or on a surface that does not repaint this window's tabs) moved the process-wide notes epoch; one atomic load per
+        // tick while nothing changed. noexcept (contained and logged inside).
+        _RefreshAllTabNotesIfChanged();
 
         // Collect first, mutate after — never erase from _claudeTabs while iterating it.
         std::vector<std::wstring> dead;

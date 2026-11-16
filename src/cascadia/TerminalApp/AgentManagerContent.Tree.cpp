@@ -561,8 +561,8 @@ namespace winrt::TerminalApp::implementation
                     }
                 });
                 // Enter = Activate (jump to live tab) — NEVER inject (Correctness Rule #2).
-                // Delete = confirm-guarded delete; F2 = rename.
-                rowBtn.KeyDown([this, id](const IInspectable&, const KeyRoutedEventArgs& e) {
+                // Delete = confirm-guarded delete; F2 = rename; F3 = the session's note (SESSION_NOTES.md §3b).
+                rowBtn.KeyDown([this, id](const IInspectable& sender, const KeyRoutedEventArgs& e) {
                     const auto key = e.Key();
                     if (key == VirtualKey::Enter)
                     {
@@ -582,10 +582,25 @@ namespace winrt::TerminalApp::implementation
                         _OnRenameSession(id);
                         e.Handled(true);
                     }
+                    else if (key == VirtualKey::F3 && _noteHandler)
+                    {
+                        // Agentmaster (SESSION_NOTES.md §3b): F3 opens THIS row's session note, beside F2's rename — the
+                        // editor card opens under the row (the sender). Handled first, so the key does not bubble on to the
+                        // page's own F3 binding (which would aim at the focused tab, not this row). Contained (Rule #18).
+                        e.Handled(true);
+                        try
+                        {
+                            _noteHandler(winrt::hstring{ id }, sender.try_as<FrameworkElement>());
+                        }
+                        catch (...)
+                        {
+                            AgentLogCaughtException(L"Explorer tree row: F3 note");
+                        }
+                    }
                 });
                 // Right-click (or context key / long-press) menu: Rename / Archive / Open New Session Here.
                 rowBtn.ContextFlyout(_MakeLazySessionMenu(id, _WorkDirOf(s), rowBtn)); // built at OPEN time (perf); the row anchors its Tags panel; Open-New-Here targets the EFFECTIVE work dir (the group this row sits under)
-                AgentSetTitledTip(rowBtn, winrt::hstring{ s.title.empty() ? std::wstring{ L"(untitled)" } : s.title }, L"Click selects this session (the pane on the right follows it), double-click or Enter jumps to its live tab. F2 renames it, Del closes it, Shift+Click starts it if it hasn't started yet, and right-click has the rest.");
+                AgentSetTitledTip(rowBtn, winrt::hstring{ s.title.empty() ? std::wstring{ L"(untitled)" } : s.title }, L"Click selects this session (the pane on the right follows it), double-click or Enter jumps to its live tab. F2 renames it, F3 opens its note, Del closes it, Shift+Click starts it if it hasn't started yet, and right-click has the rest.");
                 // Agentmaster (accessibility, E2E_TESTING.md §6.3): the row's content is a panel (no name of its own) and
                 // its selection is only a background tint. Name = the title, id = am.mgr.tree.row.<key>, item status = the
                 // state word the row shows, then the facts that hold. The tree rebuilds on every change, a selection
@@ -1620,6 +1635,45 @@ namespace winrt::TerminalApp::implementation
             }
         });
         menu.Items().Append(rename);
+
+        // Agentmaster (SESSION_NOTES.md §3a — the user's picks of 2026-11-16: "Under Rename", "And add F3 hotkey and mention F3
+        // like we do for Rename tab"): "Set Note… (F3)" right under Rename, the WT tab menu's twin in the same slot — the
+        // session's free-text note, shown under the title of its rich hover card. The label follows the note as it is NOW
+        // (one session-store read per open, the record cache's one stat), so a session with a note offers "Edit Note…".
+        // The PAGE owns the editor card (SetNoteHandler): it opens under the element this menu was opened on — `anchor`,
+        // held WEAKLY for the 23 GB leak rule the Tags item below explains (the anchor's subtree owns this menu). Offered
+        // only once the page wired the handler: an item that could do nothing is left out.
+        if (_noteHandler)
+        {
+            const bool hasNote = !::Agentmaster::GetSessionNote(id).text.empty();
+            MenuFlyoutItem noteItem;
+            noteItem.Text(hasNote ? L"Edit Note\x2026 (F3)" : L"Set Note\x2026 (F3)");
+            noteItem.Icon(glyphIcon(L"\xE70B")); // QuickNote — the glyph a noted tab and a noted side-panel card wear
+            AgentSetTip(noteItem, hasNote ? L"Edit or remove this session's note \x2014 it shows under the title when you hover the session's tab or the side panel card's note glyph."
+                                          : L"Write a note about this session \x2014 why it exists, what it waits for, what comes next. It shows under the title when you hover the session's tab, and its tab and side panel card wear a small note glyph.");
+            AgentSetAutomationId(noteItem, L"am.sessionmenu.note");
+            const auto noteAnchorWeak = anchor ? winrt::make_weak(anchor) : winrt::weak_ref<winrt::Windows::UI::Xaml::FrameworkElement>{};
+            noteItem.Click([weak, disp, id, noteAnchorWeak](const IInspectable&, const RoutedEventArgs&) {
+                // Deferred one tick like Rename and Tags: the closing menu restores the focus to its target, and that must
+                // land BEFORE the editor card takes the keyboard into its box.
+                auto act = [weak, id, noteAnchorWeak]() {
+                    // Contained (Rule #18): a failure costs this one open of the editor, never the window.
+                    try
+                    {
+                        if (const auto self = weak.get(); self && self->_noteHandler)
+                        {
+                            self->_noteHandler(winrt::hstring{ id }, noteAnchorWeak.get()); // a dead anchor resolves null: the page default-places the card
+                        }
+                    }
+                    catch (...)
+                    {
+                        AgentLogCaughtException(L"session menu: Set Note");
+                    }
+                };
+                if (disp) { disp.TryEnqueue(act); } else { act(); }
+            });
+            menu.Items().Append(noteItem);
+        }
 
         // Copy — a submenu mirroring the per-tab link badge's copy button (DESIGN §9.7 / TAB_OVERLAY.md).
         // Placed directly below Rename (at the user's request). It routes through the SAME shared

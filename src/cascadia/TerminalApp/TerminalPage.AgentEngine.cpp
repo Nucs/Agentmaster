@@ -2508,6 +2508,15 @@ namespace winrt::TerminalApp::implementation
                 self->_OpenTagEditorForElement(std::wstring{ id }, anchor);
             }
         });
+        // Agentmaster (SESSION_NOTES.md §3a): the session menu's "Set Note… (F3)" (a side-panel card, a board card, a tree row)
+        // and the tree row's F3 — open the page's note editor card for that session, under the element (the Manager content
+        // and the side panel live inside this page's visual tree, so the anchor transforms into Root() space).
+        content->SetNoteHandler([weakThis](winrt::hstring id, winrt::Windows::UI::Xaml::FrameworkElement anchor) {
+            if (auto self = weakThis.get())
+            {
+                self->_OpenNoteEditorForElement(std::wstring{ id }, anchor);
+            }
+        });
         // Agentmaster (2026-11-14 — the user's "Add to sidemenu right click menu context: Favorite, Mark Unread, Open In
         // Explorer", every session menu by their pick): the session menu's "Mark Unread" and "Favorite" / "Unfavorite" (a side
         // panel card, a board card, a tree row) run the WT tab menu's two actions, in the window that hosts the session's tab
@@ -3225,6 +3234,11 @@ namespace winrt::TerminalApp::implementation
         // likewise (its badge anchor belongs to the strip layout that is about to change).
         _CloseTagEditorPopup();
         _CloseTagHoverPopup();
+        // Agentmaster (SESSION_NOTES.md §3c): the note editor closes too, and SAVES — a tab switch is a click away from it, and a
+        // click away commits (like a tab rename's); what was typed is never lost to a Ctrl+Tab. The glyph's hover card closes
+        // with the tag hover panel. Both are noexcept.
+        _CloseNoteEditorPopup(/*save*/ true, L"tab switch");
+        _CloseNoteHoverCard();
         // Agentmaster (side panel "+" launcher, SIDE_PANEL.md §2e): a tab switch closes the launcher card too — the user
         // moved away from it (a tab, a close successor, the Agent Manager page). It runs BEFORE _SyncManagerSelectionToTab
         // below: the card's last text goes into the Agent Manager's box first, and the selection pre-aim then sets that

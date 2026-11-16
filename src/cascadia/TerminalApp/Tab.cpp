@@ -154,7 +154,7 @@ namespace winrt::TerminalApp::implementation
                 const auto n = args.PropertyName();
                 if (n.empty() || n == L"AgentStatusHalfVisible" || n == L"AgentFlashRingVisible" || n == L"AgentPendingVisible" ||
                     n == L"AgentFavoriteVisible" || n == L"AgentFavoriteStarVisible" || n == L"AgentCacheWarmVisible" ||
-                    n == L"AgentSelectionVisible" || n == L"AgentTagsSpec")
+                    n == L"AgentSelectionVisible" || n == L"AgentTagsSpec" || n == L"AgentNoteVisible")
                 {
                     tab->_UpdateAgentItemStatus();
                 }
@@ -205,6 +205,7 @@ namespace winrt::TerminalApp::implementation
                     .Add(kAgentStatusUnread, _tabStatus.AgentFlashRingVisible())
                     .Add(kAgentStatusDraft, _tabStatus.AgentPendingVisible())
                     .Add(kAgentStatusFavorite, _tabStatus.AgentFavoriteVisible() || _tabStatus.AgentFavoriteStarVisible())
+                    .Add(kAgentStatusNote, _tabStatus.AgentNoteVisible()) // SESSION_NOTES.md §4b: the note glyph after the title, in words
                     .Add(kAgentStatusCacheWarm, _tabStatus.AgentCacheWarmVisible())
                     .Add(kAgentStatusSelectedOnPage, _tabStatus.AgentSelectionVisible());
                 const std::wstring spec{ _tabStatus.AgentTagsSpec() };
@@ -2573,6 +2574,29 @@ namespace winrt::TerminalApp::implementation
         }
 
         {
+            // "Set Note… (F3)" (Agentmaster, SESSION_NOTES.md §3a — the user's pick of 2026-11-16: "Under Rename", "And add F3
+            // hotkey and mention F3 like we do for Rename tab") — open the NOTE EDITOR for this tab's session: a card under the
+            // tab with a multi-line box, the PAGE's islands-safe Popup (a ContentDialog's or a Flyout's text box gets no
+            // keypresses under XAML Islands — the Tags panel's lesson). Built COLLAPSED and without a tooltip: the page shows it
+            // at every flyout-open only on a managed agent-session tab, sets its label from the session's note ("Edit Note…"
+            // once one exists) and gives it its tooltip then (SetAgentNoteState), so the strip's hundreds of tabs carry no
+            // ToolTip object for it. Raises NoteEditorRequested; the page resolves THIS tab's session and anchors the card.
+            Controls::FontIcon noteSymbol;
+            noteSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            noteSymbol.Glyph(L"\xE70B"); // QuickNote — the glyph a noted tab and a noted side-panel card wear
+
+            _noteMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    tab->NoteEditorRequested.raise();
+                }
+            });
+            _noteMenuItem.Text(L"Set Note\x2026 (F3)");
+            _noteMenuItem.Icon(noteSymbol);
+            _noteMenuItem.Visibility(WUX::Visibility::Collapsed); // shown only on a managed agent-session tab (page-driven)
+        }
+
+        {
             // "Filter ▸" (Agentmaster, SIDE_PANEL.md §2l "The tab menu's Filter"; the user's request of 2026-11-14: "The
             // filter, support that for the top tabs bar right click menu context, place below Tags. The filter from top bar
             // works exactly like filter in card sidemenu menu items") — the side panel card menu's Filter lines for THIS
@@ -2781,7 +2805,8 @@ namespace winrt::TerminalApp::implementation
         Controls::MenuFlyoutSeparator menuSeparator;
         contextMenuFlyout.Items().Append(_activateSessionMenuItem); // Agentmaster (eager-init): "Activate Tab" — FIRST item, shown only when this tab's session is dormant
         contextMenuFlyout.Items().Append(_renameTabMenuItem);
-        contextMenuFlyout.Items().Append(_copySessionSubMenu); // Agentmaster: "Copy >" directly below "Rename Tab" (hidden unless this tab hosts a managed session)
+        contextMenuFlyout.Items().Append(_noteMenuItem); // Agentmaster (SESSION_NOTES.md §3a): "Set Note… (F3)" right under "Rename tab (F2)" — session-only (page-driven), the user's pick "Under Rename"
+        contextMenuFlyout.Items().Append(_copySessionSubMenu); // Agentmaster: "Copy >" below "Rename Tab" and its "Set Note…" (hidden unless this tab hosts a managed session)
         contextMenuFlyout.Items().Append(_showTranscriptMenuItem); // Agentmaster (transcript overlay): "Show Transcript" directly below "Copy >" (shown with it)
         contextMenuFlyout.Items().Append(_markUnreadMenuItem); // Agentmaster: "Mark Unread" — session-only, grouped under "Copy >"
         contextMenuFlyout.Items().Append(_openInExplorerMenuItem); // Agentmaster: "Open In Explorer" — session-only, beside "Mark Unread" (opens the session's working dir; the overlay Open Path twin)
@@ -3045,6 +3070,26 @@ namespace winrt::TerminalApp::implementation
         ASSERT_UI_THREAD();
 
         _tagMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+    }
+
+    // Agentmaster (SESSION_NOTES.md §3a): see Tab.h. The label names the F3 hotkey the way "Rename tab (F2)" names F2 (the
+    // user's "mention F3 like we do for Rename tab"), and it says what a click will do: set a first note, or edit the one
+    // there. The tooltip and the AutomationId are written here, at the first open that shows the item, through the
+    // islands-safe helpers (AgentSetTip keeps its state in one host per thread) — never a build-time ToolTip per tab.
+    void Tab::SetAgentNoteState(bool visible, bool hasNote)
+    {
+        ASSERT_UI_THREAD();
+
+        _noteMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+        if (!visible)
+        {
+            return; // a shell tab: no label, tooltip or id to keep current
+        }
+        _noteMenuItem.Text(hasNote ? L"Edit Note\x2026 (F3)" : L"Set Note\x2026 (F3)");
+        AgentSetTip(_noteMenuItem,
+                    hasNote ? L"Edit or remove this session's note \x2014 it shows under the title when you hover the tab or the side panel card's note glyph. F3 opens it on the focused tab."
+                            : L"Write a note about this session \x2014 why the tab exists, what it waits for, what comes next. It shows under the title when you hover the tab, and the tab wears a small note glyph. F3 opens it on the focused tab.");
+        AgentSetAutomationId(_noteMenuItem, L"am.tabmenu.note");
     }
 
     // Agentmaster (SIDE_PANEL.md §2l "The tab menu's Filter"): the "Filter ▸" line right under "Tags", handed to the page,

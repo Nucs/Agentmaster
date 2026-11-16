@@ -67,6 +67,12 @@ namespace TerminalApp
         Boolean AgentFavoriteVisible { get; set; };
         Boolean AgentFavoriteStarVisible { get; set; };
 
+        // Agentmaster (SESSION_NOTES.md §4b): the NOTE marker after the title (bound by TabHeaderControl.xaml through x:Load,
+        // so a tab whose session has no note never creates the glyph at all) — true while the hosted session has a note (the
+        // durable SessionStore "note" key). TerminalPage drives it via Tab.TabStatus() (_SetTabAgentNote): at bind, after an
+        // edit in this window, and when the process-wide notes epoch moves (an edit in another window).
+        Boolean AgentNoteVisible { get; set; };
+
         // Agentmaster (PENDING_INPUT.md): the UNSENT-DRAFT indicator — true when the Fleet Observer
         // detects the user has typed but not yet submitted a message in this tab's Claude input box
         // (the debounced SessionInfo::pendingInput). TabHeaderControl.xaml shows a small animated "3

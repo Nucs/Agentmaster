@@ -91,6 +91,15 @@ namespace Agentmaster
     inline constexpr const wchar_t* kSessionStoreDraftKey = L"draft";
     inline constexpr const wchar_t* kSessionStoreDraftAtKey = L"draftAtUnixMs";
 
+    // The NOTE field keys (SESSION_NOTES.md §2): the user's free-text note ABOUT a session — why its tab exists, what it
+    // waits for, what comes next — and the unix-ms stamp of its last save. Two keys, ONE fact: SetSessionNoteIn writes them
+    // in one read-modify-write, so a note can never carry another save's stamp, and an empty note removes BOTH (the store
+    // stays sparse). Keyed by session id alone, so a note outlives its tab (Close archives, a restart keeps it) and shows
+    // again when the session is resumed. Shown under the title of the session's rich hover card (the tab's, and the side
+    // panel glyph's), marked by a glyph after the tab's title and in the side-panel card's band; set from "Set Note… (F3)".
+    inline constexpr const wchar_t* kSessionStoreNoteKey = L"note";
+    inline constexpr const wchar_t* kSessionStoreNoteAtKey = L"noteAtUnixMs";
+
     // ===== testable core (explicit store dir) ================================================
 
     // The whole record for `sessionId` (empty map if it has no stored file / unreadable / bad id).
@@ -230,6 +239,71 @@ namespace Agentmaster
     std::wstring GetStoredSessionDraft(const std::wstring& sessionId);
     int64_t GetStoredSessionDraftAt(const std::wstring& sessionId);
     bool SetStoredSessionDraft(const std::wstring& sessionId, const std::wstring& text, int64_t atUnixMs);
+
+    // ===== typed convenience: the NOTE (SESSION_NOTES.md) ====================================
+    //
+    // A plain-text note the user writes about a session. Pure primitives first (unit-tested standalone), then the store
+    // cores (explicit store dir) and their live wrappers.
+
+    // The most UTF-16 code units a note keeps. The editor's box caps typing at this length (TextBox::MaxLength), and
+    // NormalizeSessionNote cuts anything longer that reaches the store another way (a paste into an older build's file,
+    // a hand edit). Large enough for a paragraph of context, small enough that the tab's hover card stays a card.
+    inline constexpr size_t kMaxSessionNoteLength = 2000;
+
+    // Canonicalize a note as typed, so every writer stores the same text for the same intent and a blank note is no note:
+    //   - line breaks become LF (CRLF and a lone CR alike — the editor's box writes CR; a paste may bring CRLF);
+    //   - control characters other than LF and TAB are dropped (an ESC or a NUL in a note would draw as garbage on the
+    //     hover card and could never be typed back);
+    //   - leading and trailing whitespace of the WHOLE note (spaces, tabs, line breaks) is trimmed; the inside is kept as
+    //     typed, blank lines included;
+    //   - the result is cut to kMaxSessionNoteLength code units, never inside a surrogate pair (a cut that would split one
+    //     drops its high half too, so the stored text is always valid UTF-16).
+    //   raw     - the text as typed or read.
+    //   returns - the stored form; "" means "no note" (the setter removes the keys).
+    //   throws  - std::bad_alloc.
+    std::wstring NormalizeSessionNote(std::wstring_view raw);
+
+    // A session's stored note as one value: the text and when it was last saved.
+    struct StoredSessionNote
+    {
+        std::wstring text; // the note (NormalizeSessionNote's form); "" = the session has no note
+        int64_t atUnixMs{ 0 }; // when it was last saved, unix ms; 0 = unknown (no note, or a stamp that does not parse)
+    };
+
+    // Read a session's note through the record cache ((size, mtime)-validated: one stat per call once the record was
+    // read, a file read only when it changed). A stamp that does not parse reads as 0 — the stamp is an honesty hint (how
+    // old the note is), never a correctness input.
+    //   storeDir  - the store directory; an empty one reads no note.
+    //   sessionId - the session; an invalid id reads no note.
+    //   returns   - the note; an empty text when the session has none.
+    //   throws    - std::bad_alloc.
+    StoredSessionNote GetSessionNoteIn(const std::wstring& storeDir, const std::wstring& sessionId);
+
+    // Save (or remove) a session's note: the text is normalized (NormalizeSessionNote) and written WITH its stamp in ONE
+    // read-modify-write of the record (SetSessionStoreFieldsIn), so the two keys can never disagree; a text that
+    // normalizes to "" removes both keys. Moves SessionNotesEpoch when the stored note CHANGED (a re-save of the same
+    // text with a new stamp counts: the "edited … ago" line moves).
+    //   storeDir  - the store directory.
+    //   sessionId - the session.
+    //   text      - the note as typed.
+    //   atUnixMs  - the save time, unix ms (ignored for a removal); a value <= 0 stores the note without a stamp.
+    //   returns   - true on success or a no-op (the same text and stamp already stored); false on a bad id, a record that
+    //               exists but cannot be read (writing would replace keys never seen — PERSISTENCE.md §16) or a write error.
+    //   throws    - std::bad_alloc.
+    bool SetSessionNoteIn(const std::wstring& storeDir, const std::wstring& sessionId, const std::wstring& text, int64_t atUnixMs);
+
+    // Every session that has a note (sid -> its note), in ONE directory scan through the scan cache. ⚠ On a COLD store
+    // (SessionStoreScanIsWarm false) this opens every record file: a UI thread must ask first (the tab markers' refresh
+    // waits for the engine's start-up warm-up).
+    //   storeDir - the store directory.
+    //   returns  - the noted sessions; an empty map when none or the dir is missing.
+    //   throws   - std::bad_alloc.
+    std::unordered_map<std::wstring, StoredSessionNote> LoadAllSessionNotesIn(const std::wstring& storeDir);
+
+    // ---- live wrappers (resolve <AgentmasterStateDir>\session-store) ----
+    StoredSessionNote GetSessionNote(const std::wstring& sessionId);
+    bool SetSessionNote(const std::wstring& sessionId, const std::wstring& text, int64_t atUnixMs);
+    std::unordered_map<std::wstring, StoredSessionNote> LoadAllSessionNotes();
 
     // ===== typed convenience: the TAGS (bookmark tags on a session's tab) ===================
     //
@@ -428,4 +502,15 @@ namespace Agentmaster
     //   returns — the current epoch; 0 until the first such change of this process.
     //   throws  — nothing.
     uint64_t SessionFactsEpoch() noexcept;
+
+    // Agentmaster (SESSION_NOTES.md §2): the NOTE-CHANGE EPOCH — moves after every write that CHANGED a session's note (the
+    // `note` / `noteAtUnixMs` keys, through SetSessionStoreFieldIn / SetSessionStoreFieldsIn — so SetSessionNoteIn and any
+    // raw write of those keys). The readers that cache notes — the side panel's per-row "has a note" cache and each window's
+    // tab markers — compare it and re-read only when it moved, so a note edited in ANOTHER window shows on this window's
+    // tabs and cards within one periodic tick, with no store read per card or per tab while nothing changed. The same
+    // reader contract and the same limit as SessionTagsEpoch: load the epoch BEFORE reading notes (a cache may be refreshed
+    // once too often, never kept stale), and only this process's writes move it.
+    //   returns — the current epoch; 0 until the first note change of this process.
+    //   throws  — nothing.
+    uint64_t SessionNotesEpoch() noexcept;
 }

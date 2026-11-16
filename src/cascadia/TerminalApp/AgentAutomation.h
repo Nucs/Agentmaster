@@ -147,6 +147,9 @@ namespace winrt::TerminalApp::implementation
     inline constexpr std::wstring_view kAgentStatusUnread = L"unread"; // the tab's red flash ring (left Running for a needs-you state, not visited since)
     inline constexpr std::wstring_view kAgentStatusDraft = L"unsent draft"; // the "3 dots": text typed into claude's input box and not sent
     inline constexpr std::wstring_view kAgentStatusFavorite = L"favorite"; // the crown / star marker
+    // SESSION_NOTES.md §4b / §4c: the session has a NOTE — the glyph after a tab's title, the glyph in a side panel card's band.
+    // The note's TEXT is never put in a status (it can be a paragraph); a reader opens the note editor to read it.
+    inline constexpr std::wstring_view kAgentStatusNote = L"note";
     // SIDE_PANEL.md §2j: a side panel card pinned to the top (its band's pushpin). Not a plain "pinned": that word names
     // Telegram's "never idle" pin in the AI search's tab words (SessionSearchTools), a different feature.
     inline constexpr std::wstring_view kAgentStatusPinnedToTop = L"pinned to the top";

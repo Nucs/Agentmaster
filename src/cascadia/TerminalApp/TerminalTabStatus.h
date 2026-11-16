@@ -57,6 +57,10 @@ namespace winrt::TerminalApp::implementation
         //                                status dot reads as its foreground).
         WINRT_OBSERVABLE_PROPERTY(bool, AgentFavoriteVisible, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(bool, AgentFavoriteStarVisible, PropertyChanged.raise);
+        // Agentmaster (SESSION_NOTES.md §4b): the NOTE marker after the title (see the idl note) — true while the hosted
+        // session has a note; driven by TerminalPage::_SetTabAgentNote via Tab.TabStatus(). The header's glyph is x:Load-bound
+        // to it, so a false value costs the tab no element; the tab's UI Automation item status adds "note" while it is true.
+        WINRT_OBSERVABLE_PROPERTY(bool, AgentNoteVisible, PropertyChanged.raise);
         // Agentmaster (PENDING_INPUT.md): the UNSENT-DRAFT "3 dots" indicator below the status dot (see
         // the idl note) — driven by TerminalPage::_SetTabPending from the debounced SessionInfo::pendingInput.
         WINRT_OBSERVABLE_PROPERTY(bool, AgentPendingVisible, PropertyChanged.raise);

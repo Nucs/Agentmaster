@@ -36,6 +36,16 @@ load-bearing.
 > | `SetAgentToolTip` / `ClearAgentToolTip` / `EnsureAgentToolTipHoverHook` (Tab, public) | still on `Tab`, forwarding to `SetContent` / `Clear` / `EnsureHoverHook` |
 > | the `PlacementRect` write inside `_UpdateAgentToolTip` | `_ApplyPlacement` (+ a per-owner placement provider) and `RefreshPlacement` |
 
+> **2026-11-16 — the session NOTE ([`SESSION_NOTES.md`](SESSION_NOTES.md) §4a, §4c; NOT BUILT yet).** The card shows the
+> session's note right under the title (`TtBuildNoteBlock`: an amber block, inert TextBlocks — invariant 6a holds; the
+> note's estimated height comes out of the body's budget). The note's text and its "edited … ago" caption ride the
+> signature (invariant 9). The shared push is now **`_PushSessionCard(const _SessionCardSink& sink, …)`**: its surface
+> answers three questions (`attached`, `open`, `setContent`); `_PushSessionToolTipCard(host, …)` builds that sink from the
+> host — exactly the calls the body made on the host before, so the tab's and the "Sum" off card's lifecycle is
+> unchanged. A THIRD surface uses it: the side panel's note glyph hosts the same card in a Popup (the tag hover panel's
+> recipe, under the surface key `"\x1F" "sidepanel-note:" <id>`), not a ToolTip — every invariant here still applies to
+> the two ToolTip surfaces.
+
 ---
 
 ## 0. Scope & what this is NOT

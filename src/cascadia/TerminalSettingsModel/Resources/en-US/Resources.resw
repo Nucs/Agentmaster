@@ -740,6 +740,10 @@
   <data name="OpenCWDCommandKey" xml:space="preserve">
     <value>Open current working directory</value>
   </data>
+  <data name="AgentOpenSessionNoteCommandKey" xml:space="preserve">
+    <value>Set session note…</value>
+    <comment>Agentmaster (SESSION_NOTES.md): the command that opens the note editor of the focused tab's session (F3 by default).</comment>
+  </data>
   <data name="CloseTab" xml:space="preserve">
     <value>Close tab</value>
   </data>

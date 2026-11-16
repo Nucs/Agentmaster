@@ -1415,6 +1415,7 @@ namespace winrt::TerminalApp::implementation
             }
             _RefreshTabFavoriteCrown(spec.sessionId); // FAVORITES.md: show the gold crown if this session is starred
             _RefreshTabTags(spec.sessionId); // bookmark tags: show the session's bookmark badges the instant its tab appears
+            _RefreshTabNote(spec.sessionId); // SESSION_NOTES.md §4b: the note glyph after the title, the instant its tab appears (a reopened window's tabs included)
             _TrackSessionStarted(spec.sessionId); // Agentmaster (eager-init): flip SessionInfo::started true the instant this control initializes (focused tab => no half-hollow flash)
             // Agentmaster (MGR-K1): the tab is mapped and wired — tell a page launch which session it opened, or give a tab
             // this launch selected the Linked-Lenses sync the tab-switch funnel ran too early for. LAST, so the lens push
@@ -2577,6 +2578,7 @@ namespace winrt::TerminalApp::implementation
                 _SetTabAgentDot(tab, AgentStatusColorFor(s->state), /*dormant*/ false, handleId, AgentStateWord(s->state));
             }
             _RefreshTabTags(handleId); // bookmark tags: a managed Codex tab wears its badges too
+            _RefreshTabNote(handleId); // SESSION_NOTES.md §4b: and its note glyph
             _NoteLaunchedSessionTab(tab, handleId); // Agentmaster (MGR-K1): the _LaunchClaudeSession twin — a page launch's id, or the lens sync
         }
 

@@ -2371,6 +2371,26 @@ mocks of the window, each following the mouse):
     restart) depend on that last fact: their real click on the chevron refuses an element reported off screen.
   - No `[exc] sidepanel strip: …` line in hooks.log.
 
+### 2n. The note glyph — a session's note, and the full session card on it (2026-11-16, NOT BUILT yet)
+
+The whole feature is [`SESSION_NOTES.md`](SESSION_NOTES.md); what it changes on the cards (§4c there):
+
+- **The band** of a card whose session has a note holds a small QuickNote glyph right after the title, left of the tag
+  ribbons: the band grid is now `[ title * ][ note glyph Auto ][ tag strip Auto ][ pushpin Auto ]` (the strip moved to
+  column 2, the pushpin to column 3) and exists while the card is noted, tagged or pinned. The card's height and stride
+  do not change (§2f). `AgentSidePanelCardModel::hasNote` comes from a per-row cache refreshed by `SessionNotesEpoch()`
+  (`_sidePanelNoteById`, the tags cache's recipe, §2b); the periodic tick has a notes belt. The card's ItemStatus reads
+  `note`; the glyph is `am.side.note.<sid8>`.
+- **Resting on the glyph** (160 ms) opens the session's FULL rich card — the tab's card, the note right under its title
+  — beside the panel, through the TAG HOVER PANEL's Popup recipe, never a ToolTip host (the §2d host never opened on
+  these cards: SP-K2). The pointer may cross into the card (a 300 ms grace close it cancels); the wheel scrolls its
+  summary. The glyph is a tooltip-free zone for the card, like the ribbons (§2b): its entry closes the card's own tip and
+  detaches the "Sum" off ToolTip. The card closes with its glyph when the note is removed (an element removed under the
+  pointer is not sure to raise its `PointerExited`), and with its card when the card leaves the list.
+- **The card's own 4 s tip** does not carry the note (the user deferred it: "Defer, i think its like the Full Session
+  Card if Sum is off.").
+- **The session menu** of every card has "Set Note… (F3)" / "Edit Note… (F3)" right under Rename.
+
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 
 The bottom area hosts a REAL `AgentTabOverlay` whose summary panel is switched into the new

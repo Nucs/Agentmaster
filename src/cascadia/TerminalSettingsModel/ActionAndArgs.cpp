@@ -104,6 +104,8 @@ static constexpr std::string_view OpenCWDKey{ "openCWD" };
 // Agentmaster: scroll the view to the nearest OFF-SCREEN sent prompt up/down (alt+up / alt+down).
 static constexpr std::string_view AgentScrollToPrevPromptKey{ "agentScrollToPrevPrompt" };
 static constexpr std::string_view AgentScrollToNextPromptKey{ "agentScrollToNextPrompt" };
+// Agentmaster (SESSION_NOTES.md §3b): open the note editor of the focused tab's session (F3, beside F2's rename).
+static constexpr std::string_view AgentOpenSessionNoteKey{ "agentOpenSessionNote" };
 
 static constexpr std::string_view ActionKey{ "action" };
 

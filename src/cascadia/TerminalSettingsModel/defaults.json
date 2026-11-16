@@ -575,6 +575,8 @@
         // Bound to alt+up / alt+down (see the keybindings section).
         { "command": "agentScrollToPrevPrompt", "id": "Agentmaster.ScrollToPrevPrompt" },
         { "command": "agentScrollToNextPrompt", "id": "Agentmaster.ScrollToNextPrompt" },
+        // Agentmaster (SESSION_NOTES.md §3b): open the note editor of the focused tab's session — bound to f3 below.
+        { "command": "agentOpenSessionNote", "id": "Agentmaster.OpenSessionNote" },
         { "command": { "action": "switchToTab", "index": 0 }, "id": "Terminal.SwitchToTab0" },
         { "command": { "action": "switchToTab", "index": 1 }, "id": "Terminal.SwitchToTab1" },
         { "command": { "action": "switchToTab", "index": 2 }, "id": "Terminal.SwitchToTab2" },
@@ -777,6 +779,9 @@
         { "keys": "ctrl+alt+9", "id": "Terminal.SwitchToLastTab" },
         // Agentmaster: F2 starts an inline rename on the focused tab.
         { "keys": "f2", "id": "Terminal.OpenTabRenamer" },
+        // Agentmaster (SESSION_NOTES.md §3b): F3 opens the focused tab's session note ("Set Note… (F3)"); on a tab with no
+        // managed session the action passes the key through, so a shell keeps its own F3 (cmd.exe repeats the last command).
+        { "keys": "f3", "id": "Agentmaster.OpenSessionNote" },
 
         // Pane Management
         { "keys": "ctrl+shift+w", "id": "Terminal.ClosePane" },

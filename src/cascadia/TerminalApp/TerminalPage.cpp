@@ -2881,6 +2881,26 @@ namespace winrt::TerminalApp::implementation
             page->_OpenTagEditorForTab(*tab);
         });
 
+        // Agentmaster (SESSION_NOTES.md §3a): context-menu "Set Note… (F3)" / "Edit Note… (F3)" -> open the note editor card for
+        // THIS tab's managed session, under the tab. No-op on a non-session tab (the item is hidden there — see the flyout
+        // Opening handler below). Contained (Rule #18): a failed open costs this click, never the window.
+        hostingTab.NoteEditorRequested([weakTab, weakThis]() {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+            if (!page || !tab)
+            {
+                return;
+            }
+            try
+            {
+                page->_OpenNoteEditorForTab(*tab);
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"tab menu: Set Note");
+            }
+        });
+
         // Agentmaster (bookmark tags): hovering a header bookmark badge -> the rich tag hover panel
         // (every session carrying the tag, title + status dot; a live row's click jumps to its tab).
         // The page owns the popup + the hover-intent timers; the header only announces enter/leave.
@@ -3131,6 +3151,9 @@ namespace winrt::TerminalApp::implementation
                     tab->SetAgentOpenInExplorerVisible(isSession); // Agentmaster: "Open In Explorer" is session-only too (opens the session's EFFECTIVE work dir — inferred → cwd — like the overlay Open Path)
                     tab->SetAgentFavoriteState(isSession, isSession && ::Agentmaster::IsSessionFavorite(sid)); // Agentmaster (FAVORITES.md): session-only; label reflects the current star
                     tab->SetAgentTagVisible(isSession); // Agentmaster (bookmark tags): "Tag" is session-only too
+                    // Agentmaster (SESSION_NOTES.md §3a): "Set Note… (F3)" right under Rename — session-only; its label says
+                    // "Edit Note…" once the session has a note (one record-cache read per open, like the ★ above).
+                    tab->SetAgentNoteState(isSession, isSession && !::Agentmaster::GetSessionNote(sid).text.empty());
                     // Agentmaster (SIDE_PANEL.md §2l "The tab menu's Filter"; the user's request of 2026-11-14): "Filter ▸"
                     // right under Tags — the side panel card menu's Filter lines for THIS tab's session (its folder and the
                     // folders above it, its state, its tags, its branch, its fork family; Pause / Resume and Clear while the

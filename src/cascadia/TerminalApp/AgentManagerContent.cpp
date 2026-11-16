@@ -395,6 +395,11 @@ namespace winrt::TerminalApp::implementation
     {
         _tagsHandler = std::move(handler);
     }
+    // Agentmaster (SESSION_NOTES.md §3a): the session menu's "Set Note… (F3)" and the tree row's F3 — see the header.
+    void AgentManagerContent::SetNoteHandler(std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::FrameworkElement)> handler)
+    {
+        _noteHandler = std::move(handler);
+    }
     // Agentmaster (2026-11-14): the session menu's "Mark Unread" and "Favorite" / "Unfavorite" — see the header.
     void AgentManagerContent::SetMarkUnreadHandler(std::function<void(winrt::hstring)> handler)
     {

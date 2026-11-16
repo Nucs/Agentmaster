@@ -5364,6 +5364,129 @@ void TestSessionTags()
     }
 }
 
+// --- SESSION NOTES (SESSION_NOTES.md §2) -------------------------------------------------------------------------------
+// The note is two SessionStore keys (`note` + `noteAtUnixMs`) written as ONE fact. This proves the normalizer's rules (line
+// breaks, control characters, the trimmed ends, the cap that never splits a surrogate pair), the store's round trip and
+// removal, the epoch rule (it moves on a CHANGE of the text or its stamp, never on a no-op or another key), the whole-
+// directory read, and the tolerant reads (a mangled stamp, a stamp left without its note, a bad id).
+void TestSessionNotes()
+{
+    std::wprintf(L"\n[TestSessionNotes]\n");
+
+    // --- NormalizeSessionNote: the stored form ---
+    CHECK(NormalizeSessionNote(L"  hello  ") == L"hello", "notes: normalize trims the note's ends");
+    CHECK(NormalizeSessionNote(L"a\r\nb\rc\nd") == L"a\nb\nc\nd", "notes: CRLF and a lone CR both become LF");
+    CHECK(NormalizeSessionNote(L"\n\n  note\n\n") == L"note", "notes: leading and trailing blank lines are trimmed");
+    CHECK(NormalizeSessionNote(L"a\n\nb") == L"a\n\nb", "notes: an inside blank line is kept as typed");
+    CHECK(NormalizeSessionNote(L"a\tb") == L"a\tb", "notes: an inside tab is kept");
+    CHECK(NormalizeSessionNote(L"a\x1b[31mb\x07\x7f\x85") == L"a[31mb", "notes: C0, DEL and C1 control characters are dropped");
+    CHECK(NormalizeSessionNote(L"\x00A0note\x3000") == L"note", "notes: a no-break and an ideographic space trim at the ends");
+    CHECK(NormalizeSessionNote(L"   \r\n\t ").empty(), "notes: a whitespace-only note normalizes to no note");
+    CHECK(NormalizeSessionNote(L"").empty(), "notes: an empty note stays empty");
+    {
+        const std::wstring longNote(3000, L'x');
+        CHECK(NormalizeSessionNote(longNote).size() == kMaxSessionNoteLength, "notes: an over-long note is cut to kMaxSessionNoteLength");
+    }
+    {
+        // 1,999 letters, then U+1F600 (a surrogate pair at code units 1,999 and 2,000), then more: a cut at 2,000 would
+        // split the pair, so the high half goes too and the note ends on the last letter.
+        std::wstring pair(kMaxSessionNoteLength - 1, L'x');
+        pair += L"\xD83D\xDE00";
+        pair += L"tail";
+        const std::wstring cut = NormalizeSessionNote(pair);
+        CHECK(cut.size() == kMaxSessionNoteLength - 1 && cut.back() == L'x', "notes: the cap never splits a surrogate pair");
+    }
+    {
+        // A cut that leaves blanks at the new end trims them: the stored form never ends in whitespace.
+        std::wstring spaced(kMaxSessionNoteLength - 2, L'y');
+        spaced += L"     zzz";
+        const std::wstring cut = NormalizeSessionNote(spaced);
+        CHECK(!cut.empty() && cut.back() == L'y', "notes: blanks the cap leaves at the end are trimmed");
+    }
+
+    // --- the store (an explicit temp dir, like the tags test) ---
+    wchar_t tmp[MAX_PATH]{};
+    ::GetTempPathW(MAX_PATH, tmp);
+    const std::wstring store = std::wstring{ tmp } + L"am_notes_" + std::to_wstring(::GetCurrentProcessId());
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::path{ store }, ec);
+
+    const std::wstring a = L"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const std::wstring b = L"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const std::wstring c = L"cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+
+    {
+        const auto none = GetSessionNoteIn(store, a);
+        CHECK(none.text.empty() && none.atUnixMs == 0, "notes: a session without a note reads no text and no stamp");
+    }
+    uint64_t epoch = SessionNotesEpoch();
+    CHECK(SetSessionNoteIn(store, a, L"  first note \r\nline 2 ", 1000), "notes: save a note");
+    CHECK(SessionNotesEpoch() != epoch, "notes: a saved note moves the notes epoch");
+    {
+        const auto n = GetSessionNoteIn(store, a);
+        CHECK(n.text == L"first note \nline 2" && n.atUnixMs == 1000, "notes: the note reads back normalized, with its stamp");
+        const auto rec = LoadSessionStoreIn(store, a);
+        CHECK(rec.count(kSessionStoreNoteKey) == 1 && rec.count(kSessionStoreNoteAtKey) == 1 && rec.at(kSessionStoreNoteAtKey) == L"1000", "notes: both keys are on the record");
+    }
+
+    epoch = SessionNotesEpoch();
+    CHECK(SetSessionNoteIn(store, a, L"first note \nline 2", 1000), "notes: re-saving the same note and stamp succeeds");
+    CHECK(SessionNotesEpoch() == epoch, "notes: a no-op save leaves the epoch alone");
+    CHECK(SetSessionNoteIn(store, a, L"first note \nline 2", 2000), "notes: re-saving the same text with a new stamp succeeds");
+    CHECK(SessionNotesEpoch() != epoch && GetSessionNoteIn(store, a).atUnixMs == 2000, "notes: a new stamp alone moves the epoch (the \"edited\" line follows it)");
+
+    epoch = SessionNotesEpoch();
+    CHECK(SetSessionStoreFieldIn(store, a, kSessionStoreTitleKey, L"A title"), "notes: a title coexists on the record");
+    CHECK(SessionNotesEpoch() == epoch, "notes: another key's write leaves the notes epoch alone");
+    CHECK(GetSessionNoteIn(store, a).text == L"first note \nline 2", "notes: the title write left the note intact");
+
+    CHECK(SetSessionNoteIn(store, b, L"note b", 3000) && SetSessionStoreFieldIn(store, c, kSessionStoreTitleKey, L"no note here"), "notes: a second noted session and an un-noted one");
+    {
+        const auto all = LoadAllSessionNotesIn(store);
+        CHECK(all.size() == 2 && all.count(a) == 1 && all.count(b) == 1, "notes: LoadAll lists exactly the noted sessions");
+        CHECK(all.count(b) == 1 && all.at(b).text == L"note b" && all.at(b).atUnixMs == 3000, "notes: LoadAll carries each note's text and stamp");
+    }
+
+    // Tolerant reads: a mangled stamp reads 0 (the text stays), and a stamp left without its note reads as no note.
+    CHECK(SetSessionStoreFieldIn(store, b, kSessionStoreNoteAtKey, L"12ab"), "notes: stage a mangled stamp");
+    {
+        const auto n = GetSessionNoteIn(store, b);
+        CHECK(n.text == L"note b" && n.atUnixMs == 0, "notes: a mangled stamp reads 0 and keeps the text");
+    }
+    CHECK(SetSessionStoreFieldIn(store, b, kSessionStoreNoteKey, L"") && SetSessionStoreFieldIn(store, b, kSessionStoreNoteAtKey, L"5000"), "notes: stage a stamp without its note");
+    {
+        const auto n = GetSessionNoteIn(store, b);
+        CHECK(n.text.empty() && n.atUnixMs == 0, "notes: a stamp without its note reads as no note");
+    }
+
+    // Removal: a blank save removes BOTH keys and moves the epoch once; a second removal is a no-op.
+    epoch = SessionNotesEpoch();
+    CHECK(SetSessionNoteIn(store, a, L"  \n ", 9000), "notes: a blank save succeeds");
+    {
+        const auto rec = LoadSessionStoreIn(store, a);
+        CHECK(rec.count(kSessionStoreNoteKey) == 0 && rec.count(kSessionStoreNoteAtKey) == 0, "notes: a blank save removes both keys");
+        CHECK(rec.count(kSessionStoreTitleKey) == 1, "notes: the removal keeps the record's other keys");
+    }
+    CHECK(SessionNotesEpoch() != epoch, "notes: the removal moves the epoch");
+    epoch = SessionNotesEpoch();
+    CHECK(SetSessionNoteIn(store, a, L"", 9000), "notes: removing an absent note succeeds");
+    CHECK(SessionNotesEpoch() == epoch, "notes: removing an absent note is a no-op for the epoch");
+
+    // A note saved without a stamp (atUnixMs <= 0) stores the text alone.
+    CHECK(SetSessionNoteIn(store, c, L"unstamped", 0), "notes: save a note without a stamp");
+    {
+        const auto rec = LoadSessionStoreIn(store, c);
+        CHECK(rec.count(kSessionStoreNoteKey) == 1 && rec.count(kSessionStoreNoteAtKey) == 0, "notes: no stamp key is written for a stamp of 0");
+        CHECK(GetSessionNoteIn(store, c).atUnixMs == 0, "notes: an unstamped note reads stamp 0");
+    }
+
+    // A malformed id never writes outside the store (ValidSid), and an empty store dir reads nothing.
+    CHECK(!SetSessionNoteIn(store, L"..\\escape", L"x", 1), "notes: an id that is not a safe file stem is refused");
+    CHECK(GetSessionNoteIn(L"", a).text.empty() && LoadAllSessionNotesIn(L"").empty(), "notes: an empty store dir reads no note");
+
+    std::filesystem::remove_all(std::filesystem::path{ store }, ec);
+}
+
 // --- SessionStore SCAN CACHE (tags perf, 2026-10-10) --------------------------------------------
 // The whole-directory reads (LoadAllSessionStoreFieldIn and the typed wrappers over it) used to open
 // and parse EVERY record file on every call: ~85 ms per call on the release profile's 2,181 records

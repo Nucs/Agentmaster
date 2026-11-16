@@ -176,6 +176,15 @@ namespace winrt::TerminalApp::implementation
         void SetForkManagedSessionHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (sessionId, model) -> fork a managed session (kind-aware), like the WT tab's "Fork session"; model = the launch-model picker's per-LAUNCH `--model <id>` pick ("" = Default; always "" for Codex — its item is plain)
         void SetRenameHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (sessionId, newTitle) -> rename in the registry + retitle the WT tab (the one title)
         void SetTagsHandler(std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::FrameworkElement)> handler); // Agentmaster (bookmark tags): (sessionId, anchor) -> the page opens its tag editor panel under the clicked board card / tree row (the WT tab menu's "Tags" twin)
+        // Agentmaster (SESSION_NOTES.md §3a): install the page's action behind the session menu's "Set Note… (F3)" /
+        // "Edit Note… (F3)" item (a side-panel card, a board card, a tree row) and the Explorer tree row's F3: the page opens
+        // its note editor card for that session, under the element the menu was opened on (or the focused row).
+        //   handler - (sessionId, anchor), called on the UI thread one dispatcher tick after the click (the menu's own
+        //             defer, so the closing menu's refocus lands before the card takes the keyboard) or at once for F3;
+        //             `anchor` may be null (a recycled element) — the page then places the card at its default spot.
+        //             It must not throw (the item's click contains and logs a throw anyway).
+        // Never throws (a std::function move).
+        void SetNoteHandler(std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::FrameworkElement)> handler);
         // Agentmaster (the session menu's "Mark Unread", 2026-11-14 — the user's "Add to sidemenu right click menu context:
         // Favorite, Mark Unread, Open In Explorer", in every session menu by their pick): install the page's action behind
         // the item — the WT tab menu's "Mark Unread" for this session: its tab's red ring flashes until the user visits the
@@ -1244,6 +1253,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring, winrt::hstring)> _forkManagedSessionHandler; // Agentmaster: Triage Board / Explorer-tree "Fork session" -> kind-aware fork of a managed session (the WT tab menu's fork), opening the fork in the acting window. (sessionId, model) — model "" = Default (the launch-model picker)
         std::function<void(winrt::hstring, winrt::hstring)> _renameHandler; // Agentmaster: Explorer-tree rename -> page (registry title + tab title in lockstep)
         std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::FrameworkElement)> _tagsHandler; // Agentmaster (bookmark tags): board-card / tree-row "Tags" -> page opens the tag editor panel (sessionId, the clicked element as the anchor)
+        std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::FrameworkElement)> _noteHandler; // Agentmaster (SESSION_NOTES.md §3a): the session menu's "Set Note… (F3)" and the tree row's F3 -> page opens the note editor card (sessionId, the element as the anchor); empty until the page wires it (SetNoteHandler) — the item is then not offered
         std::function<void(winrt::hstring)> _markUnreadHandler; // Agentmaster (2026-11-14): the session menu's "Mark Unread" -> the page marks the session unread in the window hosting its tab (SetMarkUnreadHandler); null until wired — the item then does nothing
         std::function<void(winrt::hstring)> _toggleFavoriteHandler; // Agentmaster (2026-11-14): the session menu's "Favorite" / "Unfavorite" -> the page flips the session's ★ and repaints its tab's crown wherever it is hosted (SetToggleFavoriteHandler); null until wired — the item then does nothing
         std::function<void(winrt::hstring, bool, winrt::hstring, winrt::hstring)> _showTranscriptHandler; // Agentmaster (transcript overlay): "Show Transcript" / "Transcript ▸ Show" -> page opens the reading view (sessionId, codex, codexRolloutId, title)

@@ -235,6 +235,7 @@ One menu for a board card, a tree row and a side-panel card (`_MakeLazySessionMe
  Pin to Top · Unpin              the side panel card only (SessionMenuHost::afterJumpToTab, SIDE_PANEL.md §2j)
  ─────────────
  Rename (F2)
+ Set Note… (F3) · Edit Note… (F3)   2026-11-16, SESSION_NOTES.md §3a (the WT tab menu's twin, under Rename)
  Copy                         ›  Session Id, Path, Branch, Current Prompt, Launch CLI, Summary, Transcript ▸
  Show Transcript
  Mark Unread                     2026-11-14

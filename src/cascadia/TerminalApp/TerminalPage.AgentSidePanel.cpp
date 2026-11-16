@@ -258,6 +258,18 @@ namespace
         return std::wstring{ L"\x1F" L"sidepanel:" } + id;
     }
 
+    // The SURFACE KEY of a side-panel card's NOTE GLYPH hover card (SESSION_NOTES.md §4c): the key its content signature and
+    // wheel-scroll pieces live under in TerminalPage::_tabTooltipSig / _tabTooltipScroll. A third surface of one session (its
+    // tab's card, its "Sum" off card and this one can all exist), so it has a key of its own, with SidePanelToolTipKey's
+    // U+001F prefix for the same reason: no session id can contain it.
+    //   id      — the card's session id.
+    //   returns — the hover card's surface key.
+    //   throws  — std::bad_alloc on allocation failure only.
+    std::wstring SidePanelNoteCardKey(const std::wstring& id)
+    {
+        return std::wstring{ L"\x1F" L"sidepanel-note:" } + id;
+    }
+
     // The two drag-to-resize separators paint a SOLID gray a touch lighter than the #2E2E2E panel
     // background, so each reads as a visible raised divider at rest instead of a see-through gap: the
     // previous ~9%-alpha white overlay was effectively transparent (and vanished entirely against a
@@ -1118,6 +1130,7 @@ namespace
             .Add(impl::kAgentStatusDraft, model.pending)
             .Add(impl::kAgentStatusCacheWarm, model.cacheWarm)
             .Add(impl::kAgentStatusPinnedToTop, model.pinned) // SIDE_PANEL.md §2j: the band's pushpin, in words
+            .Add(impl::kAgentStatusNote, model.hasNote) // SESSION_NOTES.md §4c: the band's note glyph, in words
             .Add(tags)
             .Add(impl::kAgentStatusSelected, selected);
         impl::AgentSetItemStatus(view.title, status.Text());
@@ -1179,6 +1192,25 @@ namespace
     constexpr double kSidePanelPinIconSize = 10.0;
     // The air between the pushpin and what is left of it: the last ribbon or "+N", else the title's ellipsis.
     constexpr double kSidePanelPinIconGapPx = 5.0;
+
+    // --- The cards' NOTE GLYPH (the title band, left of the tag ribbons — SESSION_NOTES.md §4c) -----------------------------------
+    // The icon font's QuickNote (U+E70B, in Segoe Fluent Icons and Segoe MDL2 Assets alike), the glyph a noted tab wears after its
+    // title and the menus' "Set Note…" item shows — one mark for "this session has a note" everywhere. Drawn from kSidePanelPinFont.
+    constexpr const wchar_t* kSidePanelNoteGlyph = L"\xE70B";
+    // 10.5 DIPs: the pushpin's size and a hair more (the note's lines are finer than the pin's outline), still inside the band's
+    // 12 px title line, so a note never makes the band — and with it every card's stride (SIDE_PANEL.md §2f) — taller.
+    constexpr double kSidePanelNoteIconSize = 10.5;
+    // The glyph's hit box padding: the transparent Border around the icon takes the hover over a few DIPs more than the ink, so
+    // the 10 DIP glyph is not a pixel hunt (left/right only: top/bottom would grow the band).
+    constexpr double kSidePanelNoteHitPadX = 3.0;
+    // The gap the hover card keeps from the panel's inner edge (the splitter + the 20 px a ToolTip keeps from its anchor rect),
+    // and from the window's edges when it is slid inside.
+    constexpr double kSidePanelNoteCardGapPx = 24.0;
+    constexpr double kSidePanelNoteCardEdgePx = 8.0;
+    // The hover card's open delay and grace close — the tag hover panel's own pair (_OnTagBadgeHoverBegin): the open waits long
+    // enough that sweeping the pointer across the list opens nothing, the close long enough to cross the gap into the card.
+    constexpr std::chrono::milliseconds kSidePanelNoteCardOpenDelay{ 160 };
+    constexpr std::chrono::milliseconds kSidePanelNoteCardGraceClose{ 300 };
 
     // --- The in-place card list (SIDE_PANEL.md §2c) ----------------------------------------------
 
@@ -1261,6 +1293,7 @@ namespace
     //   animationsEnabled — Windows' "Animation effects" (AgentAnimationsEnabled), read once per update.
     //   indicators        — the status icon's per-update inputs (the unread census, the cache lifetime, the clock,
     //                       the crown's color — SIDE_PANEL.md §2g).
+    //   hasNote           — the session has a note (SESSION_NOTES.md §4c: the card's per-row note cache) — the band's glyph.
     //   returns           — the model.
     //   throws            — std::bad_alloc on allocation failure only.
     winrt::TerminalApp::implementation::AgentSidePanelCardModel SidePanelCardModelFor(const ::Agentmaster::SessionInfo& s,
@@ -1270,7 +1303,8 @@ namespace
                                                                                       const ::Agentmaster::DirColorIndex& dirColors,
                                                                                       uint32_t pendingArgb,
                                                                                       bool animationsEnabled,
-                                                                                      const SidePanelIndicatorInputs& indicators)
+                                                                                      const SidePanelIndicatorInputs& indicators,
+                                                                                      bool hasNote)
     {
         winrt::TerminalApp::implementation::AgentSidePanelCardModel m;
         m.title = s.title.empty() ? s.id : s.title;
@@ -1339,6 +1373,9 @@ namespace
         // PIN TO TOP (SIDE_PANEL.md §2j): the band's pushpin. The pushpin itself takes no pointer (a press selects the card), so the
         // card's tooltip is where it reads as words, with the way back: the same right-click menu that pinned it.
         m.pinned = ::Agentmaster::IsSidePanelPinStamp(s.sidePanelPinnedAtUnixMs);
+        // SESSION_NOTES.md §4c: the NOTE GLYPH. The mark only — the card's own 4 s tip does not carry the note (the user deferred
+        // that, 2026-11-16: "Defer, i think its like the Full Session Card if Sum is off."); the glyph's hover card reads it.
+        m.hasNote = hasNote;
         const wchar_t* const pinLine = m.pinned ? L"\npinned to the top of this list (right-click \x25B8 Unpin)" : L"";
         m.tipTitle = s.title;
         m.tipText = dir + (s.branch.empty() ? L"" : (L"\nbranch: " + s.branch)) + tagsLine + pinLine + L"\n\nClick to select \x00B7 double-click to jump to its tab \x00B7 right-click for actions.";
@@ -3071,6 +3108,8 @@ namespace winrt::TerminalApp::implementation
         }
         _sidePanelCollapsed = !_sidePanelCollapsed;
         ::Agentmaster::LogNav(_sidePanelCollapsed ? L"sidepanel collapse" : L"sidepanel expand");
+        // SESSION_NOTES.md §4c: a note glyph's hover card hangs beside the cards — it closes with the panel either way (noexcept).
+        _CloseNoteHoverCard();
         if (_sidePanelCollapsed)
         {
             // The "+" launcher card belongs to the header that is going away (SIDE_PANEL.md §2e). The press on ⋯ (the
@@ -3383,6 +3422,8 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        // SESSION_NOTES.md §4c: the cards' tooltip mode is switching under a note glyph's hover card — close it first (noexcept).
+        _CloseNoteHoverCard();
         _sidePanelSummaryHidden = !_sidePanelSummaryHidden;
         ::Agentmaster::LogNav(_sidePanelSummaryHidden ? L"sidepanel summary -> hidden (cards show the rich session tooltip)" : L"sidepanel summary -> shown");
         _SidePanelUpdateSumButton(); // the ToggleButton flipped itself before Click; re-pin it to the member anyway
@@ -4152,6 +4193,13 @@ namespace winrt::TerminalApp::implementation
         {
             _sidePanelDirty = true;
         }
+        // Notes belt (SESSION_NOTES.md §4c): a note set or removed in ANOTHER window (this window's own saves repaint the cards
+        // at once, _SidePanelNoteSessionNoteChanged) moves the process-wide notes epoch the cards' note cache was read at — and
+        // so does a re-home's note carry. One atomic load per tick.
+        if (!_sidePanelDirty && ::Agentmaster::SessionNotesEpoch() != _sidePanelNotesEpoch)
+        {
+            _sidePanelDirty = true;
+        }
         // Favorites belt (SIDE_PANEL.md §2l): with the Favorite flag on, a ★ set or cleared anywhere in this process (the
         // Sessions page, a tab's menu, another window) moves the facts epoch the ★ cache was read at — and decides which
         // cards are listed. One atomic load per tick, only while the flag is on AND applies (a paused row, or the flag's chip
@@ -4450,6 +4498,30 @@ namespace winrt::TerminalApp::implementation
                 _sidePanelTagColors = ::Agentmaster::LoadAllTagColors();
                 _sidePanelTagColorsLoaded = true;
             }
+            // SESSION_NOTES.md §4c: each listed row's "has a note", from the per-row cache (its epoch was checked above,
+            // _SidePanelSyncFactCaches, before any read): a row new to the list reads its note once (one record-cache stat), a
+            // row that stays reads nothing. Pruned to the listed rows like the tags, so it never grows with every session that
+            // ever passed through the list.
+            for (const auto& row : rows)
+            {
+                if (_sidePanelNoteById.find(row.session->id) == _sidePanelNoteById.end())
+                {
+                    _sidePanelNoteById.emplace(row.session->id, !::Agentmaster::GetSessionNote(row.session->id).text.empty());
+                }
+            }
+            if (_sidePanelNoteById.size() > rows.size())
+            {
+                std::unordered_map<std::wstring, bool> keptNotes;
+                keptNotes.reserve(rows.size());
+                for (const auto& row : rows)
+                {
+                    if (const auto it = _sidePanelNoteById.find(row.session->id); it != _sidePanelNoteById.end())
+                    {
+                        keptNotes.emplace(it->first, it->second);
+                    }
+                }
+                _sidePanelNoteById.swap(keptNotes);
+            }
 
             // One model per ROW — realized or not: a scroll realizes a row from its stored model, so every row's must
             // be current. The shared inputs are read ONCE per update: the dir-colors snapshot every row's band color
@@ -4481,7 +4553,7 @@ namespace winrt::TerminalApp::implementation
                     continue;
                 }
                 order.push_back(row.session->id);
-                models.push_back(SidePanelCardModelFor(*row.session, mode, _sidePanelTagsById[row.session->id], _sidePanelTagColors, dirColors, pendingArgb, animationsEnabled, indicators));
+                models.push_back(SidePanelCardModelFor(*row.session, mode, _sidePanelTagsById[row.session->id], _sidePanelTagColors, dirColors, pendingArgb, animationsEnabled, indicators, _sidePanelNoteById[row.session->id]));
                 sessions.push_back(row.session);
             }
 
@@ -4816,12 +4888,13 @@ namespace winrt::TerminalApp::implementation
         // shared blink clock now, not whenever its glyph is destroyed. Shutdown never throws.
         for (auto& [id, view] : _sidePanelCardViews)
         {
-            _SidePanelDropCardToolTip(view, id);
+            _SidePanelDropCardToolTip(view, id); // also closes the note glyph's hover card of that card (SESSION_NOTES.md §4c)
             if (view.glyph)
             {
                 view.glyph->Shutdown();
             }
         }
+        _CloseNoteHoverCard(); // belt: a hover card pending for a row with no card closes with the list (noexcept)
         // The maps first: clearing them cannot fail, so the page's view of the list is consistently "empty"
         // even when the panel below refuses its Clear.
         _sidePanelCardViews.clear();
@@ -5438,6 +5511,12 @@ namespace winrt::TerminalApp::implementation
         {
             _SidePanelApplyCardPin(view, model);
         }
+        // The NOTE GLYPH (SESSION_NOTES.md §4c), left of the tag strip in the title's ink — the same release rule: the grid
+        // goes back to the plain band only once nothing at all is left in it.
+        if (fresh || model.hasNote != shown.hasNote || (model.hasNote && model.darkInk != shown.darkInk))
+        {
+            _SidePanelApplyCardNote(view, model, id);
+        }
         if (fresh || model.state != shown.state)
         {
             const Color stateColor = StateColor(model.state);
@@ -5582,7 +5661,7 @@ namespace winrt::TerminalApp::implementation
         // than badges floating mid-bar. The same constant the margin is made of, so a later padding change can't
         // silently detach them from the edge.
         auto strip = _SidePanelMakeTagStrip(model.tags, colors, model.darkInk, kSidePanelBandPadY, view.card, id);
-        Grid::SetColumn(strip, 1); // the middle column: left of the pushpin's, so the pin stays at the band's very end
+        Grid::SetColumn(strip, 2); // right of the note glyph's column, left of the pushpin's — the pin stays at the band's very end
         // The title alone becomes [ title * ][ strip ][ pushpin ] (a no-op when the grid exists — a card pinned before it was
         // tagged already has it). Built BEFORE the strip goes in, so the strip only ever lands in a grid that is in the band.
         _SidePanelEnsureBandGrid(view);
@@ -5603,13 +5682,18 @@ namespace winrt::TerminalApp::implementation
         Grid bandGrid{};
         ColumnDefinition titleCol{};
         titleCol.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+        // SESSION_NOTES.md §4c: the NOTE GLYPH's column, right after the title (column 1). Auto, so it is 0 wide on a card with
+        // no note — a tagged or pinned card without one lays out exactly as before the note existed.
+        ColumnDefinition noteCol{};
+        noteCol.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
         ColumnDefinition tagCol{};
         tagCol.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-        // SIDE_PANEL.md §2j: the PIN TO TOP pushpin's column, the band's right end. Auto, so it is 0 wide on an unpinned card —
-        // a tagged card that is not pinned lays out exactly as before the pin existed.
+        // SIDE_PANEL.md §2j: the PIN TO TOP pushpin's column, the band's right end (column 3). Auto, so it is 0 wide on an
+        // unpinned card — a tagged card that is not pinned lays out exactly as before the pin existed.
         ColumnDefinition pinCol{};
         pinCol.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
         bandGrid.ColumnDefinitions().Append(titleCol);
+        bandGrid.ColumnDefinitions().Append(noteCol);
         bandGrid.ColumnDefinitions().Append(tagCol);
         bandGrid.ColumnDefinitions().Append(pinCol);
         bandGrid.Margin(ThicknessHelper::FromLengths(kSidePanelBandPadX, kSidePanelBandPadY, kSidePanelBandPadX, kSidePanelBandPadY)); // the band padding moves from the title to the grid that now holds it
@@ -5623,9 +5707,9 @@ namespace winrt::TerminalApp::implementation
 
     void TerminalPage::_SidePanelReleaseBandGridIfBare(AgentSidePanelCardView& view)
     {
-        if (!view.bandGrid || view.tagStrip || view.pinIcon)
+        if (!view.bandGrid || view.tagStrip || view.pinIcon || view.noteGlyph)
         {
-            return; // the band is already the title alone, or the grid still holds a tag strip or the pushpin
+            return; // the band is already the title alone, or the grid still holds a tag strip, the pushpin or the note glyph
         }
         // Back to the plain band: the title alone over the band, the padding back on it. The title leaves the grid FIRST: a
         // XAML element has one parent, and handing it to the band area while the grid still holds it would throw.
@@ -5664,13 +5748,119 @@ namespace winrt::TerminalApp::implementation
             // on it, and the card's own tooltip — which names the pin and its way back — covers it. That also keeps the user's
             // rule that a card is pinned (and unpinned) only through its right-click menu: the pushpin is no button.
             pin.IsHitTestVisible(false);
-            Grid::SetColumn(pin, 2); // the band's right end, right of the tag strip
+            Grid::SetColumn(pin, 3); // the band's right end, right of the note glyph and the tag strip
             _SidePanelEnsureBandGrid(view);
             view.bandGrid.Children().Append(pin);
             view.pinIcon = pin;
         }
         // The title's own ink (WCAG-picked against the band, like the "+N" count), so the pushpin reads on any folder color.
         view.pinIcon.Foreground(model.darkInk ? Fill(0xFF, 0x10, 0x10, 0x10) : Fill(0xFF, 0xF0, 0xF0, 0xF0));
+    }
+
+    void TerminalPage::_SidePanelApplyCardNote(AgentSidePanelCardView& view, const AgentSidePanelCardModel& model, const std::wstring& id)
+    {
+        if (!model.hasNote)
+        {
+            if (view.noteGlyph)
+            {
+                // The note is gone (removed here or in another window) while its glyph may still anchor an open hover card:
+                // close that card with its glyph. Removing the element under the pointer is not guaranteed to raise its
+                // PointerExited, so the grace close might never start, and the card would float beside the panel until a tab
+                // switch. This branch runs only in a models-changed pass or the indicators refresh — dispatcher ticks, never a
+                // layout handler — so closing a popup here is as safe as the tooltip shutdown those passes already do.
+                _CloseNoteHoverCardFor(id); // noexcept; a no-op unless this session's card is up or pending
+                if (view.bandGrid)
+                {
+                    SidePanelRemoveChild(view.bandGrid, view.noteGlyph);
+                }
+                view.noteGlyph = nullptr;
+            }
+            _SidePanelReleaseBandGridIfBare(view); // the title alone again, unless a tag strip or the pushpin is left
+            return;
+        }
+        if (!view.noteGlyph)
+        {
+            FontIcon icon{};
+            icon.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ kSidePanelPinFont });
+            icon.Glyph(kSidePanelNoteGlyph);
+            icon.FontSize(kSidePanelNoteIconSize);
+            icon.IsHitTestVisible(false); // the Border around it takes the pointer, over the whole glyph box
+            // The hit box: a TRANSPARENT background makes the whole Border hit-testable (a null background would leave only
+            // the icon's ink), so the hover starts anywhere on the glyph. A childful Border with NO corner radius: no
+            // composition node (SIDE_PANEL.md §2f).
+            Border hit{};
+            hit.Background(SolidColorBrush{ Colors::Transparent() });
+            hit.Padding(ThicknessHelper::FromLengths(kSidePanelNoteHitPadX, 0, kSidePanelNoteHitPadX, 0));
+            hit.Margin(ThicknessHelper::FromLengths(kSidePanelPinIconGapPx - kSidePanelNoteHitPadX, 0, 0, 0)); // the pushpin's air after the title's ellipsis
+            hit.VerticalAlignment(VerticalAlignment::Center); // on the title's line, like the pushpin (the ribbons hang from the top edge instead)
+            hit.Child(icon);
+            Grid::SetColumn(hit, 1); // right after the title, left of the tag strip
+            // Accessibility (E2E_TESTING.md §6.3): the glyph has a name and an id of its own — the e2e driver hovers it by id.
+            AgentSetAutomationId(hit, AgentAutomationIdFor(L"am.side.note.", id));
+            AgentSetAccessibleName(hit, L"Note");
+            // ⚠ The glyph is a TOOLTIP-FREE ZONE for the card, like the tag strip (SIDE_PANEL.md §2b, _SidePanelMakeTagStrip): the
+            // card's own AgentSetTip tip covers its whole Border and pointer events bubble, so the glyph would also arm that
+            // tip — which would open over the session card after 4 s. So its entry closes / cancels the card's tip and stops the
+            // event there, and it swallows its own moves. The handlers hold the card WEAKLY (the strip's leak rule: the glyph
+            // lives inside the card) and the session id by value (the hover card looks the session up again when it opens).
+            const auto weakThis = get_weak();
+            const auto cardWeak = winrt::make_weak(view.card);
+            hit.PointerEntered([weakThis, cardWeak, id](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+                if (const auto c = cardWeak.get())
+                {
+                    AgentCloseTipsIn(c); // a pending card tip is cancelled, an open one closed
+                }
+                e.Handled(true); // bubbling on, it would reach the card's tip handler and arm it again
+                const auto self = weakThis.get();
+                const auto el = sender.try_as<FrameworkElement>();
+                if (self && el)
+                {
+                    // "Sum" off: the card's own rich session tooltip must not float beside the panel under this one — detach it
+                    // (a no-op in the classic mode), before the hover begins, so the two never overlap.
+                    self->_SidePanelSuspendCardToolTip(id);
+                    self->_OnSidePanelNoteGlyphHoverBegin(id, el); // ~160 ms open delay; re-targets when another glyph is mid-delay
+                }
+            });
+            hit.PointerExited([weakThis](const IInspectable&, const PointerRoutedEventArgs&) {
+                if (const auto self = weakThis.get())
+                {
+                    self->_OnSidePanelNoteGlyphHoverEnd(); // cancels a pending open; an open card gets the ~300 ms grace close
+                }
+            });
+            hit.PointerMoved([](const IInspectable&, const PointerRoutedEventArgs& e) {
+                e.Handled(true); // a move reaching the card would re-arm its tip (the helper re-arms an un-armed outer element)
+            });
+            // The wheel over the glyph scrolls the open hover card's summary (the tab header's rule: the card is read where
+            // the pointer is); a notch the card cannot use stays with the card list's own scroller.
+            hit.PointerWheelChanged([weakThis](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+                const auto self = weakThis.get();
+                const auto el = sender.try_as<UIElement>();
+                if (!self || !el)
+                {
+                    return;
+                }
+                // Contained (Rule #18): a wheel handler must never let an exception out into the input dispatch.
+                try
+                {
+                    if (self->_ScrollNoteHoverCard(e.GetCurrentPoint(el).Properties().MouseWheelDelta()))
+                    {
+                        e.Handled(true);
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"side panel note glyph: wheel");
+                }
+            });
+            _SidePanelEnsureBandGrid(view);
+            view.bandGrid.Children().Append(hit);
+            view.noteGlyph = hit;
+        }
+        // The title's own ink (WCAG-picked against the band, like the pushpin), so the glyph reads on any folder color.
+        if (const auto icon = view.noteGlyph.Child().try_as<FontIcon>())
+        {
+            icon.Foreground(model.darkInk ? Fill(0xFF, 0x10, 0x10, 0x10) : Fill(0xFF, 0xF0, 0xF0, 0xF0));
+        }
     }
 
     // Build a card's bookmark-TAG strip: the ribbons in the title band's TOP-RIGHT corner. It is the
@@ -6138,6 +6328,8 @@ namespace winrt::TerminalApp::implementation
     // `view`: the leaving card. `id`: its session. Never throws (Shutdown is noexcept; a failed key build is logged).
     void TerminalPage::_SidePanelDropCardToolTip(AgentSidePanelCardView& view, const std::wstring& id)
     {
+        // SESSION_NOTES.md §4c: the note glyph's hover card is anchored on this card — it closes with it (noexcept).
+        _CloseNoteHoverCardFor(id);
         if (view.tipHost)
         {
             view.tipHost->Shutdown();
@@ -6152,6 +6344,379 @@ namespace winrt::TerminalApp::implementation
         catch (...)
         {
             ::Agentmaster::AgentLogCaughtException(L"_SidePanelDropCardToolTip");
+        }
+    }
+
+    // ===== SESSION_NOTES.md §4c — the NOTE GLYPH's hover card: the session's FULL rich card beside the panel ==================
+    // The user's pick of 2026-11-16 ("Full session card", after "can hovering the glyph show the tooltip and not that little
+    // classic tooltip you suggested?"): resting on a card's note glyph opens the very card a tab shows when hovered, the note
+    // right under its title. NOT a ToolTip: the "Sum" off design hosted this card on this card in an AgentSessionToolTipHost and
+    // it never opened (SP-K2, the cause never looked into), while the tag hover panel's Popup recipe opens on these very cards
+    // in production — so this is that recipe: a Root()-parented Popup, a one-shot open delay armed by the glyph's
+    // PointerEntered (no tree work inside pointer dispatch), and a grace close on PointerExited that an entry into the card
+    // cancels. The card itself comes from the shared push (_PushSessionCard) through a popup sink, under its own surface key.
+
+    void TerminalPage::_OnSidePanelNoteGlyphHoverBegin(const std::wstring& sessionId, const winrt::Windows::UI::Xaml::FrameworkElement& glyph)
+    {
+        if (sessionId.empty() || !glyph)
+        {
+            return;
+        }
+        // The two timers are created lazily — not tree work, so safe here inside the pointer dispatch (the tag hover panel's
+        // rule); the popup itself is built on the open tick, a clean dispatcher pass.
+        if (!_noteHoverOpenTimer)
+        {
+            _noteHoverOpenTimer = winrt::Windows::UI::Xaml::DispatcherTimer{};
+            _noteHoverOpenTimer.Interval(kSidePanelNoteCardOpenDelay);
+            _noteHoverOpenTimer.Tick([weak = get_weak()](auto&&, auto&&) {
+                if (const auto page = weak.get())
+                {
+                    if (page->_noteHoverOpenTimer)
+                    {
+                        page->_noteHoverOpenTimer.Stop(); // one-shot
+                    }
+                    page->_ShowNoteHoverCardNow(); // contained inside
+                }
+            });
+        }
+        if (!_noteHoverCloseTimer)
+        {
+            _noteHoverCloseTimer = winrt::Windows::UI::Xaml::DispatcherTimer{};
+            _noteHoverCloseTimer.Interval(kSidePanelNoteCardGraceClose);
+            _noteHoverCloseTimer.Tick([weak = get_weak()](auto&&, auto&&) {
+                if (const auto page = weak.get())
+                {
+                    if (page->_noteHoverCloseTimer)
+                    {
+                        page->_noteHoverCloseTimer.Stop(); // one-shot
+                    }
+                    page->_CloseNoteHoverCard(); // noexcept
+                }
+            });
+        }
+        _noteHoverPendingId = sessionId;
+        _noteHoverPendingGlyph = winrt::make_weak(glyph);
+        _noteHoverCloseTimer.Stop();
+        if (_noteHoverPopup && _noteHoverPopup.IsOpen() && _noteHoverShownId == sessionId)
+        {
+            return; // already showing this session's card: the re-entry only cancels the grace close
+        }
+        _noteHoverOpenTimer.Stop();
+        _noteHoverOpenTimer.Start(); // one-shot; restarts the delay on each glyph entry
+    }
+
+    void TerminalPage::_OnSidePanelNoteGlyphHoverEnd()
+    {
+        if (_noteHoverOpenTimer)
+        {
+            _noteHoverOpenTimer.Stop(); // a pending open is simply cancelled
+        }
+        if (_noteHoverPopup && _noteHoverPopup.IsOpen() && _noteHoverCloseTimer)
+        {
+            _noteHoverCloseTimer.Start(); // an open card gets the grace close — cancelled if the pointer arrives on the card
+        }
+    }
+
+    void TerminalPage::_EnsureNoteHoverPopup()
+    {
+        if (_noteHoverPopup)
+        {
+            return;
+        }
+        // The host: the popup's child for its whole life, holding the current card (replaced per build). The keepalive and
+        // the wheel live HERE, wired once, so a rebuilt card needs no handlers of its own (a per-card handler on a tree that is
+        // rebuilt on every content change is the leak class AgentTipHelpers.h describes).
+        _noteHoverHost = Border{};
+        _noteHoverHost.RequestedTheme(ElementTheme::Dark); // Agentmaster surfaces are always dark (the card paints its own colors anyway)
+        AgentSetAutomationId(_noteHoverHost, L"am.side.notecard");
+        _noteHoverHost.PointerEntered([weak = get_weak()](auto&&, auto&&) {
+            if (const auto page = weak.get())
+            {
+                if (page->_noteHoverCloseTimer)
+                {
+                    page->_noteHoverCloseTimer.Stop(); // the pointer crossed from the glyph into the card: keep it open
+                }
+            }
+        });
+        _noteHoverHost.PointerExited([weak = get_weak()](auto&&, auto&&) {
+            if (const auto page = weak.get())
+            {
+                if (page->_noteHoverCloseTimer)
+                {
+                    page->_noteHoverCloseTimer.Start(); // leaving the card closes it after the grace
+                }
+            }
+        });
+        _noteHoverHost.PointerWheelChanged([weak = get_weak()](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+            const auto page = weak.get();
+            const auto el = sender.try_as<UIElement>();
+            if (!page || !el)
+            {
+                return;
+            }
+            // Contained (Rule #18): a wheel handler must never let an exception out into the input dispatch.
+            try
+            {
+                if (page->_ScrollNoteHoverCard(e.GetCurrentPoint(el).Properties().MouseWheelDelta()))
+                {
+                    e.Handled(true);
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"side panel note card: wheel");
+            }
+        });
+        _noteHoverPopup = winrt::Windows::UI::Xaml::Controls::Primitives::Popup{};
+        _noteHoverPopup.Child(_noteHoverHost);
+        // Top/left aligned so HorizontalOffset/VerticalOffset are root-relative (the tag hover panel's recipe).
+        _noteHoverPopup.HorizontalAlignment(HorizontalAlignment::Left);
+        _noteHoverPopup.VerticalAlignment(VerticalAlignment::Top);
+        Grid::SetRow(_noteHoverPopup, 0);
+        Grid::SetRowSpan(_noteHoverPopup, 3); // span the whole Root grid
+        Root().Children().Append(_noteHoverPopup);
+    }
+
+    void TerminalPage::_ShowNoteHoverCardNow()
+    {
+        try
+        {
+            const std::wstring id = _noteHoverPendingId;
+            if (id.empty() || !_noteHoverPendingGlyph.get())
+            {
+                return; // the glyph left the tree (its card left the list) before the delay ran out
+            }
+            if (!_sidePanelBuilt || _sidePanelCollapsed || _sidePanelAiMode)
+            {
+                return; // the cards are not on screen
+            }
+            _EnsureNoteHoverPopup(); // safe here: the open timer's tick is a clean dispatcher pass
+            if (!_noteHoverPopup)
+            {
+                return;
+            }
+            if (_noteHoverPopup.IsOpen() && _noteHoverShownId != id)
+            {
+                // Another glyph's card is up (the pointer moved glyph to glyph inside the grace): it gives way.
+                _noteHoverPopup.IsOpen(false);
+                _noteHoverShownId.clear();
+            }
+            const bool wasOpen = _noteHoverPopup.IsOpen();
+            _UpdateNoteHoverCard(id, /*swapWhileOpen*/ false, /*kickSummary*/ true); // a hover-time build: a fresh "ago", the summary load kicked
+            if (!wasOpen)
+            {
+                _ResetTabAgentToolTipScroll(SidePanelNoteCardKey(id)); // a fresh hover starts at the top of the summary
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ShowNoteHoverCardNow");
+            _CloseNoteHoverCard(); // a half-built card never stays up
+        }
+    }
+
+    void TerminalPage::_UpdateNoteHoverCard(const std::wstring& sessionId, bool swapWhileOpen, bool kickSummary)
+    {
+        if (!_noteHoverPopup || !_noteHoverHost || !_sessionRegistry || sessionId.empty())
+        {
+            return;
+        }
+        // Only the card being opened (the pending session, popup closed) or the one on screen: a summary that lands after the
+        // card closed, or for a session no longer shown, builds nothing.
+        const bool open = _noteHoverPopup.IsOpen();
+        const bool showing = open && _noteHoverShownId == sessionId;
+        const bool opening = !open && _noteHoverPendingId == sessionId;
+        if (!showing && !opening)
+        {
+            return;
+        }
+        const auto info = _sessionRegistry->GetWithoutQueue(sessionId);
+        if (!info || !info->live)
+        {
+            _CloseNoteHoverCard(); // gone / archived since the hover began: nothing to show
+            return;
+        }
+        // The tags as the push wants them (the "Sum" off card's recipe): from the card's model while the card is realized —
+        // already color-resolved through ResolveTagDisplayColor — else from the store (a card scrolled away while its card is up).
+        std::wstring tagsSpec;
+        std::vector<std::pair<std::wstring, Color>> tagChips;
+        if (const auto it = _sidePanelCardViews.find(sessionId); it != _sidePanelCardViews.end())
+        {
+            const auto& model = it->second.model;
+            tagChips.reserve(model.tags.size());
+            for (size_t i = 0; i < model.tags.size(); ++i)
+            {
+                const bool resolved = i < model.tagArgb.size();
+                tagChips.emplace_back(model.tags[i], resolved ? SidePanelUnpackArgb(model.tagArgb[i]) : TagColorFor(model.tags[i]));
+                tagsSpec += model.tags[i];
+                tagsSpec += L'\t';
+                tagsSpec += resolved ? std::to_wstring(model.tagArgb[i]) : std::wstring{};
+                tagsSpec += L'\n';
+            }
+        }
+        else
+        {
+            const auto tags = ::Agentmaster::GetSessionTags(sessionId);
+            const auto stored = tags.empty() ? std::map<std::wstring, std::wstring>{} : ::Agentmaster::LoadAllTagColors();
+            for (const auto& tag : tags)
+            {
+                const Color c = ResolveTagDisplayColor(tag, stored);
+                tagChips.emplace_back(tag, c);
+                tagsSpec += tag;
+                tagsSpec += L'\t';
+                tagsSpec += std::to_wstring(SidePanelPackArgb(c));
+                tagsSpec += L'\n';
+            }
+        }
+        // The popup's sink: it holds this session's card when it is open for it; a build lands in the host and opens / re-places
+        // the popup. The functions are used only inside the push below, while `this` is alive.
+        _SessionCardSink sink;
+        sink.attached = [this, sessionId]() {
+            return _noteHoverPopup && _noteHoverPopup.IsOpen() && _noteHoverShownId == sessionId && _noteHoverHost && _noteHoverHost.Child();
+        };
+        sink.open = [this, sessionId]() {
+            return _noteHoverPopup && _noteHoverPopup.IsOpen() && _noteHoverShownId == sessionId;
+        };
+        sink.setContent = [this, sessionId](const UIElement& card, const winrt::hstring& /*sig*/, bool /*swapWhileOpen*/) {
+            // A Popup (not a ToolTip) may take a new child while open: the summary body landing in the open card swaps it
+            // here, and the card is re-placed for its new height — beside the glyph it opened for, not the pending one.
+            if (!_noteHoverPopup.IsOpen())
+            {
+                _noteHoverShownGlyph = _noteHoverPendingGlyph; // the opening glyph becomes the shown card's anchor
+            }
+            _noteHoverHost.Child(card);
+            _noteHoverShownId = sessionId;
+            _PlaceNoteHoverCard(); // contained inside
+            if (!_noteHoverPopup.IsOpen())
+            {
+                _noteHoverPopup.IsOpen(true);
+                ::Agentmaster::LogNav(L"sidepanel note card open " + ::Agentmaster::ShortId(sessionId));
+            }
+        };
+        // The summary arrival re-hosts THIS card (the surface's own re-host; a no-op once the card closed or moved on).
+        auto rehost = [weakThis = get_weak(), sessionId]() {
+            if (const auto self = weakThis.get())
+            {
+                // ⚠ kickSummary=false — an arrival must NEVER schedule another analyze (the 2026-08-29 loop rule).
+                self->_UpdateNoteHoverCard(sessionId, /*swapWhileOpen*/ true, /*kickSummary*/ false);
+            }
+        };
+        _PushSessionCard(sink, SidePanelNoteCardKey(sessionId), *info, tagsSpec, tagChips, _SidePanelCardToolTipRoomWidth(), swapWhileOpen, kickSummary, std::move(rehost));
+    }
+
+    void TerminalPage::_PlaceNoteHoverCard()
+    {
+        try
+        {
+            const auto glyph = _noteHoverShownGlyph.get(); // the glyph the shown card belongs to (set as it opened)
+            if (!_noteHoverPopup || !_noteHoverHost || !_sidePanelHost || !glyph)
+            {
+                return;
+            }
+            const auto root = Root();
+            const double rootW = root.ActualWidth();
+            const double rootH = root.ActualHeight();
+            if (rootW <= 0.0 || rootH <= 0.0)
+            {
+                return;
+            }
+            // The card's size: measured now (it is not laid out yet when it was just built; a Measure of the detached host
+            // reads its desired size). An unmeasurable card falls back to the narrowest card at a third of the window.
+            _noteHoverHost.Measure(winrt::Windows::Foundation::Size{ static_cast<float>(rootW), static_cast<float>(rootH) });
+            double w = _noteHoverHost.DesiredSize().Width;
+            double h = _noteHoverHost.DesiredSize().Height;
+            if (w <= 0.0 || h <= 0.0)
+            {
+                w = 320.0;
+                h = rootH / 3.0;
+            }
+            // Beside the panel, on its terminal side (the "Sum" off placement, SIDE_PANEL.md §2d): right of a left-docked panel,
+            // left of a right-docked one, centered on the glyph's line, then slid back inside the window.
+            const auto panelOrigin = _sidePanelHost.TransformToVisual(root).TransformPoint(winrt::Windows::Foundation::Point{ 0.0f, 0.0f });
+            const double panelLeft = panelOrigin.X;
+            const double panelRight = panelOrigin.X + _sidePanelHost.ActualWidth();
+            const auto glyphOrigin = glyph.TransformToVisual(root).TransformPoint(winrt::Windows::Foundation::Point{ 0.0f, 0.0f });
+            const double centerY = glyphOrigin.Y + glyph.ActualHeight() / 2.0;
+            double x = _appSettings.sidePanelOnLeft ? panelRight + kSidePanelNoteCardGapPx : panelLeft - kSidePanelNoteCardGapPx - w;
+            double y = centerY - h / 2.0;
+            x = std::clamp(x, kSidePanelNoteCardEdgePx, std::max(kSidePanelNoteCardEdgePx, rootW - w - kSidePanelNoteCardEdgePx));
+            y = std::clamp(y, kSidePanelNoteCardEdgePx, std::max(kSidePanelNoteCardEdgePx, rootH - h - kSidePanelNoteCardEdgePx));
+            _noteHoverPopup.HorizontalOffset(x);
+            _noteHoverPopup.VerticalOffset(y);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_PlaceNoteHoverCard"); // the card keeps its last place
+        }
+    }
+
+    void TerminalPage::_CloseNoteHoverCard() noexcept
+    {
+        try
+        {
+            if (_noteHoverOpenTimer)
+            {
+                _noteHoverOpenTimer.Stop();
+            }
+            if (_noteHoverCloseTimer)
+            {
+                _noteHoverCloseTimer.Stop();
+            }
+            if (_noteHoverPopup && _noteHoverPopup.IsOpen())
+            {
+                // Only the popup closes — not a tree mutation, so this is safe inside a pointer handler or a tab switch. The
+                // card stays the host's child until the next build replaces it (its weak scroll pieces lapse with it then).
+                _noteHoverPopup.IsOpen(false);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_CloseNoteHoverCard");
+        }
+        _noteHoverShownId.clear();
+        _noteHoverPendingId.clear();
+        _noteHoverPendingGlyph = nullptr;
+        _noteHoverShownGlyph = nullptr;
+    }
+
+    void TerminalPage::_CloseNoteHoverCardFor(const std::wstring& sessionId) noexcept
+    {
+        if (!sessionId.empty() && (_noteHoverShownId == sessionId || _noteHoverPendingId == sessionId))
+        {
+            _CloseNoteHoverCard();
+        }
+    }
+
+    bool TerminalPage::_ScrollNoteHoverCard(int wheelDelta)
+    {
+        if (!_noteHoverPopup || !_noteHoverPopup.IsOpen() || _noteHoverShownId.empty())
+        {
+            return false; // nothing open: the notch belongs to the card list
+        }
+        return _ScrollSessionToolTipBody(SidePanelNoteCardKey(_noteHoverShownId), _noteHoverShownId, wheelDelta, L"note");
+    }
+
+    void TerminalPage::_SidePanelNoteSessionNoteChanged() noexcept
+    {
+        if (!_sidePanelBuilt)
+        {
+            return;
+        }
+        if (_sidePanelCollapsed || _sidePanelAiMode)
+        {
+            _sidePanelDirty = true; // nothing of the card list on screen: the expand / the AI view's close pays it
+            return;
+        }
+        // A deliberate user edit, so NOW — past the registry drain's min-gap (the tag edit's rule). The rebuild syncs the
+        // caches first (_SidePanelSyncFactCaches): the notes epoch moved, so each listed row reads its note again.
+        try
+        {
+            _SidePanelRebuildCards();
+        }
+        catch (...)
+        {
+            _sidePanelDirty = true; // the next periodic tick retries
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelNoteSessionNoteChanged");
         }
     }
 
@@ -8327,6 +8892,14 @@ namespace winrt::TerminalApp::implementation
         {
             _sidePanelFavoriteById.clear();
             _sidePanelFavoritesEpoch = factsEpoch;
+        }
+        // SESSION_NOTES.md §4c: a note written anywhere in this process moves the notes epoch; the cards' "has a note" cache is
+        // then dropped and each listed row reads its note again once.
+        const uint64_t notesEpoch = ::Agentmaster::SessionNotesEpoch();
+        if (notesEpoch != _sidePanelNotesEpoch)
+        {
+            _sidePanelNoteById.clear();
+            _sidePanelNotesEpoch = notesEpoch;
         }
         // The fork family (SIDE_PANEL.md §2l "The card's Filter menu"): while the record names one, its members are brought
         // up to date HERE — once per update or census, before any session is judged (_SidePanelFilterFactsOf only looks a
@@ -12292,6 +12865,8 @@ namespace winrt::TerminalApp::implementation
                 // never changes; a throw here leaves the mode off (the catch below).
                 _SidePanelAiEnsureView();
                 _SidePanelAiAttach();
+                // SESSION_NOTES.md §4c: the AI view covers the cards — a note glyph's hover card goes with them (noexcept).
+                _CloseNoteHoverCard();
             }
             _sidePanelAiMode = on;
             // The box KEEPS its text through the switch, both ways — the user's rule for the AI search box (2026-10-31, the

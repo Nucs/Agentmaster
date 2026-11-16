@@ -132,6 +132,7 @@ int wmain()
     TestCodexObserve();
     TestTranscriptStore();
     TestSessionTags();
+    TestSessionNotes(); // SESSION_NOTES.md §2: the note keys, their normalizer and the notes epoch (tests_transcript.cpp)
     TestSessionStoreScanCache(); // tags perf: the session store's scan cache, by counting file opens (tests_transcript.cpp)
     TestExtractPathsFromText();
     TestInferWorkingDirectory();
