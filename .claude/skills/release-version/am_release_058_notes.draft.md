@@ -1,24 +1,29 @@
-<!-- Agentmaster 0.5.8 release notes - archived 2026-11-16 from the published release (no draft was
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     Agentmaster 0.5.8 release notes - archived 2026-11-16 from the published release (no draft was
      kept when it was released). The body below is the release's body exactly as GitHub published
      it, saved before the one-row rewrite of every release replaced it there (release id 344535323,
      published 2026-06-25T07:19:12Z). -->
 ## Agentmaster 0.5.8 (pre-release)
 
-**0.5.8 is a pre-release** building on 0.5.7: a stability-and-diagnostics pass — a greppable **navigation audit trail** and **timestamped logs**, two notable **freeze fixes** (switching keyboard layout · interrupting a subagent turn), **smarter Sessions search ranking**, a **~95% quieter log**, and a small **favorite/close** refinement. Enable **Settings → Updates → Allow pre-release versions** to receive it automatically, or install from the assets below. The stable **0.5.5** remains the default for everyone else.
+**0.5.8 is a pre-release** building on 0.5.7: a stability-and-diagnostics pass. Enable **Settings → Updates → Allow pre-release versions** to receive it automatically, or install from the assets below. The stable **0.5.5** remains the default for everyone else.
 
-## New in 0.5.8
+## What's new
 
-- **Navigation audit trail (`[nav]` log).** Every UI navigation and action — clicks, selections, launch/fork/resume/close, and a tab's conversation **swaps** (`/clear`, `/resume`, `/compact`) — now emits one greppable line in `hooks.log`. `grep '[nav]' hooks.log` reconstructs exactly what you clicked, and the lines reference the same ids the engine already tags (`[fork]`/`[resume]`/`[rehome]`/`[spawn]`/`[archive]`), so *intent* and *mechanism* finally join up. This is what turns a vague "it opened the wrong session" into a followable chain.
-- **Timestamps on every log line.** A local-time `[HH:MM:SS.mmm]` stamp is now prefixed at the single logging chokepoint, so every layer — hook events, engine tags, the `[nav]` trail, the observer census, `autopilot.log`, `scanner.log` — is time-ordered at once. Turn duration, Enter-retry gaps, and observer lag read straight off the log.
-- **Silent failures are now surfaced.** A launch that produced no tab (`[launch-fail]`) and a failed state write (`[persist-fail]` — `sessions.json`, per-window records, templates, dir-colors, …) used to vanish without a trace; both now log the id/path and reason, so a lost session or a "the launch did nothing" is diagnosable.
-- **~95% quieter logs.** The observer census (which had grown to roughly a third of a multi-hundred-MB `hooks.log`) now re-logs only when **your** fleet actually changes — unrelated `claude`/`codex` sessions you're running elsewhere no longer trigger it — and its keep-alive heartbeat went from every 15 s to every 5 min. The full live counts still print as context; they just no longer spam.
+- **A navigation audit trail.** Every click, selection, launch, fork, resume or close writes one `[nav]` line to hooks.log.
+- **Timestamps on every log line.** Each line starts with a local `[HH:MM:SS.mmm]` stamp, so every log reads in time order.
+- **Silent failures are logged.** A launch that made no tab and a failed state write now log their id or path and the reason.
+- **About 95% quieter logs.** The observer census logs only when your fleet changes, and its heartbeat went from every 15 s to every 5 min.
 
-## Fixes
+## What's fixed
 
-- **No more multi-second freeze when you switch keyboard layout.** Changing the input language (Alt+Shift / Win+Space) while a Claude session was running froze the window for several seconds, every time — an inherited Windows Terminal issue ([microsoft/terminal#11522](https://github.com/microsoft/terminal/issues/11522)) where a layout change triggered a full settings reload re-applied to every pane. A layout change now only re-resolves the keybinding map (the one thing it can legitimately affect), so it's instant even with many live panes.
-- **No more freeze / runaway log on an interrupted subagent turn.** Interrupting (Esc) a **Full-autopilot** session that was running Task subagents could pin the whole window unresponsive (observed: ~13 minutes, with `hooks.log` ballooning past a quarter-gigabyte) as the state scanner flip-flopped the session **Running ↔ Waiting** on every tick — each flip rebuilding the board, advancing Autopilot, and rewriting `sessions.json`. The interrupt is now correctly treated as a turn-ender, so the oscillation can't start.
-- **Sessions search ranks names and titles above incidental content.** Searching the browser for a session by name now surfaces the **name/title** match at the top, instead of letting a more-recently-active session that merely *mentions* the term somewhere in its conversation float above it — the subtle trap behind resuming or forking the wrong row.
-- **Closing an already-favorite session offers "Unfavorite & Close."** The close confirm's keep-this button flips sense on the session's current star: an already-favorite session now offers **☆ Unfavorite & Close** (the hollow anti-star) instead of a no-op re-favorite.
+- **No freeze when you switch keyboard layout.** Changing the input language while a Claude session runs no longer freezes the window for seconds.
+- **No freeze on an interrupted subagent turn.** Esc on a session running subagents no longer flips it Running ↔ Waiting on every tick and floods the log.
+- **Sessions search ranks names first.** A session's name or title match now outranks one that only mentions the words.
+- **Closing a favorite offers Unfavorite & Close.** The close confirm's keep button follows the session's star.
 
 ## Install (pre-release)
 

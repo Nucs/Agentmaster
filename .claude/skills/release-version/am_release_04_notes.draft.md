@@ -1,4 +1,9 @@
-<!-- ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
      GitHub published it, saved before the one-row rewrite of every release replaced it there. The
      body this file held until then differed from the published one (a draft revised after, or never
      applied as written); it is this file at the commit before this note.
@@ -9,40 +14,40 @@
      commits omitted as internal) cross-checked against the dev-session transcripts. -->
 ## Agentmaster 0.4.0
 
-0.4.0 deepens the per-session *here-and-now* lens and hardens the engine: every tab now carries a live **summary panel** and a hover **action row** over its link badge, the Manager selection **follows your tab both ways**, keyboard navigation lands (**F2** rename, **Alt+arrows** to the Manager), folder tab colors become **permanent**, externals can be **adopted by forking a safe copy** — and a batch of reliability fixes squashes the `/clear` title-flood, makes Claude/Codex launch robust on npm-only installs, recovers Autopilot's eaten submit-Enter, and reads delegating (subagent) turns as **Running**.
+**0.4.0 deepens the per-session lens and hardens the engine.**
 
-## New in 0.4.0
+## What's new
 
-- **Per-tab summary panel.** A second overlay below the link badge renders the same box `session-end.js` prints — **Parent / Plan, Tasks, the numbered prompt history, and Files Read / Created / Edited** (newly-created files distinguished from edits; each file shown in exactly one list — Edited/Created take over Read, no duplicates) — analyzed straight from the transcript, with a **live "age · last user message · last activity" line that ticks**. Toggle it with the badge's **pencil** (a global, persisted setting, **on by default**); it's **resizable** by left / bottom / corner grips, and the size is shared + persisted across windows — or hold **Shift** while dragging for a per-tab, ephemeral size. A **wrap-newlines** toggle in the times bar switches messages between one-line (escaped `\n`) and full multi-line, and **slash-command prompts** (`/clear`, `/compact`, custom `/commands`) are reconstructed and listed rather than dropped. The displayed panel is trimmed to what the badge *doesn't* already show; the badge's copy menu yields the complete box.
-- **Per-tab badge — hover action row.** Hovering a linked session's badge reveals an actions row: an **Open Path** folder button (opens the working dir in Explorer) and a **copy menu** — Session Id · working-dir Path · **Branch Name** · the **REAL** Claude / Codex launch command line (the live process commandline, not a toy `--resume`) · the full session **Summary** · the whole **Transcript** as plain text (human + assistant only). Every copy / open plays a short confirmation chime.
-- **Per-tab badge — working-dir + branch row.** The linked badge gains a dim second line `‹workdir folder›/‹branch›` showing the session's place and its **live** git branch (read from `.git/HEAD`, worktrees and detached-HEAD handled).
-- **The Manager lens follows your tab — both ways.** Switching to a managed session's terminal tab now **selects it in the Manager** (board card + tree row + Flight Plan), completing the two-way Linked-Lenses sync (the board/tree → tab half was already there via Activate). Selecting any card / tab / external also drops its working directory into the **Launch box**, pre-aiming Launch / Open-New-Session; a new board **Clear** button deselects.
-- **Manager hover/selection pills the session's tab.** While you're on the Manager tab, the terminal tab of the session you **hover** in the Triage Board / Explorer Tree — or, with nothing hovered, the **selected** session — wears an accent **pill** behind its header, so you can preview *which tab is which* without switching to it. It follows the mouse, falls back to the lens selection, and clears the instant you leave the Manager tab; presentation-only — it never changes the real tab selection or the per-directory tab color.
-- **Keyboard navigation.** **F2** renames the focused tab (now advertised on both Rename menu items); **Alt+Left** jumps to the pinned **Agent Manager** tab; **Alt+Right** cycles forward through the window's tabs and wraps back to the Manager.
-- **Keyboard-commit rename.** Tab/session titles are multi-line, and you can now commit a rename from the keyboard — **Shift+Enter** by default (plain Enter inserts a newline), switchable in Settings to plain-Enter or click-away-only. Clicking away always commits.
-- **Permanent per-folder tab colors.** A working directory now keeps the **same** tab color across tabs, windows, and restarts (persisted), and two folders never share a color while any remain free — so a folder's color becomes a stable visual cue. Existing color maps are de-collided on upgrade.
-- **Adopt an external by forking a safe copy.** Adopting an external Claude/Codex session now offers **Fork a copy** (default) vs **Resume anyway**: fork branches the conversation into a new, independent transcript/rollout, so you can adopt a session that's **still running** without two writers fighting over one transcript.
-- **Resume where you left off — `/clear` continuation chains.** A Claude conversation that was `/clear`ed, plan-restarted, or continued via a handover lives across several separate on-disk session files. You recognize it by its original first-prompt title (the chain *head*), but "restore my conversation" means *where you left off* (the *tail*). **Resume here** / **Fork here** in the Sessions browser now follow the continuation chain — same working directory, time-adjacent — to the latest conversation, so you land where you stopped instead of on a dead `/clear`ed parent. A `/branch` fork is correctly treated as a branch, never a continuation link.
-- **Sessions browser — hide & refresh.** Right-click **"Hide from list"** drops a session from the Sessions browser (persisted, reversible via the cog's **"Reset hidden sessions"**); a **↻** button re-scans so new or grown sessions appear and fold into the search index. The transcript on disk is never touched.
-- **Sessions browser — rich detail pane.** Selecting a session now renders the full descriptive **session-summary box** (plan · tasks · prompts · files read/created/edited · durations — the same box the per-tab summary panel shows) in the detail pane, replacing the old flat prompt list.
-- **Tab context menu — Move to start / end.** New items relocate a tab to the first movable slot or the last slot (respecting the pinned Manager tab at index 0). The fork title now **increments** (`(fork)`, `(fork 2)`, `(fork 3)`…) instead of stacking `(fork) (fork)`.
-- **Manager & menu polish.** Triage-Board cards are **borderless at rest** (the state-colored border shows on hover / when selected); all Manager / Archive / Sessions tooltips open **~3× faster**; the Flight Plan opens **scrolled to the latest** message; the Launch button reads **"Launch Claude"** (parallel to "Launch Codex") and clears the box after a Resume/Fork; and the tab menu's **"Duplicate session"** sits below "Restart session".
+- **A summary panel on every tab.** It shows the session's plan, tasks, numbered prompts and the files it read, created and edited.
+- **A hover action row on the badge.** Open Path opens the working folder, and a copy menu copies the session id, path, branch, real launch command and summary.
+- **The working folder and branch on the badge.** A second line shows the session's folder and its live git branch.
+- **The Manager follows your tab, both ways.** Switching to a session's tab selects it in the Manager, and selecting a card drops its folder into the Launch box.
+- **The Manager pills the session's tab.** On the Manager tab, the hovered or selected session's terminal tab wears an accent pill.
+- **Keyboard navigation.** F2 renames the focused tab, Alt+Left jumps to the Agent Manager, and Alt+Right cycles through the window's tabs.
+- **Commit a rename from the keyboard.** Shift+Enter commits a multi-line title by default, and clicking away always commits.
+- **Permanent per-folder tab colors.** A folder keeps the same tab color across tabs, windows and restarts, and two folders never share one while colors remain.
+- **Adopt an external session by forking a copy.** Fork a copy (the default) or Resume anyway, so a still-running session never gets two writers.
+- **Resume where you left off.** Restoring a /clear-ed, plan-restarted or handed-over conversation opens its newest part, not its first.
+- **Hide sessions and refresh the browser.** Hide from list drops a session from the Sessions browser (reversible), and ↻ re-scans.
+- **A rich detail pane in Sessions.** Selecting a session shows its full summary box: plan, tasks, prompts, files and durations.
+- **Move a tab to the start or end.** And a fork's title counts up: (fork), (fork 2), (fork 3).
+- **Manager and menu polish.** Board cards are borderless at rest, tooltips open about 3× faster, and the Flight Plan opens at the latest message.
 
-## Fixes
+## What's fixed
 
-- **The `/clear` title-flood.** Running `/clear` in a managed tab could send the tab title swapping forever between the old and new conversation names, spin the CPU, and explode `hooks.log` past 100 MB with repeated `[Unknown]` lines — a registry↔tab title sync loop. Programmatic title pins are now one-way (latched) and always read the title fresh, so it settles deterministically.
-- **Claude wouldn't launch on an npm-only install.** Programmatic launch used a bare `claude` token, which the underlying `CreateProcessW` resolves to `.exe` only (ignoring `PATHEXT`) — so a machine with only the npm `claude.cmd` died with `0x80070002` ("my friend couldn't run it"). Agentmaster now launches the resolved native `claude.exe` **by full path**; if none is found the Manager guides you to install it or point at it, and Settings exposes an override.
-- **Codex wouldn't launch on a `.cmd`/`.bat`-only install.** Same `CreateProcessW`/`PATHEXT` trap for Codex — the launcher is now resolved to a full path (a `.cmd`/`.bat` is run via `cmd /c`).
-- **Duplicating a Codex tab spawned a stray Claude.** Duplicate (Ctrl+Shift+D / menu) on a managed Codex tab launched a blank `claude.exe` in its directory instead of forking the Codex conversation; it now forks the Codex rollout (or starts fresh when there's none).
-- **Autopilot prompt typed but never sent.** An injected prompt's submit Enter could be absorbed by Claude's TUI as a newline, leaving the prompt typed-but-unsubmitted and the turn stuck. Autopilot now **re-presses a lone Enter** (up to 3× over ~10s intervals) until the turn actually starts — never re-sending the text.
-- **Delegating tabs read idle.** A tab whose turn delegates to a **subagent / Task** — or whose conversation `/fork`/`/clear`/`/compact`/`/resume`'d to a new id — showed Idle/Waiting while the real work ran in side files; it now reads **Running** (blue), driven out-of-band by the subagent transcripts and Claude's own busy heartbeat.
-- **Sessions stuck showing Running.** A finished session could stay blue (Running) forever when no `Stop` hook fired and the transcript tail still read in-progress; now, when Claude's own (pid-validated) heartbeat reports idle and the transcript has gone quiet, the session is released to Waiting → Idle.
-- **"Needs you" stuck after you answered.** A session you'd answered or approved that kept working stayed orange (Needs-approval) for the rest of the turn; it's now released back to **Running**.
-- **Closing a plain tab gave no confirmation.** Pressing **X** (or middle-click / Close) on a shell tab with no managed session could close it silently under the default setting; a deliberate single-tab close now **always asks first**.
-- **Keyboard focus jumped off the clicked card.** A background title change rebuilt the Triage Board / Explorer Tree and dropped keyboard focus off the card/row you'd just clicked; focus is now preserved across the rebuild.
-- **Two folders could share a tab color.** The old hash-based picker had no collision check, so different directories could land on the same color (and it stuck, persisted). Colors are now collision-free, and a one-time migration de-collides existing maps.
-- **Empty summary box flash.** The summary panel could briefly show a bare empty box for a never-prompted session; it now stays hidden until there's real content.
-- **Codex resume targeting under PID reuse.** A reused process id could momentarily map a Codex tab to the wrong rollout; the resolver now validates process start time before reusing a cached id.
+- **No more /clear title flood.** A /clear no longer swaps the tab title back and forth forever, spinning the CPU and swelling hooks.log.
+- **Claude launches on an npm-only install.** Agentmaster launches the native claude.exe by full path instead of a bare name.
+- **Codex launches on a .cmd or .bat install.** Its launcher is resolved to a full path, and a .cmd runs through cmd /c.
+- **Duplicating a Codex tab forks Codex.** It no longer spawns a stray Claude.
+- **Autopilot recovers an eaten Enter.** It re-presses a lone Enter until the turn starts, never re-sending the text.
+- **Delegating tabs read Running.** A turn handed to a subagent reads Running instead of Idle.
+- **Sessions no longer stick on Running.** Claude's own idle heartbeat and a quiet transcript release a finished session.
+- **"Needs you" clears after you answer.** An answered or approved session goes back to Running.
+- **Closing a plain tab asks first.** A deliberate close of a shell tab with no managed session always confirms.
+- **Keyboard focus stays on the clicked card.** A background rebuild no longer drops it.
+- **Two folders no longer share a tab color.** Colors are collision-free, and existing maps are fixed once.
+- **No empty summary box flash.** The panel stays hidden until it has content.
+- **Codex resume targets the right rollout.** A reused process id no longer maps a tab to the wrong rollout.
 
 ## Install
 

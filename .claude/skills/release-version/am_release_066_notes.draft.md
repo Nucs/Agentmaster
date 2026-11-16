@@ -1,4 +1,9 @@
-<!-- Agentmaster 0.6.6 release notes — PRE-RELEASE (NOT Latest; v0.6.1 stays Latest).
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     Agentmaster 0.6.6 release notes — PRE-RELEASE (NOT Latest; v0.6.1 stays Latest).
      PRERELEASE NOTES RULE: show ONLY this prerelease's OWN explicit delta (the full accumulation
      happens when a STABLE release is cut). See the release-notes skill §2.
      0.6.6's explicit delta over 0.6.5 = the launch-model picker: spawn (4afb948d7) AND fork (af18c741d).
@@ -6,11 +11,11 @@
      Assets: Agentmaster_0.6.6.0.msixbundle, _x64.zip, _arm64.zip, Agentmaster.cer. -->
 ## Agentmaster 0.6.6 (pre-release)
 
-**0.6.6 is a pre-release that adds the launch-model picker** — pick which Claude model a session starts on, right where you start or fork it. Enable **Settings → Updates → "Allow pre-release versions"** to receive it automatically, or install from the assets below. The stable **0.6.1** remains the default for everyone else.
+**0.6.6 is a pre-release** building on 0.6.5. Enable **Settings → Updates → "Allow pre-release versions"** to receive it automatically, or install from the assets below. The stable **0.6.1** remains the default for everyone else.
 
-## New in 0.6.6
+## What's new
 
-- **Launch-model picker — start or fork a session on the model you choose.** Every **"Open New Session Here"** *and* every **"Fork session" / "Fork here"** affordance — on the Triage Board, the Explorer tree, an **External** row, the **Sessions** page (its detail buttons are now split buttons), and the tab right-click menu — is now a **picker**: **Default** (your global model, or Claude's own default when that's blank) plus one item per configured model. Picking a model launches (or forks) *that one session* with `--model <id>` — only that launch is affected (resume / restart still follow your settings model, and it's deliberately not persisted). The model list is a **new cog setting** (**Settings ⚙ → Sessions → Launch models**), a simple **"Display name | model-id"** list shipped with **Fable 5**, **Opus 4.8**, and **Sonnet 5** (edit it to add your own). The Triage-Board card / per-tab overlay `model·effort` adornment reflects the pick automatically; Codex sessions keep their plain New/Fork items (the list is Claude models).
+- **A launch-model picker.** Every Open New Session Here and Fork session, on the board, the tree, the Sessions page and the tab menu, picks the Claude model the new session starts on.
 
 ## Install (pre-release)
 

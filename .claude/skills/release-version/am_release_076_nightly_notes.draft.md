@@ -1,4 +1,9 @@
-<!-- Agentmaster 0.7.6-prerelease-nightly release notes — NIGHTLY (the tier BELOW pre-release).
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     Agentmaster 0.7.6-prerelease-nightly release notes — NIGHTLY (the tier BELOW pre-release).
      Range: v0.7.5-prerelease-nightly..5bf3d08e6 = 5 commits (1 the 0.7.5 notes archive; 4 user-facing).
      Baseline = the previous release of ANY kind = the 0.7.5 nightly (release-notes §2). RELEASING from
      5bf3d08e6 (= origin/agentmaster tip after push).
@@ -15,17 +20,17 @@
 
 > ⚠️ **NIGHTLY build** — an unstable development version. It may have memory leaks, CPU issues, and crashes. Install it only to help test, and be willing to have your work interrupted.
 
-**The "window stops accepting clicks" freeze now heals itself.** A rare, system-pressure-induced failure — diagnosed live off a frozen instance under machine-wide memory exhaustion — could silently kill the UI framework's event delivery: the window kept painting and every engine lane kept running, but clicks and queued UI work were accepted and never delivered, indefinitely. No crash, no exception, nothing any public API could recover — until now: the UI-stall watchdog (shipped in 0.7.5) gained a **rescue tier** that force-pumps the wedged dispatcher and, if that fails, a **gated self-restart** that relaunches the app cleanly — the workspace comes back via the normal durability path. Nightlies are **not** offered to pre-release users — enable **Settings → Updates → "Allow updating to nightly builds (unstable)"** (a warning confirm gates it) or install from the assets below. The stable **0.7.0** remains Latest for everyone else.
+Nightlies are **not** offered to pre-release users — enable **Settings → Updates → "Allow updating to nightly builds (unstable)"** (a warning confirm gates it) or install from the assets below. The stable **0.7.0** remains Latest for everyone else.
 
-## New
+## What's new
 
-- **A locked terminal shows the "unavailable" cursor.** While a pane is read-only — during the draft swap's brief lock as a queued prompt is delivered, or the stock read-only toggle — the mouse pointer over it becomes the Windows circle-with-a-slash cursor, so the pane reads as *intentionally locked*. Previously, typing into a locked tab just made the pointer vanish (Windows hides it while typing) with no signal at all of why nothing was happening.
-- **The session summary lists the skills a session loaded.** A new **Skills Loaded** section appears in the summary box on every surface that renders it (the per-tab summary panel, its Copy Summary, the Sessions detail pane, the Manager's Summary pane), and the artifacts block is reordered to **Skills Loaded → Files Created → Files Edited → Files Read**.
+- **A locked terminal shows the "unavailable" cursor.** While a pane is read-only, such as during a queued prompt's delivery, the pointer over it is the circle-with-a-slash cursor.
+- **The summary lists the skills a session loaded.** A Skills Loaded section joins the summary on every surface that shows it, ahead of the files created, edited and read.
 
-## Fixes
+## What's fixed
 
-- **The dispatch-wedge freeze self-heals.** Under machine-wide commit exhaustion, XAML's event delivery could latch dead for the process's one UI thread — clicks dead, queued UI work never delivered (measured 18+ minutes, ~550 stranded heartbeats), while the message pump answered probes and the engine kept working, so nothing looked hung from outside. The `[ui-stall]` watchdog now escalates: a sent-message rescue that force-processes the stalled queue, then — only if the UI is still dead — a self-restart that brings the app back with its workspace restored.
-- **Clearing a multi-line draft leaves no empty lines behind.** The automatic input-box clear (used by the draft swap and the MAIL button's move) stopped too early on multi-line drafts: Ctrl+U kills a line's *content*, but removing the now-empty row takes another press — so blank rows were left in the box. The clear now tracks the box's visual row span and keeps going until a single empty row remains.
+- **The "window stops accepting clicks" freeze heals itself.** When XAML's event delivery latches dead under memory pressure, the watchdog pumps the stalled queue, or restarts the app cleanly with the workspace restored.
+- **Clearing a multi-line draft leaves no empty lines.** The automatic input-box clear keeps going until one empty row remains.
 
 ## Install (nightly)
 

@@ -1,15 +1,20 @@
-<!-- Agentmaster 0.5.1 release notes. ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     Agentmaster 0.5.1 release notes. ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
      GitHub published it, saved before the one-row rewrite of every release replaced it there. The
      body this file held until then differed from the published one (a draft revised after, or never
      applied as written); it is this file at the commit before this note. -->
 ## Agentmaster 0.5.1
 
-**0.5.1** is a focused follow-up to 0.5.0: a new **summary-panel "Jump"** that scrolls the terminal to wherever a past prompt was sent, plus the completion of the **hover-tooltip sweep** so every control — and every dense adornment — explains itself.
+**0.5.1 is a focused follow-up to 0.5.0.**
 
-## New in 0.5.1
+## What's new
 
-- **Summary-panel "Jump" — scroll the terminal to where a prompt was sent.** Every numbered prompt in a tab's summary panel now carries a **▸ jump button**: click it and the session's terminal scrolls to **center on where that prompt is rendered** in the live buffer. It's a fuzzy, duplicate-aware match (a soft-wrap or re-indent won't defeat it, and the *i*-th send of a repeated prompt maps to the *i*-th on-screen occurrence), it resolves **right-to-left prompts** (Hebrew/Arabic, which a terminal stores visually reversed), and a button whose prompt **isn't currently on screen is dimmed** so the working ones stand out. It costs nothing until you click (a per-click buffer search on par with Ctrl+Shift+F).
-- **Hover-tooltip sweep completed.** Rounds 6–8 finish what 0.5.0 began — now beyond interactive controls to the **dense informative adornments** that were cryptic at a glance: the **Manager pane resize splitters**, the **markdown code-block Run button**, and the **state dots, the codex / external / host pills, the `model · effort · sandbox · approval` lines, the working-directory color, the `flight` / `typed` chips, and the autopilot/queue badge** all now say what they mean on hover.
+- **Jump to a prompt from the summary.** Each numbered prompt in a tab's summary panel has a ▸ button that scrolls the terminal to where that prompt was sent.
+- **Every control explains itself.** The hover-tooltip sweep reaches the splitters, the code-block Run button, the state dots and the pills.
 
 ## Install
 

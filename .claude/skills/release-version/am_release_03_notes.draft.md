@@ -1,4 +1,9 @@
-<!-- ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
      GitHub published it, saved before the one-row rewrite of every release replaced it there. The
      body this file held until then differed from the published one (a draft revised after, or never
      applied as written); it is this file at the commit before this note.
@@ -8,19 +13,23 @@
      Asset names assume tag v0.3.0 -> 0.3.0.0. -->
 ## Agentmaster 0.3.0
 
+**0.3.0** takes the 0.2.0 line to its first public release, and adds Codex and a command line.
 
-## New in 0.3.0
+## What's new
 
-- **Codex, managed alongside Claude.** Agentmaster now runs **Codex** sessions as first-class agents, not just Claude. Launch one from the primary launch bar via a **Claude ⇄ Codex** toggle; it restores with its window like any session, wears a teal **codex** pill on its Triage-Board card and Explorer-tree row, and the Fleet Observer derives its turn-state from the rollout transcript (observe-only, nothing injected).
-- **Command-line introspection — `agentmaster <verb>`.** Query the whole fleet from any shell, whether the app is running *or* not. `agentmaster show <ref>` gives a session's derived state + presence, the conversation tail + last assistant reply, activity (messages / tools / **files touched**), the last prompt, and the Flight-Plan queue + Autopilot; plus `list` / `sessions` / `tabs` / `windows` / `external`, `--self` (the calling tab), and `--json`. Read-only — it reads persisted + OS-observable state, nothing injected.
-- **Shell tabs restore at their real working directory.** Reopening a window brings pwsh/cmd tabs back where you left them (the OSC-reported cwd, with an out-of-band fallback), fully passively — not at the profile default.
-- **Sharper external census.** External claudes are labeled by **host identity** (real Windows Terminal vs Agentmaster vs Agentmaster Dev); orphaned claudes are dropped (no phantom rows after deploy cycles), and the Claude **desktop app** is excluded (no spurious "system32" sessions).
-- **Launch-box & manager niceties.** Paste a session id in the launch box and it validates live (green/red) with **Resume** + **Fork**; **Copy Session Id** is on every context menu; session titles can be **multi-line** (Return inserts a newline) and the rename box auto-sizes.
-- **Engine state-machine robustness.** The scanner no longer strands blocked / interrupted / approved sessions in the wrong state; a resumed mid-turn session no longer falsely lights up **Running** (run-repair ignores the restore-time history replay); and Claude tabs no longer auto-close when `claude.exe` exits gracefully.
-- **Tooltip & tab-strip polish.** Tooltips dismiss correctly everywhere — the Manager tab, through ScrollViewers, and on keyboard-nav scroll; the tab-strip status dot is repositioned and no longer clips at the tab's left edge.
-- **Per-install profiles + clean release/dev coexistence** *(first public release of the 0.2.0 line)*. On first launch Agentmaster asks for a **profile folder** — Production (`%USERPROFILE%\.agentmaster`), Development (`%USERPROFILE%\.agentmaster-dev`), or **Browse…** — holding *everything* it persists, including Terminal's own settings. The released **`Agentmaster`** and a from-source **`AgentmasterDev`** install side by side with separate launchers, single-instance scopes, and profiles; hooks route to each install's own engine. Portable zips are truly self-contained (a `.portable` marker keeps all state inside the unzip folder).
-- **Ordered hook state machine** *(0.2.0 line)*. Hook events carry a fire-time `ts` + per-turn identity, so a slow `Stop` landing after the next prompt can't paint a stale state — fixes the "second turn never shows Running" bug; type-ahead prompts keep the session correctly Running.
-- **Sessions search grammar + cross-window actions** *(0.2.0 line)*. `"quoted phrases"` match exactly and a bare session-id GUID finds that session *and its forks*; the 📁/📄 directory/file scopes are on by default and answered from the index. Triage-Board cards gain the full right-click menu and a LOCAL/GLOBAL scope toggle shared with the tree; **Activate** and **Rename** work on a session hosted in *any* window.
+- **Codex, managed alongside Claude.** A Claude ⇄ Codex toggle on the launch bar starts Codex sessions that restore with their window and wear a teal codex pill.
+- **`agentmaster <verb>` on the command line.** Query the fleet from any shell, app running or not: `agentmaster show <ref>` gives a session's state, conversation tail, activity and queue.
+- **Shell tabs restore at their real folder.** Reopening a window brings pwsh and cmd tabs back where you left them.
+- **A sharper External census.** External claudes are labeled by their host, orphans are dropped, and the Claude desktop app is left out.
+- **Launch box and Manager niceties.** A pasted session id validates live with Resume and Fork, Copy Session Id is on every menu, and titles can be multi-line.
+- **Per-install profiles, release and dev side by side.** The first launch asks for a profile folder that holds everything the app saves, and release and dev builds no longer collide.
+- **An ordered hook state machine.** A slow Stop can no longer paint a stale state, so the second turn shows Running.
+- **Sessions search grammar and cross-window actions.** "Quoted phrases" match exactly, a pasted session id finds the session and its forks, and board cards get the full right-click menu.
+
+## What's fixed
+
+- **Sessions no longer strand in the wrong state.** Blocked, interrupted and approved sessions read right, a resumed mid-turn session no longer lights Running, and Claude tabs stay open when claude.exe exits.
+- **Tooltip and tab-strip polish.** Tooltips dismiss correctly everywhere, and the tab strip's status dot no longer clips at the tab's edge.
 
 ## Install
 

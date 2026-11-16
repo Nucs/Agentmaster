@@ -1,4 +1,9 @@
-<!-- Agentmaster 0.7.0 release notes — STABLE (becomes Latest; the 0.6.x line graduates).
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     Agentmaster 0.7.0 release notes — STABLE (becomes Latest; the 0.6.x line graduates).
      STABLE = the comprehensive changelog since the last stable (0.6.1): a curated Highlights reel +
      the 0.7.0-only batch (v0.6.9..24d4a993c = 28 code commits) + the full per-version fold of every
      intervening pre-release (0.6.3..0.6.9). release-notes skill §6.
@@ -8,147 +13,33 @@
        (REPLACES 0.6.1 as Latest). Assets: Agentmaster_0.7.0.0.msixbundle, _x64.zip, _arm64.zip, Agentmaster.cer. -->
 ## Agentmaster 0.7.0
 
-**0.7.0 is a stable release — the entire 0.6.x pre-release line plus a final batch, now the default for everyone.** Since the last stable (0.6.1) Agentmaster gained the **`/handover` family** (hand a session off to a fresh successor — beside it, in place, or pre-typed in standby), **Windows notifications** when an agent needs you, a **launch-model picker** that can now start a session on *any* model you name, **configurable tab-title naming**, a live **current-model** readout, and **workspace pre-trust** so an unattended tab is never parked on Claude's startup trust prompt. It also fixed what made the 0.6.x line worth graduating: the **23 GB memory leak**, the **resume crash-loop**, the **0.6.8 UI freeze**, an **auto-updater that never prompted**, and a session that stayed orange "needs you" for a *median 39 seconds* after you'd already answered it. This build becomes the new default **Latest**; the highlights are below, followed by the complete per-version changelog since 0.6.1.
+**0.7.0 is a stable release — the entire 0.6.x pre-release line plus a final batch, now the default for everyone.** This build becomes the new default **Latest**; below are the highlights since the last stable (0.6.1).
 
-## Highlights
+## What's new
 
-### New
-- **The `/handover` family — pass a session to a fresh successor.** Type **`/handover <what to carry over>`** and Claude writes a self-contained briefing that becomes a **new session's first message, verbatim and in full**: a clean context window that already knows everything. **`/handover-here`** puts the successor in the *current* tab instead; **`/handover-standby`** pre-types the briefing and waits for *you* to press Enter. All three fan out — several briefing files in one turn open several parallel successors — and take per-message hints: `/handover [fable] [my title] …` picks that successor's model and tab title. A Settings **Commands** tab renames/disables each command and shapes what it produces (model · title · which files count · where they're written · delete-after).
-- **Windows notifications.** Every managed session (Claude & Codex) raises a toast when it leaves **Running** for another state; clicking it brings the window to the front and jumps to the tab. A **Notifications** cog tab controls the states, focus-skip, and sound.
-- **Launch on any model — the picker plus "Specify…".** Every "Open New Session Here" **and** "Fork session / Fork here" is a picker: Default, your configured models, and **Specify…** to type *any* model id for that one launch. The drop-down is durable (everything you specify is offered from then on) and a **Fetch models** button pulls the published Anthropic + Codex catalogs straight into it. The shipped defaults are now version-**less** aliases (`fable` / `opus` / `sonnet`), so the menu follows Anthropic's next release instead of rotting on a pinned version.
-- **Workspace pre-trust — an unattended tab is never parked.** Claude's startup "is this a folder you trust?" prompt could silently stop a managed tab dead — no card, no state, nothing to click for an automated launch. Agentmaster now pre-trusts the working directory before launching (a surgical, opt-out `~/.claude.json` edit), so tabs come up ready.
-- **Configurable tab-title naming.** Choose how an untitled tab's title derives from its working directory — folder-word / folder / two-folders / capitals, or the **git-branch** trio — plus case and spaces→underscores, with a live preview.
-- **Live current-model readout.** Each session shows the model it's *actually* on (read from the transcript, so a mid-session `/model` updates it) on the board card, tab tooltip, and per-tab overlay.
-- **In-app Debug Mode** (Settings → About) unlocks the developer-only Auto Testing / Tests Autorunner in a release install, and **one-click Claude install** installs or migrates Claude straight from the "not found" prompt.
-- **Tab display options.** A **"Remove colors"** coloring mode (your saved colors kept), an option to **hide the profile icon** on tabs, the tab strip now **scrolls to reveal a selected session's tab**, and a **spark crown** — a soft amber glow with rising embers around a resting session's status dot while its prompt cache is still warm.
-- **Smarter state & tab color.** A still-running shell / background agent / teammate keeps a session **Running**; a git repo and **all its worktrees share one tab color**; a session launched in your **home directory infers** where it actually works. Designated-area tooltip panels replace floating tooltips across the cog, Sessions, and Manager.
-- **Install & update.** The one-command installer now **asks** instead of auto-elevating (admin install · no-admin portable · cancel), and a **nightly channel** sits below pre-release for testers who opt into unstable builds behind a warning.
+- **The `/handover` family.** `/handover` has Claude write a briefing that becomes a fresh session's first message, `/handover-here` puts the successor in the current tab, and `/handover-standby` types it there without sending.
+- **Windows notifications.** Every managed session raises a toast when it leaves Running, and a click brings its window to the front and jumps to its tab.
+- **Launch on any model.** Every Open New Session Here and Fork session is a picker: Default, your configured models, and Specify… for any model id.
+- **Workspace pre-trust.** Agentmaster trusts the working folder before a launch, so Claude's startup trust question can no longer park an unattended tab.
+- **Tab-title naming.** An untitled tab's title can come from the folder's last word, its name, two folders, capitals or the git branch, with a live preview.
+- **The live model on every card.** Each session shows the model it is actually on, read from the transcript, on its board card, tab tooltip and overlay.
+- **Debug Mode and a one-click Claude install.** Settings → About → Enable Debug Mode unlocks Auto Testing in a release install, and the "Claude not found" prompt installs Claude in one click.
+- **Tab display options.** A "Remove colors" mode, a hidden profile icon, a strip that scrolls to the selected session's tab, and the spark crown while a session's prompt cache is warm.
+- **Smarter state and tab colors.** A running shell, background agent or teammate keeps a session Running, a repo and its worktrees share one color, and a session launched in your home folder infers where it works.
+- **The installer asks instead of elevating, and a nightly channel.** The one-command installer offers an administrator install, a no-admin portable install or cancel, and nightlies sit below pre-releases behind a warning.
 
-### Fixes
-- **The 23 GB Manager memory leak** — a reference-cycle leak that grew ~85 MB/min under a busy fleet until the UI froze.
-- **The resume crash-loop** — heavy sessions dying in a self-sustaining loop seconds after launch; every summary/analyze lane is now contained.
-- **The 0.6.8 UI freeze** — the summary panel re-resolving every session on the UI thread until it stopped responding; now cached, focus-gated, and floored.
-- **Auto-updates that never fired** — 0.6.x installs never prompted for updates (the preferences were stored at the wrong level of `settings.json`); fixed end-to-end, with atomic writes and a working "Not now."
-- **Answering a question left the card orange.** A session you'd answered kept reading "needs you" for a measured *median 39 s* (up to minutes) before going back to Running; three independent detection paths now catch it, typically within a heartbeat.
-- **A fatally-errored session showing a green "Done."** A session Claude aborted (e.g. an unknown `--model`) reported "Done" while sitting there broken — the error evidence now outranks the label.
-- **Auto Testing that silently never ran.** Debug Mode didn't actually arm the Tests Autorunner (two separate causes), and adopted or `/clear`-re-homed sessions came up with the autorunner Off, so queued prompts sat Pending forever.
-- **Window-close & tab-drag crashes** — guarded UI-thread teardown + the MUX tab-drag null-deref, so closing a window or dragging a tab no longer risks a terminate. Plus a runaway terminal auto-scroll fix and truer notifications (no toast at all for a turn under 10 s).
-- **"Restart session" actually restarts** — no `259` banner, no false archive, and a fork keeps its branch. `/model` (and other local slash commands) no longer flip an idle session to Running.
+## What's fixed
 
----
-
-**Full changelog since 0.6.1** — every change, grouped by the release it first shipped in (0.7.0's own batch first, then each pre-release):
-
-## 0.7.0
-### New
-
-- **`/handover-standby` — the hand-off that waits for you.** A third member of the `/handover` family: the successor tab opens exactly as `/handover` does, but its briefing is **typed into the input box and never sent**. You read the pre-filled message and press Enter yourself — "a handover in standby", one keystroke away, with nothing running until you say so. Delivery is confirmed by reading the box back (and re-filled if the terminal ate the paste); a session you've already started driving is never touched, and an undelivered briefing always keeps its file.
-- **Pick the successor's model and title from the message itself.** A hand-off can lead with hints that override the Commands-tab settings for that one hand-off: **`/handover [fable] do a b c`**, `/handover fable 5: fix the tests`, or **`/handover [fable] [my title] …`** — the model match is partial and case-insensitive against your configured list (so `sonnet` finds `claude-sonnet-5`), and a leading bracket that names no model becomes the successor's **tab title** instead. All three commands now also carry an `argument-hint`, so the syntax shows up in Claude Code's `/` autocomplete as you type.
-- **Briefings land in a scratchpad, not your repo.** Where a hand-off writes its `HANDOVER-<topic>.md` is now a setting (**Commands → Handover file location**) with presets — and the shipped default is the session **scratchpad** instead of the working directory, so hand-offs stop leaving files at your repo root (paired with delete-after-hand-off, which is on by default for fresh installs). The Commands tab also reports what each command-definition file on disk *is* (up to date / managed / edited by you and therefore left alone) and can reinstall them.
-- **"Specify a model…" on every model menu.** Every "Open New Session Here" / "Fork session" picker — and the three Successor-model combos — gains **Specify…** right under Default: type any model id and launch that one session on it, no settings detour. The drop-down is a **durable list** (anything you specify is offered from then on, across windows and restarts), it always offers your configured Launch models, and it links to both published model lists with a **Fetch models** button that downloads the Anthropic and Codex catalogs straight into it (Fetch is the explicit "rebuild this list" gesture).
-- **Version-less shipped launch models.** The default launch list is now **Fable / Opus / Sonnet** on Claude Code's "latest of this family" aliases instead of pinned versions, so it follows Anthropic's next release on its own rather than advertising a superseded (eventually dead) model id. Existing installs whose list is still the untouched old default are upgraded automatically; any list you edited is left alone, and typing a full id still pins a version.
-- **Workspace pre-trust — Claude's startup trust prompt can't park a tab.** Launching in an untrusted folder made Claude stop on "Quick safety check: is this a project you trust?", which an unattended tab cannot answer: no card, no status, no automation — and the app's own default folder (your home directory) re-asked *every* launch, because Claude deliberately never remembers a home-directory answer. Agentmaster now pre-trusts the launch directory (a surgical single-flag edit of `~/.claude.json` that preserves every other byte, takes Claude's own config lock, and can be turned off in Settings → Sessions). Note `--dangerously-skip-permissions` never covered this — verified against a real terminal.
-- **The spark crown — the cache-warm hint on the tab strip.** The Triage Board's amber ⚡ "still server-cached" hint now has a tab-strip twin: a soft amber glow behind the status dot plus three embers that rise and fade, shown while a follow-up would still reuse Claude's warm prompt prefix. The status dot itself is untouched, so the state color reads exactly as before — and both surfaces now show the hint **only for a session at rest**, never mid-turn (where it was permanently lit and told you nothing).
-- **A nightly update channel.** A tier *below* pre-release for unstable development builds: nightlies are skipped by every update check — even with "Allow pre-release versions" on — unless you enable **Settings → Updates → "Allow updating to nightly builds (unstable)"**, whose turn-on is gated behind an explicit warning. The two opt-ins are independent, so a pre-release user is never handed a nightly by accident.
-- **The installer asks instead of elevating.** Run without admin rights, the one-command installer now offers **[A]dministrator** (one UAC prompt, trusts the signing cert machine-wide), **[U]ser install** (no admin, no certificate — the self-contained portable build under your profile, with a Start-menu shortcut), or **[C]ancel** — asked before the big download, and re-offered if UAC is declined. The in-app updater now shares that script's core verbatim, so both paths behave identically.
-- **Unsent drafts, bulletproofed.** The "3 dots" unsent-draft indicator was hardened against real-world terminals: the draft text is extracted exactly (a hidden separator character used to prefix every recorded draft), Claude's side-by-side question menus no longer register as a 3,000-character "draft", a large **pasted** block is resolved back to its real content instead of a `[Pasted text #N]` placeholder, and the draft is **persisted** — a restored tab shows what was left unsent before its session even starts, labeled with how old that memory is.
-
-### Fixes
-
-- **A session you answered stayed orange "needs you."** Answering a question and having the agent keep working was the one path with no fast exit from **Needs approval**: measured at 19.8 s and 45.3 s on live sessions, with a corpus median of 38.8 s and a p90 of nearly two minutes. Three independent detectors now cover it — Claude's own status heartbeat (which flips seconds before anything else), the answer line itself, and the existing hook/transcript pair — any one of which releases the card, typically within a heartbeat. A one-second "answered and immediately finished" blip no longer flashes the tab.
-- **A dead session showing a green "Done" card.** Launching with an invalid model made Claude report a fatal API error and then shut the conversation down while staying on screen — and because the "session ended" label arrived ~1.2 s before the error evidence could be judged, the board showed a green **Done** card for a session that was visibly broken, permanently (no path could correct it). An unrecovered API-error tail now outranks the "ended" label, so it reads **Error**, and a paused autorunner won't fire queued prompts into it.
-- **"Enable Debug Mode" never armed the Tests Autorunner.** Two separate causes, both fixed: the toggle was written inside the settings envelope but read from the top level (so it always read false), and once that was fixed the flag latched in the executable only and never crossed into the app's main module. Queued prompts that silently sat Pending forever — with no trace anywhere — are the class of failure this ends.
-- **Adopted and re-homed sessions ran with the autorunner Off.** A hand-typed `claude` that Agentmaster adopted, and the new conversation an in-session `/clear` or `/resume` creates, were the two session records the engine mints itself — and neither picked up your default autorunner mode, so those sessions never auto-sent a queued prompt. Both now stamp the configured default at creation.
-- **No notification for a sub-10-second turn.** A completion toast now requires a Running span of at least 10 seconds, evaluated as an outright suppression rather than a delay — so the "completed after 0 seconds but still running" pop is gone for good, and short turns you were already watching don't interrupt you.
-- **Model-prompt polish.** The three Successor-model combos read "Specify 26" (a mangled ellipsis that shipped a literal "26"), the prompt's Claude link pointed at the API reference instead of the model overview page, and a fetch could drop your configured Launch models out of the drop-down. All fixed.
-
-
-## 0.6.9
-### New
-
-- **`/handover` — hand your session off to a fresh successor.** Type **`/handover <what to carry over>`** in any managed Claude session: Claude writes a self-contained briefing (`HANDOVER-<topic>.md`) addressed to its successor, and Agentmaster automatically opens a **new tab** with a fresh session in the same working directory — seeded with that briefing **verbatim and in full as its first message**. You get a clean context window that already knows everything, without copy-pasting. It's repeatable (every `/handover` spawns its own successor), and it **fans out**: if Claude writes **several** briefing files in one turn, you get **several parallel successors**, one per file.
-- **`/handover-here` — the in-place twin.** Same hand-off, except the successor **replaces the current tab** instead of opening beside it. The original session is archived (and stays resumable from the **Sessions** browser), so a long-running tab can start fresh without you losing anything or re-arranging your workspace.
-- **Customize the hand-off — a new Settings "Commands" tab.** **Rename** either command (the word you type is the command's name) or **disable** it entirely, and **shape what a hand-off produces**: pick the successor's **model**, **rewrite its title** with a find/replace regex, control **which markdown files count** as a briefing (a file-match regex, defaulting to the `HANDOVER-…` naming), and optionally **delete the briefing file** once the successor has actually started — the answer to leftover `HANDOVER-*.md` clutter. Each tab also gains a **Reset** button to restore its defaults.
-
-### Fixes
-
-- **The 0.6.8 UI freeze.** On 0.6.8 the window could stop repainting and stop responding to input while everything else kept running normally — sessions still advanced, hooks still arrived. The cause: the summary panel re-resolved every linked session's prompt-jump targets every few seconds, on the UI thread, for **all** sessions rather than the visible one; with a busy fleet and long conversations that pegged the thread at ~98% of a core and it stopped pumping input entirely. That refresh is now **cached** per buffer change, **limited to the focused tab**, and **floored at one pass per 2.5 minutes** — with a ~5× faster resolver behind it.
-- **Automatic updates actually work now.** The updater stored its three preferences at the wrong level of `settings.json`, so the startup and hourly checks **never saw "Allow pre-release versions"** — they always queried the stable channel, which (with every release since 0.6.4 marked pre-release) meant a 0.6.x install **never prompted for an update at all**, no matter what the checkbox said; Skip/Postpone choices were also wiped by the next settings save. All three now round-trip correctly, writes are atomic, **"Not now"** silences the updater until the next launch, and the whole surface is hardened against errors — so updates flow again from here on.
-- **No more premature "completed" toast.** A session that reported a completion after a sub-2-second Running span — while it was in fact still working — no longer fires a misleading "waiting for you" notification; the toast is held for re-light confirmation first.
-
-
-## 0.6.8
-### New
-
-- **Tab-title naming conventions.** How an untitled session's tab title derives from its working directory is now a **Settings ⚙ → Tabs → "Tab title naming"** choice, with a **live preview**. Pick from **Last word** of the folder (the new default — `Potato.Tomato.SlangGang` → `SlangGang`), **Folder name**, **Two folders** (`repos/Agentmaster`), **Capital letters** (`PotaTo.Tomato.Slang` → `PTTS`), or the **git-branch trio** — **Branch name**, **Branch / folder**, **Branch / two folders** (`feature/ui/Agentmaster`) — plus a **Title-case** option and **spaces → underscores**. Replaces the old fixed heuristic that named things `PTS` with no way to change it.
-- **Debug Mode — unlock Auto Testing in a release build.** A new **Settings ⚙ → About → Enable Debug Mode** toggle (persisted) turns on the developer-only **Auto Testing / Tests Autorunner** subsystem in a normal release install — the durable, in-app twin of launching with `--debug` — so queued prompts auto-send on turn-complete, Send-now works, and every hidden autorunner surface appears.
-- **One-click Claude install.** When no native `claude.exe` is detected, the "Claude Code not found" prompt now offers a **one-click install/migrate** tailored to your machine — `claude install` (npm) or the official claude.ai native bootstrap — instead of only linking the docs.
-- **A git repo and all its worktrees share one tab color.** Worktrees of the same repository now wear the repository's single per-directory color, so a repo and its worktrees read as one at a glance (grouping and mechanics stay worktree-granular).
-- **Click a notification to jump to the session.** Clicking a session's Windows toast now **brings its window to the front and switches to its tab** (restoring it if minimized, across windows) — and a toast click no longer opens a stray empty window.
-- **Home-directory sessions infer their working directory.** A session you launch in your home folder (where a bare `claude` almost never actually works) now infers the directory its tool calls concentrate in — in **every** tab-color mode — so its color, grouping, and "Open New Session Here" target follow the real work, not the empty launch folder.
-- **Designated-area tooltips.** The Settings cog, the Sessions page, and the Manager tab now render their hover help in a **fixed side panel** instead of floating tooltips that chase the pointer — every control is titled, and the panel is sized to the window.
-
-### Fixes
-
-- **Window-close & tab-drag crashes.** A cluster of teardown crashes is fixed: every UI-thread destructor path is guarded, six unguarded fire-and-forget lanes are contained, and the MUX tab-strip drag-start null-dereference is guarded — so closing a window or dragging a tab no longer risks terminating the app.
-- **Runaway terminal auto-scroll.** Selecting text and releasing outside the terminal could leave it **scrolling as if the mouse were held above the pane**; auto-scroll now stops on pointer-capture loss, pointer-cancel, and focus loss.
-- **Truer notifications.** A "completed / waiting for you" toast is now **held** while a session's background work (a shell, a `run_in_background` agent, a teammate) is still live — so a session that's actually still working doesn't fire a premature "waiting for you" — plus a 20-second per-session double-toast guard.
-- **`/model` no longer flips a session to "Running."** Running a local slash command like `/model` on an idle or waiting-for-you session no longer bounces it to **Running**; turn-less user lines and the `/compact` bridge are handled too.
-- **Long tab titles show in full.** The tab-title length limit is now a **255-character safety net**, not a 30-character display cap — a long name is no longer clipped.
-- **"Copy Launch CLI" pastes and runs.** The copied command is prefixed with the PowerShell call operator, so pasting it into a shell runs instead of just printing the path.
-- **UI performance.** Tab tooltip cards are built **on hover** instead of every tick (killing a measured ~65%-of-a-core UI-thread burn), the Manager's per-notify refresh is coalesced and throttled, the sessions autosave is debounced to one write per quiet second, and the pending-input poll is a single integer compare on a quiet tab.
-- **Splash.** Closing the loading window now **aborts the launch** (shuts the starting instance down) instead of continuing to start up in the background.
-
-
-## 0.6.7
-### New
-
-- **Windows notifications when a session needs you.** Every managed session — Claude *and* Codex — now raises a **Windows toast** the moment its status leaves **Running** for anything else, so a tab or window you aren't looking at can still get your attention: *"‹session title› — Has completed after 2h30m and is ‹status›."* A new **Settings ⚙ → Notifications** tab controls it: a master on/off, a per-state checkbox for each target state (**Waiting for you / Needs approval / Idle / Done / Error** — all on by default), **"Skip when the tab is focused"** (on), and **"Play the notification sound"** (on).
-- **See each session's current model at a glance.** A session's **live model** now shows in short form — on the **Triage-Board card**, the **tab tooltip**, and the **per-tab overlay** (left of the status dot). It reflects the model the session is *actually on*, read from the transcript, so a mid-session **`/model`** switch updates it (the launch `--model` / env is only the initial request and goes stale). The family list that shortens bare `--model` aliases is now a **cog setting** (Settings → Sessions), so a newly-shipped Claude family is recognized without waiting for an app update.
-- **The "Launch models" editor validates as you type.** The cog's **Settings ⚙ → Sessions → Launch models** box (the launch-model picker's list, from 0.6.6) now lints live like the environment-variable editors — a colored border plus a status line ("✓ N models in the pickers" / a warning with the first issue / an error), so a typo in a `Display name | model-id` entry is obvious before it reaches the menus.
-
-
-## 0.6.6
-### New
-
-- **Launch-model picker — start or fork a session on the model you choose.** Every **"Open New Session Here"** *and* every **"Fork session" / "Fork here"** affordance — on the Triage Board, the Explorer tree, an **External** row, the **Sessions** page (its detail buttons are now split buttons), and the tab right-click menu — is now a **picker**: **Default** (your global model, or Claude's own default when that's blank) plus one item per configured model. Picking a model launches (or forks) *that one session* with `--model <id>` — only that launch is affected (resume / restart still follow your settings model, and it's deliberately not persisted). The model list is a **new cog setting** (**Settings ⚙ → Sessions → Launch models**), a simple **"Display name | model-id"** list shipped with **Fable 5**, **Opus 4.8**, and **Sonnet 5** (edit it to add your own). The Triage-Board card / per-tab overlay `model·effort` adornment reflects the pick automatically; Codex sessions keep their plain New/Fork items (the list is Claude models).
-
-
-## 0.6.5
-### New
-
-- **"Remove colors" tab-coloring mode.** A fourth option under **Settings → Tabs → Tab coloring**: no tab is colored at all — but your saved per-directory / per-session colors are **kept** (not erased), so switching back to any colored mode restores exactly the colors your fleet had. It's strip-wide (every non-managed tab's color is *suspended*, never voided) and "Change tab color" is disabled while the mode is active.
-- **Hide the profile icon on tabs.** A new global **"Show icons on tabs"** setting (default **off** — an Agentmaster change from stock Windows Terminal) drops the profile icon from every tab, so a tab reads on its status dot + title. Toggles live.
-- **The tab strip reveals a selected session's tab.** Selecting a session on the Triage Board or Explorer tree now scrolls the tab strip so that session's terminal tab is visible — completing the tab-strip half of the Linked-Lenses selection sync (previously the highlight pill could sit scrolled off-screen with many tabs). It's virtualization-aware and lands the tab clear of the overlay's scroll / **+** buttons.
-- **A still-running shell, background agent, or teammate keeps the session "Running."** Work that *outlives the turn* — a live shell job, a `run_in_background` agent, or a Claude teammate writing to the lead's side files for minutes after the lead's turn ends — now correctly reads **Running** instead of dropping to Idle / Done / Waiting-for-you, and settles back to Waiting only once that background work actually quiets.
-- **Dismiss an Error card by hand.** The triage **Move to Idle** / **Move to Done** actions now extend to the **Error** state on both the Triage Board and the Explorer tree, so you can clear an errored session you've already dealt with.
-- **Ctrl+Home** toggles the Agent Manager (home / back), rebound from Shift+Home.
-
-### Fixes
-
-- **"Restart session" actually restarts.** Restarting a managed session could print a `[process exited with code 259] … press Enter to restart` banner into the pane, then **falsely archive** the freshly-restarted session ~1.4 s later, and relaunch an **empty** conversation (a forked session silently losing its branch). Five distinct defects behind that were fixed; Restart now cleanly re-points the connection with no banner, no false archive, and a fork keeps its branch.
-- **A marked triage state survives opening the tab.** Marking a background session **"Move to Waiting-for-you"** (or **Mark Unread**) and then activating it for the first time reset it straight back to **Idle** — because focusing a lazily-restored tab starts its `claude`, whose `SessionStart` hook unconditionally forced the state to Idle. A lazy-start `SessionStart` now **preserves** an at-rest "needs-you" triage (this also reinforces the crash-restore state preservation).
-- **Overlay buttons register clicks on their icons.** Clicking the *glyph* of a per-tab overlay button (e.g. the summary-panel **pencil**) could miss because the icon ate the hit instead of the button — fixed, and the pencil now gives clear visual feedback (a state-colored glyph, plus an empty-panel placeholder) on every click.
-- **Teammate & background-agent traffic no longer pollutes your history or fakes the cache hint.** When a Claude teammate or a background agent delivers a message to a session, that delivery fires a real prompt-submit on the receiving session — which used to record the wrapper text into that session's **Sent/Typed** history (and persist it to `sessions.json`) and light the Triage-Board **⚡ "still cached"** hint even though the teammate's turn ran in its own context. Corpus-audited across both delivery shapes, that machine traffic is now noise-gated out of the Typed record, and the ⚡ hint keys strictly on the receiving session's own API turns.
-- **Consistent tab-strip height.** A tab with a multi-line title no longer changes the tab-strip height depending on scroll position.
-
-
-## 0.6.4
-### Fixes
-
-- **The 0.6.x "resume crash-loop."** Resuming a large / heavy session — an image-paste-heavy, `/compact`-ed transcript — could put the app into a **self-sustaining crash loop**: it would die silently ~2–4 s after launch, durability would reopen the workspace, and it would die again. Root cause: the summary surfaces (the per-tab **overlay panel**, the Manager's **Summary** pane, and the **Sessions** detail with its neighbor prefetches) all whole-file-analyze the *same* transcript **concurrently on background threads** with no exception containment — so a transient memory spike (`std::bad_alloc`) on a huge transcript threw, and a throw on a detached thread / fire-and-forget coroutine is an **instant, log-less process death**. (The 0.5.5 line survived the same data for weeks because it did a single-pass analyze; every 0.6.x launch died in 15–35 s.) Now **every** summary/analyze lane is contained end-to-end — a failure degrades to an empty panel plus one log line instead of crashing — the analyze footprint is bounded, and the two **Copy** lanes (**Copy Transcript** / **Copy Summary**, the same unguarded class but click-triggered) are netted too.
-
-
-## 0.6.3
-### Fixes
-
-- **The 23 GB Manager memory leak.** After 0.6.1 fixed the tooltip-leak freeze, a *second* leak remained: a C++/WinRT reference cycle in the Triage-Board / Explorer-tree session context menu (the menu held its host card/row strongly, and the menu's **Tags** item held the host strongly back — an uncollectable cycle under COM refcounting). Because the Manager rebuilds its board and tree on every registry update (plus a 30 s backstop), each rebuild leaked the entire discarded card/row subtree — measured at roughly **85 MB/minute** under a busy fleet, reaching ~23 GB and eventually freezing the UI. The menu is now weak-anchored to its host, animation storyboards are stopped instead of left running forever, and every insert-only cache is bounded — so a long-lived Manager no longer grows.
-
-### New
-
-- **Hourly update check.** With auto-update enabled, Agentmaster now re-checks for a new version **every hour while running**, not only at startup — so a fix like the one above reaches you without a restart.
-
-
+- **The 23 GB memory leak is gone.** A reference-cycle leak in the Manager grew about 85 MB a minute under a busy fleet until the UI froze.
+- **No more resume crash loop.** Heavy sessions no longer die in a self-sustaining loop seconds after launch.
+- **The 0.6.8 UI freeze is fixed.** The summary panel no longer re-resolves every session on the UI thread.
+- **Automatic updates work.** 0.6.x installs never prompted for an update, because the preferences sat at the wrong level of settings.json.
+- **An answered question no longer leaves the card orange.** A session goes back to Running within a heartbeat instead of a median 39 s.
+- **A fatally errored session no longer shows a green Done.** The error now outranks the "session ended" label.
+- **Auto Testing runs when Debug Mode is on.** Debug Mode arms the Tests Autorunner, and adopted or /clear-re-homed sessions get your default mode.
+- **Closing a window or dragging a tab no longer crashes.** UI-thread teardown is guarded, and so is the tab-drag lookup.
+- **Restart session really restarts.** No "259" banner, no false archive, a fork keeps its branch, and /model no longer flips an idle session to Running.
+- **Smaller fixes.** A runaway terminal auto-scroll stops, and a turn under 10 s raises no toast.
 
 ## Install
 

@@ -1,4 +1,9 @@
-<!-- Agentmaster 0.6.3 release notes — STABLE (becomes Latest; NOT a pre-release).
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     Agentmaster 0.6.3 release notes — STABLE (becomes Latest; NOT a pre-release).
      Cut off v0.6.1 (merge-base 8ea00ecc) with ONLY the two safe fixes isolated from the 0.6.2 pre-release
      UI line: the 23 GB Manager-rebuild leak fix (fcf9013c6) + the updater 1h re-check (4d2976176) + docs.
      RELEASING from 4d2976176 (tag v0.6.3). Tag v0.6.3 -> 0.6.3.0.
@@ -6,15 +11,15 @@
      Assets: Agentmaster_0.6.3.0.msixbundle, _x64.zip, _arm64.zip, Agentmaster.cer. -->
 ## Agentmaster 0.6.3
 
-**0.6.3 is a stable release** — a focused hotfix on 0.6.1 that ships the critical **memory-leak fix** to everyone as the default, plus an **hourly update check**. The larger tab / overlay / restart work that debuted in the 0.6.2 pre-release is still baking and will land in a later release; 0.6.3 deliberately carries **only** the two changes below on top of the stable 0.6.1 base. This build becomes the new default **Latest**.
+**0.6.3 is a focused hotfix on 0.6.1:** the critical memory-leak fix, plus an hourly update check.
 
-## Fixes
+## What's new
 
-- **The 23 GB Manager memory leak.** After 0.6.1 fixed the tooltip-leak freeze, a *second* leak remained: a C++/WinRT reference cycle in the Triage-Board / Explorer-tree session context menu (the menu held its host card/row strongly, and the menu's **Tags** item held the host strongly back — an uncollectable cycle under COM refcounting). Because the Manager rebuilds its board and tree on every registry update (plus a 30 s backstop), each rebuild leaked the entire discarded card/row subtree — measured at roughly **85 MB/minute** under a busy fleet, reaching ~23 GB and eventually freezing the UI. The menu is now weak-anchored to its host, animation storyboards are stopped instead of left running forever, and every insert-only cache is bounded — so a long-lived Manager no longer grows.
+- **An hourly update check.** With auto-update on, Agentmaster checks for a new version every hour while it runs, not only at startup.
 
-## New
+## What's fixed
 
-- **Hourly update check.** With auto-update enabled, Agentmaster now re-checks for a new version **every hour while running**, not only at startup — so a fix like the one above reaches you without a restart.
+- **The 23 GB Manager memory leak is gone.** A reference cycle in the board's and tree's session menu kept every rebuilt card alive.
 
 ## Install
 

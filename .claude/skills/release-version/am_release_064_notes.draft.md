@@ -1,15 +1,20 @@
-<!-- Agentmaster 0.6.4 release notes — PRE-RELEASE (NOT Latest; v0.6.3 stays Latest).
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     Agentmaster 0.6.4 release notes — PRE-RELEASE (NOT Latest; v0.6.3 stays Latest).
      v0.6.4 = v0.6.3 (4a038e7f8) + 2 cherry-picked crash-fix commits (d606d657 -> 7eb61789), tag commit e8a1646f6.
      Last stable is 0.6.3, so this IS the full changelog since last stable.
      PRERELEASE mechanics: publish --draft=false --prerelease --latest=false (the stable 0.6.3 stays Latest).
      Assets: Agentmaster_0.6.4.0.msixbundle, _x64.zip, _arm64.zip, Agentmaster.cer. -->
 ## Agentmaster 0.6.4 (pre-release)
 
-**0.6.4 is a pre-release** on top of 0.6.3 carrying one important stability fix: it stops a **crash loop when resuming a heavy session** that could kill the app within seconds of launch on 0.6.x. If you've seen Agentmaster die silently a few seconds after it reopens your workspace, this is for you. Enable **Settings → Updates → "Allow pre-release versions"** to receive it automatically, or install from the assets below. The stable **0.6.3** remains the default for everyone else.
+**0.6.4 is a pre-release** on top of 0.6.3 carrying one important stability fix. Enable **Settings → Updates → "Allow pre-release versions"** to receive it automatically, or install from the assets below. The stable **0.6.3** remains the default for everyone else.
 
-## Fixes
+## What's fixed
 
-- **The 0.6.x "resume crash-loop."** Resuming a large / heavy session — an image-paste-heavy, `/compact`-ed transcript — could put the app into a **self-sustaining crash loop**: it would die silently ~2–4 s after launch, durability would reopen the workspace, and it would die again. Root cause: the summary surfaces (the per-tab **overlay panel**, the Manager's **Summary** pane, and the **Sessions** detail with its neighbor prefetches) all whole-file-analyze the *same* transcript **concurrently on background threads** with no exception containment — so a transient memory spike (`std::bad_alloc`) on a huge transcript threw, and a throw on a detached thread / fire-and-forget coroutine is an **instant, log-less process death**. (The 0.5.5 line survived the same data for weeks because it did a single-pass analyze; every 0.6.x launch died in 15–35 s.) Now **every** summary/analyze lane is contained end-to-end — a failure degrades to an empty panel plus one log line instead of crashing — the analyze footprint is bounded, and the two **Copy** lanes (**Copy Transcript** / **Copy Summary**, the same unguarded class but click-triggered) are netted too.
+- **No more crash loop when resuming a heavy session.** A large, image-heavy or compacted transcript no longer kills the app a few seconds after it reopens your workspace.
 
 ## Install (pre-release)
 

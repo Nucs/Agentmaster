@@ -1,17 +1,25 @@
-<!-- Agentmaster 0.2.0 release notes - archived 2026-11-16 from the published release (no draft was
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     Agentmaster 0.2.0 release notes - archived 2026-11-16 from the published release (no draft was
      kept when it was released). The body below is the release's body exactly as GitHub published
      it, saved before the one-row rewrite of every release replaced it there (release id 338718826,
      published 2026-06-13T20:45:08Z). -->
+## Agentmaster 0.2.0
 
-## New in 0.2.0
+**0.2.0** brings per-install profiles, and release and dev builds that live side by side.
 
-- **Profiles — pick where everything lives.** On first launch Agentmaster asks for a **profile folder**: Production (`%USERPROFILE%\.agentmaster`), Development (`%USERPROFILE%\.agentmaster-dev`), or **Browse…** to any folder. A profile holds *everything* the app persists — sessions, Flight Plans, window layouts, app settings, hooks, **and Terminal's own settings.json/state.json** (under `<profile>\terminal\`). A "copy existing data" checkbox migrates your current state into the chosen folder (originals kept). Change it later from Manager → ⚙ → **Profile** (applies on restart). A kernel guard warns if two running instances point at one profile.
-- **Release and dev builds no longer collide.** The released app owns the `Agentmaster` package identity (`agentmaster` alias, Start menu "Agentmaster"); a from-source dev build is **`AgentmasterDev`** (`agentmasterdev` alias, "Agentmaster Dev"). Both install side by side with separate single-instance scopes, separate launchers, separate profiles — window reopen, jump lists, and new-window launchers always target the install that issued them. Each instance's Claude hooks now also route to **its own** engine (the bridge-discovery fallback is per-profile — previously two instances could cross-route hooks).
-- **True portable zips.** `Agentmaster_<ver>_x64.zip` / `_arm64.zip` now ship a `.portable` marker: Terminal settings live in `<unzip>\settings` and the Agentmaster profile in `<unzip>\profile`. Nothing outside the unzip folder is touched — carry it on a USB stick.
-- **Ordered hook state machine.** Hook events now carry a fire-time `ts` and a per-turn identity, so a slow `Stop` forwarder landing after the next turn's prompt can no longer paint a stale state — fixes the "second turn never shows Running" bug, and type-ahead prompts queued mid-turn keep the session correctly **Running** through the follow-on turn.
-- **Sessions browser: search query grammar.** `"quoted phrases"` match exactly (never fuzzied); a bare session-id GUID finds that session *and its forks*, and scopes content matches to it — paste an id straight from a log. The 📁 directory / 📄 file scopes (which directories/files a session's tool calls touched) are now ON by default and answered instantly from the index.
-- **Triage Board parity + cross-window actions.** Board cards carry the same right-click menu as Explorer-Tree rows (Rename… / Archive… / Open New Session Here); double-click **Activates** — and Activate/Rename now work on a session hosted in *any* window: the hosting window selects the tab and comes to the foreground, renames sync registry⇄tab across windows. The Board gets its own **LOCAL/GLOBAL** scope toggle, shared with the tree and persisted per window.
-- **Polish.** Tab-strip status dots optically centered; Archive/Sessions page tooltips dismiss when the mouse leaves.
+## What's new
+
+- **Profiles: pick where everything lives.** The first launch asks for a profile folder (Production, Development or any folder), which holds everything the app saves, Terminal's own settings included.
+- **Release and dev builds no longer collide.** The release is `Agentmaster` and a dev build `AgentmasterDev`, each with its own alias, Start entry, single-instance scope and profile.
+- **True portable zips.** A portable zip keeps its Terminal settings and Agentmaster profile inside the unzip folder and touches nothing else.
+- **An ordered hook state machine.** Hooks carry their fire time and turn, so a slow Stop can no longer paint a stale state, and the second turn shows Running.
+- **A Sessions search grammar.** "Quoted phrases" match exactly, a pasted session id finds the session and its forks, and the folder and file scopes are on by default.
+- **Triage Board parity and cross-window actions.** Board cards get the tree's right-click menu, and Activate and Rename work on a session hosted in any window.
+- **Polish.** The tab strip's status dots are centered, and page tooltips close when the mouse leaves.
 
 ## Install
 

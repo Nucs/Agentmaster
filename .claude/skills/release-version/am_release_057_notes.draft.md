@@ -1,4 +1,9 @@
-<!-- Agentmaster 0.5.7 release notes — PRE-RELEASE. DRAFT (held for the user's "go").
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     Agentmaster 0.5.7 release notes — PRE-RELEASE. DRAFT (held for the user's "go").
      Adapted to the 0.5.5/0.5.6 style: tight intro (NO "A fork of Windows Terminal..." preamble),
      NO "## Capabilities" section, optional "## Thanks" for community PRs (NONE in this range).
      Range: v0.5.6..HEAD — 26 commits, 4 docs-only omitted (8f87f9839 /scratch+README, 7c77ffae0 +
@@ -11,24 +16,24 @@
      Asset names: tag v0.5.7 -> 0.5.7.0. -->
 ## Agentmaster 0.5.7 (pre-release)
 
-**0.5.7 is a pre-release** building on 0.5.6: a Flight-Plan **Summary tab**, a **Global + per-directory environment-variable** editor, two shipped **reliability defaults** (far more API retries · keep Claude history effectively forever), bulk **tab-close** actions, more accurate **"last active"** timing, an **Autopilot** question-handling fix, and **crash/hover** fixes. Enable **Settings → Updates → Allow pre-release versions** to receive it automatically, or install from the assets below. The stable **0.5.5** remains the default for everyone else.
+**0.5.7 is a pre-release** building on 0.5.6. Enable **Settings → Updates → Allow pre-release versions** to receive it automatically, or install from the assets below. The stable **0.5.5** remains the default for everyone else.
 
-## New in 0.5.7
+## What's new
 
-- **Flight Plan ⇄ Summary tab.** The Flight-Plan pane's header is now a two-state **[Summary | Flight Plan]** pill. The new **Summary** tab renders the selected Claude session's summary box (recap · tasks · messages · files) **newest-first** and scrollable, right inside the pane — so you can read where a session stands without leaving the Manager. The prompt queue + compose box live under **Flight Plan** (with the Autopilot toggle moved to a strip atop it). The choice is global and syncs across windows.
-- **Per-session environment variables (Global + Per-directory).** Settings' **Environment variables** area is now a two-tab **Global / Per-directory** editor whose values are merged into every **Claude *and* Codex** session you launch — a per-directory entry overriding a same-named global one. Per-directory sets persist (like per-dir tab colors), and the editor live-validates each line (green / amber / red, with a status line and reserved-name warnings).
-- **Two shipped reliability defaults — editable, and they stay deleted.** Every install (new *and* updated) now seeds two sensible defaults you can freely change or remove (a deleted one never silently returns): **`CLAUDE_CODE_MAX_RETRIES=50000`** in the global env (far more resilient to transient API errors), and **`cleanupPeriodDays=36500`** written to your `~/.claude/settings.json` so Claude effectively **never purges session history** — what Resume and the Sessions browser rely on. A new **"Keep Claude history (days)"** field in Settings exposes the latter (blank reverts to Claude's 30-day default).
-- **Flight Plan: copy a prompt.** The prompt right-click menu gains **Copy** on any row (sent or queued); the misplaced whole-session "Close" was removed from it (session-level verbs already live on the card / tab menus).
-- **Bulk tab-close actions.** The tab right-click **Close ›** submenu gains **Close all tabs** (the whole-window twin of "Close other tabs") and **★ Favorite & close all tabs** (stars every managed session, then closes everything — shown only when the window hosts a managed session). Both route through the same path as a normal tab close, so they keep the single aggregate confirm and the always-archive (never-delete) bookkeeping, and never touch the pinned Manager tab; the **Move** and **Close** submenus also pick up header icons.
-- **Sessions: slash-insensitive directory search.** A directory search term now matches regardless of `/` vs `\` — so `k:/source` finds a session under `k:\source`.
+- **A Summary tab beside the Flight Plan.** The pane's header switches between the selected session's summary, newest first, and its Flight Plan.
+- **Environment variables, global and per folder.** Settings merges them into every Claude and Codex session you launch, a folder's entry overriding a global one.
+- **Two reliability defaults.** `CLAUDE_CODE_MAX_RETRIES=50000` and `cleanupPeriodDays=36500` are seeded once, and one you delete never comes back.
+- **Copy a prompt from the Flight Plan.** Any row's right-click menu copies its prompt.
+- **Bulk tab closes.** Close › gets Close all tabs and ★ Favorite & close all tabs.
+- **Slash-insensitive folder search.** `k:/source` finds a session under `k:\source`.
 
-## Fixes
+## What's fixed
 
-- **Accurate "last active."** A session's last-activity is now derived from its last **real conversation line** instead of the transcript file's modified-time — so a `claude --resume` (or a `/model`, permission-mode, or shell-cwd change) that appends untimestamped trailer lines no longer bumps an idle session to "just now." This corrects the Triage-Board cards, the Explorer tree, the per-tab overlay, the tab tooltip, the **MOST ACTIVE** sort, the **⚡ "still cached"** hint, and the `agentmaster` CLI.
-- **Autopilot no longer stalls on a question.** When an agent ends a turn with a clarifying question (a "needs-you" state), the next queued prompt now simply **stays queued** and waits for the following turn — exactly as it does mid-run — instead of being moved to a separate "Held" state that could strand the whole queue on resume. (Prompts stranded as Held by an older build are rehabilitated automatically.)
-- **Forked sessions track the right conversation.** Forking a session — from the Sessions page, a duplicate-tab fork, or **Adopt → fork-a-copy** — no longer leaves the new tab following the *source* it branched from. A `--fork-session` fork's very first startup hook briefly reports the source id (Claude is mid-resume at that instant, before it forks), and the app mistook that echo for an in-session `/resume` and re-homed the fork's tab onto the inactive source — so its overlay, state dot, and "copy launch CLI" all tracked the wrong conversation while "the observer never caught any changes." That source-id echo is now recognized by tab token and ignored (one-shot), so the tab stays bound to the live fork (a later, deliberate `/resume` still re-homes normally).
-- **No crash on Alt+↓ / Alt+↑ — plus app-wide crash hardening.** Pressing **Alt+↓ / Alt+↑** (jump to the next / previous sent prompt) on a tab whose terminal hadn't initialized yet — a lazily-restored or never-focused tab — could crash the app: the prompt-nav path read the viewport before confirming the prompt had actually resolved, dereferencing an uninitialized buffer. It now bails cleanly when nothing resolves. The same pass hardened **every background path that reads a transcript** (the prompt navigator, the summary panel, the Sessions browser, the state scanner): a thrown error on a malformed or partial transcript — or a teardown race — can no longer escape its background thread and take the **entire window** down, killing every managed session; the error is contained and the operation simply no-ops. Genuine off-screen prompt navigation is unaffected.
-- **Hover & tooltip polish.** Every Manager toolbar / header / compose button is now hit-testable with a real hover lift; the splitter grip keeps its highlight while you drag the divider; the scope-toggle accent and the per-tab badge/summary hover are no longer disrupted by inner labels; the per-tab badge/summary tooltips route through the shared **dark, stuck-proof** tooltip helper; and the default tab-title tooltip is dark-pinned (was light over the dark strip). The tab-strip **Favorite crown** is also a touch larger.
+- **"Last active" is accurate.** It comes from the last real conversation line, so a resume or a `/model` no longer makes an idle session read "just now".
+- **Autopilot no longer stalls on a question.** A queued prompt stays queued for the next turn instead of moving to a Held state that could strand the queue.
+- **Forks track their own conversation.** A new fork's tab no longer follows the session it branched from.
+- **No crash on Alt+↓ / Alt+↑.** Jumping between prompts on a tab whose terminal had not started no longer crashes the app.
+- **Hover and tooltip polish.** Every Manager button hovers properly, and the splitter keeps its highlight while you drag it.
 
 ## Install (pre-release)
 

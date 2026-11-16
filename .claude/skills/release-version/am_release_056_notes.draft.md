@@ -1,23 +1,28 @@
-<!-- Agentmaster 0.5.6 release notes - archived 2026-11-16 from the published release (no draft was
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     Agentmaster 0.5.6 release notes - archived 2026-11-16 from the published release (no draft was
      kept when it was released). The body below is the release's body exactly as GitHub published
      it, saved before the one-row rewrite of every release replaced it there (release id 343783327,
      published 2026-06-23T21:59:03Z). -->
 ## Agentmaster 0.5.6 (pre-release)
 
-**0.5.6 is a pre-release** building on 0.5.5: a new **Keep Awake** toolbar control, **Favorites replace the Archive** (the Sessions page is now the single history view), **context-window usage** on Triage-Board cards, a row-level **Filter** menu in Sessions, and a refreshed Manager toolbar. Enable **Settings → Updates → Allow pre-release versions** to receive it automatically, or install from the assets below. The stable **0.5.5** remains the default for everyone else.
+**0.5.6 is a pre-release** building on 0.5.5. Enable **Settings → Updates → Allow pre-release versions** to receive it automatically, or install from the assets below. The stable **0.5.5** remains the default for everyone else.
 
-## New in 0.5.6
+## What's new
 
-- **Keep Awake (tri-mode).** A new **Keep Awake** toggle in the Manager toolbar stops the PC and display from sleeping during long unattended runs — the in-app equivalent of a stay-awake script. It cycles three modes: **Off** (sleep normally) · **Always** (always held) · **While Running** (held *only* while a session is actively running, then lets the machine sleep once every agent is at rest). The button is green while actually holding the machine awake and amber when *While Running* is armed but nothing is running, so you can tell at a glance. Per-window and not persisted across restarts (a deliberate safety default).
-- **Favorites replace Archive.** The separate "Archive" concept is gone — a managed tab's lifecycle is now **Close** and **Favorite**, and the **Sessions** page is the single browser for your history and every other session on the machine. **★ Favorite** any session to keep and find it: a leftmost ★ column and a `[ ] Favorite` filter in Sessions, a row/tab right-click **Favorite/Unfavorite**, and a **gold crown** on a favorited session's tab-strip dot while you work. **★ Favorite & Close** keeps + closes in one gesture (the close confirm — single and batch — offers Close · ★ Favorite & Close · Cancel). Favorites persist in the durable per-session store, survive Close, and work for never-managed on-disk sessions; closing never deletes a transcript, so any session stays resumable in Sessions.
-- **Context-window usage on Triage-Board cards.** Each managed session card now shows how much context the conversation is carrying as a raw token count (e.g. `ctx 182K`, with the exact comma-grouped count in the tooltip), so a session nearing auto-compact stands out. The number is the API's own token accounting (input + cache-creation + cache-read + output of the newest turn), not an estimate — verified to track the context carried into the next request within ~1–2%.
-- **Sessions: a row-level Filter menu.** Right-click any Sessions row → **Filter ▸** to narrow the list to sessions *like* that row: **By Same Directory / Same Branch / Same Day / Same Week / Same Month / Fork Family** — composing (**AND**) with the search box and the scope / Open / Hidden / Favorite toggles. A dismissible **✕ filter** chip beside the search box summarizes the active facets and clears them. (Directory match is filesystem-aware, branch is exact, the day/week/month buckets are DST-safe local time, and "Fork Family" is the connected fork lineage of the row.)
-- **Manager toolbar refresh.** The action buttons now sit in a **compact row under the title** — **Settings · Sessions · Keep Awake · Pause Autopilot**. Opening the Manager no longer auto-focuses the Launch path box (no surprise caret or path-picker popup — clicking any control still focuses it). The Sessions page search bar moved to its own row with the filters beneath it, stretched to the table edge.
+- **Keep Awake.** A toolbar toggle keeps the PC and display awake: Off, Always, or only While Running.
+- **Favorites replace the Archive.** A tab's lifecycle is Close and Favorite, and the Sessions page is the one browser for your history, with a ★ column and filter.
+- **Context usage on board cards.** Each card shows how many tokens its conversation carries, so a session near auto-compact stands out.
+- **A Filter menu on Sessions rows.** Right-click a row to narrow the list to the same folder, branch, day, week, month or fork family.
+- **A refreshed Manager toolbar.** Settings, Sessions, Keep Awake and Pause Autopilot sit in a compact row under the title.
 
-## Fixes
+## What's fixed
 
-- **Rich tab tooltip no longer gets stuck open.** The session-aware tab-strip tooltip relied on a single `PointerExited` to close, which XAML Islands routinely drops (window deactivate, a fast exit, a click/drag stealing pointer capture) — leaving it stranded open. It now closes defensively: an 8-second auto-dismiss backstop (re-armed while you read) plus close-on-`PointerExited`/`PointerCanceled`/`PointerCaptureLost`.
-- **Sessions Filter hover crash.** Fixed a stowed-exception crash (`0xC000027B`) when hovering the filter chip / submenu — the shared tooltip helper wasn't idempotent and re-tipping a persistent element orphaned a placement-less ToolTip. The fix also hardens every tooltip surface in the app against the same foot-gun.
+- **The rich tab tooltip no longer sticks open.** It closes by itself when XAML drops the pointer's exit.
+- **No crash hovering the Sessions filter.** Re-tipping a persistent element no longer orphans a tooltip, on any surface.
 
 ## Thanks
 

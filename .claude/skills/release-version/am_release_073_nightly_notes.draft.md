@@ -1,4 +1,9 @@
-<!-- Agentmaster 0.7.3-prerelease-nightly release notes — NIGHTLY (the tier BELOW pre-release).
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     Agentmaster 0.7.3-prerelease-nightly release notes — NIGHTLY (the tier BELOW pre-release).
      Range: v0.7.2-prerelease-nightly..3e3654c1f = 8 commits (1 the 0.7.2 notes archive, 1 internal
      refactor; 6 user-facing). Baseline = the previous release of ANY kind = the 0.7.2 nightly
      (release-notes §2). RELEASING from 3e3654c1f (= origin/agentmaster tip after push).
@@ -15,18 +20,18 @@
 
 > ⚠️ **NIGHTLY build** — an unstable development version. It may have memory leaks, CPU issues, and crashes. Install it only to help test, and be willing to have your work interrupted.
 
-**Auto Testing delivery is now atomic — the queue can no longer stack, park invisibly, or double-send.** This nightly's centerpiece is a **delivery gate** that makes placing "the next prompt" one indivisible operation across the four actors that used to race over the input box (the scheduler advance, the draft swap, the Enter-retry watchdog, and the pending-input scan), closing a set of log-proven failures: an 8-cycle mark/decline/rollback storm, a prompt marked-sent twice around a decline, restart press-storms into restored boxes, and — the worst — a duplicate late-stamped Stop firing an advance that pasted a second prompt into a *running* turn (silently lost into an open question dialog). Nightlies are **not** offered to pre-release users — enable **Settings → Updates → "Allow updating to nightly builds (unstable)"** (a warning confirm gates it) or install from the assets below. The stable **0.7.0** remains Latest for everyone else.
+Nightlies are **not** offered to pre-release users — enable **Settings → Updates → "Allow updating to nightly builds (unstable)"** (a warning confirm gates it) or install from the assets below. The stable **0.7.0** remains Latest for everyone else.
 
-## New
+## What's new
 
-- **Close a whole folder's sessions at once.** The Triage-Board card / Explorer-tree session right-click **Close** is now a **Close ▸** submenu: **This Session** (the plain close, unchanged), **Of Same Folder** (close every live session sharing this one's effective working directory), and **Other of Same Folder** (the same batch minus this one). It's cross-window and shows a single confirm listing the tabs it will close — no per-session prompt train.
-- **"Open In Explorer" on the tab right-click menu.** A managed session's tab menu now opens its working directory in Explorer, reusing the exact code the per-tab overlay's folder button runs (so the two can never disagree), resolved to the session's *effective* directory — the inferred work dir when it infers, else the launch cwd.
+- **Close a whole folder's sessions at once.** The board card's and tree row's Close becomes a Close ▸ submenu: This Session, Of Same Folder and Other of Same Folder.
+- **Open In Explorer on the tab menu.** A managed session's tab menu opens its effective working folder in Explorer.
 
-## Fixes
+## What's fixed
 
-- **The Auto Testing queue no longer stacks or double-sends.** A new **delivery gate** (see above) gives the scheduler, the draft swap, the Enter-retry watchdog, and the pending-input scan one shared fact that a delivery is in progress — ending the mark/decline/rollback storm, the marked-sent-twice race, the restart press-storm into restored input boxes, and a multi-line compose-box prompt that never matched its own wire echo (a phantom unacknowledged send).
-- **A second prompt can't land in a running turn.** A duplicate Stop whose slow forwarder stamped its timestamp *after* the next prompt's submit read as a 15 ms "turn complete" and fired an advance — pasting a second queued prompt into Claude's already-running turn, where an open question dialog silently swallowed it. The ordered state machine now refuses to advance off a Stop whose turn never actually ran.
-- **A queue could park invisibly with no way to release it.** When an agent ended its turn on a clarifying question, the question-guard latched and parked every queued prompt — with the only trace a deduped line in the autorunner log, and *no* user gesture (not even cycling the mode) releasing it. The trap is released, and the MAIL button's queued draft — your own next message, by construction — is never treated as a blind auto-answer.
+- **The Auto Testing queue no longer stacks or double-sends.** A delivery gate gives the scheduler, the draft swap, the Enter-retry watchdog and the draft scan one shared fact that a delivery is in progress.
+- **A second prompt can no longer land in a running turn.** A duplicate, late-stamped Stop no longer reads as a finished turn and fires the next queued prompt.
+- **A queue no longer parks invisibly.** A turn that ended on a clarifying question no longer holds every queued prompt with no way to release it.
 
 ## Install (nightly)
 

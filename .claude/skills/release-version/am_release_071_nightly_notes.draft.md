@@ -1,4 +1,9 @@
-<!-- Agentmaster 0.7.1-prerelease-nightly release notes — NIGHTLY (the tier BELOW pre-release).
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     Agentmaster 0.7.1-prerelease-nightly release notes — NIGHTLY (the tier BELOW pre-release).
      Range: v0.7.0..6695ac853 = 22 commits. RELEASING from 6695ac853 (= origin/agentmaster tip).
      Engine gate at that tree: 2985 checks, 0 failures.
      NIGHTLY mechanics: the tag CONTAINS "nightly" -> release.yml strips the suffix to digits for the
@@ -13,29 +18,29 @@
 
 > ⚠️ **NIGHTLY build** — an unstable development version. It may have memory leaks, CPU issues, and crashes. Install it only to help test, and be willing to have your work interrupted.
 
-**A snapshot of mainline the day after 0.7.0**, carrying 22 commits of in-flight work: the tab hover-card became a real scrollable surface, the Triage Board grew tag-filter chips, the unsent-draft pipeline learned to reconcile with the Manager's compose box and to restore itself into a reopened tab, and completion toasts now tell you *which* request came back. Nightlies are **not** offered to pre-release users — enable **Settings → Updates → "Allow updating to nightly builds (unstable)"** (a warning confirm gates it) or install from the assets below. The stable **0.7.0** remains Latest for everyone else.
+Nightlies are **not** offered to pre-release users — enable **Settings → Updates → "Allow updating to nightly builds (unstable)"** (a warning confirm gates it) or install from the assets below. The stable **0.7.0** remains Latest for everyone else.
 
-## New
+## What's new
 
-- **The tab hover card scrolls.** The rich tab tooltip's body now takes the mouse wheel (with a slim auto-hiding scrollbar that appears only while you scroll), so a session with a long summary is readable instead of clipped.
-- **A MAIL button on the tab overlay.** Queue the tab's **unsent draft** straight into the Tests Autorunner from the badge — the Manager compose row's "add to queue" envelope, on the tab itself. The draft stays where it is (it's a copy). Dev/debug builds only, Claude only.
-- **Bookmark-tag filter chips on the Triage Board.** The Sessions browser's tag chips now lead the board header too, right after **Clear** — except they combine with **OR** (triage is "show me anything tagged release *or* hotfix"), they're persisted per window, and an **Untagged** chip leads the row (on by default) as the one switch that says "only tagged cards."
-- **The tab color picker opens ready.** Custom — and its advanced RGB/HSV/Hex inputs — start expanded instead of collapsed, each toggle is remembered, and a new **Use Tab Color** button seeds the custom picker with the color the tab already wears.
-- **Completion toasts say which request finished.** A third toast line carries the truncated prompt whose turn just completed, so a fleet-wide pop tells you *what* came back — and the toast now stays on screen ~25 s instead of the short default.
-- **The Manager's compose box reconciles with your tab draft.** Click into it and it pulls the tab's unsent prompt in; keep typing in the terminal and it *extends* in place; type something genuinely different and a **pull button** offers the replace explicitly (never silently overwriting text you composed). Every draft change is also cached in a durable per-session store.
-- **A reopened session gets its unsent draft typed back.** The remembered draft is re-filled into the fresh input box (fill-only, never sent, verified by reading the box back), so reopening a tab no longer loses the message you'd half-written. On by default; off in Settings.
-- **Copy a single prompt from the summary panel.** Right-click any numbered prompt → **Copy Prompt** for that exact prompt, verbatim.
-- **The updater's "Not now" is now a real choice.** The button became the default radio **"Remind me next restart,"** sitting alongside tomorrow / 3 / 7 / 30 days / skip — and "tomorrow" is proven to resolve to the next **local** 08:00.
-- **Briefings are never deleted by default.** `/handover`'s delete-after-hand-off is now off on every install (a briefing is a document you may still want), and its old hard-coded 10-minute wait became a real **24-hour** setting — a background successor may not be visited for hours.
+- **The tab hover card scrolls.** The rich tab tooltip's body takes the mouse wheel, so a long summary is readable instead of clipped.
+- **A mail button on the tab overlay.** It queues the tab's unsent draft into the Tests Autorunner as a copy (dev and debug builds, Claude tabs only).
+- **Tag filter chips on the Triage Board.** The board's header filters its cards by tag, any of the picked ones, with an Untagged chip that is on by default.
+- **The tab color picker opens ready.** Custom and its RGB / HSV / Hex inputs start expanded, and Use Tab Color seeds it with the tab's current color.
+- **Completion toasts say which request finished.** A third line shows the prompt whose turn just completed, and the toast stays about 25 s.
+- **The Manager's compose box follows your tab draft.** It pulls the tab's unsent prompt in, extends it as you type in the terminal, and offers a replace only when the texts differ.
+- **A reopened session gets its unsent draft typed back.** The remembered draft is filled into the new input box, never sent, and checked by reading the box back.
+- **Copy a single prompt from the summary.** A right-click on a numbered prompt copies that exact prompt.
+- **The updater's "Not now" is a real choice.** Remind me next restart is the default, beside tomorrow at 08:00 local time, 3, 7 or 30 days, or skipping the version.
+- **Briefings are kept by default.** `/handover`'s delete-after-hand-off is off on every install, and its wait became a 24-hour setting.
 
-## Fixes
+## What's fixed
 
-- **A UI freeze when arming SemiAuto.** The autorunner wrote to the registry on every pass, spinning a notify → observe → advance loop at roughly 3 ms per cycle that locked up the release UI; those writes are now change-gated.
-- **Tab tooltips that never opened.** A tooltip attached mid-hover would stay dark forever, and every tab recycle detached it — both fixed at the root, so hover cards appear reliably.
-- **A two-file `/handover` losing its second successor.** The seal that pairs a command's writes with its turn fired on a 20-second write-silence fallback while Claude was still generating the second briefing (transcripts are byte-silent mid-stream), so the second successor was never spawned. The seal now holds while the turn is demonstrably still in flight.
-- **The draft swap restores your text properly.** Stashing your unsent draft aside while a queued prompt sends now uses Claude's own **Ctrl+S** whole-box stash instead of Ctrl+U, which was line-scoped and handed the text back with the cursor stranded mid-string.
-- **Board chips stay put.** The tag chip strip is ordered alphabetically rather than by activity, so it can't reshuffle under your pointer between aiming and clicking, and the scope / "Show all" controls no longer hide under the tooltip panel.
-- **Summary-panel context menus are contained.** A throw in a XAML event handler is a process fail-fast, not a lost menu — all three handlers are now guarded.
+- **No more UI freeze when arming SemiAuto.** The autorunner no longer writes to the registry on every pass, which spun a 3 ms loop.
+- **Tab tooltips open reliably.** A tooltip attached mid-hover no longer stays dark, and a recycled tab keeps its tooltip.
+- **A two-file /handover keeps its second successor.** The seal holds while Claude is still writing the second briefing.
+- **The draft swap restores your text properly.** It stashes the whole box with Claude's own Ctrl+S, so the text comes back without the cursor stranded mid-string.
+- **Board chips stay put.** The tag chips are sorted alphabetically, so they no longer reshuffle under your pointer.
+- **The summary panel's menus can no longer crash the app.** All three of its context-menu handlers are guarded.
 
 ## Install (nightly)
 

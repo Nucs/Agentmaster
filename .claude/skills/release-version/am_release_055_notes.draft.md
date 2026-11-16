@@ -1,36 +1,37 @@
-<!-- Agentmaster 0.5.5 release notes - archived 2026-11-16 from the published release (no draft was
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     Agentmaster 0.5.5 release notes - archived 2026-11-16 from the published release (no draft was
      kept when it was released). The body below is the release's body exactly as GitHub published
      it, saved before the one-row rewrite of every release replaced it there (release id 343446862,
      published 2026-06-23T11:13:19Z). -->
 ## Agentmaster 0.5.5
 
-**0.5.5** is a reliability-focused release that also promotes the big 0.5.4 feature drop to stable: **Autopilot now defaults to Full**, **multi-line prompts send as one message**, smarter stuck-submit recovery, Claude's idle **recap** for **external** sessions, and correctness fixes for sessions that switch conversation mid-flight (`/clear`, `/compact`, `/resume`) or get resumed. Upgrading keeps your data.
+**0.5.5 is a stable release** focused on reliability, and it brings the 0.5.4 pre-release's features to everyone. Upgrading keeps your data.
 
-> **Coming from 0.5.2?** This release also brings everything from the 0.5.4 pre-release (listed under *Also new since 0.5.2* below) — rich tab-strip tooltips, the idle recap across the UI, a Waiting-for-you "unread inbox", an updater overhaul, durable session titles, and per-tab prompt navigation.
+## What's new
 
-## New in 0.5.5
+- **Autopilot defaults to Full.** New and reopened sessions run on Autopilot, so queued prompts send themselves when a turn completes.
+- **Multi-line prompts send as one message.** A multi-line prompt goes as a single bracketed paste instead of splitting at its first line break.
+- **Smarter stuck-submit recovery.** A submit that does not land is retried quickly, then marked Failed with that session's Autopilot paused, instead of looping.
+- **The idle recap shows for external sessions too.** Claude's "what we did / what's next" recap is read from the transcript of sessions Agentmaster only observes.
+- **Prompt navigation stays in sync.** Alt+↑ / Alt+↓ re-read the conversation before each jump, and ↓ past the last prompt drops to the live tail.
+- **Rich tab-strip tooltips.** Hovering a tab shows a session card: its state and why it needs you, model, folder and branch, the queue and the last exchange.
+- **Claude's idle recap everywhere.** The recap shows on the board card, the tab tooltip, the summary panel, the Sessions detail, the copied Summary and `agentmaster show`.
+- **Durable session titles.** A session's name persists across windows and restarts.
+- **Waiting-for-you is an unread inbox.** A finished turn stays there until you look at its tab or a timeout (1 hour by default) lapses, and Mark Unread pins it.
+- **An updater overhaul and one-click uninstall.** An embedded installer self-heals the 0x80073CFB conflict, and Settings gets an Uninstall Agentmaster button.
+- **Prompt navigation on the badge.** ↑ / ↓ buttons scroll to your previous or next sent prompt, and a third row previews the next queued prompt.
+- **Deleted sessions hide from Sessions.** The transcript stays on disk, and a Hidden checkbox shows them again with Unhide.
+- **Autopilot drives adopted sessions.** Turning Autopilot on for an adopted session sends its queued prompts.
+- **"Claude not found" on every launch path.** Every launch prompts when no claude.exe exists, and recovers once you install Claude.
 
-- **Autopilot now defaults to Full.** New *and* reopened sessions run on Autopilot by default — the rule is now "all new or opened sessions run on Autopilot," so queued prompts auto-send on turn-complete out of the box. A reopened session adopts the default too (overriding its previously-saved mode); switch any session back to **Semi/Manual** in the **Flight Plan**, or change the global default in **Settings → Autopilot**.
-- **Multi-line prompts send as one message.** Queuing or sending a multi-line prompt now delivers the whole block as a **single** message (via a bracketed paste) instead of submitting on the first line break and tearing the prompt across turns. Single-line sends are hardened against the "Enter eaten by the TUI" race at the same time.
-- **Smarter stuck-submit recovery.** When an injected prompt's submit doesn't land, Agentmaster re-presses Enter **quickly** (≈3 s) and then backs off; if the turn still never starts after the retries, the prompt is marked **Failed** and that session's Autopilot **pauses** — instead of leaving a phantom "Sent" or re-sending in a loop. Fix the cause, then Send-now / re-arm.
-- **Idle recap now shows for external sessions.** Claude's one-paragraph *"what we did / what's next"* recap is now read straight from the transcript tail for **external** (observe-only) sessions too — not just the ones Agentmaster launched — and even a recap **buried deep** in a long session that recapped then kept working is caught on first sight.
-- **Prompt navigation stays in sync.** Alt+↑/↓ (and the badge's ↑/↓ buttons) now re-read the conversation **before** each jump, so a just-sent prompt is immediately reachable; pressing **↓ past the last prompt** drops to the **live tail**, **↑** stops at the first prompt instead of scrolling into older scrollback, and a background refresh keeps the jump targets current under a focused session.
+## What's fixed
 
-## Fixes
-
-- **Mid-conversation switches are tracked correctly.** When a managed session changes its active conversation — `/clear`, `/compact`, or `/resume` into another conversation — Agentmaster now follows the **live** conversation (via Claude's own pid-keyed presence heartbeat + the hook payload) instead of stranding the tab on the launch id. State, the tab dot, and hooks no longer stick on a dead conversation while Claude works in a new one.
-- **Resume / Restore lands where you left off.** Resuming or restoring a session now follows the **continuation chain to its tail** (a `/clear` or plan restart writes a *new* session file), so you reopen at the latest point rather than an earlier link — and duplicate correlations are de-duped so the same session isn't resumed twice.
-
-## Also new since 0.5.2 (promoted from the 0.5.4 pre-release)
-
-- **Rich, session-aware tab-strip tooltips.** Hovering any classified tab shows a compact session **card** — live state + *why* it needs you, full title, `agent · model · effort`, working dir + branch, queued count + next prompt, Autopilot progress, the last user message paired with the agent's last reply, recency, and the idle recap.
-- **Claude's idle recap, surfaced everywhere.** The one-paragraph *"what we did / what's next"* recap appears (in full) on the Triage-Board card tooltip, the tab-strip tooltip, the summary panel, the Sessions detail, the copyable Summary, and the `agentmaster show` CLI.
-- **Durable per-session titles.** A session's name is kept in a durable per-session store, so it persists **across windows and across app restarts** — a rename sticks everywhere, every run.
-- **Waiting-for-you is an "unread inbox."** A finished turn stays in the Waiting-for-you column until you've actually **looked at the tab** (or a configurable timeout lapses — **1 hour** by default, 1 min – 3 days or **Never**); **Mark Unread** pins it, and each card shows a **1px countdown bar**. Claude's ~5-minute server cache is split into a separate **⚡ "still cached"** hint.
-- **Updater overhaul + one-click uninstall.** A real embedded installer, **self-heals the `0x80073CFB`** loose-install conflict, an **"Uninstall Agentmaster"** button in Settings, and "What's New" links that open the specific release page.
-- **Per-tab badge: prompt navigation + next-prompt preview.** **↑ / ↓** buttons scroll to your previous / next off-screen sent prompt, and a **third row previews the next queued prompt**.
-- **Sessions: auto-hide deleted + a "Hidden" reveal filter.** Permanently deleting a session also hides it from the Sessions browser (the transcript on disk is kept and resumable); a **"Hidden"** checkbox reveals the hidden set with a per-row **Unhide**.
-- **Autopilot drives adopted sessions; "Claude not found" handled on every launch path; Manager header polish** (Triage Board **↻ refresh**, emphasized LOCAL/GLOBAL scope toggle).
+- **Mid-conversation switches are tracked.** After /clear, /compact or /resume into another conversation, the tab follows the live conversation instead of the launch id.
+- **Resume and restore land where you left off.** They follow the continuation chain to its newest session, and the same session is never resumed twice.
 
 ## Install
 

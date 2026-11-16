@@ -1,4 +1,9 @@
-<!-- Agentmaster 0.6.7 release notes — PRE-RELEASE (NOT Latest; v0.6.1 stays Latest).
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     Agentmaster 0.6.7 release notes — PRE-RELEASE (NOT Latest; v0.6.1 stays Latest).
      PRERELEASE NOTES RULE: show ONLY this prerelease's OWN explicit delta (the full accumulation
      happens when a STABLE release is cut). See the release-notes skill §2.
      0.6.7's explicit delta over 0.6.6 = Windows notifications (db6cdadc5) + current-model display
@@ -10,13 +15,13 @@
      Assets: Agentmaster_0.6.7.0.msixbundle, _x64.zip, _arm64.zip, Agentmaster.cer. -->
 ## Agentmaster 0.6.7 (pre-release)
 
-**0.6.7 is a pre-release that adds Windows notifications and a live current-model readout.** Now your agents can get your attention when you're looking elsewhere, and every session shows which model it's actually on. Enable **Settings → Updates → "Allow pre-release versions"** to receive it automatically, or install from the assets below. The stable **0.6.1** remains the default for everyone else.
+**0.6.7 is a pre-release** building on 0.6.6. Enable **Settings → Updates → "Allow pre-release versions"** to receive it automatically, or install from the assets below. The stable **0.6.1** remains the default for everyone else.
 
-## New in 0.6.7
+## What's new
 
-- **Windows notifications when a session needs you.** Every managed session — Claude *and* Codex — now raises a **Windows toast** the moment its status leaves **Running** for anything else, so a tab or window you aren't looking at can still get your attention: *"‹session title› — Has completed after 2h30m and is ‹status›."* A new **Settings ⚙ → Notifications** tab controls it: a master on/off, a per-state checkbox for each target state (**Waiting for you / Needs approval / Idle / Done / Error** — all on by default), **"Skip when the tab is focused"** (on), and **"Play the notification sound"** (on).
-- **See each session's current model at a glance.** A session's **live model** now shows in short form — on the **Triage-Board card**, the **tab tooltip**, and the **per-tab overlay** (left of the status dot). It reflects the model the session is *actually on*, read from the transcript, so a mid-session **`/model`** switch updates it (the launch `--model` / env is only the initial request and goes stale). The family list that shortens bare `--model` aliases is now a **cog setting** (Settings → Sessions), so a newly-shipped Claude family is recognized without waiting for an app update.
-- **The "Launch models" editor validates as you type.** The cog's **Settings ⚙ → Sessions → Launch models** box (the launch-model picker's list, from 0.6.6) now lints live like the environment-variable editors — a colored border plus a status line ("✓ N models in the pickers" / a warning with the first issue / an error), so a typo in a `Display name | model-id` entry is obvious before it reaches the menus.
+- **Windows notifications when a session needs you.** Every managed session, Claude and Codex, raises a toast when its status leaves Running, set up under Settings → Notifications.
+- **Each session's current model at a glance.** The model a session is actually on, read from the transcript, shows on its board card, tab tooltip and overlay.
+- **The Launch models editor checks as you type.** Settings → Sessions → Launch models shows a colored border and a status line while you edit the list.
 
 ## Install (pre-release)
 

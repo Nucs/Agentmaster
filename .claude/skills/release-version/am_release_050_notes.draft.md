@@ -1,4 +1,9 @@
-<!-- ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
      GitHub published it, saved before the one-row rewrite of every release replaced it there. The
      body this file held until then differed from the published one (a draft revised after, or never
      applied as written); it is this file at the commit before this note.
@@ -12,42 +17,42 @@
      tooltip-polish WIP (62 lines) folds into "Tooltips sharpened". Asset names assume tag v0.5.0 -> 0.5.0.0. -->
 ## Agentmaster 0.5.0
 
-**0.5.0** is a big one: an **in-app updater** so you stay current automatically, **agent sessions that no longer dead-end** (quitting an agent drops you to a live shell prompt instead of a dead pane), a **sortable, color-coded Triage Board**, a redesigned per-tab badge with a clickable Autopilot, a terminal **search box restyled into the HUD**, and a deep sweep of tab-strip, Sessions-browser, and lifecycle improvements — on top of a large batch of crash and correctness fixes.
+**0.5.0 is a big release.**
 
-## New in 0.5.0
+## What's new
 
-- **In-app updater.** Agentmaster now checks GitHub Releases — at startup (release builds) and on demand from **Settings → Updates** — and offers **Update now / Postpone (3 · 7 · 30 days) / Skip this version**, with an opt-in for pre-releases. The installer is **embedded**: it downloads the signed bundle, trusts the cert once (a single UAC prompt, skipped when already trusted), upgrades, and relaunches. The startup check is time-bounded so it can never wedge launch. *(From 0.5.0 on you'll be offered new versions automatically.)*
-- **Sessions never dead-end — quit drops you to a live prompt.** Every managed Claude/Codex session is now hosted inside an **interactive PowerShell**, so when the agent exits (`/exit`, Ctrl-C, or a crash) you land at a usable **`PS <session-dir>>`** prompt at the right working directory instead of a dead "[process exited]" pane. Restored/restarted sessions keep the behavior; closing the tab still archives and closes normally.
-- **Sortable Triage Board + live cross-window sync.** The board header gained a **sort toggle** — **MOST ACTIVE (default) · NEWEST · OLDEST · A–Z** — that reorders cards within every state column. It's a separate global from the Explorer Tree's sort, and **any global setting change now syncs across all open windows immediately** (board sort, tree sort, cog settings) instead of only at next launch.
-- **Color-coded board cards.** Each managed card's **title now sits in a band painted with the session's working-directory color** (the same color its tab wears), text auto-flipped black/white for contrast — so same-directory sessions cluster at a glance across the state columns. Cards are also cleaner: the old `model · effort · heartbeat` line was removed (those facts live on the per-tab badge), leaving working-dir · timing · Autopilot.
-- **Redesigned tab badge + clickable Autopilot.** The per-tab link badge's top row is now discrete, individually-tooltipped parts — **status · model·effort · Autopilot · queued · link** — each explaining itself on hover. **Autopilot is now a button** that cycles **Off → Semi → Full** (color-matched to the board), arming a queued plan on the spot; the folder / copy / pencil actions are always visible (the badge just dims at rest and brightens on hover).
-- **Terminal search box, restyled into the HUD.** Press Ctrl+Shift+F and the search box now adopts the Agentmaster badge look (dark, compact, rounded) and **seats itself immediately left of the per-tab badge**, top-aligned, reading as one HUD. New **"Highlight all matches" toggle** (default on) lets you light up only the current match while prev/next and the n/m counter still walk the full set. And **Ctrl+F now both opens find and passes `^F` through to the app** (so a shell's readline / Claude's TUI still receive the key).
-- **Tab strip: Home & Jump Back.** When the pinned Manager tab scrolls off the left edge, a **Home** button appears to jump back to it; its inverse, **Jump Back**, appears while you're on the Manager tab to return to the session you came from. They're mutually exclusive and only show when the jump is real.
-- **Tab strip: "Mark Unread."** A right-click item on a managed tab that **manually flashes the red attention ring until you visit the tab** — sticky, and (unlike the automatic flash) it works even on the currently-focused tab. Marks are session-keyed, so they follow a session across windows.
-- **Attention flash, refined.** When a managed session leaves **Running** while its tab isn't focused (→ Idle / Waiting / Needs-approval — never Done/Error), that tab's status dot now grows a **thin red ring** that blinks in lockstep with every other flagged tab until you visit it.
-- **Tab right-click menu: more reach.** **"New Session Here"** (above Restart) spawns a managed session in the tab's working directory, of the same agent kind the tab hosts; **"Duplicate session" is renamed "Fork session"**; both now open **next to the clicked tab** rather than at the end of the strip. A **"Copy ›" submenu** (Session Id · Path · Branch · Claude CLI · Codex CLI · Summary · Transcript) and **"Close tabs to the left"** were added; bulk-close actions can never close the pinned Manager tab.
-- **Batch close dialog.** Closing several tabs (or a whole window) that hold managed sessions now raises **one** consolidated **🗑 Delete All · Archive All · Cancel All** dialog instead of a train of per-tab prompts. (A batch of plain shell tabs skips it.)
-- **Copy submenu, everywhere.** A full **Copy** submenu — Session Id · Path · Branch · Claude CLI · Codex CLI · Summary · Transcript — now lives in all three places (the Triage-Board / Explorer session menu, the tab right-click menu, and the per-tab badge), sharing one code path so they can never drift. The summary panel also gained a **"Copy Summary"** right-click.
-- **Sessions browser — find and open faster.** Double-clicking an **open** session **jumps straight to its live tab** (cross-window); double-clicking a **closed** one offers **Resume / Fork / Cancel**. A new **"Open" filter** narrows the list to sessions live right now; open sessions show their **real (renamed) tab title**; right-click **Jump / Resume / Fork / Open-New** now open in the **background** so you can launch several in a row; **Title and Directory cells are underlined in the working-dir color**; and neighbor summaries are **prefetched** (with a loading spinner) for instant navigation.
-- **Board cards: ⋯ menu, Jump to Tab, scroll-into-view.** Triage-Board cards reveal a **⋯ more-button** on hover (the same menu as right-click) with **Jump to Tab**; returning to the Manager tab now **scrolls the selected card (and tree row) into view**; and a board-card click syncs the Explorer Tree's scope to where the card lives.
-- **Smarter launch box + path-picker.** Typing a bare token (no path) now **fuzzy-matches your recent directories** by closeness; a rooted path **filters subfolders by the typed leaf** (exact match first) and also lists an exact directory's own contents below its siblings — like a shell address bar. Type a directory that doesn't exist yet and the button becomes **"Create & Launch"** (amber), creating the folder (and parents) on launch.
-- **Trash a session (permanent remove).** Beside Archive *everywhere* — the close dialog, the board/tree + Flight-Plan menus, and the Archive page (per-row + bulk) — a **trash** action **drops a session's record** (and strips it from saved windows) when you don't want it kept as restorable. It's **record-only**: the conversation `.jsonl` on disk is preserved, so the session still appears in the Sessions browser (a still-running session hosted in another window is refused).
-- **Flight Plan — compose focus + prompt history.** Focus returns to the compose box after you queue or send (fire several in a row without re-clicking), and **Up-arrow recalls previously-sent prompts** (newest-first, shell-history style, dup-collapsed; Esc cancels back to your draft). Modified arrows (Shift/Ctrl) pass through untouched. *(Plain Enter is a newline; the `!` button sends.)*
-- **Tab options honored + more legible tabs.** The **"Show close (×) button"** and **"Close with middle-click"** settings now apply to tabs, the minimum tab width is raised to a fixed **130px** (a full strip scrolls instead of shrinking tabs unreadably), and the summary panel's title is shown as its top row.
-- **Silent profile on first launch.** First run now **auto-selects** the per-install default profile (release → Production, dev → Development) instead of prompting — still changeable any time from **Settings → Change profile folder**.
-- **Tooltips sharpened across the board.** Audited and (re)wrote the hover tooltips on the Manager toolbar, the Settings cog, tab context-menu, per-tab badge, summary-panel resize grips, board/tree cards, tab-strip status dot + nav buttons, and the Archive + Sessions pages so each says, on hover, exactly what the control does — and filled in the many that had none.
+- **An in-app updater.** Agentmaster checks GitHub Releases at startup and from Settings → Updates, and offers Update now, Postpone or Skip, with an opt-in for pre-releases.
+- **Sessions never dead-end.** Every managed session runs inside an interactive PowerShell, so quitting the agent leaves a live prompt in its folder instead of a dead pane.
+- **A sortable Triage Board, synced across windows.** The board sorts by Most active, Newest, Oldest or A–Z, and every global setting change reaches every window at once.
+- **Color-coded board cards.** A card's title sits in a band of its folder's color, the color its tab wears.
+- **A redesigned tab badge with a clickable Autopilot.** The badge's parts explain themselves on hover, and Autopilot is a button that cycles Off → Semi → Full.
+- **The terminal search box joins the HUD.** Ctrl+Shift+F opens it in the badge's look, beside the badge, with a "Highlight all matches" toggle.
+- **Home and Jump Back on the tab strip.** Home returns to the pinned Manager tab when it scrolls away, and Jump Back returns to the session you came from.
+- **Mark Unread.** A tab's right-click item flashes its red attention ring until you visit it, even on the focused tab.
+- **A refined attention flash.** A session that leaves Running while its tab is not focused grows a thin red ring that blinks with every other flagged tab.
+- **More reach from the tab menu.** New Session Here and Fork session (renamed from Duplicate) open next to the clicked tab, and a Copy › submenu joins them.
+- **One dialog for a batch close.** Closing several managed tabs or a window asks once: Delete All, Archive All or Cancel All.
+- **The Copy submenu everywhere.** Session Id, Path, Branch, the CLIs, Summary and Transcript, from the board, the tab menu and the badge alike.
+- **A faster Sessions browser.** A double-click jumps to an open session's tab or offers Resume / Fork for a closed one, and an Open filter lists the live sessions.
+- **Board cards get a ⋯ menu and Jump to Tab.** And the selected card scrolls into view when you return to the Manager.
+- **A smarter launch box.** A bare word fuzzy-matches your recent folders, and a path filters its subfolders by the typed leaf, like an address bar.
+- **Trash a session.** Beside Archive, a trash action drops a session's record; the conversation on disk stays.
+- **Flight Plan compose focus and prompt history.** Focus returns to the compose box after a send, and Up recalls earlier prompts.
+- **Tab options honored, and legible tabs.** The close-button and middle-click settings apply to tabs, and tabs keep a 130 px minimum width.
+- **A silent profile on first launch.** The first run picks the install's default profile without asking.
+- **Sharper tooltips.** Every Manager, cog, menu, badge and page control says what it does on hover.
 
-## Fixes
+## What's fixed
 
-- **State no longer flaps idle↔running.** A long-running tool (a multi-minute build) or a "No response from API · retrying" backoff used to make the tab dot oscillate Running↔Waiting every few seconds (and spuriously trigger the red flash). The dot now stays **blue (Running)** through a paused/retrying turn, while a genuinely finished turn still settles to Waiting.
-- **Content clicks no longer drag the window.** The caption/drag hit-test is now restricted to the actual titlebar band, so left-dragging on Manager gaps, the margins between cards, or page bodies no longer **moves the window** (or pops the system menu on right-click); the Manager pane was also made opaque so clicks land inert instead of falling through.
-- **Tab tear-out fixes.** Tearing a tab into a new window no longer **crashes** when the tab was never focused (a never-initialized control), and a torn-out window now **hosts the moved tab** instead of adopting a leftover saved-window layout and orphaning the dragged session. A fast drag-reorder also no longer **loses the tab**.
-- **"Restart session" crash on a restored-but-never-shown tab.** Right-clicking → Restart on a tab restored on relaunch but never activated used to crash (its terminal was never initialized); it's now a safe no-op (the session starts cleanly when first shown).
-- **Summary panel.** No longer **crashes** ("Layout cycle detected") when you drag-resize vigorously over wrapping content; no longer **empty** when a session's only message begins with a newline; and dragging a resize grip on a short-transcript tab now grows past its own content and snaps back on release (the shared size is preserved for fuller tabs).
-- **A complete Ctrl+F passthrough.** The Ctrl+F double-delivery now sends both key-down **and** key-up, so an app in raw-input mode (Claude's TUI) sees a full press+release instead of a stuck key.
-- **"Launch Claude" stuck disabled after switching tabs.** Selecting a session drops its working dir into the Launch box programmatically; validation now re-runs on every such set (selection sync, resume/fork clear, settings re-seed) so the red "missing dir" underline + disabled button no longer freeze on a stale value.
-- **Install/upgrade over a conflicting registration (`0x80073CFB`).** When an unpackaged/registered install of the same identity blocked the MSIX, the installer/updater now detects it, removes it (your profile data lives outside the package, so sessions/settings are preserved), and retries automatically — and auto-fetches a missing VCLibs dependency.
-- **Smaller fixes.** The pinned Manager tab can no longer be renamed (all gestures disabled, menu greyed); "Close tabs to the left/other" are disabled when the Manager is the only target; the Sessions time-window range popup dismisses on hover-leave; the summary-panel toggle draws as a pencil-with-a-line and its Files Read/Created/Edited bullets are flush-left.
+- **State no longer flaps between Idle and Running.** A long tool or an API retry keeps the dot Running instead of flickering.
+- **Clicks on content no longer drag the window.** Only the real title bar moves it.
+- **Tab tear-out fixes.** Tearing out a never-focused tab no longer crashes, and the new window hosts the moved tab.
+- **Restart on a never-shown restored tab no longer crashes.** The session simply starts when the tab is first shown.
+- **The summary panel no longer crashes or shows empty.** A vigorous resize no longer hits a layout cycle, and a message that starts with a newline shows.
+- **A complete Ctrl+F passthrough.** Claude's TUI gets both the key-down and the key-up.
+- **"Launch Claude" no longer sticks disabled.** The Launch box re-validates every folder Agentmaster drops into it.
+- **Installs over a conflicting registration work.** The installer and updater remove a registration that blocks with 0x80073CFB, keeping your data, and retry.
+- **Smaller fixes.** The pinned Manager tab can no longer be renamed, and the Sessions range popup closes when the pointer leaves it.
 
 ## Install
 

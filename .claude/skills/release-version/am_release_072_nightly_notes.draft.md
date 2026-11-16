@@ -1,4 +1,9 @@
-<!-- ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
      GitHub published it, saved before the one-row rewrite of every release replaced it there. The
      body this file held until then differed from the published one (a draft revised after, or never
      applied as written); it is this file at the commit before this note.
@@ -15,21 +20,23 @@
      Publish: gh release edit v0.7.2-prerelease-nightly -R Nucs/Agentmaster --draft=false --prerelease --latest=false
        (NEVER --latest; the stable 0.7.0 stays Latest).
      Assets: Agentmaster_0.7.2.0.msixbundle, _x64.zip, _arm64.zip, Agentmaster.cer. -->
+## Agentmaster 0.7.2-prerelease-nightly (nightly)
+
 > ⚠️ **NIGHTLY build** — an unstable development version. It may have memory leaks, CPU issues, and crashes. Install it only to help test, and be willing to have your work interrupted.
 
-**The tab-drag crash is finally dead.** The headline of this nightly is the elimination of the WinUI tab-strip drag crash — a null-dereference deep inside Microsoft's tab control that could take the whole app down when you reordered or tore out a tab on a busy strip, dump-proven four separate times and unguarded even upstream. Native tab-drag is now permanently off and reorder / tear-out are re-implemented as a pointer-owned gesture, so dragging a tab still works but can no longer reach the broken code path. Nightlies are **not** offered to pre-release users — enable **Settings → Updates → "Allow updating to nightly builds (unstable)"** (a warning confirm gates it) or install from the assets below. The stable **0.7.0** remains Latest for everyone else.
+Nightlies are **not** offered to pre-release users — enable **Settings → Updates → "Allow updating to nightly builds (unstable)"** (a warning confirm gates it) or install from the assets below. The stable **0.7.0** remains Latest for everyone else.
 
-## New
+## What's new
 
-- **The MAIL button now MOVES the draft.** Queuing a tab's unsent draft into the Tests Autorunner from the overlay used to leave a copy behind in Claude's input box, so you had a duplicate to delete by hand. A plain click now **moves** it — queue, then clear the box (the clear is the draft-swap's verified, keystroke-safe clear) — while **Shift+Click keeps** the draft in the box. The clear only runs after the queue append succeeds, so a failed or empty queue never touches your box.
-- **Briefings written to the scratchpad are never deleted.** The shipped default hand-off location is the session scratchpad — a temp folder already outside your repo that the OS reclaims — so "delete the briefing after hand-off" is now hard-disabled while the location is the scratchpad, not merely nudged off. Even a hand-edited `settings.json` with the toggle on can't arm a delete there, and the cog greys the toggle out with a note explaining why.
+- **The mail button moves the draft.** Queuing a tab's unsent draft from the overlay now clears it from Claude's box, and Shift+Click keeps a copy.
+- **Briefings in the scratchpad are never deleted.** While briefings are written to the session scratchpad, deleting them after the hand-off stays off.
 
-## Fixes
+## What's fixed
 
-- **The WinUI tab-drag crash class, killed.** MUX's tab-view drag lookup null-dereferences on the first virtualized-out tab on *both* the drag-start and the drop path (`0xC0000005` inside `Microsoft.UI.Xaml.dll`), a class that no check-then-allow gate could close (the drop cannot be vetoed) and that could also leave the app live-but-wedged. Native drag is now off by construction and the reorder / tear-out gesture is pointer-owned, so neither crash site can run. A side effect gone with it: a ~30 Hz log storm during a large window restore.
-- **Turning delete-after off actually disarms it.** A briefing already queued for deletion while the setting was on stayed armed even if you turned delete-after off before the successor started — far more reachable now that the wait is 24 hours. The sweep re-reads the setting: off ⇒ every pending deletion is dropped and its file kept. (Turning it back on never retro-arms an already-spawned successor.)
-- **The MAIL button no longer dead-clicks.** It is enabled only while an unsent draft exists — greyed on an empty box — so it lights exactly when the "3 dots" pulse, instead of being an always-present button that silently does nothing on an empty box.
-- **A selected board tag chip reads cleaner.** A picked tag-filter chip on the Triage Board is now a 1px accent **border** rather than a filled accent background, so it matches the plain buttons beside it instead of standing out as a translucent block.
+- **The WinUI tab-drag crash is gone.** Native tab drag is off, and reorder and tear-out are Agentmaster's own pointer gesture, so dragging a tab can no longer reach the crashing code.
+- **Turning delete-after off disarms it.** A briefing already queued for deletion is kept when you turn delete-after off before its successor starts.
+- **The mail button no longer dead-clicks.** It is enabled only while an unsent draft exists.
+- **A selected board tag chip reads cleaner.** A picked chip wears a 1 px accent border instead of a filled background.
 
 ## Install (nightly)
 

@@ -41,8 +41,10 @@ fall back to the plain table form (`gh release view vX.Y.Z -R Nucs/Agentmaster`)
 - **Published body (temp):** the draft minus the comment header → applied to the GitHub release
   with `gh release edit … --notes-file`.
 - **A published body that is REPLACED** gets a dated note at the top of its draft's comment header:
-  the owner's words, what changed, and the commit whose draft still holds the old body (the
-  v0.8.0–v0.9.0 drafts carry the 2026-11-16 one-row rewrite's note; v0.9.0's also the 11-13 merge).
+  the owner's words, what changed, and the commit whose draft still holds the old body (every draft
+  from v0.1.0 to v0.9.0 carries the 2026-11-16 one-row rewrite's note; v0.9.0's also the 11-13 merge).
+  A release without a draft gets one holding its published body BEFORE its body is replaced, in a
+  commit of its own (3da02fdbc did that for 18 releases), so the published text always survives.
 
 The `<NNN>` file name and the committed archive are the convention — match it.
 
@@ -100,9 +102,10 @@ changes in the release notes, like we do in the head of all release notes … se
 bold and then, essentially a sentence, maybe a sentence and a half, or a bit more if you really have
 to"*. Shown three layouts of v0.9.0 rendered by GitHub (the rows on top with the long details kept
 open, folded behind a `<details>` line, or removed), the owner picked **"Head only"**: the rows ARE the
-notes. v0.8.0, v0.8.1, v0.8.2-prerelease and v0.9.0 were rewritten that way the same day; their drafts
-(`.claude/skills/release-version/am_release_0{80,81,82,90}_notes.draft.md`) are the models — read one
-before writing.
+notes. Every release on GitHub, v0.1.0 through v0.9.0 and the nightlies, was rewritten that way the
+same day (the owner: "Change the releases on gh too, finish"); their drafts
+(`.claude/skills/release-version/am_release_<NNN>_notes.draft.md`) are the models — read one before
+writing (`090` for a stable, `082` for a pre-release, `078_nightly` for a nightly).
 
 - **One row = one user-visible change:** `- **Lead.** One sentence.` The sentence says what the change
   does for the user: a sentence and a half at most, a bit more only when the reader cannot act without

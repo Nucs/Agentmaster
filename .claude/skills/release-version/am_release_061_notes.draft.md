@@ -1,4 +1,9 @@
-<!-- ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
      GitHub published it, saved before the one-row rewrite of every release replaced it there. The
      body this file held until then differed from the published one (a draft revised after, or never
      applied as written); it is this file at the commit before this note.
@@ -7,27 +12,19 @@
      the full changelog since last stable. RELEASING from the pinned commit 8ea00ecc5d88ac01449214c5c261b569b04f45f1.
      Tag v0.6.1 -> 0.6.1.0. STABLE mechanics: publish --draft=false --latest (REPLACES 0.6.0 as Latest; no --prerelease).
      Assets: Agentmaster_0.6.1.0.msixbundle, _x64.zip, _arm64.zip, Agentmaster.cer. -->
-<!-- Agentmaster 0.6.1 release notes — STABLE patch (becomes Latest; NOT a pre-release).
-     Range: v0.6.0..8ea00ecc = 8 commits (3 user-facing + docs). Last stable is 0.6.0, so this IS
-     the full changelog since last stable. RELEASING from the pinned commit 8ea00ecc5d88ac01449214c5c261b569b04f45f1.
-     Tag v0.6.1 -> 0.6.1.0. STABLE mechanics: publish --draft=false --latest (REPLACES 0.6.0 as Latest; no --prerelease).
-     Assets: Agentmaster_0.6.1.0.msixbundle, _x64.zip, _arm64.zip, Agentmaster.cer. -->
 ## Agentmaster 0.6.1
 
-**0.6.1 is a stability & correctness patch on 0.6.0** — recommended for everyone. The headline is a fix for a **memory leak that could eventually freeze the app** during long, multi-window sessions. It also lands two correctness fixes: the **Inferred working directory** now drives where a session lives across the whole UI (not just its tab color), and the Triage-Board **⚡ "still cached"** hint no longer shows false positives. This build becomes the new default **Latest**.
+**0.6.1 is a stable patch** on 0.6.0. This build becomes the new default **Latest**.
 
-## Fixes
+## What's new
 
-- **The long-session freeze (memory leak) — the big one.** On a machine that kept Agentmaster open for a long time (especially with more than one window), committed memory could climb steadily — measured at roughly **1.6 GB/hour**, reaching tens of GB after a day or two — until Windows ran out of commit and the app **froze**: the window stayed up and everything non-graphical kept running (hooks, the engine, the autorunner), but the view stopped repainting and stopped responding to input. Root cause: under XAML Islands, a per-element tooltip's framework-side registration was **never torn down**, so every rebuild of the Manager's board/tree/Sessions surfaces left its ~100 tooltips (and their whole element trees) pinned in memory forever. Tooltips now route through **one shared, per-thread tooltip host** that attaches only for the duration of an actual hover, so nothing accumulates — plus a round of follow-up hardening (a strong open-owner reference so a rebuilt-away element can't strand an attachment, a deliberately-leaked host to avoid a shutdown-teardown crash, live re-tipping of an open tooltip, and cancelling a pending tooltip when its page hides).
-- **Triage-Board ⚡ "still cached" false positives.** The card's **⚡** "server prompt-cache still warm" hint keyed on a fallback timestamp (the Waiting-for-you decay anchor) that gets stamped "now" by events with **zero API traffic** — so it lit up right after you **adopt** a session, use **Move to Waiting-for-you**, freshly **launch** or **resume**, on a never-prompted session, or on a managed **Codex** (which has no prompt cache at all). It now keys strictly on **real API-turn evidence**, so ⚡ only appears when a request actually happened inside the cache window.
+- **The inferred working folder is used everywhere.** With the Inferred working directory coloring mode, the folder a session really works in drives its grouping, scope and Open New Session Here, not only its color.
+- **The contributor CLA is final.** Its governing law is set and its draft framing removed, and the README's licensing section is clearer.
 
-## Changes
+## What's fixed
 
-- **The Inferred working directory is now the session's working directory everywhere.** When you use the **Inferred working directory** tab-coloring mode (0.6.0), Agentmaster detects the directory a session *actually works in* (by the paths its tools touch). Previously only the **color** used that; every other surface still read the launch folder — so a session that inferred into another repo wore that repo's color but was still **grouped, scoped, displayed, "Open New Session Here"-targeted, and copied** under its launch folder. Now a single resolver (`EffectiveWorkingDir`) feeds all of those, so a card/row can never sit in one directory group while its tab wears another's color. The terminal's real working directory still owns all the *mechanics* (spawn / resume / fork / restart, hook + transcript correlation, per-directory environment) — so launching and correlation are unchanged; only *where the UI files the session* follows the inference.
-
-## Also in this release
-
-- Documentation: the contributor **CLA** is finalized (governing law set to Israel; DRAFT framing removed), README **licensing** details clarified, and the 0.6.0 release notes archived in full.
+- **The long-session freeze is fixed.** A memory leak that grew about 1.6 GB an hour on a long-running Agentmaster, until Windows ran out of commit and the app froze, is gone.
+- **No false ⚡ "still cached" hints.** The board's warm-cache hint no longer lights after an adopt, a Move to Waiting-for-you, a launch or a resume.
 
 ## Install
 

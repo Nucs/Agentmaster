@@ -1,4 +1,9 @@
-<!-- ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
+<!-- ONE-ROW NOTES since 2026-11-16, at the owner's request ("Change the releases on gh too, finish",
+     after v0.8.0-v0.9.0 were rewritten that way the same day): the body is a short intro, "## What's
+     new" and "## What's fixed" (one row per change: a bold lead and about a sentence), then the
+     kept sections (Worth knowing / Thanks / Install) unchanged. The body GitHub published until
+     2026-11-16 is this file at 3da02fdbc; none of it is on GitHub any more.
+     ARCHIVED AS PUBLISHED 2026-11-16: the body below this header is now the release's body exactly as
      GitHub published it, saved before the one-row rewrite of every release replaced it there. The
      body this file held until then differed from the published one (a draft revised after, or never
      applied as written); it is this file at the commit before this note.
@@ -8,22 +13,22 @@
      Asset names assume tag v0.4.1 -> 0.4.1.0. -->
 ## Agentmaster 0.4.1
 
-**0.4.1** is a fixes-and-polish release on top of 0.4.0: **Restart session** now resumes the conversation, tab-navigation keys work from the Manager tab, the Triage Board keeps its scroll position across refreshes, and the per-tab summary panel gains a truncate toggle — plus a **one-command installer** and a build-identity line in Settings.
+**0.4.1 is a fixes-and-polish release** on top of 0.4.0.
 
-## New in 0.4.1
+## What's new
 
-- **One-command install / upgrade.** A single PowerShell line installs or upgrades to a specific version — `& ([scriptblock]::Create((irm <raw-url>))) -Version 0.4.1` — fetching the signed bundle, verifying its SHA-256, and trusting the self-signed cert behind a single UAC prompt (skipped when the cert is already trusted, so upgrades are usually prompt-free). `-Portable` is a cert-free, no-admin path (downloads the zip and preserves in-folder state); `-Launch` starts it after; a missing VCLibs dependency is auto-fetched.
-- **Build identity in Settings.** The Settings overlay now shows `v‹version› · ‹commit› · ‹channel› · ‹config›` directly under the title (hover for the git branch + full package family), so you always know exactly which build you're running — version read live from the package, commit build-stamped.
-- **Summary panel — truncate toggle.** A new `…` toggle in the times bar caps long messages (6 lines when wrapping, else 500 chars), **on by default**, beside the existing wrap (`↵`) toggle; both are global + persisted. Turn it off to show every message in full.
-- **Summary box — each file listed once.** A file that was both read and written now appears only under Files Edited / Created (Files Read keeps only files that were *only* read) — applied at the data source, so it's consistent across the Sessions-page detail, the per-tab panel, and the copied Summary. The Sessions header (search + scope toggles) is also left-aligned next to the title.
+- **A one-command installer.** One PowerShell line installs or upgrades to a given version, checking the bundle's SHA-256 and trusting its certificate behind one UAC prompt.
+- **The build's identity in Settings.** Version, commit, channel and configuration show under the Settings title.
+- **A truncate toggle in the summary panel.** `…` caps long messages (on by default), beside the wrap toggle.
+- **Each file listed once in the summary.** A file both read and written appears only under Edited or Created.
 
-## Fixes
+## What's fixed
 
-- **"Restart session" did nothing for an already-used session.** Restart replayed the *original launch* commandline — for a normally-launched session that's `--session-id <A>`, but A's transcript now exists, so Claude refused with "session id already in use" and the relaunch exited instantly (a fork re-forked from its parent; only a resume happened to work). Restart now **resumes the current conversation** (transcript-gated — fresh if none; Codex via `codex resume`), tears the old process down first (no orphan), and restores the full session environment — and it follows a conversation that diverged via `/clear` · `/compact` · `/resume`.
-- **Alt+Left / Alt+Right didn't navigate tabs from the Manager tab.** The Manager's focused search box swallowed the arrow keys; a tunneling handler now dispatches the tab-switch chords first (leaving typing / caret keys untouched), so Alt+arrows reach the tab strip from the Manager too.
-- **Triage Board snapped to the top on every refresh.** A board rebuild (a selection, a state/title change, an observer enrichment) reset each column's scroll to 0 — losing the card you'd clicked near the bottom of a tall column (e.g. a large External census). Columns now preserve their scroll position across rebuilds.
-- **Sessions From/To range popup mis-anchored.** After the header cluster moved next to the title, the date-range popup opened over the window buttons; it's re-anchored to open under its own button.
-- **Selection pill looked like a tight box.** The hovered/selected tab pill now has padding and rounded corners — a proper pill — without shifting the tab's icon or title.
+- **Restart session resumes the conversation.** It no longer replays the original launch, which Claude refused for an id already in use.
+- **Alt+Left / Alt+Right work from the Manager tab.** The Manager's search box no longer swallows them.
+- **The Triage Board keeps its scroll.** A rebuild no longer snaps each column to the top.
+- **The Sessions date-range popup is anchored right.** It opens under its own button instead of over the window buttons.
+- **The selection pill is a real pill.** It has padding and rounded corners, without moving the tab's icon or title.
 
 ## Install
 
