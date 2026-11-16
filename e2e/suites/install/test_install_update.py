@@ -38,6 +38,11 @@ DAY_MS = 24 * 3600 * 1000
 """A day in milliseconds."""
 LOCKED_NAME = "NOTICE.html"
 """IS-87's locked file: one the release ships and the app never opens, so the app runs while it is locked."""
+RUNNING_STAMP = "last-seen-running.json"
+"""The profile's running stamp (Updater.h kRunningStampLeaf): when the app last ran there. A start within 20 minutes of
+it offers no update (IS-89, UPDATER.md "Quiet after a restart")."""
+QUIET_MINUTES = 20
+"""The quiet window after the last run (Updater.h kQuietAfterLastRunMs)."""
 
 
 # ---- helpers ------------------------------------------------------------------------------------------------------
@@ -136,6 +141,41 @@ def _no_prompt_for(dest: Path, seconds: float) -> None:
               describe=lambda: [d.dump() for d in TaskDialog.all(exe_dirs=[dest])])
 
 
+def _running_stamp() -> dict:
+    """The Default profile's running stamp, as the app last wrote it.
+
+    Returns:
+        Its fields ({} when the file does not exist).
+    Raises:
+        json.JSONDecodeError: When the file is not JSON.
+    """
+    path = install.default_profile() / RUNNING_STAMP
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def _last_ran_minutes_ago(minutes: float) -> None:
+    """Make the Default profile say the app last ran — and closed — that many minutes ago, the way a pause between two
+    sessions leaves it. The next start is then judged as a launch after that pause, not as the restart it really is: a
+    test ends and starts the copy within seconds, and a start within 20 minutes of the last run offers no update (IS-89).
+
+    Call it only while the copy is not running: a running copy rewrites the stamp every minute.
+
+    Args:
+        minutes: How long ago the last run closed.
+    Returns:
+        None.
+    Raises:
+        OSError: When the file cannot be written.
+    """
+    seen = int((time.time() - minutes * 60) * 1000)
+    path = install.default_profile() / RUNNING_STAMP
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"seenRunningUnixMs": seen, "startedUnixMs": seen - 3_600_000, "closed": True, "pid": 0}),
+                    encoding="utf-8")
+
+
 def _next_local_morning_ms(now: datetime) -> int:
     """The next local 08:00 after a moment ("Remind me tomorrow": the next occurrence, always within 24 h).
 
@@ -225,15 +265,20 @@ def _downloads(fake, name: str) -> list[dict]:
 
 @pytest.mark.p1
 @pytest.mark.flow("INS-06")
-@pytest.mark.install("IS-81", "IS-82")
+@pytest.mark.install("IS-81", "IS-82", "IS-89")
 def test_the_startup_prompt_and_its_choices(lane, kit, machine, fake_github):
     """An installed copy stamped older than the newest release asks at its start, before any window: Update now /
     Postpone and six choices (IS-81); each choice does what it says (IS-82) — next restart writes nothing and the next
     start asks again, tomorrow is the next local 08:00, 3 / 7 / 30 days are that many days, a postponed copy asks
-    nothing, and a skipped version is never offered again while a newer one is.
+    nothing, and a skipped version is never offered again while a newer one is. A restart within 20 minutes of the last
+    run asks nothing at all, and says why in the log (IS-89).
 
-    Promise (INS-06 phases 1–4): an update is offered once per start at most, never on top of a window, and a "later"
-    of the user's is kept exactly as chosen.
+    Every later start that must ask — or must be quiet because of a postpone or a skip, not because it is a restart —
+    first makes the profile say the last run closed 25 minutes ago (_last_ran_minutes_ago): the test's starts are seconds
+    apart, which the app rightly reads as restarts.
+
+    Promise (INS-06 phases 1–4 and 7): an update is offered once per start at most, never on top of a window, never at a
+    restart, and a "later" of the user's is kept exactly as chosen.
 
     Args:
         lane: The install lane's facts.
@@ -280,19 +325,36 @@ def test_the_startup_prompt_and_its_choices(lane, kit, machine, fake_github):
         return app.pid, pressed
 
     # IS-81 + Remind me next restart: nothing written, the next start asks again.
-    start_and_answer(None)
+    first_pid, _ = start_and_answer(None)
     s = _settings()
     assert not s.get("updatePostponedUntilUnixMs") and not s.get("updateSkippedVersion"), f"next restart wrote: {s}"
     assert any("check (startup)" in ln and "available" in ln for ln in install.profile_log_lines("[update]")), \
         "no [update] check (startup) … available line"
     install.end_agentmaster(dest)
 
+    # IS-89: the run stamped itself (at its start, then every minute), and the copy was killed, so the stamp says "running,
+    # not closed" — and a start right after it is a restart: no prompt, no network round-trip, and the log says why.
+    stamp = _running_stamp()
+    assert stamp.get("pid") == first_pid and stamp.get("closed") is False, f"the run's stamp: {stamp}"
+    assert time.time() * 1000 - stamp.get("seenRunningUnixMs", 0) < 5 * 60_000, f"the run's stamp is not recent: {stamp}"
+    started = time.time()
+    install.start_like_explorer(dest / "Agentmaster.exe")
+    install.wait_app(dest, timeout_s=120, newer_than=started)
+    _no_prompt_for(dest, 20)
+    quiet = [ln for ln in install.profile_log_lines("[update]")
+             if "check (startup) skipped: the previous run" in ln and f"within {QUIET_MINUTES}m of the last run" in ln]
+    assert quiet and f"(pid {first_pid})" in quiet[-1] and "ended without closing" in quiet[-1], \
+        f"no [update] line for the quiet restart: {install.profile_log_lines('[update]')[-6:]}"
+    install.end_agentmaster(dest)
+
     # Tomorrow: the next local 08:00; a postponed copy asks nothing.
+    _last_ran_minutes_ago(QUIET_MINUTES + 5)
     _, pressed = start_and_answer("Remind me tomorrow")
     until = _settings().get("updatePostponedUntilUnixMs", 0)
     expected = _next_local_morning_ms(datetime.fromtimestamp(pressed))
     assert abs(until - expected) <= 120_000, f"tomorrow = {until}, the next 08:00 = {expected}"
     install.end_agentmaster(dest)
+    _last_ran_minutes_ago(QUIET_MINUTES + 5)  # quiet because of the postpone, not because it is a restart
     started = time.time()
     install.start_like_explorer(dest / "Agentmaster.exe")
     install.wait_app(dest, timeout_s=120, newer_than=started)
@@ -302,6 +364,7 @@ def test_the_startup_prompt_and_its_choices(lane, kit, machine, fake_github):
     # 3 / 7 / 30 days.
     for days, choice in ((3, "Remind me in 3 days"), (7, "Remind me in 7 days"), (30, "Remind me in 30 days")):
         _set_settings(updatePostponedUntilUnixMs=None)
+        _last_ran_minutes_ago(QUIET_MINUTES + 5)
         _, pressed = start_and_answer(choice)
         until = _settings().get("updatePostponedUntilUnixMs", 0)
         assert abs(until - (pressed * 1000 + days * DAY_MS)) <= 120_000, f"{choice}: {until} for a press at {pressed}"
@@ -309,15 +372,18 @@ def test_the_startup_prompt_and_its_choices(lane, kit, machine, fake_github):
 
     # Skip: never offered again; a newer release is.
     _set_settings(updatePostponedUntilUnixMs=None)
+    _last_ran_minutes_ago(QUIET_MINUTES + 5)
     start_and_answer("Skip this version")
     assert _settings().get("updateSkippedVersion") == "v0.8.2", f"skip wrote: {_settings()}"
     install.end_agentmaster(dest)
+    _last_ran_minutes_ago(QUIET_MINUTES + 5)  # quiet because of the skip, not because it is a restart
     started = time.time()
     install.start_like_explorer(dest / "Agentmaster.exe")
     install.wait_app(dest, timeout_s=120, newer_than=started)
     _no_prompt_for(dest, 20)
     install.end_agentmaster(dest)
     fake_github.publish("v0.8.3", {"Agentmaster_0.8.3.0_x64.zip": kit.zip("0.8.3.0")})
+    _last_ran_minutes_ago(QUIET_MINUTES + 5)
     start_and_answer(None, tag="v0.8.3")
     install.end_agentmaster(dest)
 

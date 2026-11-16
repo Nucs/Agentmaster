@@ -52,7 +52,11 @@
 // declined-this-run marker (kDeclinedEnvVar) that silences the startup + hourly checks ENTIRELY
 // (pre-network presence gate: no query, no prompt, even for a newer release published mid-run)
 // until the NEXT LAUNCH, which always asks again (RunStartupUpdateCheck clears an inherited latch);
-// the cog's explicit "Check for updates" stays fully live. Every check/prompt/decision logs an
+// the cog's explicit "Check for updates" stays fully live. A launch within 20 minutes of the previous
+// run — a restart, a swap, a crash's relaunch — offers no update at all (the owner's rule of 2026-11-16):
+// the app keeps <profile>\last-seen-running.json fresh every minute and marks it closed at a normal
+// close (RunningStampKeeper), and the startup check reads the previous run's copy first (section
+// "quiet after a restart"); the hourly check and the cog's are unaffected. Every check/prompt/decision logs an
 // "[update]" line to the profile's hooks.log (LogUpdate — the EXE-safe twin of the engine's
 // AppendStateLog), and NO catch swallows silently: every guard either logs, or is itself the
 // logger / a logger-failed nested catch (each annotated as such at the site).
@@ -1570,6 +1574,491 @@ namespace Agentmaster::Updater
         return tag;
     }
 
+    // ==================== quiet after a restart (the running stamp) ====================
+    //
+    // The owner's rule of 2026-11-16: a launch that comes within a couple of minutes of the last run — a restart, a
+    // close and reopen, a swap, the relaunch after a crash or a UI stall — must not offer an update. A launch offers one
+    // only when at least 20 minutes passed since Agentmaster last ran on this profile: since it CLOSED, or, when it never
+    // closed (a crash, a kill, a swap's stop), since it was last SEEN RUNNING. So the running app keeps a stamp in the
+    // profile (RunningStampKeeper: written at launch, rewritten every minute, marked closed at a normal close) and the
+    // startup check reads the previous run's stamp before it does anything else (RunStartupUpdateCheck). Only the launch
+    // is quiet: the hourly check and the cog's "Check for updates" behave as before. UPDATER.md "Quiet after a restart".
+
+    /// <summary>
+    /// The profile file that says when Agentmaster last ran on this profile, read by the next launch's startup check.
+    /// </summary>
+    /// <remarks>
+    /// Not a state document (PERSISTENCE.md §17): it holds no user data, so it is written in place, has no shadow and is
+    /// left out of the version-change snapshots. A missing, torn or foreign copy reads as "no earlier run known", and the
+    /// startup check then asks exactly as it did before this rule existed — the rule can only ever fail toward one extra
+    /// prompt, never toward an updater that stays silent. Distinct from last-run.json (StateBackups.h: WHICH build ran last).
+    /// </remarks>
+    inline constexpr const wchar_t* kRunningStampLeaf = L"last-seen-running.json";
+
+    /// <summary>
+    /// How long after Agentmaster last ran a launch stays quiet: the startup check offers no update to a launch within it,
+    /// and the hourly check (an hour after that launch) is the next one that can.
+    /// </summary>
+    /// <remarks>
+    /// The owner's number ("at least 20 minutes"). Measured from the previous run's LAST stamp, so a run that crashed is
+    /// judged by its last minute alive, at most kRunningStampPeriodMs before it died.
+    /// </remarks>
+    inline constexpr long long kQuietAfterLastRunMs = 20LL * 60 * 1000;
+
+    /// <summary>
+    /// How often the running app rewrites its stamp: the most by which "the last time it ran" can trail a crash or a kill.
+    /// </summary>
+    /// <remarks>A minute against a 20-minute rule: one small in-place write a minute, on a thread-pool thread.</remarks>
+    inline constexpr DWORD kRunningStampPeriodMs = 60u * 1000u;
+
+    /// <summary>
+    /// How much later than its due time Windows may run a stamp tick, so it can batch the wake-up with other timers' (the
+    /// thread-pool timer's window length): a few seconds of slack is nothing against the 20-minute rule.
+    /// </summary>
+    inline constexpr DWORD kRunningStampTickSlackMs = 5u * 1000u;
+
+    /// <summary>
+    /// The largest Unix-millisecond value a stamp may carry (the year 33658): a bigger one is foreign or corrupt, and is
+    /// refused before it is cast to an integer (an out-of-range double-to-integer cast is undefined behavior).
+    /// </summary>
+    inline constexpr double kRunningStampMaxUnixMs = 1e15;
+
+    /// <summary>What the running stamp says about one run of Agentmaster on this profile.</summary>
+    struct RunningStamp
+    {
+        /// <summary>
+        /// The last time the run was seen running, in Unix milliseconds (UTC): its close, or its last minute's stamp when it
+        /// never closed. 0 = no stamp (no earlier run known): the startup check then asks as usual.
+        /// </summary>
+        long long seenRunningUnixMs{ 0 };
+
+        /// <summary>When the run started, in Unix milliseconds (UTC); 0 when unknown. Only the log line uses it (the run's length).</summary>
+        long long startedUnixMs{ 0 };
+
+        /// <summary>
+        /// Whether the run closed normally (its message loop ended, or Windows ended the session). False when it ended any
+        /// other way: a crash, a kill, a swap's stop, the exit for an update — or when it is still running.
+        /// </summary>
+        bool closed{ false };
+
+        /// <summary>The run's process id (0 when unknown). Only the log line uses it, to name the run.</summary>
+        unsigned long pid{ 0 };
+    };
+
+    /// <summary>Reads the running stamp of a profile.</summary>
+    /// <param name="stateDir">The profile folder.</param>
+    /// <returns>
+    /// The stamp; all zeros ("no earlier run known") when the folder is empty, or the file is missing, unreadable, not a JSON
+    /// object, or carries no positive, sane last-seen time.
+    /// </returns>
+    /// <remarks>
+    /// Never throws: an allocation failure is logged and reads as "no stamp" (the startup check then asks as before). The
+    /// file is read whole and small; a missing file is the normal first run and logs nothing.
+    /// </remarks>
+    inline RunningStamp ReadRunningStamp(const std::wstring& stateDir) noexcept
+    {
+        try
+        {
+            if (stateDir.empty())
+            {
+                return {};
+            }
+            const auto parsed = json::Parse(detail::ReadFileWide(stateDir + L"\\" + kRunningStampLeaf));
+            if (!parsed || parsed->type != json::Value::Type::Obj)
+            {
+                return {};
+            }
+            // Range-check every number as a double BEFORE the cast to an integer: a hand-edited or foreign file with 1e30
+            // in it must read as "no stamp", never as an undefined cast's garbage.
+            const auto sane = [](double ms) { return ms > 0 && ms < kRunningStampMaxUnixMs; };
+            const double seen = parsed->NumAt(L"seenRunningUnixMs", 0);
+            if (!sane(seen))
+            {
+                return {};
+            }
+            RunningStamp stamp;
+            stamp.seenRunningUnixMs = static_cast<long long>(seen);
+            const double started = parsed->NumAt(L"startedUnixMs", 0);
+            stamp.startedUnixMs = sane(started) ? static_cast<long long>(started) : 0;
+            stamp.closed = parsed->BoolAt(L"closed", false);
+            const double pid = parsed->NumAt(L"pid", 0);
+            stamp.pid = pid > 0 && pid <= 4294967295.0 ? static_cast<unsigned long>(pid) : 0;
+            return stamp;
+        }
+        catch (...)
+        {
+            // Only bad_alloc reaches here (ReadFileWide logs its own failures, json::Parse throws bad_alloc only).
+            try
+            {
+                LogUpdate(stateDir, L"running stamp: read CRASHED (exception \x2014 no earlier run assumed: the startup check runs as usual)");
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through
+            }
+            return {};
+        }
+    }
+
+    /// <summary>Writes a running stamp into a profile, replacing the one there.</summary>
+    /// <param name="stateDir">The profile folder (the profile bootstrap made it).</param>
+    /// <param name="stamp">The stamp to write.</param>
+    /// <returns>
+    /// ERROR_SUCCESS when the whole stamp was written; otherwise the Win32 error that stopped it (ERROR_INVALID_PARAMETER
+    /// for an empty folder, ERROR_NOT_ENOUGH_MEMORY when the text could not be built, ERROR_WRITE_FAULT for a short write).
+    /// </returns>
+    /// <remarks>
+    /// Never throws and never logs: the heartbeat calls it every minute, so the CALLER logs a failure once per streak
+    /// (RunningStampKeeper). Written IN PLACE, not through a temp file and a rename: a kill in the middle of a write can
+    /// at worst leave a torn file, which reads as "no stamp" (one extra prompt at most), whereas a temp file such a kill
+    /// left behind would stay in the profile for good. No flush either: the stamp need not survive a power cut.
+    /// </remarks>
+    inline DWORD WriteRunningStamp(const std::wstring& stateDir, const RunningStamp& stamp) noexcept
+    {
+        try
+        {
+            if (stateDir.empty())
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            auto doc = json::Value::MkObj();
+            doc.Set(L"seenRunningUnixMs", json::Value::MkNum(static_cast<double>(stamp.seenRunningUnixMs)));
+            doc.Set(L"startedUnixMs", json::Value::MkNum(static_cast<double>(stamp.startedUnixMs)));
+            doc.Set(L"closed", json::Value::MkBool(stamp.closed));
+            doc.Set(L"pid", json::Value::MkNum(static_cast<double>(stamp.pid)));
+            doc.Set(L"note", json::Value::MkStr(L"When Agentmaster last ran on this profile (rewritten every minute while it runs; closed = it closed normally). "
+                                                L"A launch within 20 minutes of seenRunningUnixMs offers no update (UPDATER.md \"Quiet after a restart\")."));
+            const std::string bytes = detail::WideToUtf8(json::Dump(doc));
+            const std::wstring path = stateDir + L"\\" + kRunningStampLeaf;
+            // Readers may share it (a starting copy of another install on the same profile); FILE_SHARE_DELETE so this
+            // handle never blocks a profile cleanup or a rename.
+            const HANDLE file = ::CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file == INVALID_HANDLE_VALUE)
+            {
+                return ::GetLastError();
+            }
+            DWORD wrote = 0;
+            const BOOL ok = ::WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &wrote, nullptr);
+            const DWORD writeError = ok ? ERROR_SUCCESS : ::GetLastError(); // read before CloseHandle can change it
+            ::CloseHandle(file);
+            if (!ok)
+            {
+                return writeError == ERROR_SUCCESS ? ERROR_WRITE_FAULT : writeError;
+            }
+            return wrote == bytes.size() ? ERROR_SUCCESS : ERROR_WRITE_FAULT;
+        }
+        catch (...)
+        {
+            // Only bad_alloc (building the text) reaches here. Not silent: the failure is the return value, which the
+            // caller logs once per streak (a log line per failed minute would flood hooks.log).
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+    }
+
+    /// <summary>
+    /// Whether a launch at <paramref name="nowMs"/> comes within <paramref name="quietMs"/> of the last time Agentmaster
+    /// was seen running on this profile — a restart, which offers no update.
+    /// </summary>
+    /// <param name="nowMs">The launch time, in Unix milliseconds (UTC); 0 or less is no time and never quiet.</param>
+    /// <param name="lastSeenRunningMs">The previous run's RunningStamp::seenRunningUnixMs; 0 or less = no earlier run known.</param>
+    /// <param name="quietMs">The quiet window (kQuietAfterLastRunMs); 0 or less turns the rule off.</param>
+    /// <returns>
+    /// True when the two times are less than the window apart, on either side: a stamp a few minutes AHEAD of now (the
+    /// clock was set back since that run) still counts as "just ran", while one further ahead than the window proves
+    /// nothing about the last run and does not count — so a wrong clock can quiet one launch, never the updater for good.
+    /// </returns>
+    /// <remarks>Pure; the harness pins its edges (TestUpdaterVersionLogic).</remarks>
+    inline bool IsWithinQuietAfterLastRun(long long nowMs, long long lastSeenRunningMs, long long quietMs) noexcept
+    {
+        if (nowMs <= 0 || lastSeenRunningMs <= 0 || quietMs <= 0)
+        {
+            return false;
+        }
+        // Both are positive, so the difference cannot overflow.
+        const long long since = nowMs - lastSeenRunningMs;
+        return since < quietMs && since > -quietMs;
+    }
+
+    /// <summary>A short span for the quiet gate's log line: seconds under a minute ("42s"), else FormatSpanShort's ("3m", "1h5m").</summary>
+    /// <param name="ms">The span in milliseconds; a negative span reads as 0s.</param>
+    /// <returns>The text.</returns>
+    /// <exception cref="std::bad_alloc">The text could not be built.</exception>
+    inline std::wstring FormatAgoShort(long long ms)
+    {
+        if (ms < 60LL * 1000)
+        {
+            return std::to_wstring(ms < 0 ? 0 : ms / 1000) + L"s";
+        }
+        return FormatSpanShort(ms);
+    }
+
+    /// <summary>
+    /// The startup check's verdict on a launch: the words of its "skipped" log line when the launch comes within the quiet
+    /// window of the previous run, or "" when the launch may offer an update.
+    /// </summary>
+    /// <param name="lastRun">The previous run's stamp, read before this run wrote its own (RunningStampKeeper::BeginRun).</param>
+    /// <param name="nowMs">The launch time, in Unix milliseconds (UTC).</param>
+    /// <param name="quietMs">The quiet window (kQuietAfterLastRunMs).</param>
+    /// <returns>
+    /// "" when no earlier run is known or it is at least <paramref name="quietMs"/> away; otherwise the reason, naming the
+    /// previous run, how it ended, how long ago, and that the hourly check asks later.
+    /// </returns>
+    /// <exception cref="std::bad_alloc">The text could not be built (RunStartupUpdateCheck catches it and asks as usual).</exception>
+    /// <remarks>Pure apart from allocation; the harness pins it.</remarks>
+    inline std::wstring QuietAfterLastRunVerdict(const RunningStamp& lastRun, long long nowMs, long long quietMs = kQuietAfterLastRunMs)
+    {
+        if (!IsWithinQuietAfterLastRun(nowMs, lastRun.seenRunningUnixMs, quietMs))
+        {
+            return {};
+        }
+        const long long since = nowMs - lastRun.seenRunningUnixMs;
+        std::wstring who = L"the previous run";
+        if (lastRun.pid != 0)
+        {
+            who += L" (pid " + std::to_wstring(lastRun.pid) + L")";
+        }
+        std::wstring what;
+        if (since < 0)
+        {
+            what = who + L" was last seen running " + FormatAgoShort(-since) + L" AHEAD of this clock (the clock was set back since)";
+        }
+        else if (lastRun.closed)
+        {
+            what = who + L" closed " + FormatAgoShort(since) + L" ago";
+        }
+        else
+        {
+            what = who + L" was last seen running " + FormatAgoShort(since) + L" ago and ended without closing (a crash, a kill, a swap or an update)";
+        }
+        // The run's length only when a stamp came after its launch stamp (a minute's tick, or its close): a run killed within
+        // its first minute left only the launch stamp, and "after running 0s" would be a guess dressed as a fact.
+        if (lastRun.startedUnixMs > 0 && lastRun.startedUnixMs < lastRun.seenRunningUnixMs)
+        {
+            what += L", after running " + FormatAgoShort(lastRun.seenRunningUnixMs - lastRun.startedUnixMs);
+        }
+        return what + L" \x2014 a launch within " + FormatSpanShort(quietMs) +
+               L" of the last run offers no update (the hourly check asks later; the cog's check stays live)";
+    }
+
+    /// <summary>
+    /// Keeps this process's running stamp: BeginRun reads the previous run's stamp and writes this run's first one,
+    /// StartHeartbeat rewrites it every minute from a thread-pool timer, EndRun stops the timer and marks the run closed.
+    /// </summary>
+    /// <remarks>
+    /// <para>One per process, in the EXE (WindowEmperor.cpp's g_amRunningStamp), and only on the updater's channel
+    /// (IsUpdaterChannel): the stamp has no other reader. The ticks run on a thread-pool thread, never the UI thread —
+    /// all windows share that one thread, and a file write on a slow or scanned disk would stall every window.</para>
+    /// <para>The process normally ends in TerminateProcess, so the destructor rarely runs; when it does (the harness) it
+    /// stops the timer and waits for a running tick, so no callback can run into freed memory. Neither copyable nor
+    /// movable: the timer's callback holds this object's address.</para>
+    /// </remarks>
+    class RunningStampKeeper
+    {
+    public:
+        /// <summary>Makes an idle keeper: nothing is read or written until BeginRun.</summary>
+        RunningStampKeeper() = default;
+
+        RunningStampKeeper(const RunningStampKeeper&) = delete;
+        RunningStampKeeper& operator=(const RunningStampKeeper&) = delete;
+        RunningStampKeeper(RunningStampKeeper&&) = delete;
+        RunningStampKeeper& operator=(RunningStampKeeper&&) = delete;
+
+        /// <summary>Stops the heartbeat (waiting for a running tick) without marking the run closed.</summary>
+        /// <remarks>Only a keeper that goes out of scope gets here (the harness); the app ends in TerminateProcess first.</remarks>
+        ~RunningStampKeeper()
+        {
+            _StopTimer();
+        }
+
+        /// <summary>
+        /// Starts this run's stamp: reads the stamp the previous run left, then writes this run's first one (started and seen
+        /// now, not closed). Call it once, at launch, BEFORE the startup check — the startup check judges the launch by the
+        /// stamp this returns, and the file holds this run's stamp from here on.
+        /// </summary>
+        /// <param name="stateDir">The profile folder.</param>
+        /// <param name="nowMs">The launch time, in Unix milliseconds (UTC); a parameter so the harness controls the clock.</param>
+        /// <returns>
+        /// The previous run's stamp (all zeros when none is known). A second call writes nothing and returns what the first
+        /// call read, so a stray second call can never make this run judge itself as "the previous run".
+        /// </returns>
+        /// <remarks>Never throws; a failed write is logged once and leaves the previous run's stamp in place.</remarks>
+        RunningStamp BeginRun(const std::wstring& stateDir, long long nowMs) noexcept
+        {
+            if (_begun)
+            {
+                return _previousRun;
+            }
+            try
+            {
+                _stateDir = stateDir;
+            }
+            catch (...)
+            {
+                // bad_alloc copying a path: this run keeps no stamp (the next launch asks as usual). Logged to the folder
+                // given, which needs no copy.
+                try
+                {
+                    LogUpdate(stateDir, L"running stamp: could not start (exception \x2014 this run keeps no stamp; the next launch asks as usual)");
+                }
+                catch (...)
+                {
+                    // logger-failed: nothing left to report through
+                }
+                return {};
+            }
+            _previousRun = ReadRunningStamp(_stateDir);
+            _startedUnixMs = nowMs;
+            _pid = ::GetCurrentProcessId();
+            _begun = true;
+            _Write(nowMs, false);
+            return _previousRun;
+        }
+
+        /// <summary>
+        /// Keeps the stamp fresh: rewrites it every <paramref name="periodMs"/> from a thread-pool timer until EndRun, so a
+        /// run that never closes (a crash, a kill, a swap) still leaves a "last seen running" at most one period old.
+        /// </summary>
+        /// <param name="periodMs">The period (kRunningStampPeriodMs; the harness passes a short one). 0 is refused.</param>
+        /// <returns>True when the timer runs; false before BeginRun, after EndRun, when it already runs, or when Windows
+        /// refused the timer (logged: this run then keeps only its launch stamp).</returns>
+        /// <remarks>Never throws. Call it from the thread that will call EndRun (the EXE's main thread).</remarks>
+        bool StartHeartbeat(DWORD periodMs = kRunningStampPeriodMs) noexcept
+        {
+            if (!_begun || _ended || _timer || periodMs == 0)
+            {
+                return false;
+            }
+            _timer = ::CreateThreadpoolTimer(&RunningStampKeeper::_OnTimer, this, nullptr);
+            if (!_timer)
+            {
+                const DWORD error = ::GetLastError();
+                try
+                {
+                    LogUpdate(_stateDir, L"running stamp: the minute heartbeat could not start (Win32 error " + std::to_wstring(error) +
+                                             L") \x2014 this run keeps only its launch stamp, so a restart long after this launch may still be quiet");
+                }
+                catch (...)
+                {
+                    // logger-failed: nothing left to report through
+                }
+                return false;
+            }
+            // A NEGATIVE due time is relative, in 100 ns units: the first tick one period from now (BeginRun just wrote).
+            LARGE_INTEGER relative{};
+            relative.QuadPart = -static_cast<LONGLONG>(periodMs) * 10000LL;
+            FILETIME due{};
+            due.dwLowDateTime = relative.LowPart;
+            due.dwHighDateTime = static_cast<DWORD>(relative.HighPart);
+            ::SetThreadpoolTimer(_timer, &due, periodMs, kRunningStampTickSlackMs);
+            return true;
+        }
+
+        /// <summary>
+        /// Ends this run's stamp at a normal close: stops the heartbeat (waiting for a tick that is running), then writes the
+        /// closing stamp (seen now, closed). Later calls do nothing.
+        /// </summary>
+        /// <param name="nowMs">The close time, in Unix milliseconds (UTC).</param>
+        /// <remarks>
+        /// Never throws. Call it from the thread that started the heartbeat, never from a tick (waiting for the ticks from
+        /// inside one would wait for itself). The timer is stopped FIRST so a tick cannot land after the closing stamp and
+        /// write "not closed" over it.
+        /// </remarks>
+        void EndRun(long long nowMs) noexcept
+        {
+            if (!_begun || _ended)
+            {
+                return;
+            }
+            _ended = true;
+            _StopTimer();
+            _Write(nowMs, true);
+        }
+
+        /// <summary>Whether BeginRun ran: this run keeps a stamp.</summary>
+        /// <returns>True after BeginRun (even when its write failed).</returns>
+        bool Begun() const noexcept
+        {
+            return _begun;
+        }
+
+    private:
+        /// <summary>The thread-pool timer's tick: rewrites the stamp with the current time.</summary>
+        /// <param name="instance">The callback instance (unused).</param>
+        /// <param name="context">The keeper (StartHeartbeat passes `this`; it outlives the timer, see _StopTimer).</param>
+        /// <param name="timer">The timer (unused).</param>
+        static void CALLBACK _OnTimer(PTP_CALLBACK_INSTANCE instance, PVOID context, PTP_TIMER timer) noexcept
+        {
+            UNREFERENCED_PARAMETER(instance);
+            UNREFERENCED_PARAMETER(timer);
+            static_cast<RunningStampKeeper*>(context)->_Write(NowUnixMs(), false);
+        }
+
+        /// <summary>
+        /// Writes the stamp (started at launch, seen <paramref name="nowMs"/>, closed as given), logging only the CHANGES of
+        /// outcome: the first failure of a streak and the first success after one, so a profile that cannot be written logs
+        /// two lines, not one a minute.
+        /// </summary>
+        /// <param name="nowMs">The time the run is seen running, in Unix milliseconds (UTC).</param>
+        /// <param name="closed">Whether this is the closing stamp.</param>
+        void _Write(long long nowMs, bool closed) noexcept
+        {
+            RunningStamp stamp;
+            stamp.seenRunningUnixMs = nowMs;
+            stamp.startedUnixMs = _startedUnixMs;
+            stamp.closed = closed;
+            stamp.pid = _pid;
+            const DWORD error = WriteRunningStamp(_stateDir, stamp);
+            const bool failed = error != ERROR_SUCCESS;
+            // exchange: one tick at a time in practice, but a tick that outlasts a period may overlap the next one, and
+            // EndRun writes from another thread (after the timer stopped): the flag decides which writer logs a change.
+            if (_failing.exchange(failed) == failed)
+            {
+                return; // same outcome as the last write: nothing new to say
+            }
+            try
+            {
+                LogUpdate(_stateDir, failed ? L"running stamp: " + std::wstring{ kRunningStampLeaf } + L" could not be written (Win32 error " + std::to_wstring(error) +
+                                                  L") \x2014 a launch soon after this run may still offer an update; retried every minute" :
+                                              L"running stamp: written again");
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through
+            }
+        }
+
+        /// <summary>Stops the heartbeat for good: no more ticks, a queued one cancelled, a running one waited for.</summary>
+        /// <remarks>Never call it from a tick (it would wait for itself). Safe when no timer runs.</remarks>
+        void _StopTimer() noexcept
+        {
+            if (!_timer)
+            {
+                return;
+            }
+            ::SetThreadpoolTimer(_timer, nullptr, 0, 0); // no due time: no more ticks
+            ::WaitForThreadpoolTimerCallbacks(_timer, TRUE); // TRUE: cancel a tick still queued, wait for a running one
+            ::CloseThreadpoolTimer(_timer);
+            _timer = nullptr;
+        }
+
+        /// <summary>The profile folder the stamp lives in (set by BeginRun, read by every tick: never changed after).</summary>
+        std::wstring _stateDir;
+        /// <summary>The previous run's stamp, as BeginRun read it (a second BeginRun returns it again).</summary>
+        RunningStamp _previousRun;
+        /// <summary>This run's launch time, in every stamp it writes.</summary>
+        long long _startedUnixMs{ 0 };
+        /// <summary>This process's id, in every stamp it writes.</summary>
+        unsigned long _pid{ 0 };
+        /// <summary>The heartbeat timer; null while none runs.</summary>
+        PTP_TIMER _timer{ nullptr };
+        /// <summary>Whether BeginRun ran (only the owner's thread reads or writes it).</summary>
+        bool _begun{ false };
+        /// <summary>Whether EndRun ran: the closing stamp is final (only the owner's thread reads or writes it).</summary>
+        bool _ended{ false };
+        /// <summary>Whether the last write failed: the log reports a change of outcome once, not every minute.</summary>
+        std::atomic<bool> _failing{ false };
+    };
+
     // ============================ the prompt ============================
 
     enum class Decision
@@ -2227,9 +2716,23 @@ namespace Agentmaster::Updater
         }
     }
 
-    // The startup check (WindowEmperor, BEFORE the "Reopen your N windows?" prompt). Runs on the
-    // main thread — the bounded worker-and-poll inside the core keeps it from wedging launch.
-    inline bool RunStartupUpdateCheck(HWND owner)
+    /// <summary>
+    /// The startup check (WindowEmperor, BEFORE the "Reopen your N windows?" prompt): clears an inherited decline, honors the
+    /// update script's restarted-after-update marker, stays quiet for a launch within 20 minutes of the previous run (a
+    /// restart), and otherwise runs the shared check and prompt.
+    /// </summary>
+    /// <param name="owner">The prompt's owner window (the startup passes nullptr: no window exists yet).</param>
+    /// <param name="lastRun">
+    /// The previous run's stamp, as RunningStampKeeper::BeginRun read it before this run wrote its own. All zeros (the
+    /// default) = no earlier run known: the launch is judged as before this rule existed and may prompt.
+    /// </param>
+    /// <returns>True IFF the installer was launched: the caller must then exit the process (TerminateProcess).</returns>
+    /// <remarks>
+    /// Never throws. Runs on the main thread; the bounded worker-and-poll inside the core keeps it from wedging the launch.
+    /// The quiet gate comes BEFORE any network round-trip, so a restart neither prompts nor asks GitHub — and it does NOT
+    /// latch a decline: the hourly check of this run (an hour after the launch) still offers the update, as does the cog.
+    /// </remarks>
+    inline bool RunStartupUpdateCheck(HWND owner, const RunningStamp& lastRun = {})
     {
         // A FRESH LAUNCH always asks again — clear a declined latch INHERITED through the env block
         // (the installer's relaunch and any child-spawned instance carry the parent's env; without
@@ -2239,12 +2742,14 @@ namespace Agentmaster::Updater
         // declined, failed): the user just chose to keep this version, so this run behaves as "Remind me next
         // restart" (the startup + hourly checks stay quiet; the cog's check stays live). Measured in the test
         // desktop on 2026-10-21: without it the restarted app offered the same update again at once.
+        bool restartedByUpdateScript = false;
         try
         {
             const std::wstring stateDir = Profiles::ResolveProfileDir();
             if (const std::wstring tag = ConsumeRestartedAfterUpdateMarker(stateDir, NowUnixMs()); !tag.empty())
             {
                 MarkDeclinedThisRun(tag);
+                restartedByUpdateScript = true;
                 LogUpdate(stateDir, L"check (startup) skipped: the update script started this version again after an update to " + tag +
                                         L" that did not complete (the startup + hourly checks stay quiet this run; the cog's check stays live)");
             }
@@ -2258,6 +2763,36 @@ namespace Agentmaster::Updater
             catch (...)
             {
                 // logger-failed: nothing left to report through
+            }
+        }
+        // Quiet after a restart (the owner's rule of 2026-11-16; the section above RunningStampKeeper): a launch within
+        // kQuietAfterLastRunMs of the previous run offers no update. Skipped when the marker above already silenced this
+        // whole run (the shared core then logs "declined this run": one reason per launch in the trail), and off the
+        // updater's channel (the core returns there without a word; this gate must not log for a dev build either).
+        if (!restartedByUpdateScript)
+        {
+            try
+            {
+                if (IsUpdaterChannel())
+                {
+                    if (const std::wstring verdict = QuietAfterLastRunVerdict(lastRun, NowUnixMs()); !verdict.empty())
+                    {
+                        LogUpdate(Profiles::ResolveProfileDir(), L"check (startup) skipped: " + verdict);
+                        return false;
+                    }
+                }
+            }
+            catch (...)
+            {
+                // bad_alloc building the verdict: the rule fails OPEN — this launch is judged as before the rule existed.
+                try
+                {
+                    LogUpdate(Profiles::ResolveProfileDir(), L"quiet-after-restart gate CRASHED (exception \x2014 the startup check runs as usual)");
+                }
+                catch (...)
+                {
+                    // logger-failed: nothing left to report through
+                }
             }
         }
         return RunUpdateCheckAndPrompt(owner, L"startup");

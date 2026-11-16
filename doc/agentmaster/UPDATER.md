@@ -10,7 +10,8 @@ release notes (`UpdaterReleaseNotes.h`).
 
 - **At startup:** `WindowEmperor` runs `RunStartupUpdateCheck` after the profile resolves and before the
   "Reopen your N previous Agentmaster windows?" prompt: a bounded GitHub-API query (≤ 6 s, on a worker,
-  so a slow network can't wedge the launch).
+  so a slow network can't wedge the launch) — unless Agentmaster last ran on this profile less than
+  20 minutes ago: such a launch is a restart and offers nothing (*Quiet after a restart*).
 - **Every hour while running:** `RunPeriodicUpdateCheck` (the shared core is `RunUpdateCheckAndPrompt`).
   `WindowEmperor` arms a Win32 `WM_TIMER` on its message window (`_setupUpdateAutocheck`; a XAML
   `DispatcherTimer` never starts in this mode); each tick runs on a detached thread, so neither the
@@ -18,6 +19,50 @@ release notes (`UpdaterReleaseNotes.h`).
   worker captures instead of `this`) prevents a second prompt.
 - **Who checks:** packaged release installs and portable copies (`IsUpdaterChannel`); dev and plain
   unpackaged builds skip unless `AGENTMASTER_UPDATE_STARTUP` is set.
+
+## Quiet after a restart
+
+The owner's rule (2026-11-16): restarting Agentmaster, or closing and reopening it within a couple of minutes, must not
+offer an update. A launch offers one only when at least **20 minutes** passed since Agentmaster last ran on this profile:
+since it **closed**, or, when it never closed (a crash, a kill, a swap's stop, the exit for an update), since it was last
+**seen running**.
+
+- **The running stamp** (`<profile>\last-seen-running.json`, `RunningStampKeeper` in `Updater.h`): `seenRunningUnixMs`,
+  `startedUnixMs`, `closed`, `pid`, and a `note`. One keeper per process (`g_amRunningStamp` in `WindowEmperor.cpp`),
+  on the updater's channel only (the stamp has no other reader):
+  - **BeginRun**, right before the startup check, reads the stamp the previous run left and only then writes this run's
+    (started and seen now, not closed). The startup check gets the previous run's copy.
+  - **StartHeartbeat** (`_setupUpdateAutocheck`, beside the hourly timer) rewrites it every minute from a thread-pool
+    timer (`kRunningStampPeriodMs`, 5 s of slack for Windows to batch it), never on the UI thread: every window shares
+    that one thread, and a write on a slow or scanned disk would stall them all. A run that never closes therefore
+    leaves a "last seen running" at most a minute old.
+  - **EndRun** stops the timer (waiting for a tick that runs, so none lands after it) and writes the closing stamp
+    (`closed: true`): at the end of the message loop, and in `WM_ENDSESSION` (Windows may end the process before the
+    loop gets there). Later calls do nothing.
+- **The gate** (`RunStartupUpdateCheck` → `QuietAfterLastRunVerdict` → `IsWithinQuietAfterLastRun`): a launch less than
+  `kQuietAfterLastRunMs` (20 min) from the previous run's `seenRunningUnixMs` returns before any network call and logs why.
+  Exactly 20 minutes is enough. A stamp up to 20 minutes AHEAD of the clock (the clock was set back since) also counts
+  as a restart; one further ahead proves nothing and is ignored, so a wrong clock quiets one launch at most.
+- **Only the launch is quiet.** The rule latches nothing: the hourly check of that run (an hour after the launch) offers
+  the update as usual, and so does the cog's *Check for updates*. A process that is always restarted within 20 minutes
+  of its last run and never lives an hour is therefore not offered updates until a launch after a longer pause.
+- **The update script's restarted marker wins** (`am-update-restarted.txt`, *Update now* below): that run is silenced
+  whole, and the quiet gate stays out of it, so the trail gives one reason per launch.
+- **Fails open.** A missing, torn, unreadable or foreign stamp (absurd numbers are refused before any cast) reads as "no
+  earlier run known", and the launch asks exactly as before the rule existed. The stamp is written in place, with no temp
+  file and no flush: a kill mid-write at worst tears it, and a temp file such a kill left would stay in the profile for
+  good. It is not a state document: no shadow, no snapshot, no `PrepareStateFileReplace` (it holds no user data).
+- **Logging** (`[update]`): `check (startup) skipped: the previous run (pid N) closed 42s ago, after running 3h12m — a launch
+  within 20m of the last run offers no update (the hourly check asks later; the cog's check stays live)`, or `… was last
+  seen running 3m ago and ended without closing (a crash, a kill, a swap or an update) …`, or `… AHEAD of this clock …`.
+  The run's length appears only when a stamp came after its launch stamp (a minute's tick, or its close). A stamp that
+  cannot be written logs `running stamp: last-seen-running.json could not be written (Win32 error N) …` once per
+  streak, and `running stamp: written again` when it recovers; a heartbeat that cannot start logs once.
+- **Tests:** `TestUpdaterVersionLogic` (`tests_spawn_sched.cpp`) pins the gate's edges, the log's words, the file's round
+  trip and refusals, the keeper on a real thread-pool timer (BeginRun, the heartbeat, EndRun, the next launch reading
+  it, a destroyed keeper's timer), and the wiring on the channel (in the harness's scratch profile only, postponed first
+  as a belt). The install lane's `test_the_startup_prompt_and_its_choices` (IS-89) kills the copy and starts it again at
+  once: no prompt, and the log line; every later start of that test backdates the stamp 25 minutes first.
 
 ## The prompt
 
@@ -27,7 +72,9 @@ release notes (`UpdaterReleaseNotes.h`).
   - **Remind me next restart** (the default, and what Cancel / X / Esc / any failure resolve to): writes
     nothing durable; it latches the process-scoped `AGENTMASTER_UPDATE_DECLINED=<tag>` env var, so the
     startup and hourly checks are skipped, before any network call, until the next launch (which clears
-    an inherited latch). The cog's manual check stays live. Each skipped tick still logs.
+    an inherited latch). The cog's manual check stays live. Each skipped tick still logs. A restart within
+    20 minutes asks nothing at its start either (*Quiet after a restart*): the reminder then comes from
+    that run's hourly check, or from a launch after a longer pause.
   - **Remind me tomorrow:** the next local 08:00 (within 24 h; DST-safe; the radio names the instant,
     e.g. "Remind me tomorrow (Sun, 8:00 AM)").
   - **3 days · 7 days · 30 days · Skip this version.**
@@ -119,7 +166,8 @@ only when the window cannot be created, or with `AGENTMASTER_UPDATE_PROMPT=taskd
   process outlived a prompt. That run found the radios' glyphs drawn classic after a click (the control had no
   theme handle to lend during the repaint): the window now draws them with a theme handle of its own.
 - **Check after the build:** a dev build with `AGENTMASTER_UPDATE_STARTUP=1` sees every release as newer and
-  prompts at startup. Check the dark window and its tabs; Tab, Esc and Enter; a resize and a move to a
+  prompts at startup — at its first start, or 20 minutes after its last run (*Quiet after a restart*; to see it again
+  sooner, close the app and delete `<profile>\last-seen-running.json`). Check the dark window and its tabs; Tab, Esc and Enter; a resize and a move to a
   monitor of another scale; `AGENTMASTER_UPDATE_PROMPT=plain`; the cog's Check for updates (an owned
   window); and the hourly prompt (its own thread).
 
@@ -178,6 +226,8 @@ only when the window cannot be created, or with `AGENTMASTER_UPDATE_PROMPT=taskd
   prompt's EXE-safe read-modify-write). Both cog-Save preserve blocks restore all four from disk.
 - `ReadPrefs` falls back to a stray top-level key; `WriteUpdateState` migrates strays into the envelope,
   refuses to rebuild an unparseable non-empty file, and writes atomically (temp + flush + `MoveFileExW`).
+- `<profile>\last-seen-running.json`: when Agentmaster last ran on this profile (*Quiet after a restart*). Written by
+  the app on the updater's channel at launch, every minute, and at a normal close; read once, at the next launch.
 
 ## Hardening and logging
 
@@ -190,7 +240,8 @@ only when the window cannot be created, or with `AGENTMASTER_UPDATE_PROMPT=taskd
   and in `LaunchInstaller`, because the installer downloads and runs what those URLs name.
 - Every check logs `[update]` lines to hooks.log through `Updater::LogUpdate` (the EXE-safe twin of
   `AppendStateLog`): the timer armed, each tick's begin and outcome tagged `(startup)` / `(periodic)` /
-  `(cog)` / `(cog-silent)` (postponed with time left, up to date, available, skipped / declined), every
-  prompt decision, installer launches and failures.
+  `(cog)` / `(cog-silent)` (postponed with time left, up to date, available, skipped / declined, a quiet
+  restart with its previous run), every prompt decision, installer launches and failures, and the running
+  stamp's write failures (once per streak).
 - No silent catch: every catch on this surface logs (with the target path for the file helpers), except
   the logger's own catch and a catch whose log line itself failed to build, both annotated in place.

@@ -166,6 +166,12 @@ edge cases.
    Features re-stamped.
 6. **A failed update.** *Do:* make the swap fail (a locked file). *Expect:* the old files put back; the installed version
    started again; that run behaves as *Remind me next restart* (no immediate re-offer).
+7. **A restart.** *Do:* end the app (close it, or kill it) and start it again within 20 minutes. *Expect:* no prompt and no
+   GitHub query at that start; the hourly check of the new run (an hour later) and the cog's check still offer the update.
+   *Check:* [FILE] `<profile>\last-seen-running.json` (`seenRunningUnixMs` at most a minute old while the app runs; `closed`
+   true after a normal close); [LOG] `[update] check (startup) skipped: the previous run (pid N) closed 42s ago … — a
+   launch within 20m of the last run offers no update` (or `… was last seen running … and ended without closing`). A start
+   20 minutes or more after the last run asks as in phase 1.
 
 **Edge cases**
 - **E1 Pre-release switch** → betas offered; a nightly only with the nightly switch (accepted through its warning).
@@ -368,6 +374,7 @@ what it waits for.
 | IS-86 | a demoted user updates the per-user install an administrator made (B1) | no prompt; updated in ~12 s; no set-aside folder left | net, demote | B1 | planned |
 | IS-87 | the swap fails half way (a locked file) | the old files back; the installed version started again; that run behaves as *Remind me next restart* | net | unit | `test_install_update.py::test_a_failed_update_starts_the_old_version_again` (a file held open without delete sharing; the update window's key press) |
 | IS-88 | offline | the check fails quietly within 6 s; the app starts normally | fresh | — | `test_install_first_launch.py::test_install_just_for_you` (the installed copy's first start: the lane points `api.github.com` at 127.0.0.1) |
+| IS-89 | a restart within 20 minutes of the last run (a close and reopen, a kill, a swap) | no prompt, no GitHub query at that start; `[update] check (startup) skipped: the previous run … within 20m of the last run offers no update`; the stamp `last-seen-running.json` names the run (its pid, not closed after a kill) | net | — | same test as IS-81 (the copy killed, then started again at once; every later start of that test first backdates the stamp 25 minutes) |
 
 ### F · Uninstall
 

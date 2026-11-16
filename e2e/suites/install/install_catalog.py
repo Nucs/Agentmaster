@@ -37,7 +37,7 @@ SCENARIOS = [
     {"test": "test_install_update.py::test_irm_iex_with_a_current_install",
      "ids": ["IS-12"], "flow": "INS-01", "machine": ["net"], "minutes": 2},
     {"test": "test_install_update.py::test_the_startup_prompt_and_its_choices",
-     "ids": ["IS-81", "IS-82"], "flow": "INS-06", "machine": ["net"], "minutes": 6},
+     "ids": ["IS-81", "IS-82", "IS-89"], "flow": "INS-06", "machine": ["net"], "minutes": 7},
     {"test": "test_install_update.py::test_update_now_from_the_cog",
      "ids": ["IS-80"], "flow": "INS-06", "machine": ["net"], "minutes": 3},
     {"test": "test_install_update.py::test_a_failed_update_starts_the_old_version_again",

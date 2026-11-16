@@ -82,6 +82,15 @@ static constexpr ULONG_PTR TERMINAL_HANDOFF_MAGIC = 0x4d524554; // 'TERM'
 static constexpr UINT_PTR AM_UPDATE_CHECK_TIMER_ID = 0xA3D7;
 static constexpr UINT AM_UPDATE_CHECK_INTERVAL_MS = 60u * 60u * 1000u; // 1 hour
 
+// Agentmaster (Updater.h RunningStampKeeper; UPDATER.md "Quiet after a restart"): this process's running stamp,
+// <profile>\last-seen-running.json. The launch reads the previous run's copy and writes its own before the startup update
+// check (HandleCommandlineArgs), which offers no update within 20 minutes of the previous run; a thread-pool timer keeps it
+// fresh every minute (_setupUpdateAutocheck); a normal close marks it closed (the end of the message loop, WM_ENDSESSION).
+// File-static rather than a WindowEmperor member so WindowEmperor.h, which main.cpp and AppHost.cpp include too, needs no
+// Updater.h; one per process either way, because the Emperor is. Its constructor touches nothing (no Win32 call before
+// main), and its destructor never runs (the process ends in TerminateProcess) — if it did, it would stop the timer first.
+static ::Agentmaster::Updater::RunningStampKeeper g_amRunningStamp;
+
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 // A convenience function around CommandLineToArgv.
@@ -834,7 +843,17 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
     {
         const std::wstring_view cmdline{ GetCommandLineW() };
         const bool embedding = cmdline.find(L"-Embedding") != std::wstring_view::npos;
-        if (!embedding && ::Agentmaster::Updater::RunStartupUpdateCheck(nullptr))
+        // Agentmaster (Updater.h RunningStampKeeper; UPDATER.md "Quiet after a restart"): when Agentmaster last ran on this
+        // profile. Read HERE, before anything of this run writes the stamp — BeginRun reads the previous run's copy and
+        // only then writes this run's — and handed to the startup check, which offers no update to a launch within 20
+        // minutes of it (a restart, a swap, a crash's relaunch). Only on the updater's channel, the stamp's one reader. An
+        // `-Embedding` launch is stamped too: it is a run of the app, so a launch right after it is a restart as well.
+        ::Agentmaster::Updater::RunningStamp lastRun;
+        if (::Agentmaster::Updater::IsUpdaterChannel())
+        {
+            lastRun = g_amRunningStamp.BeginRun(::Agentmaster::Profiles::ResolveProfileDir(), ::Agentmaster::Updater::NowUnixMs());
+        }
+        if (!embedding && ::Agentmaster::Updater::RunStartupUpdateCheck(nullptr, lastRun))
         {
             TerminateProcess(GetCurrentProcess(), gsl::narrow_cast<UINT>(0));
             __assume(false);
@@ -1197,6 +1216,12 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+
+    // Agentmaster (Updater.h RunningStampKeeper; UPDATER.md "Quiet after a restart"): the app closes normally — stop the
+    // minute heartbeat and mark the stamp closed, so the next launch judges its 20 quiet minutes from THIS moment. First,
+    // before the persistence work below, so even a throw there leaves the close recorded. A no-op off the updater's
+    // channel (no stamp was begun) and after WM_ENDSESSION already ended it.
+    g_amRunningStamp.EndRun(::Agentmaster::Updater::NowUnixMs());
 
     _finalizeSessionPersistence();
 
@@ -1826,6 +1851,9 @@ LRESULT WindowEmperor::_messageHandler(HWND window, UINT const message, WPARAM c
             RegisterApplicationRestart(nullptr, RESTART_NO_CRASH | RESTART_NO_HANG);
             return TRUE;
         case WM_ENDSESSION:
+            // Agentmaster (Updater.h RunningStampKeeper): Windows may end the process any time after this message returns,
+            // before the message loop below gets to its own EndRun — so the close is recorded here, first. Idempotent.
+            g_amRunningStamp.EndRun(::Agentmaster::Updater::NowUnixMs());
             _finalizeSessionPersistence();
             _skipPersistence = true;
             PostQuitMessage(0);
@@ -1876,6 +1904,9 @@ void WindowEmperor::_setupSessionPersistence(bool enabled)
 // loop always pumps it, so it doesn't depend on the XAML DispatcherTimer (which our DefaultProfile
 // mode never starts). The check itself — the bounded network round-trip AND the modal TaskDialog —
 // runs on a DETACHED background thread (see the WM_TIMER handler) so the UI never blocks.
+//
+// It also starts the running stamp's minute heartbeat (Updater.h RunningStampKeeper), which tells the
+// NEXT launch when this run was last alive: a launch within 20 minutes of it offers no update.
 void WindowEmperor::_setupUpdateAutocheck()
 {
     // Gated to the published RELEASE install (or forced via AGENTMASTER_UPDATE_STARTUP) exactly like
@@ -1887,6 +1918,12 @@ void WindowEmperor::_setupUpdateAutocheck()
     // WM_TIMER is low priority (delivered only when the queue is otherwise idle), which is exactly
     // right for an hourly, non-urgent check. _window exists by now (_createMessageWindow ran above).
     SetTimer(_window.get(), AM_UPDATE_CHECK_TIMER_ID, AM_UPDATE_CHECK_INTERVAL_MS, nullptr);
+    // Agentmaster (Updater.h RunningStampKeeper; UPDATER.md "Quiet after a restart"): keep this run's stamp fresh every
+    // minute — on a thread-pool timer, NOT another WM_TIMER here: this is the one UI thread of every window, and a file
+    // write on a slow or scanned disk would stall all of them. Its point is the run that never closes (a crash, a kill, a
+    // swap's stop): the next launch still finds a "last seen running" at most a minute old. Same channel gate as the
+    // hourly check above (the launch began the stamp under it); a failure to start is logged by the keeper itself.
+    g_amRunningStamp.StartHeartbeat();
     // Anchor the [update] trail: every later "check (periodic) …" line pairs against this arm, so a
     // missing hourly line is diagnosable (timer never armed vs a tick that didn't run). Guarded —
     // the timer is ALREADY armed above; a logging hiccup (profile resolve / alloc) must not take

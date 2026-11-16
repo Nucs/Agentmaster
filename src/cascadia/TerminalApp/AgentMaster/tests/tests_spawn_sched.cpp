@@ -4191,6 +4191,244 @@ void TestUpdaterVersionLogic()
         std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
     }
 
+    // 2026-11-16, the owner's rule: a launch within 20 minutes of the previous run (a restart, a close and reopen, a swap,
+    // a crash's relaunch) offers no update. The previous run is known by its RUNNING STAMP (<profile>\last-seen-running.json:
+    // written at launch, every minute after, and marked closed at a normal close); the startup check judges the launch by
+    // the copy the previous run left (UPDATER.md "Quiet after a restart").
+    {
+        constexpr long long kMin = 60LL * 1000;
+        const long long quiet = U::kQuietAfterLastRunMs;
+        const long long now = 1'800'000'000'000LL;
+        CHECK(quiet == 20 * kMin, "quiet: the window is the owner's 20 minutes");
+
+        // The gate's edges: strictly LESS than 20 minutes apart, on either side of the clock.
+        CHECK(!U::IsWithinQuietAfterLastRun(now, 0, quiet), "quiet: no earlier run known -> the launch may prompt");
+        CHECK(U::IsWithinQuietAfterLastRun(now, now - 1000, quiet), "quiet: a restart 1 s after the last run -> quiet");
+        CHECK(U::IsWithinQuietAfterLastRun(now, now - quiet + 1, quiet), "quiet: 1 ms short of 20 minutes -> still quiet");
+        CHECK(!U::IsWithinQuietAfterLastRun(now, now - quiet, quiet), "quiet: exactly 20 minutes -> 'at least 20 minutes' is met, the launch may prompt");
+        CHECK(!U::IsWithinQuietAfterLastRun(now, now - 25 * kMin, quiet), "quiet: 25 minutes after the last run -> the launch may prompt");
+        CHECK(U::IsWithinQuietAfterLastRun(now, now + 5 * kMin, quiet), "quiet: a stamp 5 min AHEAD (the clock was set back since) -> still a restart");
+        CHECK(!U::IsWithinQuietAfterLastRun(now, now + quiet, quiet), "quiet: a stamp 20+ min ahead proves nothing -> never silences the updater for good");
+        CHECK(!U::IsWithinQuietAfterLastRun(now, now - 1000, 0), "quiet: a zero window turns the rule off");
+        CHECK(!U::IsWithinQuietAfterLastRun(0, 1000, quiet) && !U::IsWithinQuietAfterLastRun(-5, 1000, quiet), "quiet: no launch time -> never quiet");
+
+        // The log's spans: seconds under a minute, FormatSpanShort's minutes above.
+        CHECK(U::FormatAgoShort(42'000) == L"42s" && U::FormatAgoShort(59'999) == L"59s", "quiet: under a minute reads in seconds");
+        CHECK(U::FormatAgoShort(60'000) == L"1m" && U::FormatAgoShort(3 * 60 * kMin + 12 * kMin) == L"3h12m", "quiet: a minute and up reads like FormatSpanShort");
+        CHECK(U::FormatAgoShort(-5) == L"0s", "quiet: a negative span reads 0s");
+
+        // The verdict: the words of the "check (startup) skipped:" line, or "" when the launch may prompt.
+        U::RunningStamp closedRun;
+        closedRun.seenRunningUnixMs = now - 42'000;
+        closedRun.startedUnixMs = closedRun.seenRunningUnixMs - (3 * 60 * kMin + 12 * kMin);
+        closedRun.closed = true;
+        closedRun.pid = 4242;
+        const std::wstring closedVerdict = U::QuietAfterLastRunVerdict(closedRun, now);
+        CHECK(closedVerdict.find(L"the previous run (pid 4242) closed 42s ago, after running 3h12m") != std::wstring::npos,
+              "verdict: a closed run is named by its pid, how long ago it closed, and how long it ran");
+        CHECK(closedVerdict.find(L"within 20m of the last run offers no update") != std::wstring::npos && closedVerdict.find(L"the hourly check asks later") != std::wstring::npos,
+              "verdict: the line says the rule and that the hourly check asks later");
+        U::RunningStamp crashedRun = closedRun;
+        crashedRun.closed = false;
+        crashedRun.seenRunningUnixMs = now - 3 * kMin;
+        CHECK(U::QuietAfterLastRunVerdict(crashedRun, now).find(L"was last seen running 3m ago and ended without closing") != std::wstring::npos,
+              "verdict: a run that never closed is judged by its last stamp and said so");
+        U::RunningStamp aheadRun;
+        aheadRun.seenRunningUnixMs = now + 2 * kMin;
+        CHECK(U::QuietAfterLastRunVerdict(aheadRun, now).find(L"2m AHEAD of this clock") != std::wstring::npos, "verdict: a stamp ahead of the clock says so");
+        CHECK(U::QuietAfterLastRunVerdict(aheadRun, now).find(L"pid") == std::wstring::npos, "verdict: no pid known -> none named");
+        U::RunningStamp staleRun = closedRun;
+        staleRun.seenRunningUnixMs = now - 25 * kMin;
+        CHECK(U::QuietAfterLastRunVerdict(staleRun, now).empty(), "verdict: 25 minutes after the last run -> \"\" (the launch may prompt)");
+        CHECK(U::QuietAfterLastRunVerdict(U::RunningStamp{}, now).empty(), "verdict: no earlier run known -> \"\"");
+
+        // The file: round trip, and everything that must read as "no stamp".
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring dir = std::wstring{ tmp } + L"am-running-stamp-" + std::to_wstring(::GetCurrentProcessId());
+        std::filesystem::create_directories(std::filesystem::path{ dir });
+        const std::wstring file = dir + L"\\" + U::kRunningStampLeaf;
+        const auto writeRaw = [&](const char* text) {
+            std::ofstream f{ std::filesystem::path{ file }, std::ios::binary | std::ios::trunc };
+            f << text;
+        };
+        CHECK(U::ReadRunningStamp(dir).seenRunningUnixMs == 0, "stamp: none yet -> zeros");
+        CHECK(U::ReadRunningStamp(L"").seenRunningUnixMs == 0, "stamp: no profile folder -> zeros");
+        CHECK(U::WriteRunningStamp(dir, closedRun) == ERROR_SUCCESS, "stamp: written");
+        {
+            const auto back = U::ReadRunningStamp(dir);
+            CHECK(back.seenRunningUnixMs == closedRun.seenRunningUnixMs && back.startedUnixMs == closedRun.startedUnixMs && back.closed && back.pid == 4242,
+                  "stamp: every field round-trips");
+        }
+        CHECK(U::WriteRunningStamp(L"", closedRun) == ERROR_INVALID_PARAMETER, "stamp: no folder -> refused");
+        CHECK(U::WriteRunningStamp(dir + L"\\no-such-folder", closedRun) == ERROR_PATH_NOT_FOUND, "stamp: a missing folder -> its Win32 error, nothing thrown");
+        writeRaw("not json");
+        CHECK(U::ReadRunningStamp(dir).seenRunningUnixMs == 0, "stamp: garbage -> zeros (the launch may prompt)");
+        writeRaw("");
+        CHECK(U::ReadRunningStamp(dir).seenRunningUnixMs == 0, "stamp: an empty (torn) file -> zeros");
+        writeRaw("{\"seenRunningUnixMs\":1e30}");
+        CHECK(U::ReadRunningStamp(dir).seenRunningUnixMs == 0, "stamp: an absurd time is refused before any cast");
+        writeRaw("{\"seenRunningUnixMs\":-5}");
+        CHECK(U::ReadRunningStamp(dir).seenRunningUnixMs == 0, "stamp: a negative time -> zeros");
+        writeRaw("{\"seenRunningUnixMs\":\"1800000000000\"}");
+        CHECK(U::ReadRunningStamp(dir).seenRunningUnixMs == 0, "stamp: a time that is no number -> zeros");
+        writeRaw("\xEF\xBB\xBF{\"seenRunningUnixMs\":1800000000000,\"startedUnixMs\":1e20,\"pid\":-1,\"closed\":true}");
+        {
+            const auto odd = U::ReadRunningStamp(dir);
+            CHECK(odd.seenRunningUnixMs == 1'800'000'000'000LL && odd.startedUnixMs == 0 && odd.pid == 0 && odd.closed,
+                  "stamp: a BOM is tolerated, and an absurd start or pid reads as unknown without losing the time");
+        }
+
+        // The keeper: what one run of the app does with the stamp, on a real thread-pool timer.
+        std::error_code stampEc; // the scratch file and folder's removal is best-effort
+        std::filesystem::remove(std::filesystem::path{ file }, stampEc);
+        const long long launch = U::NowUnixMs() - 10'000; // ten seconds "ago", so a tick's real clock is visibly later
+        {
+            U::RunningStampKeeper keeper;
+            CHECK(!keeper.Begun() && !keeper.StartHeartbeat(40), "keeper: nothing runs before BeginRun");
+            const auto previous = keeper.BeginRun(dir, launch);
+            CHECK(previous.seenRunningUnixMs == 0 && keeper.Begun(), "keeper: a first run finds no earlier run");
+            {
+                const auto mine = U::ReadRunningStamp(dir);
+                CHECK(mine.seenRunningUnixMs == launch && mine.startedUnixMs == launch && !mine.closed && mine.pid == ::GetCurrentProcessId(),
+                      "keeper: BeginRun stamps this run at once (started = seen = the launch, not closed, this process)");
+            }
+            CHECK(keeper.BeginRun(dir, launch + 5'000).seenRunningUnixMs == 0 && U::ReadRunningStamp(dir).seenRunningUnixMs == launch,
+                  "keeper: a second BeginRun returns the first reading and writes nothing (this run never judges itself)");
+            CHECK(keeper.StartHeartbeat(40), "keeper: the heartbeat starts");
+            CHECK(!keeper.StartHeartbeat(40), "keeper: one heartbeat per run");
+            bool ticked = false;
+            for (const ULONGLONG deadline = ::GetTickCount64() + 5000; !ticked && ::GetTickCount64() < deadline;)
+            {
+                ::Sleep(20);
+                const auto seen = U::ReadRunningStamp(dir); // a torn read mid-write reads zeros: just "not yet"
+                ticked = seen.seenRunningUnixMs > launch + 5'000 && seen.startedUnixMs == launch && !seen.closed;
+            }
+            CHECK(ticked, "keeper: the heartbeat rewrites the stamp with the current time (a crash leaves a recent 'last seen running')");
+            const long long closeAt = U::NowUnixMs();
+            keeper.EndRun(closeAt);
+            {
+                const auto closed = U::ReadRunningStamp(dir);
+                CHECK(closed.seenRunningUnixMs == closeAt && closed.closed && closed.startedUnixMs == launch, "keeper: EndRun marks the run closed at the close time");
+            }
+            ::Sleep(200); // five periods: a tick that could still land would overwrite the closing stamp now
+            CHECK(U::ReadRunningStamp(dir).closed, "keeper: no tick lands after the closing stamp (the timer stopped first)");
+            keeper.EndRun(closeAt + 60'000);
+            CHECK(U::ReadRunningStamp(dir).seenRunningUnixMs == closeAt, "keeper: a second EndRun changes nothing");
+            CHECK(!keeper.StartHeartbeat(40), "keeper: no heartbeat after EndRun");
+        }
+        {
+            // The NEXT launch reads what that run left, and judges itself by it.
+            U::RunningStampKeeper next;
+            const auto previous = next.BeginRun(dir, U::NowUnixMs());
+            CHECK(previous.closed && previous.startedUnixMs == launch && previous.pid == ::GetCurrentProcessId(), "keeper: the next launch reads the previous run's closing stamp");
+            CHECK(!U::QuietAfterLastRunVerdict(previous, U::NowUnixMs()).empty(), "keeper: ...and a launch right after it is quiet");
+            CHECK(!U::ReadRunningStamp(dir).closed, "keeper: the next launch's own stamp replaced it (running, not closed)");
+            // A keeper that goes out of scope with its heartbeat running stops it (the destructor waits for a tick).
+            CHECK(next.StartHeartbeat(20), "keeper: a second run's heartbeat starts");
+        }
+        {
+            const auto settled = U::ReadRunningStamp(dir).seenRunningUnixMs;
+            ::Sleep(150);
+            CHECK(U::ReadRunningStamp(dir).seenRunningUnixMs == settled && !U::ReadRunningStamp(dir).closed,
+                  "keeper: a destroyed keeper's timer is gone (no tick after it), and it never claims a normal close");
+        }
+
+        // The wiring, ON the updater's channel: RunStartupUpdateCheck returns before the network with the verdict's line.
+        // It reads and writes the PROCESS's profile (ResolveProfileDir), so it runs only in the harness's own scratch
+        // profile (run-m5-tests.bat: %TEMP%\agentmaster-m5-tests) — a direct run from a shell inside the app would reach the
+        // LIVE profile. Belt: that settings.json is postponed first, so a broken gate stops at "postponed" — no network, no
+        // real prompt — and the [update] lines each call wrote tell the two apart. Everything touched is put back.
+        const std::wstring profile = ::Agentmaster::Profiles::ResolveProfileDir();
+        if (U::detail::EndsWithNoCase(profile, L"\\agentmaster-m5-tests"))
+        {
+            const std::wstring settingsPath = profile + L"\\settings.json";
+            const bool hadSettings = ::GetFileAttributesW(settingsPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+            const std::wstring settingsBefore = hadSettings ? U::detail::ReadFileWide(settingsPath) : std::wstring{};
+            wchar_t forceBuf[256];
+            const DWORD forceLen = ::GetEnvironmentVariableW(L"AGENTMASTER_UPDATE_STARTUP", forceBuf, 256);
+            const bool hadForce = forceLen > 0 && forceLen < 256;
+            const std::wstring force = hadForce ? std::wstring{ forceBuf, forceLen } : std::wstring{};
+            wchar_t declinedBuf[256];
+            const DWORD declinedLen = ::GetEnvironmentVariableW(U::kDeclinedEnvVar, declinedBuf, 256);
+            const bool hadDeclined = declinedLen > 0 && declinedLen < 256;
+            const std::wstring declined = hadDeclined ? std::wstring{ declinedBuf, declinedLen } : std::wstring{};
+            // What one call appended to the scratch hooks.log: the log only grows, so the text past its earlier length is
+            // that call's lines (plus, at most, a line another of the harness's threads appended meanwhile — the checks
+            // look for their own words, never for the absence of everything else).
+            const auto logText = [&]() { return U::detail::ReadFileWide(profile + L"\\hooks.log"); };
+            const auto loggedSince = [&](size_t mark) {
+                const std::wstring log = logText();
+                return mark <= log.size() ? log.substr(mark) : log;
+            };
+
+            CHECK(U::WritePostpone(profile, U::NowUnixMs() + 24 * 60 * kMin), "wiring: the scratch profile is postponed (the belt)");
+            ::SetEnvironmentVariableW(L"AGENTMASTER_UPDATE_STARTUP", L"1"); // the channel gate opens (the forced-on test switch)
+
+            U::RunningStamp justClosed;
+            justClosed.seenRunningUnixMs = U::NowUnixMs() - 5'000;
+            justClosed.closed = true;
+            justClosed.pid = 4242;
+            size_t mark = logText().size();
+            CHECK(!U::RunStartupUpdateCheck(nullptr, justClosed), "wiring: a restart 5 s after the last run launches no installer");
+            {
+                const std::wstring said = loggedSince(mark);
+                CHECK(said.find(L"check (startup) skipped: the previous run (pid 4242) closed") != std::wstring::npos && said.find(L"skipped: postponed") == std::wstring::npos,
+                      "wiring: ...and the quiet gate, not the postpone, is why (it runs before everything that could reach the network)");
+            }
+
+            U::RunningStamp longAgo = justClosed;
+            longAgo.seenRunningUnixMs = U::NowUnixMs() - 25 * kMin;
+            mark = logText().size();
+            CHECK(!U::RunStartupUpdateCheck(nullptr, longAgo), "wiring: a launch 25 minutes after the last run passes the gate");
+            {
+                const std::wstring said = loggedSince(mark);
+                CHECK(said.find(L"check (startup) skipped: postponed") != std::wstring::npos && said.find(L"the previous run") == std::wstring::npos,
+                      "wiring: ...on to the usual gates (here the belt's postpone): only a launch within 20 minutes is quiet");
+            }
+
+            mark = logText().size();
+            CHECK(!U::RunStartupUpdateCheck(nullptr), "wiring: no stamp handed over (the default) passes the gate as well");
+            CHECK(loggedSince(mark).find(L"check (startup) skipped: postponed") != std::wstring::npos, "wiring: ...on to the usual gates");
+
+            // The update script's restarted marker wins: that run is silenced whole (the decline latch), and the quiet gate
+            // stays out of it — one reason per launch in the trail.
+            const std::wstring markerPath = profile + L"\\" + U::kRestartedMarkerLeaf;
+            {
+                std::ofstream marker{ std::filesystem::path{ markerPath }, std::ios::binary | std::ios::trunc };
+                marker << "v9.9.9\n"
+                       << U::NowUnixMs() << "\n";
+            }
+            mark = logText().size();
+            CHECK(!U::RunStartupUpdateCheck(nullptr, justClosed), "wiring: the restarted-after-update launch launches no installer");
+            {
+                const std::wstring said = loggedSince(mark);
+                CHECK(said.find(L"the update script started this version again after an update to v9.9.9") != std::wstring::npos && said.find(L"the previous run") == std::wstring::npos,
+                      "wiring: ...the marker's line, and no quiet line beside it");
+                CHECK(U::DeclinedThisRunTag() == L"v9.9.9" && ::GetFileAttributesW(markerPath.c_str()) == INVALID_FILE_ATTRIBUTES,
+                      "wiring: ...the marker was consumed and silenced the whole run (the hourly check too)");
+            }
+
+            // Put everything back: the decline latch, the channel switch, the scratch settings.
+            ::SetEnvironmentVariableW(U::kDeclinedEnvVar, hadDeclined ? declined.c_str() : nullptr);
+            ::SetEnvironmentVariableW(L"AGENTMASTER_UPDATE_STARTUP", hadForce ? force.c_str() : nullptr);
+            if (hadSettings)
+            {
+                U::detail::WriteFileUtf8(settingsPath, settingsBefore);
+            }
+            else
+            {
+                ::DeleteFileW(settingsPath.c_str());
+            }
+        }
+        else
+        {
+            std::wprintf(L"  (skipped: the startup check's wiring runs only in the harness's scratch profile, not %s)\n", profile.c_str());
+        }
+
+        std::filesystem::remove_all(std::filesystem::path{ dir }, stampEc);
+    }
+
     // Full-fidelity envelope: an updater RMW must not disturb ANY other cog setting (the broad
     // "an update choice can never break your settings" guarantee, past the model-only check above).
     {
