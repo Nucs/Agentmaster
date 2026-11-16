@@ -980,22 +980,67 @@ namespace Agentmaster::Msg
                 {
                     return;
                 }
-                const std::wstring source = L"telegram:" + std::to_wstring(msgId);
+                // §21.57.9 fix 2: the new text is READ like a typed message of the topic (ParseRemoteCommand → DecideQueuedEdit). The
+                // edit used to write the RAW text into the prompt, so an edit into /exit, /resume or /config skipped the refusal
+                // tables (§7.2) and was typed into claude. A refused edit keeps the prompt's words. A merged prompt (§21.57.5 🔗)
+                // takes the new words in the PART of the edited message and is joined again.
+                const QueuedEditDecision decision = DecideQueuedEdit(ParseRemoteCommand(text));
+                bool waiting = false;
                 bool replaced = false;
+                std::wstring promptId;
                 _registry->Update(sessionId, [&](SessionInfo& s) {
                     for (auto& q : s.queue)
                     {
-                        if (q.remoteSource == source && q.status == PromptStatus::Pending)
+                        if (!PromptWaits(q) || !PromptHasMessage(q, msgId))
                         {
-                            q.text = text;
-                            q.label = TgFirstLine(text, 56);
-                            replaced = true;
+                            continue;
                         }
+                        waiting = true;
+                        promptId = q.id;
+                        if (decision.outcome != QueuedEditOutcome::Replace)
+                        {
+                            break;
+                        }
+                        if (q.remoteParts.empty())
+                        {
+                            q.text = decision.text;
+                        }
+                        else
+                        {
+                            for (auto& part : q.remoteParts)
+                            {
+                                if (part.messageId == msgId)
+                                {
+                                    part.text = decision.text;
+                                }
+                            }
+                            q.text = MergedRemoteText(q.remoteParts);
+                        }
+                        q.label = TgFirstLine(q.text, 56);
+                        replaced = true;
+                        break;
                     }
                 });
-                if (!replaced)
+                if (!waiting)
                 {
                     _reply(threadId, L"Already sent \x2014 send the change as a new message.", false, json::Value{}, msgId);
+                    return;
+                }
+                if (!replaced)
+                {
+                    _reply(threadId, QueuedEditRefusalHtml(decision), false, json::Value{}, msgId);
+                    LogNav(L"remote telegram edit " + ShortId(sessionId) + L" -> refused:" + (decision.name.empty() ? std::wstring{ L"empty" } : decision.name));
+                    return;
+                }
+                {
+                    // The ticket says so ("✏️ edited HH:MM") at its next render.
+                    std::lock_guard lk{ _mtx };
+                    if (const auto it = _tickets.find(promptId); it != _tickets.end())
+                    {
+                        it->second.editedAtMs = WallMs();
+                        ++_ticketGen[promptId];
+                        _stateDirty = true;
+                    }
                 }
                 return;
             }
@@ -1105,6 +1150,13 @@ namespace Agentmaster::Msg
         {
             return;
         }
+        // §21.57.7: a REPLY made of an X alone (❌ … x) removes the replied-to waiting message, a plus alone (➕ +) queues it again — taken
+        // before a question card's text, so a lone ❌ is never read as a question's answer. A held message was written before its
+        // session existed: no gesture.
+        if (!held && _takeQueueReply(sessionId, msg, threadId))
+        {
+            return;
+        }
         // §21.30: while the session's QUESTION CARD is open, a plain message is the card's — the answer or the note the user asked
         // to write (✍️ / 📝) or replied to the card with, else asked about (the answer, or the next prompt?). A /command stays a
         // command; a message a new thread held was written before any question.
@@ -1174,7 +1226,7 @@ namespace Agentmaster::Msg
         return static_cast<int64_t>(hours) * 3600 * 1000;
     }
 
-    bool MessagingService::_queueRemotePrompt(const std::wstring& sessionId, const std::wstring& text, int64_t messageId, int64_t threadId, bool fromBacklog, int addDirOption)
+    bool MessagingService::_queueRemotePrompt(const std::wstring& sessionId, const std::wstring& text, int64_t messageId, int64_t threadId, bool fromBacklog, int addDirOption, std::wstring* queuedId)
     {
         const auto s = _registry->Get(sessionId);
         if (!s || !s->live)
@@ -1202,6 +1254,7 @@ namespace Agentmaster::Msg
         p.origin = PromptOrigin::Autorun; // every delivery-evidence rule keys on Autorun (QueuedPrompt::remoteSource)
         p.guardPattern = std::wstring{ kAnswersQuestionOk }; // the user's own message is the answer to an open question
         p.remoteSource = L"telegram:" + std::to_wstring(messageId);
+        p.remoteThreadId = threadId; // §21.57: the topic it was written in (a ticket re-posts the words when that topic is gone)
         if (addDir)
         {
             // §21.34: watched from now on — its dialog becomes a card in this topic, answered by a tap or by itself after a minute.
@@ -1221,16 +1274,9 @@ namespace Agentmaster::Msg
         size_t position = 0;
         RemoteWait waits = RemoteWait::None; // §21.44: what the message waits behind, decided with the queue it goes into
         _registry->Update(sessionId, [&](SessionInfo& ss) {
-            // D30: next in line — before the runner's own planned prompts, after earlier remote ones.
-            auto at = ss.queue.end();
-            for (auto it = ss.queue.begin(); it != ss.queue.end(); ++it)
-            {
-                if (it->status == PromptStatus::Pending && it->remoteSource.empty())
-                {
-                    at = it;
-                    break;
-                }
-            }
+            // D30: next in line — before the runner's own planned prompts, after earlier remote ones. §21.57.8: and before every
+            // LEFT-OVER one (FreshRemoteInsertIndex): a left-over prompt held by a Paused runner must never block a new message.
+            auto at = ss.queue.begin() + static_cast<std::ptrdiff_t>(FreshRemoteInsertIndex(ss.queue));
             // §21.44: will it WAIT for a turn (a turn or a delivery in flight, an earlier message ahead)? Read in the update that
             // inserts it, so the state and the queue are those of this very moment: a turn that ends a beat later cannot split
             // the decision from the insertion. Such a message will sit in the topic above the turn that kept it waiting, so its
@@ -1247,6 +1293,12 @@ namespace Agentmaster::Msg
         {
             std::lock_guard lk{ _mtx };
             _reacted[p.id] = PromptStatus::Pending;
+        }
+        // §21.57.9 fix 1: where the ✍ goes, so it comes off when the prompt leaves the queue by any way.
+        _noteReactedWhere(p.id, sessionId, PromptMessageIds(p));
+        if (queuedId)
+        {
+            *queuedId = p.id; // §21.57.7: a ➕ re-queue's post becomes this prompt's ticket
         }
         _react(messageId, L"\x270D");
         LogNav(L"remote telegram queue " + ShortId(sessionId) + L" chars=" + std::to_wstring(text.size()) + (fromBacklog ? L" (from the backlog)" : L""));
@@ -1316,7 +1368,8 @@ namespace Agentmaster::Msg
         }
         const bool sendNow = action == SteerAction::Send;
         const int64_t nowMs = WallMs();
-        const QueuedPrompt p = BuildSteerPrompt(NewSessionId(), words, msgId, sendNow, nowMs);
+        QueuedPrompt p = BuildSteerPrompt(NewSessionId(), words, msgId, sendNow, nowMs);
+        p.remoteThreadId = threadId; // §21.57: the topic it was written in (as every message of the topic records it)
         // The reaction's record and the watch go in BEFORE the prompt reaches the queue: the tick may meet the prompt the moment it
         // is there, and a prompt it meets already taken (Sent and echoed) with no record of it is recorded WITHOUT its 👨‍💻 reaction
         // (_syncReactions' rule for the prompts of an earlier run).
@@ -1328,6 +1381,7 @@ namespace Agentmaster::Msg
                 _steers[p.id] = SteerWatch{ sessionId, msgId, threadId, nowMs };
             }
         }
+        _noteReactedWhere(p.id, sessionId, PromptMessageIds(p)); // §21.57.9 fix 1: a steer removed while it waits loses its ✍ too
         if (addDir)
         {
             // §21.34: its dialog's watch, BEFORE the send (the watch reads the transcript from where it stands now). A prompt that
@@ -1512,31 +1566,14 @@ namespace Agentmaster::Msg
         }
         if (name == L"queue")
         {
-            std::wstring html = L"<b>Queue</b>";
-            size_t n = 0;
-            std::vector<std::vector<std::pair<std::wstring, std::wstring>>> rows;
-            for (const auto& q : s->queue)
-            {
-                if (q.status != PromptStatus::Pending)
-                {
-                    continue;
-                }
-                ++n;
-                html += L"\n" + std::to_wstring(n) + L". " + (q.remoteSource.empty() ? L"" : L"\U0001F4F1 ") + TgEscapeHtml(TgFirstLine(q.text, 120));
-                if (n <= 8)
-                {
-                    rows.push_back({ { L"\x2716 " + std::to_wstring(n), _tokenFor(L"unqueue", sessionId, q.id, kTokenTtlMsFor(2)) } });
-                }
-            }
-            if (n == 0)
-            {
-                html += L"\nempty";
-            }
-            else
-            {
-                rows.push_back({ { L"\x25B6 Send next now", L"c:sendnow:" + sessionId } });
-            }
-            _reply(threadId, html, false, rows.empty() ? json::Value{} : _buttons(rows));
+            // §21.57.5: the LIVE list — every waiting prompt with its keycap (the tickets' numbers), the phone's with why they wait,
+            // a ✖ per prompt and ▶ Send next now. Its buttons are stateless "pq:" ones that edit the list IN PLACE, so its numbers
+            // stay right after a ✖ (it used to answer below the list and keep the old numbers, which a later /unqueue n then missed).
+            // The title row goes under its header line in the text itself, so every edit keeps it (§21.54: an edit adds none).
+            std::wstring html;
+            json::Value markup;
+            _queueListParts(*s, html, markup);
+            _sendText(threadId, WithTopicTitleRowAfterHeader(html, _titleRowClassic(threadId)), true, SendPriority::Final, L"", markup, nullptr, msgId, true, nullptr, nullptr, false);
             done(L"ok");
             return;
         }
@@ -2907,6 +2944,14 @@ namespace Agentmaster::Msg
             answer(_onQuestionTap(data, threadId, messageId));
             return;
         }
+        // §21.57: a QUEUE button ("pq:<verb>:<id>[:<arg>]") — a ticket's ⚡ Steer / 🗑 Delete / ⏫ Move Up / 🔗 Merge ↑ (and its ✅ / ✕),
+        // ↩ Undo, 🔁 Retry, 🗑 Dismiss, and the /queue list's ✖ and ▶. Stateless: it acts on the queue as it is now. The toast says what
+        // happened; the tap stays busy until the tickets' edits are in (§21.28).
+        if (data.rfind(kQueueCallbackPrefix, 0) == 0)
+        {
+            answer(_onQueueTap(data, threadId, messageId));
+            return;
+        }
         // §21.34: a MENU CARD's option ("tm:<card>:<digit>") — a local command's dialog (/add-dir's) answered from here. The toast
         // says what happens; the tap stays busy until the hosting window pressed the option (or said why it did not).
         if (data.rfind(L"tm:", 0) == 0)
@@ -3432,6 +3477,18 @@ namespace Agentmaster::Msg
 
     void MessagingService::_sendnow(const std::wstring& sessionId, int64_t threadId)
     {
+        // §21.57.6: when the next prompt is a phone message, its message may have been deleted in Telegram since: the delete check
+        // first (a copy of the prompt; the check removes a deleted one itself), and a deleted message is never sent.
+        if (const auto before = _registry->Get(sessionId))
+        {
+            const auto next = std::find_if(before->queue.begin(), before->queue.end(), [](const QueuedPrompt& q) { return q.status == PromptStatus::Pending; });
+            if (next != before->queue.end() && IsTopicPrompt(*next) && !_remotePreSendCheck(sessionId, *next))
+            {
+                _reply(threadId, L"The next queued message was deleted in Telegram: it is left out. /sendnow again sends the one after it.", false);
+                LogNav(L"remote telegram send-now " + ShortId(sessionId) + L" -> left-out:deleted");
+                return;
+            }
+        }
         // The Manager's Send-now recipe: mark the first Pending prompt Sent, then the ONE send seam.
         std::wstring text;
         std::wstring promptId;
@@ -7082,6 +7139,8 @@ namespace Agentmaster::Msg
                    L"/download &lt;path&gt; \x2014 a file's download link (absolute, or relative to the session's folder), with \U0001F4E4 Send as file\n"
                    // §21.47: /enter submits what already sits in the box at the PC (one Enter, read back; never into a menu or dialog).
                    L"/enter \x2014 press Enter at the PC: the prompt waiting in the session's input box is submitted (nothing is pressed into a menu, a dialog or an empty box)\n"
+                   // §21.57: the ticket under a waiting message, and the two reply gestures.
+                   L"A message that has to wait gets a ticket under it (its number, why it waits): \x26A1 Steer sends it now, \U0001F5D1 Delete takes it out (\x21A9 Undo for 2 minutes), \x23EB Move Up, \U0001F517 Merge \x2191 joins it to the one above (after a preview). Reply \x274C to a waiting message (or voice note) to remove it, \x2795 to any earlier message to queue it again; deleting your message drops it before it is sent; an edit changes it\n"
                    L"/queue \x00B7 /sendnow \x00B7 /steer &lt;text&gt; \x00B7 /unqueue n\n/runner auto|paused\n/pin \x00B7 /unpin \x2014 never idle\n/wake \x00B7 /moveidle \x00B7 /markunread\n/rename &lt;title&gt;\n/favorite \x00B7 /tags \x00B7 /tag x \x00B7 /untag x\n"
                    L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /screenimage\n"
                    // §21.40: /status sends the card copy, then what Claude Code's own /status dialog shows.

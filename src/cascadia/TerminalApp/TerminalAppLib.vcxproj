@@ -236,6 +236,10 @@
     <ClInclude Include="AgentMaster\MessagingStartNote.h" />
     <ClInclude Include="AgentMaster\MessagingTaps.h" />
     <ClInclude Include="AgentMaster\MessagingSteer.h" />
+    <!-- Agentmaster (MESSAGING.md section 21.57): queue management from a topic - the tickets under waiting messages, their
+         buttons, why a message waits, the merge text, the X / plus reply gestures, an edit's reading, the /queue list and the
+         tickets' state-file form (header-only, pure). -->
+    <ClInclude Include="AgentMaster\MessagingQueueTickets.h" />
     <!-- Agentmaster (MESSAGING.md section 21.43, VOICE.md): VOICE NOTES - the session vocabulary and the dictionary pass
          (VoiceVocabulary.h, pure), the voice worker protocol (VoiceProtocol.h, pure), the transcriber seam (VoiceBridge.h),
          the worker process, the endpoint client, the spell checker word test, the correction layer (VoiceCorrect.h: its
@@ -673,6 +677,12 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\SessionLink.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <!-- Agentmaster (MESSAGING.md section 21.57): queue management from a topic - the service's tickets (posted, edited, ended),
+         the queue buttons (Steer, Delete, Move Up, Merge, Undo, Retry, Dismiss, the /queue list's), the X / plus replies and the
+         check that leaves a message deleted in Telegram out of its send. Plain C++, no PCH. -->
+    <ClCompile Include="AgentMaster\Messaging.Queue.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <!-- Agentmaster (MESSAGING.md section 21.32.4): the service's FILE LINKS - the linked set, the session keys, the server's

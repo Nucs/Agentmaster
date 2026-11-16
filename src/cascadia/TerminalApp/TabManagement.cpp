@@ -1275,6 +1275,8 @@ namespace winrt::TerminalApp::implementation
                 _sessionRegistry->Update(id, [&leftWaiting](::Agentmaster::SessionInfo& s) {
                     s.live = false;
                     leftWaiting = ::Agentmaster::DemoteWaitingOnClose(s);
+                    // MESSAGING.md §21.57.8: a pane close is the user's close: the phone's waiting messages become LEFT OVER.
+                    ::Agentmaster::MarkRemotePromptsLeftOver(s.queue);
                 });
                 _sessionRegistry->SetInjector(id, nullptr);
                 _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector

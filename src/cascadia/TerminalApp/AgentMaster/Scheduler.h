@@ -124,7 +124,9 @@ namespace Agentmaster
         {
             return 0; // hold disabled
         }
-        if (!prompt.remoteSource.empty() && settleMs > kRemotePromptSettleMs)
+        // MESSAGING.md §21.57.8: only a FRESH remote prompt has the short window — a LEFT-OVER one (its session was closed or
+        // deactivated while it waited) is a runner prompt now and waits out the full settle like the runner's own.
+        if (IsFreshRemotePrompt(prompt) && settleMs > kRemotePromptSettleMs)
         {
             settleMs = kRemotePromptSettleMs; // the user's own message from the phone (see kRemotePromptSettleMs)
         }
@@ -230,15 +232,17 @@ namespace Agentmaster
     // box state, the pickup guard, the settle hold — shortened to kRemotePromptSettleMs for it — and the
     // spacing) still apply — they protect the session, not the runner's budget. PURE; shared by DecideAdvance
     // and the scheduler's idle-start trigger.
+    // MESSAGING.md §21.57.8: a LEFT-OVER remote prompt (QueuedPrompt::remoteLeftOver — its session was closed or deactivated while
+    // it waited) answers false: it lost the pass and goes by the runner's rules, like every prompt the PC queued.
     //   s       — the session (its queue read).
-    //   returns — true when the first Pending prompt carries a remoteSource.
+    //   returns — true when the first Pending prompt is a FRESH remote one (IsFreshRemotePrompt).
     inline bool NextPromptIsRemote(const SessionInfo& s) noexcept
     {
         for (const auto& q : s.queue)
         {
             if (q.status == PromptStatus::Pending)
             {
-                return !q.remoteSource.empty();
+                return IsFreshRemotePrompt(q);
             }
         }
         return false;
@@ -426,7 +430,10 @@ namespace Agentmaster
         // (the message just stays queued), and a Held prompt could otherwise strand — OnObserved's
         // idle-start re-trigger only watches Pending prompts. A per-prompt opt-out (guardPattern
         // == kAnswersQuestionOk) marks a prompt that is itself the answer, so it still fires through.
-        const bool overridesQuestionGuard = (item.guardPattern == kAnswersQuestionOk);
+        // MESSAGING.md §21.57.8: a LEFT-OVER remote prompt keeps its guardPattern (no seam rewrites a prompt's own fields), but
+        // it no longer answers a question by itself — written before its session was closed or parked, its words were never the
+        // answer to a question that session asks now; the runner's question guard holds it like the runner's own prompts.
+        const bool overridesQuestionGuard = (item.guardPattern == kAnswersQuestionOk) && !item.remoteLeftOver;
         if (s.lastMessageWasQuestion && !overridesQuestionGuard)
         {
             plan.reason = L"question pending — stay queued and wait (treated like running)";
@@ -942,6 +949,20 @@ namespace Agentmaster
     //   paused — true == every session's automatic send is held; false == resumed.
     using GlobalPauseObserver = std::function<void(bool paused)>;
 
+    // Agentmaster (MESSAGING.md §21.57.6 — a message deleted in Telegram is left out): the check a REMOTE prompt (one with a
+    // remoteSource, fresh or left over) passes right before the auto-advance marks it Sent. Telegram tells a bot nothing when the
+    // user deletes a message, but a reaction call on a deleted one answers "message to react not found", so the Telegram
+    // service (the only setter) asks that — and when the user's message (or every part of a merged prompt) is gone, it removes
+    // the prompt from the queue itself, through the registry. Called on the scheduler's worker thread, OUTSIDE every lock; it
+    // may block for up to a few seconds (one paced Telegram call), and it must answer "keep" whenever it cannot tell: a lost
+    // prompt costs more than a stray one.
+    //   sessionId — the session whose queue holds the prompt.
+    //   prompt    — a COPY of the prompt the plan would send.
+    //   returns   — true = send as planned (or the answer was unknown); false = the check changed the queue (the prompt or a part
+    //               of it is gone), so the plan must be decided again.
+    //   throws    — anything the setter's code throws; the scheduler logs it (Rule #18) and sends as planned.
+    using RemotePreSendCheck = std::function<bool(const std::wstring& sessionId, const QueuedPrompt& prompt)>;
+
     // The engine half of the PROMPT QUEUE RUNNER (its UI name since 2026-10-09; "Tests Autorunner"
     // before, and still "autorunner" in every identifier, persisted key and log line) — ONE per process
     // (Engine.cpp), shared by every window. It has two jobs that are deliberately separable:
@@ -1050,6 +1071,15 @@ namespace Agentmaster
         //   returns — the window in milliseconds (0 == disabled).
         int64_t StateSettleMs() const noexcept { return _stateSettleMs.load(); }
 
+        // Agentmaster (MESSAGING.md §21.57.6): install or clear the check a remote prompt passes right before the auto-advance
+        // marks it Sent (RemotePreSendCheck). The Telegram service installs it when the bot starts and clears it FIRST when the
+        // bot stops; a check already running on the worker finishes with the copy it took (the service waits for it before it
+        // frees what the check uses). Only the auto-advance asks it: Send now and the /handover pump are the user's own sends.
+        // Thread-safe (the copy is taken under the scheduler's lock and called outside it).
+        //   check  — the check; an empty function (or none) clears it.
+        //   throws — std::bad_alloc when the copy cannot be allocated (the previous check then stays installed).
+        void SetRemotePreSendCheck(RemotePreSendCheck check);
+
     private:
         void _worker() noexcept;
         void _process(const std::wstring& id);
@@ -1123,5 +1153,8 @@ namespace Agentmaster
         std::atomic<bool> _autoAdvance{ true };
         // The STATE SETTLE window handed to DecideAdvance (SetStateSettleMs; DELIVERY.md §16).
         std::atomic<int64_t> _stateSettleMs{ kStateSettleMs };
+        // MESSAGING.md §21.57.6: the remote prompt's check before the send (SetRemotePreSendCheck). Guarded by _mtx; held as a
+        // shared pointer so the worker can copy it under the lock and call it outside, while the service may clear it at any time.
+        std::shared_ptr<const RemotePreSendCheck> _remotePreSendCheck;
     };
 }

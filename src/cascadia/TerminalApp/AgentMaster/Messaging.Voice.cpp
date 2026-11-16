@@ -758,7 +758,28 @@ namespace Agentmaster::Msg
                 {
                     echoText += L"\n\x26A0\xFE0F not corrected: " + TgEscapeHtml(r.correctionError);
                 }
-                _reply(threadId, echoText, false, json::Value{}, messageId);
+                // §21.57.7: the echo's id is remembered with its note's, so a ❌ or ➕ REPLY to the echo acts on the note's prompt (a reply
+                // carries only the message it quotes, never what that one quoted). Otherwise exactly _reply's send: silent, quoting the note.
+                auto self = weak_from_this();
+                const int64_t noteId = messageId;
+                _sendText(threadId, echoText, true, SendPriority::Final, L"", json::Value{}, [self, noteId](const TgResult& sent) {
+                    const int64_t echoId = sent.ok ? sent.result.I64At(L"message_id", 0) : 0;
+                    if (echoId <= 0)
+                    {
+                        return;
+                    }
+                    const auto me = self.lock();
+                    if (!me)
+                    {
+                        return;
+                    }
+                    std::lock_guard lk{ me->_mtx };
+                    me->_voiceEchoNotes[echoId] = noteId;
+                    while (me->_voiceEchoNotes.size() > kVoiceEchoNotesMax)
+                    {
+                        me->_voiceEchoNotes.erase(me->_voiceEchoNotes.begin()); // the oldest echo (message ids grow)
+                    }
+                }, messageId);
             }
             const std::wstring correction = !r.correctionError.empty() ? L", correction failed: " + r.correctionError
                                             : r.correctionMs > 0       ? (r.corrected ? L", corrected in " : L", correction kept it, ") +

@@ -440,6 +440,55 @@ namespace Agentmaster
             // Re-decided under the SAME rules after the throttle sleep — the settle window included, so a
             // status change that landed during the sleep re-arms the hold instead of sending through it.
             auto plan2 = DecideAdvance(*s2, NowMs(), _registry->LastHumanInputUnixMs(id), _globalPause.load(), _stateSettleMs.load());
+            // Agentmaster (MESSAGING.md §21.57.6 — a message deleted in Telegram is left out): a REMOTE prompt passes the
+            // Telegram service's check before it is marked Sent. The check may take seconds (one paced Telegram call) and may
+            // remove the prompt (or a deleted part of a merged one), so the plan is decided AGAIN after every check — the state
+            // may have moved meanwhile — and a plan that now names ANOTHER remote prompt is checked in turn. Bounded: a prompt is
+            // checked once per pass, and after kMaxRemotePreSendChecks rounds the plan goes as decided (a stray send costs less
+            // than a stalled queue). The check is copied under the lock and called outside it (it may call into the registry).
+            {
+                std::shared_ptr<const RemotePreSendCheck> check;
+                {
+                    std::lock_guard lk{ _mtx };
+                    check = _remotePreSendCheck;
+                }
+                constexpr int kMaxRemotePreSendChecks = 4;
+                std::unordered_set<std::wstring> checkedIds;
+                for (int round = 0; check && *check && round < kMaxRemotePreSendChecks; ++round)
+                {
+                    if (plan2.action != AdvanceAction::Send || plan2.promptIndex >= s2->queue.size())
+                    {
+                        break;
+                    }
+                    const QueuedPrompt candidate = s2->queue[plan2.promptIndex]; // a COPY: s2 is replaced below
+                    if (candidate.remoteSource.empty() || !checkedIds.insert(candidate.id).second)
+                    {
+                        break; // not a remote prompt, or this pass checked it already (it was kept): send it
+                    }
+                    bool keep = true;
+                    try
+                    {
+                        keep = (*check)(id, candidate);
+                    }
+                    catch (...)
+                    {
+                        // Rule #18. Recovery: the prompt goes as planned — the check could not tell, and a lost prompt costs
+                        // more than a stray one.
+                        LogSwallowedException(L"Scheduler::_process (the remote prompt's pre-send check)");
+                        keep = true;
+                    }
+                    s2 = _registry->Get(id);
+                    if (!s2)
+                    {
+                        return;
+                    }
+                    plan2 = DecideAdvance(*s2, NowMs(), _registry->LastHumanInputUnixMs(id), _globalPause.load(), _stateSettleMs.load());
+                    if (!keep)
+                    {
+                        AppendStateLog(L"autorunner.log", L"[pre-send] " + id + L" a remote prompt's message was deleted in Telegram: left out, the plan decided again\n");
+                    }
+                }
+            }
             if (plan2.action == AdvanceAction::Send)
             {
                 std::wstring text;
@@ -792,5 +841,14 @@ namespace Agentmaster
                 return;
             }
         }
+    }
+
+    void Scheduler::SetRemotePreSendCheck(RemotePreSendCheck check)
+    {
+        // The new copy is made BEFORE the lock (an allocation failure throws and leaves the installed check as it was); the swap
+        // under the lock is all the worker can race with — it copies the pointer under the same lock and calls its own copy.
+        std::shared_ptr<const RemotePreSendCheck> next = check ? std::make_shared<const RemotePreSendCheck>(std::move(check)) : nullptr;
+        std::lock_guard lk{ _mtx };
+        _remotePreSendCheck = std::move(next);
     }
 }

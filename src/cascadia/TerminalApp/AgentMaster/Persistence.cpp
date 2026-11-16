@@ -564,6 +564,28 @@ namespace Agentmaster
         {
             o.Set(L"remoteQueuedBusyUnixMs", json::Value::MkNum(static_cast<double>(p.remoteQueuedBusyUnixMs)));
         }
+        // Agentmaster (MESSAGING.md §21.57): the topic the remote prompt was written in, the messages a merged one came from, and
+        // the left-over mark. Each is omitted at its default, so a sessions.json that has none is byte-unchanged.
+        if (p.remoteThreadId > 0)
+        {
+            o.Set(L"remoteThreadId", json::Value::MkNum(static_cast<double>(p.remoteThreadId)));
+        }
+        if (!p.remoteParts.empty())
+        {
+            auto parts = json::Value::MkArr();
+            for (const auto& part : p.remoteParts)
+            {
+                auto po = json::Value::MkObj();
+                po.Set(L"messageId", json::Value::MkNum(static_cast<double>(part.messageId)));
+                po.Set(L"text", json::Value::MkStr(part.text));
+                parts.Push(std::move(po));
+            }
+            o.Set(L"remoteParts", std::move(parts));
+        }
+        if (p.remoteLeftOver)
+        {
+            o.Set(L"remoteLeftOver", json::Value::MkBool(true));
+        }
         return o;
     }
 
@@ -589,6 +611,28 @@ namespace Agentmaster
         // MESSAGING.md §21.44: absent (an older file, or a prompt that never waited) => 0. A negative value (a hand-edited
         // file) reads as 0 too: the mirror's test is "> 0", and a stray number must not post a "sent from the queue" line.
         p.remoteQueuedBusyUnixMs = (std::max)(int64_t{ 0 }, v.I64At(L"remoteQueuedBusyUnixMs"));
+        // MESSAGING.md §21.57: absent (an older file, a prompt that is not remote) => 0 / no parts / not left over. A negative
+        // thread (a hand-edited file) reads as unknown, and a part without text is dropped: it would put an empty line into the
+        // merged prompt.
+        p.remoteThreadId = (std::max)(int64_t{ 0 }, v.I64At(L"remoteThreadId"));
+        if (const auto* parts = v.Find(L"remoteParts"); parts && parts->type == json::Value::Type::Arr)
+        {
+            for (const auto& po : parts->arr)
+            {
+                if (po.type != json::Value::Type::Obj)
+                {
+                    continue;
+                }
+                RemotePromptPart part;
+                part.messageId = (std::max)(int64_t{ 0 }, po.I64At(L"messageId"));
+                part.text = po.StrAt(L"text");
+                if (!part.text.empty())
+                {
+                    p.remoteParts.push_back(std::move(part));
+                }
+            }
+        }
+        p.remoteLeftOver = v.BoolAt(L"remoteLeftOver", false);
         // `echoed` is transient (not persisted): a reloaded Sent prompt's echo already happened in
         // a past run (or never will) — so mark it CONSUMED on load (DELIVERY.md RC3). Left false,
         // every restored Sent prompt read as an in-flight, un-acknowledged send: the Enter-retry

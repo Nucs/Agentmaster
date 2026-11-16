@@ -1740,6 +1740,9 @@ namespace winrt::TerminalApp::implementation
             _sessionRegistry->Update(id, [&leftWaiting](::Agentmaster::SessionInfo& s) {
                 s.live = false;
                 leftWaiting = ::Agentmaster::DemoteWaitingOnClose(s);
+                // MESSAGING.md §21.57.8: the USER's close also makes the phone's waiting messages LEFT OVER (runner prompts from
+                // now on), in the same mutation, so one notify carries the close, the state and the queue.
+                ::Agentmaster::MarkRemotePromptsLeftOver(s.queue);
             });
             _sessionRegistry->SetInjector(id, nullptr);
             _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
@@ -1921,6 +1924,9 @@ namespace winrt::TerminalApp::implementation
             _sessionRegistry->Update(id, [&leftWaiting](::Agentmaster::SessionInfo& s) {
                 s.live = false;
                 leftWaiting = ::Agentmaster::DemoteWaitingOnClose(s);
+                // MESSAGING.md §21.57.8: the USER's close also makes the phone's waiting messages LEFT OVER (runner prompts from
+                // now on), in the same mutation, so one notify carries the close, the state and the queue.
+                ::Agentmaster::MarkRemotePromptsLeftOver(s.queue);
             });
             _sessionRegistry->SetInjector(id, nullptr);
             _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
@@ -2139,6 +2145,9 @@ namespace winrt::TerminalApp::implementation
             _sessionRegistry->Update(sessionId, [&leftWaiting](::Agentmaster::SessionInfo& s) {
                 s.live = false;
                 leftWaiting = ::Agentmaster::DemoteWaitingOnClose(s);
+                // MESSAGING.md §21.57.8: the USER's close also makes the phone's waiting messages LEFT OVER (runner prompts from
+                // now on), in the same mutation, so one notify carries the close, the state and the queue.
+                ::Agentmaster::MarkRemotePromptsLeftOver(s.queue);
             });
             _sessionRegistry->SetInjector(sessionId, nullptr);
             _sessionRegistry->SetPromptSubmitter(sessionId, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
@@ -3806,6 +3815,9 @@ namespace winrt::TerminalApp::implementation
             s.live = true;
             s.pid = 0;
             s.started = false;
+            // MESSAGING.md §21.57.8: a Deactivate is the user's park — the phone's messages still waiting in the queue become
+            // LEFT OVER (runner prompts: they go once the tab is active again and its runner is Auto), in this same mutation.
+            ::Agentmaster::MarkRemotePromptsLeftOver(s.queue);
             // Agentmaster (CUT-OFF TURNS — HOOKS.md "Cut-off turns"): a park ends the claude. A turn
             // that was in flight is cut off by it — remember that before the normalization
             // (RestoredMidTurnFlag), exactly as the sessions.json load does for a restored tab.

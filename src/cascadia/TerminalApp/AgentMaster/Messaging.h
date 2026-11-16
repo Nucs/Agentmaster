@@ -68,6 +68,7 @@
 #include "MessagingSessionControl.h" // §21.41: the card's ⎋ Esc and 🌙 Deactivate (the window actions, its decisions, the answers' words and texts)
 #include "MessagingEnter.h" // §21.47: /enter, ONE Enter in the terminal (the window action, its decision, the read-back, the answers and texts)
 #include "MessagingFromQueue.h" // §21.44: a topic message that waited in the queue (when it waits, the mirror's test, its 🫡)
+#include "MessagingQueueTickets.h" // §21.57: queue management from a topic (the tickets, their buttons, the ❌ / ➕ replies, an edit's reading)
 #include "MessagingOutbox.h" // §21.50: the durable outbox's pure core (the journal's lines and fold, the answer table, the classes, lanes, probes)
 #include "MessagingOutboxJournal.h" // §21.50: the durable outbox's files (the journal, dead.jsonl, .lock, the flusher)
 #include "TuiMenus.h" // §21.34: a local command's dialog answered from Telegram (/add-dir: the screen parser, the press, the card)
@@ -1970,10 +1971,12 @@ namespace Agentmaster::Msg
         /// <param name="addDirOption">§21.25.9: for a "/add-dir &lt;path&gt;", the dialog's option to press as soon as the dialog shows
         /// (1 for this session, 2 remember it) — chosen in a new thread's ➕ message before the session existed, so nobody is asked
         /// again and no 60 s default runs; 0 (the default) asks on the card as before. Ignored for any other text.</param>
+        /// <param name="queuedId">§21.57.7: receives the new prompt's id when it was queued (a ➕ re-queue's own post becomes its ticket);
+        /// nullptr (the default) = not wanted.</param>
         /// <returns>True when the prompt went into the queue; false when the session is closed or the text was refused (each answered
         /// in the topic).</returns>
         /// <exception cref="std::bad_alloc">If the prompt, a reply or a log line cannot be allocated.</exception>
-        bool _queueRemotePrompt(const std::wstring& sessionId, const std::wstring& text, int64_t messageId, int64_t threadId, bool fromBacklog, int addDirOption = 0);
+        bool _queueRemotePrompt(const std::wstring& sessionId, const std::wstring& text, int64_t messageId, int64_t threadId, bool fromBacklog, int addDirOption = 0, std::wstring* queuedId = nullptr);
         /// <summary>
         /// Runs an Agentmaster /command in a session's topic — typed, or a card button that names one (§21.24) — and replies in the
         /// topic (a refused or unknown one says why). §21.28: called from a tapped button, it runs inside the tap's scope, so its
@@ -2023,6 +2026,170 @@ namespace Agentmaster::Msg
         /// <param name="s">The session (the tick's snapshot).</param>
         /// <exception cref="std::bad_alloc">If a notice cannot be allocated.</exception>
         void _sweepSteers(const SessionInfo& s);
+
+        // ----- §21.57: queue management from a topic (Messaging.Queue.cpp) -----
+
+        /// <summary>
+        /// §21.57.4, once per tick and topic (after _sweepSteers): keeps the topic's QUEUE TICKETS in step with the queue. A waiting
+        /// phone prompt that has to wait (DecideTicketWhy) gets a ticket — a reply under its message, or a post of its words when the
+        /// message went with an older topic —, every live ticket is re-rendered when its place or reason changed, and a ticket whose
+        /// prompt left the waiting set ends (picked up: deleted; failed: the notice with 🔁 Retry · 🗑 Dismiss; removed anywhere:
+        /// "Removed" with ↩ Undo; merged; deleted in Telegram). Tickets of OTHER sessions in this thread (a /clear's old conversation)
+        /// are rendered from their own session's record. Also queues the ➕ posts the send thread answered (_againPending). Tick
+        /// thread (a tap calls it for one topic through _syncTicketsOf).
+        /// </summary>
+        /// <param name="sessionId">The topic's session.</param>
+        /// <param name="threadId">The topic.</param>
+        /// <param name="s">The session (the tick's snapshot).</param>
+        /// <exception cref="std::bad_alloc">If a record, a render or an outbox item cannot be allocated.</exception>
+        void _syncTickets(const std::wstring& sessionId, int64_t threadId, const SessionInfo& s);
+        /// <summary>
+        /// §21.57: _syncTickets for one session NOW, with a fresh registry read — what a tap calls after it changed the queue, so the
+        /// numbers of every ticket follow at once (the tap's answer then waits for those edits, §21.28). Nothing when the session
+        /// has no topic. Any thread but under no lock.
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <exception cref="std::bad_alloc">If the read or a render cannot be allocated.</exception>
+        void _syncTicketsOf(const std::wstring& sessionId);
+        /// <summary>
+        /// §21.57.4: renders ONE ticket record and sends what changed — a post (its message id comes back on the send thread), an
+        /// edit, or a delete — or nothing when the render's hash is what the message shows. The render is computed outside the lock
+        /// and committed only when the record's generation is still the one it read (a newer change renders itself). An ended
+        /// ticket whose last render is in is forgotten. Any thread but under no lock.
+        /// </summary>
+        /// <param name="promptId">The ticket's prompt.</param>
+        /// <param name="s">The session whose queue holds the prompt (nullptr = its record is gone: the ticket ends as Gone).</param>
+        /// <param name="tapPriority">True from a tap (the answer's priority: the button's spinner waits for it); false from the tick.</param>
+        /// <exception cref="std::bad_alloc">If the render or an outbox item cannot be allocated.</exception>
+        void _renderTicket(const std::wstring& promptId, const SessionInfo* s, bool tapPriority);
+        /// <summary>
+        /// §21.57.9 fix 3: a phone prompt FAILED (a lost send, a refused delivery): its ticket becomes the failure notice with
+        /// 🔁 Retry · 🗑 Dismiss, or — a prompt that had no ticket — a new notice is recorded for the tick to post as a reply under
+        /// its message (today's 👎 line, with the two buttons and without the /sendnow advice that sent another prompt). Tick thread
+        /// (_syncReactions).
+        /// </summary>
+        /// <param name="s">The session (its runner's mode goes into the notice).</param>
+        /// <param name="q">The failed prompt.</param>
+        /// <param name="threadId">The session's topic.</param>
+        /// <exception cref="std::bad_alloc">If the record cannot be allocated.</exception>
+        void _failTicket(const SessionInfo& s, const QueuedPrompt& q, int64_t threadId);
+        /// <summary>
+        /// §21.57.5: a tapped QUEUE button ("pq:&lt;verb&gt;:&lt;id&gt;[:&lt;arg&gt;]", ParseQueueCallback) — ⚡ Steer, 🗑 Delete, ⏫ Move Up,
+        /// 🔗 Merge ↑ and its ✅ / ✕, ↩ Undo, 🔁 Retry, 🗑 Dismiss, and the /queue list's ✖ and ▶ Send next now. Each acts on the queue
+        /// as it is NOW (a prompt that is gone answers so). Poll thread, inside the tap's scope (its edits hold the answer).
+        /// </summary>
+        /// <param name="data">The button's data.</param>
+        /// <param name="threadId">The thread the button sits in.</param>
+        /// <param name="messageId">The message the button sits on (the /queue list is edited in place).</param>
+        /// <returns>The tap's toast ("" = none).</returns>
+        /// <exception cref="std::bad_alloc">If a reply, a render or a hold cannot be allocated.</exception>
+        std::wstring _onQueueTap(const std::wstring& data, int64_t threadId, int64_t messageId);
+        /// <summary>
+        /// §21.57.7: a REPLY made of an X alone (❌ … x) or a plus alone (➕ +) in a session's topic — the X removes the replied-to waiting
+        /// message (its prompt, through a ticket, a voice note's echo or the message itself), the plus queues the replied-to
+        /// message's prompt again as the bot's "👤 You · ➕ again" post. The user's gesture reply is deleted when it acted. Poll thread
+        /// (_handleTopicMessage, before a question card's text: a lone ❌ is never a question's answer).
+        /// </summary>
+        /// <param name="sessionId">The topic's session.</param>
+        /// <param name="msg">The message.</param>
+        /// <param name="threadId">The topic.</param>
+        /// <returns>True when the message was a gesture (answered here, never queued); false for any other message.</returns>
+        /// <exception cref="std::bad_alloc">If a reply or a post cannot be allocated.</exception>
+        bool _takeQueueReply(const std::wstring& sessionId, const json::Value& msg, int64_t threadId);
+        /// <summary>
+        /// §21.57.5 ⚡ Steer: /steer's path for a prompt that already WAITS — DecideSteer on the session's facts, the delete check,
+        /// the prompt first in the queue and marked Sent, SubmitPrompt with its own id, the steer watch (_steers) so a later decline
+        /// is told once. A tab that is not running, an ended claude or an open menu keep it FIRST in the queue (the toast says why).
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="promptId">The waiting prompt.</param>
+        /// <param name="threadId">The topic (the watch's notice goes there).</param>
+        /// <returns>The toast.</returns>
+        /// <exception cref="std::bad_alloc">If a record or a log line cannot be allocated.</exception>
+        std::wstring _steerQueuedPrompt(const std::wstring& sessionId, const std::wstring& promptId, int64_t threadId);
+        /// <summary>
+        /// §21.57.5 🗑 Delete (and ❌, the /queue list's ✖): takes a waiting prompt out of the queue, takes the ✍ off its messages, and
+        /// turns its ticket into "Removed" with ↩ Undo for kQueueUndoWindowMs (the prompt as it was is kept for that long).
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="promptId">The prompt.</param>
+        /// <param name="how">What removed it, for the log ("the ticket's Delete", "a reply ❌", "the /queue list").</param>
+        /// <returns>The toast.</returns>
+        /// <exception cref="std::bad_alloc">If the snapshot or a log line cannot be allocated.</exception>
+        std::wstring _removeQueuedPrompt(const std::wstring& sessionId, const std::wstring& promptId, const wchar_t* how);
+        /// <summary>
+        /// §21.57.5 ↩ Undo: puts a removed prompt back where it was (before the prompt that followed it, else first among the phone's),
+        /// its ✍ and its ticket with it — within the window, and only into a session that is still open.
+        /// </summary>
+        /// <param name="promptId">The removed prompt.</param>
+        /// <returns>The toast.</returns>
+        /// <exception cref="std::bad_alloc">If the prompt or a log line cannot be allocated.</exception>
+        std::wstring _undoQueuedRemove(const std::wstring& promptId);
+        /// <summary>§21.57.5 ⏫ Move Up: swaps a waiting prompt with the waiting prompt above it (the PC's Move up); every ticket follows.</summary>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="promptId">The prompt.</param>
+        /// <returns>The toast.</returns>
+        /// <exception cref="std::bad_alloc">If a log line cannot be allocated.</exception>
+        std::wstring _moveQueuedUp(const std::wstring& sessionId, const std::wstring& promptId);
+        /// <summary>
+        /// §21.57.5 🔗 Merge ↑ and its preview: `confirm` false shows the PREVIEW on the ticket (the merged text, ✅ Merge · ✕ Cancel);
+        /// true merges into the prompt the preview showed (`upperPrefix`, the first 8 characters of its id) — refused when the order
+        /// changed or either one no longer waits. The merged prompt keeps the upper one's place and both messages as its parts.
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="promptId">The lower prompt (the ticket's).</param>
+        /// <param name="confirm">False = show the preview; true = merge.</param>
+        /// <param name="upperPrefix">The preview's upper prompt (confirm only).</param>
+        /// <returns>The toast.</returns>
+        /// <exception cref="std::bad_alloc">If the merged text or a log line cannot be allocated.</exception>
+        std::wstring _mergeQueued(const std::wstring& sessionId, const std::wstring& promptId, bool confirm, const std::wstring& upperPrefix);
+        /// <summary>§21.57.5 🔁 Retry: a failed phone prompt's words are queued again as a NEW prompt (same messages), first among the phone's.</summary>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="promptId">The failed prompt.</param>
+        /// <param name="threadId">The topic.</param>
+        /// <returns>The toast.</returns>
+        /// <exception cref="std::bad_alloc">If the prompt or a log line cannot be allocated.</exception>
+        std::wstring _retryFailedPrompt(const std::wstring& sessionId, const std::wstring& promptId, int64_t threadId);
+        /// <summary>
+        /// §21.57.6: the check a phone prompt passes right before the auto-advance (and ⚡ Steer, /sendnow) sends it: one reaction call
+        /// per message of the prompt (✍ → ⚡); "message to react not found" means the user deleted it — the deleted part, or the
+        /// whole prompt, leaves the queue and its ticket goes. Any other answer, a flood pause or no answer within
+        /// kPreSendCheckTimeoutMs keeps the prompt. Runs on the scheduler's thread (Scheduler::SetRemotePreSendCheck) or the poll
+        /// thread, under no lock; counted in _preSendChecksInFlight, and never touches `_api` once Stop began.
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="prompt">A copy of the prompt about to be sent.</param>
+        /// <returns>True = send it (alive, or unknown); false = the queue changed (decide again).</returns>
+        bool _remotePreSendCheck(const std::wstring& sessionId, const QueuedPrompt& prompt) noexcept;
+        /// <summary>
+        /// §21.57.5: the /queue list's text and buttons for a session (BuildQueueListHtml / BuildQueueListButtons): every waiting
+        /// prompt with its keycap, the phone's with why they wait.
+        /// </summary>
+        /// <param name="s">The session.</param>
+        /// <param name="html">Receives the text.</param>
+        /// <param name="markup">Receives the inline keyboard (a Null value when nothing waits).</param>
+        /// <exception cref="std::bad_alloc">If the text or the buttons cannot be allocated.</exception>
+        void _queueListParts(const SessionInfo& s, std::wstring& html, json::Value& markup);
+        /// <summary>The session whose topic is this thread ("" = none: the Search topic, a new thread, a gone topic). Takes `_mtx`.</summary>
+        /// <param name="threadId">The thread.</param>
+        /// <returns>The session id, or "".</returns>
+        /// <exception cref="std::bad_alloc">If the id cannot be copied.</exception>
+        std::wstring _sessionOfThread(int64_t threadId);
+        /// <summary>
+        /// §21.57.9 fix 1: records where a phone prompt's ✍ went (its session and messages), so the reaction sync can take it off
+        /// when the prompt vanishes from the queue. Takes `_mtx`.
+        /// </summary>
+        /// <param name="promptId">The prompt.</param>
+        /// <param name="sessionId">Its session.</param>
+        /// <param name="messageIds">Its messages (PromptMessageIds).</param>
+        /// <exception cref="std::bad_alloc">If the entry cannot be allocated.</exception>
+        void _noteReactedWhere(const std::wstring& promptId, const std::wstring& sessionId, std::vector<int64_t> messageIds);
+        /// <summary>Deletes one message of the chat (deleteMessage at `prio`, keyed by `key` when not empty). A refusal is ignored.</summary>
+        /// <param name="messageId">The message (0 or less: nothing).</param>
+        /// <param name="prio">The outbox priority.</param>
+        /// <param name="key">"" or the replacement key (a ticket's, so its queued edit is replaced by the delete).</param>
+        /// <exception cref="std::bad_alloc">If the item cannot be allocated.</exception>
+        void _deleteChatMessage(int64_t messageId, SendPriority prio, const std::wstring& key);
         /// <summary>
         /// REACTIVATE (§21.5, §21.6): a parked tab's claude is started in place; a session in Error, or one whose
         /// claude exited (Done), is restarted (the same conversation resumes in the same tab; with
@@ -3494,6 +3661,97 @@ namespace Agentmaster::Msg
         /// Cleared with _reacted at a start and at a change of bot (a watch names a message of the old chat).
         /// </summary>
         std::unordered_map<std::wstring, SteerWatch> _steers;
+
+        // ----- §21.57: queue management from a topic (Messaging.Queue.cpp; all guarded by `_mtx` unless noted) -----
+
+        /// <summary>
+        /// §21.57.4: the QUEUE TICKETS by prompt id — the bot's line under each waiting phone message and what it shows now
+        /// (QueueTicket: its message, phase, hash). Loaded from state.json at a start (MessagingState::queueTickets) and written back
+        /// at every save; created and rendered by _syncTickets (tick) and the queue's taps (poll thread). A ticket's record goes
+        /// once its last render is in (a reply that ended is deleted; an ended own post keeps its words).
+        /// </summary>
+        std::map<std::wstring, QueueTicket> _tickets;
+        /// <summary>
+        /// §21.57.4: the change counter of each ticket's RECORD (prompt id -> generation; transient). Every change of a record (a
+        /// phase, a merge, an edit stamp) bumps it; a render computed outside the lock is committed only when the generation it
+        /// read is still current, so the tick and a tap never overwrite each other's newer render with an older one.
+        /// </summary>
+        std::unordered_map<std::wstring, uint64_t> _ticketGen;
+        /// <summary>§21.57.4: a ticket whose post or edit failed waits until this wall-clock ms before it is tried again (prompt id -> ms; transient).</summary>
+        std::unordered_map<std::wstring, int64_t> _ticketRetryAtMs;
+        /// <summary>
+        /// §21.57.4: prompts that get NO ticket for the rest of the run (transient): the user deleted the ticket's message in
+        /// Telegram (its edit answered "message to edit not found") — posting it again would fight the user.
+        /// </summary>
+        std::unordered_set<std::wstring> _ticketSuppressed;
+        /// <summary>One prompt as ↩ Undo puts it back (§21.57.5): the session, the prompt as it was, the prompt that followed it, and until when.</summary>
+        struct QueueUndo
+        {
+            std::wstring sessionId; // the session whose queue it left
+            QueuedPrompt prompt; // the prompt as it was (its id, words, parts, stamps)
+            std::wstring beforeId; // the waiting prompt that followed it ("" = it was the last)
+            int64_t untilMs{ 0 }; // the window's end (wall-clock ms)
+        };
+        /// <summary>§21.57.5: what ↩ Undo can put back, by prompt id (in memory only: a restart within the window loses Undo).</summary>
+        std::unordered_map<std::wstring, QueueUndo> _queueUndo;
+        /// <summary>The last copy _syncTickets saw of a waiting phone prompt (§21.57.5): its session, the prompt, the waiting prompt after it.</summary>
+        struct TicketSeen
+        {
+            std::wstring sessionId; // the session whose queue held it
+            QueuedPrompt prompt; // the prompt as it was
+            std::wstring nextId; // the waiting prompt that followed it ("" = it was the last)
+        };
+        /// <summary>
+        /// §21.57.5: the last copy _syncTickets SAW of each waiting phone prompt (prompt id -> TicketSeen), so a removal made
+        /// anywhere — the PC's Delete, /unqueue, an older /queue list's ✖ — still offers ↩ Undo with the prompt as it was. Pruned once
+        /// the prompt no longer waits and its ticket (if any) has left the live phases.
+        /// </summary>
+        std::unordered_map<std::wstring, TicketSeen> _ticketSeen;
+        /// <summary>
+        /// §21.57.6: the ⚡ the delete check put on a phone prompt's messages (prompt id -> wall-clock ms). The reaction sync puts the
+        /// ✍ back when the prompt is still Pending kSendingMarkRevertMs later (its send was declined), and forgets it once the
+        /// prompt is no longer Pending.
+        /// </summary>
+        std::unordered_map<std::wstring, int64_t> _sendingMarks;
+        /// <summary>§21.57.6: the messages the delete check found ALIVE (message id -> wall-clock ms), reused for kPreSendCheckReuseMs.</summary>
+        std::unordered_map<int64_t, int64_t> _aliveChecks;
+        /// <summary>Where a phone prompt's ✍ went (§21.57.9 fix 1): the session, and every message of the prompt (all its parts').</summary>
+        struct ReactedWhere
+        {
+            std::wstring sessionId; // the session whose queue holds the prompt
+            std::vector<int64_t> messageIds; // the user's messages that show the prompt's status
+        };
+        /// <summary>
+        /// §21.57.9 fix 1: the phone prompts that show ✍, by prompt id. The reaction sync walks the queue, so a prompt REMOVED from it
+        /// (🗑, ❌, /unqueue, the PC's Delete) was never visited again and kept its ✍ for good; these entries name the messages a
+        /// prompt that vanished must take the ✍ off. Erased once the prompt's status shows as sent or failed, or it vanished.
+        /// </summary>
+        std::unordered_map<std::wstring, ReactedWhere> _reactedWhere;
+        /// <summary>
+        /// §21.57.7: a voice note's 🎤 ECHO -> the note (echo message id -> note message id), so a ❌ or ➕ reply to the echo acts on
+        /// the note's prompt. Recorded by the echo's send (_voiceDeliver); bounded (the oldest entries go past kVoiceEchoNotesMax).
+        /// </summary>
+        std::map<int64_t, int64_t> _voiceEchoNotes;
+        /// <summary>The most echo -> note pairs _voiceEchoNotes keeps (a ❌ or ➕ reply to an older echo finds no note and is answered so).</summary>
+        static constexpr size_t kVoiceEchoNotesMax = 400;
+        /// <summary>A ➕ re-queue whose post is in (§21.57.7): the tick queues it as the session's prompt (never the send thread).</summary>
+        struct AgainPost
+        {
+            std::wstring sessionId; // the session it is queued for
+            int64_t threadId{ 0 }; // the topic
+            int64_t messageId{ 0 }; // the bot's post that stands for the user's message
+            std::wstring words; // the prompt's words
+            std::wstring baseHtml; // the post's own text (its ticket's base)
+        };
+        /// <summary>§21.57.7: the ➕ posts the send thread has answered and the tick has not queued yet.</summary>
+        std::vector<AgainPost> _againPending;
+        /// <summary>
+        /// §21.57.6: the delete checks running on the scheduler's thread (atomic; no lock). Stop clears the scheduler's hook, ends
+        /// every Telegram call in flight (TelegramApi::Shutdown), then waits for this to reach 0 before it frees `_api`: a check runs
+        /// on a thread Stop does not join.
+        /// </summary>
+        std::atomic<int> _preSendChecksInFlight{ 0 };
+
         std::unordered_map<std::wstring, int64_t> _dirty; // session ids the registry notified since the last tick (-> ms)
         /// <summary>
         /// §21.16.7, under `_mtx`: the topics a directory DOT put first, not yet seen by the tick — session id -> when the tap

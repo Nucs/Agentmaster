@@ -2682,6 +2682,15 @@ namespace Agentmaster::Msg
         /// A Null value = none (not written to the file).
         /// </summary>
         json::Value newThreads;
+        /// <summary>
+        /// §21.57: the QUEUE TICKETS — the bot's line under each waiting phone message (its keycap, why it waits, ⚡ Steer, 🗑 Delete,
+        /// ⏫ Move Up, 🔗 Merge) and what each ticket shows now, as MessagingQueueTickets.h QueueTicketsToJson writes them. Kept
+        /// OPAQUE here, like `newThreads`: the service converts it at its start (QueueTicketsFromJson) and writes it back at every
+        /// save, so a restart still edits and deletes the tickets of the run before. Per bot like everything here (the identity
+        /// gate's reset clears it). A Null value = none (not written to the file); volatile for the older-writer repair (the
+        /// service ends tickets once acted on, so a copy brought back from the shadow would name tickets that are long done).
+        /// </summary>
+        json::Value queueTickets;
     };
 
     /// <summary>
@@ -2810,6 +2819,11 @@ namespace Agentmaster::Msg
         {
             // §21.25: the wizards and their launches, as the service wrote them (opaque here; omitted when there are none).
             o.Set(L"newThreads", s.newThreads);
+        }
+        if (s.queueTickets.type == json::Value::Type::Arr)
+        {
+            // §21.57: the queue tickets, as the service wrote them (opaque here; omitted when there are none).
+            o.Set(L"queueTickets", s.queueTickets);
         }
         return o;
     }
@@ -2949,6 +2963,11 @@ namespace Agentmaster::Msg
         {
             // §21.25 (absent in an older file: no wizard to resume). Copied as it is: the service reads it at its start.
             s.newThreads = *newThreads;
+        }
+        if (const auto* tickets = v.Find(L"queueTickets"); tickets && tickets->type == json::Value::Type::Arr)
+        {
+            // §21.57 (absent in an older file: no ticket to look after). Copied as it is: the service reads it at its start.
+            s.queueTickets = *tickets;
         }
         return s;
     }

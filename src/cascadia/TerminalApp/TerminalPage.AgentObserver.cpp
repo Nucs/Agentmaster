@@ -8589,6 +8589,10 @@ namespace winrt::TerminalApp::implementation
                     // SIDE_PANEL.md §2j: its side panel pin moves to the successor (the carry below) — the archived conversation
                     // gives it up, so resuming it later from the Sessions page brings back no second pinned card.
                     s.sidePanelPinnedAtUnixMs = 0;
+                    // MESSAGING.md §21.57.8: the user's /clear or /resume left this conversation; the phone's messages that still
+                    // wait in ITS queue stay with it (they are never sent into the new one) and become LEFT OVER: runner prompts
+                    // that go only if this conversation is resumed with its runner on.
+                    ::Agentmaster::MarkRemotePromptsLeftOver(s.queue);
                 });
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[rehome] " + superseded + L" -> " + id + L" (same tab, new conversation id)\n");
                 // Nav audit: a TAB SWAPPED its bound session id (claude switched conversation in place

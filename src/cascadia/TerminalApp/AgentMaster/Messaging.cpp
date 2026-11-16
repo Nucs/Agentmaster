@@ -1184,6 +1184,32 @@ namespace Agentmaster::Msg
                 _reacted.clear();
                 _steers.clear(); // §21.33: a watch of the last run names a send this run never made
                 _menuWatches.clear(); // §21.34: a menu watch of the last run names a card this run never posted
+                // §21.57: the queue's bookkeeping of the last run is this run's to rebuild — except the TICKETS, which name messages
+                // in the chat: they come back from the state file, so a restart still edits and deletes them (a post that was in
+                // flight was saved as "not posted" and goes again). A failure here costs the tickets of the last run, never the start.
+                _ticketGen.clear();
+                _ticketRetryAtMs.clear();
+                _ticketSuppressed.clear();
+                _queueUndo.clear();
+                _ticketSeen.clear();
+                _sendingMarks.clear();
+                _aliveChecks.clear();
+                _reactedWhere.clear();
+                _voiceEchoNotes.clear();
+                _againPending.clear();
+                try
+                {
+                    QueueTicketsFromJson(_state.queueTickets, _tickets);
+                    for (const auto& [pid, t] : _tickets)
+                    {
+                        ++_ticketGen[pid];
+                    }
+                }
+                catch (...)
+                {
+                    LogSwallowedException(L"MessagingService::_start (restore the queue tickets)"); // Rule #18; recovery: none restored
+                    _tickets.clear();
+                }
                 _outbox.clear();
                 // §21.50: the durable outbox's run state. What the last run left in the JOURNAL comes back right after this block
                 // (_outboxRecover); everything else the queue held (cards, edits, reactions, a replay batch) is rebuilt by its own
@@ -1349,6 +1375,25 @@ namespace Agentmaster::Msg
             // §21.43: the VOICE NOTES' transcriber (the factory's) and its thread — before the poll thread, so the first update can
             // already hand a voice note over (Messaging.Voice.cpp); never throws.
             _voiceStart();
+            // §21.57.6: the delete check a phone prompt passes right before the auto-advance sends it (Scheduler::SetRemotePreSendCheck).
+            // The hook holds the service only weakly: a service that is gone answers "send" (as the scheduler does without a hook).
+            // Stop clears it first and waits for a check in flight before it frees `_api`.
+            if (_scheduler)
+            {
+                try
+                {
+                    std::weak_ptr<MessagingService> weak = weak_from_this();
+                    _scheduler->SetRemotePreSendCheck([weak](const std::wstring& sessionId, const QueuedPrompt& prompt) {
+                        const auto self = weak.lock();
+                        return self ? self->_remotePreSendCheck(sessionId, prompt) : true;
+                    });
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: no delete check this run — a message deleted in Telegram is still sent, as before §21.57.
+                    LogSwallowedException(L"MessagingService::_start (the scheduler's remote pre-send check)");
+                }
+            }
             _running.store(true);
             _setStatus(L"Starting\x2026");
             _pollThread = std::thread([this]() noexcept { _pollLoop(); });
@@ -1382,6 +1427,20 @@ namespace Agentmaster::Msg
             _stop.store(true);
             _tickCv.notify_all();
             _sendCv.notify_all();
+            // §21.57.6: the scheduler stops asking this service before a send FIRST (a check already running finishes with its own
+            // copy; the wait before `_api` is freed, below, covers it).
+            if (_scheduler)
+            {
+                try
+                {
+                    _scheduler->SetRemotePreSendCheck(nullptr);
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: the hook stays; it holds the service weakly and answers "send" once `_stop` is set.
+                    LogSwallowedException(L"MessagingService::Stop (clear the remote pre-send check)");
+                }
+            }
             // §21.50: EVERY call in flight ends at once — the long poll, the send loop's call, a topic call of the tick — and no
             // thread starts a new one (TelegramApi::Shutdown; one Abort slot used to hold only the last call to start, so a stop
             // during a send missed the long poll and waited up to ~40 s, on the UI thread when the cog's Save stopped the bot).
@@ -1454,6 +1513,19 @@ namespace Agentmaster::Msg
                 // Detaches this start's sink only: the Search conversation is the process's and lives on (parked), so
                 // the next start of the bot continues it (§21.7).
                 _search.reset();
+            }
+            // §21.57.6: a delete check runs on the SCHEDULER's thread, which Stop does not join: wait (bounded) until none is using
+            // `_api`. Each one ends quickly now — `_stop` is set and TelegramApi::Shutdown refused every new call above.
+            for (int waited = 0; _preSendChecksInFlight.load() > 0 && waited < 10000; waited += 10)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            if (_preSendChecksInFlight.load() > 0)
+            {
+                // Never expected (a check ends within a call's abort). The client is LEFT ALLOCATED rather than freed under a thread
+                // that may still read it: one leaked object for the rest of the run costs less than a use-after-free.
+                _log(L"[msg] a delete check still ran 10 s after the stop began; the Telegram client is left allocated");
+                static_cast<void>(_api.release());
             }
             _api.reset();
             // The secretary's client goes after every thread that could use it is joined (the send loop uses it).
@@ -1658,6 +1730,9 @@ namespace Agentmaster::Msg
             L"topicCreatePauseUntilMs",
             L"topicCreatePausedSinceMs",
             L"resortWholeList",
+            // §21.57: the queue tickets — ended (and forgotten) once acted on; a copy brought back from the shadow after an older build
+            // ran would name tickets that are long done.
+            L"queueTickets",
         };
         RepairStateFileWrittenByOlderBuild(profileDir, stateFile, L"messaging\\telegram\\state.json", &MessagingStateRoundTrip, true, &kVolatile);
         MessagingStateFileLoad out;
@@ -1785,6 +1860,8 @@ namespace Agentmaster::Msg
             // either the old file or the new one, never a topic map from one moment and the wizards from another). An empty set
             // writes no key (NewThreadsToJson's object is dropped), so a state file without wizards reads as before §21.25.
             _state.newThreads = (_newThreads.empty() && _threadBinds.empty()) ? json::Value{} : NewThreadsToJson(_newThreads, _threadBinds);
+            // §21.57: the queue tickets go into the same atomic write (none = no key).
+            _state.queueTickets = QueueTicketsToJson(_tickets);
             doc = StateToJson(_state);
             _stateDirty = false;
             _stateProgressDirty = false;
@@ -2671,6 +2748,18 @@ namespace Agentmaster::Msg
                                     _reacted.clear();
                                     _steers.clear(); // §21.33: its watches name messages of the OLD bot's chat
                                     _menuWatches.clear(); // §21.34: and so do the menu watches and their cards
+                                    // §21.57: and so do the queue tickets and every mark of the queue's bookkeeping.
+                                    _tickets.clear();
+                                    _ticketGen.clear();
+                                    _ticketRetryAtMs.clear();
+                                    _ticketSuppressed.clear();
+                                    _queueUndo.clear();
+                                    _ticketSeen.clear();
+                                    _sendingMarks.clear();
+                                    _aliveChecks.clear();
+                                    _reactedWhere.clear();
+                                    _voiceEchoNotes.clear();
+                                    _againPending.clear();
                                     // §21.16.7: the dots' holds and requests name the OLD bot's topics (this runs on the tick
                                     // thread, which owns _frontHeld).
                                     _frontHeld.clear();
@@ -2868,6 +2957,8 @@ namespace Agentmaster::Msg
                     }
                     _syncReactions(*s);
                     _sweepSteers(*s); // §21.33: after the reactions, so a steer the window put back gets its ✍ last
+                    // §21.57: the QUEUE TICKETS — after the reactions (a failure's ticket was recorded there) and the steers.
+                    _syncTickets(sid, topic.threadId, *s);
                     _updatePromptStatus(topic, mirror, *s); // §21.12: after the reactions (a phone prompt's 👨‍💻 goes first)
                     _sweepRevives(*s);
                     {
@@ -2902,6 +2993,33 @@ namespace Agentmaster::Msg
                     // text copied again) cost as much as the first. A change the pass made to the session in the registry
                     // meanwhile reaches the card at the next tick.
                     _refreshCard(sid, false, false, false, &*s);
+                }
+                // §21.57.4: the tickets of topics that are GONE (a closed tab's topic is deleted with its messages) are forgotten — no
+                // tick visits such a topic any more, and a waiting prompt of a resumed session gets a new ticket in its new topic.
+                {
+                    std::lock_guard lk{ _mtx };
+                    std::unordered_set<int64_t> liveThreads;
+                    for (const auto& [topicSid, t] : _state.topics)
+                    {
+                        if (t.threadId != 0)
+                        {
+                            liveThreads.insert(t.threadId);
+                        }
+                    }
+                    for (auto it = _tickets.begin(); it != _tickets.end();)
+                    {
+                        if (liveThreads.count(it->second.threadId) == 0)
+                        {
+                            _ticketGen.erase(it->first);
+                            _ticketRetryAtMs.erase(it->first);
+                            it = _tickets.erase(it);
+                            _stateDirty = true;
+                        }
+                        else
+                        {
+                            ++it;
+                        }
+                    }
                 }
                 // §21.30: Claude's questions — new requests become cards, every card reads its dialog's result, and the questions no
                 // hook offered within kAskPairWaitMs are posted show-only. After the per-topic pass: the mirror's question items of
@@ -10496,6 +10614,7 @@ namespace Agentmaster::Msg
                 bool matchedSent = false;
                 std::wstring matchedPromptId;
                 int64_t queuedBusyMs = 0;
+                std::vector<int64_t> matchedMessageIds; // §21.57: every message a merged prompt is made of (its 🫡 goes to each)
                 const auto matchQueue = [&](const SessionInfo& from) {
                     size_t looked = 0;
                     for (auto q = from.queue.rbegin(); q != from.queue.rend() && looked < 60; ++q, ++looked)
@@ -10516,6 +10635,7 @@ namespace Agentmaster::Msg
                             matchedSent = q->status == PromptStatus::Sent;
                             matchedPromptId = q->id;
                             queuedBusyMs = q->remoteQueuedBusyUnixMs;
+                            matchedMessageIds = PromptMessageIds(*q);
                             return true;
                         }
                     }
@@ -10634,9 +10754,17 @@ namespace Agentmaster::Msg
                     // below. Recorded as Sent, so the reaction sync neither shows 👨‍💻 for it (that reads "running" on a message whose
                     // turn shows its status elsewhere) nor takes it back to ✍ while the echo that sets `echoed` is still on its way.
                     _react(topicMessageId, kSentFromQueueReaction);
+                    for (const int64_t partId : matchedMessageIds)
+                    {
+                        if (partId != topicMessageId)
+                        {
+                            _react(partId, kSentFromQueueReaction); // §21.57: a merged prompt's other messages
+                        }
+                    }
                     {
                         std::lock_guard lk{ _mtx };
                         _reacted[matchedPromptId] = PromptStatus::Sent;
+                        _reactedWhere.erase(matchedPromptId); // §21.57.9 fix 1: sent — no ✍ left to take off
                     }
                     const int64_t wentAtMs = it.tsMs > 0 ? it.tsMs : WallMs();
                     _log(L"[msg] " + ShortId(sessionId) + L" a topic message that waited in the queue went (message " + std::to_wstring(topicMessageId) + L", " +
@@ -10991,21 +11119,55 @@ namespace Agentmaster::Msg
     {
         // A remote prompt's status as a reaction on the user's own Telegram message: ✍ queued (set when it
         // was queued), 👨‍💻 sent and picked up, 👎 failed. §21.44: 🫡 instead of 👨‍💻 for a message that waited in the queue
-        // (the mirror sets it with its "sent from the queue" line; this sync only as the fallback).
+        // (the mirror sets it with its "sent from the queue" line; this sync only as the fallback). §21.57: a MERGED prompt's status
+        // goes to every message it is made of (PromptMessageIds), the ⚡ the delete check put on a message whose send was then
+        // declined turns back to ✍, and a prompt that LEFT the queue (🗑, ❌, /unqueue, the PC's Delete) takes its ✍ off.
+        const int64_t nowMs = WallMs();
+        std::unordered_set<std::wstring> present; // §21.57.9 fix 1: this session's phone prompts the snapshot holds
         for (const auto& q : s.queue)
         {
             if (q.remoteSource.rfind(L"telegram:", 0) != 0)
             {
                 continue;
             }
+            present.insert(q.id);
+            const std::vector<int64_t> messageIds = PromptMessageIds(q);
             PromptStatus shown = PromptStatus::Pending;
             bool known = false;
+            bool revertSending = false;
             {
                 std::lock_guard lk{ _mtx };
                 if (const auto it = _reacted.find(q.id); it != _reacted.end())
                 {
                     shown = it->second;
                     known = true;
+                }
+                // §21.57.9 fix 1: where a WAITING prompt's ✍ is — recorded for a prompt queued before this run too, so its removal
+                // takes the mark off as well.
+                if (PromptWaits(q) && !messageIds.empty() && _reactedWhere.count(q.id) == 0)
+                {
+                    _reactedWhere[q.id] = ReactedWhere{ s.id, messageIds };
+                }
+                // §21.57.6: the delete check's ⚡ — forgotten once the prompt left Pending (its pickup's reaction replaces it), put
+                // back to ✍ when the prompt is still Pending kSendingMarkRevertMs later (its send was declined and rolled back).
+                if (const auto mark = _sendingMarks.find(q.id); mark != _sendingMarks.end())
+                {
+                    if (q.status != PromptStatus::Pending)
+                    {
+                        _sendingMarks.erase(mark);
+                    }
+                    else if (nowMs - mark->second >= kSendingMarkRevertMs)
+                    {
+                        _sendingMarks.erase(mark);
+                        revertSending = true;
+                    }
+                }
+            }
+            if (revertSending)
+            {
+                for (const int64_t id : messageIds)
+                {
+                    _react(id, L"\x270D");
                 }
             }
             PromptStatus want = q.status;
@@ -11026,6 +11188,7 @@ namespace Agentmaster::Msg
                     // never re-reacts on every old message. A line this run's mirror posts sets its 🫡 all the same.
                     std::lock_guard lk{ _mtx };
                     _reacted[q.id] = PromptStatus::Sent;
+                    _reactedWhere.erase(q.id); // §21.57.9 fix 1: sent — no ✍ left to take off
                 }
                 else if (shown != PromptStatus::Sent && SentFromQueueReactionOverdue(q, WallMs()))
                 {
@@ -11034,9 +11197,17 @@ namespace Agentmaster::Msg
                     // one is looked at once, not every tick.
                     const int64_t overdueId = static_cast<int64_t>(std::wcstoll(q.remoteSource.c_str() + 9, nullptr, 10));
                     _react(overdueId, kSentFromQueueReaction);
+                    for (const int64_t id : messageIds)
+                    {
+                        if (id != overdueId)
+                        {
+                            _react(id, kSentFromQueueReaction); // §21.57: every merged part's message too
+                        }
+                    }
                     {
                         std::lock_guard lk{ _mtx };
                         _reacted[q.id] = PromptStatus::Sent;
+                        _reactedWhere.erase(q.id);
                     }
                     _log(L"[msg] " + ShortId(s.id) + L" a topic message that waited in the queue was sent " + TgShortSpan(WallMs() - q.sentAtUnixMs) +
                          L" ago without its \"sent from the queue\" line (message " + std::to_wstring(overdueId) + L"): marked \U0001FAE1 by the reaction sync");
@@ -11054,22 +11225,25 @@ namespace Agentmaster::Msg
                 // queue would undo those, and cost a call each. Recorded, not reacted.
                 std::lock_guard lk{ _mtx };
                 _reacted[q.id] = want;
+                _reactedWhere.erase(q.id);
                 continue;
             }
-            int64_t msgId = 0;
-            try
+            if (messageIds.empty())
             {
-                msgId = std::stoll(q.remoteSource.substr(9));
-            }
-            catch (...)
-            {
-                continue;
+                continue; // a source that does not name a message (a damaged one): nothing to react on
             }
             const wchar_t* emoji = want == PromptStatus::Failed ? L"\U0001F44E" : (want == PromptStatus::Sent ? L"\U0001F468‍\U0001F4BB" : L"✍");
-            _react(msgId, emoji);
+            for (const int64_t id : messageIds)
+            {
+                _react(id, emoji); // §21.57: every message a merged prompt is made of
+            }
             {
                 std::lock_guard lk{ _mtx };
                 _reacted[q.id] = want;
+                if (want == PromptStatus::Sent || want == PromptStatus::Failed)
+                {
+                    _reactedWhere.erase(q.id); // its ✍ is gone: nothing for the vanish check to take off
+                }
             }
             if (want == PromptStatus::Failed)
             {
@@ -11081,22 +11255,70 @@ namespace Agentmaster::Msg
                         thread = it->second.threadId;
                     }
                 }
-                // The runner's mode as THIS snapshot holds it, never assumed. The verdicts that pause it (the lost send,
-                // the Enter-retry give-up, the merge) set Off in the same registry update that sets Failed, so the
-                // snapshot already shows it; the verified send's refusal (DELIVERY.md §11, §19) fails the prompt and
-                // leaves the mode alone, and saying "paused" then sent the user looking for a pause that never happened.
-                const bool runnerAuto = s.autorunner.mode == AutorunnerMode::Full;
-                _sendText(thread,
-                          std::wstring{ L"\U0001F44E <b>not delivered</b> \x2014 the prompt never became a message (lost send or a refused delivery); " } +
-                              (runnerAuto ? L"the runner stays <b>Auto</b>." : L"the runner is <b>Paused</b>.") +
-                              L" Look at the terminal, then /sendnow or send it again.",
-                          true,
-                          SendPriority::Final,
-                          L"",
-                          json::Value{},
-                          nullptr,
-                          msgId);
+                // §21.57.9 fix 3: the "not delivered" notice is the prompt's TICKET now — its ticket turned into it, or a new one
+                // posted under the message by the ticket sync right after this — with 🔁 Retry · 🗑 Dismiss. The old line ended in
+                // "/sendnow or send it again", and /sendnow sends the first PENDING prompt, never the failed one. The runner's mode
+                // as THIS snapshot holds it, never assumed: the verdicts that pause it (the lost send, the Enter-retry give-up, the
+                // merge) set Off in the same registry update that sets Failed, so the snapshot already shows it; the verified send's
+                // refusal (DELIVERY.md §11, §19) fails the prompt and leaves the mode alone, and saying "paused" then sent the user
+                // looking for a pause that never happened.
+                _failTicket(s, q, thread);
             }
+        }
+        // §21.57.9 fix 1: a phone prompt that LEFT the queue (🗑, ❌, /unqueue, the PC's Delete) while it showed ✍ takes the mark off.
+        // The reaction sync walks the queue, so such a prompt was never visited again and kept its ✍ for good. A candidate is
+        // confirmed by ONE fresh registry read: a prompt queued after this tick's snapshot was taken is in the registry, not gone.
+        std::vector<std::wstring> candidates;
+        {
+            std::lock_guard lk{ _mtx };
+            for (const auto& [pid, where] : _reactedWhere)
+            {
+                if (where.sessionId == s.id && present.count(pid) == 0)
+                {
+                    candidates.push_back(pid);
+                }
+            }
+        }
+        if (candidates.empty())
+        {
+            return;
+        }
+        const auto fresh = _session(s.id);
+        std::vector<std::vector<int64_t>> vanished;
+        {
+            std::lock_guard lk{ _mtx };
+            for (const auto& pid : candidates)
+            {
+                const bool stillThere = fresh && std::any_of(fresh->queue.begin(), fresh->queue.end(), [&pid](const QueuedPrompt& q) { return q.id == pid; });
+                if (stillThere)
+                {
+                    continue;
+                }
+                const auto where = _reactedWhere.find(pid);
+                if (where == _reactedWhere.end())
+                {
+                    continue;
+                }
+                const auto shownIt = _reacted.find(pid);
+                if (shownIt == _reacted.end() || shownIt->second == PromptStatus::Pending)
+                {
+                    vanished.push_back(where->second.messageIds); // it shows ✍ (or a mark from before this run)
+                }
+                _reactedWhere.erase(where);
+                _reacted.erase(pid);
+                _sendingMarks.erase(pid);
+            }
+        }
+        for (const auto& ids : vanished)
+        {
+            for (const int64_t id : ids)
+            {
+                _react(id, L""); // an empty list takes the bot's reaction off
+            }
+        }
+        if (!vanished.empty())
+        {
+            _log(L"[msg] " + ShortId(s.id) + L" " + std::to_wstring(vanished.size()) + L" phone prompt(s) left the queue: their \x270D came off");
         }
     }
 }

@@ -452,6 +452,17 @@ namespace Agentmaster
         Typed, // typed directly into the terminal by the human (captured via UserPromptSubmit)
     };
 
+    // Agentmaster (MESSAGING.md §21.57 — 🔗 Merge): one PART of a phone prompt that the user merged out of several Telegram messages
+    // of the session's topic. The prompt's text is its parts' texts joined by line breaks (MergedRemoteText in
+    // MessagingQueueTickets.h), and each part remembers the Telegram message it came from, so that an EDIT of any of those messages
+    // rebuilds the merged text in place, the delete check before the send (§21.57.6) drops only a deleted part, and the status
+    // reactions reach every message the user wrote. A plain (never merged) prompt has NO parts: its one message is remoteSource.
+    struct RemotePromptPart
+    {
+        int64_t messageId{ 0 }; // the Telegram message (in the session's topic) this part came from; 0 = unknown (a recovered part)
+        std::wstring text; // the part's words as they go to the session (the message's text after the topic's command reading)
+    };
+
     struct QueuedPrompt
     {
         std::wstring id;
@@ -548,6 +559,25 @@ namespace Agentmaster
         // status. The scheduler never reads it (a waiting message goes exactly as before). PERSISTED (omitted when 0, absent = 0),
         // so a restart between the queueing and the send still posts the line.
         int64_t remoteQueuedBusyUnixMs{ 0 };
+        // Agentmaster (MESSAGING.md §21.57 — queue management from a topic): the TOPIC (Telegram thread id) the remote prompt's
+        // message was written in; 0 = unknown (a prompt queued before §21.57, or not a remote prompt). Why it exists: the session's
+        // topic can change under a waiting prompt — a closed tab's topic is deleted WITH the user's message, a /recreate makes a
+        // new one — and a ticket must then re-post the words in the CURRENT topic instead of replying to a message that is gone.
+        // Telegram numbers a private chat's topics apart from its messages (production's state, 2026-11-16: thread 46159 holds
+        // card 21868), so the thread cannot be derived from the message id. PERSISTED (omitted at 0).
+        int64_t remoteThreadId{ 0 };
+        // Agentmaster (MESSAGING.md §21.57 — 🔗 Merge): the Telegram messages this prompt was merged from, in order (see
+        // RemotePromptPart). Empty for every prompt that was never merged — its one message is remoteSource. The scheduler never
+        // reads it: the merged text is `text`, sent as one prompt like any other. PERSISTED (omitted when empty).
+        std::vector<RemotePromptPart> remoteParts;
+        // Agentmaster (MESSAGING.md §21.57.8 — LEFT-OVER messages, the user's rule "whatever agentmaster already does"): this remote
+        // prompt was still waiting when the USER closed or deactivated its session (or switched the tab's conversation with /clear
+        // or /resume), so it lost D30's pass and is a runner prompt from now on: it goes only while the session's runner is Auto
+        // (after the full 40 s settle), Pause all and maxAutoSends hold it, and it no longer answers an open question by itself
+        // (IsFreshRemotePrompt is what the scheduler asks). ⚠ Set ONLY by MarkRemotePromptsLeftOver at the user's close / park /
+        // re-home seams — never by a window close or an app quit (those come back with the window, Rule #16). PERSISTED (omitted
+        // when false).
+        bool remoteLeftOver{ false };
     };
 
     // Agentmaster (bounded queue history): the queue records EVERY message a session received
@@ -592,6 +622,43 @@ namespace Agentmaster
                 ++it;
             }
         }
+    }
+
+    // Agentmaster (MESSAGING.md §7.1 D30 + §21.57.8): is this a FRESH remote prompt — a message the user typed in the session's
+    // Telegram topic that still carries D30's pass (sent whatever the runner's mode, past Pause all and the send budget, with the
+    // short remote settle and the question guard's pass)? A LEFT-OVER one (QueuedPrompt::remoteLeftOver) is a runner prompt from
+    // now on and answers false. The ONE question every D30 rule asks (NextPromptIsRemote, StateSettleRemainingMs, DecideAdvance's
+    // question guard, the topic's insert point), so a left-over prompt can never keep half of the pass. PURE; never throws.
+    //   q       — the queued prompt.
+    //   returns — true for a remote prompt that was not left over.
+    inline bool IsFreshRemotePrompt(const QueuedPrompt& q) noexcept
+    {
+        return !q.remoteSource.empty() && !q.remoteLeftOver;
+    }
+
+    // Agentmaster (MESSAGING.md §21.57.8 — LEFT-OVER messages): marks every remote prompt that still WAITS (Pending, or a legacy
+    // Held) as left over — the user closed or deactivated the session (or switched the tab's conversation) while the phone's
+    // messages waited, and from now on they follow the runner like every other queued prompt ("whatever agentmaster already does",
+    // the user's rule of 2026-11-16): they go once the session is active again AND its runner is Auto, and a Paused runner keeps
+    // them until Send now or ⚡ Steer. Sent and failed prompts are history and stay as they are; a prompt already left over is
+    // not counted again. Call it inside the SAME registry Update that closes, parks or re-homes the session (next to
+    // DemoteWaitingOnClose at the close seams), so one notify carries both. ⚠ Only at the USER's seams: a window close or an
+    // app quit (_ArchiveWindowSessionsOnTeardown) must not call it — the window's record brings those tabs back, and their
+    // messages keep their pass. PURE; never throws.
+    //   queue   — the session's queue (the caller's Update lambda, under the registry lock).
+    //   returns — how many prompts it marked (0 = nothing waited from the phone).
+    inline size_t MarkRemotePromptsLeftOver(std::vector<QueuedPrompt>& queue) noexcept
+    {
+        size_t marked = 0;
+        for (auto& q : queue)
+        {
+            if ((q.status == PromptStatus::Pending || q.status == PromptStatus::Held) && IsFreshRemotePrompt(q))
+            {
+                q.remoteLeftOver = true;
+                ++marked;
+            }
+        }
+        return marked;
     }
 
     // Agentmaster (queue pop — the envelope's inverse): take the LAST still-queued prompt OUT of the
