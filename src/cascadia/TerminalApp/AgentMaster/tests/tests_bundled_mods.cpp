@@ -157,11 +157,19 @@ void TestBundledMods()
 
     // ---- the embedded catalog against its own bytes ----
     const auto& catalog = BundledModCatalog();
-    // MESSAGING.md §21.56: agentmaster-link (Agentmaster's own mod, the session link's end in each tab) joined the two vendored ones.
-    CHECK(catalog.size() == 3, "bundled: three mods ship");
-    CHECK(catalog.size() == 3 && catalog[0].name == L"file-links" && catalog[1].name == L"better-verbose-bash" && catalog[2].name == L"agentmaster-link",
-          "bundled: file-links, better-verbose-bash, then agentmaster-link (the --plugin-dir order)");
-    CHECK(catalog.size() == 3 && catalog[2].minClaudeCode == L"2.1.322", "bundled: the link needs Claude Code 2.1.322 (the $.model.fork it was measured on)");
+    // MESSAGING.md §21.56: agentmaster-link (Agentmaster's own mod, the session link's end in each tab) joined the two vendored ones;
+    // prompt-cut (BUNDLED_MODS.md §9: the prompt box's cut, whose key is the user's own keybindings.json line) came after it.
+    // A new mod goes LAST: a folder plugin listed earlier sits above the ones after it in Claude Code's hook chain, so
+    // appending keeps every earlier mod's seat (and the indexes below).
+    CHECK(catalog.size() == 4, "bundled: four mods ship");
+    CHECK(catalog.size() == 4 && catalog[0].name == L"file-links" && catalog[1].name == L"better-verbose-bash" && catalog[2].name == L"agentmaster-link" &&
+              catalog[3].name == L"prompt-cut",
+          "bundled: file-links, better-verbose-bash, agentmaster-link, then prompt-cut (the --plugin-dir order)");
+    CHECK(catalog.size() == 4 && catalog[2].minClaudeCode == L"2.1.322", "bundled: the link needs Claude Code 2.1.322 (the $.model.fork it was measured on)");
+    // The minimums gate a claude.exe that would get a mod it was never run on: file-links 0.5 was tested on the 2.1.292,
+    // 2.1.308 and 2.1.311 kits only, and prompt-cut reads pastes the way 2.1.310 hands them to mods.
+    CHECK(catalog.size() == 4 && catalog[0].minClaudeCode == L"2.1.292", "bundled: file-links needs Claude Code 2.1.292 (the oldest kit 0.5 was tested on)");
+    CHECK(catalog.size() == 4 && catalog[3].minClaudeCode == L"2.1.310", "bundled: prompt-cut needs Claude Code 2.1.310");
     for (const auto& mod : catalog)
     {
         const auto files = BundledModFiles(mod.name);
@@ -170,6 +178,9 @@ void TestBundledMods()
         bool hasHooks = false;
         bool clean = true;
         std::vector<std::wstring> modules;
+        // The contract plugin.json names under "types", as an embedded path ("./types/index.d.ts" -> "types/index.d.ts");
+        // empty for a mod that names none.
+        std::wstring contract;
         for (const auto& f : files)
         {
             clean = clean && f.bytes.find('\r') == std::string::npos && f.path.find(L".test.") == std::wstring::npos;
@@ -179,6 +190,8 @@ void TestBundledMods()
                 const auto root = json::Parse(FromUtf8(f.bytes));
                 CHECK(root && root->StrAt(L"name") == mod.name, "bundled: plugin.json names the mod");
                 CHECK(root && root->StrAt(L"version") == mod.version, "bundled: plugin.json's version is the catalog's");
+                const std::wstring types = root ? root->StrAt(L"types") : std::wstring{};
+                contract = types.rfind(L"./", 0) == 0 ? types.substr(2) : types;
             }
             if (f.path == L"hooks/hooks.json")
             {
@@ -208,11 +221,32 @@ void TestBundledMods()
             }
             CHECK(found, "bundled: every module hooks.json names is embedded");
         }
+        if (!contract.empty())
+        {
+            // Claude Code's loader refuses a mod whose named contract is missing ("types: Path not found ... The runtime
+            // loader will report this as a load failure", `claude plugin validate`, 2.1.322): the folder we write must hold it.
+            bool embedded = false;
+            for (const auto& f : files)
+            {
+                embedded = embedded || f.path == contract;
+            }
+            CHECK(embedded, "bundled: the contract plugin.json names under \"types\" is embedded (the loader refuses the mod without it)");
+        }
         CHECK(BundledModContentHashOf(files) == mod.contentHash, "bundled: the recorded hash is the hash of the embedded files (regenerate BundledModsData.h)");
         CHECK(mod.contentHash.size() == 64, "bundled: the hash is a full SHA-256");
         CHECK(BundledModFolderLeaf(mod) == mod.version + L"-" + mod.contentHash.substr(0, 8), "bundled: the folder leaf is <version>-<hash8>");
         CHECK(ParseClaudeVersionText(mod.minClaudeCode).has_value(), "bundled: the minimum Claude Code version reads");
         CHECK(!mod.summary.empty(), "bundled: the cog has a summary line");
+    }
+    {
+        // prompt-cut is the mod that names a contract (its $.state families: armed, paste, pasteIds), so the loop's contract
+        // check above is not vacuous: a generator that dropped types/ again fails here by name.
+        bool hasContract = false;
+        for (const auto& f : BundledModFiles(L"prompt-cut"))
+        {
+            hasContract = hasContract || f.path == L"types/index.d.ts";
+        }
+        CHECK(hasContract, "bundled: prompt-cut's types/index.d.ts (its $.state contract) is embedded");
     }
     CHECK(BundledModFiles(L"no-such-mod").empty(), "bundled: an unknown name carries no files");
     CHECK(BundledModContentHashOf({}) == L"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "bundled: no files hash as the empty input (the framing adds nothing)");
@@ -374,8 +408,9 @@ void TestBundledMods()
 
         useConfig(L"none", "");
         auto c = ChooseBundledMods(stateDir, settings, claude, (scratch / L"project-none").wstring(), false);
+        // VersionedExePath() is System32's cmd.exe, whose file version (10.x) passes every mod's minimum, so each mod loads.
         CHECK(c.size() == catalog.size() && ChoiceFor(c, L"file-links").verdict == BundledModVerdict::Loads && ChoiceFor(c, L"better-verbose-bash").verdict == BundledModVerdict::Loads &&
-                  ChoiceFor(c, L"agentmaster-link").verdict == BundledModVerdict::Loads,
+                  ChoiceFor(c, L"agentmaster-link").verdict == BundledModVerdict::Loads && ChoiceFor(c, L"prompt-cut").verdict == BundledModVerdict::Loads,
               "choose: nothing of the user's -> every mod loads");
         CHECK(ChoiceFor(c, L"file-links").folder.empty(), "choose: a preview names no folder and writes none");
         CHECK(DescribeBundledModChoice(ChoiceFor(c, L"better-verbose-bash")) == L"better-verbose-bash " + catalog[1].version + L" loads", "choose: the loaded sentence");

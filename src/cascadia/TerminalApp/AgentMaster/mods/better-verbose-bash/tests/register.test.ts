@@ -8,6 +8,7 @@ import {
   DESCRIPTION_CHARS,
   descriptionOf,
   dotStyleOf,
+  isCheckedBuild,
   isCoreRow,
   lineOf,
   MAC_BULLET,
@@ -129,6 +130,17 @@ describe('the header', () => {
     expect(nodeOf(header.children[0]).props).toMatchObject({ minWidth: BULLET_COLUMNS, flexShrink: 0 })
   })
 
+  test("a standalone call in the compact view (isExpanded false) gets the same header: its row shows the command too", async ($, on) => {
+    seatCore(on)
+    // The compact view: no --verbose, no ctrl+o. Before 0.2.0 this row kept
+    // its plain "● Bash(git status)"; the view is no longer asked.
+    const drawing = await row($, { ...BASH_ROW, isExpanded: false })
+    expect(await textsOf(drawing)).toEqual([BULLET, 'Show working tree status', '  '])
+    const tree = nodeOf(await drawing.drawn())
+    expect(tree.props).toMatchObject({ flexDirection: 'column', marginTop: 1 })
+    expect(nodeOf(tree.children[1]).children[0]).toEqual(CORE)
+  })
+
   test('a PowerShell call is drawn the same way', async ($, on) => {
     seatCore(on)
     const drawing = await row($, { ...BASH_ROW, tool: 'PowerShell', input: { command: 'Get-ChildItem', description: 'List files' } })
@@ -149,11 +161,13 @@ describe('the header', () => {
 })
 
 describe('rows left as Claude Code draws them', () => {
-  test('a compact row (isExpanded false or absent) never reaches the hook', async ($, on) => {
-    seatLabel(on)
-    expect(await textsOf(await row($, { ...BASH_ROW, isExpanded: false }))).toEqual(['engine:Bash(git status)'])
-    const { isExpanded: _dropped, ...compact } = BASH_ROW
-    expect(await textsOf(await row($, { ...compact, tool_use_id: 'toolu_compact' }))).toEqual(['engine:Bash(git status)'])
+  test('a row from a build that sends no isExpanded (2.1.292 and earlier) keeps its row: the layout was never checked there', async ($, on) => {
+    seatCore(on)
+    const { isExpanded: _dropped, ...older } = BASH_ROW
+    const drawing = await row($, { ...older, tool_use_id: 'toolu_older' })
+    // Core's own row, handed on as it came: no header, no blanks.
+    expect(await textsOf(drawing)).toEqual([])
+    expect(await drawing.drawn()).toEqual(CORE)
   })
 
   test('a call with no description, an empty one, or one of white space alone keeps its own row', async ($, on) => {
@@ -283,5 +297,11 @@ describe('the parts', () => {
     expect(isCoreRow({ type: 'Box' })).toBe(false)
     expect(isCoreRow({ type: 'Box', children: [CORE] })).toBe(false)
     expect(isCoreRow({ type: 'Text', children: ['engine:Bash(ls)'] })).toBe(false)
+  })
+
+  test('isCheckedBuild: a row that says how it is drawn, true or false, may take the header; one that does not say may not', () => {
+    expect(isCheckedBuild({ isExpanded: true })).toBe(true)
+    expect(isCheckedBuild({ isExpanded: false })).toBe(true)
+    expect(isCheckedBuild({})).toBe(false)
   })
 })

@@ -13,10 +13,11 @@ Subcommands:
          (``dev/``, ``__pycache__/``, ``node_modules/``). Files the source no longer has are removed from the vendored copy.
          A mod whose manifest entry says ``"source": "repo"`` (Agentmaster's own agentmaster-link) is skipped: its folder in
          the repository is its source.
-  gen    Write BundledModsData.h from the vendored folders: each mod's RUNTIME files (``.claude-plugin/plugin.json`` and
-         every file under ``hooks/`` that is not a test), with its name and version (read from its plugin.json), its
-         minimum Claude Code version and summary (from the manifest), and a SHA-256 over the files (the engine names the
-         mod's folder after it and re-checks it in the unit tests).
+  gen    Write BundledModsData.h from the vendored folders: each mod's RUNTIME files (``.claude-plugin/plugin.json``,
+         every file under ``hooks/`` that is not a test, and the contract ``.d.ts`` its plugin.json names under
+         ``types``, without which Claude Code's loader refuses the mod), with its name and version (read from its
+         plugin.json), its minimum Claude Code version and summary (from the manifest), and a SHA-256 over the files (the
+         engine names the mod's folder after it and re-checks it in the unit tests).
   check  Exit 1, naming the first difference, when BundledModsData.h is not what ``gen`` would write now.
 
 Run it with any Python 3.9+; it reads and writes only the paths above (and the source folder for ``sync``).
@@ -97,7 +98,8 @@ def load_manifest() -> dict:
 
     Raises:
         SystemExit: When the manifest is missing or does not parse, or a listed mod lacks a name, minClaudeCode or
-            summary (each with a message saying which).
+            summary, or a summary holds a character the C++ literal cannot carry as written (non-ASCII, a double
+            quote, a backslash) (each with a message saying which).
     """
     try:
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
@@ -109,6 +111,11 @@ def load_manifest() -> dict:
                 raise SystemExit(f"{MANIFEST}: a mod entry has no {key}: {entry}")
         if not entry["summary"].isascii():
             raise SystemExit(f"{MANIFEST}: {entry['name']}'s summary must be ASCII (it becomes a wide C++ literal)")
+        # render_header writes the summary into L"..." as it stands, unescaped: a double quote would end the literal
+        # early (a compile error far from its cause) and a backslash would start an escape that changes the text the
+        # cog shows. A summary that wants to quote something (a key binding) says it without quotes instead.
+        if '"' in entry["summary"] or "\\" in entry["summary"]:
+            raise SystemExit(f"{MANIFEST}: {entry['name']}'s summary must hold no double quote or backslash (it is written into a C++ literal unescaped)")
     return manifest
 
 
@@ -191,6 +198,48 @@ def sync(manifest: dict, override: str | None) -> int:
     return 0
 
 
+def contract_file(mod_dir: Path, plugin_json: Path) -> Path | None:
+    """Finds the contract a mod's plugin.json names under ``types``: a file Claude Code's loader requires at load.
+
+    A mod that declares ``$.state`` families or adds a noun to ``$`` ships its own contract, a ``.d.ts`` its
+    plugin.json names as ``"types": "./types/index.d.ts"``. The loader reads it when it loads the mod, so a folder
+    without it does not load: ``claude plugin validate --strict`` on prompt-cut 0.2.0's plugin.json and hooks alone
+    says "types: Path not found: ./types/index.d.ts. The runtime loader will report this as a load failure" (Claude
+    Code 2.1.322), and passes once the file is there. A mod naming no contract (file-links, better-verbose-bash) gets
+    nothing extra embedded.
+
+    Args:
+        mod_dir: The vendored mod folder.
+        plugin_json: Its ``.claude-plugin/plugin.json``.
+
+    Returns:
+        The contract's resolved path, or None when plugin.json names no ``types``.
+
+    Raises:
+        SystemExit: When plugin.json does not parse, when ``types`` is not a non-empty string, when it points outside
+            the mod's folder, or when the file it names is missing (each with a message saying which).
+    """
+    try:
+        plugin = json.loads(plugin_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"cannot read {plugin_json}: {exc}") from exc
+    raw = plugin.get("types")
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw.strip():
+        raise SystemExit(f"{plugin_json}: its \"types\" must name a file, not {raw!r}")
+    root = mod_dir.resolve()
+    path = (root / raw).resolve()
+    # The engine writes every embedded path under <profile>\mods\<name>\<version>-<hash8>\ (BundledMods.cpp), so a
+    # contract outside the mod's folder could not be embedded at the path the manifest names; refuse it here, where
+    # the cause is visible, rather than ship a mod the loader refuses.
+    if not path.is_relative_to(root):
+        raise SystemExit(f"{plugin_json}: its \"types\" ({raw}) points outside the mod's folder")
+    if not path.is_file():
+        raise SystemExit(f"{plugin_json} names its contract {raw}, which is missing: Claude Code would not load the mod (run `sync` first)")
+    return path
+
+
 def runtime_files(mod_dir: Path) -> tuple[ModFile, ...]:
     """Collects the files of a mod that Claude Code loads, as the header embeds them.
 
@@ -198,11 +247,12 @@ def runtime_files(mod_dir: Path) -> tuple[ModFile, ...]:
         mod_dir: The vendored mod folder.
 
     Returns:
-        ``.claude-plugin/plugin.json`` and every file under ``hooks/`` except tests (``*.test.*``), sorted by path, each
-        with CRLF turned into LF.
+        ``.claude-plugin/plugin.json``, every file under ``hooks/`` except tests (``*.test.*``), and the contract its
+        plugin.json names under ``types`` (see :func:`contract_file`), sorted by path, each with CRLF turned into LF.
 
     Raises:
-        SystemExit: When the folder has no plugin.json or no hooks/hooks.json (the mod would load nothing).
+        SystemExit: When the folder has no plugin.json or no hooks/hooks.json (the mod would load nothing), or its
+            plugin.json names a contract that :func:`contract_file` refuses.
     """
     files = []
     plugin = mod_dir / ".claude-plugin" / "plugin.json"
@@ -213,6 +263,15 @@ def runtime_files(mod_dir: Path) -> tuple[ModFile, ...]:
     for path in candidates:
         relative = path.relative_to(mod_dir).as_posix()
         files.append(ModFile(relative, path.read_bytes().replace(b"\r\n", b"\n")))
+    contract = contract_file(mod_dir, plugin)
+    if contract is not None:
+        # Relative to the RESOLVED folder: contract_file resolved the path, and a repository reached through a junction
+        # would otherwise make relative_to fail on the unresolved mod_dir.
+        relative = contract.relative_to(mod_dir.resolve()).as_posix()
+        # Embedded once: a contract kept under hooks/ is already listed, and a duplicate path would be written twice
+        # and counted twice in the hash the engine's unit test recomputes.
+        if all(f.path != relative for f in files):
+            files.append(ModFile(relative, contract.read_bytes().replace(b"\r\n", b"\n")))
     return tuple(sorted(files, key=lambda f: f.path))
 
 
@@ -362,9 +421,9 @@ def render_header(mods: list[Mod]) -> str:
     w("// GENERATED by tools/bundled-mods/bundled_mods.py gen. Do not edit: change the mods under AgentMaster/mods/ (or")
     w("// their source, then `sync`) and run `gen` again. doc/agentmaster/BUNDLED_MODS.md.")
     w("//")
-    w("// The Claude Code mods Agentmaster ships inside TerminalApp.dll: every RUNTIME file of each one (its plugin.json and")
-    w("// its hooks), byte for byte (UTF-8, LF line ends), with what the engine needs to write and gate it. Only BundledMods.cpp")
-    w("// includes this header: the bytes then live in one translation unit.")
+    w("// The Claude Code mods Agentmaster ships inside TerminalApp.dll: every RUNTIME file of each one (its plugin.json, its")
+    w("// hooks and the contract its plugin.json names under types), byte for byte (UTF-8, LF line ends), with what the engine")
+    w("// needs to write and gate it. Only BundledMods.cpp includes this header: the bytes then live in one translation unit.")
     w("//")
     for m in mods:
         w(f"//   {m.name} {m.version} (Claude Code {m.min_claude_code}+): {len(m.files)} files, sha256 {m.content_hash}")

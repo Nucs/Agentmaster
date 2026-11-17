@@ -1,8 +1,16 @@
 {
   "name": "file-links",
-  "version": "0.4.1",
-  "description": "Draws the file paths and file names in Claude's replies as clickable file:/// links on Windows and macOS, the form a CLAUDE.md rule may ask replies to use, so the model need not write them. A span is linked only when it names a file or folder the mod finds: a full path that exists, a relative path under the session's folder, a file the session's tools read or wrote, a file in the session's scratchpad, or the file of the session's git repository with that name (the shortest path when several folders hold one). Code blocks and existing links stay as written, and so does every reply in a terminal that draws no hyperlinks (Apple Terminal; FORCE_HYPERLINK=1 overrides, as it does for Claude Code). Display only: the stored reply and what the model reads back do not change.",
+  "version": "0.5.1",
+  "description": "Draws the file paths and file names in Claude's replies as clickable file:/// links on Windows and macOS, the form a CLAUDE.md rule may ask replies to use, so the model need not write them. A span is linked only when it names a file or folder the mod finds: a full path that exists, a relative path under the session's folder, a folder name written with its slash (projects/), a file the session's tools read or wrote, a file in the session's scratchpad, the end of a folder the session knows (<session id>/scratchpad), or the file of the session's git repository with that name (the shortest path when several folders hold one). A path with a folder part draws two links: the folder part opens the folder, the name opens the file. In the fullscreen terminal (Claude Code 2.1.311+) a plain click on a file link in a reply opens it once, through the mod: a file in its own app, a folder in the file manager, a program or script shown in its folder, never run; a ctrl-click is still the terminal's and Claude Code's, and in Windows Terminal and Agentmaster both open it. Code blocks and existing links stay as written (the reply's own file links take plain clicks too), and so does every reply in a terminal that draws no hyperlinks (Apple Terminal; FORCE_HYPERLINK=1 overrides, as it does for Claude Code). Display only: the stored reply and what the model reads back do not change.",
   "author": {
     "name": "Eli Belash"
+  },
+  "userConfig": {
+    "plainClickOpens": {
+      "type": "boolean",
+      "title": "file-links: a plain click opens a file link",
+      "description": "On: in the fullscreen terminal, the mod draws the text of each reply that holds a file link as a Markdown laid over Claude Code's own row (its margin and bullet stay Claude Code's), so a plain click on a link opens it once: a file in its own app, a folder in the file manager, a program or script shown in its folder. Off: replies are drawn by Claude Code with the links added, and only a ctrl-click opens a link (twice in Windows Terminal and Agentmaster, which both open it).",
+      "default": true
+    }
   }
 }

@@ -1,15 +1,20 @@
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, PluginOptions, Register, RenderElement, RenderInput } from 'claude-code'
 import {
   absoluteOf,
+  anchoredCandidatesOf,
   baseName,
   bestOf,
   claudeTempOf,
   hyperlinksOf,
+  isFolderPath,
   joinPath,
   linkify,
   normalize,
   parentOf,
+  pathOfFileUri,
   platformOf,
+  pressableHrefsOf,
+  runsWhenOpened,
   scan,
   scratchpadPathOf,
   type HyperlinkSupport,
@@ -40,6 +45,19 @@ import {
  * rewritten text. chat-view matches rows to the transcript by their text, so
  * file-links must be seated beneath chat-view (enabledPlugins order), never
  * above it.
+ *
+ * Clicks (0.5.0): in the fullscreen terminal, a reply that draws a `file:`
+ * link is drawn by this mod as a `Markdown` element that answers its file
+ * links, so a PLAIN click opens a link once, here (see openPressed): a file
+ * in its own app, a folder in the file manager. A ctrl- or alt-click still
+ * goes to the terminal and to Claude Code, which BOTH open it (Windows
+ * Terminal and Agentmaster open the link on the press, Claude Code on the
+ * release), so that click opens two windows; no mod can stop that. The
+ * engine still draws the reply's own row (its margin and bullet) around a
+ * one-row stub, and the Markdown covers that row (see overlaidReplyOf), so
+ * the row looks as Claude Code draws it in every view. Footgun: a plugin
+ * seated beneath this one at `AssistantMessage` sees the stub, not the
+ * reply's text; the `plainClickOpens` option turns the whole path off.
  */
 
 /** What the module knows of the session. Module memory: a reload starts it over. */
@@ -136,6 +154,79 @@ const FILE_TOOLS = ['Read', 'Edit', 'Write', 'NotebookEdit'] as const
 
 /** How many folders the walk up to a repository's `.git` climbs before it gives up. */
 const MAX_REPO_DEPTH = 40
+
+/**
+ * How long the program that opens a pressed link may take to hand it on
+ * (PowerShell starts in about half a second; `open` and `xdg-open` return
+ * at once; a hung one is cut, and the press says it failed).
+ */
+const OPEN_TIMEOUT_MS = 20_000
+
+/**
+ * The environment variable the Windows openers read the path from: the path
+ * never enters a command string, so no character in a file name (a quote, a
+ * curly quote, `&`, `;`, `$`) can change the command.
+ */
+const TARGET_VARIABLE = 'FILE_LINKS_TARGET'
+
+/** Windows PowerShell, which every Windows 10 and 11 has, run with no profile and no prompt. */
+const POWERSHELL = ['powershell', '-NoProfile', '-NonInteractive', '-Command'] as const
+
+/**
+ * Opens a path on Windows as a double-click in Explorer does: a file in the
+ * app the system opens it with, a folder in a window of its own.
+ *
+ * Not `explorer <path>`: explorer splits its argument at commas, so a folder
+ * named `a,b` opened Documents instead (seen live, 2026-11-15). Tried on
+ * names holding a space, `&` and a comma, `#` and `%`, parentheses, Hebrew,
+ * `~`, a quote and brackets, a curly quote, `;` and `^`: each opened its own
+ * folder. `rundll32 url.dll,FileProtocolHandler` failed on Hebrew.
+ */
+const WINDOWS_OPEN = [...POWERSHELL, `Invoke-Item -LiteralPath $env:${TARGET_VARIABLE}`]
+
+/**
+ * Shows a path selected in its folder on Windows: `explorer /select,"<path>"`,
+ * the quotes explorer's own parser needs for a path holding a comma, written
+ * by PowerShell from the variable. The same names as WINDOWS_OPEN each
+ * showed their folder with the file selected.
+ */
+const WINDOWS_REVEAL = [...POWERSHELL, `Start-Process -FilePath explorer.exe -ArgumentList ('/select,"' + $env:${TARGET_VARIABLE} + '"')`]
+
+/** The `userConfig` key of the plain-click option (see plugin.json). */
+const PLAIN_CLICK_OPTION = 'plainClickOpens'
+
+/** The `key` of the `Markdown` a reply is drawn as: what `ui.press` names. */
+const REPLY_KEY = 'reply'
+
+/** The bullet Claude Code draws at the head of a reply on Windows and Linux. */
+const BULLET = '●'
+
+/** The bullet Claude Code draws there on macOS. */
+const MAC_BULLET = '⏺'
+
+/**
+ * Columns the engine's bullet box takes at the left of a reply's first block
+ * (`minWidth: 2`): where the reply's text starts.
+ */
+const BULLET_COLUMNS = 2
+
+/**
+ * The text the engine is handed for a reply the mod draws itself: one
+ * zero-width space, so Claude Code draws its own row (its top margin, which
+ * depends on where the row stands, and its bullet) around one row that shows
+ * nothing, and the mod's Markdown, lifted one row, covers that row.
+ *
+ * Not blank to the engine (its empty-reply check trims whitespace, and a
+ * zero-width space is none), not a control character to the props check.
+ */
+const CHROME_STUB = '\u200B'
+
+/**
+ * What a `Markdown` text may not hold: a control character other than tab
+ * and newline (a carriage return among them), or an unpaired surrogate half.
+ * A reply holding one keeps the engine's own row: the element would refuse it.
+ */
+const REFUSED_IN_MARKDOWN = /[\u0000-\u0008\u000B-\u001F\u007F]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
 
 /**
  * The most `$.fs.exists` answers kept; past it the oldest go first. A dropped
@@ -591,6 +682,10 @@ async function firstExisting($: EngineInterface, world: World, paths: readonly s
  * `mods/prompt-queue/hooks/hooks.json`, a reply's `hooks.json` means that
  * file, not a shorter one in another folder.
  *
+ * Last of all (0.5.0), a relative path, and a `/x` path that is no path of
+ * this machine, is read as the END of a folder the session knows (see
+ * anchoredTarget): `<session id>/scratchpad` is the scratchpad.
+ *
  * @param $ the calling hook's engine interface
  * @param world the module's world
  * @param mention the mention
@@ -601,7 +696,11 @@ async function firstExisting($: EngineInterface, world: World, paths: readonly s
 async function targetOf($: EngineInterface, world: World, mention: Mention, scratchpad?: string): Promise<string | undefined> {
   if (mention.kind === 'absolute') {
     const absolute = absoluteOf(mention.path, world.home, world.platform)
-    return absolute !== undefined && (await existsAt($, world, absolute)) ? absolute : undefined
+    if (absolute !== undefined && (await existsAt($, world, absolute))) return absolute
+    // A drive path or a home path names one place, found or not. A `/x`
+    // path that is not there (on Windows never one of this machine, unless
+    // it is Git Bash's `/c/x`) is often a tail written with a leading slash.
+    return mention.path.startsWith('/') ? anchoredTarget($, world, mention.path, scratchpad) : undefined
   }
   // The scratchpad last of the three: a file of the project wins over a file
   // of the same name that Claude left in its scratchpad.
@@ -614,6 +713,9 @@ async function targetOf($: EngineInterface, world: World, mention: Mention, scra
     const joined = joinPath(folder, mention.path)
     if (await existsAt($, world, joined)) return joined
   }
+  // The touched files and the index list files: a path written as a folder
+  // (`hooks/`) must not land on a file that happens to share its name.
+  if (isFolderPath(mention.path)) return anchoredTarget($, world, mention.path, scratchpad)
   if (mention.kind === 'relative') {
     const touched = await firstExisting($, world, touchedFits(world, mention.path))
     if (touched !== undefined) return touched
@@ -621,7 +723,29 @@ async function targetOf($: EngineInterface, world: World, mention: Mention, scra
   // git listed these files at the last build; one deleted since links to
   // nothing, which a click shows at once, so no existence check is spent here.
   // Several fit (the same name in two folders): the shortest path wins.
-  return bestOf(indexFits(world, mention.path))
+  const indexed = bestOf(indexFits(world, mention.path))
+  if (indexed !== undefined || mention.kind === 'name') return indexed
+  return anchoredTarget($, world, mention.path, scratchpad)
+}
+
+/**
+ * Places a written path as the end of a folder the session knows: the
+ * scratchpad, the working folder, the project root or the home folder (see
+ * anchoredCandidatesOf), the first candidate that exists.
+ *
+ * The scratchpad first: its tail (`<session id>/scratchpad`) is the one a
+ * reply writes without its long head; a working folder's own name is a
+ * common word in comparison.
+ *
+ * @param $ the calling hook's engine interface
+ * @param world the module's world, placed
+ * @param written the path as written
+ * @param scratchpad the session's scratchpad folder; undefined when none
+ * @returns the absolute normalized path that exists, or undefined
+ */
+async function anchoredTarget($: EngineInterface, world: World, written: string, scratchpad: string | undefined): Promise<string | undefined> {
+  const folders = [scratchpad, world.cwd, world.root, world.home].filter((folder): folder is string => folder !== undefined)
+  return firstExisting($, world, anchoredCandidatesOf(written, folders))
 }
 
 /**
@@ -637,9 +761,11 @@ async function drawnTextOf($: EngineInterface, world: World, text: string): Prom
   const mentions = scan(text)
   if (mentions.length === 0) return text
   await place($, world)
-  // Asked once per text, and only when a mention is placed by folder: an
-  // absolute path needs no scratchpad, and the answer is cached per session.
-  const scratchpad = mentions.some(mention => mention.kind !== 'absolute') ? await scratchpadFolderOf($, world) : undefined
+  // Asked once per text, and only when a mention may be placed by folder: a
+  // drive or home path needs no scratchpad, but a `/x` one may be its tail
+  // (see targetOf). The answer is cached per session.
+  const needsScratchpad = mentions.some(mention => mention.kind !== 'absolute' || mention.path.startsWith('/'))
+  const scratchpad = needsScratchpad ? await scratchpadFolderOf($, world) : undefined
   // One lookup per distinct path and kind: a reply often names a file twice.
   const lookups = new Map<string, Promise<string | undefined>>()
   for (const mention of mentions) {
@@ -665,6 +791,216 @@ function remember(world: World, key: string, drawn: string): void {
     const oldest = world.drawn.keys().next().value
     if (oldest !== undefined) world.drawn.delete(oldest)
   }
+}
+
+/**
+ * Tells whether a reply can be drawn as a `Markdown` that answers its links,
+ * and with which links.
+ *
+ * @param $ the render hook's engine interface
+ * @param e the `AssistantMessage` render input, on the terminal
+ * @param world the module's world, placed
+ * @param text the markdown to draw, links added
+ * @returns the hrefs a plain click is answered for; undefined when the build's
+ *   terminal has no `Markdown` element (before link presses existed), the
+ *   text draws no file link of this machine, or holds a character the element
+ *   would refuse (the engine's own row is then drawn, links added)
+ */
+function pressablesOf($: EngineInterface, e: RenderInput<'AssistantMessage', 'terminal'>, world: World, text: string): string[] | undefined {
+  // An older build resolves no Markdown: the caller falls back to the text rewrite.
+  if (typeof $.ui.resolve(e).Markdown !== 'function') return undefined
+  if (REFUSED_IN_MARKDOWN.test(text)) return undefined
+  const hrefs = pressableHrefsOf(text, world.platform)
+  return hrefs.length === 0 ? undefined : hrefs
+}
+
+/**
+ * Builds the `Markdown` a reply is drawn as: its text, links added, with its
+ * file links answered by {@link openPressed}.
+ *
+ * @param $ the render hook's engine interface
+ * @param e the `AssistantMessage` render input, on the terminal
+ * @param world the module's world, placed
+ * @param text the markdown to draw
+ * @param hrefs the links a plain click is answered for (see pressablesOf)
+ * @returns the element
+ */
+function replyMarkdownOf($: EngineInterface, e: RenderInput<'AssistantMessage', 'terminal'>, world: World, text: string, hrefs: string[]): RenderElement {
+  return $.ui.resolve(e).Markdown({
+    key: REPLY_KEY,
+    text,
+    // Not awaited by the engine's press: the open runs on its own and
+    // reports its own failure (a toast), never the press's.
+    onLinkPress: link => void openPressed($, world, link.href),
+    pressableLinks: hrefs,
+  })
+}
+
+/**
+ * Draws a reply over Claude Code's own row: the engine draws its row around
+ * {@link CHROME_STUB} (its top margin, which depends on where the row stands,
+ * and its bullet), and the reply's `Markdown`, lifted one row, covers the one
+ * blank row the stub draws, from where the engine's text starts.
+ *
+ * So the row keeps the engine's look in every view: one blank row above a
+ * reply in the main transcript, none under the ctrl+o transcript's time and
+ * model line, the bullet's own box and color. Seen live on 2.1.311: the
+ * drawing matches the engine's own row by row in both views.
+ *
+ * @param $ the render hook's engine interface
+ * @param e the `AssistantMessage` render input, on the terminal
+ * @param world the module's world, placed
+ * @param chrome the engine's own row for the stub (`{ type: 'engine' }`)
+ * @param text the markdown to draw, links added
+ * @param hrefs the links a plain click is answered for
+ * @returns the tree: the engine's row, then the Markdown over its last row
+ */
+function overlaidReplyOf(
+  $: EngineInterface,
+  e: RenderInput<'AssistantMessage', 'terminal'>,
+  world: World,
+  chrome: RenderElement,
+  text: string,
+  hrefs: string[],
+): RenderElement {
+  const { Box } = $.ui.resolve(e)
+  return Box({
+    flexDirection: 'column',
+    children: [
+      chrome,
+      // After the engine's row, so it paints over the stub's row. The text
+      // column starts after the bullet box on a block that opens a reply,
+      // and at the row's own edge on any other, as the engine lays it out.
+      Box({
+        flexDirection: 'column',
+        marginTop: -1,
+        marginLeft: e.props.isFirstOfReply ? BULLET_COLUMNS : 0,
+        children: [replyMarkdownOf($, e, world, text, hrefs)],
+      }),
+    ],
+  })
+}
+
+/**
+ * Draws a reply as Claude Code 2.1.311 draws its own reply row, with no help
+ * from the engine: the fallback for a stub that a plugin seated beneath
+ * this one drew its own way (no engine row to lay the text over).
+ *
+ * The row mirrors the engine's (its reply component): a row Box with one row
+ * of top margin, the bullet in a two-column box on the block that opens a
+ * reply, and the markdown in a column beside it. Footgun: the engine's own
+ * margin depends on where the row is drawn (none under the ctrl+o
+ * transcript's time and model line, none after an agent team's speaker
+ * label), which no hook is told; one row is the margin of every reply in the
+ * main transcript.
+ *
+ * @param $ the render hook's engine interface
+ * @param e the `AssistantMessage` render input, on the terminal
+ * @param world the module's world, placed
+ * @param text the markdown to draw, links added
+ * @param hrefs the links a plain click is answered for
+ * @returns the tree
+ */
+function ownReplyRowOf($: EngineInterface, e: RenderInput<'AssistantMessage', 'terminal'>, world: World, text: string, hrefs: string[]): RenderElement {
+  const { Box, Text } = $.ui.resolve(e)
+  // Every reply in a session shares the platform; the glyph is the engine's
+  // per OS (macOS draws ⏺), told from the home folder as chong does.
+  const bullet = world.platform === 'posix' && world.home?.startsWith('/Users/') === true ? MAC_BULLET : BULLET
+  return Box({
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    marginTop: 1,
+    width: '100%',
+    children: [
+      ...(e.props.isFirstOfReply ? [Box({ minWidth: BULLET_COLUMNS, children: [Text({ color: 'text', children: [bullet] })] })] : []),
+      Box({ flexDirection: 'column', children: [replyMarkdownOf($, e, world, text, hrefs)] }),
+    ],
+  })
+}
+
+/**
+ * Tells whether a drawing is Claude Code's own row: the engine reference
+ * (`{ type: 'engine', ref }`) `next(e)` resolves to when no plugin seated
+ * beneath this one drew the row its own way.
+ *
+ * @param drawing what `next(e)` resolved to
+ * @returns true for the engine's own row
+ */
+function isEngineRow(drawing: RenderElement): boolean {
+  return drawing.type === 'engine'
+}
+
+/**
+ * Opens the target of a pressed `file:` link, once: a folder in the file
+ * manager, a file in the app the system opens it with, and anything that
+ * would run, install or mount (`.exe`, `.ps1`, `.app`; see runsWhenOpened)
+ * revealed in its folder instead, never started by a click.
+ *
+ * Windows: PowerShell `Invoke-Item` / `explorer /select,"<path>"` (see
+ * WINDOWS_OPEN, WINDOWS_REVEAL); macOS `open` / `open -R`; Linux `xdg-open`
+ * (a reveal opens the parent folder).
+ *
+ * @param $ the engine interface of the hook that drew the link
+ * @param world the module's world, placed
+ * @param href the pressed link's target, as the press carries it; a folder's
+ *   ends with `/`
+ * @throws never: an unreadable link, a missing path and a failed opener each
+ *   say so in a toast (the debug log for a link that is no local path)
+ */
+async function openPressed($: EngineInterface, world: World, href: string): Promise<void> {
+  const path = pathOfFileUri(href, world.platform)
+  if (path === undefined) {
+    $.ui.log(`press on a link that is no local path: ${href}`, { to: 'debug' })
+    return
+  }
+  const stat = await $.fs.stat(path).catch(() => undefined)
+  if (stat === undefined) {
+    $.ui.toast(`file-links: ${path} is not there`)
+    return
+  }
+  const isFolder = stat.kind === 'dir' || href.endsWith('/')
+  const opener = openerOf(world, path, isFolder, runsWhenOpened(path))
+  try {
+    const { exitCode, stderr } = await $.process.run(opener.argv, {
+      timeoutMs: OPEN_TIMEOUT_MS,
+      ...(opener.env === undefined ? {} : { env: opener.env }),
+    })
+    // Each opener here answers 0 once it handed the path on (explorer,
+    // which answers 1 even then, is never run directly).
+    if (exitCode !== 0) $.ui.toast(`file-links could not open ${path}: ${stderr.trim().split(/\r?\n/)[0] || `exit ${exitCode}`}`)
+  } catch (error) {
+    // The program could not start (no PowerShell, an AppLocker rule) or hung.
+    $.ui.toast(`file-links could not open ${path}: ${String(error)}`)
+  }
+}
+
+/** The command that opens or reveals a path: its argument vector, and the variables it reads. */
+type Opener = {
+  /** The argument vector for `$.process.run`. */
+  argv: readonly string[]
+  /** Variables set over the host's environment for it; the Windows openers read the path here. */
+  env?: Record<string, string>
+}
+
+/**
+ * Builds the command that opens or reveals a path on this platform.
+ *
+ * @param world the module's world, placed: its platform and home folder tell
+ *   Windows, macOS (home under `/Users/`) and Linux apart
+ * @param path the path, normalized
+ * @param isFolder true for a folder, which is opened (shown) as it is
+ * @param isRevealed true to show it selected in its folder instead of opening it
+ * @returns the command; macOS and Linux take the path as an argument of its own
+ */
+function openerOf(world: World, path: string, isFolder: boolean, isRevealed: boolean): Opener {
+  if (world.platform === 'windows') {
+    // Explorer and the shell read backslashes; the path reaches PowerShell
+    // through the variable, never through the command text.
+    return { argv: isRevealed ? WINDOWS_REVEAL : WINDOWS_OPEN, env: { [TARGET_VARIABLE]: path.replace(/\//g, '\\') } }
+  }
+  if (world.home?.startsWith('/Users/') === true) return { argv: isRevealed ? ['open', '-R', path] : ['open', path] }
+  // xdg-open has no reveal: a revealed path opens its folder.
+  return { argv: ['xdg-open', isRevealed && !isFolder ? (parentOf(path) ?? path) : path] }
 }
 
 /**
@@ -694,8 +1030,11 @@ function statusText(world: World, now: number, scratchpad: string | undefined): 
   ].join('\n')
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options: PluginOptions) => {
   const world = newWorld()
+  // On unless /config turned it off: the plugin.json default is true, and a
+  // host that passes no options (an older kit) gets the same.
+  const isPlainClickOn = options[PLAIN_CLICK_OPTION] !== false
 
   on('session.start', async ($, e, next) => {
     // The folder the session starts in is the likeliest name of its
@@ -773,6 +1112,19 @@ export const register: Register = on => {
         drawn = text
       }
       remember(world, key, drawn)
+    }
+    // A plain click opens a link only in the fullscreen terminal (the main
+    // screen reports no clicks): there the reply is drawn as a Markdown that
+    // answers its file links. A summary row keeps the engine's drawing, whose
+    // ` · summary` mark a hook's own tree cannot draw.
+    if (isPlainClickOn && e.surface === 'terminal' && e.viewport?.isFullscreen === true && e.props.isSummary !== true) {
+      const hrefs = pressablesOf($, e, world, drawn)
+      if (hrefs !== undefined) {
+        // Decided before `next`: a second call only replays the first, so
+        // the engine is asked once, for its row around the stub.
+        const chrome = await next({ ...e, props: { ...e.props, text: CHROME_STUB } })
+        return isEngineRow(chrome) ? overlaidReplyOf($, e, world, chrome, drawn, hrefs) : ownReplyRowOf($, e, world, drawn, hrefs)
+      }
     }
     // Every other prop (isFirstOfReply, isSummary, onScreen) is handed on as
     // received: the engine refuses a rewrite that changes them.

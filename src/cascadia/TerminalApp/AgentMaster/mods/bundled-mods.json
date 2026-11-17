@@ -1,22 +1,27 @@
 {
-  "$comment": "The Claude Code mods Agentmaster ships inside TerminalApp.dll and loads into every Claude tab it launches (doc/agentmaster/BUNDLED_MODS.md). Listed in --plugin-dir order. After editing a mod here, or this file, run `python tools/bundled-mods/bundled_mods.py gen`; to take a newer copy from the source folder, `sync` first. minClaudeCode is the oldest Claude Code that runs the mod (Agentmaster passes it only to a claude.exe at least that new); summary is the line the cog's Claude tab shows. A mod whose \"source\" is \"repo\" is Agentmaster's own: its folder here IS its source, and `sync` leaves it alone.",
+  "$comment": "The Claude Code mods Agentmaster ships inside TerminalApp.dll and loads into every Claude tab it launches (doc/agentmaster/BUNDLED_MODS.md). Listed in --plugin-dir order. After editing a mod here, or this file, run `python tools/bundled-mods/bundled_mods.py gen`; to take a newer copy from the source folder, `sync` first. minClaudeCode is the oldest Claude Code that runs the mod (Agentmaster passes it only to a claude.exe at least that new); summary is the line the cog's Claude tab shows (ASCII, no double quote or backslash: it is written into a C++ literal as it stands). A mod whose \"source\" is \"repo\" is Agentmaster's own: its folder here IS its source, and `sync` leaves it alone. A new mod goes last, so the mods before it keep their seats, and TestBundledMods' count and order follow.",
   "source": "~/.claude/mods",
   "mods": [
     {
       "name": "file-links",
-      "minClaudeCode": "2.1.287",
-      "summary": "Draws the file paths and file names in Claude's replies as clickable file:/// links (only names it finds on disk)."
+      "minClaudeCode": "2.1.292",
+      "summary": "Draws the file paths and file names in Claude's replies as clickable file:/// links (a path's folder, then its name), only names it finds on disk; in fullscreen a plain click opens one."
     },
     {
       "name": "better-verbose-bash",
       "minClaudeCode": "2.1.308",
-      "summary": "In verbose views (--verbose, Verbose output, ctrl+o), the reason given for a shell call becomes its row's header."
+      "summary": "Wherever Claude Code draws a shell call's own Bash(command) row, in any view, the reason given for the call becomes the row's header."
     },
     {
       "name": "agentmaster-link",
       "source": "repo",
       "minClaudeCode": "2.1.322",
       "summary": "Links the tab to Agentmaster so Telegram's /btw is answered inside the session from its prompt cache (off: a headless fork answers)."
+    },
+    {
+      "name": "prompt-cut",
+      "minClaudeCode": "2.1.310",
+      "summary": "Cuts the whole prompt box to the clipboard, pastes expanded, also mid-turn; needs ctrl+x ctrl+x bound to command:prompt-cut (Chat) in your keybindings.json."
     }
   ]
 }

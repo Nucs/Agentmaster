@@ -1,4 +1,4 @@
-import type { On, ProcessRunResult, RenderPropsOf, RenderSurface } from 'claude-code'
+import type { On, ProcessRunResult, RenderElement, RenderPropsOf, RenderSurface, RenderViewport } from 'claude-code'
 import type { Engine, MockClock, Mounted } from 'claude-code/testing'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
@@ -15,6 +15,12 @@ const MAC_PROJECT = '/Users/me/proj'
 
 /** The surfaces on this machine, where a file link opens the file. */
 const LOCAL_SURFACES = ['terminal', 'desktop', 'vscode'] as const satisfies readonly RenderSurface[]
+
+/** The fullscreen terminal, which reports clicks: a reply with a file link is the mod's own Markdown there. */
+const FULLSCREEN: RenderViewport = { columns: 120, rows: 40, isFullscreen: true }
+
+/** The terminal's main screen, which reports no clicks: replies stay the engine's own rows there. */
+const MAIN_SCREEN: RenderViewport = { columns: 120, rows: 40, isFullscreen: false }
 
 /** The machine a test session runs on: its folder and the environment `$.env.get` reads. */
 type Machine = {
@@ -70,7 +76,26 @@ type World = {
   clock: MockClock
   /** The mod's `$.ui.log` lines (its caught failures), which every test expects empty. */
   logs: string[]
+  /**
+   * Every command the mod ran that was not git: the openers of pressed links,
+   * argv whole, then `FILE_LINKS_TARGET=<value>` when the run set that variable.
+   */
+  opened: string[][]
+  /** The exit status and error text the opener stand-in answers with; 0 and none when absent. */
+  openerFails?: { exitCode: number; stderr: string }
+  /** Every `$.ui.toast` line the mod showed. */
+  toasts: string[]
+  /**
+   * What the AssistantMessage stand-in draws: `engine` answers core's own row
+   * (`{ type: 'engine', ref: 0 }`), as Claude Code does; `tree` answers a
+   * plugin's tree, as a plugin seated beneath file-links that draws the row
+   * its own way would.
+   */
+  replyRow: 'engine' | 'tree'
 }
+
+/** Core's own row, as `next(e)` resolves to when no plugin beneath draws it. */
+const CORE: RenderElement = { type: 'engine', ref: 0 }
 
 /**
  * Spells a path one way, as the test disk keys it. The engine hands fs hooks
@@ -113,7 +138,19 @@ function seat(on: On, files: readonly string[], repo: string[] | undefined, dele
   const disk = new Set(files.map(canonical))
   // A repository is a folder holding `.git`: the mod looks for it before git runs.
   if (repo !== undefined) disk.add(canonical(`${machine.project}/.git`))
-  const world: World = { machine, disk, repo, deleted, gitCalls: 0, drawn: [], clock: mock.clock(on), logs: [] }
+  const world: World = {
+    machine,
+    disk,
+    repo,
+    deleted,
+    gitCalls: 0,
+    drawn: [],
+    clock: mock.clock(on),
+    logs: [],
+    opened: [],
+    toasts: [],
+    replyRow: 'engine',
+  }
   on('session.cwd', () => ({ value: machine.project }))
   on('session.root', () => ({ value: machine.project }))
   on('env.get', ($, e) => ({ value: machine.env[e.name] }))
@@ -134,7 +171,18 @@ function seat(on: On, files: readonly string[], repo: string[] | undefined, dele
     world.logs.push(`[${e.to}] ${e.text}`)
     return { value: undefined }
   })
+  on('ui.toast', ($, e) => {
+    world.toasts.push(e.text)
+    return { value: undefined }
+  })
   on('process.run', async ($, e) => {
+    // A pressed link's opener (PowerShell, open, xdg-open): recorded, never run.
+    if (e.argv[0] !== 'git') {
+      const target = e.init?.env?.['FILE_LINKS_TARGET']
+      world.opened.push([...e.argv, ...(target === undefined ? [] : [`FILE_LINKS_TARGET=${target}`])])
+      const fails = world.openerFails
+      return { value: fails === undefined ? ran(0, '') : { ...ran(fails.exitCode, ''), stderr: fails.stderr } }
+    }
     world.gitCalls++
     if (world.repo === undefined) return { value: ran(128, '') }
     // The list is read at the call, as git reads the disk when it starts.
@@ -147,8 +195,9 @@ function seat(on: On, files: readonly string[], repo: string[] | undefined, dele
   on('tool.call', () => ({ result: {} as never }))
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
-    if (e.component === 'AssistantMessage') world.drawn.push(e.props.text)
-    return Text({ children: ['engine'] })
+    if (e.component !== 'AssistantMessage') return Text({ children: ['engine'] })
+    world.drawn.push(e.props.text)
+    return world.replyRow === 'engine' ? CORE : Text({ children: ['a plugin beneath'] })
   })
   return world
 }
@@ -165,6 +214,16 @@ async function start($: Engine, world: World): Promise<void> {
   await world.clock.settle()
 }
 
+/** How a test draws a reply block beyond its text: the layout and the block's own flags. */
+type DrawOptions = {
+  /** What the surface measured; absent, as a surface that never measured, which is how most tests draw. */
+  viewport?: RenderViewport
+  /** True for a block that holds a summary of the model's text. */
+  isSummary?: true
+  /** False for a block that does not open its reply (no bullet); true when absent. */
+  isFirstOfReply?: boolean
+}
+
 /**
  * Draws one reply block through the mod, as the transcript asks for it.
  *
@@ -172,11 +231,24 @@ async function start($: Engine, world: World): Promise<void> {
  * @param surface where it is drawn
  * @param text the block's markdown
  * @param requestId the row's id; a second draw of the same row unmounts first
+ * @param options the layout and the block's flags; none draws an unmeasured
+ *   block that opens its reply
  * @returns the mounted drawing
  */
-async function draw($: Engine, surface: RenderSurface, text: string, requestId: string): Promise<Mounted<RenderSurface, 'AssistantMessage'>> {
-  const props: RenderPropsOf['AssistantMessage'] = { text, isFirstOfReply: true }
-  return $.ui.mount({ plugin: 'file-links', surface, component: 'AssistantMessage', props, requestId })
+async function draw(
+  $: Engine,
+  surface: RenderSurface,
+  text: string,
+  requestId: string,
+  options: DrawOptions = {},
+): Promise<Mounted<RenderSurface, 'AssistantMessage'>> {
+  const props: RenderPropsOf['AssistantMessage'] = {
+    text,
+    isFirstOfReply: options.isFirstOfReply ?? true,
+    ...(options.isSummary === true ? { isSummary: true } : {}),
+  }
+  const viewport = options.viewport === undefined ? {} : { viewport: options.viewport }
+  return $.ui.mount({ plugin: 'file-links', surface, component: 'AssistantMessage', props, requestId, ...viewport })
 }
 
 describe('AssistantMessage', () => {
@@ -187,7 +259,7 @@ describe('AssistantMessage', () => {
     for (const surface of LOCAL_SURFACES) {
       const drawing = await draw($, surface, text, `m-${surface}`)
       expect(world.drawn.at(-1)).toBe(
-        'Read [`README.md`](file:///C:/proj/README.md), [guide.md](file:///C:/proj/docs/guide.md) and [C:\\\\Users\\\\me\\\\notes.md](file:///C:/Users/me/notes.md), not ui.render.',
+        'Read [`README.md`](file:///C:/proj/README.md), [guide.md](file:///C:/proj/docs/guide.md) and [C:\\\\Users\\\\me\\\\](file:///C:/Users/me/)[notes.md](file:///C:/Users/me/notes.md), not ui.render.',
       )
       await drawing.unmount()
     }
@@ -261,7 +333,217 @@ describe('AssistantMessage', () => {
     await world.clock.advance(15_000)
     // The kit redraws an invalidated drawing when the test reads it next.
     await drawing.find({ type: 'Text' })
-    expect(world.drawn.at(-1)).toBe('Next: [docs/later.md](file:///C:/proj/docs/later.md)')
+    expect(world.drawn.at(-1)).toBe('Next: [docs/](file:///C:/proj/docs/)[later.md](file:///C:/proj/docs/later.md)')
+    expect(world.logs).toEqual([])
+  })
+
+  test('a folder name written with its slash links to that folder, and the bare word stays prose', async ($, on) => {
+    const world = seat(on, [`${PROJECT}/projects`], undefined)
+    await start($, world)
+    await draw($, 'terminal', 'Transcripts live under projects/ in projects.', 'm1')
+    expect(world.drawn.at(-1)).toBe('Transcripts live under [projects/](file:///C:/proj/projects/) in projects.')
+    expect(world.logs).toEqual([])
+  })
+
+  test('a path written as a folder never lands on a file of that name', async ($, on) => {
+    // The repository holds a FILE `a/tools/hooks`; `tools/hooks/` names a folder.
+    const world = seat(on, [], ['a/tools/hooks'])
+    await start($, world)
+    await draw($, 'terminal', 'See tools/hooks/ and hooks.', 'm1')
+    expect(world.drawn.at(-1)).toBe('See tools/hooks/ and hooks.')
+    expect(world.logs).toEqual([])
+  })
+})
+
+describe('clicks (fullscreen terminal)', () => {
+  /** Windows Terminal, with what `$.fs.stat` says of the files the tests press. */
+  const WINDOWS_FILES: Machine = {
+    ...WINDOWS,
+    kinds: {
+      [canonical(`${PROJECT}/README.md`)]: 'file',
+      [canonical(`${PROJECT}/hooks/x.ts`)]: 'file',
+      [canonical(`${PROJECT}/RULES.md`)]: 'file',
+      [canonical(`${PROJECT}/run.ps1`)]: 'file',
+    },
+  }
+
+  /** The files and folder on the test disk for the click tests. */
+  const FILES = [`${PROJECT}/README.md`, `${PROJECT}/hooks`, `${PROJECT}/hooks/x.ts`, `${PROJECT}/RULES.md`, `${PROJECT}/run.ps1`]
+
+  test('a reply with a file link is a Markdown answering its file links, laid over the engine\'s own row', async ($, on) => {
+    const world = seat(on, FILES, ['README.md', 'hooks/x.ts'], [], WINDOWS_FILES)
+    await start($, world)
+    const text = 'See README.md, hooks/x.ts, [the rules](file:///C:/proj/RULES.md) and [docs](https://example.com).'
+    const drawing = await draw($, 'terminal', text, 'm1', { viewport: FULLSCREEN })
+    // The engine draws its own row (margin, bullet) around the one-row stub.
+    expect(world.drawn).toEqual(['\u200B'])
+    const tree = await drawing.drawn()
+    expect(tree).toMatchObject({ type: 'Box', props: { flexDirection: 'column' } })
+    const [chrome, overlay] = (tree as { children: unknown[] }).children
+    expect(chrome).toEqual(CORE)
+    // Lifted onto the stub's row, from where the engine's text starts.
+    expect(overlay).toMatchObject({ type: 'Box', props: { marginTop: -1, marginLeft: 2 } })
+    const markdown = await drawing.find({ type: 'Markdown' })
+    expect(markdown?.key).toBe('reply')
+    expect(markdown?.props['text']).toBe(
+      'See [README.md](file:///C:/proj/README.md), [hooks/](file:///C:/proj/hooks/)[x.ts](file:///C:/proj/hooks/x.ts), [the rules](file:///C:/proj/RULES.md) and [docs](https://example.com).',
+    )
+    // The mod's links and the reply's own file link; the web link stays the terminal's.
+    expect(markdown?.props['pressableLinks']).toEqual([
+      'file:///C:/proj/README.md',
+      'file:///C:/proj/hooks/',
+      'file:///C:/proj/hooks/x.ts',
+      'file:///C:/proj/RULES.md',
+    ])
+    // The bullet is the engine's, in its row: the mod draws none of its own.
+    expect(await drawing.find({ type: 'Text', text: '●' })).toBeUndefined()
+    expect(world.logs).toEqual([])
+  })
+
+  test('a block that does not open its reply lays its text at the row\'s own edge', async ($, on) => {
+    const world = seat(on, FILES, ['README.md'], [], WINDOWS_FILES)
+    await start($, world)
+    const drawing = await draw($, 'terminal', 'And README.md.', 'm1', { viewport: FULLSCREEN, isFirstOfReply: false })
+    const tree = (await drawing.drawn()) as { children: unknown[] }
+    expect(tree.children[1]).toMatchObject({ type: 'Box', props: { marginTop: -1, marginLeft: 0 } })
+    expect(await drawing.find({ type: 'Markdown' })).toBeDefined()
+    expect(world.logs).toEqual([])
+  })
+
+  test('a stub a plugin beneath draws its own way gets the mod\'s own row: bullet, margin, text', async ($, on) => {
+    const world = seat(on, FILES, ['README.md'], [], WINDOWS_FILES)
+    world.replyRow = 'tree'
+    await start($, world)
+    const drawing = await draw($, 'terminal', 'See README.md.', 'm1', { viewport: FULLSCREEN })
+    expect(await drawing.drawn()).toMatchObject({ type: 'Box', props: { flexDirection: 'row', marginTop: 1 } })
+    expect((await drawing.find({ type: 'Text', text: '●' }))?.props['color']).toBe('text')
+    expect((await drawing.find({ type: 'Markdown' }))?.props['text']).toBe('See [README.md](file:///C:/proj/README.md).')
+    // The plugin beneath's own drawing of the stub is not shown.
+    expect(await drawing.find({ type: 'Text', text: 'a plugin beneath' })).toBeUndefined()
+    expect(world.logs).toEqual([])
+  })
+
+  test('a reply holding a character a Markdown refuses keeps the engine\'s row, links added', async ($, on) => {
+    const world = seat(on, FILES, ['README.md'], [], WINDOWS_FILES)
+    await start($, world)
+    const drawing = await draw($, 'terminal', 'See README.md.\r\nDone.', 'm1', { viewport: FULLSCREEN })
+    expect(world.drawn).toEqual(['See [README.md](file:///C:/proj/README.md).\r\nDone.'])
+    expect(await drawing.find({ type: 'Markdown' })).toBeUndefined()
+    expect(world.logs).toEqual([])
+  })
+
+  test('a reply whose only file link names another machine keeps the engine\'s row', async ($, on) => {
+    const world = seat(on, FILES, [], [], WINDOWS_FILES)
+    await start($, world)
+    const drawing = await draw($, 'terminal', 'See [share](file://server/share/x.md).', 'm1', { viewport: FULLSCREEN })
+    expect(world.drawn).toEqual(['See [share](file://server/share/x.md).'])
+    expect(await drawing.find({ type: 'Markdown' })).toBeUndefined()
+    expect(world.logs).toEqual([])
+  })
+
+  test('a plain click opens a file once, a folder link its folder, and a script is shown, never run', async ($, on) => {
+    const world = seat(on, FILES, ['README.md', 'hooks/x.ts'], [], WINDOWS_FILES)
+    await start($, world)
+    const drawing = await draw($, 'terminal', 'See hooks/x.ts, README.md and run.ps1.', 'm1', { viewport: FULLSCREEN })
+    for (const href of ['file:///C:/proj/hooks/x.ts', 'file:///C:/proj/hooks/', 'file:///C:/proj/run.ps1']) {
+      await drawing.press({ key: 'reply', link: { href } })
+      // The open runs on its own after the press: let it finish.
+      await world.clock.settle()
+    }
+    // The path rides in a variable, never in the command text.
+    const open = ['powershell', '-NoProfile', '-NonInteractive', '-Command', 'Invoke-Item -LiteralPath $env:FILE_LINKS_TARGET']
+    const reveal = [
+      'powershell',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      `Start-Process -FilePath explorer.exe -ArgumentList ('/select,"' + $env:FILE_LINKS_TARGET + '"')`,
+    ]
+    expect(world.opened).toEqual([
+      [...open, 'FILE_LINKS_TARGET=C:\\proj\\hooks\\x.ts'],
+      [...open, 'FILE_LINKS_TARGET=C:\\proj\\hooks'],
+      [...reveal, 'FILE_LINKS_TARGET=C:\\proj\\run.ps1'],
+    ])
+    expect(world.toasts).toEqual([])
+    expect(world.logs).toEqual([])
+  })
+
+  test('a path whose name would break a command line reaches the opener whole, in the variable', async ($, on) => {
+    const odd = `${PROJECT}/a&b,c; it's ‘q’ $x`
+    const world = seat(on, [odd], undefined, [], WINDOWS_FILES)
+    await start($, world)
+    const drawing = await draw($, 'terminal', 'See [odd](file:///C:/proj/a%26b%2Cc%3B%20it%27s%20%E2%80%98q%E2%80%99%20%24x).', 'm1', {
+      viewport: FULLSCREEN,
+    })
+    await drawing.press({ key: 'reply', link: { href: 'file:///C:/proj/a%26b%2Cc%3B%20it%27s%20%E2%80%98q%E2%80%99%20%24x' } })
+    await world.clock.settle()
+    expect(world.opened.at(-1)?.at(-1)).toBe("FILE_LINKS_TARGET=C:\\proj\\a&b,c; it's ‘q’ $x")
+    // The command text is the same for every path.
+    expect(world.opened.at(-1)?.at(-2)).toBe('Invoke-Item -LiteralPath $env:FILE_LINKS_TARGET')
+    expect(world.logs).toEqual([])
+  })
+
+  test('an opener that fails says so with its first error line', async ($, on) => {
+    const world = seat(on, FILES, ['README.md'], [], WINDOWS_FILES)
+    world.openerFails = { exitCode: 1, stderr: 'Invoke-Item : Access is denied.\r\nAt line:1 char:1' }
+    await start($, world)
+    const drawing = await draw($, 'terminal', 'See README.md.', 'm1', { viewport: FULLSCREEN })
+    await drawing.press({ key: 'reply', link: { href: 'file:///C:/proj/README.md' } })
+    await world.clock.settle()
+    expect(world.toasts).toEqual(['file-links could not open C:/proj/README.md: Invoke-Item : Access is denied.'])
+    expect(world.logs).toEqual([])
+  })
+
+  test('a click on a link to a missing file says so and runs nothing', async ($, on) => {
+    const world = seat(on, FILES, ['README.md'], [], WINDOWS_FILES)
+    await start($, world)
+    const drawing = await draw($, 'terminal', 'See [gone](file:///C:/proj/gone.md) and README.md.', 'm1', { viewport: FULLSCREEN })
+    await drawing.press({ key: 'reply', link: { href: 'file:///C:/proj/gone.md' } })
+    await world.clock.settle()
+    expect(world.opened).toEqual([])
+    expect(world.toasts).toEqual(['file-links: C:/proj/gone.md is not there'])
+  })
+
+  test('on macOS a click opens with `open`, a script is revealed with `open -R`, and the mod\'s own row draws ⏺', async ($, on) => {
+    const machine: Machine = {
+      ...MAC,
+      kinds: { [canonical(`${MAC_PROJECT}/README.md`)]: 'file', [canonical(`${MAC_PROJECT}/go.command`)]: 'file' },
+    }
+    const world = seat(on, [`${MAC_PROJECT}/README.md`, `${MAC_PROJECT}/go.command`], undefined, [], machine)
+    // The mod's own row (a plugin beneath drew the stub): its bullet is macOS's.
+    world.replyRow = 'tree'
+    await start($, world)
+    const drawing = await draw($, 'terminal', 'Read README.md, then go.command.', 'm1', { viewport: FULLSCREEN })
+    expect(await drawing.find({ type: 'Text', text: '⏺' })).toBeDefined()
+    for (const href of ['file:///Users/me/proj/README.md', 'file:///Users/me/proj/go.command']) {
+      await drawing.press({ key: 'reply', link: { href } })
+      await world.clock.settle()
+    }
+    expect(world.opened).toEqual([
+      ['open', '/Users/me/proj/README.md'],
+      ['open', '-R', '/Users/me/proj/go.command'],
+    ])
+    expect(world.logs).toEqual([])
+  })
+
+  test('the main screen, a summary row and a reply with no file link keep the engine\'s own row', async ($, on) => {
+    const world = seat(on, FILES, ['README.md'], [], WINDOWS_FILES)
+    await start($, world)
+    await draw($, 'terminal', 'See README.md.', 'm1', { viewport: MAIN_SCREEN })
+    expect(world.drawn.at(-1)).toBe('See [README.md](file:///C:/proj/README.md).')
+    await draw($, 'terminal', 'Summed: README.md.', 'm2', { viewport: FULLSCREEN, isSummary: true })
+    expect(world.drawn.at(-1)).toBe('Summed: [README.md](file:///C:/proj/README.md).')
+    await draw($, 'terminal', 'Nothing to open, see [docs](https://example.com).', 'm3', { viewport: FULLSCREEN })
+    expect(world.drawn.at(-1)).toBe('Nothing to open, see [docs](https://example.com).')
+    expect(world.logs).toEqual([])
+  })
+
+  test('with plainClickOpens off the fullscreen reply is the engine\'s own row, links added', { options: { plainClickOpens: false } }, async ($, on) => {
+    const world = seat(on, FILES, ['README.md'], [], WINDOWS_FILES)
+    await start($, world)
+    const drawing = await draw($, 'terminal', 'See README.md.', 'm1', { viewport: FULLSCREEN })
+    expect(world.drawn.at(-1)).toBe('See [README.md](file:///C:/proj/README.md).')
+    expect(await drawing.find({ type: 'Markdown' })).toBeUndefined()
     expect(world.logs).toEqual([])
   })
 })
@@ -288,7 +570,7 @@ describe('index builds', () => {
     // The first build ended with the old list; the next poll builds again.
     await world.clock.advance(15_000)
     await drawing.find({ type: 'Text' })
-    expect(world.drawn.at(-1)).toBe('Next: [docs/later.md](file:///C:/proj/docs/later.md)')
+    expect(world.drawn.at(-1)).toBe('Next: [docs/](file:///C:/proj/docs/)[later.md](file:///C:/proj/docs/later.md)')
     expect(world.logs).toEqual([])
   })
 })
@@ -313,7 +595,7 @@ describe('platforms', () => {
     await start($, world)
     await draw($, 'terminal', 'Open /Users/me/notes.md, ~/proj/README.md, `README.md`, hooks/x.ts, guide.md, C:\\proj\\README.md and /c/Users/me/notes.md.', 'm1')
     expect(world.drawn.at(-1)).toBe(
-      'Open [/Users/me/notes.md](file:///Users/me/notes.md), [\\~/proj/README.md](file:///Users/me/proj/README.md), [`README.md`](file:///Users/me/proj/README.md), [hooks/x.ts](file:///Users/me/proj/hooks/x.ts), [guide.md](file:///Users/me/proj/docs/guide.md), C:\\proj\\README.md and /c/Users/me/notes.md.',
+      'Open [/Users/me/](file:///Users/me/)[notes.md](file:///Users/me/notes.md), [\\~/proj/](file:///Users/me/proj/)[README.md](file:///Users/me/proj/README.md), [`README.md`](file:///Users/me/proj/README.md), [hooks/](file:///Users/me/proj/hooks/)[x.ts](file:///Users/me/proj/hooks/x.ts), [guide.md](file:///Users/me/proj/docs/guide.md), C:\\proj\\README.md and /c/Users/me/notes.md.',
     )
     expect(world.logs).toEqual([])
   })
@@ -367,7 +649,21 @@ describe('scratchpad', () => {
     await start($, world)
     await draw($, 'terminal', 'See notes.txt, run1/summary.json, README.md and missing.txt.', 'm1')
     expect(world.drawn.at(-1)).toBe(
-      `See [notes.txt](file:///${SCRATCH}/notes.txt), [run1/summary.json](file:///${SCRATCH}/run1/summary.json), [README.md](file:///C:/proj/README.md) and missing.txt.`,
+      `See [notes.txt](file:///${SCRATCH}/notes.txt), [run1/](file:///${SCRATCH}/run1/)[summary.json](file:///${SCRATCH}/run1/summary.json), [README.md](file:///C:/proj/README.md) and missing.txt.`,
+    )
+    expect(world.logs).toEqual([])
+  })
+
+  test('a tail of the scratchpad links into it: its session id and name, with or without a leading slash', async ($, on) => {
+    const files = ['C:/Users/me/AppData/Local/Temp/claude', SCRATCH, `${SCRATCH}/run1`, `${SCRATCH}/run1/summary.json`]
+    const world = seat(on, files, undefined, [], WINDOWS_TEMP)
+    await start($, world)
+    await draw($, 'terminal', `See ${SESSION_ID}/scratchpad, /${SESSION_ID}/scratchpad/run1/summary.json and scratchpad/.`, 'm1')
+    const session = 'C:/Users/me/AppData/Local/Temp/claude/C--proj/sess-1'
+    expect(world.drawn.at(-1)).toBe(
+      `See [${SESSION_ID}/](file:///${session}/)[scratchpad](file:///${SCRATCH}), ` +
+        `[/${SESSION_ID}/scratchpad/run1/](file:///${SCRATCH}/run1/)[summary.json](file:///${SCRATCH}/run1/summary.json) ` +
+        `and [scratchpad/](file:///${SCRATCH}/).`,
     )
     expect(world.logs).toEqual([])
   })

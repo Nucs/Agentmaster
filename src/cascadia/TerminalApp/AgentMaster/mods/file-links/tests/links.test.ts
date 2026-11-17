@@ -2,17 +2,25 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import {
   absoluteOf,
+  anchoredCandidatesOf,
   bestOf,
   claudeTempOf,
+  fileHrefsOf,
   fileUri,
+  folderUri,
   hyperlinksOf,
+  isFolderPath,
   linkify,
   MAX_MENTIONS,
+  MAX_PRESSABLE,
   normalize,
   parentOf,
   pathOf,
+  pathOfFileUri,
   platformOf,
+  pressableHrefsOf,
   projectKeyOf,
+  runsWhenOpened,
   scan,
   scratchpadPathOf,
   trimmedBounds,
@@ -35,6 +43,10 @@ const PLACED: Record<string, string> = {
   '__init__.py': 'C:/proj/pkg/__init__.py',
   'mods/chat-view/': 'C:/proj/mods/chat-view',
   'C:\\proj\\a (1).txt': 'C:/proj/a (1).txt',
+  'projects/': 'C:/proj/projects',
+  '.\\notes.md': 'C:/proj/notes.md',
+  'C:\\top.md': 'C:/top.md',
+  'C:\\a`b\\c.md': 'C:/a`b/c.md',
 }
 
 /**
@@ -90,6 +102,28 @@ describe('pathOf', () => {
     expect(pathOf('C:\\Program Files\\Git', false)).toBeUndefined()
     expect(pathOf('my folder/x.ts', true)).toBeUndefined()
   })
+
+  test('reads a lone folder name written with its separator as relative, and the bare word as none', () => {
+    expect(pathOf('projects/', false)).toEqual({ path: 'projects/', kind: 'relative' })
+    expect(pathOf('scratchpad\\', false)).toEqual({ path: 'scratchpad\\', kind: 'relative' })
+    expect(pathOf('.claude/', false)).toEqual({ path: '.claude/', kind: 'relative' })
+    for (const written of ['projects', './', '../', '.\\', 'a b/', '*/']) expect(pathOf(written, true)).toBeUndefined()
+  })
+
+  test('reads a session id and its scratchpad as a relative path, and its slash form as absolute', () => {
+    const id = 'd5deb5da-8c08-4124-a312-8b87bd0c7061'
+    expect(pathOf(`${id}/scratchpad`, false)).toEqual({ path: `${id}/scratchpad`, kind: 'relative' })
+    expect(pathOf(`/${id}/scratchpad`, false)).toEqual({ path: `/${id}/scratchpad`, kind: 'absolute' })
+  })
+})
+
+describe('isFolderPath', () => {
+  test('tells a path written as a folder by its trailing separator', () => {
+    expect(isFolderPath('projects/')).toBe(true)
+    expect(isFolderPath('C:\\x\\')).toBe(true)
+    expect(isFolderPath('C:\\x')).toBe(false)
+    expect(isFolderPath('hooks/x.ts')).toBe(false)
+  })
 })
 
 describe('trimmedBounds', () => {
@@ -108,25 +142,28 @@ describe('trimmedBounds', () => {
 })
 
 describe('scan and linkify', () => {
-  test('links a code span, keeping its backticks inside the link text', () => {
+  test('links a code span as two code spans: the folder part, then the name', () => {
     expect(linked('Edit `hooks/register.ts` next.')).toBe(
-      'Edit [`hooks/register.ts`](file:///C:/proj/hooks/register.ts) next.',
+      'Edit [`hooks/`](file:///C:/proj/hooks/)[`register.ts`](file:///C:/proj/hooks/register.ts) next.',
     )
   })
 
-  test('links a bare path and escapes the backslashes markdown would eat', () => {
+  test('links a bare path as its folder and its name, and escapes the backslashes markdown would eat', () => {
     expect(linked('Read C:\\Users\\me\\.claude\\CLAUDE.md first')).toBe(
-      'Read [C:\\\\Users\\\\me\\\\.claude\\\\CLAUDE.md](file:///C:/Users/me/.claude/CLAUDE.md) first',
+      'Read [C:\\\\Users\\\\me\\\\.claude\\\\](file:///C:/Users/me/.claude/)[CLAUDE.md](file:///C:/Users/me/.claude/CLAUDE.md) first',
     )
   })
 
   test('keeps a line suffix in the link text and out of the URI', () => {
     expect(linked('See `register.ts:42`.')).toBe('See [`register.ts:42`](file:///C:/proj/hooks/register.ts).')
+    expect(linked('See C:\\Users\\me\\.claude\\CLAUDE.md:27.')).toBe(
+      'See [C:\\\\Users\\\\me\\\\.claude\\\\](file:///C:/Users/me/.claude/)[CLAUDE.md:27](file:///C:/Users/me/.claude/CLAUDE.md).',
+    )
   })
 
-  test('keeps trailing punctuation and emphasis outside the link', () => {
+  test('keeps trailing punctuation and emphasis outside the links', () => {
     expect(linked('Open **README.md**, then hooks/register.ts.')).toBe(
-      'Open **[README.md](file:///C:/proj/README.md)**, then [hooks/register.ts](file:///C:/proj/hooks/register.ts).',
+      'Open **[README.md](file:///C:/proj/README.md)**, then [hooks/](file:///C:/proj/hooks/)[register.ts](file:///C:/proj/hooks/register.ts).',
     )
   })
 
@@ -134,15 +171,24 @@ describe('scan and linkify', () => {
     expect(linked('Add __init__.py here')).toBe('Add [\\_\\_init\\_\\_.py](file:///C:/proj/pkg/__init__.py) here')
   })
 
-  test('links a folder named with a trailing separator', () => {
-    expect(linked('Under mods/chat-view/ sits the mod.')).toBe(
-      'Under [mods/chat-view/](file:///C:/proj/mods/chat-view) sits the mod.',
+  test('links a folder named with a trailing separator as one folder link', () => {
+    expect(linked('Under mods/chat-view/ sits the mod, and projects/ holds the rest.')).toBe(
+      'Under [mods/chat-view/](file:///C:/proj/mods/chat-view/) sits the mod, and [projects/](file:///C:/proj/projects/) holds the rest.',
     )
+  })
+
+  test('a dot folder part links to the folder the file was found in', () => {
+    expect(linked('Open .\\notes.md now')).toBe('Open [.\\\\](file:///C:/proj/)[notes.md](file:///C:/proj/notes.md) now')
+  })
+
+  test('a file at a drive root splits off the root, and a code span holding a backtick stays one link', () => {
+    expect(linked('See C:\\top.md.')).toBe('See [C:\\\\](file:///C:/)[top.md](file:///C:/top.md).')
+    expect(linked('See ``C:\\a`b\\c.md``.')).toBe('See [``C:\\a`b\\c.md``](file:///C:/a%60b/c.md).')
   })
 
   test('encodes spaces and parentheses in the URI', () => {
     expect(linked('Run `C:\\Program Files\\Git\\bin\\bash.exe` and open `C:\\proj\\a (1).txt`.')).toBe(
-      'Run [`C:\\Program Files\\Git\\bin\\bash.exe`](file:///C:/Program%20Files/Git/bin/bash.exe) and open [`C:\\proj\\a (1).txt`](file:///C:/proj/a%20%281%29.txt).',
+      'Run [`C:\\Program Files\\Git\\bin\\`](file:///C:/Program%20Files/Git/bin/)[`bash.exe`](file:///C:/Program%20Files/Git/bin/bash.exe) and open [`C:\\proj\\`](file:///C:/proj/)[`a (1).txt`](file:///C:/proj/a%20%281%29.txt).',
     )
   })
 
@@ -270,6 +316,70 @@ describe('paths and URIs', () => {
     expect(fileUri('C:/x/שלום.md')).toBe('file:///C:/x/%D7%A9%D7%9C%D7%95%D7%9D.md')
     expect(fileUri('/home/me/x.md')).toBe('file:///home/me/x.md')
     expect(fileUri('/Users/me/Library/Application Support/x.json')).toBe('file:///Users/me/Library/Application%20Support/x.json')
+  })
+
+  test('folderUri ends a folder with one slash, a root included', () => {
+    expect(folderUri('C:/proj/hooks')).toBe('file:///C:/proj/hooks/')
+    expect(folderUri('C:/')).toBe('file:///C:/')
+    expect(folderUri('/Users/me')).toBe('file:///Users/me/')
+    expect(folderUri('/')).toBe('file:///')
+  })
+
+  test('pathOfFileUri reads back what fileUri and folderUri write, on both platforms', () => {
+    for (const path of ['C:/Users/me/a b#c%d.md', 'C:/x/(y)!.md', 'C:/x/שלום.md', 'C:/']) {
+      expect(pathOfFileUri(fileUri(path), 'windows')).toBe(path)
+    }
+    expect(pathOfFileUri(folderUri('C:/proj/hooks'), 'windows')).toBe('C:/proj/hooks')
+    expect(pathOfFileUri(fileUri('/Users/me/Library/Application Support/x.json'), 'posix')).toBe('/Users/me/Library/Application Support/x.json')
+    expect(pathOfFileUri('file://localhost/etc/hosts', 'posix')).toBe('/etc/hosts')
+    // The common slip of a reply: the drive where the host belongs.
+    expect(pathOfFileUri('file://C:/x/y.md', 'windows')).toBe('C:/x/y.md')
+  })
+
+  test('pathOfFileUri refuses other schemes, other hosts, queries, bad escapes and the other platform', () => {
+    for (const href of ['https://x.com/a.md', 'file://server/share/a.md', 'file:///C:/a.md?x=1', 'file:///C:/a.md#L2', 'file:///C:/a%zz.md', 'file:///C:/a%00.md', 'file:///etc/hosts']) {
+      expect(pathOfFileUri(href, 'windows')).toBeUndefined()
+    }
+    expect(pathOfFileUri('file:///C:/x.md', 'posix')).toBeUndefined()
+  })
+
+  test('fileHrefsOf lists each file link of a text once, the mod\'s and the reply\'s own, and no web link', () => {
+    const text = [
+      'See [a](file:///C:/a.md), [b](file:///C:/b.md "title"), [web](https://x.com) and <file:///C:/c.md>.',
+      'Again [a](file:///C:/a.md) and [`x`](file:///C:/x/)[`y.md`](file:///C:/x/y.md).',
+    ].join('\n')
+    expect(fileHrefsOf(text)).toEqual(['file:///C:/a.md', 'file:///C:/b.md', 'file:///C:/c.md', 'file:///C:/x/', 'file:///C:/x/y.md'])
+    const many = Array.from({ length: MAX_PRESSABLE + 10 }, (_, i) => `[f](file:///C:/f${i}.md)`).join(' ')
+    expect(fileHrefsOf(many).length).toBe(MAX_PRESSABLE)
+  })
+
+  test('pressableHrefsOf keeps the file links of this machine, and leaves other hosts and platforms to the terminal', () => {
+    const text = '[a](file:///C:/a.md) [unc](file://server/share/x.md) [mac](file:///Users/me/x.md) [frag](file:///C:/b.md#L2) [c](file://C:/c.md)'
+    expect(pressableHrefsOf(text, 'windows')).toEqual(['file:///C:/a.md', 'file://C:/c.md'])
+    expect(pressableHrefsOf(text, 'posix')).toEqual(['file:///Users/me/x.md'])
+  })
+
+  test('anchoredCandidatesOf reads a path as the end of a known folder, the longest overlap first', () => {
+    const scratch = 'C:/Users/me/AppData/Local/Temp/claude/C--proj/sess-1/scratchpad'
+    expect(anchoredCandidatesOf('sess-1/scratchpad', [scratch])).toEqual([scratch])
+    expect(anchoredCandidatesOf('/sess-1/scratchpad/run1/x.json', [scratch])).toEqual([`${scratch}/run1/x.json`])
+    expect(anchoredCandidatesOf('scratchpad/', [scratch, 'C:/proj'])).toEqual([scratch])
+    expect(anchoredCandidatesOf('.claude/mods/x.md', ['C:/Users/me/.claude'])).toEqual(['C:/Users/me/.claude/mods/x.md'])
+    // Without case, as Windows and macOS read names.
+    expect(anchoredCandidatesOf('SESS-1\\Scratchpad', [scratch])).toEqual([scratch])
+    // One candidate per folder, in the folders' order.
+    expect(anchoredCandidatesOf('proj/x.md', ['C:/proj', 'D:/proj'])).toEqual(['C:/proj/x.md', 'D:/proj/x.md'])
+    expect(anchoredCandidatesOf('other/x.md', [scratch, 'C:/proj'])).toEqual([])
+    expect(anchoredCandidatesOf('../proj/x.md', ['C:/proj'])).toEqual([])
+  })
+
+  test('runsWhenOpened names programs, scripts, installers and bundles, and passes documents and folders', () => {
+    for (const path of ['C:/x/setup.EXE', 'C:/x/run.ps1', 'C:/x/a.bat', 'C:/x/link.lnk', 'C:/x/y.msi', '/Applications/Foo.app/', '/x/install.pkg', '/x/go.command', 'C:/x/tool.py']) {
+      expect(runsWhenOpened(path)).toBe(true)
+    }
+    for (const path of ['C:/x/notes.md', 'C:/x/data.json', 'C:/x/report.pdf', 'C:/x/folder', '/Users/me/.bashrc', 'C:/x/archive.zip']) {
+      expect(runsWhenOpened(path)).toBe(false)
+    }
   })
 })
 

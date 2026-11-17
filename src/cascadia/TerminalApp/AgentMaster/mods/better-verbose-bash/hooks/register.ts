@@ -1,13 +1,14 @@
 import type { EngineInterface, Register, RenderElement, RenderInput } from 'claude-code'
 
 /**
- * better-verbose-bash: in the views where Claude Code draws a shell call in
- * full, the reason the model gave for the call becomes the row's header.
+ * better-verbose-bash: wherever Claude Code draws a shell call's own row,
+ * the reason the model gave for the call becomes the row's header.
  *
  * Claude Code draws a call as `● Bash(git status)`, and the `description`
  * the model wrote for it ("Show working tree status") shows only in the
- * permission dialog. In the full views (`--verbose`, Verbose output in
- * `/config`, the ctrl+o transcript) this mod draws the row as
+ * permission dialog. In every view that draws that row (a standalone call in
+ * the compact view, `--verbose`, Verbose output in `/config`, the ctrl+o
+ * transcript, a call group unfolded into rows) this mod draws it as
  *
  *     ● Show working tree status
  *       Bash(git status)
@@ -15,8 +16,10 @@ import type { EngineInterface, Register, RenderElement, RenderInput } from 'clau
  *
  * The second line on is Claude Code's own row (its command, wait and
  * progress lines), drawn by the engine; the mod adds the header and paints
- * blanks over the engine's bullet, so the row keeps one bullet. Display
- * only: the transcript and what the model reads back do not change.
+ * blanks over the engine's bullet, so the row keeps one bullet. A call that
+ * the compact view folds into a group's count line (`Ran 3 shell commands`)
+ * has no row of its own, so it gets no header. Display only: the transcript
+ * and what the model reads back do not change.
  */
 
 /**
@@ -207,6 +210,30 @@ export function isCoreRow(theirs: RenderElement): boolean {
 }
 
 /**
+ * Tells whether a row comes from a build whose `ToolUse` rows the header's
+ * layout was checked against: one that says how it draws the row
+ * (`isExpanded`, true or false), as Claude Code 2.1.308 and later do on the
+ * terminal.
+ *
+ * The value is not read, by design: it says whether the view draws calls in
+ * full (`--verbose`, the ctrl+o transcript), not whether this row shows its
+ * command, and a standalone row shows its `Bash(command)` line in the compact
+ * view too. Before 0.2.0 the hook took `isExpanded: true` rows alone, so a
+ * compact view's standalone call kept its plain row. Only the prop's absence
+ * counts: Claude Code 2.1.292 and earlier send none, and the layout
+ * ({@link headerTree}: the one-line top margin, the bullet on line
+ * {@link BULLET_LINE}) was never checked there, so their rows stay as Claude
+ * Code draws them, as they always did with this mod.
+ *
+ * @param props the row's props, as the hook's `e.props` carries them
+ * @returns true when the row may take the header; false for a build that
+ *   does not say how it draws the row
+ */
+export function isCheckedBuild(props: { readonly isExpanded?: boolean }): boolean {
+  return props.isExpanded !== undefined
+}
+
+/**
  * Draws the row: a bulleted header line with the description, and Claude
  * Code's own row under it, its bullet painted over with blanks.
  *
@@ -277,15 +304,20 @@ export function headerTree($: EngineInterface, e: ToolUseEvent, theirs: RenderEl
 
 /**
  * Registers the mod's one hook: a `ui.render` hook on the terminal's
- * `ToolUse` rows of {@link SHELL_TOOLS} that Claude Code draws in full.
+ * `ToolUse` rows of {@link SHELL_TOOLS}, in every view.
  *
- * The matcher does the choosing: `isExpanded: true` is the engine's own word
- * for a row drawn in full (`--verbose`, Verbose output, the ctrl+o
- * transcript, and the rows of a call group a plugin unfolded); a compact row
- * leaves it false or absent and never reaches the hook. Other surfaces
- * (desktop, VS Code, phones) draw their own rows, with no bullet column to
- * clip, so they are left alone too. A row that a plugin seated beneath drew
- * its own way keeps that plugin's drawing ({@link isCoreRow}).
+ * The row is the test for "Claude Code shows this call's command", not the
+ * view: the engine raises a `ToolUse` row exactly where it draws a call's
+ * `Bash(command)` line, and none for a call that the compact view folds into
+ * a group's count line. Claude Code 2.1.308 has two such sites: a standalone
+ * row (its `isExpanded` follows `--verbose` and the ctrl+o transcript) and a
+ * row of an unfolded call group (always expanded). So a verbose session, a
+ * compact one and the ctrl+o transcript all get the header on every shell
+ * row they draw. Other surfaces (desktop, VS Code, phones) draw their own
+ * rows, with no bullet column to clip, so they are left alone. A row from a
+ * build that the layout was not checked on ({@link isCheckedBuild}) and a row
+ * that a plugin seated beneath drew its own way ({@link isCoreRow}) stay as
+ * they are drawn.
  *
  * @param on adds a hook
  */
@@ -294,8 +326,11 @@ export const register: Register = on => {
 
   on(
     'ui.render',
-    { component: 'ToolUse', surface: 'terminal', props: { tool: [...SHELL_TOOLS], isExpanded: true } },
+    { component: 'ToolUse', surface: 'terminal', props: { tool: [...SHELL_TOOLS] } },
     async ($, e, next) => {
+      // A build that does not say how it draws the row (2.1.292 and earlier):
+      // the header's layout was never checked against its rows.
+      if (!isCheckedBuild(e.props)) return next(e)
       const description = descriptionOf(e.props.input)
       // No description, or none with anything to show: Claude Code's row as
       // it is, so a call never loses its bullet for an empty header.

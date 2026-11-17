@@ -1,0 +1,19 @@
+{
+  "name": "prompt-cut",
+  "version": "0.2.0",
+  "description": "Cut for the prompt box: a key bound to command:prompt-cut in ~/.claude/keybindings.json (ctrl+x ctrl+x, as the README sets it up) puts the whole draft on the clipboard and empties the box, also while Claude works. Pastes are expanded: a [Pasted text #N +M lines] placeholder goes to the clipboard as the text it stands for, read back from the clipboard right after the paste; a truncated long draft is rebuilt, and a prompt recalled from the history gets its pastes from history.jsonl and the paste cache. When a paste's text is still unknown (pasted before the mod loaded, or the clipboard had changed), the key arms Enter instead ([Enter cuts ✕] on the hint row): Claude Code expands every paste on its own send, which the mod takes over and drops, so nothing is sent; typing, the key again or the ✕ cancels, and the arm lasts 60 s. Images stay in the box. Leaves no row in the transcript. A mod (Claude Code 2.1.310+). Version lives only in its plugin.json.",
+  "author": {
+    "name": "Eli Belash"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "clipboardCommand": {
+      "type": "string",
+      "title": "Clipboard reader",
+      "description": "The command that prints the clipboard's text, run without a shell, its words split at spaces (no quoting). Empty (the default): Windows PowerShell's Get-Clipboard on Windows and in WSL, pbpaste on macOS, wl-paste, xclip or xsel on Linux.",
+      "required": false,
+      "default": ""
+    }
+  }
+}

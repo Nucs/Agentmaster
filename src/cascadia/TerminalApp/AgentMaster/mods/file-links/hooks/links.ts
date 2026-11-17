@@ -218,14 +218,35 @@ export function pathOf(written: string, allowsSpaces: boolean): WrittenPath | un
   if (hasSpace) return undefined
   const segments = path.split(/[\\/]/)
   // A trailing separator marks a folder (`mods/chat-view/`); it adds no segment.
-  if (segments.length > 1 && segments.at(-1) === '') segments.pop()
+  const isFolder = segments.length > 1 && segments.at(-1) === ''
+  if (isFolder) segments.pop()
   if (segments.length >= 2) {
     // A leading separator left here is a `//x` network or URL spelling (a
     // POSIX `/x` was taken above): its empty first segment fails SEGMENT, so
     // it is never looked up.
     return segments.every(segment => SEGMENT.test(segment)) ? { path, kind: 'relative' } : undefined
   }
+  if (isFolder) {
+    // A lone folder name written with its separator (`projects/`), placed
+    // like a relative path: the separator is what tells it from a word, so a
+    // bare `projects` stays prose. `./` and `../` name the working folder or
+    // its parent, which no reply means as a link.
+    const [name = ''] = segments
+    return SEGMENT.test(name) && name !== '.' && name !== '..' ? { path, kind: 'relative' } : undefined
+  }
   return FILE_NAME.test(path) ? { path, kind: 'name' } : undefined
+}
+
+/**
+ * Tells whether a written path names a folder by its spelling: it ends with a
+ * separator (`projects/`, `C:\x\`).
+ *
+ * @param path a mention's path, as {@link pathOf} keeps it
+ * @returns true for a trailing `/` or `\`; a folder written without one reads
+ *   as false (only the disk could tell it from a file)
+ */
+export function isFolderPath(path: string): boolean {
+  return /[\\/]$/.test(path)
 }
 
 /**
@@ -475,12 +496,16 @@ function closingOf(line: string, open: number, opening: string, closing: string)
  * Writes the placed mentions back into the text as links, every other
  * character as it was.
  *
+ * A path with a folder part is written as two links side by side (see
+ * {@link linkPartsOf}): the folder part opens the folder, the name the file.
+ * Each shows the characters it replaces, so the text reads as before.
+ *
  * @param text the reply's markdown
  * @param mentions what {@link scan} found in it, in text order
  * @param targetOf the absolute path a mention names, or undefined to leave
  *   that span as written
- * @returns the text with each placed span as `[span](file:///...)`; the same
- *   string when nothing was placed
+ * @returns the text with each placed span as `[span](file:///...)` (or the
+ *   two links of a split span); the same string when nothing was placed
  */
 export function linkify(text: string, mentions: readonly Mention[], targetOf: (mention: Mention) => string | undefined): string {
   let out = ''
@@ -489,11 +514,61 @@ export function linkify(text: string, mentions: readonly Mention[], targetOf: (m
   for (const mention of mentions) {
     const target = targetOf(mention)
     if (target === undefined) continue
-    out += `${text.slice(last, mention.start)}[${labelOf(mention)}](${fileUri(target)})`
+    const links = linkPartsOf(mention, target).map(part => `[${part.label}](${part.href})`)
+    out += `${text.slice(last, mention.start)}${links.join('')}`
     last = mention.end
     isChanged = true
   }
   return isChanged ? out + text.slice(last) : text
+}
+
+/** One link a placed mention is drawn as: the markdown label and the URI it opens. */
+export type LinkPart = {
+  /** The link text, as markdown: a code span, or a bare token with its punctuation escaped. */
+  label: string
+  /** The `file:` URI; a folder's ends with `/`, which is how a press tells the two apart. */
+  href: string
+}
+
+/**
+ * Splits a placed mention into the links that draw it.
+ *
+ * A path with a folder part becomes two links, as the person asked
+ * (2026-11-15): the folder part, separator included, opens the target's
+ * folder, and the name (with any line suffix) opens the file. `C:\x\a.md:27`
+ * draws `C:\x\` and `a.md:27`; `.\a.md` draws `.\` (the folder the file was
+ * found in) and `a.md`. A bare name, and a path written as a folder (trailing
+ * separator), stay one link: the name opens the file, the folder the folder.
+ *
+ * @param mention the mention
+ * @param target the absolute normalized path the resolver placed it at
+ * @returns one or two parts, in text order; their labels together show the
+ *   span as written
+ */
+export function linkPartsOf(mention: Mention, target: string): LinkPart[] {
+  if (isFolderPath(mention.path)) return [{ label: labelOf(mention), href: folderUri(target) }]
+  const cut = Math.max(mention.path.lastIndexOf('/'), mention.path.lastIndexOf('\\'))
+  const folder = parentOf(target)
+  // A name, or a target at a root (nothing above it), is one link.
+  if (cut === -1 || folder === undefined) return [{ label: labelOf(mention), href: fileUri(target) }]
+  const file = { href: fileUri(target) }
+  const folderHref = folderUri(folder)
+  if (!mention.isCode) {
+    // A bare token's raw text starts with the path: the cut indexes both.
+    return [
+      { label: escapedLabel(mention.raw.slice(0, cut + 1)), href: folderHref },
+      { label: escapedLabel(mention.raw.slice(cut + 1)), ...file },
+    ]
+  }
+  const ticks = '`'.repeat(runLengthAt(mention.raw, 0, '`'))
+  const content = mention.raw.slice(ticks.length, mention.raw.length - ticks.length).trim()
+  // Each half becomes a code span of its own; one holding a backtick would
+  // need padding to stay a span, so such a path stays one link instead.
+  if (content.includes('`')) return [{ label: labelOf(mention), ...file }]
+  return [
+    { label: `${ticks}${content.slice(0, cut + 1)}${ticks}`, href: folderHref },
+    { label: `${ticks}${content.slice(cut + 1)}${ticks}`, ...file },
+  ]
 }
 
 /**
@@ -507,7 +582,183 @@ export function linkify(text: string, mentions: readonly Mention[], targetOf: (m
  */
 function labelOf(mention: Mention): string {
   if (mention.isCode) return mention.raw
-  return mention.raw.replace(/[\\[\]`*_~]/g, char => `\\${char}`)
+  return escapedLabel(mention.raw)
+}
+
+/**
+ * Escapes the markdown punctuation of a bare token's text, so a link label
+ * shows it as written.
+ *
+ * @param text the text
+ * @returns it with `\ [ ] ` * _ ~` each behind a backslash
+ */
+function escapedLabel(text: string): string {
+  return text.replace(/[\\[\]`*_~]/g, char => `\\${char}`)
+}
+
+/**
+ * Spells an absolute folder as a `file:` URI that ends with `/`.
+ *
+ * The trailing slash is the mark a link press reads to open a folder rather
+ * than a file, and the form terminals and browsers take for a directory.
+ *
+ * @param path an absolute folder, `C:/x`, `C:/` or `/x`
+ * @returns `file:///C:/x/` (or `file:///x/`, `file:///C:/`, `file:///`)
+ */
+export function folderUri(path: string): string {
+  const uri = fileUri(path)
+  return uri.endsWith('/') ? uri : `${uri}/`
+}
+
+/**
+ * Reads a `file:` URI back as a path, for a press on a link: the mod's own
+ * links and the ones a reply wrote itself.
+ *
+ * @param href the URI as the link carries it: `file:///C:/x/a%20b.md`,
+ *   `file://localhost/x`, or the common `file://C:/x` (a drive where a host
+ *   belongs)
+ * @param platform the session's platform: Windows takes drive paths only
+ *   (a UNC host is refused, `$.fs` refuses network places anyway), POSIX
+ *   takes `/x`
+ * @returns the path, normalized (`C:/x/a b.md`, `/x`); undefined for any other
+ *   scheme, a host that is not this machine, a query or fragment, a bad
+ *   percent escape, or a path of the other platform
+ */
+export function pathOfFileUri(href: string, platform: Platform): string | undefined {
+  const match = /^file:\/\/([^/?#]*)(\/[^?#]*)?$/i.exec(href)
+  if (match === null) return undefined
+  const [, host = '', rest = ''] = match
+  let encoded = rest
+  if (DRIVE_ROOT.test(host)) encoded = `/${host}${rest}`
+  else if (host !== '' && host.toLowerCase() !== 'localhost') return undefined
+  let decoded: string
+  try {
+    decoded = encoded.split('/').map(decodeURIComponent).join('/')
+  } catch {
+    // A `%` with no two hex digits after it: no path can be read from it.
+    return undefined
+  }
+  if (decoded.includes('\0')) return undefined
+  if (platform === 'windows') return /^\/[A-Za-z]:(?:\/|$)/.test(decoded) ? normalize(decoded.slice(1)) : undefined
+  return decoded.startsWith('/') && !/^\/[A-Za-z]:(?:\/|$)/.test(decoded) ? normalize(decoded) : undefined
+}
+
+/** The most links one `Markdown` may answer (its `pressableLinks` limit). */
+export const MAX_PRESSABLE = 256
+
+/** The longest link target a `Markdown` may answer (its `pressableLinks` entry limit). */
+const MAX_HREF_CHARS = 2048
+
+/**
+ * Lists the `file:` links a reply's markdown draws, the mod's own and the
+ * ones the reply wrote itself: the links a plain click in the fullscreen
+ * terminal is answered for.
+ *
+ * Read with a pattern, not the scanner: an inline link's destination
+ * (`](file:...)`) and an autolink (`<file:...>`). A destination with a space
+ * or a raw parenthesis is missed, and its link keeps the terminal's own
+ * behaviour; a link inside a code block is listed and never pressed.
+ *
+ * @param text the markdown to draw
+ * @returns each distinct target once, in text order, at most
+ *   {@link MAX_PRESSABLE}, none longer than 2048 characters
+ */
+export function fileHrefsOf(text: string): string[] {
+  const hrefs = new Set<string>()
+  for (const match of text.matchAll(/\]\((file:[^)\s]+)(?:\s+"[^"]*")?\)|<(file:[^>\s]+)>/gi)) {
+    const href = match[1] ?? match[2]
+    if (href !== undefined && href.length <= MAX_HREF_CHARS) hrefs.add(href)
+    if (hrefs.size >= MAX_PRESSABLE) break
+  }
+  return [...hrefs]
+}
+
+/**
+ * Lists the file links of a reply that a plain click is answered for: the
+ * ones {@link fileHrefsOf} finds that name a path of this machine.
+ *
+ * A link to another host (`file://server/share/x`), with a query or fragment,
+ * or of the other platform stays the terminal's, as before 0.5.0: answered,
+ * it could only fail.
+ *
+ * @param text the markdown to draw
+ * @param platform the session's platform (see {@link pathOfFileUri})
+ * @returns the hrefs, in text order, at most {@link MAX_PRESSABLE}
+ */
+export function pressableHrefsOf(text: string, platform: Platform): string[] {
+  return fileHrefsOf(text).filter(href => pathOfFileUri(href, platform) !== undefined)
+}
+
+/**
+ * Lists where a written path may lie when it is the END of a path the
+ * session knows: the leading segments it shares with a folder's last ones
+ * are that folder, the rest lies under it.
+ *
+ * `<session id>/scratchpad` and `/<session id>/scratchpad/x.json` are tails
+ * of the scratchpad; `.claude/mods/x` is one of a working folder that ends in
+ * `.claude`. The longest overlap with each folder is tried first; one
+ * candidate per folder, the folders in the order given.
+ *
+ * @param written the path as written, `/` or `\` separated; a leading
+ *   separator (a tail written as if absolute) is ignored
+ * @param folders absolute normalized folders, best first
+ * @returns the candidate paths, normalized, each distinct; none for a path
+ *   that climbs (`..`) or holds no segment
+ */
+export function anchoredCandidatesOf(written: string, folders: readonly string[]): string[] {
+  const segments = written.split(/[\\/]/).filter(segment => segment !== '' && segment !== '.')
+  if (segments.length === 0 || segments.includes('..')) return []
+  const candidates = new Set<string>()
+  for (const folder of folders) {
+    const own = folder.split('/').filter(segment => segment !== '')
+    for (let overlap = Math.min(segments.length, own.length); overlap >= 1; overlap--) {
+      const tail = own.slice(own.length - overlap)
+      // Compared without case: Windows and macOS file systems ignore it, and
+      // on Linux the existence check the caller makes refuses a wrong case.
+      if (tail.every((segment, i) => segment.toLowerCase() === segments[i]!.toLowerCase())) {
+        candidates.add(segments.length === overlap ? normalize(folder) : joinPath(folder, segments.slice(overlap).join('/')))
+        break
+      }
+    }
+  }
+  return [...candidates]
+}
+
+/**
+ * Extensions a plain "open" would run, install or mount rather than show:
+ * programs, scripts, installers, shortcuts, disk images, app bundles. A press
+ * on such a link reveals it in its folder instead (see {@link runsWhenOpened}).
+ *
+ * Windows' set follows the file types Outlook and SmartScreen block; macOS
+ * adds bundles (`.app`) and the types `open` hands to Terminal or Installer.
+ */
+const RUNS_WHEN_OPENED = new Set([
+  // Windows programs, scripts and installers.
+  'exe', 'com', 'bat', 'cmd', 'scr', 'pif', 'cpl', 'msc', 'msi', 'msp', 'mst', 'msix', 'msixbundle', 'appx', 'appxbundle',
+  'appinstaller', 'application', 'appref-ms', 'gadget', 'hta', 'inf', 'ins', 'isp', 'jar', 'js', 'jse', 'lnk', 'url', 'reg',
+  'ps1', 'ps1xml', 'ps2', 'ps2xml', 'psc1', 'psc2', 'psd1', 'psm1', 'msh', 'msh1', 'msh2', 'mshxml', 'msh1xml', 'msh2xml',
+  'scf', 'sct', 'shb', 'shs', 'vb', 'vbe', 'vbs', 'ws', 'wsc', 'wsf', 'wsh', 'xbap', 'xnk', 'settingcontent-ms',
+  'library-ms', 'search-ms', 'diagcab', 'chm', 'hlp', 'iso', 'img', 'vhd', 'vhdx', 'py', 'pyw', 'pyz', 'pyc',
+  // macOS bundles, Terminal and Installer types, profiles, disk images.
+  'app', 'command', 'tool', 'terminal', 'pkg', 'mpkg', 'dmg', 'workflow', 'action', 'scpt', 'scptd', 'applescript',
+  'osax', 'prefpane', 'kext', 'mobileconfig', 'fileloc', 'inetloc', 'webloc', 'sh', 'zsh', 'bash', 'csh', 'ksh', 'pl', 'rb',
+])
+
+/**
+ * Tells whether opening a path would run, install or mount something, so a
+ * press reveals it in its folder instead of opening it.
+ *
+ * Read from the name alone, folders included: a macOS `.app` is a folder that
+ * `open` launches.
+ *
+ * @param path a path in any spelling
+ * @returns true when its last segment's extension is one of
+ *   {@link RUNS_WHEN_OPENED} (without case)
+ */
+export function runsWhenOpened(path: string): boolean {
+  const name = baseName(path.replace(/[\\/]+$/, ''))
+  const dot = name.lastIndexOf('.')
+  return dot > 0 && RUNS_WHEN_OPENED.has(name.slice(dot + 1).toLowerCase())
 }
 
 /**
