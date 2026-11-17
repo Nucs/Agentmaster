@@ -20,5 +20,12 @@ namespace TerminalApp
 
         event TitleChangeRequestedArgs TitleChangeRequested;
         event Windows.Foundation.TypedEventHandler<Object, Object> RenameEnded;
+
+        // Agentmaster (SESSION_NOTES.md section 4b): for the XAML compiler's generated binding code only. The note glyph's
+        // x:Load is BOUND (x:Load="{x:Bind TabStatus.AgentNoteVisible}"), and the C++/WinRT code generated for a
+        // bound x:Load unloads the element through its owner's UnloadObject, which a C++/WinRT control has only when
+        // its runtime class declares it (C++/CX generated it into the partial class). Declared LAST, so every earlier
+        // member of the default interface keeps its vtable slot.
+        void UnloadObject(Windows.UI.Xaml.DependencyObject dependencyObject);
     }
 }

@@ -1179,6 +1179,30 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (SESSION_NOTES.md §4b): the unload half of the note glyph's bound x:Load — see the declaration in
+    // TabHeaderControl.h for who calls it and why it must exist on the runtime class.
+    void TabHeaderControl::UnloadObject(const winrt::Windows::UI::Xaml::DependencyObject& dependencyObject) noexcept
+    {
+        // The generated code passes the element it realized; a null one has nothing to unload (and
+        // XamlMarkupHelper would throw E_INVALIDARG for it).
+        if (!dependencyObject)
+        {
+            return;
+        }
+        try
+        {
+            // Fully qualified: this file also opens winrt::Microsoft::UI::Xaml, so a bare Markup:: could resolve to
+            // the WinUI 2 namespace instead of the system XAML helper that owns the element.
+            winrt::Windows::UI::Xaml::Markup::XamlMarkupHelper::UnloadObject(dependencyObject);
+        }
+        catch (...)
+        {
+            // The glyph stays in the tree: a note marker that outlives its note until the next change of
+            // AgentNoteVisible is cosmetic, while an exception escaping into the binding update could fail the window.
+            ::Agentmaster::AgentLogCaughtException(L"tab-header note glyph unload (x:Load)");
+        }
+    }
+
     // Method Description:
     // - Show the tab rename box for the user to rename the tab title
     // - We automatically use the previous title as the initial text of the box

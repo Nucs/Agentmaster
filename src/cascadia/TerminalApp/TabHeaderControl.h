@@ -66,6 +66,20 @@ namespace winrt::TerminalApp::implementation
         // UI thread only. Never throws: a XAML failure is logged (Rule #18) and leaves the old font.
         void ApplyTitleFont(double fontSize, uint16_t fontWeight) noexcept;
 
+        // Agentmaster (SESSION_NOTES.md §4b, the note glyph): unloads an x:Load-realized element of this header, for
+        // the XAML compiler's generated binding code ONLY. The note glyph is x:Load-bound to TabStatus.AgentNoteVisible,
+        // so a tab without a note pays no element for it (per-tab XAML is multiplied by ~700 tabs); when that binding
+        // turns false, the generated code calls UnloadObject on this header's PROJECTED type, which exists only because
+        // TabHeaderControl.idl declares it (without it TerminalAppLib does not compile: C2039 in
+        // TabHeaderControl.xaml.g.hpp). It forwards to XamlMarkupHelper::UnloadObject, which takes the element out of
+        // the tree and drops its x:Name registration, so the binding's next true value realizes a FRESH glyph through
+        // FindName. ⚠ Not for other callers: unloading an element that is not x:Load-managed removes it for good.
+        // Parameters:
+        //   dependencyObject - the realized element to unload (the note glyph); a null one is ignored.
+        // UI thread only (the binding update runs there). Never throws: a XAML failure is logged (Rule #18) and the
+        // glyph stays loaded — a stale note marker until the next note change, never a torn-down header.
+        void UnloadObject(const winrt::Windows::UI::Xaml::DependencyObject& dependencyObject) noexcept;
+
         til::event<TerminalApp::TitleChangeRequestedArgs> TitleChangeRequested;
         til::typed_event<> RenameEnded;
 
