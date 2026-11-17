@@ -14,6 +14,11 @@
 //      and a ```diff block as "File diffs" draws it (3c): the gutter's numbers counted from the hunk headers, the green and red
 //      bands, the ellipsis between hunks, a quoted git diff's dim file header vs a lone "--- " line (a removed "-- " line),
 //      a "\ No newline" note, a long line broken at the edge on its band;
+//      and a pipe table as Claude Code 2.1.322 draws it (3e, §21.39.1): its box row by row (the centered header, the body's
+//      alignments, a rule between body rows, a cell's bold and code), its widths at a narrow sheet, its wrap (wrap-ansi
+//      without trimming: the break's blank kept at a line's end, a blank starting the line after a full one), its vertical
+//      records (one line per cell, a rule between rows, a header-only table's unlabeled cells), its 200-row cap and note,
+//      a table on a prompt's band, a wide glyph's two columns;
 //   4. end to end (RenderConversationImages) on a turns fixture transcript, and again with File diffs (two more rows) and with
 //      Last Turn (its newest turn alone, still numbered as in the whole conversation).
 // Sections 3 and 4 need MarkdownBlocks (cmark): without the vcpkg cmark of a full build they report a skip, like
@@ -268,6 +273,7 @@ namespace
         MdParseOptions parse;
         parse.softBreaksAsLineBreaks = true;
         parse.maxBlockChars = kConversationBlockMaxChars;
+        parse.tables = true; // §21.39.1: as RenderConversationImages parses (pipe tables drawn as Claude Code's box)
         const MdParseResult parsed = ParseMarkdownBlocks(markdown, parse);
         ConversationSheetOptions options;
         options.cols = cols;
@@ -798,6 +804,179 @@ void TestConversationImage()
             allZero = allZero && t == 0;
         }
         CHECK(allZero && pseudo.turns == 0, "layout: the pseudo-turn of a transcript that opens mid-turn claims no turn number");
+    }
+
+    // ===== 3e. a pipe table as Claude Code draws it (21.39.1): the box, alignments, styles, wrapping, the records, the cap =====
+    {
+        const auto rowsFit = [](const ConversationSheet& s, int cols) {
+            for (const auto& row : s.snapshot.lines)
+            {
+                if (ConvRowWidth(row) > cols)
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+        const auto rowText = [](const ConversationSheet& s, int r) {
+            return r >= 0 && static_cast<size_t>(r) < s.snapshot.lines.size() ? ConvRowText(s.snapshot.lines[static_cast<size_t>(r)]) : std::wstring{};
+        };
+        const auto rule = [](wchar_t left, wchar_t tee, wchar_t right, std::initializer_list<int> widths) {
+            std::wstring s(1, left);
+            size_t i = 0;
+            for (const int w : widths)
+            {
+                s += std::wstring(static_cast<size_t>(w) + 2, L'\x2500');
+                s += ++i < widths.size() ? tee : right;
+            }
+            return s;
+        };
+
+        // The box: widths at each column's longest cell (5, 4, 5), the header centered, the body by alignment (left, right,
+        // center), a rule between every two body rows, the reply's hanging indent before each row (the table is not its first
+        // block), no Markdown pipe left.
+        const std::wstring doc = L"### Turn 1 \x00B7 now\n\n"
+                                 L"**\x276F User**\n> compare\n\n"
+                                 L"**\x25CF Claude**\n"
+                                 L"> Here:\n"
+                                 L">\n"
+                                 L"> | Name | Size | State |\n"
+                                 L"> |:-----|-----:|:-----:|\n"
+                                 L"> | alpha | 12 | **ok** |\n"
+                                 L"> | beta | 7 | `x` |\n";
+        const ConversationSheet sheet = ConvLayout(doc, kConversationImageCols);
+        const int top = ConvFindRow(sheet, L"\x250C");
+        CHECK(top > 0 && rowText(sheet, top) == L"  " + rule(L'\x250C', L'\x252C', L'\x2510', { 5, 4, 5 }), "table: the top border, each column as wide as its longest cell");
+        CHECK(rowText(sheet, top + 1) == L"  \x2502 Name  \x2502 Size \x2502 State \x2502", "table: the header row, centered");
+        CHECK(rowText(sheet, top + 2) == L"  " + rule(L'\x251C', L'\x253C', L'\x2524', { 5, 4, 5 }), "table: the rule under the header");
+        CHECK(rowText(sheet, top + 3) == L"  \x2502 alpha \x2502   12 \x2502  ok   \x2502", "table: a body row - left, right and center aligned, the bold marks gone");
+        CHECK(rowText(sheet, top + 4) == L"  " + rule(L'\x251C', L'\x253C', L'\x2524', { 5, 4, 5 }), "table: a rule between two body rows");
+        CHECK(rowText(sheet, top + 5) == L"  \x2502 beta  \x2502    7 \x2502   x   \x2502", "table: the last body row");
+        CHECK(rowText(sheet, top + 6) == L"  " + rule(L'\x2514', L'\x2534', L'\x2518', { 5, 4, 5 }), "table: the bottom border");
+        CHECK(ConvFindRow(sheet, L"|") < 0, "table: no Markdown pipe is drawn");
+        if (top > 0)
+        {
+            const auto& alpha = sheet.snapshot.lines[static_cast<size_t>(top) + 3];
+            const int ok = ConvCellIndexOf(alpha, L"ok");
+            CHECK(ok > 0 && alpha[static_cast<size_t>(ok)].fg == kConvBright && (alpha[static_cast<size_t>(ok)].flags & kScreenCellBold) != 0,
+                  "table: a bold cell is bright and bold, as in a paragraph");
+            CHECK(alpha[2].fg == kConvText, "table: the borders are in the reply's text color");
+            const auto& beta = sheet.snapshot.lines[static_cast<size_t>(top) + 5];
+            const int x = ConvCellIndexOf(beta, L"x");
+            CHECK(x > 0 && beta[static_cast<size_t>(x)].fg == kConvCode, "table: a code cell wears the code color");
+        }
+
+        // A reply that IS a table: Claude's bullet goes on the table's top border.
+        const ConversationSheet first = ConvLayout(L"**\x25CF Claude**\n> | a | b |\n> |---|---|\n> | 1 | 2 |\n", kConversationImageCols);
+        const int firstTop = ConvFindRow(first, L"\x250C");
+        CHECK(firstTop >= 0 && rowText(first, firstTop).rfind(L"\x25CF \x250C", 0) == 0, "table: a reply that starts with a table has its bullet on the top border");
+
+        // Too wide for the room: each column keeps its longest word and the rest is shared in proportion (5 + 8, then 16 more to
+        // the long column: 5 and 24); the long cell wraps to three lines and the short one sits on the middle line.
+        const std::wstring wide = L"**\x25CF Claude**\n> | Topic | Detail |\n> |---|---|\n"
+                                  L"> | wrap | a fairly long sentence that cannot fit on one line of a narrow sheet |\n";
+        const ConversationSheet narrow = ConvLayout(wide, 40);
+        const int wideTop = ConvFindRow(narrow, L"\x250C");
+        CHECK(rowsFit(narrow, 40) && wideTop >= 0 && rowText(narrow, wideTop) == L"\x25CF " + rule(L'\x250C', L'\x252C', L'\x2510', { 5, 24 }),
+              "table: a table wider than the room gets Claude Code's proportional widths and stays within the sheet");
+        const int line1 = ConvFindRow(narrow, L"a fairly long sentence");
+        CHECK(line1 > 0 && rowText(narrow, line1) == L"  \x2502       \x2502 a fairly long sentence   \x2502" &&
+                  rowText(narrow, line1 + 1) == L"  \x2502 wrap  \x2502 that cannot fit on one   \x2502" &&
+                  rowText(narrow, line1 + 2) == L"  \x2502       \x2502 line of a narrow sheet   \x2502",
+              "table: a long cell wraps by words and a short one is centered top to bottom in its row");
+
+        // A box that cannot fit even at the scaled-down widths: Claude Code's vertical records - "Header: value" per cell (the header
+        // bold), a rule between two rows (as long as the room allows, at most 40), no box.
+        const std::wstring many = L"**\x25CF Claude**\n> | A | B | C | D | E | F |\n> |---|---|---|---|---|---|\n"
+                                  L"> | one | two | three | four | five | six |\n> | 1 | 2 | 3 | 4 | 5 | 6 |\n";
+        const ConversationSheet records = ConvLayout(many, 30);
+        const int a1 = ConvFindRow(records, L"A: one");
+        const int a2 = ConvFindRow(records, L"A: 1");
+        CHECK(rowsFit(records, 30) && ConvFindRow(records, L"\x250C") < 0 && a1 >= 0 && ConvFindRow(records, L"F: six") == a1 + 5 && a2 == a1 + 7,
+              "table: a table that cannot fit as a box is drawn as vertical records, one line per cell");
+        CHECK(a1 >= 0 && rowText(records, a1 + 6) == L"  " + std::wstring(27, L'\x2500'), "table: a rule between two records, as long as the room allows");
+        if (a1 >= 0)
+        {
+            const auto& rec = records.snapshot.lines[static_cast<size_t>(a1)];
+            const int label = ConvCellIndexOf(rec, L"A:");
+            CHECK(label >= 0 && (rec[static_cast<size_t>(label)].flags & kScreenCellBold) != 0, "table: a record's header label is bold");
+        }
+        // A row that would wrap into more than four lines is a record too.
+        std::wstring longCell;
+        for (int i = 0; i < 40; ++i)
+        {
+            longCell += L"word" + std::to_wstring(i) + L" ";
+        }
+        const ConversationSheet tall = ConvLayout(L"**\x25CF Claude**\n> | Key | Value |\n> |---|---|\n> | k | " + longCell + L"|\n", 60);
+        CHECK(rowsFit(tall, 60) && ConvFindRow(tall, L"\x250C") < 0 && ConvFindRow(tall, L"Key: k") >= 0 && ConvFindRow(tall, L"Value: word0") >= 0,
+              "table: a row taller than four lines sends the table to the vertical records");
+
+        // Past 200 body rows: the first 200 are drawn, and Claude Code's own note counts the rest (thousands grouped).
+        std::wstring big = L"**\x25CF Claude**\n> | n |\n> |---|\n";
+        for (int i = 0; i < 1201; ++i)
+        {
+            big += L"> | r" + std::to_wstring(i) + L" |\n";
+        }
+        const ConversationSheet capped = ConvLayout(big, kConversationImageCols);
+        const int note = ConvFindRow(capped, L"more rows not shown");
+        CHECK(note > 0 && rowText(capped, note).find(L"\x2026 1,001 more rows not shown") != std::wstring::npos && ConvFindRow(capped, L"r199") > 0 &&
+                  ConvFindRow(capped, L"r200 ") < 0 && rowText(capped, note - 1).find(L"\x2514") != std::wstring::npos,
+              "table: past 200 body rows the rest are counted under the box");
+
+        // A table inside a user's prompt keeps the prompt's band across every row.
+        const ConversationSheet band = ConvLayout(L"**\x276F User**\n> | a | b |\n> |---|---|\n> | 1 | 2 |\n", kConversationImageCols);
+        const int bandTop = ConvFindRow(band, L"\x250C");
+        bool onBand = bandTop >= 0;
+        for (int r = (std::max)(bandTop, 0); onBand && r < bandTop + 5; ++r)
+        {
+            const auto& row = band.snapshot.lines[static_cast<size_t>(r)];
+            onBand = ConvRowWidth(row) == kConversationImageCols && row.back().bg == kConvPromptBand;
+        }
+        CHECK(onBand, "table: a table in a prompt is drawn on the prompt's band, the band across the whole row");
+
+        // Wide glyphs count two columns: the border follows the cell's real width.
+        const ConversationSheet cjk = ConvLayout(L"**\x25CF Claude**\n> | \x540D\x524D | x |\n> |---|---|\n> | \x4E2D\x6587\x5B57 | y |\n", kConversationImageCols);
+        const int cjkTop = ConvFindRow(cjk, L"\x250C");
+        CHECK(cjkTop >= 0 && rowText(cjk, cjkTop) == L"\x25CF " + rule(L'\x250C', L'\x252C', L'\x2510', { 6, 3 }) &&
+                  ConvRowWidth(cjk.snapshot.lines[static_cast<size_t>(cjkTop) + 1]) == ConvRowWidth(cjk.snapshot.lines[static_cast<size_t>(cjkTop)]),
+              "table: a wide glyph takes two columns of its cell, and every row of the box is as wide as its border");
+
+        // Claude Code wraps a cell with wrap-ansi, trim off: the blank at a break stays at the end of its line, so a right-aligned
+        // line that broke sits one column further left than the cell's last line (widths 3 and 26 at 40 columns: 4 + 22 of 22).
+        const ConversationSheet right = ConvLayout(L"**\x25CF Claude**\n> | k | v |\n> |---|--:|\n"
+                                                   L"> | x | aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll |\n",
+                                                   40);
+        const int rightLine = ConvFindRow(right, L"aaaa bbbb");
+        CHECK(rightLine > 0 && rowText(right, rightLine) == L"  \x2502     \x2502  aaaa bbbb cccc dddd eeee  \x2502" &&
+                  rowText(right, rightLine + 1) == L"  \x2502 x   \x2502  ffff gggg hhhh iiii jjjj  \x2502" &&
+                  rowText(right, rightLine + 2) == L"  \x2502     \x2502" + std::wstring(18, L' ') + L"kkkk llll \x2502",
+              "table: a right-aligned line that broke keeps the break's blank at its end (wrap-ansi without trimming), the last line does not");
+        // ... and after a line filled to the column the next one starts with that blank.
+        const ConversationSheet filled = ConvLayout(L"**\x25CF Claude**\n> | k | v |\n> |---|---|\n> | x | aaaa bbbb cccc dddd eeeeee ffff gggg |\n", 40);
+        const int filledLine = ConvFindRow(filled, L"eeeeee");
+        CHECK(filledLine > 0 && rowText(filled, filledLine) == L"  \x2502 x   \x2502 aaaa bbbb cccc dddd eeeeee \x2502" &&
+                  rowText(filled, filledLine + 1) == L"  \x2502     \x2502  ffff gggg" + std::wstring(17, L' ') + L"\x2502",
+              "table: after a line that fills its column exactly, the next line starts with the break's blank");
+
+        // A table with only its header row: Claude Code's box is the header between two rules and the bottom border ...
+        const ConversationSheet headOnly = ConvLayout(L"**\x25CF Claude**\n> | a | b |\n> |---|---|\n", kConversationImageCols);
+        const int headTop = ConvFindRow(headOnly, L"\x250C");
+        CHECK(headTop >= 0 && rowText(headOnly, headTop) == L"\x25CF " + rule(L'\x250C', L'\x252C', L'\x2510', { 3, 3 }) &&
+                  rowText(headOnly, headTop + 1) == L"  \x2502  a  \x2502  b  \x2502" &&
+                  rowText(headOnly, headTop + 2) == L"  " + rule(L'\x251C', L'\x253C', L'\x2524', { 3, 3 }) &&
+                  rowText(headOnly, headTop + 3) == L"  " + rule(L'\x2514', L'\x2534', L'\x2518', { 3, 3 }),
+              "table: a header-only table is the box's top, the header, its rule and the bottom");
+        // ... and, when that box is too wide, its header cells one per line with no labels, their Markdown styles kept.
+        const ConversationSheet headRecords = ConvLayout(L"**\x25CF Claude**\n> | **A** | B | C | D | E | F |\n> |---|---|---|---|---|---|\n", 30);
+        const int headA = ConvFindRow(headRecords, L"\x25CF A");
+        bool headLines = headA >= 0 && rowText(headRecords, headA) == L"\x25CF A";
+        for (int k = 1; headLines && k < 6; ++k)
+        {
+            headLines = rowText(headRecords, headA + k) == std::wstring(L"  ") + static_cast<wchar_t>(L'A' + k);
+        }
+        CHECK(headLines && ConvFindRow(headRecords, L"A:") < 0 && ConvFindRow(headRecords, L"\x250C") < 0 &&
+                  (headRecords.snapshot.lines[static_cast<size_t>(headA)][2].flags & kScreenCellBold) != 0,
+              "table: a header-only table too wide for its box lists its header cells, unlabeled, a bold one still bold");
     }
 
     // ===== 4. end to end: a turns fixture transcript drawn as pictures =====

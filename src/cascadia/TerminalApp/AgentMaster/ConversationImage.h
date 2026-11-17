@@ -18,7 +18,8 @@
 //   3. BuildConversationSheet lays the blocks out on a terminal grid (a ScreenSnapshot) the way Claude Code draws a
 //      conversation: the prompt on a gray band after "❯", "●" before Claude's text and each tool call (green when it went
 //      well, red when it failed), "⎿" before what came back, the turn as a rule. Markdown inside the messages keeps its
-//      bold, italics, code and lists.
+//      bold, italics, code and lists, and a pipe table is drawn as Claude Code's own box (or its vertical records when the
+//      box does not fit: MESSAGING.md §21.39.1).
 //   4. ScreenImage's tall renderer draws the sheet with the screen renderer's look into PNG parts of a bounded height
 //      (RenderTallScreenSnapshotPngs), starting a part at a turn where it can.
 //
@@ -127,10 +128,11 @@ namespace Agentmaster
     };
 
     /// <summary>
-    /// Lays a turns-view document (TranscriptTurns' Markdown, parsed by ParseMarkdownBlocks with soft breaks as line breaks)
-    /// out on a terminal grid the way Claude Code draws a conversation - see the file comment for the look. Words wrap at the
-    /// sheet's width (a word longer than a row is split), wide glyphs take two cells, a combining mark rides on the cell before
-    /// it, a TAB goes to the next multiple of 4 columns, and a code block keeps its spaces and wraps at the edge.
+    /// Lays a turns-view document (TranscriptTurns' Markdown, parsed by ParseMarkdownBlocks with soft breaks as line breaks and
+    /// MdParseOptions::tables on) out on a terminal grid the way Claude Code draws a conversation - see the file comment for the
+    /// look. Words wrap at the sheet's width (a word longer than a row is split), wide glyphs take two cells, a combining mark
+    /// rides on the cell before it, a TAB goes to the next multiple of 4 columns, a code block keeps its spaces and wraps at the
+    /// edge, and a table is Claude Code's box - its column widths, alignments and wrapping - or its vertical records (§21.39.1).
     /// </summary>
     /// <param name="blocks">The parsed blocks, top to bottom.</param>
     /// <param name="options">The width and the row cap.</param>

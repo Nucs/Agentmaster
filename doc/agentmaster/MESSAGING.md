@@ -5946,7 +5946,7 @@ cell in Cascadia Mono, on Campbell's colors, 1,232 px wide.
   (Full level) or the user's answer, dimmed. A compaction is an orange `✻`. The turns view's "(no tool calls)" is left out:
   Claude Code shows nothing there.
 - **The reply** follows a white `●`, its Markdown kept: bold, italic, lists with their markers, headings bold, links
-  underlined in blue, code blocks on a darker band with their spaces.
+  underlined in blue, code blocks on a darker band with their spaces, pipe tables in Claude Code's box (§21.39.1).
 - **A subagent or teammate:** an orange `●`, its name bold and its details dimmed; its work is indented two columns under it.
 - **A file change** (File diffs; any ```` ```diff ```` block, so also a diff quoted in a message; `LayoutDiffBlock`) is drawn
   as Claude Code draws one, under the call's `⎿`:
@@ -6026,8 +6026,6 @@ this Debug run took 1,125 ms for 631.
 
 **Not changed, still open.**
 - Like `/screen` and 🖼 Screen Image, the pictures are NOT redacted (§9.6's redactor is not built).
-- A Markdown table in a message draws as its pipe lines: the pictures parse without `MdParseOptions::tables` (the transcript
-  overlay draws tables as grids since 2026-10-31, TRANSCRIPT_OVERLAY.md §3i). Drawing them on the terminal grid is open.
 - The picture shows the turns view's content in Claude Code's look, not Claude Code's own screen. A call reads as the turns
   view writes it ("Bash — what it does: `the command` · ok"), not as Claude Code's "Bash(command)" with its output's first
   lines under it; a call's output shows only at the Full level (its first line).
@@ -6049,6 +6047,7 @@ this Debug run took 1,125 ms for 631.
   line broken at the edge on its band with a blank gutter.
 - The turn of the rows above the first turn heading (3d): a lone turn's own note counts as that turn (31), a whole
   conversation's head (the legend) as turn 1 with turn 2's rows still turn 2's, and a pseudo-turn alone claims no number.
+- A pipe table (3e, §21.39.1): Claude Code's box row by row, its widths, its vertical records, its 200-row cap.
 - `RenderConversationImages` end to end on a turns fixture, and again with File diffs: exactly two more rows (its created
   file's two lines); and with Last Turn: its newest turn alone (turn 3, every part's turns 3–3), in fewer rows.
 - The layout and end-to-end cases need cmark. Without the vcpkg cmark, `tests\conversation_image_stub.cpp` stands in for
@@ -6186,6 +6185,120 @@ this Debug run took 1,125 ms for 631.
    not one." (`-> refused:not-claude`).
 6. On a phone: open a tall part from Telegram, and from the gallery after Save; note whether the viewer keeps the text
    readable.
+
+#### 21.39.1 Tables: Claude Code's own box (2026-11-17; in no build yet)
+
+> The user's report (2026-11-17): "the telegram all screen feature creates an image of text that should be showing tables
+> but i think text is not monospaced so the table is all messed up / or maybe we need markdown renderer to deal with tables"
+
+**What was wrong.**
+- The font was never the cause. Every font a sheet uses is monospace (Cascadia Mono), and each glyph lands on its cell (the
+  batched-runs test above finds 0 pixels apart).
+- The pictures parsed the Markdown without `MdParseOptions::tables`. So a pipe table reached the sheet as a paragraph of its
+  raw `| a | b |` lines:
+  - nothing padded a cell, so the pipes of two rows never lined up;
+  - a cell's `**` and backtick marks were drawn as styles, not as characters, so a row with bold or code came out shorter;
+  - a long row wrapped onto the next line.
+
+**Now.** The pictures parse with `tables` on (`RenderConversationImages`). A `MdBlockKind::Table` block is drawn by
+`LayoutTableBlock` (`ConversationImage.cpp`) the way Claude Code's TUI draws a table. The rules come from its own table
+renderer, read in the bundle of Claude Code 2.1.322 (`~/.local/bin/claude.exe`: `qr`, `Kt`, `xe`, `cqr`, `lt`; the
+constants `De=3`, `Be=4`, `hs=4`, `_r=200`):
+
+```
+● ┌───────┬──────┬───────┐
+  │ Name  │ Size │ State │
+  ├───────┼──────┼───────┤
+  │ alpha │   12 │  ok   │
+  ├───────┼──────┼───────┤
+  │ beta  │    7 │   x   │
+  └───────┴──────┴───────┘
+```
+
+- **The box.**
+  - `┌─┬─┐` over the header, `├─┼─┤` under it and between every two body rows, `└─┴─┘` at the bottom; a blank on each side
+    of a cell.
+  - A table with only its header row is the top, the header, its rule and the bottom.
+  - The borders are in the block's text color: Claude Code prints them unstyled.
+- **The cells.**
+  - The header row is centered. A body cell follows its column's alignment: `:--` left, `--:` right, `:-:` centered, a plain
+    `---` left. Centering puts the odd blank on the right (`cqr`).
+  - A cell shorter than its row sits in its middle, with `floor((row lines − cell lines) / 2)` lines above it.
+  - A cell's inline Markdown is drawn as in a paragraph: bold bright and bold, inline code lavender, a link underlined.
+  - A line break or a tab in a cell reads as a blank, and the blanks at its ends are trimmed.
+  - A wide glyph takes two columns, and a combining mark rides on its cell (`ClaudeCellWidth`).
+- **The widths** (`qr`). `ideal` is a column's longest cell on one line and `least` its longest word, both at least 3 (`De`).
+  The room for the cells is the terminal's width − (1 + 3 × columns) − 4 (`Be`), at least 3 per column. Then:
+  1. the ideal widths, when they fit: every cell on one line;
+  2. else, when the longest words fit: each column gets its longest word plus a share of what is left, in proportion to how
+     much more its longest cell would take (each share floored, so the columns may end a few cells short of the room);
+  3. else the longest words scaled down to the room (at least 3 each), and words broken where they must be.
+- **The wrap** (`xe`, `WrapTableCell`): each cell wraps in its column as Claude Code wraps it, with wrap-ansi and
+  `{ hard, trim: false, wordWrap: true }`. Words stay whole, and a word that does not fit starts the next line. Two effects
+  of `trim: false` show in a box, and the pictures keep them:
+  - the blank at a break stays at the END of its line, so a right-aligned or centered line that broke sits a column further
+    left than the cell's last line;
+  - after a line filled to the column, the next line STARTS with that blank.
+  In step 3 a word wider than its column is broken into pieces that fill the column. Its first piece goes on the current line
+  when that costs no extra line (wrap-ansi's own rule).
+- **The vertical records** (`Kt`). A table is drawn as Claude Code's records instead of a box when its box would still be
+  wider than the terminal less 4, or when one of its rows would wrap into more than 4 lines (`hs`):
+  - a line `Header: value` per cell, the header and its colon bold;
+  - a cell with neither a header nor a value is left out; an empty value under a header keeps its line;
+  - a long value wraps to the room, its next lines two columns in;
+  - a rule `─` of min(40, room − 1) between two rows;
+  - a table with only its header row lists its header cells, one per line, unlabeled, their styles kept.
+- **The cap.** At most 200 body rows are drawn (`_r`). Claude Code's own note under the table counts the rest:
+  `… 1,001 more rows not shown`, dim italic, thousands grouped, "row" for one. Under records, a rule comes before it. The
+  parser's per-block cap (20,000 characters, `kConversationBlockMaxChars`) keeps the header and the rows that fit, with the
+  sheet's "cut here" note.
+- **The terminal's width.**
+  - The sheet's 100 columns stand for Claude Code's terminal: a reply's table gets the widths it gets on a 100-column
+    terminal (the reply's `● ` is 2 of them; the margin of 4 leaves room for it).
+  - A table indented further, in an agent's work or a list, gets as many columns less as its extra indent.
+  - Records wrap to the sheet's room. Claude Code's own record lines can reach one column past its message box, where Ink
+    breaks them again; the pictures keep each line within the room.
+- **In a prompt** (the user's or a teammate's message), a table is drawn on the prompt's band across the whole row, like the
+  message's other Markdown in the pictures.
+
+**Tests** (`tests_conversation_image.cpp` 3e; `ConvLayout` parses as `RenderConversationImages` does, tables on):
+- **The box** at 100 columns, row by row: the borders at each column's widest cell, the centered header, left / right /
+  center bodies, a rule between two body rows, a bold cell bright and bold, a code cell lavender, the borders in the text
+  color, no `|` left. Also a reply that is only a table, which gets its `●` on the top border.
+- **The widths** at 40 columns: 5 and 24, the long cell in three lines, the short cell on the middle one.
+- **The wrap:** a right-aligned cell's broken lines end with the break's blank and its last line does not; after a line that
+  fills its column, the next line starts with a blank.
+- **The records** at 30 columns: one line per cell, `F: six` five lines under `A: one`, the 27-column rule, the bold label.
+  Also a row taller than four lines, which sends the table to records.
+- **Header-only tables:** the box (top, header, rule, bottom), and the records (the cells unlabeled, a bold one still bold).
+- **The cap:** 1,201 body rows draw `r0`–`r199`, then `… 1,001 more rows not shown` under the bottom border.
+- **A prompt's table** on the band, each row as wide as the sheet.
+- **A wide glyph** takes two columns, and each row of the box is as wide as its border.
+
+**Checked** (2026-11-17, before any build):
+- The m5 suite, isolated (scratch outputs, a wiped scratch profile): 13,792 checks, the 25 new ones included. The only
+  failures are the three known `TestTaskbarBadge` ones. An earlier run also failed one real-time scheduler check (the load
+  flake), which nothing here touches.
+- A negative control (mutated copies on Q:, the repo untouched) made five changes. Each failed exactly the checks aimed at it:
+  - centering with the odd blank on the left: the header and center-aligned body checks;
+  - no new row before the blank after a full row: the "line that fills its column" check;
+  - the break's blank trimmed off each line: the right-aligned wrap check;
+  - the records' rule one column longer: the rule check;
+  - a cap of 199 rows: the cap check.
+- `cl /Zs` of `ConversationImage.cpp` with the worktree build's recorded line (the app's `/W3 /WX` plus `/we4189 /we4100
+  /we4242 /we4389 /we4244`) passes. The two changed headers changed only in comments. A probe unit including it fails with
+  exactly C4189 (an unused local) and C2338 (a false `static_assert` on `kTableMaxBodyRows`).
+- Looked at: four sample tables drawn to PNGs by the real renderer:
+  - a comparison table: the box, the alignments, a bold and a code cell;
+  - a wrapped settings table: its cells broken by words, one line starting with the break's blank after a full one;
+  - a 12-column table: Claude Code's records;
+  - a table in a prompt, on the band.
+
+**Check after the build** (dev, with the bot):
+1. Ask a session for a small comparison table, then 📜 All Screen ▸ ⭐ Full. The picture shows the table in Claude Code's
+   box, its columns lined up as the session's terminal shows them.
+2. A table of a dozen columns shows as the vertical records.
+3. A table with a long text column wraps inside its box, as in the terminal.
 
 ### 21.40 `/status`: what Claude Code's own /status shows — its Status tab, the account, the plan usage (2026-10-26; in dev since 0.0.1.38, in production since 0.8.0.1)
 

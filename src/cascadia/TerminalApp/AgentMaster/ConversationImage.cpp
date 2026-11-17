@@ -400,6 +400,19 @@ namespace Agentmaster
             }
 
             /// <summary>
+            /// One row built whole by its caller (a table's border or one of its text lines, LayoutTableBlock): stored as it is,
+            /// with no wrapping. The caller keeps it within the sheet's width — a wider row would be drawn past the picture's
+            /// right edge, since the tall renderer sizes every part by the sheet's columns.
+            /// </summary>
+            /// <param name="row">The row's cells, its prefix included (and its band's padding, when the block has one).</param>
+            /// <param name="cut">Its cut value (kTallCut*): kTallCutBlock or the block's own for a block's first row, else kTallCutAny.</param>
+            /// <exception cref="std::bad_alloc">If the row cannot be stored.</exception>
+            void Row(std::vector<ScreenCell>&& row, uint8_t cut)
+            {
+                _Push(std::move(row), cut);
+            }
+
+            /// <summary>
             /// The finished sheet. When rows were dropped at the top, the first two rows become the note saying how many (and
             /// through which turn) plus a blank, so the sheet never exceeds its cap.
             /// </summary>
@@ -1182,10 +1195,550 @@ namespace Agentmaster
             }
         }
 
+        // ----- tables: Claude Code's own table (MESSAGING.md §21.39.1) -----
+        //
+        // A GitHub pipe table (MdBlockKind::Table, parsed with MdParseOptions::tables) is drawn the way Claude Code's TUI draws one
+        // — its bundle's table renderer, read in 2.1.322 — so a picture shows the table Claude wrote as the user saw it:
+        //   ┌───────┬──────┐
+        //   │ Name  │ Size │   the header row centered (bold only where the Markdown is),
+        //   ├───────┼──────┤
+        //   │ alpha │   12 │   a body cell by its column's alignment (":-" / "-:" / ":-:"; left by default),
+        //   ├───────┼──────┤   a rule between every two body rows,
+        //   │ beta  │    7 │   a cell shorter than its row centered top to bottom.
+        //   └───────┴──────┘
+        // The column widths are Claude Code's: every column at its whole text when the table fits; else at least its longest word,
+        // the room left shared in proportion to what each column still lacks; else the longest words scaled down and long words
+        // broken. Each cell wraps as Claude Code wraps it (wrap-ansi without trimming: WrapTableCell). A table that still does not
+        // fit, or whose wrapped row would be more than kTableMaxRowLines lines tall, is drawn as Claude Code's VERTICAL records
+        // instead: "Header: value" per cell, a short rule between rows. Before the table's
+        // layout existed here the table reached the sheet as its raw "| a | b |" lines — the pipes never lined up (nothing pads
+        // a cell, the bold and code marks of a cell are not drawn, a long row wrapped): the owner's report of 2026-11-17.
+
+        // Claude Code 2.1.322's constants (its bundle: `De=3`, `Be=4`, `hs=4`, `_r=200`).
+        constexpr int kTableMinColWidth = 3; // the narrowest column (De)
+        constexpr int kTableMarginCols = 4; // the terminal's width less this is the widest table drawn as a box (Be)
+        constexpr int kTableMaxRowLines = 4; // a row that wraps into more lines than this sends the table to the vertical records (hs)
+        constexpr size_t kTableMaxBodyRows = 200; // the body rows drawn; the rest are counted in a note (_r)
+        constexpr int kTableRecordRuleMax = 40; // the vertical records' rule: at most this long (Claude Code: min(width - 1, 40))
+        // The box's pieces: the top, middle and bottom border's left corner / tee / right corner, and the two lines.
+        constexpr wchar_t kBoxTopLeft = L'\x250C';
+        constexpr wchar_t kBoxTopTee = L'\x252C';
+        constexpr wchar_t kBoxTopRight = L'\x2510';
+        constexpr wchar_t kBoxMidLeft = L'\x251C';
+        constexpr wchar_t kBoxCross = L'\x253C';
+        constexpr wchar_t kBoxMidRight = L'\x2524';
+        constexpr wchar_t kBoxBottomLeft = L'\x2514';
+        constexpr wchar_t kBoxBottomTee = L'\x2534';
+        constexpr wchar_t kBoxBottomRight = L'\x2518';
+        constexpr wchar_t kBoxVertical = L'\x2502';
+        constexpr wchar_t kBoxHorizontal = L'\x2500';
+
+        /// <summary>
+        /// A table cell's Markdown as styled cells on ONE line, before any wrapping: its runs styled as a paragraph's (SpansOf: bold
+        /// bright, code lavender, a link underlined), a line break or a TAB as one blank (a cell is one line in GFM), control
+        /// characters dropped, a combining mark riding on the cell before it, and the blanks at both ends trimmed.
+        /// </summary>
+        /// <param name="runs">The cell's runs (MdTableCell).</param>
+        /// <param name="colors">The colors of the block's runs.</param>
+        /// <param name="bg">The cells' background (the block's: a band inside a prompt).</param>
+        /// <returns>The cells (empty for an empty cell).</returns>
+        /// <exception cref="std::bad_alloc">If the cells cannot be allocated.</exception>
+        std::vector<ScreenCell> TableCellLine(const MdTableCell& runs, const RunColors& colors, uint32_t bg)
+        {
+            MdBlock holder; // SpansOf reads a block's runs: the cell's are lent to an empty one (no truncation note: it is not truncated)
+            holder.runs = runs;
+            std::vector<ScreenCell> cells;
+            for (const Span& span : SpansOf(holder, colors))
+            {
+                const std::wstring_view text{ span.text };
+                for (size_t i = 0; i < text.size();)
+                {
+                    size_t units = 1;
+                    const char32_t cp = CodePointAt(text, i, units);
+                    const std::wstring_view piece = text.substr(i, units);
+                    i += units;
+                    if (cp == U'\n' || cp == U'\r' || cp == U'\t')
+                    {
+                        cells.push_back(MakeCell(L" ", span.fg, bg, span.flags));
+                        continue;
+                    }
+                    if (cp < 0x20 || (cp >= 0x7F && cp < 0xA0))
+                    {
+                        continue; // checked before the width: a control character must never ride on the cell before it
+                    }
+                    const int width = ClaudeCellWidth(cp);
+                    if (width == 0)
+                    {
+                        // A combining mark, a joiner or a variation selector belongs to the cluster of the cell before it.
+                        if (!cells.empty() && cells.back().text.size() + piece.size() <= kScreenCellMaxChars)
+                        {
+                            cells.back().text.append(piece);
+                        }
+                        continue;
+                    }
+                    cells.push_back(MakeCell(std::wstring{ piece }, span.fg, bg, span.flags, static_cast<uint8_t>(width)));
+                }
+            }
+            const auto blank = [](const ScreenCell& c) { return c.text == L" "; };
+            while (!cells.empty() && blank(cells.back()))
+            {
+                cells.pop_back();
+            }
+            const auto lead = std::find_if_not(cells.begin(), cells.end(), blank);
+            cells.erase(cells.begin(), lead);
+            return cells;
+        }
+
+        /// <summary>The widest word of a cell, in columns (words are split at blanks): the narrowest a column can be without breaking a word.</summary>
+        /// <param name="cells">The cell (TableCellLine).</param>
+        /// <returns>The width (0 for an empty cell).</returns>
+        int LongestWordWidth(const std::vector<ScreenCell>& cells) noexcept
+        {
+            int longest = 0;
+            int current = 0;
+            for (const auto& c : cells)
+            {
+                if (c.text == L" ")
+                {
+                    longest = (std::max)(longest, current);
+                    current = 0;
+                    continue;
+                }
+                current += c.width == 2 ? 2 : 1;
+            }
+            return (std::max)(longest, current);
+        }
+
+        /// <summary>
+        /// Wraps a cell's line to `width` columns exactly as Claude Code wraps a table cell: its `xe`, which is wrap-ansi with
+        /// `{ hard, trim: false, wordWrap: true }` then drops the empty lines. Words are split at every blank (two blanks in a row
+        /// hold an empty word between them) and kept whole; a word that does not fit starts the next line. Two wrap-ansi
+        /// behaviors of `trim: false` show in the box, and are kept so a picture matches the terminal:
+        /// - the blank at a break stays at the END of the line before it — it pads that line like any blank, so a right-aligned
+        ///   or centered line sits a column further left than the cell's last line;
+        /// - after a line filled to the column, the next line STARTS with that blank (a column further right).
+        /// With `hard` (the widths were scaled below the longest words) a word wider than the column is broken across lines, its
+        /// first piece on the current line when that costs no extra line (wrap-ansi's breaksStartingThisLine /
+        /// breaksStartingNextLine), each piece filled to the column; a wide glyph that would straddle the edge starts the next
+        /// piece. Without `hard` such a word stays whole (Claude Code's widths never let that happen). At least one line: an
+        /// empty cell is one empty line.
+        /// </summary>
+        /// <param name="cells">The cell (TableCellLine: no blanks at its ends).</param>
+        /// <param name="width">The column's width (raised to 1).</param>
+        /// <param name="hard">Break words wider than the column.</param>
+        /// <returns>The lines, top first.</returns>
+        /// <exception cref="std::bad_alloc">If the lines cannot be allocated.</exception>
+        std::vector<std::vector<ScreenCell>> WrapTableCell(const std::vector<ScreenCell>& cells, int width, bool hard)
+        {
+            width = (std::max)(1, width);
+            // The words as wrap-ansi's `split(" ")` sees them, each with the blank cell before it (its colors kept: a blank
+            // inside a code span or a bold run is drawn as that run's blank).
+            struct Word
+            {
+                const ScreenCell* blank = nullptr; // the blank before the word (none before the first)
+                std::vector<ScreenCell> cells;
+                int columns = 0; // its visible width
+            };
+            std::vector<Word> words(1);
+            for (const auto& c : cells)
+            {
+                if (c.text == L" ")
+                {
+                    Word next;
+                    next.blank = &c;
+                    words.push_back(std::move(next));
+                    continue;
+                }
+                words.back().cells.push_back(c);
+                words.back().columns += c.width == 2 ? 2 : 1;
+            }
+            std::vector<std::vector<ScreenCell>> rows(1);
+            int rowW = 0; // the visible width of rows.back()
+            const auto newRow = [&]() {
+                rows.emplace_back();
+                rowW = 0;
+            };
+            for (size_t i = 0; i < words.size(); ++i)
+            {
+                Word& word = words[i];
+                if (i != 0)
+                {
+                    // trim:false - a row already full makes a new one, and the blank goes on the row either way: at the end of
+                    // a row the next word then leaves, or at the start of the new one.
+                    if (rowW >= width)
+                    {
+                        newRow();
+                    }
+                    rows.back().push_back(*word.blank);
+                    rowW += 1;
+                }
+                if (hard && word.columns > width)
+                {
+                    // Start the word on this row when that does not add a break (both counts are wrap-ansi's; the operands are
+                    // never negative here — rowW <= width < word.columns — so integer division is its Math.floor).
+                    const int remaining = width - rowW;
+                    const int breaksStartingHere = 1 + (word.columns - remaining - 1) / width;
+                    const int breaksStartingNext = (word.columns - 1) / width;
+                    if (breaksStartingNext < breaksStartingHere)
+                    {
+                        newRow();
+                    }
+                    for (size_t k = 0; k < word.cells.size(); ++k)
+                    {
+                        const int cw = word.cells[k].width == 2 ? 2 : 1;
+                        if (rowW + cw > width)
+                        {
+                            newRow(); // a glyph that would pass the edge starts the next piece
+                        }
+                        rows.back().push_back(std::move(word.cells[k]));
+                        rowW += cw;
+                        if (rowW == width && k + 1 < word.cells.size())
+                        {
+                            newRow(); // a filled row: the rest of the word goes on below
+                        }
+                    }
+                    continue;
+                }
+                if (rowW + word.columns > width && rowW > 0 && word.columns > 0)
+                {
+                    newRow(); // the word does not fit after what the row holds: it starts the next row
+                }
+                rows.back().insert(rows.back().end(), std::make_move_iterator(word.cells.begin()), std::make_move_iterator(word.cells.end()));
+                rowW += word.columns;
+            }
+            // Claude Code keeps only the lines that hold something (`filter(line => line.length > 0)`), and at least one.
+            rows.erase(std::remove_if(rows.begin(), rows.end(), [](const std::vector<ScreenCell>& row) { return row.empty(); }), rows.end());
+            if (rows.empty())
+            {
+                rows.emplace_back();
+            }
+            return rows;
+        }
+
+        /// <summary>
+        /// Claude Code's "… 1,234 more rows not shown" (its `lt`): the count with thousands grouped, "row" for one. Said under a
+        /// table whose body has more than kTableMaxBodyRows rows.
+        /// </summary>
+        /// <param name="hidden">How many body rows are left out (at least 1).</param>
+        /// <returns>The note.</returns>
+        /// <exception cref="std::bad_alloc">If the note cannot be allocated.</exception>
+        std::wstring TableHiddenRowsNote(size_t hidden)
+        {
+            std::wstring digits = std::to_wstring(hidden);
+            std::wstring grouped;
+            for (size_t i = 0; i < digits.size(); ++i)
+            {
+                if (i > 0 && (digits.size() - i) % 3 == 0)
+                {
+                    grouped += L',';
+                }
+                grouped += digits[i];
+            }
+            return L"\x2026 " + grouped + (hidden == 1 ? L" more row not shown" : L" more rows not shown");
+        }
+
+        /// <summary>
+        /// Lays a pipe table out (the section comment above): Claude Code's box when it fits, its vertical records when it does not.
+        /// Each line of the table is one sheet row after the block's prefix (the reply's "● " on the first, the quote bars and the
+        /// hanging indent on the rest), on the block's background — a table inside a prompt keeps the prompt's band. The borders
+        /// are in the block's text color, as Claude Code prints them unstyled.
+        /// </summary>
+        /// <param name="w">The writer.</param>
+        /// <param name="b">The table block (its header row first; at least one row and one column).</param>
+        /// <param name="prefix">The cells its rows start with (clamped already).</param>
+        /// <param name="colors">The colors of its runs.</param>
+        /// <param name="style">The background, the band and the first row's cut value.</param>
+        /// <exception cref="std::bad_alloc">If a row cannot be built or stored.</exception>
+        void LayoutTableBlock(SheetWriter& w, const MdBlock& b, const Prefix& prefix, const RunColors& colors, const TextStyle& style)
+        {
+            const size_t cols = b.tableAlign.size();
+            if (cols == 0 || b.tableRows.empty())
+            {
+                return; // the parser never makes one: nothing to draw
+            }
+            // The room after the prefix, counted as Claude Code counts its terminal: its widths take kTableMarginCols off the
+            // terminal's width, two of them for the "● " indent a reply is drawn after — which the sheet took off the room already.
+            const int room = (std::max)(1, w.Cols() - CellsWidth(prefix.first));
+            const int terminalCols = room + 2;
+            const uint32_t border = colors.text;
+            bool firstRow = true;
+            const auto emit = [&](std::vector<ScreenCell>&& cells) {
+                std::vector<ScreenCell> row = firstRow ? prefix.first : prefix.rest;
+                const uint8_t cut = firstRow ? style.cut : kTallCutAny;
+                firstRow = false;
+                row.insert(row.end(), std::make_move_iterator(cells.begin()), std::make_move_iterator(cells.end()));
+                if (style.fill)
+                {
+                    for (int used = CellsWidth(row); used < w.Cols(); ++used)
+                    {
+                        row.push_back(MakeCell(L" ", kConvText, style.bg));
+                    }
+                }
+                w.Row(std::move(row), cut);
+            };
+            // The rows drawn: the header and at most kTableMaxBodyRows body rows (Claude Code's widths read only those too).
+            const size_t shown = (std::min)(b.tableRows.size(), kTableMaxBodyRows + 1); // (std::min): the <windows.h> macro
+            const size_t hidden = b.tableRows.size() - shown;
+            std::vector<std::vector<std::vector<ScreenCell>>> text(shown); // [row][column] -> the cell on one line
+            for (size_t r = 0; r < shown; ++r)
+            {
+                text[r].reserve(cols);
+                for (size_t c = 0; c < cols; ++c)
+                {
+                    text[r].push_back(c < b.tableRows[r].cells.size() ? TableCellLine(b.tableRows[r].cells[c], colors, style.bg) : std::vector<ScreenCell>{});
+                }
+            }
+            // The widths (Claude Code's): `ideal` = a column's longest cell on one line, `least` = its longest word, both at least
+            // kTableMinColWidth; the content room = the terminal less the borders and padding (1 + 3 per column) and the margin.
+            std::vector<int> ideal(cols, kTableMinColWidth);
+            std::vector<int> least(cols, kTableMinColWidth);
+            for (size_t r = 0; r < shown; ++r)
+            {
+                for (size_t c = 0; c < cols; ++c)
+                {
+                    ideal[c] = (std::max)(ideal[c], CellsWidth(text[r][c]));
+                    least[c] = (std::max)(least[c], LongestWordWidth(text[r][c]));
+                }
+            }
+            const int columns = static_cast<int>(cols);
+            const int chrome = 1 + columns * 3;
+            const int contentRoom = (std::max)(terminalCols - chrome - kTableMarginCols, columns * kTableMinColWidth);
+            int idealSum = 0;
+            int leastSum = 0;
+            for (size_t c = 0; c < cols; ++c)
+            {
+                idealSum += ideal[c];
+                leastSum += least[c];
+            }
+            std::vector<int> widths(cols, kTableMinColWidth);
+            bool hard = false;
+            if (idealSum <= contentRoom)
+            {
+                widths = ideal; // the whole table fits on single lines
+            }
+            else if (leastSum <= contentRoom)
+            {
+                // Every word fits whole: each column gets its longest word, plus a share of the room left in proportion to how much
+                // more its longest cell would take (Claude Code floors each share, as here, so a column or two may stay a cell short).
+                const int extra = contentRoom - leastSum;
+                int lackSum = 0;
+                for (size_t c = 0; c < cols; ++c)
+                {
+                    lackSum += ideal[c] - least[c];
+                }
+                for (size_t c = 0; c < cols; ++c)
+                {
+                    const int share = lackSum == 0 ? 0 : static_cast<int>(static_cast<double>(ideal[c] - least[c]) / lackSum * extra);
+                    widths[c] = least[c] + share;
+                }
+            }
+            else
+            {
+                // Not even the longest words fit: they are scaled down together, and words are broken where they must.
+                hard = true;
+                const double scale = static_cast<double>(contentRoom) / leastSum;
+                for (size_t c = 0; c < cols; ++c)
+                {
+                    widths[c] = (std::max)(static_cast<int>(least[c] * scale), kTableMinColWidth);
+                }
+            }
+            // Every cell wrapped to its column; a row taller than kTableMaxRowLines, or a box wider than the room, is drawn as the
+            // vertical records instead.
+            std::vector<std::vector<std::vector<std::vector<ScreenCell>>>> wrapped(shown); // [row][column] -> lines
+            size_t tallest = 1;
+            for (size_t r = 0; r < shown; ++r)
+            {
+                wrapped[r].reserve(cols);
+                for (size_t c = 0; c < cols; ++c)
+                {
+                    wrapped[r].push_back(WrapTableCell(text[r][c], widths[c], hard));
+                    tallest = (std::max)(tallest, wrapped[r].back().size());
+                }
+            }
+            int boxWidth = chrome;
+            for (size_t c = 0; c < cols; ++c)
+            {
+                boxWidth += widths[c];
+            }
+            const bool vertical = tallest > static_cast<size_t>(kTableMaxRowLines) || boxWidth > terminalCols - kTableMarginCols;
+            if (!vertical)
+            {
+                const auto rule = [&](wchar_t left, wchar_t tee, wchar_t right) {
+                    std::vector<ScreenCell> cells;
+                    cells.push_back(MakeCell(std::wstring(1, left), border, style.bg));
+                    for (size_t c = 0; c < cols; ++c)
+                    {
+                        for (int k = 0; k < widths[c] + 2; ++k)
+                        {
+                            cells.push_back(MakeCell(std::wstring(1, kBoxHorizontal), border, style.bg));
+                        }
+                        cells.push_back(MakeCell(std::wstring(1, c + 1 < cols ? tee : right), border, style.bg));
+                    }
+                    emit(std::move(cells));
+                };
+                const auto rowLines = [&](size_t r, bool header) {
+                    size_t height = 1;
+                    for (const auto& lines : wrapped[r])
+                    {
+                        height = (std::max)(height, lines.size());
+                    }
+                    for (size_t line = 0; line < height; ++line)
+                    {
+                        std::vector<ScreenCell> cells;
+                        cells.push_back(MakeCell(std::wstring(1, kBoxVertical), border, style.bg));
+                        for (size_t c = 0; c < cols; ++c)
+                        {
+                            const auto& lines = wrapped[r][c];
+                            // A cell shorter than its row sits in the middle of it (Claude Code: floor((height - lines) / 2) above).
+                            const size_t above = (height - lines.size()) / 2;
+                            const bool has = line >= above && line - above < lines.size();
+                            const std::vector<ScreenCell> empty;
+                            const std::vector<ScreenCell>& content = has ? lines[line - above] : empty;
+                            const int pad = (std::max)(0, widths[c] - CellsWidth(content));
+                            const MdAlign align = header ? MdAlign::Center : b.tableAlign[c];
+                            const int left = align == MdAlign::Center ? pad / 2 : (align == MdAlign::Right ? pad : 0);
+                            cells.push_back(MakeCell(L" ", kConvText, style.bg));
+                            AppendBlanks(cells, left, style.bg);
+                            cells.insert(cells.end(), content.begin(), content.end());
+                            AppendBlanks(cells, pad - left, style.bg);
+                            cells.push_back(MakeCell(L" ", kConvText, style.bg));
+                            cells.push_back(MakeCell(std::wstring(1, kBoxVertical), border, style.bg));
+                        }
+                        emit(std::move(cells));
+                    }
+                };
+                rule(kBoxTopLeft, kBoxTopTee, kBoxTopRight);
+                rowLines(0, true);
+                rule(kBoxMidLeft, kBoxCross, kBoxMidRight);
+                for (size_t r = 1; r < shown; ++r)
+                {
+                    rowLines(r, false);
+                    if (r + 1 < shown)
+                    {
+                        rule(kBoxMidLeft, kBoxCross, kBoxMidRight);
+                    }
+                }
+                rule(kBoxBottomLeft, kBoxBottomTee, kBoxBottomRight);
+            }
+            else
+            {
+                // Claude Code's vertical records: per body row, "Header: value" for each cell that holds anything (the header bold),
+                // a long value going on under it two columns in, and a short rule between two rows.
+                std::vector<std::wstring> headers(cols);
+                for (size_t c = 0; c < cols; ++c)
+                {
+                    for (const auto& cell : text[0][c])
+                    {
+                        headers[c] += cell.text;
+                    }
+                }
+                const int ruleLength = (std::min)(kTableRecordRuleMax, (std::max)(1, room - 1));
+                const auto recordRule = [&]() {
+                    std::vector<ScreenCell> cells;
+                    for (int k = 0; k < ruleLength; ++k)
+                    {
+                        cells.push_back(MakeCell(std::wstring(1, kBoxHorizontal), border, style.bg));
+                    }
+                    emit(std::move(cells));
+                };
+                // One record line (Claude Code's `Kt`): "Header: value" — the header and its colon bold, as its
+                // `${Dr}${T}:${Fr}` — or the value alone when there is no header. The value keeps its Markdown styles, its runs
+                // of blanks read as one (TableCellLine already joined its line breaks and trimmed it), and it wraps to the room
+                // with its next lines two columns in (Claude Code's "  " before them).
+                const auto writeRecord = [&](const std::wstring& header, const std::vector<ScreenCell>& value) {
+                    std::vector<Span> spans;
+                    if (!header.empty())
+                    {
+                        spans.push_back(Span{ header + L":", colors.bold, static_cast<uint8_t>(colors.flags | kScreenCellBold) });
+                        spans.push_back(Span{ L" ", colors.text, colors.flags });
+                    }
+                    bool lastBlank = false;
+                    for (const auto& cell : value)
+                    {
+                        const bool isBlank = cell.text == L" ";
+                        if (isBlank && lastBlank)
+                        {
+                            continue;
+                        }
+                        lastBlank = isBlank;
+                        spans.push_back(Span{ cell.text, cell.fg, cell.flags });
+                    }
+                    Prefix record;
+                    record.first = firstRow ? prefix.first : prefix.rest;
+                    record.rest = prefix.rest;
+                    AppendBlanks(record.rest, 2, style.bg);
+                    TextStyle line = style;
+                    line.cut = firstRow ? style.cut : kTallCutAny;
+                    firstRow = false;
+                    w.Text(spans, record, line);
+                };
+                bool wroteAny = false; // a record line is on the sheet already (the next row's lines then follow a rule)
+                if (shown == 1)
+                {
+                    // A table with only its header row (Claude Code's records then have no headers and the header cells as their
+                    // one row): each header cell that holds anything on a line of its own, its Markdown styles kept.
+                    for (size_t c = 0; c < cols; ++c)
+                    {
+                        if (text[0][c].empty())
+                        {
+                            continue;
+                        }
+                        writeRecord(std::wstring{}, text[0][c]);
+                        wroteAny = true;
+                    }
+                }
+                for (size_t r = 1; r < shown; ++r)
+                {
+                    bool rowWrote = false;
+                    for (size_t c = 0; c < cols; ++c)
+                    {
+                        if (headers[c].empty() && text[r][c].empty())
+                        {
+                            continue; // Claude Code skips a cell with no header and no value; an empty value under a header stays
+                        }
+                        if (!rowWrote && wroteAny)
+                        {
+                            recordRule(); // between two rows that drew something (a row of empty cells draws neither)
+                        }
+                        rowWrote = true;
+                        writeRecord(headers[c], text[r][c]);
+                        wroteAny = true;
+                    }
+                }
+                if (hidden > 0 && wroteAny)
+                {
+                    recordRule(); // Claude Code rules the hidden rows' note off from the records above it
+                }
+            }
+            if (hidden > 0)
+            {
+                // Claude Code's own count of the rows it leaves out (a note: dim, like the sheet's other notes).
+                Prefix note;
+                note.first = firstRow ? prefix.first : prefix.rest;
+                note.rest = prefix.rest;
+                TextStyle line = style;
+                line.cut = firstRow ? style.cut : kTallCutAny;
+                firstRow = false;
+                w.Text({ Span{ TableHiddenRowsNote(hidden), kConvDim, kScreenCellItalic } }, note, line);
+            }
+            if (b.truncated)
+            {
+                // The parser cut the table at kConversationBlockMaxChars (its header and the rows that fit are drawn): said under it.
+                Prefix note;
+                note.first = firstRow ? prefix.first : prefix.rest;
+                note.rest = prefix.rest;
+                TextStyle line = style;
+                line.cut = firstRow ? style.cut : kTallCutAny;
+                firstRow = false;
+                w.Text({ Span{ L"\x2026 (cut here: the table is longer than " + std::to_wstring(kConversationBlockMaxChars) + L" characters)", kConvDim, kScreenCellItalic } },
+                       note, line);
+            }
+        }
+
         /// <summary>
         /// Lays out one block of a message, a reply or a note: a paragraph or a heading as wrapped text, a code block on its band
         /// keeping its spaces (a ```diff block as Claude Code draws a file change: LayoutDiffBlock), a rule as a line across the
-        /// room left.
+        /// room left, a pipe table as Claude Code's box (LayoutTableBlock).
         /// </summary>
         /// <param name="w">The writer.</param>
         /// <param name="b">The block.</param>
@@ -1197,6 +1750,12 @@ namespace Agentmaster
         {
             ClampPrefix(prefix.first);
             ClampPrefix(prefix.rest);
+            if (b.kind == MdBlockKind::Table)
+            {
+                // A pipe table Claude (or the user) wrote: Claude Code's own box, or its vertical records when the box does not fit.
+                LayoutTableBlock(w, b, prefix, colors, style);
+                return;
+            }
             if (b.kind == MdBlockKind::Code && b.info == L"diff")
             {
                 // A file change (§21.39 "File diffs") or a diff in a message: Claude Code's own diff look, numbers and bands.
@@ -1644,6 +2203,9 @@ namespace Agentmaster
             MdParseOptions parse;
             parse.softBreaksAsLineBreaks = true;
             parse.maxBlockChars = kConversationBlockMaxChars;
+            // §21.39.1: pipe tables become Table blocks, drawn as Claude Code's box (LayoutTableBlock) — without it a table reached
+            // the sheet as its raw "| a | b |" lines, whose pipes never line up.
+            parse.tables = true;
             const MdParseResult parsed = ParseMarkdownBlocks(*markdown, parse);
             if (parsed.failed && parsed.blocks.empty())
             {

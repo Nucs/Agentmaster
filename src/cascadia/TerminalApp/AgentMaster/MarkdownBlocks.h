@@ -182,8 +182,8 @@ namespace Agentmaster
         size_t maxBlockChars = 0;
         // Recognize GitHub-style PIPE TABLES (a header row, a "|---|:-:|" delimiter row, body rows) and emit them as
         // MdBlockKind::Table blocks. cmark itself is CommonMark only: without this a table is a paragraph of pipe-
-        // separated lines. Off by default, so a caller that draws no tables (📜 All Screen's ConversationImage)
-        // keeps its blocks byte-identical; the transcript overlay turns it on. The rules, GFM's: the delimiter
+        // separated lines. Off by default (a caller that draws no tables keeps its blocks byte-identical); the transcript
+        // overlay and 📜 All Screen's ConversationImage (MESSAGING.md §21.39.1: Claude Code's box) turn it on. The rules, GFM's: the delimiter
         // row's cell count must equal the header's; "\|" is a literal pipe (inside a code span too); a short body
         // row is padded, a long one cut; lines of the paragraph above the header row stay a paragraph; a table
         // inside a quote or list item ("> | a | b |", the turns view's quoted replies) is found the same way.

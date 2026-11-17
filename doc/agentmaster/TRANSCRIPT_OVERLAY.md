@@ -422,8 +422,9 @@ The tenth ask (2026-10-31), about a comparison table in one of Claude's replies 
   literal pipe, inside a code span too; a cell that would read as a block on its own (`- x`, `# x`, `<div>`) shows
   as written. A table inside a quote — every reply in the turns view is one — or a list item is found the same way
   (the continuation lines' `>` markers and item indents are stripped).
-- **Opt-in** (`MdParseOptions::tables`, default off): 📜 All Screen's pictures (ConversationImage) still draw a
-  table as its pipe lines, byte for byte as before.
+- **Opt-in** (`MdParseOptions::tables`, default off): the overlay turns it on, and so do 📜 All Screen's pictures
+  (ConversationImage, since 2026-11-17), which draw a table as Claude Code's own box (MESSAGING.md §21.39.1). A caller
+  that leaves it off keeps its blocks byte for byte.
 
 ## 4. Rendering
 
