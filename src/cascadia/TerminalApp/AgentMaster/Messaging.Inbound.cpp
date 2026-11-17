@@ -5548,7 +5548,12 @@ namespace Agentmaster::Msg
                 repost = true;
             }
             addFollows = !addFirst && nt.addMessageId != 0;
-            const NewThreadView view = BuildNewThreadView(nt, WallMs());
+            // §21.58: the folder step says what the bot's running timers will pick (and offers ⏹); AI_TITLES.md: its title line
+            // says when the session is named by AI. Both read under `_mtx` with the record, so a render shows one moment's state.
+            NewThreadViewContext viewCtx;
+            viewCtx.timers = _autoPicks;
+            viewCtx.aiTitles = _aiTitleTelegram.load();
+            const NewThreadView view = BuildNewThreadView(nt, WallMs(), viewCtx);
             html = view.html;
             for (const auto& row : view.rows)
             {
@@ -5963,6 +5968,18 @@ namespace Agentmaster::Msg
 
     std::wstring MessagingService::_onNewThreadAction(const NewThreadAction& action, int64_t threadId)
     {
+        // §21.58: a ⏹ acts on the BOT's timers, not on a thread's wizard — taken before the record lookup, so the one on a
+        // "🚀 Opening …" line works after its wizard became a session's topic (no record), and the folder step's re-renders.
+        if (action.kind == NewThreadAction::Kind::StopModelAuto || action.kind == NewThreadAction::Kind::StopWindowAuto)
+        {
+            NewThreadOutcome stop;
+            stop.kind = NewThreadOutcome::Kind::StopTimer;
+            stop.stopModelTimer = action.kind == NewThreadAction::Kind::StopModelAuto;
+            stop.stopWindowTimer = action.kind == NewThreadAction::Kind::StopWindowAuto;
+            stop.text = stop.stopModelTimer ? std::wstring{ L"\x23F9 Timed model stopped: the next session asks for its model again." }
+                                            : std::wstring{ L"\x23F9 Timed window stopped: the next session asks for its window again." };
+            return _applyNewThreadOutcome(threadId, stop, 0);
+        }
         // §21.25: the wizard decides (ApplyNewThreadButton: a button of an earlier step changes nothing), the dispatcher acts.
         NewThreadOutcome out;
         NewThreadStep step = NewThreadStep::Folder;
@@ -6029,16 +6046,67 @@ namespace Agentmaster::Msg
             return {}; // the caller holds the message (it owns it)
         case Kind::Render:
             _showNewThreadPicker(threadId, replyTo != 0);
-            return {};
+            return out.text; // "" for a step change; §21.58: a ⏱ chip's toast says what it arms
         case Kind::CheckFolder:
             return _checkNewThreadFolder(threadId, out.path, out.typed, replyTo);
         case Kind::CreateFolder:
             return _createNewThreadFolder(threadId, out.path);
         case Kind::EnterModel:
-            _enterNewThreadModelStep(threadId);
+            // §21.58: the folder is chosen — a running model timer takes the model step at once and the windows are asked next;
+            // otherwise the step renders and asks.
+            if (_enterNewThreadModelStep(threadId, true))
+            {
+                _collectNewThreadWindows(threadId, replyTo);
+                return {};
+            }
             _showNewThreadPicker(threadId, replyTo != 0);
             return {};
+        case Kind::StopTimer:
+        {
+            // §21.58: ⏹ — the bot's timer(s) end now; a thread that still has its wizard renders again (its folder step drops the
+            // line and the button), and the next wizards ask.
+            bool hasWizard = false;
+            bool wasRunning = false; // a ⏹ on an old line can name a timer that already ran out (or was stopped elsewhere)
+            {
+                std::lock_guard lk{ _mtx };
+                const int64_t now = WallMs();
+                if (out.stopModelTimer)
+                {
+                    wasRunning = NewThreadModelTimerActive(_autoPicks, now);
+                    StopNewThreadModelTimer(_autoPicks);
+                }
+                if (out.stopWindowTimer)
+                {
+                    wasRunning = wasRunning || NewThreadWindowTimerActive(_autoPicks, now);
+                    StopNewThreadWindowTimer(_autoPicks);
+                }
+                _stateDirty = true;
+                hasWizard = _newThreads.find(threadId) != _newThreads.end();
+            }
+            const std::wstring which = out.stopModelTimer ? L"model" : L"window";
+            _log(L"[msg] timed picks: the " + which + (wasRunning ? L" timer was stopped" : L" timer was not running") + L" (\x23F9 in thread " + std::to_wstring(threadId) + L")");
+            LogNav(L"remote telegram timed-pick stop " + which + (wasRunning ? L"" : L" (not running)"));
+            if (hasWizard)
+            {
+                _showNewThreadPicker(threadId, false);
+            }
+            // The toast is the truth of the moment: "stopped" only when a timer ran; else that the step asks already.
+            return wasRunning ? out.text : L"No timed " + which + L" runs \x2014 the " + which + L" step asks already.";
+        }
         case Kind::CollectWindows:
+            if (out.modelTimerMs > 0)
+            {
+                // §21.58: the model was chosen with a ⏱ chip — the bot keeps it for every new session for that long (a running
+                // timer is replaced: the newest choice wins).
+                {
+                    std::lock_guard lk{ _mtx };
+                    SetNewThreadModelTimer(_autoPicks, out.timedModelTarget, out.timedModelLabel, WallMs(), out.modelTimerMs);
+                    _stateDirty = true;
+                }
+                _log(L"[msg] timed picks: model \x201C" + out.timedModelLabel + L"\x201D (" + (out.timedModelTarget.empty() ? std::wstring{ L"Default" } : out.timedModelTarget) +
+                     L") is kept for every new session for " + TgShortSpan(out.modelTimerMs) + L" (set in thread " + std::to_wstring(threadId) + L")");
+                LogNav(L"remote telegram timed-pick model " + (out.timedModelTarget.empty() ? std::wstring{ L"Default" } : out.timedModelTarget) + L" for " + TgShortSpan(out.modelTimerMs));
+            }
             if (!out.rememberModel.empty())
             {
                 // A TYPED model id joins the "Specify a model" droplist and becomes its pre-fill — the PC prompt's own rule, so the
@@ -6056,6 +6124,19 @@ namespace Agentmaster::Msg
             _collectNewThreadWindows(threadId, replyTo);
             return {};
         case Kind::Launch:
+            if (out.windowTimerMs > 0)
+            {
+                // §21.58: the window was chosen with a ⏱ chip — from the next session on, the window step is skipped for that long
+                // (each opens next to its folder's newest tab). This launch goes where the user picked.
+                {
+                    std::lock_guard lk{ _mtx };
+                    SetNewThreadWindowTimer(_autoPicks, WallMs(), out.windowTimerMs);
+                    _stateDirty = true;
+                }
+                _log(L"[msg] timed picks: the window step is skipped for " + TgShortSpan(out.windowTimerMs) + L" (each session next to its folder's newest tab; set in thread " +
+                     std::to_wstring(threadId) + L")");
+                LogNav(L"remote telegram timed-pick window for " + TgShortSpan(out.windowTimerMs));
+            }
             return _launchNewThread(threadId, replyTo);
         case Kind::Abort:
             _abortNewThread(threadId, L"cancelled by the user", true);
@@ -6098,9 +6179,12 @@ namespace Agentmaster::Msg
         static constexpr const wchar_t* kKinds[] = { L"exists", L"missing", L"a file", L"no root", L"invalid", L"no answer" };
         _log(L"[msg] new thread " + std::to_wstring(threadId) + L": " + (typed ? L"typed" : L"picked") + L" folder " + path + L" \x2192 " +
              kKinds[static_cast<size_t>(res.kind) < std::size(kKinds) ? static_cast<size_t>(res.kind) : 4] + (res.path.empty() || res.path == path ? std::wstring{} : L" (" + res.path + L")"));
-        if (next.kind == NewThreadOutcome::Kind::EnterModel)
+        // §21.58: a chosen folder enters the model step, which a running model timer may take at once — the windows are then asked
+        // next (their answer renders the window step, or launches when the window timer runs too), and nothing renders here.
+        if (next.kind == NewThreadOutcome::Kind::EnterModel && _enterNewThreadModelStep(threadId, true))
         {
-            _enterNewThreadModelStep(threadId);
+            _collectNewThreadWindows(threadId, replyTo);
+            return {};
         }
         _showNewThreadPicker(threadId, replyTo != 0);
         if (next.kind == NewThreadOutcome::Kind::EnterModel || (typed && res.kind == FolderResolveKind::Missing))
@@ -6195,15 +6279,17 @@ namespace Agentmaster::Msg
         }
         _log(L"[msg] new thread " + std::to_wstring(threadId) + L": " + (ok ? L"created the folder " + path : L"could not create the folder " + path + L": " + error));
         LogNav(L"remote telegram new-thread " + std::to_wstring(threadId) + (ok ? L" created-folder" : L" create-folder-failed"));
-        if (next.kind == NewThreadOutcome::Kind::EnterModel)
+        // §21.58: the made folder enters the model step, which a running model timer may take at once (the windows are asked next).
+        if (next.kind == NewThreadOutcome::Kind::EnterModel && _enterNewThreadModelStep(threadId, true))
         {
-            _enterNewThreadModelStep(threadId);
+            _collectNewThreadWindows(threadId, 0);
+            return L"Created " + path;
         }
         _showNewThreadPicker(threadId);
         return ok ? L"Created " + path : L"Not created: " + error;
     }
 
-    void MessagingService::_enterNewThreadModelStep(int64_t threadId)
+    bool MessagingService::_enterNewThreadModelStep(int64_t threadId, bool allowTimedPick)
     {
         LaunchMenuSource source;
         std::wstring spec;
@@ -6239,18 +6325,52 @@ namespace Agentmaster::Msg
             LogSwallowedException(L"MessagingService::_enterNewThreadModelStep (the last specified model)");
         }
         std::vector<NewThreadModelChoice> choices = BuildNewThreadModelChoices(info.entries, last);
-        std::lock_guard lk{ _mtx };
-        if (const auto it = _newThreads.find(threadId); it != _newThreads.end())
+        NewThreadModelTimerResult timed = NewThreadModelTimerResult::NotActive;
+        std::wstring timedLabel;
+        std::wstring timedTarget;
+        int64_t leftMs = 0;
         {
+            std::lock_guard lk{ _mtx };
+            const auto it = _newThreads.find(threadId);
+            if (it == _newThreads.end())
+            {
+                return false; // cancelled or launched while the menu was read
+            }
             EnterNewThreadModelStep(it->second.wizard, std::move(choices), info.offerAddPresets, settingsModel);
             _stateDirty = true;
+            if (allowTimedPick)
+            {
+                // §21.58: the bot's model timer takes the step while it runs (ApplyNewThreadModelTimer: never for a thread whose
+                // launch did not go through, never a preset the menu lost — that one ENDS the timer: it could not launch again).
+                const int64_t now = WallMs();
+                timedLabel = _autoPicks.modelLabel;
+                timedTarget = _autoPicks.modelTarget;
+                leftMs = _autoPicks.modelUntilMs - now;
+                timed = ApplyNewThreadModelTimer(it->second.wizard, _autoPicks, now);
+                if (timed == NewThreadModelTimerResult::Gone)
+                {
+                    StopNewThreadModelTimer(_autoPicks);
+                }
+            }
         }
+        if (timed == NewThreadModelTimerResult::Picked)
+        {
+            _log(L"[msg] new thread " + std::to_wstring(threadId) + L": model \x201C" + timedLabel + L"\x201D taken by the timed pick (" + TgShortSpan(leftMs) + L" left); the model step is skipped");
+            LogNav(L"remote telegram new-thread " + std::to_wstring(threadId) + L" timed model " + (timedTarget.empty() ? std::wstring{ L"Default" } : timedTarget));
+            return true;
+        }
+        if (timed == NewThreadModelTimerResult::Gone)
+        {
+            _log(L"[msg] new thread " + std::to_wstring(threadId) + L": the timed model " + timedTarget + L" is no longer in the menu; its timer is stopped and the model step asks");
+        }
+        return false;
     }
 
     void MessagingService::_collectNewThreadWindows(int64_t threadId, int64_t replyTo)
     {
         uint64_t serial = 0;
         std::wstring folder;
+        bool timedWindow = false; // §21.58: the window timer will take the step once the windows answer
         {
             std::lock_guard lk{ _mtx };
             const auto it = _newThreads.find(threadId);
@@ -6263,8 +6383,14 @@ namespace Agentmaster::Msg
             w.windowsSerial = serial; // a census asked before this one is stale from now on
             w.windowsCollected = false;
             folder = w.folder;
+            timedWindow = NewThreadWindowTimerWillPick(w, _autoPicks, WallMs());
         }
-        _showNewThreadPicker(threadId, replyTo != 0); // "looking at the open windows…" (a keyed edit: a fast answer replaces it)
+        // "looking at the open windows…" (a keyed edit: a fast answer replaces it). §21.58: not when the window timer takes the step
+        // — the answer launches at once and the launch deletes the picker, so the render would only flash a step nobody answers.
+        if (!timedWindow)
+        {
+            _showNewThreadPicker(threadId, replyTo != 0);
+        }
         if (!_hooks.windowCensus)
         {
             _applyNewThreadWindows(threadId, serial, NewThreadWindowPlan{}); // no window step in this host: the engine's choice
@@ -6341,6 +6467,7 @@ namespace Agentmaster::Msg
             NewThreadOutcome out;
             size_t windows = 0;
             int defaultWindow = -1;
+            bool timed = false; // §21.58: the window timer took the step
             {
                 std::lock_guard lk{ _mtx };
                 const auto it = _newThreads.find(threadId);
@@ -6353,14 +6480,18 @@ namespace Agentmaster::Msg
                 {
                     return; // stale: the step moved on, or a newer census was asked (🔄 Refresh)
                 }
-                out = ApplyNewThreadWindows(w, std::move(plan));
+                // §21.58: the step's own rules first (one window or none skips it; after a refusal it asks), then a running window
+                // timer takes its ⭐ Default — the window of the folder's newest tab, right after that tab.
+                out = ApplyNewThreadWindowsTimed(w, std::move(plan), _autoPicks, WallMs());
                 windows = w.windows.size();
                 defaultWindow = w.defaultWindow;
+                timed = w.windowTimed;
                 _stateDirty = true;
             }
             _log(L"[msg] new thread " + std::to_wstring(threadId) + L": " + std::to_wstring(windows) + L" window(s) answered" +
                  (defaultWindow >= 0 ? L", default window " + std::to_wstring(defaultWindow + 1) : std::wstring{}) +
-                 (out.kind == NewThreadOutcome::Kind::Launch ? std::wstring{ L"; the window step is skipped" } : std::wstring{}));
+                 (timed ? std::wstring{ L"; the timed pick takes the default window" } :
+                          (out.kind == NewThreadOutcome::Kind::Launch ? std::wstring{ L"; the window step is skipped" } : std::wstring{})));
             if (out.kind == NewThreadOutcome::Kind::Launch)
             {
                 _launchNewThread(threadId, 0);
@@ -6403,6 +6534,9 @@ namespace Agentmaster::Msg
         int64_t pickerId = 0;
         int64_t addId = 0; // §21.25.9: the ➕ message, deleted with the picker once a window took the launch
         std::optional<NewThread> picker; // the thread's record, out of the map while the launch is asked for
+        // §21.58: the "🚀 Opening …" line offers ⏹ for each timer that picked this launch and still runs (read with the record).
+        bool stopModelOffer = false;
+        bool stopWindowOffer = false;
         // §21.28: a tapped window (or model) button stays busy until the window answers the launch — an opened tab, or a refusal and
         // the wizard again (_settleLaunchAnswers); the holds wait in `_bindTapHolds` under the launch's token. Empty for a typed
         // choice. Taken before the lock (it allocates); unused, they go with this function.
@@ -6420,6 +6554,8 @@ namespace Agentmaster::Msg
                 return kNewThreadGone;
             }
             plan = BuildNewThreadLaunchPlan(it->second);
+            stopModelOffer = it->second.wizard.modelTimed && NewThreadModelTimerActive(_autoPicks, WallMs());
+            stopWindowOffer = it->second.wizard.windowTimed && NewThreadWindowTimerActive(_autoPicks, WallMs());
             bind.sessionId = NewSessionId();
             bind.threadId = threadId;
             bind.dir = plan.dir;
@@ -6449,8 +6585,25 @@ namespace Agentmaster::Msg
         req.windowId = plan.windowId; // "" = the engine's choice
         req.afterSessionId = plan.afterSessionId;
         // What is opening, in the thread — BEFORE the launch (§21.23): the window's answer, which the tick may post a moment later
-        // from another thread, can never land above it. A typed last choice is quoted; a button's line stands alone.
-        _reply(threadId, plan.summaryHtml, false, json::Value{}, replyTo);
+        // from another thread, can never land above it. A typed last choice is quoted; a button's line stands alone. §21.58: what a
+        // timer picked is marked ⏱ in the line, and its ⏹ rides under it — the user sees at once that a step was skipped and can end
+        // the timer right there (the buttons act on the bot's timers, so they work after the thread became the session's topic).
+        json::Value launchMarkup;
+        if (stopModelOffer || stopWindowOffer)
+        {
+            std::vector<std::vector<std::pair<std::wstring, std::wstring>>> stopRows;
+            for (const auto& row : BuildNewThreadTimerStopRows(stopModelOffer, stopWindowOffer))
+            {
+                std::vector<std::pair<std::wstring, std::wstring>> r;
+                for (const auto& b : row)
+                {
+                    r.emplace_back(b.text, b.data);
+                }
+                stopRows.push_back(std::move(r));
+            }
+            launchMarkup = _buttons(stopRows);
+        }
+        _reply(threadId, plan.summaryHtml, false, std::move(launchMarkup), replyTo);
         bool ok = false;
         try
         {

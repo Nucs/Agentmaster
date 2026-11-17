@@ -8833,6 +8833,97 @@ How it was checked (nothing built, no live test):
 9. **A restart.** Restart Agentmaster with a ticket up. After the restart it is still edited and deleted as its prompt
    moves.
 
+### 21.58 Timed picks: the wizard's model and window kept for a while (⏱), and the AI title line (2026-11-17; NOT BUILT — the next build must purge: `Messaging.h`'s `MessagingService` gained members, `SessionModels.h` changed for [AI_TITLES.md](AI_TITLES.md))
+
+> The user's request (2026-11-17): "the dialogue in which you create, has the model picking and has the window picking. I want
+> these two to be somehow allowed to be set to default value for a certain amount of time. So let's say I want always for the
+> next 24 hours or the 6 hours or the 16 hours and so on, couple of other layers. I want to set all the picks for new sessions
+> to be Opus 5.5 which is the default, but I can also pick obviously any other model for the next period of time. The point of
+> this feature is not to permanently disable or auto pick a certain answer but to actually, for a certain amount of time, allow
+> flowing creation. Now the second part beyond model picking is the window picking. I think that one should be automatically
+> picking the last location a session has been created in that working directory" (the message was cut off there).
+>
+> Decided with the user the same day (an HTML question): the window rule is **the folder's newest open tab** (the window
+> step's ⭐ Default); the timers are a **⏱ row on each step** (model and window timed separately); the lengths are **Once · 1 h ·
+> 3 h · 6 h · 16 h · 24 h · 3 days**. The same request asked for AI titles: [AI_TITLES.md](AI_TITLES.md) (on by default for
+> sessions the phone starts).
+
+**What the user sees.**
+
+| Where | What changes |
+|---|---|
+| The model step (§21.25.3) | Under the models, above ◀ Back / ✖ Cancel, two rows of chips: [⏱ Once] [1 h] [3 h] [6 h] / [16 h] [24 h] [3 days]; the chosen one carries ✓. A line says what they do ("Tap a time first to keep the model you pick next for every new session — this step is then skipped"; with a chip: "**6 h**: the model you pick now is kept for every new session for 6 h"). A chip only ARMS the next choice: the model tapped (Default included), a preset, ✏ Specify…'s typed id or `/model <id>` is then kept. The chip goes back to Once once used. |
+| The model-id step | While a chip is chosen: "**6 h**: the id you send is kept for every new session for 6 h". |
+| The window step (§21.25.4) | The same chips under 🔄 Refresh once the windows are listed. A window tapped (or typed) with a chip opens THIS session there; for that long after it, new sessions skip the step and open next to their folder's newest tab (the step's ⭐ Default). |
+| The folder step | While a timer runs, a line leads the step: "⏱ **Timed picks on**: model **Opus 5.5** (5h12m left) · window by folder (2h left). Pick a folder and the session opens right away." (or "Timed model …" / "Timed window …" alone), and a row [⏹ Stop timed model] [⏹ Stop timed window] (the running ones) sits above ✖ Cancel. |
+| The "🚀 Opening …" line | What a timer picked carries ⏱: "… · Opus 5.5 ⏱ · window 2 ⏱, next to “beta”…" (a timed Default is named "Default ⏱"; a tapped Default stays unnamed, as before), with the ⏹ buttons of the timers that picked it under the line. |
+| The folder step's title line (AI_TITLES.md) | While `aiTitleTelegramSessions` is on, an unnamed thread reads "Its title: named by AI from your first message — rename this thread to choose it yourself." |
+
+**The rules.**
+- **The bot's timers** (`MessagingNewThreadWizard.h` `NewThreadAutoPicks`, `MessagingService::_autoPicks` under `_mtx`): the
+  model's (`modelTarget` / `modelLabel` until `modelUntilMs`) and the window's (`windowUntilMs`). One per bot, not per thread: a
+  timer set in one thread drives every thread opened after it, until it runs out or ⏹ ends it. A newer timed choice replaces a
+  running one. Persisted with the state file (`MessagingState::newThreadAutoPicks`, only RUNNING timers, no key while none
+  runs; restored at `_start`), and volatile for the older-writer repair, so a stopped timer never comes back from the shadow. A
+  file can shorten a timer, never make it run past the longest chip (3 days from its setting: `NewThreadAutoPicksFromJson`).
+- **The model step skipped** (`ApplyNewThreadModelTimer`, called by `_enterNewThreadModelStep(…, true)` when a FOLDER was just
+  chosen — a list pick, a typed path, a made folder): while the model timer runs, the kept model is chosen at once
+  (`NewThreadWizard::modelTimed`), named as the menu names it now, and the windows are asked next. A model id launches always;
+  a kept PRESET the menu no longer has ends the timer (logged), and the step asks with the reason on top.
+- **The window step skipped** (`ApplyNewThreadWindowsTimed` at the census answer): the step's own rules come first (one window or
+  none skips it as before; after a refused launch it must ask); when it would show its list and the window timer runs, its ⭐
+  Default is taken — the window of the newest open tab working in the folder, right after that tab (`BuildNewThreadWindowPlan`;
+  no such tab: the window used last) — and marked `windowTimed`. The service shows no "looking at the open windows…" render
+  then (`NewThreadWindowTimerWillPick`): the launch follows the answer at once and deletes the picker.
+- **A refusal is never retried by a timer.** `ReturnNewThreadToStep` sets `NewThreadWizard::autoPicksOff`: a thread whose launch
+  did not go through asks every step from then on, and its folder step says "The timed picks are paused for this thread".
+- **⏹ works from any message**: `_onNewThreadAction` takes `StopModelAuto` / `StopWindowAuto` before it looks for the thread's
+  wizard (`NewThreadStepTakes` takes them at every step), so the ⏹ under a "🚀 Opening …" line works after its thread became
+  the session's topic. The toast says the next session asks again; a thread that still has its wizard renders again.
+- **The ➕ message** (§21.25.9) is posted at the first render of an active step: with only the model step timed it appears at the
+  window step; with both timed the session opens without it (add folders with `/add-dir` in the session).
+- **Buttons**: `nt:mt:<i>` / `nt:wt:<i>` (a chip; an index past the row is stale), `nt:xm` / `nt:xw` (⏹).
+- **Not covered**: the paths with no wizard — a session topic's `/newsession` / `/forksession` and 🔎 Search's `/newsession
+  <folder>` (§21.21) — take no timer (they ask no model or window either). A wizard restored at its model step after a restart
+  asks (the timer acts only on the way forward from a folder choice).
+
+**The code.** `MessagingNewThread.h`: the four kinds, their data and parse; `BuildNewThreadPickerHtml`'s `aiTitle`.
+`MessagingNewThreadWizard.h`: the timer table (`kNewThreadTimers`, `NewThreadTimerMs` / `NewThreadTimerLabel`),
+`NewThreadAutoPicks` and its helpers and JSON, the wizard's `modelTimer` / `windowTimer` / `modelTimed` / `windowTimed` /
+`autoPicksOff` (persisted with the record), `NewThreadOutcome`'s `modelTimerMs` / `timedModelTarget` / `timedModelLabel` /
+`windowTimerMs` / `StopTimer`, `TakeNewThreadModelTimer` / `TakeNewThreadWindowTimer`, `ApplyNewThreadModelTimer`,
+`NewThreadWindowTimerWillPick`, `ApplyNewThreadWindowsTimed`, `BuildNewThreadTimerStopRows`, `NewThreadViewContext` and the
+3-argument `BuildNewThreadView`, the launch line's ⏱. `MessagingModels.h`: `MessagingState::newThreadAutoPicks`. `Messaging.cpp`:
+the restore at `_start`, the save, the volatile entry, `Apply`'s `_aiTitleTelegram`. `Messaging.Inbound.cpp`: the render's
+context, the ⏹ route, `_applyNewThreadOutcome` (a timed choice starts its timer, `StopTimer`, `EnterModel`'s timed skip),
+`_checkNewThreadFolder` / `_createNewThreadFolder`, `_enterNewThreadModelStep`, `_collectNewThreadWindows`,
+`_applyNewThreadWindows`, `_launchNewThread`'s ⏹ under the line.
+
+**Logs.** `[msg] timed picks: model "<label>" (<target>) is kept for every new session for 6h (set in thread N)`, `… the
+window step is skipped for 3h …`, `… the model timer was stopped (⏹ in thread N)`, `[msg] new thread N: model "<label>" taken by
+the timed pick (5h12m left); the model step is skipped`, `… the timed model @x is no longer in the menu; its timer is stopped`,
+`… K window(s) answered, default window D; the timed pick takes the default window`, `[msg] timed picks restored: …` at a start;
+`[nav] remote telegram timed-pick model|window|stop …` and `[nav] remote telegram new-thread N timed model <target>`.
+
+**Tests.** `tests_messaging_newthread.cpp` → `TestMessagingNewThreadWizard` W17: the buttons and their parse; the timer table;
+the timers' start, length, Once, round trip, a timer that ran out, a garbled file bounded, prune, stop, the state file; the model
+step's chips, the tick, a tapped / Default / typed choice with a chip, a chip past the row or on the wrong step; the model timer
+at the step's entry (the menu's label, a timer that ran out, a thread's timers off, a preset gone, a typed id); the window step's
+chips, a tapped and a typed window with a chip, the timer taking the default (its anchor), a timer that ran out, a step that must
+ask, timers off, one window; the launch line's marks; the folder step's three lines and ⏹ rows and its paused line; ⏹ at any
+step; the AI title line; the refusal latch; the wizard's new fields' round trip.
+
+**Check after the build** (dev, with the bot, two windows):
+1. Open a new thread, pick a folder, tap [6 h], then a model: the window step comes; the folder step of the NEXT thread shows
+   "⏱ Timed model …" and [⏹ Stop timed model]. Pick a folder there: the model step is skipped, and the 🚀 line says "Opus 5.5 ⏱"
+   with ⏹ under it.
+2. At a window step tap [3 h], then a window: the next thread's folder pick launches at once next to the folder's newest tab
+   ("window N ⏱"); with both timers on, no "looking at the open windows…" flashes.
+3. Tap ⏹ on a 🚀 line after its session is up: the toast says the step asks again, and the next thread asks.
+4. Close the window the timer would pick while a timer runs: the launch goes to the folder's newest tab in the windows still
+   open; refuse a launch (a preset that cannot start): the wizard comes back and asks every step ("paused for this thread").
+5. Restart Agentmaster with a timer running: it still runs (`[msg] timed picks restored`).
+
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
 > The user's questions (2026-10-17, session 0b1f8635): "Lets discover how can we make forums/groups to: Can you make groups

@@ -40,6 +40,7 @@
 #include "AgentTabOverlay.h" // _claudeOverlays.erase needs the complete com_ptr<AgentTabOverlay> type
 #include "AgentModelPrompt.h" // AgentBuildSpecifyModelCard — the shared "Specify a model..." prompt this page hosts
 #include "AgentPanelFocus.h" // Agentmaster (TCM-K2): where the keyboard goes back to when the "Specify a model" prompt closes
+#include "AgentMaster/AiSessionTitle.h" // AiTitleWantedAtLaunch — a new session's AI-title mark (AI_TITLES.md)
 #include "AgentMaster/ApiErrorRewind.h" // the API-ERROR REWIND before a resume (HOOKS.md "API-error turns")
 #include "AgentMaster/ClaudeSpawn.h" // BuildClaudeSpawn / ClaudeConversationExists / AppendStateLog
 #include "AgentMaster/CommandWatch.h" // IsSaneWatchPath — the /handover action's path re-assert (COMMANDS.md)
@@ -982,6 +983,9 @@ namespace winrt::TerminalApp::implementation
         }
 
         std::wstring ttl{ title };
+        // Agentmaster (AI_TITLES.md): whether the caller passed no title, so the one below is DERIVED from the folder — only such
+        // a new session may get an AI title at its first prompt (a title someone gave is never replaced).
+        const bool titleDerived = ttl.empty();
         if (ttl.empty())
         {
             // Smart tab/session name: walk past generic bin/obj/Debug/... segments to the first
@@ -1285,6 +1289,19 @@ namespace winrt::TerminalApp::implementation
             if (info.createdUnixMs == 0)
             {
                 info.createdUnixMs = createdNowMs;
+            }
+            // Agentmaster (AI_TITLES.md — AI session titles): a NEW conversation whose title was derived above gets the AI-title
+            // MARK — its derived title — when the switch for its origin is on (_remoteLaunchInFlight: the phone asked for this
+            // launch, AppSettings::aiTitleTelegramSessions, default on; every other launch aiTitleOtherSessions, default off). The
+            // titler (SessionTitler.cpp) names the session at its first real prompt and only while its title still IS the mark,
+            // so a rename before or during the naming always wins. A fork keeps its "(fork)" name: never marked. The settings
+            // are this launch's fresh read (appSettings), so a switch flipped in the cog applies to the very next launch.
+            if (::Agentmaster::AiTitle::AiTitleWantedAtLaunch(!titleDerived, !effectiveForkFrom.empty(), false, _remoteLaunchInFlight,
+                                                              appSettings.aiTitleTelegramSessions, appSettings.aiTitleOtherSessions))
+            {
+                info.aiTitlePendingFrom = ttl;
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[ai-title] " + ::Agentmaster::ShortId(spec.sessionId) + L" marked: \x201C" + ttl + L"\x201D is named at its first prompt (" +
+                                                                (_remoteLaunchInFlight ? L"a Telegram launch" : L"a launch at the PC") + L")\n");
             }
         }
         else

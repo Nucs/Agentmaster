@@ -137,6 +137,21 @@ namespace Agentmaster
         int64_t lastActivityUnixMs{ 0 }; // max(lastActivityUnixMs, convLastActivityUnixMs), as SessionHeadline; 0 = no recorded activity
     };
 
+    // Agentmaster (AI_TITLES.md): one session as the AI title's example selection reads it (SessionRegistry::TitleSamples) — its
+    // name, the two folders it may belong to, whether its tab is open, and how new it is. Copied for every record, open and closed:
+    // the selection lists the folder's open tabs first and tops the list up with closed ("historical") sessions.
+    struct SessionTitleSample
+    {
+        std::wstring id; // SessionInfo::id — the session being named leaves itself out by it
+        std::wstring title; // SessionInfo::title — the one name of the tab (Rule #11)
+        std::wstring workingDir; // SessionInfo::workingDir — the launch folder
+        std::wstring inferredWorkingDir; // SessionInfo::inferredWorkingDir — where its tool calls concentrate; EMPTY when unknown
+        bool live{ false }; // SessionInfo::live — an open tab now (false = a closed, archived record)
+        // How new the session is: its creation stamp (createdUnixMs) when it has one, else its newest activity —
+        // max(lastActivityUnixMs, convLastActivityUnixMs). 0 = unknown (sorted after every stamped session).
+        int64_t newestUnixMs{ 0 };
+    };
+
     class SessionRegistry
     {
     public:
@@ -250,6 +265,15 @@ namespace Agentmaster
         //   returns — one sample per record; empty when the registry is empty.
         //   throws  — std::bad_alloc on allocation failure only.
         std::vector<SessionPlaceSample> PlaceSamples() const;
+
+        // Agentmaster (AI_TITLES.md): every session's name, folders, openness and newness (SessionTitleSample) — live and
+        // archived records alike, in insertion order. For the AI title of a new session (SessionTitler.cpp), which lists the
+        // titles of its folder's open tabs and tops them up with closed sessions of that folder: it copies four strings and two
+        // scalars per record, where Snapshot() copied every record with its queue and its transcript texts. Called once per
+        // NAMED session (at its first real prompt), never periodically.
+        //   returns — one sample per record; empty when the registry is empty.
+        //   throws  — std::bad_alloc on allocation failure only; the stored records are left intact.
+        std::vector<SessionTitleSample> TitleSamples() const;
 
         // The SessionScanner's per-pass snapshot: the LIVE sessions (the SnapshotLive set and order), each
         // copied without two parts the scanner never reads:

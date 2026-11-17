@@ -1201,6 +1201,267 @@ namespace
             CHECK((bindBack && bindBack->wizard.extraFolders.size() == 2 && bindBack->wizard.extraFolders[1].path == L"K:\\shared"),
                   "W16: a launch waiting for its session keeps the extra folders across a restart (the bind sends them once it is live)");
         }
+
+        // ===== W17. the timed picks: a model and a window kept for a while (21.58) ==========================================
+        {
+            // --- the buttons ---
+            CHECK((NewThreadCallbackData(K::ModelTimer, 3) == L"nt:mt:3" && NewThreadCallbackData(K::WindowTimer, 0) == L"nt:wt:0" &&
+                   NewThreadCallbackData(K::StopModelAuto, 9) == L"nt:xm" && NewThreadCallbackData(K::StopWindowAuto, 0) == L"nt:xw"),
+                  "W17: the timer chips' and the stops' data");
+            CHECK((ParseNewThreadCallbackData(L"nt:mt:6").kind == K::ModelTimer && ParseNewThreadCallbackData(L"nt:mt:6").value == 6 &&
+                   ParseNewThreadCallbackData(L"nt:wt:2").kind == K::WindowTimer && ParseNewThreadCallbackData(L"nt:xm").kind == K::StopModelAuto &&
+                   ParseNewThreadCallbackData(L"nt:xw").kind == K::StopWindowAuto),
+                  "W17: they parse back");
+            CHECK((ParseNewThreadCallbackData(L"nt:mt:").kind == K::None && ParseNewThreadCallbackData(L"nt:xm:1").kind == K::None &&
+                   ParseNewThreadCallbackData(L"nt:x").kind == K::Cancel && ParseNewThreadCallbackData(L"nt:m:1").kind == K::PickUsed),
+                  "W17: a chip without its value or a stop with one is no button; the older tags keep their meaning");
+
+            // --- the timer table ---
+            CHECK((kNewThreadTimerCount == 7 && NewThreadTimerMs(0) == 0 && NewThreadTimerMs(1) == 3600000LL && NewThreadTimerMs(2) == 3 * 3600000LL &&
+                   NewThreadTimerMs(3) == 6 * 3600000LL && NewThreadTimerMs(4) == 16 * 3600000LL && NewThreadTimerMs(5) == 24 * 3600000LL &&
+                   NewThreadTimerMs(6) == 72 * 3600000LL && NewThreadTimerMs(7) == 0),
+                  "W17: Once, 1 h, 3 h, 6 h, 16 h, 24 h, 3 days; an index past the row is Once");
+            CHECK((NewThreadTimerLabel(4) == L"16 h" && NewThreadTimerLabel(6) == L"3 days" && NewThreadTimerLabel(99) == L"Once"), "W17: the chips' labels");
+
+            // --- the bot's timers ---
+            const int64_t now = 1000000000LL;
+            NewThreadAutoPicks t;
+            CHECK((!NewThreadModelTimerActive(t, now) && !NewThreadWindowTimerActive(t, now)), "W17: no timer runs by default");
+            SetNewThreadModelTimer(t, L"@mimo-pro", L"MiMo Pro", now, NewThreadTimerMs(3));
+            SetNewThreadWindowTimer(t, now, NewThreadTimerMs(1));
+            CHECK((NewThreadModelTimerActive(t, now + 1000) && t.modelUntilMs == now + 6 * 3600000LL && NewThreadWindowTimerActive(t, now + 3599999) &&
+                   !NewThreadWindowTimerActive(t, now + 3600000)),
+                  "W17: a timer runs for its length and not a moment longer");
+            NewThreadAutoPicks once = t;
+            SetNewThreadModelTimer(once, L"x", L"x", now, 0);
+            CHECK((once.modelTarget == L"@mimo-pro"), "W17: Once (0) starts no timer and leaves a running one alone");
+            const json::Value tj = NewThreadAutoPicksToJson(t, now);
+            const NewThreadAutoPicks tb = NewThreadAutoPicksFromJson(tj, now);
+            CHECK((tb.modelTarget == L"@mimo-pro" && tb.modelLabel == L"MiMo Pro" && tb.modelUntilMs == t.modelUntilMs && tb.windowUntilMs == t.windowUntilMs),
+                  "W17: the running timers round-trip");
+            const json::Value later = NewThreadAutoPicksToJson(t, now + 2 * 3600000LL);
+            CHECK((later.Find(L"windowUntilMs") == nullptr && later.Find(L"modelUntilMs") != nullptr), "W17: a timer that ran out is not written");
+            CHECK((NewThreadAutoPicksToJson(t, now + 7 * 3600000LL).type == json::Value::Type::Null), "W17: with no running timer nothing is written");
+            auto garbled = json::Value::MkObj();
+            garbled.Set(L"modelSetMs", json::Value::MkNum(static_cast<double>(now)));
+            garbled.Set(L"modelUntilMs", json::Value::MkNum(static_cast<double>(now + 30LL * 24 * 3600000)));
+            garbled.Set(L"windowUntilMs", json::Value::MkNum(static_cast<double>(now + 30LL * 24 * 3600000)));
+            const NewThreadAutoPicks gb = NewThreadAutoPicksFromJson(garbled, now + 1000);
+            CHECK((gb.modelUntilMs == now + kNewThreadTimerMaxMs && gb.windowUntilMs == now + 1000 + kNewThreadTimerMaxMs),
+                  "W17: a file can never make a timer outlive the longest chip");
+            CHECK((!NewThreadModelTimerActive(NewThreadAutoPicksFromJson(json::Value::MkStr(L"x"), now), now)), "W17: anything but an object reads as no timer");
+            NewThreadAutoPicks pruned = t;
+            CHECK((PruneNewThreadTimers(pruned, now + 2 * 3600000LL) && pruned.windowUntilMs == 0 && pruned.modelUntilMs != 0), "W17: prune drops only what ran out");
+            StopNewThreadModelTimer(pruned);
+            CHECK((pruned.modelUntilMs == 0 && pruned.modelTarget.empty() && !PruneNewThreadTimers(pruned, now)), "W17: stop ends a timer");
+            MessagingState st;
+            st.newThreadAutoPicks = tj;
+            const auto stBack = StateFromJson(StateToJson(st));
+            CHECK((stBack.has_value() && NewThreadAutoPicksFromJson(stBack->newThreadAutoPicks, now).modelLabel == L"MiMo Pro"), "W17: the state file carries the timers");
+            CHECK((StateToJson(MessagingState{}).Find(L"newThreadAutoPicks") == nullptr), "W17: a state without timers writes no key");
+
+            // --- the model step: the chips, a timed choice by tap and by typing ---
+            const auto modelStep = []() {
+                NewThreadRecord r;
+                r.wizard.folder = L"K:\\proj";
+                EnterNewThreadModelStep(r.wizard, BuildNewThreadModelChoices({ { L"Opus", L"opus" }, { L"MiMo Pro", L"@mimo-pro" } }, L""), false, L"opus");
+                return r;
+            };
+            NewThreadRecord mr = modelStep();
+            NewThreadView mv = BuildNewThreadView(mr, now);
+            CHECK((WzPress(mv.rows, L"Once").kind == K::ModelTimer && WzPress(mv.rows, L"16 h").kind == K::ModelTimer && WzPress(mv.rows, L"3 days").value == 6 &&
+                   mv.html.find(L"Tap a time first") != std::wstring::npos),
+                  "W17: the model step shows the seven chips and says what they do");
+            CHECK((ParseNewThreadCallbackData(mv.rows.back()[0].data).kind == K::BackToFolders), "W17: Back and Cancel stay the last row");
+            NewThreadOutcome out = ApplyNewThreadButton(mr, WzPress(mv.rows, L"6 h"));
+            CHECK((out.kind == O::Render && mr.wizard.modelTimer == 3 && !out.text.empty()), "W17: a chip arms the next choice (a render and a toast)");
+            mv = BuildNewThreadView(mr, now);
+            bool ticked = false;
+            for (const auto& row : mv.rows)
+            {
+                for (const auto& b : row)
+                {
+                    ticked = ticked || (b.data == L"nt:mt:3" && b.text == L"\x2713 6 h");
+                }
+            }
+            CHECK((ticked && mv.html.find(L"<b>6 h</b>") != std::wstring::npos), "W17: the chosen chip carries the tick, and the step says its length");
+            out = ApplyNewThreadButton(mr, WzPress(mv.rows, L"MiMo Pro"));
+            CHECK((out.kind == O::CollectWindows && out.modelTimerMs == 6 * 3600000LL && out.timedModelTarget == L"@mimo-pro" && out.timedModelLabel == L"MiMo Pro" &&
+                   mr.wizard.modelTimer == 0 && !mr.wizard.modelTimed),
+                  "W17: a model tapped with a chip is kept by the bot for its length; the chip goes back to Once; the choice is the user's own");
+            CHECK((ApplyNewThreadButton(mr, NewThreadAction{ K::ModelTimer, 1 }).kind == O::Stale), "W17: a model chip tapped at the window step is stale");
+            NewThreadRecord past = modelStep();
+            CHECK((ApplyNewThreadButton(past, NewThreadAction{ K::ModelTimer, 7 }).kind == O::Stale && past.wizard.modelTimer == 0), "W17: a chip past the row is stale");
+            NewThreadRecord def = modelStep();
+            ApplyNewThreadButton(def, NewThreadAction{ K::ModelTimer, 1 });
+            out = ApplyNewThreadButton(def, NewThreadAction{ K::ModelDefault, 0 });
+            CHECK((out.kind == O::CollectWindows && out.modelTimerMs == 3600000LL && out.timedModelTarget.empty() && out.timedModelLabel == L"Default"),
+                  "W17: Default can be kept too");
+            NewThreadRecord typed = modelStep();
+            ApplyNewThreadButton(typed, NewThreadAction{ K::ModelTimer, 5 });
+            out = ApplyNewThreadText(typed, L"/model claude-opus-5-5[1m]");
+            CHECK((out.kind == O::CollectWindows && out.modelTimerMs == 24 * 3600000LL && out.timedModelTarget == L"claude-opus-5-5[1m]" &&
+                   out.rememberModel == L"claude-opus-5-5[1m]"),
+                  "W17: a typed model id uses the chip like a tap");
+            NewThreadRecord plain = modelStep();
+            out = ApplyNewThreadButton(plain, NewThreadAction{ K::ModelPick, 0 });
+            CHECK((out.kind == O::CollectWindows && out.modelTimerMs == 0), "W17: without a chip a choice is for this session only");
+
+            // --- the model timer at the step's entry ---
+            NewThreadAutoPicks run;
+            SetNewThreadModelTimer(run, L"opus", L"Old label", now, NewThreadTimerMs(3));
+            NewThreadRecord tr = modelStep();
+            CHECK((ApplyNewThreadModelTimer(tr.wizard, run, now) == NewThreadModelTimerResult::Picked && tr.wizard.step == NewThreadStep::Window &&
+                   tr.wizard.modelTimed && tr.wizard.modelTarget == L"opus" && tr.wizard.modelLabel == L"Opus"),
+                  "W17: a running model timer takes the step, named as the menu names it now");
+            NewThreadRecord expired = modelStep();
+            CHECK((ApplyNewThreadModelTimer(expired.wizard, run, now + 7 * 3600000LL) == NewThreadModelTimerResult::NotActive && expired.wizard.step == NewThreadStep::Model),
+                  "W17: a timer that ran out leaves the step to ask");
+            NewThreadRecord off = modelStep();
+            off.wizard.autoPicksOff = true;
+            CHECK((ApplyNewThreadModelTimer(off.wizard, run, now) == NewThreadModelTimerResult::NotActive && off.wizard.step == NewThreadStep::Model),
+                  "W17: a thread whose launch did not go through is never timed");
+            NewThreadAutoPicks gone;
+            SetNewThreadModelTimer(gone, L"@deleted", L"Deleted preset", now, NewThreadTimerMs(3));
+            NewThreadRecord gr = modelStep();
+            CHECK((ApplyNewThreadModelTimer(gr.wizard, gone, now) == NewThreadModelTimerResult::Gone && gr.wizard.step == NewThreadStep::Model &&
+                   gr.wizard.notice.find(L"not in the menu") != std::wstring::npos),
+                  "W17: a kept preset the menu lost: the step asks, saying why (the service ends the timer)");
+            NewThreadAutoPicks id;
+            SetNewThreadModelTimer(id, L"claude-opus-5-5[1m]", L"claude-opus-5-5[1m]", now, NewThreadTimerMs(3));
+            NewThreadRecord ir = modelStep();
+            CHECK((ApplyNewThreadModelTimer(ir.wizard, id, now) == NewThreadModelTimerResult::Picked && ir.wizard.modelTarget == L"claude-opus-5-5[1m]"),
+                  "W17: a typed model id is kept even though the menu does not list it");
+
+            // --- the window step: the chips, a timed choice, the timer taking the default ---
+            const auto windowStep = [&]() {
+                NewThreadRecord r = modelStep();
+                ApplyNewThreadButton(r, NewThreadAction{ K::ModelDefault, 0 });
+                ApplyNewThreadWindows(r.wizard, BuildNewThreadWindowPlan(WzCensus(), WzTabFacts(), NormDirKey(L"K:\\proj"), L"proj"));
+                return r;
+            };
+            NewThreadRecord wr = windowStep();
+            NewThreadView wv = BuildNewThreadView(wr, now);
+            CHECK((WzPress(wv.rows, L"24 h").kind == K::WindowTimer && wv.html.find(L"newest tab") != std::wstring::npos &&
+                   ParseNewThreadCallbackData(wv.rows.back()[0].data).kind == K::BackToModels),
+                  "W17: the window step shows its chips once the windows are listed; Back and Cancel stay last");
+            out = ApplyNewThreadButton(wr, WzPress(wv.rows, L"24 h"));
+            CHECK((out.kind == O::Render && wr.wizard.windowTimer == 5), "W17: a window chip arms the next window choice");
+            CHECK((ApplyNewThreadButton(wr, NewThreadAction{ K::WindowTimer, 9 }).kind == O::Stale), "W17: a window chip past the row is stale");
+            out = ApplyNewThreadButton(wr, WzPress(BuildNewThreadView(wr, now).rows, L"\U0001FA9F 2"));
+            CHECK((out.kind == O::Launch && out.windowTimerMs == 24 * 3600000LL && wr.wizard.windowId == L"{W2}" && wr.wizard.windowTimer == 0 && !wr.wizard.windowTimed),
+                  "W17: the window tapped with a chip opens this session there; the bot skips the step for the next ones");
+            NewThreadRecord wt = windowStep();
+            ApplyNewThreadButton(wt, NewThreadAction{ K::WindowTimer, 2 });
+            out = ApplyNewThreadText(wt, L"window 1");
+            CHECK((out.kind == O::Launch && out.windowTimerMs == 3 * 3600000LL && wt.wizard.windowId == L"{W1}"), "W17: a typed window number uses the chip like a tap");
+
+            NewThreadAutoPicks wrun;
+            SetNewThreadWindowTimer(wrun, now, NewThreadTimerMs(2));
+            NewThreadWizard ww = windowStep().wizard;
+            ww.windowsCollected = false;
+            CHECK((NewThreadWindowTimerWillPick(ww, wrun, now) && !NewThreadWindowTimerWillPick(ww, wrun, now + 4 * 3600000LL)),
+                  "W17: the service knows ahead that the timer will take the step (no looking-at-the-windows render)");
+            out = ApplyNewThreadWindowsTimed(ww, BuildNewThreadWindowPlan(WzCensus(), WzTabFacts(), NormDirKey(L"K:\\proj"), L"proj"), wrun, now);
+            CHECK((out.kind == O::Launch && ww.windowTimed && ww.windowId == L"{W1}" && ww.anchorSessionId == L"b"),
+                  "W17: a running window timer takes the default: the window of the folder's newest tab, right after it");
+            NewThreadWizard wexp = windowStep().wizard;
+            out = ApplyNewThreadWindowsTimed(wexp, BuildNewThreadWindowPlan(WzCensus(), WzTabFacts(), NormDirKey(L"K:\\proj"), L"proj"), wrun, now + 4 * 3600000LL);
+            CHECK((out.kind == O::Render && !wexp.windowTimed), "W17: a window timer that ran out leaves the step to ask");
+            NewThreadWizard wask = windowStep().wizard;
+            wask.askWindow = true;
+            CHECK((!NewThreadWindowTimerWillPick(wask, wrun, now)), "W17: a step that must ask (after a refusal) is never taken by the timer");
+            out = ApplyNewThreadWindowsTimed(wask, BuildNewThreadWindowPlan(WzCensus(), WzTabFacts(), NormDirKey(L"K:\\proj"), L"proj"), wrun, now);
+            CHECK((out.kind == O::Render && !wask.windowTimed), "W17: ...and it shows its list");
+            NewThreadWizard woff = windowStep().wizard;
+            woff.autoPicksOff = true;
+            out = ApplyNewThreadWindowsTimed(woff, BuildNewThreadWindowPlan(WzCensus(), WzTabFacts(), NormDirKey(L"K:\\proj"), L"proj"), wrun, now);
+            CHECK((out.kind == O::Render && !woff.windowTimed), "W17: a thread whose launch did not go through is never timed at the window step");
+            WindowCensus solo;
+            solo.windowId = L"{W2}";
+            solo.tabs = { WzTab(0, L"delta", L"d") };
+            NewThreadWizard wone = windowStep().wizard;
+            out = ApplyNewThreadWindowsTimed(wone, BuildNewThreadWindowPlan({ solo }, WzTabFacts(), NormDirKey(L"K:\\proj"), L"proj"), wrun, now);
+            CHECK((out.kind == O::Launch && wone.windowAuto && !wone.windowTimed), "W17: one window skips the step by its own rule, not the timer's");
+
+            // --- the launch line marks what a timer picked ---
+            NewThreadRecord lr;
+            lr.wizard = ww; // the timer took window 1
+            lr.wizard.folder = L"K:\\proj";
+            lr.wizard.modelTarget.clear();
+            lr.wizard.modelLabel = L"Default";
+            lr.wizard.modelTimed = true;
+            const NewThreadLaunchPlan lp = BuildNewThreadLaunchPlan(lr);
+            CHECK((lp.summaryText.find(L"Default \x23F1") != std::wstring::npos && lp.summaryText.find(L"window 1 \x23F1") != std::wstring::npos),
+                  "W17: the launch line names a timed Default and a timed window with the timer mark");
+            lr.wizard.modelTimed = false;
+            lr.wizard.windowTimed = false;
+            const NewThreadLaunchPlan lp2 = BuildNewThreadLaunchPlan(lr);
+            CHECK((lp2.summaryText.find(L"Default") == std::wstring::npos && lp2.summaryText.find(L"\x23F1") == std::wstring::npos && lp2.summaryText.find(L"window 1") != std::wstring::npos),
+                  "W17: a tapped Default stays unnamed and nothing is marked, as before");
+
+            // --- the folder step with timers running, the stops ---
+            NewThreadRecord fr;
+            fr.listsBuilt = true;
+            fr.lists.recent = { NewThreadFolder{ L"K:\\proj", 3, 1000 } };
+            NewThreadViewContext ctx;
+            ctx.timers = t; // the model (6 h) and the window (1 h)
+            NewThreadView fv = BuildNewThreadView(fr, now, ctx);
+            CHECK((fv.html.find(L"Timed picks on") != std::wstring::npos && fv.html.find(L"MiMo Pro") != std::wstring::npos && fv.html.find(L"6h left") != std::wstring::npos &&
+                   fv.html.find(L"1h left") != std::wstring::npos),
+                  "W17: the folder step says what the running timers will pick and how long they still run");
+            CHECK((fv.rows.size() >= 2 && fv.rows[fv.rows.size() - 2].size() == 2 && ParseNewThreadCallbackData(fv.rows[fv.rows.size() - 2][0].data).kind == K::StopModelAuto &&
+                   ParseNewThreadCallbackData(fv.rows[fv.rows.size() - 2][1].data).kind == K::StopWindowAuto && ParseNewThreadCallbackData(fv.rows.back()[0].data).kind == K::Cancel),
+                  "W17: its stop row sits right above Cancel");
+            ctx.timers = t;
+            StopNewThreadWindowTimer(ctx.timers);
+            fv = BuildNewThreadView(fr, now, ctx);
+            CHECK((fv.html.find(L"Timed model") != std::wstring::npos && fv.rows[fv.rows.size() - 2].size() == 1), "W17: the model timer alone, with its one stop");
+            ctx.timers = t;
+            StopNewThreadModelTimer(ctx.timers);
+            fv = BuildNewThreadView(fr, now, ctx);
+            CHECK((fv.html.find(L"Timed window") != std::wstring::npos && ParseNewThreadCallbackData(fv.rows[fv.rows.size() - 2][0].data).kind == K::StopWindowAuto),
+                  "W17: the window timer alone, with its stop");
+            fv = BuildNewThreadView(fr, now + 7 * 3600000LL, ctx);
+            CHECK((fv.html.find(L"Timed") == std::wstring::npos && ParseNewThreadCallbackData(fv.rows.back()[0].data).kind == K::Cancel &&
+                   ParseNewThreadCallbackData(fv.rows[fv.rows.size() - 2][0].data).kind != K::StopWindowAuto),
+                  "W17: with no running timer the folder step is as before");
+            NewThreadRecord paused = fr;
+            paused.wizard.autoPicksOff = true;
+            ctx.timers = t;
+            CHECK((BuildNewThreadView(paused, now, ctx).html.find(L"paused for this thread") != std::wstring::npos), "W17: a thread whose launch did not go through says its timers are paused");
+            CHECK((ApplyNewThreadButton(fr, NewThreadAction{ K::StopModelAuto, 0 }).kind == O::StopTimer && ApplyNewThreadButton(mr, NewThreadAction{ K::StopWindowAuto, 0 }).stopWindowTimer),
+                  "W17: a stop is taken at any step");
+            CHECK((BuildNewThreadTimerStopRows(false, false).empty() && BuildNewThreadTimerStopRows(true, false)[0].size() == 1 && BuildNewThreadTimerStopRows(true, true)[0].size() == 2),
+                  "W17: the stop row has one button per running timer");
+
+            // --- AI_TITLES.md: the folder step's title line ---
+            NewThreadViewContext ai;
+            ai.aiTitles = true;
+            CHECK((BuildNewThreadView(fr, now, ai).html.find(L"named by AI from your first message") != std::wstring::npos), "W17: with AI titles an unnamed thread says so");
+            NewThreadRecord named = fr;
+            named.topicName = L"my work";
+            CHECK((BuildNewThreadView(named, now, ai).html.find(L"<b>my work</b>") != std::wstring::npos), "W17: a named thread keeps its name either way");
+            CHECK((BuildNewThreadView(fr, now).html.find(L"the folder's name") != std::wstring::npos), "W17: without AI titles the line is as before");
+
+            // --- a refusal turns the timers off for its thread; the wizard's fields round-trip ---
+            NewThreadRecord refused = modelStep();
+            ReturnNewThreadToStep(refused.wizard, NewThreadStep::Model, L"x");
+            CHECK((refused.wizard.autoPicksOff && ApplyNewThreadModelTimer(refused.wizard, run, now) == NewThreadModelTimerResult::NotActive),
+                  "W17: a launch that did not go through is never retried by a timer");
+            NewThreadWizard pw;
+            pw.modelTimer = 4;
+            pw.windowTimer = 2;
+            pw.modelTimed = true;
+            pw.windowTimed = true;
+            pw.autoPicksOff = true;
+            const NewThreadWizard pb = NewThreadWizardFromJson(NewThreadWizardToJson(pw));
+            CHECK((pb.modelTimer == 4 && pb.windowTimer == 2 && pb.modelTimed && pb.windowTimed && pb.autoPicksOff), "W17: the wizard's chips, timed marks and latch round-trip");
+            auto oldWizard = NewThreadWizardToJson(NewThreadWizard{});
+            oldWizard.Set(L"modelTimer", json::Value::MkNum(99));
+            const NewThreadWizard ob = NewThreadWizardFromJson(oldWizard);
+            CHECK((ob.modelTimer == 0 && ob.windowTimer == 0 && !ob.autoPicksOff), "W17: a chip past the row reads as Once; absent fields read as before 21.58");
+        }
     }
 }
 

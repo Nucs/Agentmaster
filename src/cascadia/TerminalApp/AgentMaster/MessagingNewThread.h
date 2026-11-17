@@ -272,6 +272,14 @@ namespace Agentmaster::Msg
             AddConfirm, // the "remember it?" confirmation's Yes: the folder is added with option 2
             AddBack, // one state back in the add flow: the folder picker to the ➕, the confirmation to the three options
             AddRemove, // value = the 0-based index of an added folder (NewThreadWizard::extraFolders) to take off the list again
+            // §21.58, the TIMED PICKS (MessagingNewThreadWizard.h, "the timed picks"): a ⏱ chip on the model and the window step
+            // chooses how long the pick the user makes NEXT is kept for every new session (the step is then skipped); a ⏹ button
+            // ends a running timer. The stops act on the bot's timers, not on one thread, so they work from any message that
+            // shows them — the folder step, or the "🚀 Opening …" line long after its wizard became a session's topic.
+            ModelTimer, // value = the model step's timer (kNewThreadTimers index; 0 = Once, this session only)
+            WindowTimer, // value = the window step's timer (kNewThreadTimers index; 0 = Once)
+            StopModelAuto, // ⏹: the model's timed pick ends now — the next wizard asks for the model again
+            StopWindowAuto, // ⏹: the window's timed pick ends now — the next wizard asks for the window again
         };
         Kind kind{ Kind::None };
         size_t value{ 0 };
@@ -280,11 +288,13 @@ namespace Agentmaster::Msg
     /// <summary>
     /// The callback data of a picker button: "nt:r:3", "nt:m:0", "nt:rp:1", "nt:mp:2", "nt:rl:1", "nt:ml:0", "nt:x"; the wizard's
     /// (§21.25) "nt:cf", "nt:bf", "nt:md", "nt:mo:4", "nt:ms", "nt:bm", "nt:w:1", "nt:wd", "nt:wr"; the ➕ message's (§21.25.9)
-    /// "nt:af", "nt:ar:3", "nt:au:0", "nt:arp:1", "nt:aup:2", "nt:arl:1", "nt:aul:0", "nt:as:2", "nt:ac", "nt:ab", "nt:ax:1".
+    /// "nt:af", "nt:ar:3", "nt:au:0", "nt:arp:1", "nt:aup:2", "nt:arl:1", "nt:aul:0", "nt:as:2", "nt:ac", "nt:ab", "nt:ax:1"; the
+    /// timed picks' (§21.58) "nt:mt:3", "nt:wt:0", "nt:xm", "nt:xw".
     /// </summary>
     /// <param name="kind">The action (None gives "").</param>
     /// <param name="value">The index, page or option (ignored by the kinds that carry none: Cancel, CreateFolder, BackToFolders,
-    /// ModelDefault, ModelSpecify, BackToModels, WindowDefault, WindowRefresh, AddFolder, AddConfirm, AddBack).</param>
+    /// ModelDefault, ModelSpecify, BackToModels, WindowDefault, WindowRefresh, AddFolder, AddConfirm, AddBack, StopModelAuto,
+    /// StopWindowAuto).</param>
     /// <returns>The data, at most 27 characters ("nt:", a tag of up to four characters, a 64-bit value's 20 digits): far under the
     /// Bot API's 64 bytes. Only a value of at most 9 digits parses back (ParseNewThreadCallbackData), which every real index, page
     /// and option is.</returns>
@@ -350,6 +360,16 @@ namespace Agentmaster::Msg
             return prefix + L"ab";
         case NewThreadAction::Kind::AddRemove:
             return prefix + L"ax:" + std::to_wstring(value);
+        // §21.58: the timed picks. "mt" / "wt" are valued (a timer's index), "xm" / "xw" bare; none equals a tag above ("mt" is not
+        // "m", "xm" is not "x": the parse compares whole tags).
+        case NewThreadAction::Kind::ModelTimer:
+            return prefix + L"mt:" + std::to_wstring(value);
+        case NewThreadAction::Kind::WindowTimer:
+            return prefix + L"wt:" + std::to_wstring(value);
+        case NewThreadAction::Kind::StopModelAuto:
+            return prefix + L"xm";
+        case NewThreadAction::Kind::StopWindowAuto:
+            return prefix + L"xw";
         case NewThreadAction::Kind::None:
         default:
             return {};
@@ -382,6 +402,8 @@ namespace Agentmaster::Msg
             { L"af", NewThreadAction::Kind::AddFolder }, // §21.25.9: the ➕ message's valueless buttons
             { L"ac", NewThreadAction::Kind::AddConfirm },
             { L"ab", NewThreadAction::Kind::AddBack },
+            { L"xm", NewThreadAction::Kind::StopModelAuto }, // §21.58: the timed picks' ⏹ buttons
+            { L"xw", NewThreadAction::Kind::StopWindowAuto },
         };
         for (const auto& [tag, kind] : kBare)
         {
@@ -476,6 +498,16 @@ namespace Agentmaster::Msg
         else if (what == L"ax")
         {
             a.kind = NewThreadAction::Kind::AddRemove;
+        }
+        // §21.58: a timer chip. Its index is NOT range-checked here (the reducer reads one past the list as a stale tap), like
+        // AddScope's option: the parse reads the data's shape only.
+        else if (what == L"mt")
+        {
+            a.kind = NewThreadAction::Kind::ModelTimer;
+        }
+        else if (what == L"wt")
+        {
+            a.kind = NewThreadAction::Kind::WindowTimer;
         }
         else
         {
@@ -643,9 +675,13 @@ namespace Agentmaster::Msg
     /// <param name="heldCount">How many of the user's messages the picker holds (0 = none yet).</param>
     /// <param name="topicName">The thread's name when the user gave it one ("" = Telegram named it, or it is not known).</param>
     /// <param name="nowMs">The clock the "ago" texts are counted against (Unix ms).</param>
+    /// <param name="aiTitle">AI_TITLES.md: a session started from the phone is named by AI at its first prompt
+    /// (AppSettings::aiTitleTelegramSessions) — an UNNAMED thread's title line then says so instead of "the folder's name". A
+    /// thread the user named keeps its name either way, and says so. False (the default) = the line as before the feature.</param>
     /// <returns>The text.</returns>
     /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
-    inline std::wstring BuildNewThreadPickerHtml(const NewThreadLists& lists, size_t recentPage, size_t usedPage, size_t heldCount, std::wstring_view topicName, int64_t nowMs)
+    inline std::wstring BuildNewThreadPickerHtml(const NewThreadLists& lists, size_t recentPage, size_t usedPage, size_t heldCount, std::wstring_view topicName, int64_t nowMs,
+                                                 bool aiTitle = false)
     {
         std::wstring html = L"\U0001F4C2 <b>New session</b> \x2014 pick the folder it works in.";
         if (heldCount == 0)
@@ -660,7 +696,11 @@ namespace Agentmaster::Msg
         {
             html += L"\n<i>Your " + std::to_wstring(heldCount) + L" messages wait here and go to the session in order.</i>";
         }
-        html += topicName.empty() ? std::wstring{ L"\n<i>Its title: the folder's name \x2014 rename this thread to change it.</i>" }
+        // AI_TITLES.md: an unnamed thread's session is named by AI from its first prompt when the Telegram switch is on — the line
+        // says what will happen, so a user who wants a name of their own knows the rename still wins.
+        const std::wstring unnamedLine = aiTitle ? std::wstring{ L"\n<i>Its title: named by AI from your first message \x2014 rename this thread to choose it yourself.</i>" }
+                                                 : std::wstring{ L"\n<i>Its title: the folder's name \x2014 rename this thread to change it.</i>" };
+        html += topicName.empty() ? unnamedLine
                                   : L"\n<i>Its title: <b>" + TgEscapeHtml(TgTitleLine(topicName, 120)) + L"</b> \x2014 rename this thread to change it.</i>"; // a title: on one line (TgTitleLine), like every title the bot prints
         html += L"\n<i>Or send a folder's full path.</i>";
         // §21.25: the folder is the wizard's FIRST step — say what follows, and that the creation's abort takes the thread with it

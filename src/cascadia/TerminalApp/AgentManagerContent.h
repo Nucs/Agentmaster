@@ -1817,6 +1817,14 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setTitleUnderscores{ nullptr }; // TABS: convert any whitespace in the derived title to '_' (AppSettings::tabTitleSpacesToUnderscores); GLOBAL
         winrt::Windows::UI::Xaml::Controls::TextBlock _titleNamingPreview{ nullptr }; // TABS: the live example preview under the naming controls — made-up paths re-derived through the REAL DeriveSessionTitle from the CURRENT (unsaved) control state on every change
         void _UpdateTitleNamingPreview(); // re-render _titleNamingPreview from the current naming controls
+        // TABS, AI_TITLES.md — AI SESSION TITLES (GLOBAL; read by each launch, so a Save applies to the very next one):
+        // a NEW session whose title was derived from its folder is named by a small model at its first real prompt.
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setAiTitleTelegram{ nullptr }; // AppSettings::aiTitleTelegramSessions — sessions the phone starts (default ON)
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setAiTitleOther{ nullptr }; // AppSettings::aiTitleOtherSessions — every other new session (default OFF)
+        // AppSettings::aiTitleModel: 0 Sonnet 5.5 (the default), 1 Haiku 5.5, and a third item for a model id a hand-edited
+        // settings.json named — kept and written back as it is, so a Save never replaces an id the user chose outside the cog.
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setAiTitleModel{ nullptr };
+        std::wstring _aiTitleModelCustom; // that model id ("" = none: the combo has its two items only)
         winrt::Windows::UI::Xaml::Controls::ComboBox _setFavoriteIcon{ nullptr }; // TABS: the FAVORITE marker glyph on a live session's tab — Crown (default) / Star (FAVORITES.md §5a); GLOBAL
         winrt::Windows::UI::Xaml::Controls::TextBox _setMaxTags{ nullptr }; // TABS: the GLOBAL cap on distinct bookmark tags (default 20, hard ceiling 40 — ClampMaxTags); GLOBAL
         winrt::Windows::UI::Xaml::Controls::Slider _setTooltipTagsOpacity{ nullptr }; // TABS: the OPACITY (10..100%) of the bookmark-tag chips in the rich tab TOOLTIP (AppSettings::tooltipTagsOpacity, default 0.9); GLOBAL. Header shows the live percent.

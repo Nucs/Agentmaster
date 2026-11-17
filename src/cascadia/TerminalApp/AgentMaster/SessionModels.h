@@ -1703,6 +1703,15 @@ namespace Agentmaster
         // the NEWEST tab working in a folder (where its default places the new tab); it falls back to the transcript's age
         // (convCreatedUnixMs) and the MOST RECENT key for a session without it. No other surface reads it yet.
         int64_t createdUnixMs{ 0 };
+        // Agentmaster (AI_TITLES.md — AI session titles): the title the launch DERIVED for this new session from its folder,
+        // kept as the MARK that the session waits for an AI title ("" = no title owed: every record from before the feature, a
+        // session someone named, a fork, a resume, a switch that was off at its launch). PERSISTED (omitted while empty), so a
+        // restart between the launch and the first prompt keeps the promise. Set once by the launch seam
+        // (TerminalPage::_LaunchClaudeSession, AiSessionTitle.h AiTitleWantedAtLaunch) and cleared by the titler
+        // (SessionTitler.cpp) in the SAME registry update that takes it — at the first real prompt, or at any prompt once the
+        // title differs from it (the user renamed the tab: the name is theirs). ⚠ Compare it with `title` before acting: a mark
+        // whose title moved on means "renamed", never "rename it now". A one-shot flag: volatile for the older-writer repair.
+        std::wstring aiTitlePendingFrom;
         // Agentmaster (⚡ server-cache hint): the last hook-time EVIDENCE OF A REAL API TURN —
         // stamped monotonically by SessionRegistry::OnHookEvent from the wire `ts`, but ONLY for
         // events that mean THIS conversation actually just made an API request (IsApiTurnEvidence,
@@ -3639,6 +3648,22 @@ namespace Agentmaster
         uint32_t voiceWorkerIdleMinutes{ 10 };
         bool voiceEchoTranscript{ true };
         std::wstring voiceCorrectionModel{ L"claude-sonnet-5-5" };
+
+        // Agentmaster (AI_TITLES.md — AI SESSION TITLES; the cog's Tabs & Overlay tab, TAB TITLES). A NEW session whose tab title
+        // was derived from its folder is renamed by a small model at its first real prompt, in the style of the titles the other
+        // tabs of that folder carry (the open ones first, topped up to ten with closed ones) — AiSessionTitle.h, SessionTitler.cpp.
+        // A title someone gave (a named Telegram thread, a rename before the first prompt, a fork's or a handover's name) is
+        // never replaced, and a rename made while the model thinks wins. GLOBAL; each launch reads the switch for its origin.
+        //  - aiTitleTelegramSessions: sessions the PHONE started (the Telegram new-thread wizard, /newsession) — default ON,
+        //    the user's "turned on by default for Telegram".
+        //  - aiTitleOtherSessions: every other new session (the launch bar, the + launcher, Open New Session Here, the Sessions
+        //    page) — default OFF: "the user has to enable it by choosing".
+        //  - aiTitleModel: the model a title is asked from ("" or "off" = the default, claude-sonnet-5-5; the switches turn the
+        //    feature off). ⚠ Each title is one hidden `claude -p` on the PC's Claude Code login (its plan or API key); the first
+        //    prompt's first 2,000 characters and the folder's titles reach Anthropic, as the prompt itself does anyway.
+        bool aiTitleTelegramSessions{ true };
+        bool aiTitleOtherSessions{ false };
+        std::wstring aiTitleModel{ L"claude-sonnet-5-5" };
     };
 
     // Agentmaster (MESSAGING.md D25): clamp the idle grace into 0..1440 minutes (a day); garbage falls back

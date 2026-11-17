@@ -735,6 +735,13 @@ namespace Agentmaster
         {
             o.Set(L"createdUnixMs", json::Value::MkNum(static_cast<double>(s.createdUnixMs)));
         }
+        // Agentmaster (AI_TITLES.md): the AI-title mark — the title the launch derived, while the session waits for its first
+        // real prompt to be named (SessionInfo::aiTitlePendingFrom). Omitted while empty: every record but a handful of brand-new
+        // sessions, so an untouched sessions.json is byte-unchanged.
+        if (!s.aiTitlePendingFrom.empty())
+        {
+            o.Set(L"aiTitlePendingFrom", json::Value::MkStr(s.aiTitlePendingFrom));
+        }
         // Agentmaster (MOST RECENT sort): the two turn-boundary stamps (SessionInfo::turnStart/EndUnixMs),
         // PERSISTED so a dormant restored session keeps its place in the order before any hook/survey
         // refreshes it. Omitted while 0 (no turn evidence — the default + every pre-feature record), so
@@ -845,6 +852,7 @@ namespace Agentmaster
         s.state = SessionStateFromString(v.StrAt(L"state", L"Idle"));
         s.lastActivityUnixMs = v.I64At(L"lastActivityUnixMs");
         s.createdUnixMs = v.I64At(L"createdUnixMs"); // PERSISTED (MESSAGING.md §21.25): absent => 0 (created before the stamp; readers fall back)
+        s.aiTitlePendingFrom = v.StrAt(L"aiTitlePendingFrom"); // PERSISTED (AI_TITLES.md): absent => "" (no AI title owed)
         s.turnStartUnixMs = v.I64At(L"turnStartUnixMs"); // PERSISTED (MOST RECENT sort): absent => 0 (no turn evidence; the sort falls back to the decay anchor)
         s.turnEndUnixMs = v.I64At(L"turnEndUnixMs"); // ditto — the assistant's last turn END
         s.external = v.BoolAt(L"external", false);
@@ -1108,6 +1116,10 @@ namespace Agentmaster
         o.Set(L"voiceWorkerIdleMinutes", json::Value::MkNum(ClampVoiceWorkerIdleMinutes(s.voiceWorkerIdleMinutes)));
         o.Set(L"voiceEchoTranscript", json::Value::MkBool(s.voiceEchoTranscript));
         o.Set(L"voiceCorrectionModel", json::Value::MkStr(s.voiceCorrectionModel));
+        // AI_TITLES.md: the AI session titles' switches (Telegram on, every other launch off by default) and model.
+        o.Set(L"aiTitleTelegramSessions", json::Value::MkBool(s.aiTitleTelegramSessions));
+        o.Set(L"aiTitleOtherSessions", json::Value::MkBool(s.aiTitleOtherSessions));
+        o.Set(L"aiTitleModel", json::Value::MkStr(s.aiTitleModel));
         return o;
     }
 
@@ -1487,6 +1499,12 @@ namespace Agentmaster
         s.voiceEchoTranscript = v.BoolAt(L"voiceEchoTranscript", true);
         // Absent => Sonnet 5.5 corrects each note; "off" is kept as written (the transcriber reads it as no correction).
         s.voiceCorrectionModel = v.StrAt(L"voiceCorrectionModel", L"claude-sonnet-5-5");
+        // AI_TITLES.md. Absent (a settings.json from before the feature) => the shipped defaults: a session the phone starts is
+        // named by the model, every other launch keeps its folder name until the user turns the second switch on. The model is
+        // kept as written ("" and "off" read as the default when a call is made: AiSessionTitle.h AiTitleModelOrDefault).
+        s.aiTitleTelegramSessions = v.BoolAt(L"aiTitleTelegramSessions", true);
+        s.aiTitleOtherSessions = v.BoolAt(L"aiTitleOtherSessions", false);
+        s.aiTitleModel = v.StrAt(L"aiTitleModel", L"claude-sonnet-5-5");
         return s;
     }
 
@@ -3555,9 +3573,12 @@ namespace Agentmaster
             // Volatile members of sessions.json (StateCompat.h RestoreKeysDroppedByOlderWriter): the unsent draft (a stale
             // one would be typed back into the box), the question guard, the "Fork interrupted" stop, the never-messaged
             // fork's source — each cleared by the app once it acted, so "absent on every record" cannot prove ignorance.
+            // AI_TITLES.md: the AI-title mark too — the titler clears it once it acted (the session named, or renamed by the user),
+            // and a mark brought back from the shadow after an older build ran could rename a tab the user has named since.
             static const std::set<std::wstring, std::less<>> kSessionsVolatile = {
                 L"sessions[].pendingInput",       L"sessions[].pendingInputUnixMs", L"sessions[].pendingPasteRefs",
                 L"sessions[].lastMessageWasQuestion", L"sessions[].stopForkedTurn", L"sessions[].forkParentId",
+                L"sessions[].aiTitlePendingFrom",
             };
             std::vector<RepairTarget> targets = {
                 { profileDir + L"\\sessions.json", L"sessions.json", &SessionsRoundTrip, true, &kSessionsVolatile },

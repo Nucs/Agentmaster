@@ -31,6 +31,7 @@
 // their "Specify..." row. A control character prefix keeps it disjoint from every real model id
 // (settings-typed ids are printable), so it can never collide with something a user configured.
 static constexpr std::wstring_view kSpecifyModelSentinel = L"" "specify-model";
+#include "AgentMaster/AiSessionTitle.h" // AI_TITLES.md — the TAB TITLES section's AI title model (its default and the "" / "off" reading)
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
 #include "AgentMaster/BundledMods.h" // BUNDLED_MODS.md — the Claude tab's MODS IN CLAUDE TABS switches and their status line
 #include "AgentMaster/LaunchPresetsOs.h" // PRESETS (HARNESSES.md): the Presets tab (config, keys, placeholders) + the successor combos' preset entries
@@ -2488,6 +2489,23 @@ namespace winrt::TerminalApp::implementation
         AgentSetTitledTip(_titleNamingPreview, L"Preview", L"What these made-up working directories would name their tabs under the settings above \x2014 re-derived through the real naming code as you change them, so what you see here is what a new session gets.");
         panel.Children().Append(_titleNamingPreview);
         _UpdateTitleNamingPreview(); // initial render (nothing selected yet -> the defaults)
+        // AI_TITLES.md — AI SESSION TITLES: the folder-derived name above is what a new tab opens with; with a switch on, a small
+        // model renames it at the session's first real prompt, in the style of the titles the folder's other tabs carry. Two
+        // switches by ORIGIN (the user's rule: on by default for Telegram, off by default for everything else) and the model.
+        _setAiTitleTelegram = ToggleSwitch{};
+        _setAiTitleTelegram.Header(winrt::box_value(L"AI titles for sessions started from Telegram"));
+        AgentSetTip(_setAiTitleTelegram, L"A new session started from the phone (the Telegram new-thread wizard, /newsession) is named by a small model at its first real prompt: it reads that prompt and the titles of the other tabs in the same folder (the open ones first, topped up to ten with closed sessions), and names the tab in your style. A thread you named keeps your name, and a rename made before the model answers always wins. Default on.");
+        panel.Children().Append(_setAiTitleTelegram);
+        _setAiTitleOther = ToggleSwitch{};
+        _setAiTitleOther.Header(winrt::box_value(L"AI titles for every other new session"));
+        AgentSetTip(_setAiTitleOther, L"The same AI naming for sessions started at the PC (the launch bar, the + launcher, Open New Session Here, the Sessions page). Forks, resumes, handovers and any session you named are never renamed. Default off.");
+        panel.Children().Append(_setAiTitleOther);
+        _setAiTitleModel = ComboBox{};
+        _setAiTitleModel.Header(winrt::box_value(L"AI title model"));
+        _setAiTitleModel.Items().Append(winrt::box_value(L"Sonnet 5.5 (default)")); // index 0 == claude-sonnet-5-5
+        _setAiTitleModel.Items().Append(winrt::box_value(L"Haiku 5.5 (faster)")); // index 1 == claude-haiku-5-5
+        AgentSetTip(_setAiTitleModel, L"The model that names a new session. Each title is one hidden Claude Code call on this PC's login (a few seconds, a few hundred tokens); the session's first prompt (its first 2,000 characters) and the folder's tab titles are sent, as the prompt itself is anyway.");
+        panel.Children().Append(_setAiTitleModel);
         // FAVORITES.md §5a: which glyph marks a FAVORITE (starred) session on its live tab — Crown
         // (default, a gold crown at the status dot's NW) or Star (the status dot foregrounded on a white,
         // golden-tipped star). GLOBAL across windows; applied live on Save + cross-window broadcast.
@@ -3881,6 +3899,41 @@ namespace winrt::TerminalApp::implementation
         // The seeded values above re-fire the controls' change handlers, but be explicit so the
         // preview never depends on a programmatic set actually raising them.
         _UpdateTitleNamingPreview();
+        // AI_TITLES.md: the AI titles' two switches and their model.
+        if (_setAiTitleTelegram)
+        {
+            _setAiTitleTelegram.IsOn(_appSettings.aiTitleTelegramSessions);
+        }
+        if (_setAiTitleOther)
+        {
+            _setAiTitleOther.IsOn(_appSettings.aiTitleOtherSessions);
+        }
+        if (_setAiTitleModel)
+        {
+            // Items: 0 Sonnet 5.5 (the default, also for "" and "off"), 1 Haiku 5.5, and a third one for any other id the file
+            // names — shown as it is and written back by the Save, so a hand-chosen model survives the cog. A third item an
+            // earlier open added goes first: the cog seeds again on every open.
+            while (_setAiTitleModel.Items().Size() > 2)
+            {
+                _setAiTitleModel.Items().RemoveAtEnd();
+            }
+            _aiTitleModelCustom.clear();
+            const std::wstring model = ::Agentmaster::AiTitle::AiTitleModelOrDefault(_appSettings.aiTitleModel);
+            if (model == ::Agentmaster::AiTitle::kAiTitleDefaultModel)
+            {
+                _setAiTitleModel.SelectedIndex(0);
+            }
+            else if (model == L"claude-haiku-5-5")
+            {
+                _setAiTitleModel.SelectedIndex(1);
+            }
+            else
+            {
+                _aiTitleModelCustom = model;
+                _setAiTitleModel.Items().Append(winrt::box_value(winrt::hstring{ model + L" (from settings.json)" }));
+                _setAiTitleModel.SelectedIndex(2);
+            }
+        }
         if (_setFavoriteIcon)
         {
             // Items: 0 == Crown (default), 1 == Star.
@@ -4813,6 +4866,23 @@ namespace winrt::TerminalApp::implementation
         if (_setTitleUnderscores)
         {
             _appSettings.tabTitleSpacesToUnderscores = _setTitleUnderscores.IsOn();
+        }
+        // AI_TITLES.md: the AI titles' switches and model (read by each launch and each naming call — no live re-apply needed).
+        if (_setAiTitleTelegram)
+        {
+            _appSettings.aiTitleTelegramSessions = _setAiTitleTelegram.IsOn();
+        }
+        if (_setAiTitleOther)
+        {
+            _appSettings.aiTitleOtherSessions = _setAiTitleOther.IsOn();
+        }
+        if (_setAiTitleModel)
+        {
+            // No selection (-1) reads as the default, like a missing field; the third item writes back the id it shows.
+            const int32_t pick = _setAiTitleModel.SelectedIndex();
+            _appSettings.aiTitleModel = pick == 1                                   ? std::wstring{ L"claude-haiku-5-5" } :
+                                        (pick == 2 && !_aiTitleModelCustom.empty()) ? _aiTitleModelCustom :
+                                                                                      std::wstring{ ::Agentmaster::AiTitle::kAiTitleDefaultModel };
         }
         if (_setFavoriteIcon)
         {

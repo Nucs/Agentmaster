@@ -20,6 +20,7 @@
 #include "SessionDbRefresher.h" // SESSIONS_DB.md §7.6 — the session database refresh tick
 #include "Messaging.h" // MESSAGING.md — the Telegram bot inside this process (D1)
 #include "SessionStore.h"
+#include "SessionTitler.h" // AI_TITLES.md — a new session's AI title at its first real prompt (the bridge sink's tap)
 #include "StartupTiming.h" // [startup] phase timing — find where launch spends its time
 
 #include <windows.h>
@@ -622,9 +623,16 @@ namespace Agentmaster
             const auto pipeName = HookPipeName(::GetCurrentProcessId());
             {
                 auto reg = e->registry; // shared, captured by the sink
+                // AI_TITLES.md: the AI session titles read this registry (weakly) and see every hook AFTER the registry applied
+                // it, so a marked session's first real prompt is judged on the record as that very hook left it. The titler only
+                // decides on the pipe thread; its model call runs on a worker of its own, never holding up the next hook.
+                StartAiSessionTitles(reg);
                 e->bridge = std::make_shared<HooksBridge>(
                     pipeName,
-                    [reg](const HookMessage& m) { reg->OnHookEvent(m); },
+                    [reg](const HookMessage& m) {
+                        reg->OnHookEvent(m);
+                        NoteHookForAiSessionTitle(m); // noexcept: a failure there never costs the hook its registry update
+                    },
                     4);
             }
             e->bridge->Start();

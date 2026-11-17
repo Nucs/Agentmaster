@@ -36,6 +36,12 @@
 // BuildNewThreadAddView). The folders ride the launch to the bind, which sends Claude Code "/add-dir <path>" for each before the
 // first prompt, the dialog answered with the option chosen here (NewThreadWizard::extraFolders, NewThreadAddDirCommand).
 //
+// THE TIMED PICKS (§21.58, "the timed picks" below): a ⏱ row on the model and the window step keeps the pick the user makes NEXT
+// for every new session for a while (1 h … 3 days) — the user's "allow flowing creation". While the bot's timer runs, the step is
+// skipped: the model step takes the kept model (ApplyNewThreadModelTimer), the window step its ⭐ Default, the window of the
+// folder's newest tab (ApplyNewThreadWindowsTimed). The folder step shows what runs, with ⏹ (BuildNewThreadTimerStopRows); a launch
+// that did not go through turns the timers off for its thread (NewThreadWizard::autoPicksOff).
+//
 // This header is the PURE half: the records (persisted in state.json, so a restart resumes a wizard where it stood), the
 // decisions (which button a step takes, what a typed message means, where a refusal goes back to), the folder resolution over
 // an INJECTED file system, the model-id check, the window choices and their default, and every message and keyboard. No I/O,
@@ -1067,6 +1073,246 @@ namespace Agentmaster::Msg
         return found;
     }
 
+    // ===== the timed picks (§21.58): the data ==========================================================================
+    //
+    // The user's request (2026-11-17): "the dialogue in which you create, has the model picking and has the window picking. I want
+    // these two to be somehow allowed to be set to default value for a certain amount of time. So let's say I want always for the
+    // next 24 hours or the 6 hours or the 16 hours and so on … I want to set all the picks for new sessions to be Opus 5.5 … but I
+    // can also pick obviously any other model for the next period of time. The point of this feature is not to permanently disable
+    // or auto pick a certain answer but to actually, for a certain amount of time, allow flowing creation. … the window picking. I
+    // think that one should be automatically picking the last location a session has been created in that working directory".
+    //
+    // A ⏱ row on the model step and on the window step: a timer chosen there (Once, 1 h, 3 h, 6 h, 16 h, 24 h, 3 days) keeps the
+    // pick the user makes NEXT on that step for every new session, until it runs out. While it runs, the step is skipped — the
+    // model step takes the kept model; the window step takes its ⭐ Default, the window of the folder's newest open tab, right after
+    // that tab (BuildNewThreadWindowPlan, the user's choice of 2026-11-17: "the folder's newest tab"). The two timers are separate.
+    // The folder step, still asked every time, says what is running and offers ⏹ to stop it; the "🚀 Opening …" line marks what a
+    // timer picked (⏱) and carries the same ⏹. A launch that did not go through turns the timers off for ITS thread
+    // (NewThreadWizard::autoPicksOff), so a refusal is never retried by a timer. The timers are the bot's, persisted in state.json
+    // (MessagingState::newThreadAutoPicks, NewThreadAutoPicksToJson).
+
+    /// <summary>One choice of the ⏱ row: its label and how long it keeps the pick (0 = Once: this session only, no timer).</summary>
+    struct NewThreadTimerChoice
+    {
+        std::wstring_view label; // the chip's text ("6 h"); the step's line names the same words
+        int64_t ms{ 0 }; // the timer's length; 0 = Once
+    };
+
+    /// <summary>
+    /// The ⏱ row's choices, in the row's order — the user's 6 h, 16 h and 24 h with "a couple of other layers" (1 h, 3 h and 3
+    /// days, the user's picks of 2026-11-17). The INDEX is what a chip's button carries (NewThreadAction::ModelTimer /
+    /// WindowTimer) and what a wizard persists (NewThreadWizard::modelTimer): a new choice goes at the END, so a button or a file
+    /// of an older build still names the same length.
+    /// </summary>
+    inline constexpr NewThreadTimerChoice kNewThreadTimers[] = {
+        { L"Once", 0 },
+        { L"1 h", int64_t{ 1 } * 60 * 60 * 1000 },
+        { L"3 h", int64_t{ 3 } * 60 * 60 * 1000 },
+        { L"6 h", int64_t{ 6 } * 60 * 60 * 1000 },
+        { L"16 h", int64_t{ 16 } * 60 * 60 * 1000 },
+        { L"24 h", int64_t{ 24 } * 60 * 60 * 1000 },
+        { L"3 days", int64_t{ 3 } * 24 * 60 * 60 * 1000 },
+    };
+    // How many chips the ⏱ row offers (the table's size).
+    inline constexpr size_t kNewThreadTimerCount = sizeof(kNewThreadTimers) / sizeof(kNewThreadTimers[0]);
+    // The longest timer any file may hold: the longest chip. A state file naming a later end (a garbled stamp, a clock that was
+    // wrong when it was set) is cut to this from its setting, so a timer can never outlive the longest one the user could choose.
+    inline constexpr int64_t kNewThreadTimerMaxMs = int64_t{ 3 } * 24 * 60 * 60 * 1000;
+
+    /// <summary>A ⏱ chip's length (kNewThreadTimers): 0 for Once and for an index past the row (a stale or forged button).</summary>
+    /// <param name="index">The chip's index.</param>
+    /// <returns>The length in ms.</returns>
+    inline int64_t NewThreadTimerMs(size_t index) noexcept
+    {
+        return index < kNewThreadTimerCount ? kNewThreadTimers[index].ms : 0;
+    }
+
+    /// <summary>A ⏱ chip's label ("6 h"); "Once" for an index past the row.</summary>
+    /// <param name="index">The chip's index.</param>
+    /// <returns>The label.</returns>
+    /// <exception cref="std::bad_alloc">If the label cannot be allocated.</exception>
+    inline std::wstring NewThreadTimerLabel(size_t index)
+    {
+        return std::wstring{ index < kNewThreadTimerCount ? kNewThreadTimers[index].label : kNewThreadTimers[0].label };
+    }
+
+    /// <summary>
+    /// The bot's RUNNING timers (§21.58): the model kept for every new session until `modelUntilMs`, and the window step skipped
+    /// until `windowUntilMs`. One per bot (not per thread): a timer set in one thread drives every thread opened after it. A field
+    /// whose end has passed is a timer that ran out — the same as none (NewThreadModelTimerActive); the service drops it at its
+    /// next save.
+    /// </summary>
+    struct NewThreadAutoPicks
+    {
+        int64_t modelSetMs{ 0 }; // when the model's timer was set (Unix ms; 0 = none)
+        int64_t modelUntilMs{ 0 }; // when it runs out (0 = no timer)
+        std::wstring modelTarget; // the kept model's launch target: "" = Default, a model id, or "@<presetId>"
+        std::wstring modelLabel; // what the steps and the launch line call it ("Default", "Opus 5.5", the preset's name)
+        int64_t windowSetMs{ 0 }; // when the window's timer was set (0 = none)
+        int64_t windowUntilMs{ 0 }; // when it runs out (0 = no timer): until then the window step takes its ⭐ Default by itself
+    };
+
+    /// <summary>Whether the model's timer is running at `nowMs` (set, and not run out).</summary>
+    /// <param name="a">The timers.</param>
+    /// <param name="nowMs">The clock (Unix ms).</param>
+    /// <returns>True while it runs.</returns>
+    inline bool NewThreadModelTimerActive(const NewThreadAutoPicks& a, int64_t nowMs) noexcept
+    {
+        return a.modelUntilMs > nowMs;
+    }
+
+    /// <summary>Whether the window's timer is running at `nowMs` (set, and not run out).</summary>
+    /// <param name="a">The timers.</param>
+    /// <param name="nowMs">The clock (Unix ms).</param>
+    /// <returns>True while it runs.</returns>
+    inline bool NewThreadWindowTimerActive(const NewThreadAutoPicks& a, int64_t nowMs) noexcept
+    {
+        return a.windowUntilMs > nowMs;
+    }
+
+    /// <summary>
+    /// Starts (or restarts) the model's timer: `target` / `label` are kept for every new session for `durationMs` from `nowMs`.
+    /// A length of 0 or less sets nothing (Once).
+    /// </summary>
+    /// <param name="a">The timers (changed in place).</param>
+    /// <param name="target">The model's launch target ("" = Default).</param>
+    /// <param name="label">Its label.</param>
+    /// <param name="nowMs">The clock (Unix ms).</param>
+    /// <param name="durationMs">The timer's length (a chip's, NewThreadTimerMs).</param>
+    /// <exception cref="std::bad_alloc">If the strings cannot be copied.</exception>
+    inline void SetNewThreadModelTimer(NewThreadAutoPicks& a, std::wstring target, std::wstring label, int64_t nowMs, int64_t durationMs)
+    {
+        if (durationMs <= 0)
+        {
+            return;
+        }
+        a.modelSetMs = nowMs;
+        a.modelUntilMs = nowMs + (std::min)(durationMs, kNewThreadTimerMaxMs); // (std::min): the <windows.h> macro
+        a.modelTarget = std::move(target);
+        a.modelLabel = std::move(label);
+    }
+
+    /// <summary>Starts (or restarts) the window's timer for `durationMs` from `nowMs`; a length of 0 or less sets nothing.</summary>
+    /// <param name="a">The timers (changed in place).</param>
+    /// <param name="nowMs">The clock (Unix ms).</param>
+    /// <param name="durationMs">The timer's length.</param>
+    inline void SetNewThreadWindowTimer(NewThreadAutoPicks& a, int64_t nowMs, int64_t durationMs) noexcept
+    {
+        if (durationMs <= 0)
+        {
+            return;
+        }
+        a.windowSetMs = nowMs;
+        a.windowUntilMs = nowMs + (std::min)(durationMs, kNewThreadTimerMaxMs);
+    }
+
+    /// <summary>Ends the model's timer (⏹, or a kept preset that no longer exists): the next wizard asks for the model again.</summary>
+    /// <param name="a">The timers (changed in place).</param>
+    inline void StopNewThreadModelTimer(NewThreadAutoPicks& a) noexcept
+    {
+        a.modelSetMs = 0;
+        a.modelUntilMs = 0;
+        a.modelTarget.clear();
+        a.modelLabel.clear();
+    }
+
+    /// <summary>Ends the window's timer (⏹): the next wizard shows the window step again.</summary>
+    /// <param name="a">The timers (changed in place).</param>
+    inline void StopNewThreadWindowTimer(NewThreadAutoPicks& a) noexcept
+    {
+        a.windowSetMs = 0;
+        a.windowUntilMs = 0;
+    }
+
+    /// <summary>Drops the timers that ran out by `nowMs` (the service's save writes only running ones).</summary>
+    /// <param name="a">The timers (changed in place).</param>
+    /// <param name="nowMs">The clock (Unix ms).</param>
+    /// <returns>True when a timer was dropped.</returns>
+    inline bool PruneNewThreadTimers(NewThreadAutoPicks& a, int64_t nowMs) noexcept
+    {
+        bool dropped = false;
+        if (a.modelUntilMs != 0 && !NewThreadModelTimerActive(a, nowMs))
+        {
+            StopNewThreadModelTimer(a);
+            dropped = true;
+        }
+        if (a.windowUntilMs != 0 && !NewThreadWindowTimerActive(a, nowMs))
+        {
+            StopNewThreadWindowTimer(a);
+            dropped = true;
+        }
+        return dropped;
+    }
+
+    /// <summary>
+    /// The timers as JSON for MessagingState::newThreadAutoPicks: an object with the running timers' fields, or a Null value when
+    /// no timer runs at `nowMs` — so a state file with no timer writes no key (a file as before §21.58).
+    /// </summary>
+    /// <param name="a">The timers.</param>
+    /// <param name="nowMs">The clock (Unix ms): a timer that ran out is not written.</param>
+    /// <returns>The JSON object, or Null.</returns>
+    /// <exception cref="std::bad_alloc">If the document cannot be allocated.</exception>
+    inline json::Value NewThreadAutoPicksToJson(const NewThreadAutoPicks& a, int64_t nowMs)
+    {
+        const bool model = NewThreadModelTimerActive(a, nowMs);
+        const bool window = NewThreadWindowTimerActive(a, nowMs);
+        if (!model && !window)
+        {
+            return json::Value{};
+        }
+        auto o = json::Value::MkObj();
+        if (model)
+        {
+            o.Set(L"modelSetMs", json::Value::MkNum(static_cast<double>(a.modelSetMs)));
+            o.Set(L"modelUntilMs", json::Value::MkNum(static_cast<double>(a.modelUntilMs)));
+            o.Set(L"modelTarget", json::Value::MkStr(a.modelTarget));
+            o.Set(L"modelLabel", json::Value::MkStr(a.modelLabel));
+        }
+        if (window)
+        {
+            o.Set(L"windowSetMs", json::Value::MkNum(static_cast<double>(a.windowSetMs)));
+            o.Set(L"windowUntilMs", json::Value::MkNum(static_cast<double>(a.windowUntilMs)));
+        }
+        return o;
+    }
+
+    /// <summary>
+    /// The timers back from MessagingState::newThreadAutoPicks. Anything but an object reads as no timer. A timer whose end lies
+    /// more than kNewThreadTimerMaxMs after its setting (a garbled file) is cut to that, and one with no setting stamp is cut to
+    /// kNewThreadTimerMaxMs from `nowMs`: a file can shorten a timer, never make it run longer than the longest chip.
+    /// </summary>
+    /// <param name="v">The JSON value.</param>
+    /// <param name="nowMs">The clock (Unix ms) a timer without its setting stamp is bounded from.</param>
+    /// <returns>The timers (possibly none, or ones that already ran out — NewThreadModelTimerActive decides).</returns>
+    /// <exception cref="std::bad_alloc">If the strings cannot be allocated.</exception>
+    inline NewThreadAutoPicks NewThreadAutoPicksFromJson(const json::Value& v, int64_t nowMs)
+    {
+        NewThreadAutoPicks a;
+        if (v.type != json::Value::Type::Obj)
+        {
+            return a;
+        }
+        const auto bounded = [nowMs](int64_t setMs, int64_t untilMs) -> int64_t {
+            if (untilMs <= 0)
+            {
+                return 0;
+            }
+            const int64_t from = setMs > 0 ? setMs : nowMs;
+            return (std::min)(untilMs, from + kNewThreadTimerMaxMs); // (std::min): the <windows.h> macro
+        };
+        a.modelSetMs = (std::max)(int64_t{ 0 }, v.I64At(L"modelSetMs", 0)); // (std::max): the <windows.h> macro
+        a.modelUntilMs = bounded(a.modelSetMs, v.I64At(L"modelUntilMs", 0));
+        a.modelTarget = v.StrAt(L"modelTarget");
+        a.modelLabel = v.StrAt(L"modelLabel");
+        a.windowSetMs = (std::max)(int64_t{ 0 }, v.I64At(L"windowSetMs", 0));
+        a.windowUntilMs = bounded(a.windowSetMs, v.I64At(L"windowUntilMs", 0));
+        if (a.modelUntilMs == 0)
+        {
+            StopNewThreadModelTimer(a); // no end: no timer (and no stray target that a later read could mistake for one)
+        }
+        return a;
+    }
+
     // ===== the records ================================================================================================
 
     /// <summary>
@@ -1135,6 +1381,21 @@ namespace Agentmaster::Msg
         // scope that records the topic, exactly once — and comes back with a refused launch. A new session folder drops the ones it
         // equals or holds (PruneNewThreadExtraFolders); nothing else changes the list but the user's ➕ and ✖.
         std::vector<NewThreadExtraFolder> extraFolders;
+        // §21.58, the TIMED PICKS: the ⏱ chip chosen on the model step (a kNewThreadTimers index; 0 = Once). The model tapped or
+        // typed NEXT is kept for that long (NewThreadOutcome::modelTimerMs, which the service turns into the bot's timer), and the
+        // chip goes back to Once once it was used — a later tap on the same step is for this session only unless chosen again.
+        size_t modelTimer{ 0 };
+        // The window step's ⏱ chip, likewise (NewThreadOutcome::windowTimerMs): its timer skips the window step for the next
+        // sessions, each opening next to its folder's newest tab (the step's ⭐ Default).
+        size_t windowTimer{ 0 };
+        // The model was taken by a RUNNING timer, not by the user (ApplyNewThreadModelTimer): the launch line marks it ⏱ and offers
+        // ⏹. A choice the user makes clears it (ChooseNewThreadModel).
+        bool modelTimed{ false };
+        // The window was taken by a running timer (ApplyNewThreadWindowsTimed), likewise; cleared by ChooseNewThreadWindow.
+        bool windowTimed{ false };
+        // A launch of this thread did not go through (ReturnNewThreadToStep sets it): the timers never act for this wizard again,
+        // so a refusal is never retried by a timer — every step asks, as the rest of the wizard's refusal rules want (askWindow).
+        bool autoPicksOff{ false };
     };
 
     /// <summary>
@@ -1211,12 +1472,25 @@ namespace Agentmaster::Msg
             // §21.25.9, the ➕ message (its own message: a Render would edit the PICKER, which did not change):
             RenderAdd, // the ➕ message changed: render it (edit it in place; a TYPED choice reposts it and the picker below the user's message); `text` is the toast ("" = none)
             CheckAddFolder, // check `path` as an EXTRA folder (a list pick must exist; a typed one is resolved case-insensitively), then ApplyNewThreadAddFolderResolved
+            // §21.58: a ⏹ button — end the bot's timer(s) named by stopModelTimer / stopWindowTimer, then render the picker (when the
+            // thread still has one); `text` is the toast. Taken from any message that shows the button (the service routes it
+            // before it looks for the thread's wizard: the "🚀 Opening …" line's ⏹ outlives its wizard).
+            StopTimer,
         };
         Kind kind{ Kind::Stale };
         std::wstring path; // CheckFolder / CreateFolder / CheckAddFolder: the folder
         bool typed{ false }; // CheckFolder / CheckAddFolder: the folder was TYPED (a missing one may be created — for the session's folder only)
-        std::wstring text; // Stale / Toast / Reply / RenderAdd: what the user is told
+        std::wstring text; // Stale / Toast / Reply / RenderAdd / StopTimer: what the user is told
         std::wstring rememberModel; // CollectWindows: a TYPED model id the service remembers (model-list.json), "" = none
+        // §21.58, CollectWindows: the model just chosen is KEPT for every new session for this long (the step's ⏱ chip; 0 = this
+        // session only). The service starts the bot's model timer with the two strings below (SetNewThreadModelTimer).
+        int64_t modelTimerMs{ 0 };
+        std::wstring timedModelTarget; // the kept model's target ("" = Default) — set with modelTimerMs
+        std::wstring timedModelLabel; // its label — set with modelTimerMs
+        // §21.58, Launch: the window step is skipped for this long from the next session on (its ⏱ chip; 0 = this session only).
+        int64_t windowTimerMs{ 0 };
+        bool stopModelTimer{ false }; // StopTimer: the model's timer ends
+        bool stopWindowTimer{ false }; // StopTimer: the window's timer ends
     };
 
     /// <summary>Whether a button of this kind belongs to the step (a mismatch is a stale tap on an older keyboard).</summary>
@@ -1266,6 +1540,15 @@ namespace Agentmaster::Msg
         case K::AddBack:
         case K::AddRemove:
             return NewThreadAddActive(step);
+        // §21.58: a ⏱ chip belongs to the step that shows it; a ⏹ acts on the bot's timers, so every step takes it (the folder step
+        // shows it, and a tap on an older keyboard still means "stop it").
+        case K::ModelTimer:
+            return step == NewThreadStep::Model;
+        case K::WindowTimer:
+            return step == NewThreadStep::Window;
+        case K::StopModelAuto:
+        case K::StopWindowAuto:
+            return true;
         case K::None:
         default:
             return false;
@@ -1742,11 +2025,16 @@ namespace Agentmaster::Msg
         w.windowName.clear();
         w.anchorSessionId.clear();
         w.anchorTitle.clear();
+        // §21.58: what a timer took goes with the choices (the next folder's pass may be timed again, or asked).
+        w.modelTimed = false;
+        w.windowTimed = false;
     }
 
     /// <summary>
     /// Records a model choice and moves to the window step (whose list the service collects next). A new model choice is a fresh
     /// pass through the window step: it may be skipped again (one window), so `askWindow` is cleared, and so is the notice.
+    /// §21.58: the choice is the USER's (ApplyNewThreadModelTimer marks a timer's own afterwards), and the window pass it starts
+    /// has not been taken by a timer yet.
     /// </summary>
     /// <param name="w">The wizard.</param>
     /// <param name="target">The launch target ("" = Default).</param>
@@ -1762,12 +2050,15 @@ namespace Agentmaster::Msg
         w.windowAuto = false;
         w.askWindow = false;
         w.notice.clear();
+        w.modelTimed = false; // §21.58: the user's choice (a timer's pick marks itself after this call)
+        w.windowTimed = false; // §21.58: the fresh window pass has not been taken by a timer yet
     }
 
     /// <summary>
     /// Records a window choice (an index of the step's list): its id, its number, its name (§21.25.8: the launch line names the
     /// window by it), and the tab to open right after. The choice ends the step's "must ask" (askWindow) and clears the notice:
-    /// the launch that follows is the user's own.
+    /// the launch that follows is the user's own. §21.58: the choice is the USER's — ApplyNewThreadWindowsTimed marks a timer's
+    /// own pick after calling this.
     /// </summary>
     /// <param name="w">The wizard.</param>
     /// <param name="index">The window's index in w.windows (must be in range; the callers check it).</param>
@@ -1782,6 +2073,42 @@ namespace Agentmaster::Msg
         w.anchorTitle = c.anchorTitle;
         w.askWindow = false;
         w.notice.clear();
+        w.windowTimed = false;
+    }
+
+    /// <summary>
+    /// §21.58: the model step's ⏱ chip, USED by the model choice just made — the outcome asks the service to keep that model for
+    /// every new session for the chip's length (modelTimerMs and the model's target and label), and the chip goes back to Once (a
+    /// later choice on the step is for this session only unless a chip is chosen again). Once (0) asks for nothing.
+    /// </summary>
+    /// <param name="w">The wizard, its model just chosen (ChooseNewThreadModel).</param>
+    /// <param name="out">The choice's outcome (CollectWindows), filled in place.</param>
+    /// <exception cref="std::bad_alloc">If the strings cannot be copied.</exception>
+    inline void TakeNewThreadModelTimer(NewThreadWizard& w, NewThreadOutcome& out)
+    {
+        const int64_t ms = NewThreadTimerMs(w.modelTimer);
+        w.modelTimer = 0;
+        if (ms <= 0)
+        {
+            return;
+        }
+        out.modelTimerMs = ms;
+        out.timedModelTarget = w.modelTarget;
+        out.timedModelLabel = !w.modelLabel.empty() ? w.modelLabel : (w.modelTarget.empty() ? std::wstring{ L"Default" } : w.modelTarget);
+    }
+
+    /// <summary>
+    /// §21.58: the window step's ⏱ chip, USED by the window choice just made — the outcome asks the service to skip the window
+    /// step for the chip's length from the next session on (windowTimerMs: each then opens next to its folder's newest tab), and
+    /// the chip goes back to Once. The window chosen now is this session's either way.
+    /// </summary>
+    /// <param name="w">The wizard, its window just chosen (ChooseNewThreadWindow).</param>
+    /// <param name="out">The choice's outcome (Launch), filled in place.</param>
+    inline void TakeNewThreadWindowTimer(NewThreadWizard& w, NewThreadOutcome& out) noexcept
+    {
+        const int64_t ms = NewThreadTimerMs(w.windowTimer);
+        w.windowTimer = 0;
+        out.windowTimerMs = ms > 0 ? ms : 0;
     }
 
     /// <summary>
@@ -1812,7 +2139,10 @@ namespace Agentmaster::Msg
         }
         // Every accepted button is the user's next choice, so the line of the step before goes — but a page label (a toast that
         // changes nothing) and Cancel (the whole record goes) leave it. A choice below that fails sets its own line again.
-        if (a.kind != K::Cancel && a.kind != K::PageLabelRecent && a.kind != K::PageLabelUsed)
+        // §21.58: so do a ⏱ chip (it only arms the next choice) and a ⏹ (the bot's timers, not this step's choice): a refused
+        // launch's reason stays readable while the user sets a timer.
+        if (a.kind != K::Cancel && a.kind != K::PageLabelRecent && a.kind != K::PageLabelUsed && a.kind != K::ModelTimer && a.kind != K::WindowTimer &&
+            a.kind != K::StopModelAuto && a.kind != K::StopWindowAuto)
         {
             w.notice.clear();
         }
@@ -1820,6 +2150,34 @@ namespace Agentmaster::Msg
         {
         case K::Cancel:
             out.kind = NewThreadOutcome::Kind::Abort;
+            return out;
+        case K::ModelTimer:
+        case K::WindowTimer:
+        {
+            // §21.58: a ⏱ chip arms the step's NEXT choice; the step renders with the chip ticked and its line saying what it does.
+            if (a.value >= kNewThreadTimerCount)
+            {
+                out.kind = NewThreadOutcome::Kind::Stale; // a chip past the row: an older build's, or a garbled button
+                out.text = kNewThreadStaleTap;
+                return out;
+            }
+            const bool model = a.kind == K::ModelTimer;
+            (model ? w.modelTimer : w.windowTimer) = a.value;
+            out.kind = NewThreadOutcome::Kind::Render;
+            out.text = a.value == 0 ? std::wstring{ L"\x23F1 Once: the pick is for this session only." } :
+                       model        ? L"\x23F1 " + NewThreadTimerLabel(a.value) + L": the model you pick next is kept for every new session." :
+                                      L"\x23F1 " + NewThreadTimerLabel(a.value) + L": after this pick, new sessions skip this step.";
+            return out;
+        }
+        case K::StopModelAuto:
+            out.kind = NewThreadOutcome::Kind::StopTimer;
+            out.stopModelTimer = true;
+            out.text = L"\x23F9 Timed model stopped: the next session asks for its model again.";
+            return out;
+        case K::StopWindowAuto:
+            out.kind = NewThreadOutcome::Kind::StopTimer;
+            out.stopWindowTimer = true;
+            out.text = L"\x23F9 Timed window stopped: the next session asks for its window again.";
             return out;
         case K::PageLabelRecent:
         case K::PageLabelUsed:
@@ -1870,6 +2228,7 @@ namespace Agentmaster::Msg
         case K::ModelDefault:
             ChooseNewThreadModel(w, L"", L"Default");
             out.kind = NewThreadOutcome::Kind::CollectWindows;
+            TakeNewThreadModelTimer(w, out); // §21.58: a ⏱ chip chosen before keeps Default for the next sessions too
             return out;
         case K::ModelPick:
             if (a.value >= w.modelChoices.size())
@@ -1880,6 +2239,7 @@ namespace Agentmaster::Msg
             }
             ChooseNewThreadModel(w, w.modelChoices[a.value].target, w.modelChoices[a.value].label);
             out.kind = NewThreadOutcome::Kind::CollectWindows;
+            TakeNewThreadModelTimer(w, out); // §21.58
             return out;
         case K::ModelSpecify:
             w.step = NewThreadStep::ModelSpecify;
@@ -1901,6 +2261,7 @@ namespace Agentmaster::Msg
             }
             ChooseNewThreadWindow(w, static_cast<size_t>(w.defaultWindow));
             out.kind = NewThreadOutcome::Kind::Launch;
+            TakeNewThreadWindowTimer(w, out); // §21.58: a ⏱ chip chosen before skips this step for the next sessions
             return out;
         case K::WindowPick:
             if (!w.windowsCollected || a.value >= w.windows.size())
@@ -1911,6 +2272,7 @@ namespace Agentmaster::Msg
             }
             ChooseNewThreadWindow(w, a.value);
             out.kind = NewThreadOutcome::Kind::Launch;
+            TakeNewThreadWindowTimer(w, out); // §21.58: this window now; the folder's newest tab for the next sessions
             return out;
         case K::WindowRefresh:
             w.windowsCollected = false;
@@ -1978,6 +2340,7 @@ namespace Agentmaster::Msg
                     {
                         ChooseNewThreadModel(w, c.target, c.label);
                         o.kind = NewThreadOutcome::Kind::CollectWindows;
+                        TakeNewThreadModelTimer(w, o); // §21.58: a typed choice uses the step's ⏱ chip like a tap
                         return o;
                     }
                 }
@@ -2001,6 +2364,7 @@ namespace Agentmaster::Msg
                 ChooseNewThreadModel(w, *id, std::move(label));
                 o.kind = NewThreadOutcome::Kind::CollectWindows;
                 o.rememberModel = *id;
+                TakeNewThreadModelTimer(w, o); // §21.58: a typed id kept by the step's ⏱ chip, like a tapped model
                 return o;
             }
             o.kind = NewThreadOutcome::Kind::Reply;
@@ -2046,6 +2410,7 @@ namespace Agentmaster::Msg
                 {
                     ChooseNewThreadWindow(w, *index);
                     out.kind = NewThreadOutcome::Kind::Launch;
+                    TakeNewThreadWindowTimer(w, out); // §21.58: a typed window uses the step's ⏱ chip like a tap
                     return out;
                 }
                 // §21.25.8: a window's NAME typed (after the number, so a window named "2" never hides window 2). A name two
@@ -2055,6 +2420,7 @@ namespace Agentmaster::Msg
                 {
                     ChooseNewThreadWindow(w, *index);
                     out.kind = NewThreadOutcome::Kind::Launch;
+                    TakeNewThreadWindowTimer(w, out); // §21.58
                     return out;
                 }
                 if (ambiguous)
@@ -2221,6 +2587,106 @@ namespace Agentmaster::Msg
         return out;
     }
 
+    // ===== the timed picks (§21.58): the reducers =======================================================================
+
+    /// <summary>What the model's timer did at the model step (ApplyNewThreadModelTimer).</summary>
+    enum class NewThreadModelTimerResult
+    {
+        NotActive, // no timer runs (or it ran out, or the thread's timers are off): the step asks
+        Picked, // the kept model is chosen: the window step comes next (the service collects the windows)
+        Gone, // the kept model is a PRESET the menu no longer has: the step asks, says why, and the service ends the timer
+    };
+
+    /// <summary>
+    /// §21.58: the model step just entered (EnterNewThreadModelStep) meets the bot's model timer. While it runs — and the thread's
+    /// timers are not off (autoPicksOff: a launch of this thread did not go through) — the kept model is chosen at once and marked
+    /// as the timer's (modelTimed: the launch line shows ⏱): a model id always (any id launches, as the user's own typed one did);
+    /// a PRESET only while the step's menu still lists it — a preset deleted since cannot launch, so the step asks instead, its
+    /// notice says why, and the answer tells the service to end the timer. The label is the menu's current one when the model is
+    /// listed (a renamed preset shows its new name), else the kept one.
+    /// </summary>
+    /// <param name="w">The wizard, at the model step with its choices (EnterNewThreadModelStep).</param>
+    /// <param name="a">The bot's timers.</param>
+    /// <param name="nowMs">The clock (Unix ms).</param>
+    /// <returns>What happened.</returns>
+    /// <exception cref="std::bad_alloc">If a string cannot be allocated.</exception>
+    inline NewThreadModelTimerResult ApplyNewThreadModelTimer(NewThreadWizard& w, const NewThreadAutoPicks& a, int64_t nowMs)
+    {
+        if (w.autoPicksOff || w.step != NewThreadStep::Model || !NewThreadModelTimerActive(a, nowMs))
+        {
+            return NewThreadModelTimerResult::NotActive;
+        }
+        std::wstring label = a.modelLabel;
+        bool listed = false;
+        for (const auto& c : w.modelChoices)
+        {
+            if (NewThreadTargetsEqual(c.target, a.modelTarget))
+            {
+                label = c.label;
+                listed = true;
+                break;
+            }
+        }
+        if (!a.modelTarget.empty() && a.modelTarget.front() == L'@' && !listed)
+        {
+            w.notice = L"\x23F1 The timed model " + (a.modelLabel.empty() ? a.modelTarget : a.modelLabel) + L" is not in the menu any more \x2014 its timer is stopped; pick a model.";
+            return NewThreadModelTimerResult::Gone;
+        }
+        if (label.empty())
+        {
+            label = a.modelTarget.empty() ? std::wstring{ L"Default" } : a.modelTarget;
+        }
+        ChooseNewThreadModel(w, a.modelTarget, std::move(label));
+        w.modelTimed = true;
+        return NewThreadModelTimerResult::Picked;
+    }
+
+    /// <summary>
+    /// §21.58: whether the window's timer will take this thread's window by itself once the windows answered — the service then
+    /// shows no "looking at the open windows…" render (the launch follows at once, and the picker is deleted with it). The same
+    /// conditions as ApplyNewThreadWindowsTimed, minus the census: the timer runs, the thread's timers are on, and the step does
+    /// not have to ask (askWindow, after a launch that did not go through).
+    /// </summary>
+    /// <param name="w">The wizard, at the window step.</param>
+    /// <param name="a">The bot's timers.</param>
+    /// <param name="nowMs">The clock (Unix ms).</param>
+    /// <returns>True when the census's answer will launch without showing the step (barring a census nobody answers).</returns>
+    inline bool NewThreadWindowTimerWillPick(const NewThreadWizard& w, const NewThreadAutoPicks& a, int64_t nowMs) noexcept
+    {
+        return !w.autoPicksOff && !w.askWindow && w.step == NewThreadStep::Window && NewThreadWindowTimerActive(a, nowMs);
+    }
+
+    /// <summary>
+    /// §21.58: the windows' census reaches the window step (ApplyNewThreadWindows) while the bot's window timer may run. The step's
+    /// own rules come first — one window or none skips it as before, and after a launch that did not go through it must ask. When
+    /// the step WOULD show its list, a running timer (and the thread's timers on) takes the step's ⭐ Default instead — the window
+    /// of the newest open tab working in the folder, right after that tab (BuildNewThreadWindowPlan; with no such tab, the window
+    /// used last): the user's "the last location a session has been created in that working directory". The pick is marked as the
+    /// timer's (windowTimed: the launch line names the window with ⏱). No default (no window) leaves the step to ask.
+    /// </summary>
+    /// <param name="w">The wizard.</param>
+    /// <param name="plan">The windows and their default (BuildNewThreadWindowPlan).</param>
+    /// <param name="a">The bot's timers.</param>
+    /// <param name="nowMs">The clock (Unix ms).</param>
+    /// <returns>Render (choose a window) or Launch (skipped: one window, none answered, or the timer's pick).</returns>
+    /// <exception cref="std::bad_alloc">If the list cannot be copied.</exception>
+    inline NewThreadOutcome ApplyNewThreadWindowsTimed(NewThreadWizard& w, NewThreadWindowPlan plan, const NewThreadAutoPicks& a, int64_t nowMs)
+    {
+        NewThreadOutcome out = ApplyNewThreadWindows(w, std::move(plan));
+        if (out.kind != NewThreadOutcome::Kind::Render || w.autoPicksOff || w.askWindow || !NewThreadWindowTimerActive(a, nowMs))
+        {
+            return out;
+        }
+        if (w.defaultWindow < 0 || static_cast<size_t>(w.defaultWindow) >= w.windows.size())
+        {
+            return out;
+        }
+        ChooseNewThreadWindow(w, static_cast<size_t>(w.defaultWindow));
+        w.windowTimed = true;
+        out.kind = NewThreadOutcome::Kind::Launch;
+        return out;
+    }
+
     /// <summary>
     /// The step a launch that did not go through goes back to (§21.25), so one tap can retry or fix it: a preset that cannot
     /// start → the model step (pick another model); a launch whose window step was SKIPPED (one window) → the model step too,
@@ -2242,7 +2708,8 @@ namespace Agentmaster::Msg
     /// <summary>
     /// Puts a wizard back at a step after a launch that did not go through (a refusal, a timeout, a window that was not open any
     /// more): the step, its notice, and — for the window step — a list to read again (the windows may have changed) that is shown
-    /// even with one window (askWindow), so the retry is always the user's tap.
+    /// even with one window (askWindow), so the retry is always the user's tap. §21.58: the bot's timers are turned off for this
+    /// wizard for good (autoPicksOff), for the same reason — a timed model or window would retry the refused launch by itself.
     /// </summary>
     /// <param name="w">The wizard.</param>
     /// <param name="step">The step to show.</param>
@@ -2252,6 +2719,9 @@ namespace Agentmaster::Msg
         w.step = step;
         w.notice = std::move(notice);
         w.windowChosen = false;
+        // §21.58: the bot's timers never act for this thread again — with them, the model step would choose the same model and the
+        // window step the same window at once, and a refusal that holds would loop without a tap. Every step asks from now on.
+        w.autoPicksOff = true;
         // No census is in flight for a wizard that comes back (the one that made its list ended long ago): 0 lets the service's
         // render start a new one for the window step — with the old serial kept, the step would wait for an answer that never
         // comes ("looking at the open windows…" for good).
@@ -2335,18 +2805,21 @@ namespace Agentmaster::Msg
             textTail += (i == 0 ? L" + " : L", ") + mark + extraLeaf;
             htmlTail += (i == 0 ? L" + " : L", ") + mark + L"<b>" + TgEscapeHtml(extraLeaf) + L"</b>";
         }
-        if (!w.modelTarget.empty())
+        // §21.58: what a TIMER picked carries ⏱ — and a timed Default is named too (a tapped Default stays unnamed, as before), so the
+        // line always says when a step was skipped by a timer rather than answered.
+        const std::wstring timedMark = L" \x23F1";
+        if (!w.modelTarget.empty() || w.modelTimed)
         {
-            const std::wstring label = w.modelLabel.empty() ? w.modelTarget : w.modelLabel;
-            textTail += L" \x00B7 " + label;
-            htmlTail += L" \x00B7 " + TgEscapeHtml(label);
+            const std::wstring label = !w.modelLabel.empty() ? w.modelLabel : (w.modelTarget.empty() ? std::wstring{ L"Default" } : w.modelTarget);
+            textTail += L" \x00B7 " + label + (w.modelTimed ? timedMark : std::wstring{});
+            htmlTail += L" \x00B7 " + TgEscapeHtml(label) + (w.modelTimed ? timedMark : std::wstring{});
         }
         if (w.windowNumber > 0 && !w.windowAuto)
         {
             // "window 2", or "Research (window 2)" for a window the user named (§21.25.8).
             const std::wstring windowLabel = NewThreadWindowLabel(w.windowNumber, w.windowName, kNewThreadWindowNameChars);
-            textTail += L" \x00B7 " + windowLabel;
-            htmlTail += L" \x00B7 " + TgEscapeHtml(windowLabel);
+            textTail += L" \x00B7 " + windowLabel + (w.windowTimed ? timedMark : std::wstring{});
+            htmlTail += L" \x00B7 " + TgEscapeHtml(windowLabel) + (w.windowTimed ? timedMark : std::wstring{});
         }
         if (!w.anchorTitle.empty())
         {
@@ -2543,14 +3016,164 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
-    /// The picker message of the wizard's current step (§21.25): its text and its keyboard. The folder step is the §21.17 picker
-    /// (BuildNewThreadPickerHtml / BuildNewThreadPickerKeyboard) under the notice line; the other steps are this header's.
+    /// What a wizard's render needs besides its own record (§21.58, AI_TITLES.md): the bot's running timers — the folder step says
+    /// what they will pick and offers ⏹ — and whether a session the phone starts is named by AI (the folder step's title line).
+    /// A default context renders every step exactly as before both features.
+    /// </summary>
+    struct NewThreadViewContext
+    {
+        NewThreadAutoPicks timers; // the bot's timers now (a timer that ran out shows nothing)
+        bool aiTitles{ false }; // AppSettings::aiTitleTelegramSessions
+    };
+
+    /// <summary>
+    /// §21.58: the ⏹ row — one button per RUNNING timer ("⏹ Stop timed model", "⏹ Stop timed window"), two to a row; empty when
+    /// none is named. Shown under the folder step's list and under the "🚀 Opening …" line of a launch a timer picked for; its
+    /// buttons act on the bot's timers from any message (NewThreadStepTakes takes them at every step, the service before it looks
+    /// for the thread's wizard).
+    /// </summary>
+    /// <param name="model">Offer to stop the model's timer.</param>
+    /// <param name="window">Offer to stop the window's timer.</param>
+    /// <returns>The rows (zero or one).</returns>
+    /// <exception cref="std::bad_alloc">If the rows cannot be allocated.</exception>
+    inline std::vector<std::vector<NewThreadButton>> BuildNewThreadTimerStopRows(bool model, bool window)
+    {
+        std::vector<std::vector<NewThreadButton>> rows;
+        std::vector<NewThreadButton> row;
+        if (model)
+        {
+            row.push_back(NewThreadButton{ L"\x23F9 Stop timed model", NewThreadCallbackData(NewThreadAction::Kind::StopModelAuto, 0) });
+        }
+        if (window)
+        {
+            row.push_back(NewThreadButton{ L"\x23F9 Stop timed window", NewThreadCallbackData(NewThreadAction::Kind::StopWindowAuto, 0) });
+        }
+        if (!row.empty())
+        {
+            rows.push_back(std::move(row));
+        }
+        return rows;
+    }
+
+    namespace detail
+    {
+        /// <summary>
+        /// §21.58: the ⏱ chips of the model or the window step — Once, then every length of kNewThreadTimers, four to the first row
+        /// and the rest on the second (seven chips: two rows that fit a phone). The chosen chip carries ✓; an unchosen Once carries
+        /// ⏱, so the row reads as a timer at a glance.
+        /// </summary>
+        /// <param name="kind">ModelTimer or WindowTimer (what the chips' buttons carry).</param>
+        /// <param name="selected">The chip chosen now (NewThreadWizard::modelTimer / windowTimer).</param>
+        /// <returns>The rows.</returns>
+        /// <exception cref="std::bad_alloc">If the rows cannot be allocated.</exception>
+        inline std::vector<std::vector<NewThreadButton>> NewThreadTimerRows(NewThreadAction::Kind kind, size_t selected)
+        {
+            std::vector<std::vector<NewThreadButton>> rows;
+            std::vector<NewThreadButton> row;
+            for (size_t i = 0; i < kNewThreadTimerCount; ++i)
+            {
+                const std::wstring label = std::wstring{ kNewThreadTimers[i].label };
+                std::wstring text = i == selected ? L"\x2713 " + label : (i == 0 ? L"\x23F1 " + label : label);
+                row.push_back(NewThreadButton{ std::move(text), NewThreadCallbackData(kind, i) });
+                if (row.size() == 4)
+                {
+                    rows.push_back(std::move(row));
+                    row.clear();
+                }
+            }
+            if (!row.empty())
+            {
+                rows.push_back(std::move(row));
+            }
+            return rows;
+        }
+
+        /// <summary>
+        /// §21.58: the line of the model or the window step that says what its ⏱ chips do — and, once one is chosen, what the next
+        /// pick will start.
+        /// </summary>
+        /// <param name="model">The model step (else the window step).</param>
+        /// <param name="selected">The chip chosen now.</param>
+        /// <returns>Telegram HTML, starting with a line break.</returns>
+        /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+        inline std::wstring NewThreadTimerLine(bool model, size_t selected)
+        {
+            if (selected == 0 || selected >= kNewThreadTimerCount)
+            {
+                return model ? std::wstring{ L"\n\x23F1 <i>Tap a time first to keep the model you pick next for every new session \x2014 this step is then skipped.</i>" }
+                             : std::wstring{ L"\n\x23F1 <i>Tap a time first: after this pick, new sessions skip this step and open next to their folder\x2019s newest tab (\x2B50 Default).</i>" };
+            }
+            const std::wstring length = TgEscapeHtml(NewThreadTimerLabel(selected));
+            return model ? L"\n\x23F1 <b>" + length + L"</b>: <i>the model you pick now is kept for every new session for " + length + L".</i>"
+                         : L"\n\x23F1 <b>" + length + L"</b>: <i>this session opens where you pick; for " + length + L" after it, new sessions skip this step and open next to their folder\x2019s newest tab.</i>";
+        }
+
+        /// <summary>
+        /// §21.58: the folder step's line about the bot's RUNNING timers — what each will pick and how long it still runs — or, for a
+        /// thread whose launch did not go through, that they are paused for it. "" when no timer runs.
+        /// </summary>
+        /// <param name="w">The wizard (its autoPicksOff).</param>
+        /// <param name="t">The bot's timers.</param>
+        /// <param name="nowMs">The clock (Unix ms).</param>
+        /// <returns>Telegram HTML ending with a blank line, or "".</returns>
+        /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+        inline std::wstring NewThreadTimersLine(const NewThreadWizard& w, const NewThreadAutoPicks& t, int64_t nowMs)
+        {
+            const bool model = NewThreadModelTimerActive(t, nowMs);
+            const bool window = NewThreadWindowTimerActive(t, nowMs);
+            if (!model && !window)
+            {
+                return {};
+            }
+            if (w.autoPicksOff)
+            {
+                return L"\x23F1 <i>The timed picks are paused for this thread: its launch did not go through, so every step asks.</i>\n\n";
+            }
+            const std::wstring modelName = TgEscapeHtml(!t.modelLabel.empty() ? t.modelLabel : (t.modelTarget.empty() ? std::wstring{ L"Default" } : t.modelTarget));
+            const std::wstring modelLeft = TgShortSpan(t.modelUntilMs - nowMs);
+            const std::wstring windowLeft = TgShortSpan(t.windowUntilMs - nowMs);
+            if (model && window)
+            {
+                return L"\x23F1 <b>Timed picks on</b>: model <b>" + modelName + L"</b> (" + modelLeft + L" left) \x00B7 window by folder (" + windowLeft +
+                       L" left).\n<i>Pick a folder and the session opens right away.</i>\n\n";
+            }
+            if (model)
+            {
+                return L"\x23F1 <b>Timed model</b>: <b>" + modelName + L"</b> (" + modelLeft + L" left) \x2014 <i>the model step is skipped; the window is asked.</i>\n\n";
+            }
+            return L"\x23F1 <b>Timed window</b> (" + windowLeft + L" left): <i>each session opens next to its folder\x2019s newest tab; the model is asked.</i>\n\n";
+        }
+    }
+
+    // Declared here, defined below: the context-free form forwards to it.
+    inline NewThreadView BuildNewThreadView(const NewThreadRecord& r, int64_t nowMs, const NewThreadViewContext& ctx);
+
+    /// <summary>
+    /// The picker message of the wizard's current step (§21.25) with a DEFAULT context: no timer runs and no AI title line — the
+    /// render as before §21.58 and AI_TITLES.md. The service renders with its own context (the overload below); the m5 checks
+    /// written before both features use this form.
     /// </summary>
     /// <param name="r">The thread's record.</param>
     /// <param name="nowMs">The clock the "ago" texts count against (Unix ms).</param>
     /// <returns>The view.</returns>
     /// <exception cref="std::bad_alloc">If the view cannot be allocated.</exception>
     inline NewThreadView BuildNewThreadView(const NewThreadRecord& r, int64_t nowMs)
+    {
+        return BuildNewThreadView(r, nowMs, NewThreadViewContext{});
+    }
+
+    /// <summary>
+    /// The picker message of the wizard's current step (§21.25): its text and its keyboard. The folder step is the §21.17 picker
+    /// (BuildNewThreadPickerHtml / BuildNewThreadPickerKeyboard) under the notice line; the other steps are this header's.
+    /// §21.58: the folder step leads with the bot's running timers and ends with their ⏹ row; the model and window steps carry
+    /// their ⏱ chips. AI_TITLES.md: the folder step's title line says when the session is named by AI.
+    /// </summary>
+    /// <param name="r">The thread's record.</param>
+    /// <param name="nowMs">The clock the "ago" texts and the timers' "left" count against (Unix ms).</param>
+    /// <param name="ctx">The bot's running timers and the AI-title switch (a default context renders as before both).</param>
+    /// <returns>The view.</returns>
+    /// <exception cref="std::bad_alloc">If the view cannot be allocated.</exception>
+    inline NewThreadView BuildNewThreadView(const NewThreadRecord& r, int64_t nowMs, const NewThreadViewContext& ctx)
     {
         using K = NewThreadAction::Kind;
         const NewThreadWizard& w = r.wizard;
@@ -2585,6 +3208,7 @@ namespace Agentmaster::Msg
             {
                 v.html += L"\n<i>No presets yet \x2014 add one at the PC: Settings \u2699 \u2192 Presets \u2192 TEMPLATES.</i>";
             }
+            v.html += detail::NewThreadTimerLine(true, w.modelTimer); // §21.58: what the ⏱ chips below do
             v.html += detail::NewThreadHeldLine(r.held.size());
             // The PC menus' order (AgentModelMenu.h): Default, then Specify right under it, then the models, then the presets.
             v.rows.push_back({ NewThreadButton{ L"\u2705 Default", NewThreadCallbackData(K::ModelDefault, 0) },
@@ -2605,13 +3229,24 @@ namespace Agentmaster::Msg
             {
                 v.rows.push_back(std::move(row));
             }
-            v.rows.push_back(cancelRow({ NewThreadButton{ L"\u25C0 Back", NewThreadCallbackData(K::BackToFolders, 0) } }));
+            // §21.58: the ⏱ chips under the models (a chip arms the model the user picks or types next), above Back and Cancel.
+            for (auto& timerRow : detail::NewThreadTimerRows(K::ModelTimer, w.modelTimer))
+            {
+                v.rows.push_back(std::move(timerRow));
+            }
+            v.rows.push_back(cancelRow({ NewThreadButton{ L"\x25C0 Back", NewThreadCallbackData(K::BackToFolders, 0) } }));
             return v;
         }
         case NewThreadStep::ModelSpecify:
             v.html = detail::NewThreadNoticeLine(w) + detail::NewThreadFolderLine(w) +
                      L"\n\n\u270F <b>Send the model id</b> as your next message \x2014 like <code>claude-opus-5-5[1m]</code>.\n<i>Letters, digits and - _ . : / [ ] only, no spaces.</i>" +
                      detail::NewThreadHeldLine(r.held.size());
+            if (w.modelTimer > 0 && w.modelTimer < kNewThreadTimerCount)
+            {
+                // §21.58: the model step's chosen ⏱ chip carries over: the id sent next is kept for that long, as a tapped model is.
+                const std::wstring length = TgEscapeHtml(NewThreadTimerLabel(w.modelTimer));
+                v.html += L"\n\x23F1 <b>" + length + L"</b>: <i>the id you send is kept for every new session for " + length + L".</i>";
+            }
             v.rows.push_back({ NewThreadButton{ L"\u2705 Use Default", NewThreadCallbackData(K::ModelDefault, 0) },
                                NewThreadButton{ L"\u25C0 Back to the list", NewThreadCallbackData(K::BackToModels, 0) } });
             v.rows.push_back(cancelRow({}));
@@ -2662,15 +3297,32 @@ namespace Agentmaster::Msg
                     v.rows.push_back(std::move(row));
                 }
                 v.rows.push_back({ NewThreadButton{ L"\U0001F504 Refresh", NewThreadCallbackData(K::WindowRefresh, 0) } });
+                // §21.58: the ⏱ chips, once the windows are listed (a chip arms the window the user picks next). Their line goes
+                // after the budgeted text: a fixed ~200 characters, well inside Telegram's 4,096 beyond kNewThreadWindowTextBudget.
+                v.html += detail::NewThreadTimerLine(false, w.windowTimer);
+                for (auto& timerRow : detail::NewThreadTimerRows(K::WindowTimer, w.windowTimer))
+                {
+                    v.rows.push_back(std::move(timerRow));
+                }
             }
-            v.rows.push_back(cancelRow({ NewThreadButton{ L"\u25C0 Back", NewThreadCallbackData(K::BackToModels, 0) } }));
+            v.rows.push_back(cancelRow({ NewThreadButton{ L"\x25C0 Back", NewThreadCallbackData(K::BackToModels, 0) } }));
             return v;
         }
         case NewThreadStep::Folder:
         default:
-            v.html = detail::NewThreadNoticeLine(w) + BuildNewThreadPickerHtml(r.lists, r.recentPage, r.usedPage, r.held.size(), r.topicName, nowMs);
+        {
+            // §21.58: the bot's running timers lead the step (what the folder pick will start), their ⏹ row sits above ✖ Cancel.
+            // AI_TITLES.md: the title line says when the session is named by AI from its first message.
+            v.html = detail::NewThreadNoticeLine(w) + detail::NewThreadTimersLine(w, ctx.timers, nowMs) +
+                     BuildNewThreadPickerHtml(r.lists, r.recentPage, r.usedPage, r.held.size(), r.topicName, nowMs, ctx.aiTitles);
             v.rows = BuildNewThreadPickerKeyboard(r.lists, r.recentPage, r.usedPage);
+            auto stops = BuildNewThreadTimerStopRows(NewThreadModelTimerActive(ctx.timers, nowMs), NewThreadWindowTimerActive(ctx.timers, nowMs));
+            if (!stops.empty() && !v.rows.empty())
+            {
+                v.rows.insert(v.rows.end() - 1, std::make_move_iterator(stops.begin()), std::make_move_iterator(stops.end())); // before ✖ Cancel, the last row
+            }
             return v;
+        }
         }
     }
 
@@ -3008,6 +3660,13 @@ namespace Agentmaster::Msg
             extra.Push(std::move(m));
         }
         o.Set(L"extraFolders", std::move(extra));
+        // §21.58: the ⏱ chips the steps show ticked, what a timer picked (the launch line's ⏱ after a restart), and the latch that
+        // keeps the timers off for a thread whose launch did not go through — a restart must not turn a refusal's retry automatic.
+        o.Set(L"modelTimer", json::Value::MkNum(static_cast<double>(w.modelTimer)));
+        o.Set(L"windowTimer", json::Value::MkNum(static_cast<double>(w.windowTimer)));
+        o.Set(L"modelTimed", json::Value::MkBool(w.modelTimed));
+        o.Set(L"windowTimed", json::Value::MkBool(w.windowTimed));
+        o.Set(L"autoPicksOff", json::Value::MkBool(w.autoPicksOff));
         return o;
     }
 
@@ -3114,6 +3773,15 @@ namespace Agentmaster::Msg
                 w.extraFolders.push_back(NewThreadExtraFolder{ m.StrAt(L"path"), static_cast<int>(option) });
             }
         }
+        // §21.58. Absent (a wizard saved before the timed picks) reads as Once on both steps, nothing timed, the timers on. A chip
+        // past the row (a newer build's longer list, a garbled file) reads as Once: a file never arms a timer nobody chose.
+        const int64_t modelTimer = v.I64At(L"modelTimer", 0);
+        const int64_t windowTimer = v.I64At(L"windowTimer", 0);
+        w.modelTimer = modelTimer > 0 && static_cast<uint64_t>(modelTimer) < kNewThreadTimerCount ? static_cast<size_t>(modelTimer) : 0;
+        w.windowTimer = windowTimer > 0 && static_cast<uint64_t>(windowTimer) < kNewThreadTimerCount ? static_cast<size_t>(windowTimer) : 0;
+        w.modelTimed = v.BoolAt(L"modelTimed", false);
+        w.windowTimed = v.BoolAt(L"windowTimed", false);
+        w.autoPicksOff = v.BoolAt(L"autoPicksOff", false);
         // A window step whose list did not survive is read again (the step shows "looking at the windows…").
         if (w.step == NewThreadStep::Window && w.windows.empty())
         {

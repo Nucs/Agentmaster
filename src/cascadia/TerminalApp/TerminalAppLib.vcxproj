@@ -252,6 +252,12 @@
     <ClInclude Include="AgentMaster\VoiceSpellWords.h" />
     <ClInclude Include="AgentMaster\VoiceCorrect.h" />
     <ClInclude Include="AgentMaster\VoiceTranscriber.h" />
+    <!-- Agentmaster (AI_TITLES.md): AI SESSION TITLES - a new session's tab named by a small model at its first real prompt, in
+         the style of its folder's other tab titles: the pure half (AiSessionTitle.h: who gets a title, the verdict on a prompt,
+         the example titles, the prompts, the arguments, the answer's cleaning) and the titler (SessionTitler.h: the hook tap,
+         the job queue and worker, the hidden claude call, the guarded rename). -->
+    <ClInclude Include="AgentMaster\AiSessionTitle.h" />
+    <ClInclude Include="AgentMaster\SessionTitler.h" />
     <!-- Agentmaster (MESSAGING.md section 21.43): where a voice note goes - a session's topic, a new thread's wizard, a binding
          topic's bind, or a refusal - and why one cannot be read (MessagingVoice.h, header-only and pure). -->
     <ClInclude Include="AgentMaster\MessagingVoice.h" />
@@ -714,6 +720,11 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\VoiceHttp.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <!-- Agentmaster (AI_TITLES.md): the AI session titles' titler - the bridge sink's hook tap, the naming jobs' worker and the
+         hidden claude call (ClaudeStatus.h RunClaudeCapture). Plain C++ + Win32, no PCH. -->
+    <ClCompile Include="AgentMaster\SessionTitler.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <!-- Agentmaster (MESSAGING.md section 21.32.4): the file links' HTTP server (Winsock), the session-key secret in

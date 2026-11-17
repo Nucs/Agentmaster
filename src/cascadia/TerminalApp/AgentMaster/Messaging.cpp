@@ -980,6 +980,8 @@ namespace Agentmaster::Msg
             // §21.42 + §21.49: whether the cards carry a picture and show 🖼️, live: the next post or edit of a card carries its picture
             // (or no longer does), and a flip adds or drops 🖼️ on every card through the slow upgrade (_refreshCard), one at a time.
             _cardPictures.store(settings.messagingCardScreenshots);
+            // AI_TITLES.md: whether a session the phone starts is named by AI — the wizard's folder step says so (the next render).
+            _aiTitleTelegram.store(settings.aiTitleTelegramSessions);
             int64_t owner = 0;
             for (const wchar_t c : settings.messagingTelegramOwnerId)
             {
@@ -1312,6 +1314,25 @@ namespace Agentmaster::Msg
                     // (they start below), so nothing waits on the lock meanwhile.
                     _log(L"[msg] new threads: " + std::to_wstring(_newThreads.size()) + L" wizard(s) and " + std::to_wstring(_threadBinds.size()) +
                          L" launch(es) restored from the state file");
+                }
+                // §21.58: the timed picks come back with the wizards (MessagingState::newThreadAutoPicks): a timer set before a restart
+                // keeps running to the end it was given. A timer that ran out while the app was closed reads as none (and is dropped
+                // at the next save); a garbled file can only shorten one (NewThreadAutoPicksFromJson's bound).
+                try
+                {
+                    _autoPicks = NewThreadAutoPicksFromJson(_state.newThreadAutoPicks, WallMs());
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: no timer runs — every wizard asks for its model and window, as before §21.58.
+                    LogSwallowedException(L"MessagingService::_start (restore the timed picks)");
+                    _autoPicks = NewThreadAutoPicks{};
+                }
+                if (NewThreadModelTimerActive(_autoPicks, WallMs()) || NewThreadWindowTimerActive(_autoPicks, WallMs()))
+                {
+                    _log(L"[msg] timed picks restored:" +
+                         (NewThreadModelTimerActive(_autoPicks, WallMs()) ? L" model \x201C" + _autoPicks.modelLabel + L"\x201D for " + TgShortSpan(_autoPicks.modelUntilMs - WallMs()) + L" more" : std::wstring{}) +
+                         (NewThreadWindowTimerActive(_autoPicks, WallMs()) ? L" window by folder for " + TgShortSpan(_autoPicks.windowUntilMs - WallMs()) + L" more" : std::wstring{}));
                 }
                 _recreateStartedMs = 0;
                 // The DIRECTORY (§21.16): the outbox was cleared above, so no send of the last run is in flight; a new serial makes
@@ -1733,6 +1754,9 @@ namespace Agentmaster::Msg
             // §21.57: the queue tickets — ended (and forgotten) once acted on; a copy brought back from the shadow after an older build
             // ran would name tickets that are long done.
             L"queueTickets",
+            // §21.58: the timed picks — a timer the user stopped (⏹) or that ran out must never come back from the shadow; at worst a
+            // running one is lost across an older build, and the wizard asks again (the safe side).
+            L"newThreadAutoPicks",
         };
         RepairStateFileWrittenByOlderBuild(profileDir, stateFile, L"messaging\\telegram\\state.json", &MessagingStateRoundTrip, true, &kVolatile);
         MessagingStateFileLoad out;
@@ -1862,6 +1886,9 @@ namespace Agentmaster::Msg
             _state.newThreads = (_newThreads.empty() && _threadBinds.empty()) ? json::Value{} : NewThreadsToJson(_newThreads, _threadBinds);
             // §21.57: the queue tickets go into the same atomic write (none = no key).
             _state.queueTickets = QueueTicketsToJson(_tickets);
+            // §21.58: the timed picks too — only the RUNNING timers (one that ran out is written as none, so the key goes away by itself).
+            PruneNewThreadTimers(_autoPicks, now);
+            _state.newThreadAutoPicks = NewThreadAutoPicksToJson(_autoPicks, now);
             doc = StateToJson(_state);
             _stateDirty = false;
             _stateProgressDirty = false;

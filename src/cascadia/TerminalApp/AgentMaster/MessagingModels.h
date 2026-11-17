@@ -2691,6 +2691,14 @@ namespace Agentmaster::Msg
         /// service ends tickets once acted on, so a copy brought back from the shadow would name tickets that are long done).
         /// </summary>
         json::Value queueTickets;
+        /// <summary>
+        /// §21.58: the new-thread wizard's TIMED PICKS — the model kept for every new session and the window step skipped, each until
+        /// its timer runs out, as MessagingNewThreadWizard.h NewThreadAutoPicksToJson writes them (only RUNNING timers; none = Null,
+        /// no key). Kept OPAQUE here, like `newThreads`: the service converts it at its start (NewThreadAutoPicksFromJson) and writes
+        /// it back at every save. Volatile for the older-writer repair: a timer the user stopped (⏹) must never come back from the
+        /// shadow because an older build ran in between.
+        /// </summary>
+        json::Value newThreadAutoPicks;
     };
 
     /// <summary>
@@ -2824,6 +2832,11 @@ namespace Agentmaster::Msg
         {
             // §21.57: the queue tickets, as the service wrote them (opaque here; omitted when there are none).
             o.Set(L"queueTickets", s.queueTickets);
+        }
+        if (s.newThreadAutoPicks.type == json::Value::Type::Obj)
+        {
+            // §21.58: the running timed picks, as the service wrote them (opaque here; omitted while no timer runs).
+            o.Set(L"newThreadAutoPicks", s.newThreadAutoPicks);
         }
         return o;
     }
@@ -2968,6 +2981,11 @@ namespace Agentmaster::Msg
         {
             // §21.57 (absent in an older file: no ticket to look after). Copied as it is: the service reads it at its start.
             s.queueTickets = *tickets;
+        }
+        if (const auto* autoPicks = v.Find(L"newThreadAutoPicks"); autoPicks && autoPicks->type == json::Value::Type::Obj)
+        {
+            // §21.58 (absent in an older file, or while no timer runs: none). Copied as it is: the service reads it at its start.
+            s.newThreadAutoPicks = *autoPicks;
         }
         return s;
     }

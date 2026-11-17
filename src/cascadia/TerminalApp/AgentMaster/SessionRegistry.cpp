@@ -505,6 +505,28 @@ namespace Agentmaster
         return out;
     }
 
+    std::vector<SessionTitleSample> SessionRegistry::TitleSamples() const
+    {
+        std::lock_guard guard{ _mtx };
+        std::vector<SessionTitleSample> out;
+        out.reserve(_order.size()); // one allocation: a reallocation would move every sample already copied
+        for (const auto& id : _order)
+        {
+            const auto it = _sessions.find(id);
+            if (it == _sessions.end())
+            {
+                continue;
+            }
+            const SessionInfo& s = it->second;
+            // The creation stamp says best how new a session is (a new tab the user just opened); a record from before the stamp
+            // falls back to its newest activity, so an old but busy session still ranks above a forgotten one. (std::max)
+            // parenthesized: windows.h's max macro.
+            const int64_t newest = s.createdUnixMs > 0 ? s.createdUnixMs : (std::max)(s.lastActivityUnixMs, s.convLastActivityUnixMs);
+            out.push_back(SessionTitleSample{ s.id, s.title, s.workingDir, s.inferredWorkingDir, s.live, newest });
+        }
+        return out;
+    }
+
     std::vector<SessionInfo> SessionRegistry::SnapshotLiveForScan() const
     {
         std::lock_guard guard{ _mtx };

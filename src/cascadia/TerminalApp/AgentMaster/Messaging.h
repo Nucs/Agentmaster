@@ -2785,10 +2785,15 @@ namespace Agentmaster::Msg
         /// §21.25: enters the thread's MODEL step with the choices the right-click menu shows now (the launch-menu source over
         /// the settings' launch models, BuildNewThreadModelChoices) and the model last typed in a "Specify a model" prompt
         /// (LoadLastSpecifiedModel). No render: the caller renders. Takes `_mtx` for the record only; the menu and the model
-        /// list are read outside it.
+        /// list are read outside it. §21.58: with `allowTimedPick` (a folder was just chosen) the bot's running model timer may
+        /// choose the model at once (ApplyNewThreadModelTimer) — the caller then collects the windows instead of rendering; a kept
+        /// preset that is gone ends the timer (logged) and the step asks. A refused launch's comeback passes false: a timer never
+        /// retries a refusal (the wizard's autoPicksOff says the same once it went through ReturnNewThreadToStep).
         /// </summary>
         /// <param name="threadId">The thread.</param>
-        void _enterNewThreadModelStep(int64_t threadId);
+        /// <param name="allowTimedPick">The bot's model timer may take the step (only on the way forward from the folder).</param>
+        /// <returns>True when the model timer chose the model (the wizard is at the window step); false when the step asks.</returns>
+        bool _enterNewThreadModelStep(int64_t threadId, bool allowTimedPick = false);
         /// <summary>
         /// §21.25: the window step's list. Marks the step "looking at the windows" with a new census serial, renders it, and
         /// asks every window for its strip on a WORKER thread (ServiceHooks::windowCensus blocks up to kNewThreadCensusTimeoutMs;
@@ -3892,6 +3897,19 @@ namespace Agentmaster::Msg
         std::wstring _launchModelsSpec;
         /// <summary>§21.25, under `_mtx`: AppSettings::model as the last Apply had it — what the model step's Default stands for.</summary>
         std::wstring _settingsModel;
+        /// <summary>
+        /// §21.58, under `_mtx`: the bot's TIMED PICKS (MessagingNewThreadWizard.h NewThreadAutoPicks) — the model kept for every new
+        /// session and the window step skipped, each until its timer runs out. Set by a model / window choice made with a ⏱ chip
+        /// (NewThreadOutcome::modelTimerMs / windowTimerMs), ended by ⏹ or a kept preset that is gone, read by the model step's
+        /// entry (ApplyNewThreadModelTimer), the census answer (ApplyNewThreadWindowsTimed) and every picker render. PERSISTED with
+        /// the state file (MessagingState::newThreadAutoPicks: running timers only), read at _start. Every change sets `_stateDirty`.
+        /// </summary>
+        NewThreadAutoPicks _autoPicks;
+        /// <summary>
+        /// AI_TITLES.md: AppSettings::aiTitleTelegramSessions as the last Apply had it — whether a session the phone starts is named
+        /// by AI at its first prompt; the wizard's folder step says so in its title line. Atomic: Apply writes it, the renders read it.
+        /// </summary>
+        std::atomic<bool> _aiTitleTelegram{ true };
         uint64_t _launchTokenSeq{ 0 }; // §21.23, under `_mtx`: the last launch token handed out (0 is never one)
         /// <summary>
         /// §21.28, under `_mtx`: a new thread's launch (_launchNewThread) by its launch token -> the holds of the tapped wizard

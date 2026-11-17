@@ -256,6 +256,15 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
   - `tabTitleCase` (Default / Lowercase / Uppercase), `tabTitleSpacesToUnderscores` (false).
   - Every mode walks past generic `bin/obj/Debug/…` segments, turns `\` into `/`, and trims only a title
     over 255 chars (to 252 + `...`); a live preview derives four sample paths (`_UpdateTitleNamingPreview`).
+- **AI titles** ([AI_TITLES.md](AI_TITLES.md)): a NEW session whose title was derived above is renamed by a small model at its
+  first real prompt, in the style of the folder's other tab titles (the open ones first, topped up to ten with closed ones).
+  A title someone gave, a fork, a resume and a rename made before the model answers are never replaced. GLOBAL; each launch
+  reads the switch for its origin (no live re-apply needed).
+  - `aiTitleTelegramSessions` (true): sessions the phone starts (the Telegram wizard, `/newsession`).
+  - `aiTitleOtherSessions` (false): every other new session (the launch row, the `+` launcher, Open New Session Here, the
+    Sessions page).
+  - `aiTitleModel` (`claude-sonnet-5-5`; the cog offers Haiku 5.5 too, and keeps another id written in the file; `""` and `off`
+    read as the default). Each title is one hidden `claude -p` on the PC's Claude Code login.
 - `favoriteIcon` (Crown / Star) and `maxTags` (20, at most 40): [TAGS.md](TAGS.md).
 - `tooltipTagsOpacity` (0.9, 10–100%): the tab tooltip's tag row.
 - `flashRingColor` (`#CCFF0000`): the unread ring's color and opacity.
