@@ -214,6 +214,20 @@ namespace Agentmaster
         std::unordered_set<uint32_t> _guiExcludedLogged; // GUI claude pids (the desktop Electron app) skipped — logged once
         std::unordered_set<uint32_t> _orphanLogged; // orphaned claude pids (host terminal exited) skipped — logged once
         std::unordered_map<std::wstring, std::wstring> _shellCwdCache; // wtSession -> last TRUSTWORTHY shell cwd (survives idle gaps when a pwsh has no child this tick)
+        // Agentmaster (OBSERVER.md §21 — Claude Code BACKGROUND SESSIONS; worker-thread-only, no lock, each pruned to what the
+        // survey that just ran saw, so a pair or a job that comes back logs again):
+        //   _bgShownLogged       — "<WT_SESSION>|<job id>" pairs whose "[bg] tab shows job" line was written (one line per
+        //                          park / attach, not one per 2 s survey);
+        //   _bgDetachedLogged    — job ids whose "[bg] no tab of ours shows job" line was written;
+        //   _spareTranscriptless — daemon spares' placeholder ids (lower case) -> "has NO transcript" (ClaudeConversationExists,
+        //                          a directory glob, runs once per id and the answer is kept either way): only a true one has
+        //                          its record retired (RetireBackgroundSpare).
+        std::unordered_set<std::wstring> _bgShownLogged;
+        std::unordered_set<std::wstring> _bgDetachedLogged;
+        std::unordered_map<std::wstring, bool> _spareTranscriptless;
+        //   _tablessHasTranscript — tab-less live records that no live claude runs (the retirement candidates, lower-case id)
+        //                          -> "its transcript exists" (one glob per id while it stays a candidate).
+        std::unordered_map<std::wstring, bool> _tablessHasTranscript;
 
         // Orphaned CONSOLE groups — the reaper (OBSERVER.md §13a; ProcessInspect's DecideOrphanReap /
         // CollectDeadConsoleGroup). Worker-thread-only (touched only inside _surveyOnce):

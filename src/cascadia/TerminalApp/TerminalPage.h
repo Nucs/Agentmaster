@@ -2713,6 +2713,19 @@ namespace winrt::TerminalApp::implementation
         winrt::fire_and_forget _KeepTabHeaderInView(winrt::weak_ref<winrt::TerminalApp::Tab> weakTab, double stripOffsetBefore, double stripScrollableBefore, std::wstring why); // Agentmaster (tab-strip reveal): after an action that must leave the strip where it was (Deactivate), re-check twice (the next low-priority tick, then kStripKeepLateCheckMs later) that the tab is still WHOLLY on screen and reveal it in place if the strip moved it — a strip of hundreds of tabs estimates the width of headers it hasn't laid out, so a re-layout can leave the same offset on a different stretch of tabs. Logs [strip] with the before/after offset + scrollable width (the evidence of what moved). Weak refs only across the delay
         void _RevealClickedSessionTab(const std::wstring& sessionId); // Agentmaster (tab-strip reveal): a board card / tree row / side-panel card CLICK asks for its session's tab to be scrolled into view even when the selection did not change (a re-click of the selected card) — bypassing _SelectSession's same-id early-out and the _selectionBroughtIntoView change gate. Only while the Agent Manager page is on screen (off it a side-panel click is a PEEK) and only for a tab hosted in THIS window
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab — local first, then fan out to the hosting window (ActivateSessionInOtherWindows)
+        /// <summary>
+        /// Agentmaster (OBSERVER.md §21): OPEN a Claude Code background session that no tab of ours shows (SessionInfo::bgDetached —
+        /// the task a `/fork` spun off, a `/bg` session nobody has open) in a new tab of THIS window: a resume of its record, which
+        /// the spawn builder turns into `claude attach &lt;job&gt;` while the job is live. The tab goes right after the tab of the card
+        /// it sticks under when that tab is in this window, else at the end; it is selected afterwards. _ActivateClaudeSession calls
+        /// it once no local tab answered and before the cross-window fan-out (no window hosts such a session).
+        /// </summary>
+        /// <param name="sessionId">The session to open.</param>
+        /// <returns>True when it was a live detached background session — opened, or refused by the launch (which logged why);
+        /// false for any other session, so the caller goes on with the ordinary activation.</returns>
+        /// <exception cref="winrt::hresult_error">Only from the tab strip's XAML calls of the launch (the caller's event context
+        /// handles it like any other launch).</exception>
+        bool _OpenBackgroundSessionTab(const std::wstring& sessionId);
         bool _ActivateDormantSession(const std::wstring& sessionId); // Agentmaster (eager-init): start a DORMANT session's claude IN PLACE (no focus change) via TermControl::InitializeWithSize + SetStarted(true); returns true if it woke one (false: not hosted here / already started). UI thread.
         void _ActivateAllDormantTabsLocal(); // Agentmaster (eager-init): DRIP-FEED-wake every dormant managed tab hosted in THIS window — 500ms between wakes, 4 wakes per 10s batch — so a many-tab activate never bursts N claude.exe spawns onto one UI pass. Merges into a running drip. The receiving half of the activate-all fan-out.
         void _ActivateAllDripStep(); // Agentmaster (eager-init pacing): one drip step — pop queued ids until one actually wakes, then re-arm _activateAllTimer (500ms in-batch; the long post-batch gap after the 4th wake so batches start 10s apart); self-stops + logs the total when the queue drains

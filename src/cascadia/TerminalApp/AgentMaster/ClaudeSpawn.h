@@ -53,6 +53,13 @@ namespace Agentmaster
         // call only — forgetting it leaves the key out of claude's env, and the launch fails with 401.
         std::wstring authTokenEnv;
         std::wstring presetId; // Agentmaster (PRESETS): the preset this launch compiled ("" = none) — for the [spawn] log line
+        // Agentmaster (OBSERVER.md §21): non-empty when this spec ATTACHES to the live Claude Code background job of that id
+        // instead of resuming the conversation (BuildClaudeSpawn / BuildClaudeRestartSpec ask SetBackgroundJobLookup's lookup
+        // whenever they would resume): `commandline` is then `<claude> attach <job>` (BuildClaudeAttachCommandline), which
+        // runs NO conversation of its own — the job keeps running the turns and firing the hooks. The launch seams read it to
+        // leave the conversation's live state alone (no restore normalization, no API-error rewind, no draft re-typing: the
+        // job's own input box is shown as it is). "" for every other spec.
+        std::wstring attachJobId;
     };
 
     // --- pure helpers (no filesystem / OS state) ---
@@ -265,6 +272,41 @@ namespace Agentmaster
     /// </summary>
     /// <param name="provider">Link::SessionLinkLaunchEnv, or nullptr for no link.</param>
     void SetSessionLinkEnvProvider(SessionLinkEnvProvider provider) noexcept;
+
+    /// <summary>
+    /// Agentmaster (OBSERVER.md §21): what tells the spawn builders that a LIVE Claude Code background session runs a conversation
+    /// they are about to resume — and under which job id. BuildClaudeSpawn (a resume) and BuildClaudeRestartSpec (a resume) ask
+    /// it; a non-empty answer makes the spec ATTACH (`claude attach &lt;job&gt;`, ClaudeSpawnSpec::attachJobId) instead of
+    /// `claude --resume &lt;id&gt;`, which Claude Code 2.1.322 answers by starting a COPY under a new id while the job keeps the
+    /// original. The app sets it to FindLiveBackgroundJobId (ProcessInspect.h) once per process from TerminalPage.AgentEngine.cpp;
+    /// every other program that compiles this file (the CLI, the session database, the m5 harness by default, the probes) leaves
+    /// it unset, so its resumes stay `--resume`, byte for byte. It must not throw: a lookup that fails answers "".
+    /// </summary>
+    /// <param name="sessionId">The conversation the spec would resume.</param>
+    /// <returns>The live job's id, or "" when none runs the conversation.</returns>
+    using BackgroundJobLookup = std::wstring (*)(std::wstring_view sessionId) noexcept;
+
+    /// <summary>
+    /// Sets (or clears, with nullptr) the background-job lookup; later specs use it, earlier ones keep their command lines.
+    /// Thread-safe (an atomic pointer: every window's UI thread builds specs).
+    /// </summary>
+    /// <param name="lookup">FindLiveBackgroundJobId, or nullptr for "never attach".</param>
+    void SetBackgroundJobLookup(BackgroundJobLookup lookup) noexcept;
+
+    /// <summary>
+    /// Agentmaster (OBSERVER.md §21): the command line that opens a Claude Code background session in a terminal —
+    /// `"&lt;claude.exe&gt;" attach &lt;job&gt;` (Claude Code: "Open the background session in this terminal. ← returns to agent
+    /// view, Ctrl+Z drops back to your shell. The session keeps running either way."). No --settings, no --plugin-dir, no
+    /// session id: the attach client runs no conversation; the job keeps its own flags (the daemon re-applies the launch's
+    /// `respawnFlags`, our hooks file included) and fires the hooks. A stopped job is woken by the attach itself. The launcher
+    /// is rendered like BuildClaudeCommandline's (a .cmd / .bat through `cmd /c`; an empty launcher the bare `claude` token).
+    /// </summary>
+    /// <param name="claudeLauncher">The resolved claude launcher, full path ("" = the bare `claude` token).</param>
+    /// <param name="jobId">The background job's id (ClaudeSpawnSpec::attachJobId). It is put on the line as one argument: a job
+    /// id is 8 hex digits, and any other text is reduced to its [A-Za-z0-9_-] characters so the line can carry nothing else.</param>
+    /// <returns>The command line (for BuildPwshHostedCommandline, like every managed claude line).</returns>
+    /// <exception cref="std::bad_alloc">If the line cannot be allocated.</exception>
+    std::wstring BuildClaudeAttachCommandline(std::wstring_view claudeLauncher, std::wstring_view jobId);
 
     // Agentmaster (PRESETS): render a compiled launch's command-line additions — `--effort <level>`, then
     // `--append-system-prompt "<note>"` (PsDoubleQuote: the managed command line runs under the pwsh host's

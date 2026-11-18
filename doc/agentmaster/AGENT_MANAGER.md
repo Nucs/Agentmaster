@@ -215,6 +215,11 @@ it), `AgentLaunchBar.{h,cpp}` (the launch row), `TabManagement.cpp` (closing tab
   (`_FocusClaudeSessionTab`: restore-if-minimized, `SetForegroundWindow`, the `SwitchToThisWindow`
   fallback). A board or tree double-click, tree `Enter`, the Prompt Queue eye and the Sessions page's
   Jump ride this seam.
+- **A background session no tab shows is OPENED** (OBSERVER.md §21, 2026-11-18, NOT BUILT yet): before the fan-out,
+  `_OpenBackgroundSessionTab` takes a live record marked `bgDetached` (a Claude Code background job — the task a
+  `/fork` spun off, a `/bg` session nobody has open — whose card is its own) and opens it in a new tab of THIS window,
+  right after its parent's tab when that tab is here: a resume of the record, which the spawn builder turns into
+  `claude attach <job>`. `[nav] activate <id> (a background session no tab showed: opened in a new tab here)`.
 - **Switching tabs selects the session on the page:** the tab-switch funnel (`_OnTabSelectionChanged`)
   calls `_SyncManagerSelectionToTab` → `SelectSession` (the same path a card click takes) for the newly
   focused tab's session (Claude or Codex). A click, `Ctrl+Tab` and `switchToTab` all route through it;

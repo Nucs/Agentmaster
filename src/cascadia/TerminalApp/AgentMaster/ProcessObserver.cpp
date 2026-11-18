@@ -7,6 +7,7 @@
 #define NOMINMAX
 #include "ProcessObserver.h"
 
+#include "BackgroundSessions.h" // OBSERVER.md §21: which background job a tab shows, a job's parent, the verbs that run no conversation
 #include "ClaudeSpawn.h" // AppendStateLog
 #include "ProcessInspect.h" // SnapshotProcesses / ReadClaudeFacts / FindDescendantByImage / ResolveSessionId / classify
 #include "SessionRegistry.h"
@@ -780,6 +781,58 @@ namespace Agentmaster
             presenceFactByPid[r.pid] = PresenceFact{ r.status, r.waitingFor };
         }
 
+        // 1c) Agentmaster (OBSERVER.md §21 — Claude Code BACKGROUND SESSIONS). Claude Code 2.1.322 runs conversations in its
+        //     daemon (`claude daemon run`, each job a `claude --bg-pty-host ... -- claude ...` with no terminal of ours around
+        //     it): `/fork <task>` runs the task there AND moves the window's own conversation there (a copy under a new id,
+        //     which the window then shows); `/bg` moves it; `claude attach <id>` shows one. A job's hooks carry no WT_SESSION
+        //     (Claude Code drops it for the daemon's children), so only this survey can tell which tab shows which job. From
+        //     the validated rows above:
+        //       presenceRowByPid — each live claude's own row (a window's `parkedJobId` names the job it moved its
+        //                          conversation into; ⚠ pointers into `presence`, valid until step 5 publishes it);
+        //       backgroundJobs   — every live "bg" row of OUR claudes (AM_SESSION: a job another instance or a plain terminal
+        //                          started is not ours to show; the census keeps it External), with its parent;
+        //       spareIds         — the daemon's SPARES (pre-started, parked until a job needs them): their ids are
+        //                          placeholders that never get a conversation, so they never get a card (3c).
+        std::unordered_map<uint32_t, const SessionPresenceRow*> presenceRowByPid;
+        std::vector<BackgroundJob> backgroundJobs;
+        std::vector<std::pair<std::wstring, uint32_t>> spareIds; // (placeholder session id, pid)
+        presenceRowByPid.reserve(presence.size());
+        for (const auto& r : presence)
+        {
+            presenceRowByPid[r.pid] = &r;
+            if (r.kind != kPresenceKindBackground || r.jobId.empty() || !LooksLikeGuid(r.sessionId))
+            {
+                continue;
+            }
+            const auto fit = factsByPid.find(r.pid);
+            if (fit == factsByPid.end() || fit->second.runningApp != RunningApp::Agentmaster)
+            {
+                continue; // not ours (another instance's job, or one started outside every Agentmaster)
+            }
+            if (r.spare)
+            {
+                spareIds.emplace_back(r.sessionId, r.pid);
+                continue;
+            }
+            BackgroundJob job;
+            job.jobId = r.jobId;
+            job.sessionId = r.sessionId;
+            job.pid = r.pid;
+            job.status = r.status;
+            job.waitingFor = r.waitingFor;
+            // Claude Code's own name, else the one its launch environment gave it (CLAUDE_CODE_SESSION_NAME).
+            job.name = !r.name.empty() ? r.name : fit->second.sessionName;
+            job.cwd = !r.cwd.empty() ? r.cwd : fit->second.cwd;
+            job.parentId = BackgroundParentFromLaunch(fit->second.resumeSourceAlive, fit->second.resumeTarget, fit->second.forkSession, r.sessionId);
+            backgroundJobs.push_back(std::move(job));
+        }
+        // The jobs some tab of ours shows this survey (lower-case job ids), filled by step 3; step 3c gives every other job a
+        // card of its own.
+        std::unordered_set<std::wstring> shownJobIds;
+        // This survey's "<WT_SESSION>|<job id>" pairs (step 3): _bgShownLogged is pruned to them, so a park or an attach that
+        // ends and comes back logs its line again.
+        std::unordered_set<std::wstring> bgShownNow;
+
         // 2) Merge every window's roster (one entry per tab; a wtSession lives in exactly one
         //    window). Track the owning windowId per tab (the _rosterByWindow key) — this is the
         //    robust per-window attribution that covers BOTH Launched and hand-typed claudes (§19-Q1).
@@ -833,7 +886,13 @@ namespace Agentmaster
             {
                 const auto fit = factsByPid.find(cpid);
                 const ClaudeProcessFacts f = (fit != factsByPid.end()) ? fit->second : ReadClaudeFacts(cpid);
-                std::wstring sid = ResolveObservedId(f);
+                // Agentmaster (OBSERVER.md §21): a claude that runs one of Claude Code's own verbs (`claude attach`, `claude
+                // agents`, `claude logs`, the daemon) runs NO conversation, so it never takes the transcript-age guess below
+                // (Rule #14's last resort would bind the tab to whichever transcript appears next in its folder); its tab shows
+                // a conversation only through the background job it opens (shownJob, below).
+                const ClaudeCliInvocation invocation = ParseClaudeCliInvocation(f.commandline);
+                const bool runsNoConversation = ClaudeCliVerbRunsNoConversation(invocation.verb);
+                std::wstring sid = runsNoConversation ? std::wstring{} : ResolveObservedId(f);
                 // Claude's OWN presence heartbeat is the authoritative record of the conversation
                 // this pid is CURRENTLY on — it follows /resume and /clear, which the launch-time
                 // --session-id on the cmdline does NOT (a /compact keeps the id: it is in-place).
@@ -843,10 +902,49 @@ namespace Agentmaster
                 // A brand-new spawn that hasn't written presence yet (or a denied PEB start time)
                 // is absent from presenceByPid and falls back to ResolveObservedId (== our launch
                 // id, which is correct until a divergence). Matches the CLI's bind precedence.
-                if (const auto pit = presenceByPid.find(cpid); pit != presenceByPid.end() && LooksLikeGuid(pit->second))
+                if (const auto pit = presenceByPid.find(cpid); !runsNoConversation && pit != presenceByPid.end() && LooksLikeGuid(pit->second))
                 {
                     sid = pit->second;
                 }
+                // Agentmaster (OBSERVER.md §21): does this tab show a Claude Code BACKGROUND job instead of its own claude's
+                // conversation? A window that moved its conversation into the daemon (`/fork` with the fleet on, `/bg`) names
+                // the job in its own row's `parkedJobId` and keeps the OLD id there; a `claude attach <id>` names it on its
+                // command line (ResolveTabShownBackgroundJob). Then the tab's conversation IS the job's: the job's session id
+                // replaces the window's stale one, so the observation below stamps THIS tab's WT_SESSION on the job's record
+                // (its hooks carry none) and the reconcile re-homes the tab onto it — the tab follows its conversation, and
+                // the job's record is the tab's card instead of a tab-less one. Its heartbeat, its busy children, its model and
+                // its folder are the JOB's (the job runs the turns); the pid stays this tab's claude (what Restart and
+                // Deactivate end: the job itself is the daemon's and outlives them).
+                const SessionPresenceRow* ownRow = nullptr;
+                if (const auto rit = presenceRowByPid.find(cpid); rit != presenceRowByPid.end())
+                {
+                    ownRow = rit->second;
+                }
+                const BackgroundJob* shownJob = ResolveTabShownBackgroundJob(backgroundJobs, ownRow ? std::wstring_view{ ownRow->parkedJobId } : std::wstring_view{}, invocation);
+                const ClaudeProcessFacts* jobFacts = nullptr;
+                if (shownJob)
+                {
+                    sid = shownJob->sessionId;
+                    shownJobIds.insert(BackgroundIdLower(shownJob->jobId));
+                    if (const auto jit = factsByPid.find(shownJob->pid); jit != factsByPid.end())
+                    {
+                        jobFacts = &jit->second;
+                    }
+                    const std::wstring pairKey = wtSession + L"|" + BackgroundIdLower(shownJob->jobId);
+                    bgShownNow.insert(pairKey);
+                    if (_bgShownLogged.insert(pairKey).second)
+                    {
+                        AppendStateLog(L"hooks.log",
+                                       L"[bg] tab wt=" + ShortWt(wtSession) + L" (claude pid " + std::to_wstring(cpid) +
+                                           (invocation.verb == ClaudeCliVerb::Attach ? std::wstring{ L", `claude attach`" } : (L", parked its conversation " + (ownRow ? ShortId(ownRow->sessionId) : std::wstring{ L"?" }))) +
+                                           L") shows Claude Code background job " + shownJob->jobId + L" (session " + ShortId(shownJob->sessionId) +
+                                           L", pid " + std::to_wstring(shownJob->pid) + L", \"" + shownJob->name + L"\"" +
+                                           (shownJob->parentId.empty() ? std::wstring{} : (L", from " + ShortId(shownJob->parentId))) +
+                                           L"): the tab follows that conversation\n");
+                    }
+                }
+                // The conversation's folder: the job's own (a fork task may run in a git worktree), else this claude's.
+                const std::wstring convCwd = (shownJob && !shownJob->cwd.empty()) ? shownJob->cwd : f.cwd;
                 const std::wstring ownerWin = ownerByWt.count(wtSession) ? ownerByWt[wtSession] : std::wstring{};
                 correlatedPids.push_back(cpid);
                 rosteredOwner[cpid] = ownerWin; // mark this pid OURS for the census below
@@ -861,14 +959,15 @@ namespace Agentmaster
                 int64_t convCreated = 0, convMtime = 0, convLast = 0, convApi = 0, convTurnStart = 0, convTurnEnd = 0;
                 if (!sid.empty())
                 {
-                    TranscriptTimes(f.cwd, sid, convCreated, convMtime); // ctime=created, mtime=the gate
-                    convLast = _LineDerivedLastActivity(f.cwd, sid, convMtime, &convApi, &convTurnStart, &convTurnEnd); // + the MOST RECENT sort's turn boundaries, same read
+                    // convCwd: a shown background job's transcript lives under ITS folder's project (OBSERVER.md §21).
+                    TranscriptTimes(convCwd, sid, convCreated, convMtime); // ctime=created, mtime=the gate
+                    convLast = _LineDerivedLastActivity(convCwd, sid, convMtime, &convApi, &convTurnStart, &convTurnEnd); // + the MOST RECENT sort's turn boundaries, same read
                 }
 
                 CorrelationRow cr;
                 cr.wtSession = wtSession;
                 cr.claudePid = cpid;
-                cr.cwd = f.cwd;
+                cr.cwd = convCwd; // the bind's folder (the tab's title / color source): the conversation's own
                 cr.sessionId = sid;
                 cr.ownerWindowId = ownerWin;
                 cr.runningApp = RunningApp::Agentmaster; // rostered == in our tab == ours (not AM_SESSION-gated)
@@ -884,7 +983,8 @@ namespace Agentmaster
                 ar.activity = TabActivity::ClaudeCode;
                 ar.image = L"claude.exe";
                 ar.cwd = f.cwd;
-                ar.busy = HasActiveChild(snap, cpid); // O6: claude with a live tool child == mid-turn
+                // O6: claude with a live tool child == mid-turn. A shown background job runs its tools under ITS process.
+                ar.busy = HasActiveChild(snap, shownJob ? shownJob->pid : cpid);
                 ar.sessionId = sid;
                 ar.observedUnixMs = now;
                 act.push_back(std::move(ar));
@@ -898,23 +998,42 @@ namespace Agentmaster
                     o.tabToken = wtSession;
                     o.amSession = f.amSession;
                     o.ownerWindowId = !ownerWin.empty() ? ownerWin : WindowIdFromAmSession(f.amSession);
-                    o.cwd = f.cwd;
+                    o.cwd = convCwd;
                     o.pid = cpid;
                     o.runningApp = RunningApp::Agentmaster;
-                    o.background = f.background;
-                    o.model = f.model;
-                    o.effort = f.effort;
-                    o.permissionMode = f.permissionMode;
-                    o.sessionName = f.sessionName;
+                    // OBSERVER.md §21: a shown job runs with ITS own launch flags (the daemon's respawn flags: model,
+                    // permission mode), so its process facts describe the conversation; the tab's claude only shows it.
+                    const ClaudeProcessFacts& convFacts = jobFacts ? *jobFacts : f;
+                    o.background = shownJob ? true : f.background;
+                    o.model = convFacts.model;
+                    o.effort = convFacts.effort;
+                    o.permissionMode = convFacts.permissionMode;
+                    o.sessionName = shownJob ? shownJob->name : f.sessionName;
                     // Git branch — the live writer for SessionInfo::branch (the per-tab overlay's
                     // row-2 "<workdir folder>/<branch>"). Read LIVE from the working dir's .git/HEAD,
                     // i.e. the CURRENT branch — NOT the transcript's recorded gitBranch, which is a
                     // per-line historical snapshot (first-seen) that reads stale, or "HEAD", when the
                     // repo was momentarily detached as that line was written. A tiny filesystem read.
-                    o.gitBranch = ReadGitBranchForDir(f.cwd);
+                    o.gitBranch = ReadGitBranchForDir(convCwd);
+                    if (shownJob)
+                    {
+                        // OBSERVER.md §21: the job this tab shows, its parent, and — when that parent is the conversation this
+                        // tab is bound to (the tab's own conversation moved into the job: a park, an attach after a restart)
+                        // — the title to keep: the tab keeps its name across the move.
+                        o.bgJobId = shownJob->jobId;
+                        o.bgParentId = shownJob->parentId;
+                        o.bgDetached = false;
+                        if (!shownJob->parentId.empty() && !tab.boundSessionId.empty() && BackgroundIdEquals(shownJob->parentId, tab.boundSessionId))
+                        {
+                            o.carryTitleFrom = tab.boundSessionId;
+                        }
+                        // The JOB's heartbeat: the window's own row says "idle" for as long as it shows the job.
+                        o.presenceStatus = shownJob->status;
+                        o.presenceWaitingFor = shownJob->waitingFor;
+                    }
                     // This PROCESS's own heartbeat first (presenceFactByPid): with one conversation in two or
                     // more processes, the by-session row can be a copy's (OBSERVER.md §20).
-                    if (const auto fpit = presenceFactByPid.find(cpid); fpit != presenceFactByPid.end())
+                    else if (const auto fpit = presenceFactByPid.find(cpid); fpit != presenceFactByPid.end())
                     {
                         o.presenceStatus = fpit->second.status; // claude's own heartbeat (busy/idle/waiting/shell)
                         o.presenceWaitingFor = fpit->second.waitingFor; // why it is blocked, when "waiting"
@@ -1056,6 +1175,147 @@ namespace Agentmaster
                 _registry->ObserveClaude(o);
             }
             _LogDuplicateConversations(duplicates, corr);
+        }
+
+        // 3c) Agentmaster (OBSERVER.md §21): the background sessions NO tab of ours shows, and the daemon's spares.
+        //     A job counts as shown when a tab's claude shows it (step 3) OR a tab is BOUND to its conversation — a restored or
+        //     deactivated tab whose claude has not started yet still owns it (its activation attaches: ClaudeSpawn.h
+        //     SetBackgroundJobLookup). Every other job — the task a `/fork` spun off, a `/bg` session nobody has open — is
+        //     observed on its own: with NO tabToken, titled by Claude Code's name (the registry follows its renames), with its
+        //     parent (the side panel sticks its card right under the parent's) and its job id (opening the card attaches to it
+        //     in a new tab). Its hooks already made its record under the same id; this one fills it.
+        {
+            std::unordered_set<std::wstring> boundSids;
+            for (const auto& [wt, entry] : roster)
+            {
+                if (!entry.boundSessionId.empty())
+                {
+                    boundSids.insert(BackgroundIdLower(entry.boundSessionId));
+                }
+            }
+            std::unordered_set<std::wstring> detachedNow;
+            for (const auto& job : backgroundJobs)
+            {
+                const std::wstring jobKey = BackgroundIdLower(job.jobId);
+                if (shownJobIds.count(jobKey) != 0 || boundSids.count(BackgroundIdLower(job.sessionId)) != 0)
+                {
+                    continue; // a tab shows it, or owns it while its claude has not started
+                }
+                const auto jit = factsByPid.find(job.pid);
+                if (jit == factsByPid.end())
+                {
+                    continue; // belt: backgroundJobs only holds rows of claudes this survey read
+                }
+                const ClaudeProcessFacts& jf = jit->second;
+                const std::wstring& cwd = job.cwd; // filled from the row, else the process (step 1c)
+                int64_t created = 0, mtime = 0, last = 0, api = 0, turnStart = 0, turnEnd = 0;
+                TranscriptTimes(cwd, job.sessionId, created, mtime);
+                last = _LineDerivedLastActivity(cwd, job.sessionId, mtime, &api, &turnStart, &turnEnd);
+                ObservedClaude o;
+                o.sessionId = job.sessionId;
+                // No tabToken (and no ownerWindowId): no tab of ours shows the job. The registry clears a stale token.
+                o.amSession = jf.amSession;
+                o.cwd = cwd;
+                o.pid = job.pid;
+                o.runningApp = RunningApp::Agentmaster;
+                o.background = true;
+                o.model = jf.model;
+                o.effort = jf.effort;
+                o.permissionMode = jf.permissionMode;
+                o.sessionName = job.name;
+                o.gitBranch = ReadGitBranchForDir(cwd);
+                o.presenceStatus = job.status;
+                o.presenceWaitingFor = job.waitingFor;
+                o.observedUnixMs = now;
+                o.createdUnixMs = created;
+                o.lastActivityUnixMs = last;
+                o.apiActivityUnixMs = api;
+                o.turnStartUnixMs = turnStart;
+                o.turnEndUnixMs = turnEnd;
+                o.bgJobId = job.jobId;
+                o.bgParentId = job.parentId;
+                o.bgDetached = true;
+                _registry->ObserveClaude(o);
+                detachedNow.insert(jobKey);
+                if (_bgDetachedLogged.insert(jobKey).second)
+                {
+                    AppendStateLog(L"hooks.log",
+                                   L"[bg] Claude Code background job " + job.jobId + L" (session " + ShortId(job.sessionId) + L", pid " + std::to_wstring(job.pid) +
+                                       L", \"" + job.name + L"\") runs with no tab of ours: its own card" +
+                                       (job.parentId.empty() ? std::wstring{ L" (no parent recorded)" } : (L", below " + ShortId(job.parentId) + L"'s")) +
+                                       L"; opening it attaches in a new tab (claude attach " + job.jobId + L")\n");
+                }
+            }
+            // The once-logged sets follow what this survey saw (a job that becomes tab-less again logs again).
+            for (auto it = _bgDetachedLogged.begin(); it != _bgDetachedLogged.end();)
+            {
+                it = (detachedNow.count(*it) == 0) ? _bgDetachedLogged.erase(it) : std::next(it);
+            }
+            for (auto it = _bgShownLogged.begin(); it != _bgShownLogged.end();)
+            {
+                it = (bgShownNow.count(*it) == 0) ? _bgShownLogged.erase(it) : std::next(it);
+            }
+
+            // The daemon's SPARES: a spare's SessionStart hook minted a live, untitled record under its placeholder id (the old
+            // GUID-titled card); the id never gets a conversation (the spare switches to the job's id when it takes one).
+            // Once its id is proven transcript-less, its record is retired — the registry removes it only while it still is
+            // exactly what that hook made (RetireBackgroundSpare). Asked every survey while the spare lives: its hook can land
+            // after the first survey that saw it. A cheap lookup when there is nothing to remove.
+            std::unordered_set<std::wstring> sparesNow;
+            for (const auto& [spareId, sparePid] : spareIds)
+            {
+                const std::wstring key = BackgroundIdLower(spareId);
+                sparesNow.insert(key);
+                auto checked = _spareTranscriptless.find(key);
+                if (checked == _spareTranscriptless.end())
+                {
+                    checked = _spareTranscriptless.emplace(key, !ClaudeConversationExists(spareId)).first;
+                    if (!checked->second)
+                    {
+                        AppendStateLog(L"hooks.log", L"[bg-spare] " + ShortId(spareId) + L" (pid " + std::to_wstring(sparePid) + L") is marked a spare but HAS a transcript - its record is left alone\n");
+                    }
+                }
+                if (checked->second)
+                {
+                    _registry->RetireBackgroundSpare(spareId);
+                }
+            }
+            for (auto it = _spareTranscriptless.begin(); it != _spareTranscriptless.end();)
+            {
+                it = (sparesNow.count(it->first) == 0) ? _spareTranscriptless.erase(it) : std::next(it);
+            }
+
+            // The END of a tab-less record: a live record no tab of ours binds (no token, no injector) whose conversation NO live
+            // claude runs any more — a detached job that finished, a spare that exited before a survey named it — kept a live
+            // card for good. Every live claude writes a presence row naming its conversation, so a candidate no row names is
+            // over: the registry retires it once it has been quiet for its grace (removed when it never got a transcript,
+            // archived otherwise; RetireTablessSession). The transcript question is a directory glob, asked once per id.
+            std::unordered_set<std::wstring> liveConversations;
+            liveConversations.reserve(presence.size());
+            for (const auto& r : presence)
+            {
+                liveConversations.insert(BackgroundIdLower(r.sessionId));
+            }
+            std::unordered_set<std::wstring> candidatesNow;
+            for (const auto& id : _registry->TablessLiveSessionIds())
+            {
+                const std::wstring key = BackgroundIdLower(id);
+                if (liveConversations.count(key) != 0)
+                {
+                    continue; // a live claude runs it (a detached job, a spare): its card stays
+                }
+                candidatesNow.insert(key);
+                auto known = _tablessHasTranscript.find(key);
+                if (known == _tablessHasTranscript.end())
+                {
+                    known = _tablessHasTranscript.emplace(key, ClaudeConversationExists(id)).first;
+                }
+                _registry->RetireTablessSession(id, known->second, now);
+            }
+            for (auto it = _tablessHasTranscript.begin(); it != _tablessHasTranscript.end();)
+            {
+                it = (candidatesNow.count(it->first) == 0) ? _tablessHasTranscript.erase(it) : std::next(it);
+            }
         }
 
         // Drop cached shell cwds for tabs no longer in any window's roster (closed tabs).

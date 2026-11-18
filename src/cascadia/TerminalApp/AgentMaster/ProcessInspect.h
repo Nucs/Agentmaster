@@ -80,6 +80,28 @@ namespace Agentmaster
     // STILL_ACTIVE is false). A cheap liveness gate for the cached-PID fast path.
     bool ProcessAlive(uint32_t pid);
 
+    /// <summary>
+    /// Agentmaster (OBSERVER.md §21): the job id of the LIVE Claude Code background session that runs `sessionId` right now, if
+    /// any — the answer the spawn builders need before they resume a conversation (ClaudeSpawn.h SetBackgroundJobLookup), set
+    /// as their lookup by TerminalPage.AgentEngine.cpp.
+    /// </summary>
+    /// <remarks>
+    /// Why it matters: Claude Code 2.1.322 does NOT open a conversation that a background session holds when it is resumed with
+    /// `claude --resume &lt;id&gt;` — it starts a COPY under a new id ("session X is already running in the background, so this
+    /// started a copy as Y"), and the two then diverge. `claude attach &lt;job&gt;` is the only way to show that conversation in a
+    /// terminal. So a window restore, a Deactivate's re-activation, a Restart or a Sessions-page resume of such a session must
+    /// attach. A direct read of the presence rows (one small file per live claude, ~60 here), never the observer's table: the
+    /// observer's first survey may not have run when a restored tab starts. A row counts when it is a "bg" row (not a spare)
+    /// naming `sessionId`, its process lives, and the row is that process's own (PresenceRowMatchesProcess — a dead job's
+    /// leftover file under a reused pid never counts). ⚠ A race remains by nature: a job that ends right after this answer
+    /// makes the attach WAKE it again (Claude Code's attach restarts a stopped job), which keeps the conversation one.
+    /// </remarks>
+    /// <param name="sessionId">The conversation about to be resumed (compared ignoring ASCII case).</param>
+    /// <returns>The job id (`claude attach &lt;job&gt;` takes it), or "" when no live background session runs the conversation, or
+    /// when the presence directory cannot be read. Never throws: a failure is logged (Rule #18) and answers "" — the
+    /// launch then resumes as it always did.</returns>
+    std::wstring FindLiveBackgroundJobId(std::wstring_view sessionId) noexcept;
+
     // ===== Orphaned console groups — the reaper's primitives (OBSERVER.md §13a) ==============
     //
     // A managed session is a pwsh-hosted claude.exe (or codex.exe) attached to a ConPTY whose HOST

@@ -326,7 +326,62 @@ namespace Agentmaster
         // conversation id yet — §11d). Thread-safe.
         // Agentmaster (RETIRED HOSTS): an observation whose (sessionId, tabToken) pair is retired
         // (RetireHostToken) is DROPPED whole — it describes the dying claude of a connection we replaced.
+        // Agentmaster (OBSERVER.md §21 — Claude Code BACKGROUND SESSIONS): it also merges the background facts —
+        // bgJobId and bgDetached as observed, bgParentId never clobbered with "" — and two title rules: a DETACHED
+        // observation (no tab of ours shows the job) clears the record's stale tabToken and follows Claude Code's own
+        // name for it (FollowBackgroundSessionName: while the title is still the name it took last, or empty); a tab's
+        // observation with carryTitleFrom gives an untitled record that conversation's title (the tab's conversation
+        // moved into the job, so the tab keeps its name). The adoption handlers fire only for a new record WITH a
+        // tabToken: a detached background session has no ConPTY of ours to bind.
         void ObserveClaude(const ObservedClaude& o);
+
+        /// <summary>
+        /// Agentmaster (OBSERVER.md §21): forget the record of a Claude Code SPARE — a background process the daemon starts
+        /// ahead of time and parks until a job needs it. Its SessionStart hook arrives like any other (with no tabToken), so
+        /// the hook adoption minted a live, untitled `external` record under the spare's placeholder id, which used to show as
+        /// a card titled with the GUID. That id never gets a conversation: when the spare takes a job, its process switches to
+        /// the job's own id. The Fleet Observer calls this for every presence row marked `spare` whose id has no transcript.
+        /// </summary>
+        /// <remarks>
+        /// Removed only when the record still is exactly what that hook made: `external`, no stdin injector (no tab of ours
+        /// ever bound it), no prompt in its queue, no title. Anything else (a record a tab bound, a queue the user filled) is
+        /// left as it is — a spare's placeholder can never be any of those, so a mismatch means the id is a real session's.
+        /// The removal notifies like Remove (the cards drop it) and logs one [bg-spare] line.
+        /// </remarks>
+        /// <param name="sessionId">The spare's placeholder session id (its presence row's sessionId).</param>
+        /// <returns>True when the record was removed; false when there was none or it was left alone.</returns>
+        /// <exception cref="std::bad_alloc">On allocation failure only (the notify's snapshot copy).</exception>
+        bool RetireBackgroundSpare(const std::wstring& sessionId);
+
+        // Agentmaster (OBSERVER.md §21): the grace a TAB-LESS live record gets before RetireTablessSession may retire it — measured
+        // from its last hook or observation, whichever is newer. Long enough for a fresh claude to write its presence row (~1 s)
+        // and for a daemon job between two of its hooks to show up in a survey (every 2 s); short enough that the card of a job
+        // that ended goes within seconds.
+        static constexpr int64_t kTablessRetireGraceMs = 15000;
+
+        /// <summary>
+        /// Agentmaster (OBSERVER.md §21): the ids of the LIVE records that no tab of ours binds — no tabToken and no stdin
+        /// injector — the candidates the Fleet Observer checks against the live claudes of a survey (RetireTablessSession).
+        /// Claude Code's background sessions and the daemon's spares start that way (their hooks carry no WT_SESSION), and such a
+        /// record had no end: a job that finished, or a spare that exited before any survey saw it, kept a live card for good.
+        /// </summary>
+        /// <returns>The ids, in the registry's order. A lean read: copies ids only.</returns>
+        /// <exception cref="std::bad_alloc">On allocation failure only.</exception>
+        std::vector<std::wstring> TablessLiveSessionIds() const;
+
+        /// <summary>
+        /// Agentmaster (OBSERVER.md §21): end the card of a tab-less live record whose conversation NO live claude runs any more
+        /// (the Fleet Observer found no presence row naming it). Re-checked under the lock: still live, still no tabToken and no
+        /// injector, and quiet — no hook and no observation for kTablessRetireGraceMs. Then a record that never got a
+        /// conversation (no transcript, `external`, nothing queued: a spare that exited, a placeholder) is removed; any other is
+        /// ARCHIVED like a closed session (live = false: kept, resumable from the Sessions browser — Rule #16). One [tabless] line.
+        /// </summary>
+        /// <param name="sessionId">The candidate (TablessLiveSessionIds).</param>
+        /// <param name="hasTranscript">Whether its transcript exists (the caller asks ClaudeConversationExists, never under this lock).</param>
+        /// <param name="nowMs">The survey's clock (system-clock ms), for the grace.</param>
+        /// <returns>True when the record was removed or archived; false when it was left as it is.</returns>
+        /// <exception cref="std::bad_alloc">On allocation failure only.</exception>
+        bool RetireTablessSession(const std::wstring& sessionId, bool hasTranscript, int64_t nowMs);
 
         // Agentmaster (RETIRED HOSTS — the deactivate/restart unbind race): record that the ConPTY
         // `tabToken` no longer hosts `sessionId` because WE replaced it: Deactivate parks a fresh, never-

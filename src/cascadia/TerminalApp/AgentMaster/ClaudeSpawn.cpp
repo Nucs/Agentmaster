@@ -847,6 +847,51 @@ exit 0
         return cmd;
     }
 
+    std::wstring BuildClaudeAttachCommandline(std::wstring_view claudeLauncher, std::wstring_view jobId)
+    {
+        // The launcher, rendered as BuildClaudeCommandline renders it (CreateProcessW appends only ".exe" and ignores PATHEXT,
+        // so a full path is mandatory; a batch launcher runs through cmd /c). Repeated here rather than shared, so the managed
+        // launch line's code stays exactly as it was.
+        bool batch = false;
+        if (!claudeLauncher.empty())
+        {
+            const auto dot = claudeLauncher.find_last_of(L'.');
+            if (dot != std::wstring_view::npos)
+            {
+                std::wstring ext{ claudeLauncher.substr(dot) };
+                for (auto& c : ext)
+                {
+                    if (c >= L'A' && c <= L'Z')
+                    {
+                        c = static_cast<wchar_t>(c - L'A' + L'a');
+                    }
+                }
+                batch = (ext == L".cmd" || ext == L".bat");
+            }
+        }
+        const std::wstring exe = claudeLauncher.empty() ? std::wstring{ L"claude" } : (L"\"" + std::wstring{ claudeLauncher } + L"\"");
+        // The job id goes on the line as ONE bare argument: Claude Code's job ids are 8 hex digits, and the line runs through
+        // the pwsh host's `&` operator (BuildPwshHostedCommandline), so anything but [A-Za-z0-9_-] is dropped — a value read
+        // from a presence file can never smuggle a second argument or a PowerShell expression onto the line.
+        std::wstring job;
+        job.reserve(jobId.size());
+        for (const wchar_t c : jobId)
+        {
+            if ((c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9') || c == L'-' || c == L'_')
+            {
+                job.push_back(c);
+            }
+        }
+        const std::wstring cmd = exe + L" attach " + job;
+        if (batch)
+        {
+            // cmd /c strips the first and last quote of a line with more than two of them: one outer pair keeps the
+            // launcher's own quotes (BuildClaudeCommandline's rule).
+            return L"cmd /c \"" + cmd + L"\"";
+        }
+        return cmd;
+    }
+
     std::wstring BuildCodexCommandline(std::wstring_view resumeCodexUuid, std::wstring_view forkCodexUuid, std::wstring_view codexLauncher)
     {
         // How to invoke codex. Like claude, the programmatic spawn runs through ConPTY's CreateProcessW,
@@ -4904,6 +4949,42 @@ send - nothing is submitted until the user presses Enter in that tab.
         g_sessionLinkEnvProvider.store(provider);
     }
 
+    // Agentmaster (OBSERVER.md §21): the background-job lookup, set once per process by the app (nullptr in every other
+    // program that compiles this file: their resumes never attach). Atomic like the providers above.
+    static std::atomic<BackgroundJobLookup> g_backgroundJobLookup{ nullptr };
+
+    void SetBackgroundJobLookup(BackgroundJobLookup lookup) noexcept
+    {
+        g_backgroundJobLookup.store(lookup);
+    }
+
+    // Turn a RESUME spec into an ATTACH when a live Claude Code background session runs its conversation (the lookup says so):
+    // `claude --resume <id>` would start a copy under a new id beside the running job, `claude attach <job>` shows the job
+    // itself. Called by both builders right after their command line is built, and only for a resume (never a fork, a re-fork
+    // or a fresh launch: none of those continues a conversation a job may hold). Logs one [bg-attach] line per attach.
+    //   spec           - the built spec (its sessionId is the resumed conversation); its commandline and attachJobId change.
+    //   claudeLauncher - the resolved claude launcher (BuildClaudeAttachCommandline renders it).
+    //   seam           - "launch" or "restart", for the log line.
+    // Never throws past std::bad_alloc (the lookup itself must not throw; a failed one answers "").
+    static void AttachIfBackgroundJobHolds(ClaudeSpawnSpec& spec, std::wstring_view claudeLauncher, const wchar_t* seam)
+    {
+        const auto lookup = g_backgroundJobLookup.load();
+        if (!lookup)
+        {
+            return;
+        }
+        std::wstring job = lookup(spec.sessionId);
+        if (job.empty())
+        {
+            return;
+        }
+        spec.commandline = BuildClaudeAttachCommandline(claudeLauncher, job);
+        AppendStateLog(L"hooks.log", L"[bg-attach] " + ShortId(spec.sessionId) + L" " + seam + L": Claude Code background job " + job +
+                                         L" runs this conversation - the tab ATTACHES to it (claude attach " + job +
+                                         L") instead of resuming a copy under a new id\n");
+        spec.attachJobId = std::move(job);
+    }
+
     // The session link's variables for one launch (AM_LINK + AM_LINK_TOKEN), appended to the spec's env AFTER the managed
     // variables and the cog's env, so a user entry can never replace the launch's own token. Nothing when no provider is set
     // or the server is not running. Never throws (the provider must not either).
@@ -5023,6 +5104,12 @@ send - nothing is submitted until the user presses Enter in that tab.
         spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFromSessionId, claudeLauncher,
                                                   launch ? std::wstring_view{ launch->model } : modelOverride, initialPrompt,
                                                   launch ? RenderLaunchExtraArgs(*launch) : std::wstring{}, modArgs);
+        // OBSERVER.md §21: a resumed conversation that a live Claude Code background session runs is ATTACHED to (a window
+        // restore, a Sessions-page resume, opening a card no tab shows). Only a resume: a fork copies, a fresh launch is new.
+        if (resume)
+        {
+            AttachIfBackgroundJobHolds(spec, claudeLauncher, L"launch");
+        }
         return spec;
     }
 
@@ -5082,6 +5169,13 @@ send - nothing is submitted until the user presses Enter in that tab.
         spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFrom, claudeLauncher,
                                                   launch ? std::wstring_view{ launch->model } : std::wstring_view{}, {},
                                                   launch ? RenderLaunchExtraArgs(*launch) : std::wstring{}, modArgs);
+        // OBSERVER.md §21: a Restart or a Deactivate's re-activation of a conversation that a live Claude Code background
+        // session runs RE-ATTACHES to that session (the job keeps running; only the tab's viewer is replaced). A re-fork or a
+        // fresh relaunch never attaches: neither continues a conversation a job may hold.
+        if (resume && forkFrom.empty())
+        {
+            AttachIfBackgroundJobHolds(spec, claudeLauncher, L"restart");
+        }
         return spec;
     }
 }

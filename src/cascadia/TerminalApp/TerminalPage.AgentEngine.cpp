@@ -52,6 +52,7 @@
 #include "AgentMaster/VoiceTranscriber.h" // MESSAGING.md §21.43, VOICE.md §6 — the voice notes' transcriber (the bot's voice factory)
 #include "AgentMaster/LaunchPresetsOs.h" // MESSAGING.md §21.25 — LaunchMenuEntries / ShouldOfferAddPresets: the bot wizard's model step
 #include "AgentMaster/Persistence.h" // Load/SaveAppSettings
+#include "AgentMaster/ProcessInspect.h" // FindLiveBackgroundJobId — the spawn builders' background-job lookup (OBSERVER.md §21, set below)
 #include "AgentMaster/ProcessObserver.h" // UnpublishWindow (teardown; Rule #10)
 #include "AgentMaster/SessionLink.h" // MOD_LINK.md — the session link's server and its launch env provider (started below)
 #include "AgentMaster/SideQuestion.h" // MESSAGING.md §21.56 — the side question's preset lookup (set below)
@@ -1456,6 +1457,16 @@ namespace winrt::TerminalApp::implementation
         {
             static std::once_flag bundledModsOnce;
             std::call_once(bundledModsOnce, [] { ::Agentmaster::SetBundledModArgsProvider(&::Agentmaster::BundledModPluginArgs); });
+        }
+
+        // Agentmaster (OBSERVER.md §21 — Claude Code BACKGROUND SESSIONS): the spawn builders' background-job lookup, once per
+        // process. A resume of a conversation that a live background job runs (a restored tab whose conversation a `/fork` or
+        // `/bg` moved into Claude Code's daemon, a Restart or a re-activation of it, a card no tab shows being opened) must
+        // ATTACH to the job — `claude --resume` would start a copy under a new id beside it. FindLiveBackgroundJobId reads the
+        // presence rows directly (the observer's first survey may not have run when a restored tab starts) and never throws.
+        {
+            static std::once_flag backgroundJobLookupOnce;
+            std::call_once(backgroundJobLookupOnce, [] { ::Agentmaster::SetBackgroundJobLookup(&::Agentmaster::FindLiveBackgroundJobId); });
         }
 
         // Agentmaster (MOD_LINK.md, MESSAGING.md §21.56): the SESSION LINK — the loopback server the bundled agentmaster-link

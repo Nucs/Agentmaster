@@ -1998,6 +1998,13 @@ namespace Agentmaster
             // round a numeric form, so only the string is decoded (a numeric one reads 0 = unknown,
             // which falls back to the startedAt window rather than risking a false reject).
             r.procStartUnixMs = PresenceProcStartToUnixMs(parsed->StrAt(L"procStart"));
+            // Agentmaster (OBSERVER.md §21): the background-session facts (see the header). Absent on an older claude -> "" /
+            // false, which reads as an ordinary interactive session everywhere.
+            r.kind = parsed->StrAt(L"kind");
+            r.jobId = parsed->StrAt(L"jobId");
+            r.parkedJobId = parsed->StrAt(L"parkedJobId");
+            r.name = parsed->StrAt(L"name");
+            r.spare = parsed->BoolAt(L"spare");
             return r.pid != 0 && !r.sessionId.empty();
         }
 

@@ -62,6 +62,14 @@ namespace Agentmaster
     // SessionState::Error (NextSessionState). Only a turn event does — the user's next message, the first
     // line of a continued turn, or claude's own working heartbeat.
     inline constexpr std::wstring_view kHookSourceResume = L"resume";
+    // Agentmaster (OBSERVER.md §21 — the built-in commands that move a conversation): the SessionStart `source` of a session
+    // that starts as a FORK of another. Claude Code 2.1.322's `/branch [name]` writes a copy of the conversation (every line
+    // carrying `forkedFrom`) and switches the SAME process to it — a new id on the same ConPTY, like a /clear — so the hook
+    // arrives with the tab's WT_SESSION and re-homes the tab. Not state-bearing: SessionRegistry::OnHookEvent gives the new
+    // record the forked conversation's title as a fork title (DeriveForkTitle: "gaprush" -> "gaprush (fork)") instead of the
+    // folder name a re-home would derive. A `--fork-session` launch (Agentmaster's own Fork, a daemon job) reports it too;
+    // those records are titled at launch, or have no ConPTY of ours, so the rule leaves them alone.
+    inline constexpr std::wstring_view kHookSourceFork = L"fork";
     inline constexpr std::wstring_view kCompactTriggerManual = L"manual"; // a user-typed `/compact` (the session was AT REST before it)
     inline constexpr std::wstring_view kCompactTriggerAuto = L"auto"; // an auto-compaction (normally MID-TURN: the turn continues after it)
 

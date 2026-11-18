@@ -972,15 +972,27 @@ void TestRegistryFanout()
     std::wstring seen2;
     reg.AddAdoptionHandler([&](const std::wstring& id, const std::wstring&, const std::wstring&) { ad1.fetch_add(1); seen1 = id; });
     const auto adTok2 = reg.AddAdoptionHandler([&](const std::wstring& id, const std::wstring&, const std::wstring&) { ad2.fetch_add(1); seen2 = id; });
-    reg.OnHookEvent(Msg(L"ext-a", HookEvent::SessionStart));
+    // Each start names its ConPTY: only a SessionStart with a tabToken fans out (OBSERVER.md §21 — a token-less one, such as a
+    // Claude Code background session's, can be bound by no window).
+    HookMessage startA = Msg(L"ext-a", HookEvent::SessionStart);
+    startA.tabToken = L"wt-fan-a";
+    reg.OnHookEvent(startA);
     CHECK(ad1.load() == 1 && ad2.load() == 1, "both adopters fired for a new session");
     CHECK(seen1 == L"ext-a" && seen2 == L"ext-a", "both adopters got the id");
 
     // Detach the second adopter; only the first fires for the next new session.
     reg.RemoveAdoptionHandler(adTok2);
-    reg.OnHookEvent(Msg(L"ext-b", HookEvent::SessionStart));
+    HookMessage startB = Msg(L"ext-b", HookEvent::SessionStart);
+    startB.tabToken = L"wt-fan-b";
+    reg.OnHookEvent(startB);
     CHECK(ad1.load() == 2, "remaining adopter fired for the second new session");
     CHECK(ad2.load() == 1, "removed adopter did not fire");
+
+    // OBSERVER.md §21: a SessionStart WITHOUT a tabToken (a Claude Code background session, a daemon spare) still makes its
+    // record — the hooks drive its state — but fans out to no adopter: no window could bind it, it only logged that it could not.
+    reg.OnHookEvent(Msg(L"ext-bg", HookEvent::SessionStart));
+    CHECK(ad1.load() == 2, "a token-less SessionStart fans out to no adopter");
+    CHECK(reg.Get(L"ext-bg") && reg.Get(L"ext-bg")->live && reg.Get(L"ext-bg")->external, "...but its record is still made (live, external)");
 }
 
 // Agentmaster: a `claude --resume <src> --fork-session --session-id <new>` fork (the Sessions-page /

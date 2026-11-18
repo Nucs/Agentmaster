@@ -38,6 +38,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "BackgroundSessions.h" // kPresenceKindBackground + BackgroundIdEquals (FindLiveBackgroundJobId, OBSERVER.md §21)
 #include "ClaudeSpawn.h" // ClaudeProjectsDir() — the live Claude transcript root
 #include "Json.h" // transcript line parsing (ReadTranscriptInfo)
 #include "TranscriptStore.h" // IsNoiseUserPrompt + PickDisplayTitle (the shared prompt-noise + title-precedence rules)
@@ -858,6 +859,25 @@ namespace Agentmaster
             background = true;
         }
         facts.background = background;
+
+        // --- Agentmaster (OBSERVER.md §21): the parent of a background session (BackgroundParentFromLaunch's inputs) ---
+        // The daemon gives a `/fork` task "<self>|<fork boundary>|<source id>"; a `/fork` or `/bg` that moved a window's
+        // conversation into the daemon runs `--fork-session --resume <that conversation's transcript>`. The flag is matched as
+        // a whole argument (ExtractCmdlineArg's tokenizer), so a prompt that merely mentions it does not count.
+        facts.resumeSourceAlive = EnvLookup(env, L"CLAUDE_CODE_RESUME_SOURCE_ALIVE");
+        facts.forkSession = false;
+        for (const auto& tok : TokenizeCmdline(commandline))
+        {
+            if (tok == L"--")
+            {
+                break; // a hosted command line follows (the pty host's): its flags are not this process's
+            }
+            if (tok == L"--fork-session")
+            {
+                facts.forkSession = true;
+                break;
+            }
+        }
     }
 
     std::wstring WindowIdFromAmSession(std::wstring_view amSession)
@@ -903,6 +923,39 @@ namespace Agentmaster
     }
 
     // ===== OS-touching: full facts read ====================================================
+
+    std::wstring FindLiveBackgroundJobId(std::wstring_view sessionId) noexcept
+    {
+        try
+        {
+            if (sessionId.empty())
+            {
+                return {};
+            }
+            for (const auto& row : ReadSessionPresence())
+            {
+                // Only a WORKING background session holds a conversation: an interactive row is a terminal's own claude (a
+                // resume of ITS conversation is the duplicate case, OBSERVER.md §20), and a spare's id is a placeholder.
+                if (row.kind != kPresenceKindBackground || row.spare || row.jobId.empty() || !BackgroundIdEquals(row.sessionId, sessionId))
+                {
+                    continue;
+                }
+                // The row must be its live process's own: a crashed job's file lingers, and Windows reuses pids.
+                if (!ProcessAlive(row.pid) || !PresenceRowMatchesProcess(row, ProcessStartUnixMs(row.pid)))
+                {
+                    continue;
+                }
+                return row.jobId;
+            }
+        }
+        catch (...)
+        {
+            // std::bad_alloc reading the rows: answer "no job", so the launch resumes as before (a copy at worst, never a
+            // lost launch). Logged, Rule #18.
+            LogSwallowedException(L"FindLiveBackgroundJobId");
+        }
+        return {};
+    }
 
     ClaudeProcessFacts ReadClaudeFacts(uint32_t pid)
     {

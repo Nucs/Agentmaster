@@ -407,6 +407,23 @@ namespace Agentmaster
         // creation, so it can only be matched within a window — it identifies THE process. 0 when absent
         // (an older claude, POSIX) or unparseable, which falls back to the startedAt window.
         int64_t procStartUnixMs{};
+        // Agentmaster (OBSERVER.md §21 — Claude Code BACKGROUND SESSIONS, written by claude >= 2.1.3xx; "" / false on an older
+        // claude, which every reader treats as "an ordinary interactive session"):
+        //   kind        — "interactive" (a terminal's own claude), "bg" (a session Claude Code's daemon hosts, with no terminal
+        //                 of the user's around it: kPresenceKindBackground), "daemon" / "daemon-worker" (run no conversation).
+        //   jobId       — a "bg" row's short job id (`claude attach <jobId>` opens it; the first 8 hex digits of its session id).
+        //   parkedJobId — an interactive row's job that the window MOVED its conversation into (`/fork` with the fleet on,
+        //                 `/bg`): Claude Code's "session X, moved to the background from this window". While it is set, the
+        //                 window shows that job and its own sessionId is the conversation it left (it runs no more turns).
+        //   name        — Claude Code's name for the session (a background session's card title; an interactive row's is
+        //                 usually a derived "<folder>-<n>" that Agentmaster ignores).
+        //   spare       — a pre-started "bg" process waiting for a job ("bornSpare"): no conversation yet, and its sessionId is a
+        //                 placeholder that never gets a transcript. Claude Code clears it once the process starts working.
+        std::wstring kind;
+        std::wstring jobId;
+        std::wstring parkedJobId;
+        std::wstring name;
+        bool spare{};
     };
 
     // PID-reuse tolerances for trusting a presence row as THIS process's (PresenceRowMatchesProcess).

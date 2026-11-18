@@ -221,6 +221,10 @@ int wmain()
     TestVoiceCorrection(); // VOICE.md §5.5 — the correction layer's prompts, guard, command line and output reader (tests_voice.cpp)
     TestVoiceNoteRoute(); // MESSAGING.md §21.43 — a voice note goes where a typed message of its thread goes (tests_voice.cpp)
     TestAiSessionTitle(); // AI_TITLES.md - a new session named by AI at its first prompt: the pure half, the registry read, the round trips, the hook tap (tests_ai_title.cpp)
+    TestBackgroundSessionRules(); // OBSERVER.md §21 - Claude Code background sessions: the verbs, the shown job, the parent, the followed name, the sticky order (tests_background.cpp)
+    TestBackgroundPresenceFacts(); // OBSERVER.md §21 - the presence rows' background fields and the parent's process facts (tests_background.cpp)
+    TestBackgroundAttachSpawn(); // OBSERVER.md §21 - `claude attach <job>` and the spawn builders' background-job lookup (tests_background.cpp)
+    TestBackgroundRegistry(); // OBSERVER.md §21 - detached jobs, the kept tab title, spares, the end of a tab-less record, /branch (tests_background.cpp)
 
     BenchPromptAnchor();
     BenchPromptAnchorRealSession(); // SUMMARY_JUMP.md §4: full batch resolve on a real heavy session (AM_BENCH_SESSION)

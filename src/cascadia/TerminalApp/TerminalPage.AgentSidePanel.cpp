@@ -94,6 +94,7 @@
 #include "AgentMenuHeaderClick.h" // AgentWireSubmenuHeaderClick — the Filter menu's Folder line answers a click on itself (SIDE_PANEL.md §2l)
 #include "AgentPanelFocus.h" // AgentCaptureFocusReturn / AgentPanelHoldsKeyboard / AgentIsUnderElement — the rename card gives the keyboard back where it was (TCM-K2, SIDE_PANEL.md §2o)
 #include "AgentStatusColors.h" // PendingDotsColorFor / CacheWarmSparkColorFor — the status icon's contrast picks (the tab strip's rules, SIDE_PANEL.md §2g); AgentAnimationsEnabled
+#include "AgentMaster/BackgroundSessions.h" // StickyChildOrder — a detached background card sits right below its parent's card (SIDE_PANEL.md §2p)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / LogNav / ShortId
 #include "AgentMaster/Engine.h" // BroadcastSettingsChanged — the ⌖ scroll-to-tab toggle reaches every OTHER open window live; CurrentUnreadSessionIds — which cards' status icons ring (SIDE_PANEL.md §2g)
 #include "AgentMaster/KeyedListDiff.h" // PlanKeyedListOps / ApplyKeyedListOp — the card list's fewest removes / inserts / moves (SIDE_PANEL.md §2c)
@@ -1405,6 +1406,17 @@ namespace
         m.hasNote = hasNote;
         const wchar_t* const pinLine = m.pinned ? L"\npinned to the top of this list (right-click \x25B8 Unpin)" : L"";
         m.tipTitle = s.title;
+        if (s.bgDetached)
+        {
+            // OBSERVER.md §21 / SIDE_PANEL.md §2p: a Claude Code BACKGROUND session that no tab shows (the task a `/fork` spun off, a
+            // `/bg` session nobody has open). The dim line says so first (the band's title is Claude Code's own name for it), and
+            // the tooltip says what a double-click does here: it opens the session in a new tab instead of jumping to one.
+            m.dirLine = L"background \x00B7 " + m.dirLine;
+            m.tipText = dir + (s.branch.empty() ? L"" : (L"\nbranch: " + s.branch)) + tagsLine + pinLine +
+                        L"\nruns in Claude Code's background (job " + s.bgJobId + L"); no tab shows it" +
+                        L"\n\nClick to select \x00B7 double-click to open it in a new tab (claude attach " + s.bgJobId + L") \x00B7 right-click for actions.";
+            return m;
+        }
         m.tipText = dir + (s.branch.empty() ? L"" : (L"\nbranch: " + s.branch)) + tagsLine + pinLine + L"\n\nClick to select \x00B7 double-click to jump to its tab \x00B7 right-click for actions.";
         return m;
     }
@@ -4392,6 +4404,50 @@ namespace winrt::TerminalApp::implementation
                 hosted = _HostedSessionIds();
             }
             _sidePanelRenderedLocalIds = hosted; // empty under GLOBAL — the belt only diffs while LOCAL
+            // SIDE_PANEL.md §2p (OBSERVER.md §21): the card each DETACHED Claude Code background session's card sticks under — the
+            // user's "the card should be sticky below the parent card". Its parent conversation's own card while that is live;
+            // else the live card that holds the parent's ConPTY — the TAB the task came from, whose conversation moved on under
+            // a new id (a `/fork` parks the tab's conversation in a job, a /clear starts another). None when neither is live:
+            // the card then keeps its sorted place. Built only when the snapshot holds such a card (normally none).
+            std::unordered_map<std::wstring, std::wstring> stickyParentOf;
+            if (std::any_of(snap.begin(), snap.end(), [](const ::Agentmaster::SessionInfo& x) { return x.bgDetached && !x.bgParentId.empty(); }))
+            {
+                std::unordered_set<std::wstring_view> liveIds;
+                liveIds.reserve(snap.size());
+                for (const auto& x : snap)
+                {
+                    liveIds.insert(x.id);
+                }
+                for (const auto& x : snap)
+                {
+                    if (!x.bgDetached || x.bgParentId.empty())
+                    {
+                        continue;
+                    }
+                    std::wstring parent;
+                    if (liveIds.count(x.bgParentId) != 0)
+                    {
+                        parent = x.bgParentId;
+                    }
+                    else if (const std::wstring parentToken = _sessionRegistry->GetTabToken(x.bgParentId); !parentToken.empty())
+                    {
+                        // The parent record is archived (GetTabToken reads it all the same): find the live, tab-bound card on
+                        // its ConPTY. A detached card never qualifies (it has no tab, and its token is cleared).
+                        for (const auto& y : snap)
+                        {
+                            if (y.id != x.id && !y.bgDetached && ::Agentmaster::TabTokenEq(y.tabToken, parentToken))
+                            {
+                                parent = y.id;
+                                break;
+                            }
+                        }
+                    }
+                    if (!parent.empty() && parent != x.id)
+                    {
+                        stickyParentOf.emplace(x.id, std::move(parent));
+                    }
+                }
+            }
 
             // Bookmark tags and ★, from their per-session caches. The epochs are loaded BEFORE any read (the SessionStore.h
             // contract): a write landing during the reads below leaves the older epoch stored, so the next update re-reads — a
@@ -4447,7 +4503,13 @@ namespace winrt::TerminalApp::implementation
                 }
                 if (local && hosted.find(s.id) == hosted.end())
                 {
-                    continue; // hosted by another window (or a live session with no tab here) — not "here"
+                    // SIDE_PANEL.md §2p: a detached background card has no tab anywhere; it belongs to the window that hosts the
+                    // card it sticks under (the tab it came from). Everything else not hosted here is another window's.
+                    const auto sticky = stickyParentOf.find(s.id);
+                    if (sticky == stickyParentOf.end() || hosted.find(sticky->second) == hosted.end())
+                    {
+                        continue; // hosted by another window (or a live session with no tab here) — not "here"
+                    }
                 }
                 ++liveTotal;
                 if (textNarrows && !SidePanelSessionMatches(s, terms, mode))
@@ -4481,6 +4543,30 @@ namespace winrt::TerminalApp::implementation
                 const int pin = ::Agentmaster::CompareSidePanelPins(a.session->sidePanelPinnedAtUnixMs, b.session->sidePanelPinnedAtUnixMs);
                 return pin < 0 || (pin == 0 && SortKeyLess(_appSettings.boardSort, a.key, b.key));
             });
+            // SIDE_PANEL.md §2p: STICKY — each detached background card right below the card it sticks under, after the sort and
+            // the pins (StickyChildOrder keeps every other row where they put it; a card whose parent the scope or a filter left
+            // out keeps its own place). Skipped whole when no such card is listed.
+            if (!stickyParentOf.empty())
+            {
+                std::vector<std::wstring> rowIds;
+                std::vector<std::wstring> rowParents;
+                rowIds.reserve(rows.size());
+                rowParents.reserve(rows.size());
+                for (const auto& row : rows)
+                {
+                    rowIds.push_back(row.session->id);
+                    const auto sticky = stickyParentOf.find(row.session->id);
+                    rowParents.push_back(sticky != stickyParentOf.end() ? sticky->second : std::wstring{});
+                }
+                const auto stickyOrder = ::Agentmaster::StickyChildOrder(rowIds, rowParents);
+                std::vector<CardRow> stickyRows;
+                stickyRows.reserve(rows.size());
+                for (const size_t index : stickyOrder)
+                {
+                    stickyRows.push_back(rows[index]);
+                }
+                rows.swap(stickyRows);
+            }
 
             // Bookmark tags, from the per-card cache (its epoch was checked above, _SidePanelSyncFactCaches, before any read).
             bool anyTagged = false;

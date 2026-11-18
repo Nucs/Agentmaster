@@ -56,6 +56,27 @@ fallbacks make it self-wire:
 > unaffected (it sets env explicitly via `spec.env`). This degradation is *why* the Fleet Observer
 > exists: it keys binding on the roster correlation, not on the shim/pipe env (Rule #13).
 
+### Built-in commands that move a conversation — background sessions, `/branch` (2026-11-18, NOT BUILT yet)
+
+The whole picture (Claude Code 2.1.322's daemon, which command does what, what Agentmaster does about each) is
+OBSERVER.md §21. What it means for the hooks:
+
+- **A Claude Code BACKGROUND session's hooks carry no `tabToken`.** `/fork <task>` (fleet on), `/background` (`/bg`)
+  and `/subtask` run conversations in Claude Code's daemon; its jobs inherit the tab's environment (our `CCMGR_*`,
+  `AM_SESSION`, `AM_LINK*`, and our `--settings` through the job's `respawnFlags`) EXCEPT `WT_SESSION`. So the wire's
+  `tabToken` is empty and the hook adoption can bind nothing: such a SessionStart makes a live, untitled `external`
+  record and, since 2026-11-18, fans out to no window (`OnHookEvent`: it only logged `[bind-try] … token=` and
+  `[adopt] … observe-only (no tabToken)` in each). The Fleet Observer places the record: a tab whose claude shows the
+  job binds it (its WT_SESSION stamped by the observation), a job no tab shows gets a card of its own, a daemon spare's
+  placeholder is forgotten, and a record nothing runs any more is retired (OBSERVER.md §21c).
+- **`/branch [name]`** writes a copy of the conversation and switches the SAME claude to it: a SessionStart with
+  source `fork` (`kHookSourceFork`) and the tab's token, which re-homes the tab like a `/clear`. `OnHookEvent` gives the
+  new record `DeriveForkTitle` of the other record holding that ConPTY ("gaprush" → "gaprush (fork)"), while its title
+  is empty or still the folder name the bind derived (`SessionInfo::titleDerivedAtBind`, set by
+  `_BindClaudeSessionToTab` — the observer can bind first). A `[branch]` line says so. No `continuedFromId`: the copy
+  holds the history itself (every line carries `forkedFrom`), so the summary needs no extra link.
+- **`/cd <path>`** keeps the session id (the transcript moves to the new folder's project): nothing to follow.
+
 ## Transport
 
 There is **no JSON on the wire** and no network. One hook invocation produces one **UTF-8,

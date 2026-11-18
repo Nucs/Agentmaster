@@ -95,6 +95,12 @@ namespace Agentmaster
         std::wstring sessionIdArg; // --session-id <id>  (when explicitly passed)
         bool background{}; // CLAUDE_CODE_SESSION_KIND=bg / CLAUDE_BG_* / "daemon run"
         std::wstring sessionName; // CLAUDE_CODE_SESSION_NAME (bg jobs)
+        // Agentmaster (OBSERVER.md §21 — the parent of a Claude Code background session, BackgroundParentFromLaunch's inputs):
+        // env CLAUDE_CODE_RESUME_SOURCE_ALIVE ("<self>|<fork boundary>|<source id>", what the daemon gives a `/fork` task; ""
+        // when absent) and whether the command line carries `--fork-session` (the process runs a COPY of its `--resume`
+        // target — the conversation a `/fork` or `/bg` moved out of a window).
+        std::wstring resumeSourceAlive;
+        bool forkSession{};
         // env AM_HARNESS (kHarnessEnvMarker): non-empty == a harness child of an Agentmaster — not
         // a session. Every census skips it. Empty also when the environment could not be read
         // (denied / elevated): such a process is then listed like any other unreadable claude.
@@ -238,6 +244,22 @@ namespace Agentmaster
         // with a monotonic MAX, so a 0 or a lagging survey never regresses a hook's newer stamp.
         int64_t turnStartUnixMs{};
         int64_t turnEndUnixMs{};
+        // --- Agentmaster (OBSERVER.md §21 — Claude Code BACKGROUND SESSIONS, BackgroundSessions.h) ---
+        // The Claude Code background job the observed conversation runs in ("" when it runs in the observed process itself):
+        // set for a tab whose claude SHOWS a job (a parked window, a `claude attach`) and for a background session no tab
+        // shows. The handle `claude attach <bgJobId>` takes (SessionInfo::bgJobId).
+        std::wstring bgJobId;
+        // The conversation that background session was made from (BackgroundJob::parentId); "" when unknown. The registry
+        // never clobbers a known parent with "" (a parent never changes).
+        std::wstring bgParentId;
+        // True for a background session NO tab of ours shows (the survey's tab-less observation): its tabToken is "" by
+        // definition and the registry clears a stale one, it gets a card of its own titled by Claude Code's name
+        // (sessionName), and opening it starts `claude attach <bgJobId>` in a new tab. False for every tab's observation.
+        bool bgDetached{};
+        // Set only on a TAB's observation of a background job whose parent is the conversation that tab is bound to: the
+        // tab's own conversation moved into the job (a `/fork` or `/bg` park, an attach after a restart), so the job's record
+        // takes that conversation's title when it has none yet — the tab keeps its name across the move. "" otherwise.
+        std::wstring carryTitleFrom;
     };
 
     // An EXTERNAL agent — one we do NOT manage: a real Windows Terminal claude (has a WT_SESSION

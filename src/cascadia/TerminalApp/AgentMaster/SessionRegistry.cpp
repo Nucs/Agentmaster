@@ -9,7 +9,9 @@
 #include <chrono>
 #include <cstdio> // swprintf (the [ups] disposition trace's FNV-1a fingerprint)
 
+#include "BackgroundSessions.h" // FollowBackgroundSessionName (OBSERVER.md §21: a detached background session's title)
 #include "ClaudeSpawn.h" // AppendStateLog (the --fork-session source-id-echo suppression trace)
+#include "Persistence.h" // DeriveForkTitle (OBSERVER.md §21: a `/branch` keeps the tab's name as a fork title)
 #include "TranscriptStore.h" // IsNoiseUserPrompt — keep teammate/control protocol out of the Typed record
 
 namespace
@@ -905,6 +907,44 @@ namespace Agentmaster
                                    (exact ? L", paired by its SessionEnd(clear))\n" : L", no SessionEnd(clear) seen: paired by the ConPTY's other record)\n");
                 }
             }
+            // Agentmaster (OBSERVER.md §21 — `/branch`): a SessionStart whose payload source is "fork" on a ConPTY that hosts
+            // ANOTHER conversation is a branch made in place: Claude Code 2.1.322's `/branch [name]` copies the conversation and
+            // switches the SAME claude to the copy, so the tab re-homes to the new id like after a /clear (the adoption fan-out
+            // below binds it by this token). A re-home gives a record that has no title the FOLDER's name, so the tab lost the
+            // name the user knew it by; instead the branch takes the conversation it branched from's title as a fork title
+            // (DeriveForkTitle: "gaprush" -> "gaprush (fork)"), the name Agentmaster's own Fork gives a fork. That conversation
+            // is the OTHER record holding this ConPTY (a live one before an archived one, then the most recent — the /clear
+            // fallback's rank). Applied while the record's title is empty (the hook came first: it just minted the record), or
+            // still exactly the folder name a bind derived for it (the Fleet Observer came first: titleDerivedAtBind) — never
+            // over a title somebody chose. The hosting window re-pins its tab from the registry on the notify that follows.
+            // Every other "fork" start is left alone: Agentmaster's own forks and re-forks are titled at launch, and a Claude
+            // Code background job has no ConPTY of ours (no tabToken).
+            if (msg.event == HookEvent::SessionStart && msg.source == kHookSourceFork && !msg.tabToken.empty() &&
+                (s.title.empty() || (!s.titleDerivedAtBind.empty() && s.title == s.titleDerivedAtBind)))
+            {
+                const SessionInfo* origin = nullptr;
+                const auto rank = [](const SessionInfo& x) {
+                    return std::make_pair(x.live ? 1 : 0, std::max(x.lastHookUnixMs, x.lastActivityUnixMs));
+                };
+                for (const auto& [sid, other] : _sessions)
+                {
+                    if (sid == s.id || other.title.empty() || !TabTokenEq(other.tabToken, msg.tabToken))
+                    {
+                        continue;
+                    }
+                    if (origin == nullptr || rank(other) > rank(*origin))
+                    {
+                        origin = &other;
+                    }
+                }
+                if (origin != nullptr)
+                {
+                    s.title = DeriveForkTitle(origin->title);
+                    s.titleDerivedAtBind.clear(); // the title is chosen now: a later bind keeps it
+                    lineageTrace += L"[branch] " + ShortId(s.id) + L" branched in place from " + ShortId(origin->id) + L" (SessionStart fork on ConPTY " + msg.tabToken +
+                                    L"): its tab keeps the name as \x201C" + s.title + L"\x201D\n";
+                }
+            }
             // Agentmaster (--fork-session source-id echo): this hook is for the session's OWN id, so the
             // fork has settled past its startup window (where it echoed the SOURCE id). Retire the
             // one-shot echo guard — a LATER deliberate in-session /resume back to that exact source id
@@ -1210,7 +1250,11 @@ namespace Agentmaster
         // in-session `/resume` (the session id changes; the ConPTY / tabToken does not — and the new
         // id may even be a previously-known/archived one, which never created a record here). The
         // reconcile is idempotent: a SessionStart for an already-bound session fast-returns.
-        if (msg.event == HookEvent::SessionStart)
+        // Agentmaster (OBSERVER.md §21): NOT for a SessionStart with no tabToken — no ConPTY names it, so no window can bind
+        // it (the handler only logged "[bind-try] ... token=" and "[adopt] ... observe-only (no tabToken)" in every window).
+        // Claude Code's background sessions and the daemon's spares start that way, several per `/fork`; the Fleet Observer
+        // places them (a tab that shows the job, or a card of their own).
+        if (msg.event == HookEvent::SessionStart && !msg.tabToken.empty())
         {
             // Fan out to every window's bind handler (M9: the registry is a process-wide singleton).
             // Snapshot under the lock, invoke outside it; whichever window hosts this session's tab
@@ -1324,6 +1368,7 @@ namespace Agentmaster
         bool created = false;
         bool changed = false;
         std::vector<SessionInfo> superseded; // stale prior conversations of the same claude on this ConPTY (notified outside the lock)
+        std::wstring carriedTitleFrom; // OBSERVER.md §21: the conversation whose title a background continuation took (logged outside the lock)
         {
             std::lock_guard guard{ _mtx };
             // Agentmaster (RETIRED HOSTS): the race belt for the pre-check above (a retirement that landed
@@ -1403,8 +1448,52 @@ namespace Agentmaster
                 // with empty (transcript momentarily unresolved / no branch recorded yet).
             }
             assign(s.permissionMode, o.permissionMode);
+            // OBSERVER.md §21: the name the record took from Claude Code LAST time, read before the assign below overwrites it
+            // (the detached title rule further down follows Claude Code's renames only while the title still is that name).
+            const std::wstring previousBackgroundName = s.sessionName;
             assign(s.background, o.background);
             assign(s.sessionName, o.sessionName);
+            // Agentmaster (OBSERVER.md §21 — Claude Code BACKGROUND SESSIONS): the job the conversation runs in (as observed:
+            // "" once it runs in an ordinary claude again), whether no tab of ours shows it, and the conversation it was made
+            // from — a parent never changes, so an observation that does not know it (a tab whose claude runs the conversation
+            // itself) never erases it.
+            assign(s.bgJobId, o.bgJobId);
+            assign(s.bgDetached, o.bgDetached);
+            if (!o.bgParentId.empty())
+            {
+                assign(s.bgParentId, o.bgParentId);
+            }
+            if (o.bgDetached)
+            {
+                // No tab of ours shows this job: a token left on the record names a tab that closed (an attach tab, the tab a
+                // `/fork` parked the conversation from) — the Telegram bot would read it as "in a tab", the reconcile would
+                // try to bind to it. The token comes back with the next tab that shows the job.
+                if (!s.tabToken.empty())
+                {
+                    s.tabToken.clear();
+                    changed = true;
+                }
+                // The card's title is Claude Code's own name for the session, followed across its renames until somebody
+                // gives the record another title (FollowBackgroundSessionName). A GUID is never a title (the old cards).
+                const std::wstring followed = FollowBackgroundSessionName(s.title, previousBackgroundName, o.sessionName);
+                if (followed != s.title)
+                {
+                    s.title = followed;
+                    changed = true;
+                }
+            }
+            if (!o.carryTitleFrom.empty() && s.title.empty())
+            {
+                // A tab now shows the background continuation of the conversation it was bound to (a `/fork` or `/bg` park, an
+                // attach after a restart): the tab keeps its name. Set here, under the same lock that stamps the tab's token,
+                // so the reconcile's re-home finds the title already in place and pins it instead of a folder name.
+                if (const auto from = _sessions.find(o.carryTitleFrom); from != _sessions.end() && !from->second.title.empty())
+                {
+                    s.title = from->second.title;
+                    changed = true;
+                    carriedTitleFrom = from->first;
+                }
+            }
             // Presence heartbeat (busy/idle/waiting/shell) — a display FACT, never SessionState
             // (Rule #13). A flip notifies (turn-cadence, not per-survey noise) so a hook-less
             // session's status chip updates live.
@@ -1488,12 +1577,19 @@ namespace Agentmaster
             snapshot = s;
         }
 
-        if (created)
+        if (!carriedTitleFrom.empty())
+        {
+            AppendStateLog(L"hooks.log", L"[bg] " + ShortId(o.sessionId) + L" (Claude Code background job " + o.bgJobId + L") continues " + ShortId(carriedTitleFrom) +
+                                             L" in its tab and keeps that tab's title \x201C" + snapshot.title + L"\x201D\n");
+        }
+        if (created && !o.tabToken.empty())
         {
             // Fire the bind/adoption handlers (outside the lock) so the app correlates the tabToken
             // (WT_SESSION) to its ConPTY and binds an injector — the same promotion path as a hook
             // SessionStart. Fan out to every window (M9); whichever hosts this tab binds it, the rest
             // no-op. Only on creation: a steady-state re-observe must not re-fire adoption.
+            // Agentmaster (OBSERVER.md §21): and only with a tabToken — a DETACHED background session (no tab of ours shows
+            // it) has no ConPTY any window could bind; its card is its own.
             std::vector<AdoptionHandler> adopters;
             {
                 std::lock_guard guard{ _mtx };
@@ -1532,6 +1628,110 @@ namespace Agentmaster
         {
             _notify(gone, HookEvent::Unknown);
         }
+    }
+
+    // Agentmaster (OBSERVER.md §21): see the declaration.
+    bool SessionRegistry::RetireBackgroundSpare(const std::wstring& sessionId)
+    {
+        if (sessionId.empty())
+        {
+            return false;
+        }
+        {
+            std::lock_guard guard{ _mtx };
+            const auto it = _sessions.find(sessionId);
+            if (it == _sessions.end())
+            {
+                return false; // the hook never made one (or it is gone already)
+            }
+            const auto& s = it->second;
+            // Exactly the record a spare's token-less SessionStart minted, or nothing: anything a tab, a rename or a queued
+            // prompt added makes it somebody's session, and Rule #16 forbids dropping one of those.
+            if (!s.external || _injectors.find(sessionId) != _injectors.end() || !s.queue.empty() || !s.title.empty())
+            {
+                return false;
+            }
+        }
+        // Removed outside the check's lock (Remove takes it again and notifies outside it). Nothing can bind the record in
+        // between: it has no tabToken and no tab of ours shows a spare.
+        Remove(sessionId);
+        AppendStateLog(L"hooks.log", L"[bg-spare] " + ShortId(sessionId) + L" forgotten: a Claude Code daemon SPARE (a background process parked until a job needs it) - its id is a placeholder that never gets a conversation, so it gets no card\n");
+        return true;
+    }
+
+    // Agentmaster (OBSERVER.md §21): see the declaration.
+    std::vector<std::wstring> SessionRegistry::TablessLiveSessionIds() const
+    {
+        std::lock_guard guard{ _mtx };
+        std::vector<std::wstring> out;
+        for (const auto& id : _order)
+        {
+            const auto it = _sessions.find(id);
+            if (it == _sessions.end())
+            {
+                continue;
+            }
+            const auto& s = it->second;
+            // No tab of ours: no ConPTY token and no injector (every launch, restore, bind and dormant park sets both). Claude
+            // only: a Codex record is managed with its tab's token, and nothing else mints a token-less one.
+            if (s.live && s.kind == AgentKind::Claude && s.tabToken.empty() && _injectors.find(id) == _injectors.end())
+            {
+                out.push_back(id);
+            }
+        }
+        return out;
+    }
+
+    // Agentmaster (OBSERVER.md §21): see the declaration.
+    bool SessionRegistry::RetireTablessSession(const std::wstring& sessionId, bool hasTranscript, int64_t nowMs)
+    {
+        if (sessionId.empty())
+        {
+            return false;
+        }
+        bool removeIt = false;
+        SessionInfo snapshot;
+        {
+            std::lock_guard guard{ _mtx };
+            const auto it = _sessions.find(sessionId);
+            if (it == _sessions.end())
+            {
+                return false;
+            }
+            auto& s = it->second;
+            // Re-checked under the lock: a tab may have bound it since the candidate list was read.
+            if (!s.live || s.kind != AgentKind::Claude || !s.tabToken.empty() || _injectors.find(sessionId) != _injectors.end())
+            {
+                return false;
+            }
+            // The grace: a hook or an observation within it means a claude still speaks for the record (a fresh one whose
+            // presence row is not written yet, a job between surveys). A record never heard from at all is quiet by definition.
+            const int64_t lastHeard = (std::max)(s.lastHookUnixMs, s.lastObservedUnixMs);
+            if (lastHeard != 0 && nowMs - lastHeard < kTablessRetireGraceMs)
+            {
+                return false;
+            }
+            // A record that never got a conversation is a placeholder (a spare that exited before a survey named it a spare):
+            // forgotten. Anything with a transcript or a queue is a real session: archived, never dropped (Rule #16).
+            removeIt = !hasTranscript && s.external && s.queue.empty();
+            if (!removeIt)
+            {
+                const auto settleBefore = CaptureSettleFacts(s);
+                s.live = false;
+                s.bgDetached = false;
+                StampSettleClock(s, settleBefore, NowMs()); // archiving flips a settle fact (DELIVERY.md §16)
+                snapshot = s;
+            }
+        }
+        if (removeIt)
+        {
+            Remove(sessionId); // notifies like every removal
+            AppendStateLog(L"hooks.log", L"[tabless] " + ShortId(sessionId) + L" forgotten: no tab of ours showed it, no live claude runs it any more, and it never got a conversation (no transcript) - a placeholder, so its card goes\n");
+            return true;
+        }
+        AppendStateLog(L"hooks.log", L"[tabless] " + ShortId(sessionId) + L" (\"" + snapshot.title + L"\") archived: no tab of ours showed it and no live claude runs it any more (a background job that ended) - resumable from the Sessions browser\n");
+        _notify(snapshot, HookEvent::Unknown);
+        return true;
     }
 
     // Agentmaster (RETIRED HOSTS): see the declaration. Pruning happens here, on the write path, so the read

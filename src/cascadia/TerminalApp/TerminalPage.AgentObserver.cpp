@@ -8864,6 +8864,9 @@ namespace winrt::TerminalApp::implementation
             if (s.title.empty())
             {
                 s.title = ttl;
+                // OBSERVER.md §21: remember that nobody CHOSE this title — a `/branch`'s SessionStart(source "fork") arriving
+                // after this bind may still replace it with the fork title (SessionRegistry::OnHookEvent), never a rename.
+                s.titleDerivedAtBind = ttl;
             }
         });
 

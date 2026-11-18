@@ -165,6 +165,13 @@ namespace winrt::TerminalApp::implementation
             {
                 return std::nullopt; // a Codex rollout has no interrupt rows to take back
             }
+            // OBSERVER.md §21: a conversation a live Claude Code background job runs is not RESUMED by a restart — the spec
+            // re-ATTACHES to the job (BuildClaudeRestartSpec), so no interrupt is taken back and nothing would continue by itself.
+            if (const auto job = ::Agentmaster::FindLiveBackgroundJobId(sessionId); !job.empty())
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[interrupt-rewind] " + ::Agentmaster::ShortId(sessionId) + L" restart: not offered \x2014 Claude Code background job " + job + L" runs this conversation (the restart re-attaches to it)\n");
+                return std::nullopt;
+            }
             const auto plan = ::Agentmaster::PlanInterruptRewindForSession(sessionId);
             if (plan.verdict != ::Agentmaster::InterruptRewindVerdict::Rewind)
             {
@@ -479,6 +486,13 @@ namespace winrt::TerminalApp::implementation
             if (!info || info->kind != ::Agentmaster::AgentKind::Claude)
             {
                 return std::nullopt; // a Codex restart resumes a rollout: there is no Claude resume to stop
+            }
+            // OBSERVER.md §21: the restart of a conversation a live Claude Code background job runs re-ATTACHES to the job; its
+            // running turn is the job's live work, which the restart neither continues nor stops — nothing to ask.
+            if (const auto job = ::Agentmaster::FindLiveBackgroundJobId(sessionId); !job.empty())
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart-question] " + ::Agentmaster::ShortId(sessionId) + L" not asked: Claude Code background job " + job + L" runs this conversation (the restart re-attaches to it)\n");
+                return std::nullopt;
             }
             if (!info->started && !info->external)
             {

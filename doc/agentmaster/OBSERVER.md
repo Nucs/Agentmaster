@@ -1043,3 +1043,160 @@ helpers to `AgentMaster/tests/`.
 - **Gap:** a conversation bound in TWO windows (each window binds the session to its own tab) keeps both
   bindings; rules 2–4 pick the host, the other tab's hooks are dropped, and the stdin injector is the one the
   last bind registered. No such state was seen; the incident was one window.
+
+## 21. Claude Code background sessions — a tab follows its conversation into the daemon (2026-11-18, NOT BUILT yet)
+
+### 21a. The report
+
+- **The user, 2026-11-18:** "I did /fork <text> and the tab no longer updates and a new side menu card with guid as
+  title actually now has the status updates of the tab that did /fork. the guid card has no tab and double-clicking
+  doesn't open the tab. Fix. There are other / commands that are builtin that might break us."
+- **What hooks.log and `~/.claude/sessions` showed** (production, the tab "gaprush", conversation `6ab8b1af…`):
+  - 06:25:54 the user typed `/fork <task>`. Within 11 seconds three new claude.exe ran under Claude Code's DAEMON,
+    none under the tab: `7c488ed3` (the task, in a git worktree), `0fac38d6` (a copy of the tab's own conversation)
+    and `0d42712a` (a "spare").
+  - Every hook of those three arrived with an EMPTY tabToken (`[bind-try] 0fac38d6 token= …`,
+    `[adopt] … observe-only (no tabToken)`), so the hook adoption minted three live, untitled, tab-less
+    `external` records: the cards titled with their GUIDs (the side panel's `title.empty() ? id` fallback).
+  - The tab's own claude (pid 131124) kept its presence row on `6ab8b1af`, now `idle` for good, with
+    `"parkedJobId":"0fac38d6"`; the user's next prompts in that tab fired `UserPromptSubmit` for `0fac38d6`. The tab
+    was bound to a conversation that no longer moved, and its status went to the GUID card.
+
+### 21b. How Claude Code 2.1.322 runs background sessions (read from its binary and the incident's files)
+
+- **The daemon.** `claude daemon run --origin transient --spawned-by {"label":"claude","cwd":…,"pid":<the tab's
+  claude>}`, started through WMI (its parent is `WmiPrvSE.exe`, so it outlives the tab and Agentmaster). Each JOB is
+  `claude --bg-pty-host \\.\pipe\cc-daemon-<id>-pty-<job> <cols> <rows> -- claude --session-id <new> --fork-session
+  --resume <source> <respawnFlags>`: a pseudo console of the daemon's own around a claude that has no terminal of the
+  user's. `respawnFlags` (the job's `~/.claude/jobs/<job>/state.json`) are the launching claude's own flags, OUR
+  `--settings hooks-settings.json` and `--plugin-dir`s included, so every job fires Agentmaster's hooks.
+- **The environment.** The daemon inherits the tab's whole environment; its jobs get all of it EXCEPT `WT_SESSION`
+  (Claude Code drops it). So a job's hooks carry no tabToken, while `AM_SESSION`, `CCMGR_*`, `AM_LINK` and
+  `AM_LINK_TOKEN` stay ("hello from 0fac38d6 (launched as 6ab8b1af)"). A job also gets `CLAUDE_CODE_SESSION_KIND=bg`,
+  `CLAUDE_BG_SOURCE` (`slash` for a slash command's job, `spare` for a spare), `CLAUDE_JOB_DIR`,
+  `CLAUDE_CODE_SESSION_NAME`, and — a `/fork` task — `CLAUDE_CODE_RESUME_SOURCE_ALIVE=<self>|<fork boundary>|<source id>`.
+- **The presence rows** (`~/.claude/sessions/<pid>.json`) gained: `kind` (`interactive` | `bg` | `daemon` |
+  `daemon-worker`), `jobId` (a bg row's short id: the session id's first 8 hex digits), `parkedJobId` (an interactive
+  row's "session X, moved to the background from this window"), `name` (Claude Code's name for the session), `spare`
+  (a pre-started bg process waiting for a job; its session id is a placeholder that never gets a transcript).
+- **The park.** `/fork <task>` with the fleet on ("Copy this conversation into a new background session and keep
+  working here") runs the task as a job AND moves the window's conversation into a job too: a `--fork-session` COPY
+  under a new id, the original transcript ending in `{"type":"continued-in","continuedInSessionId":"<copy>"}`. The
+  window writes `parkedJobId`, keeps its own old session id, and runs Claude Code's agent view in-process with that
+  job opened (`autoOpenJobId`): the user keeps typing into the copy.
+- **`claude attach <id|name>`** ("Open the background session in this terminal. ← returns to agent view, Ctrl+Z drops
+  back to your shell. The session keeps running either way.") shows a job in a terminal and wakes a stopped one.
+- **`claude --resume <id>` of a conversation a live job holds does NOT open it:** "session X is already running in the
+  background, so this started a copy as Y. `claude attach X` opens the original." Two conversations then diverge.
+- **The built-in commands and what each does to a tab's conversation** (2.1.322):
+
+  | Command | What Claude Code does | Agentmaster |
+  |---|---|---|
+  | `/clear` | the same process, a new id (SessionStart `clear`) | re-homes the tab (unchanged) |
+  | `/resume <id>` | the same process switches to an existing id | re-homes the tab (unchanged) |
+  | `/branch [name]` | writes a copy (every line carries `forkedFrom`) and switches the same process to it (SessionStart `fork`) | re-homes the tab; the branch keeps the tab's name as a fork title (§21c.8) |
+  | `/fork <task>` (fleet on) | the task runs as a job; the window's conversation moves into a job (a copy, new id) that the window shows | the tab follows the copy (§21c.1); the task gets a card of its own (§21c.4) |
+  | `/fork <directive>` (fleet off) | an in-process background agent with the full context | nothing moves (its hooks name the tab's own session) |
+  | `/background` (`/bg`) | moves the window's conversation into a job and frees the terminal | as `/fork`: the tab follows a park; a job no window shows gets its card |
+  | `/subtask <task>` | a subagent with the full context whose result comes back (offered with the fleet on) | a job it starts is a background session like any other |
+  | `/cd <path>` | moves the transcript to the new folder's project, the SAME id (a `relocated` line) | tracking unchanged; the record keeps its launch folder (§21d) |
+  | `/teleport` (`/tp`), `/remote-control` | to the cloud / from claude.ai; a remote bridge | not handled specially (§21d) |
+  | `/rename` | Claude Code's own name for the session | ignored for a tab (Rule #11); a tab-less job's card follows it (§21c.4) |
+  | `/exit` | the claude exits; the pwsh host stays | unchanged (a `SessionEnd` → Done) |
+  | `claude attach`, `claude agents`, `logs`, `stop`, `kill`, `respawn`, `rm`, `daemon` | verbs that run no conversation | never guessed a conversation from their folder (§21c.3) |
+
+### 21c. What Agentmaster does
+
+The pure rules are `AgentMaster/BackgroundSessions.h`; the survey's half is `ProcessObserver::_surveyOnce` (steps 1c,
+3 and 3c), the registry's half `SessionRegistry` (`ObserveClaude`, `OnHookEvent`, `RetireBackgroundSpare`,
+`TablessLiveSessionIds` / `RetireTablessSession`), the launch half `ClaudeSpawn` (`SetBackgroundJobLookup`,
+`BuildClaudeAttachCommandline`) and `TerminalPage` (`_LaunchClaudeSession`, `_OpenBackgroundSessionTab`).
+
+1. **A tab follows its parked conversation.** Step 1c collects the survey's live background jobs (validated "bg" rows
+   of OUR claudes — `AM_SESSION`; spares apart) with their parent (`BackgroundParentFromLaunch`:
+   `CLAUDE_CODE_RESUME_SOURCE_ALIVE`'s third field, else the `--fork-session --resume <transcript>` stem). In step 3 a
+   tab's claude whose own row names a live `parkedJobId` SHOWS that job (`ResolveTabShownBackgroundJob`): the
+   observation carries the JOB's session id with THIS tab's `WT_SESSION`, the job's heartbeat, busy children, model and
+   folder, `bgJobId`, `bgParentId`, and — when the job's parent is the conversation the tab is bound to —
+   `carryTitleFrom`. `ObserveClaude` stamps the tab's token on the job's record and gives it the tab's title; the
+   reconcile tick (`_ReconcileClaudeTabs` → `_BindClaudeSessionToTab`) re-homes the tab onto it (the old record
+   archived; the note, the side panel pin and the managed provenance carried as for a `/clear`), and from then on the
+   job's token-less hooks drive the TAB's card. The pid stays the tab's own claude: what Restart and Deactivate end
+   (the job is the daemon's and outlives both), and why their rewind seams see the job as a holder they cannot end.
+2. **A tab running `claude attach <id|name>`** shows the job its target names (a job id, a session id, a unique
+   session-id prefix of 8+ characters, a unique name; an ambiguous one opens nothing).
+3. **Verbs never guess.** A claude whose command line is one of Claude Code's verbs (`ParseClaudeCliInvocation`:
+   attach, agents, logs, stop, kill, respawn, rm, daemon, the pty host) runs no conversation: it never takes the
+   transcript-age fallback (Rule #14's last resort), which would bind its tab to whatever transcript appears next in
+   its folder.
+4. **A job no tab shows gets a card of its own** (step 3c). A job counts as shown when a tab's claude shows it OR a
+   tab is BOUND to its conversation (a restored or deactivated tab whose claude has not started). Every other job is
+   observed with no tabToken and `bgDetached`: `ObserveClaude` clears a stale token (an attach tab that closed),
+   titles the record with Claude Code's name and follows its renames while the title is still the name it took last
+   (`FollowBackgroundSessionName`; a rename in Agentmaster wins from then on), and fires no adoption (nothing to
+   bind). Its card sits right below its parent's card (SIDE_PANEL.md §2p), says "background ·" on its folder line,
+   and a double-click OPENS it: `_ActivateClaudeSession` → `_OpenBackgroundSessionTab` launches a resume of the record
+   right after the parent's tab (the spawn builder turns it into `claude attach <job>`, item 7), so it becomes a
+   normal tab, and the Telegram bot gives it a topic like any tab (it lists only records with a tab token).
+5. **Spares are forgotten.** A spare's SessionStart made a record under its placeholder id; once that id is proven
+   transcript-less (once per id), `RetireBackgroundSpare` removes the record — only while it is exactly what the hook
+   made (external, no injector, nothing queued, untitled).
+6. **A tab-less record ends.** A live record no tab binds (no token, no injector) whose conversation NO live presence
+   row names any more — a detached job that ended, a spare that exited before a survey named it — is retired by
+   `RetireTablessSession` once it has been quiet (no hook, no observation) for `kTablessRetireGraceMs` (15 s): removed
+   when it never got a transcript, archived otherwise (Rule #16: resumable from the Sessions browser).
+7. **Resumes attach.** `BuildClaudeSpawn` (a resume) and `BuildClaudeRestartSpec` (a resume) ask the app-set lookup
+   `FindLiveBackgroundJobId` (a direct read of the presence rows: the observer's first survey may not have run when a
+   restored tab starts). A live job holding the conversation makes the spec `"<claude.exe>" attach <job>`
+   (`ClaudeSpawnSpec::attachJobId`; `[bg-attach]`): a window restore, a Deactivate's re-activation, a Restart, a
+   Sessions-page resume and a card's double-click show the running conversation instead of starting a copy. With an
+   attach, `_LaunchClaudeSession` keeps the record's live state (no restore normalization, no cut-off flag), types no
+   remembered draft, arms no fork stop watch, and makes no API-error rewind; a live job also counts as "the
+   conversation exists" before its transcript does. Restart's two questions stand down (`[restart-question]`,
+   `[interrupt-rewind]` "not asked/offered — Claude Code background job …"). Every other program that compiles
+   `ClaudeSpawn.cpp` leaves the lookup unset and resumes as before.
+8. **`/branch` keeps the tab's name.** A SessionStart(source `fork`) with a tabToken whose record has no title — or
+   still the folder name a bind derived (`SessionInfo::titleDerivedAtBind`: the observer can bind the branch before
+   its hook lands) — takes `DeriveForkTitle(<the other record holding that ConPTY>.title)` ("gaprush" → "gaprush
+   (fork)"). Never over a title somebody chose; never for a /clear or a token-less daemon job.
+9. **A token-less SessionStart fans out to no window** (`OnHookEvent`): it only logged `[bind-try] … token=` and
+   `[adopt] … observe-only (no tabToken)` in every window, several times per `/fork`.
+
+### 21d. Limits
+
+- **The agent view.** After a park the window shows Claude Code's agent view, where the user can open ANOTHER job (←
+  returns to the list). Nothing on disk says which job is open, so the tab keeps following the parked one.
+- **What moves with a park:** the title, the note and the side panel pin (the re-home's carries). The prompt queue,
+  the tags and the favorite stay with the conversation the tab left, as for a `/clear`.
+- **Closing a detached card** is refused while its job runs (the existing "claude pid still alive, not hosted in this
+  window" rule); stop a job with Claude Code (`claude stop <job>`, `/stop` in the attached tab).
+- **`/cd`** keeps the conversation id (the transcript moves), so tracking holds; the record's `workingDir` stays the
+  launch folder, so a later resume starts there (Claude Code finds the relocated transcript by its id).
+- **`/teleport` and `/remote-control`** are not handled specially: a remote attach switches the process's id like a
+  `/resume` (the tab re-homes), its transcript may not be local.
+- **A job of ANOTHER Agentmaster instance or of a plain terminal** (a foreign or no `AM_SESSION`) is not ours: it is
+  neither followed nor carded, and the census keeps it External.
+
+### 21e. Logs (hooks.log)
+
+- `[bg] tab wt=<wt> (claude pid N, parked its conversation <sid8> | `claude attach`) shows Claude Code background job
+  <job> (session <sid8>, pid N, "<name>", from <parent8>): the tab follows that conversation` — once per (tab, job).
+- `[bg] <sid8> (Claude Code background job <job>) continues <parent8> in its tab and keeps that tab's title "<title>"`.
+- `[bg] Claude Code background job <job> (session <sid8>, pid N, "<name>") runs with no tab of ours: its own card,
+  below <parent8>'s; opening it attaches in a new tab (claude attach <job>)` — once per job while it stays tab-less.
+- `[bg-spare] <sid8> forgotten: a Claude Code daemon SPARE …`; `[tabless] <sid8> forgotten | archived …`.
+- `[bg-attach] <sid8> launch|restart: Claude Code background job <job> runs this conversation - the tab ATTACHES …`;
+  `[restart] claude <id> (attach to background job <job>)`; the Deactivate line says "attach to background job".
+- `[branch] <sid8> branched in place from <origin8> (SessionStart fork on ConPTY <wt>): its tab keeps the name as "…"`.
+- `[nav] activate <sid8> (a background session no tab showed: opened in a new tab here)`.
+
+### 21f. Tests
+
+- `tests_background.cpp`: `TestBackgroundSessionRules` (the command-line split, the verbs, the shown job, the
+  attach targets, the parent, the followed name, the sticky order), `TestBackgroundPresenceFacts` (the presence
+  fields from files shaped like the incident's, the parent's process facts, the live lookup's "no job"),
+  `TestBackgroundAttachSpawn` (`claude attach`, the lookup seam), `TestBackgroundRegistry` (detached jobs, the kept
+  tab title, spares, the end of a tab-less record, `/branch` in both orders). `TestRegistryFanout` (tests_state.cpp)
+  pins the token-less SessionStart that fans out to no window.
+- **Not tested live:** a real `/fork`, `/bg`, `/branch` and `claude attach` in a built Agentmaster (the facts above
+  were read from Claude Code 2.1.322's binary and the incident's files; no build was made).

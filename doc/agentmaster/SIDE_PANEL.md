@@ -2500,6 +2500,46 @@ rename card**.
   editor and read "Rename (F2)". No `[exc] _SidePanelOpenRenameCard`, `[exc] _SidePanelCloseRenameCard`, `[exc]
   _SidePanelRenameSession` or `[exc] session menu: Rename` line in hooks.log.
 
+### 2p. Background cards — a Claude Code background session no tab shows sticks below its parent's card (2026-11-18, NOT BUILT yet)
+
+The user's report: `/fork <text>` left a card "with guid as title" that had no tab and that a double-click could not
+open (the whole incident: OBSERVER.md §21). Their pick the same day, from three rendered options (a card that opens
+it · the External column only · a named card that cannot open): **Card that opens it**, with the note "the card should
+be sticky below the parent card".
+
+```
+┌──────────────────────────────────────────┐
+│ gaprush                                  │  ← the tab the /fork was typed in (it follows its moved conversation)
+│ ● Running  created 1d, active 2s ago     │
+└──────────────────────────────────────────┘
+┌──────────────────────────────────────────┐
+│ ⑂ Can text be fixed size and not res…    │  ← the forked task: Claude Code's own name for it, always right below
+│ ● Needs approval                         │
+│ background · gap-label-zoom / gap-label… │  ← "background ·" — no tab shows it
+└──────────────────────────────────────────┘
+```
+
+- **Which cards:** a record the Fleet Observer marks `SessionInfo::bgDetached` — a Claude Code background job that no
+  tab of ours shows (the task a `/fork` spun off, a `/bg` session nobody has open). Its title is Claude Code's name for
+  the job, followed across Claude Code's renames until somebody renames the card (OBSERVER.md §21c.4).
+- **Sticky:** after the sort and the pins, `_SidePanelRebuildCards` moves each such card right below the card it sticks
+  under (`StickyChildOrder`, `AgentMaster/BackgroundSessions.h`): its parent conversation's own card (`bgParentId`) while
+  that one is live, else the live card holding the parent's ConPTY — the TAB the task came from, whose conversation
+  moved on under a new id (a park, a `/clear`). A card whose parent is filtered out or not listed keeps its sorted
+  place; several cards under one parent keep their own order; a loop in the links is broken.
+- **LOCAL scope:** such a card has no tab anywhere, so it belongs to the window that hosts the card it sticks under
+  (`_HostedSessionIds` holds its parent's card); GLOBAL lists it like any card.
+- **The card:** the folder line starts with "background · "; the tooltip says "runs in Claude Code's background (job
+  <job>); no tab shows it" and "double-click to open it in a new tab (claude attach <job>)".
+- **Double-click (and Jump, tree Enter, the board):** `_ActivateClaudeSession` finds no tab, and
+  `_OpenBackgroundSessionTab` opens one in THIS window, right after the parent's tab when that tab is here: a resume
+  of the record, which the spawn builder turns into `claude attach <job>` (OBSERVER.md §21c.7). From then on it is a
+  normal tab and card (the mark goes, the stickiness with it).
+- **Not changed:** the Triage Board and the Explorer tree list such a card like any other (no stickiness there).
+- **Checks owed (NOT BUILT):** after a `/fork <task>` in a tab, the tab's card keeps its name and its live status, and
+  the task's card — titled "⑂ <task>" — sits right below it in LOCAL and GLOBAL; a double-click opens a tab right after
+  the tab, attached to the task; closing that tab brings the card back below its parent; no card titled with a GUID.
+
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 
 The bottom area hosts a REAL `AgentTabOverlay` whose summary panel is switched into the new

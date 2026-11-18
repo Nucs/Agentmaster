@@ -2056,8 +2056,27 @@ namespace Agentmaster
         std::wstring model; // --model / CLAUDE_CODE_* (drives Manager/overlay adornments)
         std::wstring effort; // --effort / CLAUDE_CODE_EFFORT_LEVEL
         std::wstring permissionMode; // --permission-mode
-        std::wstring sessionName; // CLAUDE_CODE_SESSION_NAME (bg jobs)
+        std::wstring sessionName; // CLAUDE_CODE_SESSION_NAME (bg jobs) — for a background job, Claude Code's own name for it (its presence row's `name`)
         bool background{}; // a background/daemon claude
+        // Agentmaster (OBSERVER.md §21 — Claude Code BACKGROUND SESSIONS; all three TRANSIENT, re-derived by every survey, never
+        // persisted — Persistence.cpp writes none of them):
+        //   bgJobId    — the Claude Code background job that runs this conversation ("" when it runs in an ordinary claude): the
+        //                handle `claude attach <bgJobId>` takes. Set for a tab that shows a job (a window that parked its
+        //                conversation with `/fork` or `/bg`, a `claude attach` tab) and for a job no tab shows.
+        //   bgParentId — the conversation that job was made from (the tab conversation a `/fork` forked, the one a `/fork` / `/bg`
+        //                moved into the job); "" when unknown. The side panel's STICKY PARENT: a card no tab shows sits right
+        //                below the card of its parent's tab. Never cleared by an observation that does not know it.
+        //   bgDetached — true while NO tab of ours shows this background session: its card is its own (titled by Claude Code's
+        //                name, which it follows — FollowBackgroundSessionName — while nobody renamed it), its tabToken is
+        //                empty, and opening it starts `claude attach <bgJobId>` in a new tab (TerminalPage::_OpenBackgroundSessionTab).
+        std::wstring bgJobId;
+        std::wstring bgParentId;
+        bool bgDetached{};
+        // Agentmaster (OBSERVER.md §21 — `/branch`; TRANSIENT): the title TerminalPage::_BindClaudeSessionToTab DERIVED from
+        // the folder for this record because it had none ("" when the bind derived nothing). It tells a title nobody chose
+        // from one somebody did: a SessionStart(source "fork") that arrives AFTER the Fleet Observer already bound the
+        // branch to its tab may still replace the derived title with the fork title, never a rename (the title then differs).
+        std::wstring titleDerivedAtBind;
         RunningApp runningApp{ RunningApp::Unknown }; // ours (Agentmaster) vs external (WindowsTerminal)
         std::wstring amSession; // owning Agentmaster instance stamp (empty if external)
         std::wstring ownerWindowId; // the window that hosts this session's tab (§19-Q1 attribution)

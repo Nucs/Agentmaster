@@ -1020,7 +1020,11 @@ namespace winrt::TerminalApp::implementation
         // --resume <id>` would fail with "No conversation found" and the tab would die (exit code 1); it
         // is re-launched FRESH instead, under the SAME id (restoreFresh below; PERSISTENCE.md §16), keeping
         // the working dir + Auto Testing. (Correctness Rule #6: restore == resume, never replay.)
-        const bool wantResume = !resumeTargetId.empty() && ::Agentmaster::ClaudeConversationExists(resumeTargetId);
+        // OBSERVER.md §21: a conversation a LIVE Claude Code background job is running exists even before its transcript does
+        // (a job that has just started): the launch must attach to it (BuildClaudeSpawn's background-job lookup), never start a
+        // fresh conversation under the same id beside the running job.
+        const std::wstring liveJobForResume = resumeTargetId.empty() ? std::wstring{} : ::Agentmaster::FindLiveBackgroundJobId(resumeTargetId);
+        const bool wantResume = !resumeTargetId.empty() && (!liveJobForResume.empty() || ::Agentmaster::ClaudeConversationExists(resumeTargetId));
         const std::wstring resumeId = wantResume ? resumeTargetId : std::wstring{};
         // Agentmaster (restore a NEVER-MESSAGED fork): a fork's OWN transcript (<id>.jsonl) is written
         // only on its FIRST turn, so a fork the user created but never sent a message to has NO transcript
@@ -1101,11 +1105,16 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (HOOKS.md "API-error turns"): a RESUME of a restored record whose turn died on an API error gets
         // the rewind line before this connection can start, so its claude continues the turn (_RewindApiErrorBeforeRestore
         // — pre-filtered on the record's state, a no-op for every healthy restored tab).
-        if (wantResume && restored)
+        // OBSERVER.md §21: never for a conversation a live Claude Code background job is running — the spec below ATTACHES to
+        // that job, and a line appended beside its running claude would be the two-writers case the rewind exists to avoid.
+        if (wantResume && restored && liveJobForResume.empty())
         {
             _RewindApiErrorBeforeRestore(*restored, appSettings);
         }
         const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId, appSettings, effectiveForkFrom, ::Agentmaster::SharedEngine().claudeExePath, forkIntoId, {}, launchPrompt, compiledLaunch ? &*compiledLaunch : nullptr);
+        // OBSERVER.md §21: the spec ATTACHES (`claude attach <job>`) when a live Claude Code background job runs the resumed
+        // conversation (the builder asked the background-job lookup): this tab SHOWS a running conversation, it reloads nothing.
+        const bool attaching = !spec.attachJobId.empty();
         if (launchArgs)
         {
             // The session keeps its snapshot for life (resume / restart / fork / handover all reuse it). A
@@ -1203,6 +1212,19 @@ namespace winrt::TerminalApp::implementation
         // it), dropped when the state is Idle — a fresh spawn (no `restored`) OR a Running-interrupted
         // record whose stale flag would otherwise falsely hold the queue. (RestoredQuestionFlag, Rule #16.)
         info.lastMessageWasQuestion = restored ? ::Agentmaster::RestoredQuestionFlag(info.state, info.lastMessageWasQuestion) : false;
+        if (attaching && restored)
+        {
+            // OBSERVER.md §21: an ATTACH shows a conversation a live Claude Code background job is running right now, so none of
+            // the restore normalization above applies: the state is the one the job's hooks keep live (a busy job stays
+            // Running), the tail is never read as a CUT-OFF turn (it is not cut off — the job runs it, and until the observer's
+            // first sight of this tab no pid of ours would vouch for it), and the question flag stays the job's. The record is
+            // no longer DETACHED: this tab shows the job from now on (the observer confirms it at its next survey).
+            info.state = restored->state;
+            info.midTurnAtRestore = false;
+            info.lastMessageWasQuestion = restored->lastMessageWasQuestion;
+            info.bgDetached = false;
+            info.bgJobId = spec.attachJobId;
+        }
         if (restoreFresh)
         {
             // PERSISTENCE.md §16: the record keeps its id (and with it the queue, the runner mode, the title, the tags), but the
@@ -1388,7 +1410,9 @@ namespace winrt::TerminalApp::implementation
         // rule) and only then arms the pump's map on the dispatcher. The resolve is STRICT here and
         // consults the session's paste JOURNAL first (§2c — present for a same-run close -> resume,
         // gone after an app restart, when the paste-cache is the only fallback).
-        if (_appSettings.restoreDraftOnResume && !info.pendingInput.empty())
+        // OBSERVER.md §21: not for an ATTACH — the background job's own input box is shown as it is, and the remembered draft is
+        // what that box held (or still holds): typing it again would double it.
+        if (!attaching && _appSettings.restoreDraftOnResume && !info.pendingInput.empty())
         {
             _ArmDraftRestore(spec.sessionId, info.pendingInput, _sessionRegistry->PasteJournal(spec.sessionId), DraftFillOrigin::Resume, std::wstring{});
         }
@@ -1398,7 +1422,9 @@ namespace winrt::TerminalApp::implementation
         // continue on its next start) continues its source's turn again when this connection starts — a re-fork reads the
         // source anew — so the stop watch follows it here. A fresh fork arms its watch in its own seam (the flag is set after
         // this launch returns).
-        if (restored && info.stopForkedTurn)
+        // OBSERVER.md §21: never for an ATTACH — the turn running there is the background job's live work, not a turn this
+        // launch would continue by itself, and the watch's Esc would interrupt it.
+        if (restored && info.stopForkedTurn && !attaching)
         {
             _ArmForkTurnStop(spec.sessionId, L"restore");
         }
@@ -1576,8 +1602,83 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::LogNav(L"activate " + ::Agentmaster::ShortId(id) + L" (local)");
             return;
         }
+        // Agentmaster (OBSERVER.md §21): a Claude Code background session that NO tab shows — its own card: the task a `/fork`
+        // spun off, a `/bg` session nobody has open — is OPENED instead: a new tab in THIS window attaches to it. No window hosts
+        // a tab for it, so the fan-out below would find none and the double-click did nothing (the user's report).
+        if (_OpenBackgroundSessionTab(id))
+        {
+            ::Agentmaster::LogNav(L"activate " + ::Agentmaster::ShortId(id) + L" (a background session no tab showed: opened in a new tab here)");
+            return;
+        }
         ::Agentmaster::LogNav(L"activate " + ::Agentmaster::ShortId(id) + L" (fan-out to other windows)");
         ::Agentmaster::ActivateSessionInOtherWindows(id, _windowId);
+    }
+
+    // Agentmaster (OBSERVER.md §21): see TerminalPage.h.
+    bool TerminalPage::_OpenBackgroundSessionTab(const std::wstring& sessionId)
+    {
+        if (!_sessionRegistry || sessionId.empty())
+        {
+            return false;
+        }
+        // The FULL record (Get, never a lean read): the launch below upserts this copy back, so a copy without its queue would
+        // erase the session's queue.
+        const auto info = _sessionRegistry->Get(sessionId);
+        if (!info || !info->live || !info->bgDetached || info->kind != ::Agentmaster::AgentKind::Claude)
+        {
+            return false; // not a background session that no tab shows: the ordinary activation applies
+        }
+        // Where: right after the tab of the card this one sticks under (SIDE_PANEL.md §2p) when that tab is in THIS window — the
+        // parent conversation's own tab, else the tab that now shows its lineage (the live session holding the parent's ConPTY:
+        // a `/fork` moved the tab's conversation into a job under a new id). Else at the end of the strip.
+        uint32_t insertAt = static_cast<uint32_t>(-1);
+        if (!info->bgParentId.empty())
+        {
+            winrt::TerminalApp::Tab anchor{ nullptr };
+            if (const auto pit = _claudeTabs.find(info->bgParentId); pit != _claudeTabs.end())
+            {
+                anchor = pit->second.get();
+            }
+            if (!anchor)
+            {
+                const std::wstring parentToken = _sessionRegistry->GetTabToken(info->bgParentId);
+                if (!parentToken.empty())
+                {
+                    for (const auto& [sid, weakTab] : _claudeTabs)
+                    {
+                        if (::Agentmaster::TabTokenEq(_sessionRegistry->GetTabToken(sid), parentToken))
+                        {
+                            anchor = weakTab.get();
+                            if (anchor)
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if (anchor)
+            {
+                if (const auto index = _GetTabIndex(anchor))
+                {
+                    insertAt = *index + 1;
+                }
+            }
+        }
+        const std::wstring dir = !info->liveCwd.empty() ? info->liveCwd : info->workingDir;
+        // A RESUME of the record: _LaunchClaudeSession's spec builder finds the live job (SetBackgroundJobLookup) and makes the
+        // tab ATTACH (`claude attach <job>`); the record keeps its state, its queue and its title, and stops being detached. A
+        // job that ended between the card's last survey and this click is resumed as an ordinary conversation instead.
+        const auto tab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ info->title }, *info, std::wstring{}, insertAt);
+        if (!tab)
+        {
+            // Refused (no claude.exe, a preset that cannot launch, a pane that could not be made): the launch logged why.
+            // Handled all the same — no other window could do better.
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[bg] " + ::Agentmaster::ShortId(sessionId) + L" (background job " + info->bgJobId + L") could not be opened in a tab: the launch was refused (see the line above)\n");
+            return true;
+        }
+        _FocusClaudeSessionTab(sessionId, /*bringWindowToFront*/ false);
+        return true;
     }
 
     // Agentmaster (cross-window activate): select `sessionId`'s tab IN THIS WINDOW — the local
@@ -3106,7 +3207,14 @@ namespace winrt::TerminalApp::implementation
             // Log the mode straight off the built spec (no second transcript stat / no race).
             reforked = spec.commandline.find(L"--fork-session") != std::wstring::npos;
             const bool resumed = !reforked && spec.commandline.find(L"--resume ") != std::wstring::npos;
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart] claude " + managedId + (reforked ? (L" (refork from " + info->forkParentId + L")") : (resumed ? L" (resume)" : L" (fresh)")) + L"\n");
+            // OBSERVER.md §21: an ATTACH (a live Claude Code background job runs the conversation) is neither: it reconnects the
+            // tab's viewer, and the job's turn goes on. No rewind below plans for it (neither `resumed` nor `specResumes`).
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart] claude " + managedId +
+                                                            (!spec.attachJobId.empty() ? (L" (attach to background job " + spec.attachJobId + L")") :
+                                                             reforked                  ? (L" (refork from " + info->forkParentId + L")") :
+                                                             resumed                   ? std::wstring{ L" (resume)" } :
+                                                                                         std::wstring{ L" (fresh)" }) +
+                                                            L"\n");
 
             // Agentmaster (HOOKS.md "API-error turns" — the API-ERROR REWIND). A RESUMED conversation whose turn died on an
             // API error gets one rewind line before the new claude reads it, so that claude CONTINUES the turn instead of
@@ -3676,8 +3784,11 @@ namespace winrt::TerminalApp::implementation
             const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline, spec.authTokenEnv);
             newConn = _BuildAgentConnection(hostedCmd, dir, title, spec.env, /*inheritCursor*/ false);
             reforked = spec.commandline.find(L"--fork-session") != std::wstring::npos;
-            // The same reading _RestartManagedSession logs, straight off the built commandline.
-            parkMode = reforked ? L"re-fork" : (spec.commandline.find(L"--resume ") != std::wstring::npos ? L"resume" : L"fresh (same id)");
+            // The same reading _RestartManagedSession logs, straight off the built commandline. OBSERVER.md §21: a conversation a
+            // live Claude Code background job runs re-ATTACHES when the parked tab is entered again (the job ran on meanwhile).
+            parkMode = !spec.attachJobId.empty() ? (L"attach to background job " + spec.attachJobId) :
+                       reforked                  ? std::wstring{ L"re-fork" } :
+                       (spec.commandline.find(L"--resume ") != std::wstring::npos ? std::wstring{ L"resume" } : std::wstring{ L"fresh (same id)" });
             // Agentmaster (HOOKS.md "API-error turns"): a parked RESUME of a conversation whose turn died on an API error
             // gets the rewind line once the claude being parked has exited (_RewindApiErrorAfterExit), so the tab wakes
             // into the interrupted turn. Gated on the record's state (a batch park of hundreds of tabs reads no transcript
