@@ -4,9 +4,15 @@
 // Agentmaster — the transcript overlay (AgentTranscriptOverlay.h has the design: what it shows, how it
 // renders, what closes it). This file is the whole implementation:
 //   * _BuildUi            — the host layer (backdrop + card), header (with the ↵ line-wrap toggle), level
-//                           tabs + "Expand all", body;
-//   * Show / Close        — open / retarget / close, the focus hand-offs; the remembered level
+//                           tabs, the separator and the three box tabs + "Expand all", the box row, body
+//                           (with the ↑ / ↓ jump buttons over its bottom-right corner);
+//   * Show / Close        — open / retarget / close, the focus hand-offs; the remembered tab
 //                           (_RememberedLevel on open, _RememberLevel on every tab pick — settings.json);
+//   * _ToggleBox          — a box tab's box click: its ticks (_RememberBox — settings.json, per tab), the
+//                           dependent boxes greyed (_SyncBoxesRow), the tab re-rendered (_ResetView) with
+//                           the reader kept on the same turn (_TopTurnNumber → the pending turn jump);
+//   * _JumpToEdge         — the ↑ / ↓ buttons (shown by _UpdateJumpButtons), the ↓ end-follow while a view
+//                           is still building (_Pump), stopped by the reader's own scroll (_CancelFollowEnd);
 //   * _ToggleWrapLines    — the line-wrap toggle: ApplyWrapMode per level view, the reader's place kept by
 //                           FindScrollAnchor / RestoreScrollAnchor (_SyncWrapMode), the state remembered
 //                           for every window (_RememberedWrapLines on open, _RememberWrapLines per click);
@@ -30,6 +36,7 @@
 #include "AgentMaster/ProcessInspect.h" // ReadConversationText / ReadConversationFollowupText / the Codex rollout resolve
 #include "AgentMaster/TranscriptLevelGuide.h" // kTranscriptLevelGuide / TranscriptLevelTip — the (i) panel and the tabs' cheat-sheet tooltips
 #include "AgentMaster/TranscriptTurns.h" // RenderTranscriptTurnsFile / TurnsOptionsForLevel / TurnsLevelName
+#include "AgentMaster/TranscriptViews.h" // the box tabs: kTranscriptViewBoxes, TranscriptViewOptions / Name / Tip, the box rules
 
 #include <winrt/Windows.UI.Xaml.Automation.h> // AutomationProperties (button names for screen readers)
 
@@ -212,8 +219,42 @@ namespace
     constexpr int kMaxAnchorDepth = 8;
 
     // A Session chain link scrolls its session's heading to the top of the view, this many DIPs below the
-    // edge — a hair of air, so the heading never reads as cut off.
+    // edge — a hair of air, so the heading never reads as cut off. A box click's keep-the-turn jump uses it too.
     constexpr double kSessionJumpGap = 8.0;
+
+    // The SEPARATOR between the five level tabs and the three box tabs (TRANSCRIPT_OVERLAY.md §3j): a hairline as tall as a
+    // tab's label, level with it (a tab is 5 DIPs of padding over its 13 DIP label), with air on both sides.
+    constexpr double kTabSeparatorHeight = 16.0;
+    constexpr double kTabSeparatorTop = 6.0;
+    constexpr double kTabSeparatorGap = 6.0;
+
+    // The BOX ROW: its text sizes (a box's words, a level group's caption) and the gaps of its wrapping panel - between two
+    // items of a line, and between two lines.
+    constexpr double kBoxFontSize = 12.5;
+    constexpr double kBoxGroupFontSize = 11.0;
+    constexpr float kBoxGapX = 12.0f;
+    constexpr float kBoxGapY = 2.0f;
+    // A group caption's extra air on its left, so "Default", "Full" and "Max" read as the start of a new group.
+    constexpr double kBoxGroupGapLeft = 10.0;
+    // What the row says before its boxes.
+    constexpr const wchar_t* kBoxRowLead = L"Also show:";
+
+    // The JUMP buttons (↑ to the top, ↓ to the bottom), stacked at the body's bottom-right corner: small round faces (the
+    // user's "40% smaller" than the first 34 DIP design), a gap between them, and the corner margins - right of the body's
+    // text column but left of the vertical scroll bar's widest (hovered) state, so neither covers the other. The glyphs are
+    // Segoe Fluent Icons' Up and Down arrows.
+    constexpr double kJumpButtonSize = 20.0;
+    constexpr double kJumpGlyphSize = 10.0;
+    constexpr double kJumpButtonGap = 4.0;
+    constexpr double kJumpMarginRight = 16.0;
+    constexpr double kJumpMarginBottom = 10.0;
+    constexpr const wchar_t* kJumpTopGlyph = L"\xE74A";
+    constexpr const wchar_t* kJumpEndGlyph = L"\xE74B";
+    constexpr const wchar_t* kJumpTopTip = L"Jump to the top (Home)";
+    constexpr const wchar_t* kJumpEndTip = L"Jump to the bottom (End) - while the view is still being laid out, it follows the end until the last line is there";
+    // How far from an edge still counts as AT that edge (DIPs): a fractional offset left by a layout rounding never shows a
+    // button that would scroll a pixel.
+    constexpr double kJumpEdgeSlack = 1.0;
 
     // Point a level's scroll view at a line-wrap mode — the whole mechanism of the ↵ toggle, one property:
     //   wrap ON  -> HorizontalScrollBarVisibility DISABLED: the content is measured at the viewport's width,
@@ -377,36 +418,151 @@ namespace
         return false;
     }
 
-    // The view keeps one LevelView per TurnsLevel value in a fixed array of 5, and settings.json stores
-    // the remembered level by NAME (TurnsLevelName) — both assume TranscriptTurns' five levels.
-    static_assert(::Agentmaster::kTurnsLevelCount == 5, "AgentTranscriptOverlay::_levels holds 5 views; update it with the TurnsLevel set");
+    // The view keeps one LevelView per VIEW in a fixed array: the five TranscriptTurns levels by their TurnsLevel value, then
+    // the three box tabs (TranscriptViews.h); settings.json stores the remembered tab by NAME (TranscriptViewName). Both
+    // assume these counts - a new level or tab must update TranscriptViews.h's table and names first.
+    static_assert(::Agentmaster::kTurnsLevelCount == 5, "AgentTranscriptOverlay::_levels starts with the 5 levels; update it with the TurnsLevel set");
+    static_assert(::Agentmaster::kTranscriptViewCount == 8, "AgentTranscriptOverlay::_levels holds 8 views (5 levels + 3 box tabs); update it with TranscriptView");
 
-    // The TurnsLevel value whose TurnsLevelName is `name`, compared case-insensitively (a hand-edited
-    // settings.json may say "Compact"); -1 when no level has that name (empty included).
-    int LevelFromName(std::wstring_view name) noexcept
+    // The BOX ROW's layout: a code-only Panel that lays its children out left to right and WRAPS onto a new line when the next
+    // one does not fit - UWP XAML has no WrapPanel, and a horizontal StackPanel would cut the last boxes off on a narrow
+    // window (twelve boxes and four group captions need ~1,300 DIPs on one line). Every child keeps its desired size; a child
+    // wider than the whole line gets a line of its own at the line's width. Each line's children are centered vertically,
+    // so a caption sits level with the boxes beside it. Its own copy of the side panel's chips-row panel
+    // (TerminalPage.AgentSidePanel.cpp AgentSidePanelWrapPanel, local to that unit) with this row's gaps.
+    // Code-only (no IDL, never named in markup — the AgentTranscriptChunkPanel idiom): winrt::make returns it as a Panel.
+    struct AgentTranscriptBoxWrapPanel : PanelT<AgentTranscriptBoxWrapPanel>
     {
-        for (int level = 0; level < ::Agentmaster::kTurnsLevelCount; ++level)
+        // Measure every child against the line's width and stack the lines.
+        //   available - the room the row gives (its width bounds a line; the height is unbounded in practice).
+        //   returns   - the widest line and the lines' total height.
+        //   throws    - nothing of its own; a child's Measure that throws fails XAML's layout pass (plain check boxes and
+        //               text blocks: never seen).
+        winrt::Windows::Foundation::Size MeasureOverride(const winrt::Windows::Foundation::Size& available)
         {
-            const std::wstring_view known{ ::Agentmaster::TurnsLevelName(static_cast<::Agentmaster::TurnsLevel>(level)) };
-            if (known.size() != name.size())
+            const float lineWidth = available.Width;
+            const winrt::Windows::Foundation::Size childAvailable{ lineWidth, std::numeric_limits<float>::infinity() };
+            float x = 0.0f;
+            float y = 0.0f;
+            float lineHeight = 0.0f;
+            float widest = 0.0f;
+            for (const auto& child : Children())
             {
-                continue;
-            }
-            bool same = true;
-            for (size_t i = 0; i < known.size(); ++i)
-            {
-                if (towlower(name[i]) != towlower(known[i]))
+                child.Measure(childAvailable);
+                const auto desired = child.DesiredSize();
+                const float w = std::min(desired.Width, lineWidth);
+                if (x > 0.0f && x + w > lineWidth)
                 {
-                    same = false;
-                    break;
+                    // The next line. Never before the line's first child: a child wider than the line still gets placed.
+                    y += lineHeight + kBoxGapY;
+                    x = 0.0f;
+                    lineHeight = 0.0f;
                 }
+                x += w;
+                widest = std::max(widest, x);
+                x += kBoxGapX;
+                lineHeight = std::max(lineHeight, desired.Height);
             }
-            if (same)
-            {
-                return level;
-            }
+            return winrt::Windows::Foundation::Size{ widest, y + lineHeight };
         }
-        return -1;
+
+        // Arrange every child where MeasureOverride's walk put it, against the final width.
+        //   finalSize - the room the row arranged the panel in.
+        //   returns   - finalSize (the panel takes what it was given).
+        //   throws    - nothing of its own (see MeasureOverride).
+        winrt::Windows::Foundation::Size ArrangeOverride(const winrt::Windows::Foundation::Size& finalSize)
+        {
+            const float lineWidth = finalSize.Width;
+            // Two passes over each line: one to learn the line's height (its children are centered in it), one to place.
+            // A line is the run of children MeasureOverride's rule puts together.
+            std::vector<UIElement> line;
+            float x = 0.0f;
+            float y = 0.0f;
+            float lineHeight = 0.0f;
+            const auto place = [&]() {
+                float cx = 0.0f;
+                for (const auto& child : line)
+                {
+                    const auto desired = child.DesiredSize();
+                    const float w = std::min(desired.Width, lineWidth);
+                    const float top = y + (lineHeight - desired.Height) / 2.0f;
+                    child.Arrange(winrt::Windows::Foundation::Rect{ cx, top, w, desired.Height });
+                    cx += w + kBoxGapX;
+                }
+            };
+            for (const auto& child : Children())
+            {
+                const auto desired = child.DesiredSize();
+                const float w = std::min(desired.Width, lineWidth);
+                if (x > 0.0f && x + w > lineWidth)
+                {
+                    place();
+                    y += lineHeight + kBoxGapY;
+                    line.clear();
+                    x = 0.0f;
+                    lineHeight = 0.0f;
+                }
+                line.push_back(child);
+                x += w + kBoxGapX;
+                lineHeight = std::max(lineHeight, desired.Height);
+            }
+            place();
+            return finalSize;
+        }
+    };
+
+    // The number of a top-level "### Turn N · …" heading (TranscriptTurns writes one per turn, numbered across the whole
+    // conversation): what a box click's keep-the-turn jump looks for. A heading inside a quote or a list item (a message
+    // that QUOTES such a heading) has containers and never counts; nor does any other heading level, nor "### Work before
+    // the first prompt" (no number: the jump then simply starts at the top).
+    // Parameters: block — a block of the level.
+    // Returns N (1..), or 0 when the block is no turn heading. Never throws (it only reads the block).
+    int TurnHeadingNumber(const ::Agentmaster::MdBlock& block) noexcept
+    {
+        if (block.kind != ::Agentmaster::MdBlockKind::Heading || block.headingLevel != 3 || !block.containers.empty())
+        {
+            return 0;
+        }
+        // The heading's text starts with "Turn " and its digits; reading at most the first run's head is enough (the number
+        // is plain text right at the start - a bold or code run never opens a turn heading).
+        if (block.runs.empty())
+        {
+            return 0;
+        }
+        const std::wstring_view text{ block.runs.front().text };
+        constexpr std::wstring_view kTurn{ L"Turn " };
+        if (text.size() <= kTurn.size() || text.substr(0, kTurn.size()) != kTurn)
+        {
+            return 0;
+        }
+        int number = 0;
+        for (size_t i = kTurn.size(); i < text.size() && text[i] >= L'0' && text[i] <= L'9'; ++i)
+        {
+            if (number > 100'000'000)
+            {
+                return 0; // no real conversation has this many turns: a heading that only looks like one
+            }
+            number = number * 10 + (text[i] - L'0');
+        }
+        return number;
+    }
+
+    // The settings list that remembers box tab `view`'s ticks (TRANSCRIPT_OVERLAY.md §3j): one AppSettings field per tab.
+    // Parameters: settings — the settings to read or change; view — a view index.
+    // Returns the tab's list inside `settings`, or nullptr for a view that is no box tab. Never throws.
+    std::vector<std::wstring>* RememberedBoxesField(::Agentmaster::AppSettings& settings, int view) noexcept
+    {
+        switch (static_cast<::Agentmaster::TranscriptView>(view))
+        {
+        case ::Agentmaster::TranscriptView::Custom:
+            return &settings.transcriptOverlayCustomBoxes;
+        case ::Agentmaster::TranscriptView::UserOnly:
+            return &settings.transcriptOverlayUserOnlyBoxes;
+        case ::Agentmaster::TranscriptView::AssistantOnly:
+            return &settings.transcriptOverlayAssistantOnlyBoxes;
+        default:
+            return nullptr;
+        }
     }
 
     // The note an EMPTY tool area becomes: its single item's text without the surrounding blanks and
@@ -697,8 +853,9 @@ namespace winrt::TerminalApp::implementation
         _card.TabFocusNavigation(KeyboardNavigationMode::Cycle);
         _host.Children().Append(_card);
 
+        // The card's rows: 0 the header, 1 the tabs, 2 the box row (box tabs only), 3 the divider, 4 the body.
         Grid layout;
-        for (const auto height : { GridLength{ 0, GridUnitType::Auto }, GridLength{ 0, GridUnitType::Auto }, GridLength{ 0, GridUnitType::Auto }, GridLength{ 1, GridUnitType::Star } })
+        for (const auto height : { GridLength{ 0, GridUnitType::Auto }, GridLength{ 0, GridUnitType::Auto }, GridLength{ 0, GridUnitType::Auto }, GridLength{ 0, GridUnitType::Auto }, GridLength{ 1, GridUnitType::Star } })
         {
             RowDefinition row;
             row.Height(height);
@@ -869,10 +1026,41 @@ namespace winrt::TerminalApp::implementation
         StackPanel tabs;
         tabs.Orientation(Orientation::Horizontal);
         tabs.Spacing(2);
-        size_t position = 0;
+        // Every tab, in the row's order: the five levels in the Copy menu's order (Default first, its words from the menu's
+        // own table), then — after a separator — the three box tabs (TRANSCRIPT_OVERLAY.md §3j; their words from
+        // TranscriptViews.h). A tab's position is its digit key (1-8).
+        struct TabEntry
+        {
+            const wchar_t* label;
+            int view;
+        };
+        std::vector<TabEntry> entries;
         for (const auto& item : kTranscriptCopyMenu)
         {
-            const int level = item.which - kCopyFieldTranscriptLevelBase;
+            entries.push_back(TabEntry{ item.label, item.which - kCopyFieldTranscriptLevelBase });
+        }
+        for (int view = ::Agentmaster::kTranscriptFirstBoxView; view < ::Agentmaster::kTranscriptViewCount; ++view)
+        {
+            entries.push_back(TabEntry{ ::Agentmaster::TranscriptViewLabel(view), view });
+        }
+        size_t position = 0;
+        for (const auto& item : entries)
+        {
+            const int level = item.view;
+            if (level == ::Agentmaster::kTranscriptFirstBoxView)
+            {
+                // The SEPARATOR the user asked for left of the box tabs: the five levels on its left, the tabs whose boxes
+                // the user picks on its right. A childless Border (no composition node), out of the tab order and of what
+                // a screen reader reads (Raw).
+                Border separator;
+                separator.Width(1);
+                separator.Height(kTabSeparatorHeight);
+                separator.Background(_ruleBrush);
+                separator.VerticalAlignment(VerticalAlignment::Top);
+                separator.Margin(Thickness{ kTabSeparatorGap, kTabSeparatorTop, kTabSeparatorGap, 0 });
+                winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetAccessibilityView(separator, winrt::Windows::UI::Xaml::Automation::Peers::AccessibilityView::Raw);
+                tabs.Children().Append(separator);
+            }
             Button tab;
             tab.Background(_transparentBrush);
             tab.BorderThickness(Thickness{ 0, 0, 0, 0 });
@@ -897,8 +1085,9 @@ namespace winrt::TerminalApp::implementation
             tab.Content(inner);
             // The tab's tooltip is that level's CHEAT SHEET (what it adds over the level below, what it
             // still leaves out and where each of those first shows), built from the same table as the (i)
-            // panel - not the Copy menu's one-line description - so the two can never disagree.
-            AgentSetTip(tab, winrt::hstring{ ::Agentmaster::TranscriptLevelTip(static_cast<::Agentmaster::TurnsLevel>(level), position + 1) });
+            // panel - not the Copy menu's one-line description - so the two can never disagree. A box tab's
+            // says which side it shows and how its boxes work (TranscriptViewTip hands a level to TranscriptLevelTip).
+            AgentSetTip(tab, winrt::hstring{ ::Agentmaster::TranscriptViewTip(level, position + 1) });
             winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(tab, winrt::hstring{ std::wstring{ item.label } + L" transcript" });
             tab.Click([weak = get_weak(), position](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 try
@@ -917,7 +1106,7 @@ namespace winrt::TerminalApp::implementation
             _tabButtons.push_back(tab);
             _tabLabels.push_back(label);
             _tabUnderlines.push_back(underline);
-            _tabLevels.push_back(level);
+            _tabViews.push_back(level);
             ++position;
         }
         // The LEVEL GUIDE: an (i) right after the last tab - inside the tabs' own stack, so it always follows
@@ -1041,18 +1230,159 @@ namespace winrt::TerminalApp::implementation
         Grid::SetRow(_tabsRow, 1);
         layout.Children().Append(_tabsRow);
 
+        // --- the BOX ROW (TRANSCRIPT_OVERLAY.md §3j): "Also show:", then the twelve boxes, each level's group under its
+        // caption (Compact · Default · Full · Max), in a panel that wraps on a narrow window. Built once; shown, filled and
+        // greyed for the box tab on screen by _SyncBoxesRow, Collapsed on a level. Real CheckBoxes: a screen reader and the
+        // e2e driver get the Toggle pattern and the state for free, and the dark theme above draws them dark. ---
+        _boxesRow = Grid{};
+        _boxesRow.Visibility(Visibility::Collapsed);
+        _boxesRow.Margin(Thickness{ 18, 0, 16, 4 });
+        {
+            ColumnDefinition leadColumn;
+            leadColumn.Width(GridLength{ 0, GridUnitType::Auto });
+            ColumnDefinition boxesColumn;
+            boxesColumn.Width(GridLength{ 1, GridUnitType::Star });
+            _boxesRow.ColumnDefinitions().Append(leadColumn);
+            _boxesRow.ColumnDefinitions().Append(boxesColumn);
+            TextBlock lead;
+            lead.Text(kBoxRowLead);
+            lead.FontSize(kBoxFontSize);
+            lead.Foreground(_dimBrush);
+            // Level with the words of the first line's boxes (a CheckBox's template is 32 DIPs tall, its words near the
+            // middle), and the lead stays at the top when the boxes wrap onto a second line.
+            lead.VerticalAlignment(VerticalAlignment::Top);
+            lead.Margin(Thickness{ 0, 7, 12, 0 });
+            Grid::SetColumn(lead, 0);
+            _boxesRow.Children().Append(lead);
+            const auto boxPanel = winrt::make<AgentTranscriptBoxWrapPanel>();
+            Grid::SetColumn(boxPanel, 1);
+            int group = -1; // the level whose caption was added last (-1: none yet)
+            for (size_t index = 0; index < std::size(::Agentmaster::kTranscriptViewBoxes); ++index)
+            {
+                const auto& box = ::Agentmaster::kTranscriptViewBoxes[index];
+                if (static_cast<int>(box.level) != group)
+                {
+                    // A level's caption opens its group: the boxes after it are what that level adds.
+                    group = static_cast<int>(box.level);
+                    TextBlock caption;
+                    caption.Text(::Agentmaster::TranscriptLevelLabel(box.level));
+                    caption.FontSize(kBoxGroupFontSize);
+                    caption.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+                    caption.Foreground(_dimBrush);
+                    caption.Margin(Thickness{ index == 0 ? 0.0 : kBoxGroupGapLeft, 0, 0, 0 });
+                    boxPanel.Children().Append(caption);
+                }
+                CheckBox check;
+                // A CheckBox's theme minimums (120 x 32) would give twelve boxes a row each on most windows: as wide as its
+                // words instead. Its words are its content - and so its name for a screen reader.
+                check.MinWidth(0);
+                check.MinHeight(0);
+                check.FontSize(kBoxFontSize);
+                check.Content(winrt::box_value(winrt::hstring{ box.label }));
+                // The tooltip says what the box shows (the level guide's own sentence), where it comes from, and when it
+                // has no effect.
+                AgentSetTip(check, winrt::hstring{ ::Agentmaster::TranscriptViewBoxTip(box) });
+                // Click, never Checked / Unchecked: Click comes only from the user (a press, Space), so _SyncBoxesRow can
+                // set IsChecked for another tab without re-entering here.
+                check.Click([weak = get_weak(), index](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                    try
+                    {
+                        if (const auto self = weak.get())
+                        {
+                            self->_ToggleBox(index);
+                        }
+                    }
+                    catch (...)
+                    {
+                        // Rule #18. Recovery: none needed - the view keeps what it showed; the box's own check may now
+                        // disagree with it until the next tab switch re-syncs the row.
+                        ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay box click");
+                    }
+                });
+                boxPanel.Children().Append(check);
+                _boxChecks.push_back(check);
+            }
+            _boxesRow.Children().Append(boxPanel);
+        }
+        Grid::SetRow(_boxesRow, 2);
+        layout.Children().Append(_boxesRow);
+
         Border divider;
         divider.Height(1);
         divider.Background(_ruleBrush);
-        Grid::SetRow(divider, 2);
+        Grid::SetRow(divider, 3);
         layout.Children().Append(divider);
 
+        // --- the body: the level views' host, and over its bottom-right corner the two JUMP buttons, ↑ stacked on ↓ (the
+        // user's picks: stacked, "40% smaller and more to right bottom"). A layer of its own, so _ReleaseLevels' Clear of
+        // the views' host never takes the buttons with it; the buttons come last, so they draw over the views. ---
+        _bodyLayer = Grid{};
+        Grid::SetRow(_bodyLayer, 4);
         _bodyHost = Grid{};
-        Grid::SetRow(_bodyHost, 3);
-        layout.Children().Append(_bodyHost);
+        _bodyLayer.Children().Append(_bodyHost);
+        {
+            StackPanel jumps;
+            jumps.Orientation(Orientation::Vertical);
+            jumps.Spacing(kJumpButtonGap);
+            // No background: only the buttons take presses; the gap between them and the rest of the corner pass through
+            // to the view under them.
+            jumps.HorizontalAlignment(HorizontalAlignment::Right);
+            jumps.VerticalAlignment(VerticalAlignment::Bottom);
+            jumps.Margin(Thickness{ 0, 0, kJumpMarginRight, kJumpMarginBottom });
+            const auto faceBrush = MakeBrush(0xF2, 0x2D, 0x2D, 0x2D);
+            const auto edgeBrush = MakeBrush(0xFF, 0x4A, 0x4A, 0x4A);
+            const auto makeJump = [this, &faceBrush, &edgeBrush](const wchar_t* glyph, const wchar_t* tip, const wchar_t* name, bool toEnd) {
+                FontIcon arrow;
+                arrow.FontFamily(FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+                arrow.Glyph(glyph);
+                arrow.FontSize(kJumpGlyphSize);
+                arrow.Foreground(_bodyBrush);
+                arrow.IsHitTestVisible(false); // the button must be the only target (the badge's mkIconBtn lesson)
+                Button jump;
+                jump.Width(kJumpButtonSize);
+                jump.Height(kJumpButtonSize);
+                jump.MinWidth(0);
+                jump.MinHeight(0);
+                jump.Padding(Thickness{ 0, 0, 0, 0 });
+                jump.CornerRadius(CornerRadius{ kJumpButtonSize / 2, kJumpButtonSize / 2, kJumpButtonSize / 2, kJumpButtonSize / 2 });
+                jump.Background(faceBrush);
+                jump.BorderBrush(edgeBrush);
+                jump.BorderThickness(Thickness{ 1, 1, 1, 1 });
+                jump.HorizontalContentAlignment(HorizontalAlignment::Center);
+                jump.VerticalContentAlignment(VerticalAlignment::Center);
+                jump.Content(arrow);
+                AgentSetTip(jump, winrt::hstring{ tip });
+                winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(jump, winrt::hstring{ name });
+                // Hidden until the view can be scrolled that way (_UpdateJumpButtons): Opacity + hit testing + tab stop, never
+                // Visibility, so showing one never re-lays the body out.
+                jump.Opacity(0.0);
+                jump.IsHitTestVisible(false);
+                jump.IsTabStop(false);
+                jump.Click([weak = get_weak(), toEnd](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                    try
+                    {
+                        if (const auto self = weak.get())
+                        {
+                            self->_JumpToEdge(toEnd);
+                        }
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay jump button"); // the view stays where it was
+                    }
+                });
+                return jump;
+            };
+            _jumpTopButton = makeJump(kJumpTopGlyph, kJumpTopTip, L"Jump to the top", false);
+            _jumpEndButton = makeJump(kJumpEndGlyph, kJumpEndTip, L"Jump to the bottom", true);
+            jumps.Children().Append(_jumpTopButton);
+            jumps.Children().Append(_jumpEndButton);
+            _bodyLayer.Children().Append(jumps);
+        }
+        layout.Children().Append(_bodyLayer);
 
-        // --- keyboard: Esc closes; 1..5 pick a tab by position (bubbling from whatever inside the card
-        // has focus — the scroll view, a selected text block, a button) ---
+        // --- keyboard: Esc closes; 1..8 pick a tab by position (bubbling from whatever inside the card
+        // has focus — the scroll view, a selected text block, a button, a box) ---
         _card.KeyDown([weak = get_weak()](const winrt::Windows::Foundation::IInspectable&, const KeyRoutedEventArgs& e) {
             try
             {
@@ -1086,7 +1416,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     tabPosition = static_cast<int>(key) - static_cast<int>(VirtualKey::NumberPad1);
                 }
-                if (tabPosition >= 0 && static_cast<size_t>(tabPosition) < self->_tabLevels.size())
+                if (tabPosition >= 0 && static_cast<size_t>(tabPosition) < self->_tabViews.size())
                 {
                     e.Handled(true);
                     self->_SelectTabPosition(static_cast<size_t>(tabPosition));
@@ -1141,6 +1471,10 @@ namespace winrt::TerminalApp::implementation
                 ++_generation;
                 _ReleaseLevels();
                 _source = source;
+                // The box tabs' boxes are, like the tab and the wrap state, the ones last ticked in ANY window — read
+                // fresh with every new view of a conversation, before _SelectLevel renders one. An overlay already open
+                // on this conversation keeps its own (the same-conversation path below): its views were rendered with them.
+                _boxes = _RememberedBoxes();
             }
             else if (!source.title.empty())
             {
@@ -1154,10 +1488,10 @@ namespace winrt::TerminalApp::implementation
             _wrapLines = _RememberedWrapLines();
             _UpdateWrapButton();
             _host.Visibility(Visibility::Visible);
-            // kRememberedLevel (any negative value): the level last picked in ANY window, read fresh from
-            // settings.json now — a pick made in another window since this one last opened counts.
+            // kRememberedLevel (any negative value): the tab last picked in ANY window — a level or a box tab — read
+            // fresh from settings.json now; a pick made in another window since this one last opened counts.
             const int wanted = level < 0 ? _RememberedLevel() : level;
-            _SelectLevel(std::clamp(wanted, 0, ::Agentmaster::kTurnsLevelCount - 1), true);
+            _SelectLevel(std::clamp(wanted, 0, ::Agentmaster::kTranscriptViewCount - 1), true);
         }
         catch (...)
         {
@@ -1198,6 +1532,15 @@ namespace winrt::TerminalApp::implementation
             if (_tabsRow)
             {
                 AgentCloseTipsIn(_tabsRow);
+            }
+            // The box row's tips and the jump buttons' tips live in that same popup.
+            if (_boxesRow)
+            {
+                AgentCloseTipsIn(_boxesRow);
+            }
+            if (_bodyLayer)
+            {
+                AgentCloseTipsIn(_bodyLayer);
             }
             // The level guide is a popup of its own, so collapsing the host would leave it floating over
             // the page with nothing under it: hide it with the overlay.
@@ -1265,15 +1608,15 @@ namespace winrt::TerminalApp::implementation
 
     void AgentTranscriptOverlay::_SelectTabPosition(size_t position)
     {
-        if (position >= _tabLevels.size())
+        if (position >= _tabViews.size())
         {
             return;
         }
-        const int level = _tabLevels[position];
+        const int level = _tabViews[position];
         if (level != _current)
         {
-            ::Agentmaster::LogNav(L"transcript-level " + ::Agentmaster::ShortId(_source.sessionId) + L" " +
-                                  ::Agentmaster::TurnsLevelName(static_cast<::Agentmaster::TurnsLevel>(level)));
+            // The view's settings name: a level's ("compact") or a box tab's ("user-only").
+            ::Agentmaster::LogNav(L"transcript-level " + ::Agentmaster::ShortId(_source.sessionId) + L" " + ::Agentmaster::TranscriptViewName(level));
         }
         _SelectLevel(level, true);
         // Every pick — the tab already showing included — is the level the next open uses, in any window
@@ -1286,7 +1629,8 @@ namespace winrt::TerminalApp::implementation
     {
         try
         {
-            const int level = LevelFromName(::Agentmaster::LoadAppSettings().transcriptOverlayLevel);
+            // A level's name or a box tab's ("custom" / "user-only" / "assistant-only"); -1 for an empty or unknown one.
+            const int level = ::Agentmaster::TranscriptViewFromName(::Agentmaster::LoadAppSettings().transcriptOverlayLevel);
             if (level >= 0)
             {
                 return level;
@@ -1304,7 +1648,7 @@ namespace winrt::TerminalApp::implementation
     {
         try
         {
-            const std::wstring name{ ::Agentmaster::TurnsLevelName(static_cast<::Agentmaster::TurnsLevel>(level)) };
+            const std::wstring name{ ::Agentmaster::TranscriptViewName(level) };
             // FRESHEST disk, one field (the ColorPickupFlyout idiom): never write a stale in-memory copy
             // over a cog Save or another window's settings change.
             auto settings = ::Agentmaster::LoadAppSettings();
@@ -1321,6 +1665,381 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    const std::vector<std::wstring>& AgentTranscriptOverlay::_BoxesOf(int view) const noexcept
+    {
+        // A level has no boxes: an empty list, the same object for every caller (an empty vector's construction never
+        // throws, and a function-local static is built once, thread-safely).
+        static const std::vector<std::wstring> kNoBoxes;
+        if (!::Agentmaster::IsTranscriptBoxView(view))
+        {
+            return kNoBoxes;
+        }
+        return _boxes[static_cast<size_t>(view - ::Agentmaster::kTranscriptFirstBoxView)];
+    }
+
+    ::Agentmaster::TurnsOptions AgentTranscriptOverlay::_ViewOptions(int view) const noexcept
+    {
+        return ::Agentmaster::TranscriptViewOptions(view, _BoxesOf(view));
+    }
+
+    void AgentTranscriptOverlay::_SyncBoxesRow()
+    {
+        if (!_boxesRow)
+        {
+            return;
+        }
+        const bool boxTab = ::Agentmaster::IsTranscriptBoxView(_current);
+        const auto wanted = boxTab ? Visibility::Visible : Visibility::Collapsed;
+        if (_boxesRow.Visibility() != wanted)
+        {
+            _boxesRow.Visibility(wanted); // a tab switch between two levels never touches the row's layout
+        }
+        if (!boxTab)
+        {
+            return;
+        }
+        const auto& ticked = _BoxesOf(_current);
+        for (size_t index = 0; index < _boxChecks.size() && index < std::size(::Agentmaster::kTranscriptViewBoxes); ++index)
+        {
+            const auto& box = ::Agentmaster::kTranscriptViewBoxes[index];
+            const auto& check = _boxChecks[index];
+            // The tab's own tick. Set only when it differs (an IsChecked change runs the box's visual-state change); a
+            // programmatic change raises Checked / Unchecked, never the Click _ToggleBox listens to.
+            const bool on = ::Agentmaster::TranscriptViewTicks(ticked, box.name);
+            const auto shown = check.IsChecked();
+            if ((shown && shown.Value()) != on)
+            {
+                check.IsChecked(on);
+            }
+            // Greyed while it would change nothing - its tick kept, so it comes back as it was the moment it matters again.
+            // A Codex session has no turns view (the body says so): every box is greyed there.
+            const bool enabled = !_source.codex && ::Agentmaster::TranscriptViewBoxTakesEffect(box, ticked);
+            if (check.IsEnabled() != enabled)
+            {
+                check.IsEnabled(enabled);
+            }
+        }
+    }
+
+    void AgentTranscriptOverlay::_ToggleBox(size_t index)
+    {
+        const int view = _current;
+        if (!_open || !::Agentmaster::IsTranscriptBoxView(view) || index >= _boxChecks.size() || index >= std::size(::Agentmaster::kTranscriptViewBoxes))
+        {
+            return;
+        }
+        const auto& box = ::Agentmaster::kTranscriptViewBoxes[index];
+        // The CheckBox flipped itself before it raised Click: its state IS the user's choice.
+        const auto checked = _boxChecks[index].IsChecked();
+        const bool on = checked && checked.Value();
+        auto& ticked = _boxes[static_cast<size_t>(view - ::Agentmaster::kTranscriptFirstBoxView)];
+        if (::Agentmaster::TranscriptViewTicks(ticked, box.name) == on)
+        {
+            return; // the tab already says so - nothing to render again
+        }
+        ticked = ::Agentmaster::TranscriptViewWithBox(std::move(ticked), box.name, on);
+        // Every window's next open (settings.json: this tab's list, this one name). Never throws.
+        _RememberBox(view, box.name, on);
+        // The dependent boxes' grey follows the full call lines' box ("ops").
+        _SyncBoxesRow();
+        // Render the tab again with its new boxes, the reader kept on the turn at the top of the view. A view that is still
+        // loading has no headings yet: a turn jump left pending by the previous click carries over instead.
+        auto& shown = _levels[static_cast<size_t>(view)];
+        const int turn = shown.pendingTurnJump > 0 ? shown.pendingTurnJump : _TopTurnNumber(shown);
+        _ResetView(view);
+        _levels[static_cast<size_t>(view)].pendingTurnJump = turn;
+        // The same tab again: nothing pending is dropped (the turn jump just set survives), the new view starts its render,
+        // and the box keeps keyboard focus (no focusBody) so the next box is one Tab away.
+        _SelectLevel(view, false);
+    }
+
+    std::array<std::vector<std::wstring>, ::Agentmaster::kTranscriptBoxViewCount> AgentTranscriptOverlay::_RememberedBoxes() noexcept
+    {
+        std::array<std::vector<std::wstring>, ::Agentmaster::kTranscriptBoxViewCount> boxes{};
+        try
+        {
+            auto settings = ::Agentmaster::LoadAppSettings();
+            for (int view = ::Agentmaster::kTranscriptFirstBoxView; view < ::Agentmaster::kTranscriptViewCount; ++view)
+            {
+                if (auto* list = RememberedBoxesField(settings, view))
+                {
+                    boxes[static_cast<size_t>(view - ::Agentmaster::kTranscriptFirstBoxView)] = std::move(*list);
+                }
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: every box clear (each tab's Minimal side) - a failed settings read never blocks the overlay.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay remembered boxes");
+            boxes = {};
+        }
+        return boxes;
+    }
+
+    void AgentTranscriptOverlay::_RememberBox(int view, std::wstring_view name, bool on) noexcept
+    {
+        try
+        {
+            // FRESHEST disk, one tab's list, one name (the ColorPickupFlyout idiom, as _RememberLevel): never a stale
+            // in-memory copy over a cog Save, another window's ticks or a newer build's names.
+            auto settings = ::Agentmaster::LoadAppSettings();
+            auto* list = RememberedBoxesField(settings, view);
+            if (!list || ::Agentmaster::TranscriptViewTicks(*list, name) == on)
+            {
+                return; // not a box tab, or the file already says so (another window ticked it too)
+            }
+            *list = ::Agentmaster::TranscriptViewWithBox(std::move(*list), name, on);
+            ::Agentmaster::SaveAppSettings(settings);
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: nothing - the view already changed; only the remembered tick is lost.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay remember box");
+        }
+    }
+
+    void AgentTranscriptOverlay::_ResetView(int view) noexcept
+    {
+        if (view < 0 || view >= static_cast<int>(_levels.size()))
+        {
+            return;
+        }
+        auto& stale = _levels[static_cast<size_t>(view)];
+        const bool expandAll = stale.expandAll; // the reader's choice, not the text's: kept, as a Refresh keeps it
+        const auto oldScroll = stale.scroll;
+        // The epoch FIRST: a render still running for the old boxes is dropped when it lands (_ApplyLevelRender).
+        ++_viewEpochs[static_cast<size_t>(view)];
+        stale = LevelView{};
+        stale.expandAll = expandAll;
+        if (!oldScroll)
+        {
+            return;
+        }
+        try
+        {
+            // Off the screen at once: the new view is made beside it right away (_EnsureLevelView), in the body's one cell.
+            oldScroll.Visibility(Visibility::Collapsed);
+            if (_dispatcher)
+            {
+                // Out of the tree LATER, at low priority: a long view's thousands of elements cost their teardown on the UI
+                // thread (XAML's event-table walk per element, CLAUDE.md "XAML's event table"), which must not stall the
+                // click. Weak both ways: the overlay may close first (its _ReleaseLevels' Clear then took the view out).
+                _dispatcher.TryEnqueue(DispatcherQueuePriority::Low, [weak = get_weak(), weakScroll = winrt::make_weak(oldScroll)]() {
+                    try
+                    {
+                        const auto self = weak.get();
+                        const auto scroll = weakScroll.get();
+                        if (!self || !scroll || !self->_bodyHost)
+                        {
+                            return;
+                        }
+                        uint32_t at = 0;
+                        if (self->_bodyHost.Children().IndexOf(scroll, at))
+                        {
+                            self->_bodyHost.Children().RemoveAt(at);
+                        }
+                    }
+                    catch (...)
+                    {
+                        // Rule #18. Recovery: the collapsed view stays in the tree until the overlay's next release.
+                        ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay release reset view");
+                    }
+                });
+            }
+            else
+            {
+                uint32_t at = 0;
+                if (_bodyHost && _bodyHost.Children().IndexOf(oldScroll, at))
+                {
+                    _bodyHost.Children().RemoveAt(at);
+                }
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the view is reset either way; the old XAML leaves with the overlay's next release.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay reset view");
+        }
+    }
+
+    int AgentTranscriptOverlay::_TopTurnNumber(LevelView& view) noexcept
+    {
+        try
+        {
+            if (!view.scroll || !view.content || view.turnHeadings.empty())
+            {
+                return 0;
+            }
+            const double top = view.scroll.VerticalOffset();
+            if (top < kJumpEdgeSlack)
+            {
+                return 0; // at the top: the new render starts there anyway
+            }
+            // A heading that a jump put at the top sits kSessionJumpGap below the edge, and must still count as the turn on
+            // top - so the edge is moved down by that much.
+            const double edge = top + kSessionJumpGap + kJumpEdgeSlack;
+            const auto headingTop = [&view](size_t index) {
+                const auto& element = view.turnHeadings[index].second;
+                return element ? static_cast<double>(element.TransformToVisual(view.content).TransformPoint(winrt::Windows::Foundation::Point{ 0.0f, 0.0f }).Y) :
+                                 std::numeric_limits<double>::infinity();
+            };
+            // The headings were built top to bottom, so their tops rise with their index: binary search for the last one at
+            // or above the edge (every heading before `low` is, every heading from `high` on is not).
+            size_t low = 0;
+            size_t high = view.turnHeadings.size();
+            while (low < high)
+            {
+                const size_t middle = low + (high - low) / 2;
+                if (headingTop(middle) <= edge)
+                {
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle;
+                }
+            }
+            return low == 0 ? 0 : view.turnHeadings[low - 1].first;
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: no turn - the re-render starts at the top.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay top turn");
+        }
+        return 0;
+    }
+
+    void AgentTranscriptOverlay::_ScrollToTurnHeading(LevelView& view, size_t index) noexcept
+    {
+        try
+        {
+            if (!view.scroll || !view.content || index >= view.turnHeadings.size() || !view.turnHeadings[index].second)
+            {
+                return;
+            }
+            const auto& heading = view.turnHeadings[index].second;
+            // The session jump's recipe: lay out first (a heading built in this very slice has no position yet, and
+            // ChangeView clamps to the current extent), then the heading's top in the content's coordinates is the offset.
+            view.scroll.UpdateLayout();
+            const auto at = heading.TransformToVisual(view.content).TransformPoint(winrt::Windows::Foundation::Point{ 0.0f, 0.0f });
+            view.scroll.ChangeView(nullptr, std::max(0.0, static_cast<double>(at.Y) - kSessionJumpGap), nullptr, true /* disableAnimation: the same place, not a glide */);
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the view stays where it was (the top). Contained here: it runs inside a build slice.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay turn jump");
+        }
+    }
+
+    void AgentTranscriptOverlay::_ScrollViewToEnd(LevelView& view, bool settle) noexcept
+    {
+        try
+        {
+            if (!view.scroll)
+            {
+                return;
+            }
+            if (settle)
+            {
+                view.scroll.UpdateLayout(); // the real extent: ChangeView clamps to the current one
+            }
+            view.scroll.ChangeView(nullptr, view.scroll.ScrollableHeight(), nullptr, true /* disableAnimation: a jump, not a glide */);
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the view stays where it was. Contained here: the end-follow runs inside a build slice.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay scroll to end");
+        }
+    }
+
+    void AgentTranscriptOverlay::_JumpToEdge(bool toEnd)
+    {
+        if (!_open)
+        {
+            return;
+        }
+        auto& view = _levels[static_cast<size_t>(_current)];
+        if (!view.scroll)
+        {
+            return;
+        }
+        // An explicit jump outranks whatever was waiting to scroll this view (a chain link clicked early, a box click's
+        // keep-the-turn jump): the reader asked for an edge.
+        view.pendingSessionJump = 0;
+        view.pendingTurnJump = 0;
+        if (toEnd)
+        {
+            _ScrollViewToEnd(view, true);
+            // Still being built: follow the end until the build is done (_Pump), so the jump lands on the real last line.
+            view.followEnd = view.state == LevelState::Building;
+        }
+        else
+        {
+            view.followEnd = false;
+            view.scroll.ChangeView(nullptr, 0.0, nullptr, true /* disableAnimation: a jump, not a glide */);
+        }
+        // The keyboard into the view: Home / End / PageUp go on from here, and the button about to hide keeps no focus.
+        view.scroll.Focus(FocusState::Programmatic);
+        _UpdateJumpButtons();
+    }
+
+    void AgentTranscriptOverlay::_UpdateJumpButtons() noexcept
+    {
+        try
+        {
+            bool showTop = false;
+            bool showEnd = false;
+            if (_open && _current >= 0 && _current < static_cast<int>(_levels.size()))
+            {
+                const auto& view = _levels[static_cast<size_t>(_current)];
+                if (view.scroll)
+                {
+                    const double offset = view.scroll.VerticalOffset();
+                    const double scrollable = view.scroll.ScrollableHeight();
+                    showTop = offset > kJumpEdgeSlack;
+                    // Not while the view follows its end: each build slice would show it, and the next scroll hide it again.
+                    showEnd = !view.followEnd && scrollable > kJumpEdgeSlack && offset < scrollable - kJumpEdgeSlack;
+                }
+            }
+            // Only what changed: this runs for every ViewChanged / SizeChanged of the view on screen.
+            const auto apply = [](const Button& button, bool shown, int8_t& last) {
+                const int8_t state = static_cast<int8_t>(shown ? 1 : 0);
+                if (!button || last == state)
+                {
+                    return;
+                }
+                last = state;
+                button.Opacity(shown ? 1.0 : 0.0);
+                button.IsHitTestVisible(shown);
+                button.IsTabStop(shown);
+            };
+            apply(_jumpTopButton, showTop, _jumpTopShown);
+            apply(_jumpEndButton, showEnd, _jumpEndShown);
+        }
+        catch (...)
+        {
+            // Rule #18 (the reporter is throttled). Recovery: the buttons keep their last state until the next update.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay jump buttons");
+        }
+    }
+
+    void AgentTranscriptOverlay::_CancelFollowEnd(const winrt::Windows::Foundation::IInspectable& scroll) noexcept
+    {
+        for (auto& view : _levels)
+        {
+            // Identity: the event's sender is the view's own scroll view (a reset view's old scroll matches no view).
+            if (view.scroll && view.scroll == scroll)
+            {
+                if (view.followEnd)
+                {
+                    view.followEnd = false;
+                    _UpdateJumpButtons(); // the ↓ comes back: the reader is above the end now
+                }
+                return;
+            }
+        }
+    }
+
     void AgentTranscriptOverlay::_SelectLevel(int level, bool focusBody)
     {
         // A session jump still pending on the level being LEFT (a chain link clicked before its heading was
@@ -1328,10 +2047,18 @@ namespace winrt::TerminalApp::implementation
         // back to it — scrolling away from wherever they are reading by then.
         if (level != _current && _current >= 0 && _current < static_cast<int>(_levels.size()))
         {
-            _levels[_current].pendingSessionJump = 0;
+            auto& left = _levels[static_cast<size_t>(_current)];
+            left.pendingSessionJump = 0;
+            // The same for a box click's keep-the-turn jump and a ↓'s end-follow: both belong to the moment the reader
+            // left, and would scroll the view when they come back.
+            left.pendingTurnJump = 0;
+            left.followEnd = false;
         }
         _current = level;
         _UpdateTabVisuals();
+        // The box row follows the tab - shown and filled for a box tab, hidden for a level - before the view is made, so
+        // the body is laid out once, under the row's final height.
+        _SyncBoxesRow();
         _EnsureLevelView(level);
         for (int i = 0; i < static_cast<int>(_levels.size()); ++i)
         {
@@ -1354,6 +2081,8 @@ namespace winrt::TerminalApp::implementation
             _SchedulePump(); // resume a build this level paused when another tab was selected
         }
         _UpdateStatus();
+        // The jump buttons follow the view on screen: a view kept from before has its own place, a new one none yet.
+        _UpdateJumpButtons();
         if (focusBody)
         {
             _FocusBodyDeferred();
@@ -1381,6 +2110,70 @@ namespace winrt::TerminalApp::implementation
         view.scroll.IsTabStop(true); // focusable, so PageUp / PageDown / Home / End / arrows scroll it
         view.scroll.Padding(Thickness{ 24, 14, 24, 18 });
         view.scroll.Content(view.content);
+        // The JUMP buttons follow this view while it is on screen: its offset (ViewChanged - a scroll, a jump, a clamp), its
+        // extent growing as the build appends (the content's SizeChanged) and its viewport (its own SizeChanged - a window
+        // resize, the box row showing). _UpdateJumpButtons reads the CURRENT view and sets only what changed, so a hidden
+        // view's events cost a comparison. Each handler reaches the overlay weakly and none captures its own element (a
+        // delegate that holds its element keeps it alive - CLAUDE.md "A handler that captures its own element").
+        view.scroll.ViewChanged([weak = get_weak()](const winrt::Windows::Foundation::IInspectable&, const ScrollViewerViewChangedEventArgs&) {
+            if (const auto self = weak.get())
+            {
+                self->_UpdateJumpButtons(); // noexcept: contains its own failures
+            }
+        });
+        view.scroll.SizeChanged([weak = get_weak()](const winrt::Windows::Foundation::IInspectable&, const SizeChangedEventArgs&) {
+            if (const auto self = weak.get())
+            {
+                self->_UpdateJumpButtons();
+            }
+        });
+        view.content.SizeChanged([weak = get_weak()](const winrt::Windows::Foundation::IInspectable&, const SizeChangedEventArgs&) {
+            if (const auto self = weak.get())
+            {
+                self->_UpdateJumpButtons();
+            }
+        });
+        // The reader moving the view THEMSELF stops a ↓'s end-follow (LevelView::followEnd): a wheel turn, a press (the scroll
+        // bar, a touch, a link, a text selection) or an upward key. handledEventsToo - the scroll view handles every one of
+        // them itself. The end-follow's own ChangeView raises none of these, which is why ViewChanged cannot tell them apart.
+        view.scroll.AddHandler(UIElement::PointerWheelChangedEvent(),
+                               winrt::box_value(PointerEventHandler{ [weak = get_weak()](const winrt::Windows::Foundation::IInspectable& sender, const PointerRoutedEventArgs&) {
+                                   if (const auto self = weak.get())
+                                   {
+                                       self->_CancelFollowEnd(sender);
+                                   }
+                               } }),
+                               true /* handledEventsToo */);
+        view.scroll.AddHandler(UIElement::PointerPressedEvent(),
+                               winrt::box_value(PointerEventHandler{ [weak = get_weak()](const winrt::Windows::Foundation::IInspectable& sender, const PointerRoutedEventArgs&) {
+                                   if (const auto self = weak.get())
+                                   {
+                                       self->_CancelFollowEnd(sender);
+                                   }
+                               } }),
+                               true /* handledEventsToo */);
+        view.scroll.AddHandler(UIElement::KeyDownEvent(),
+                               winrt::box_value(KeyEventHandler{ [weak = get_weak()](const winrt::Windows::Foundation::IInspectable& sender, const KeyRoutedEventArgs& e) {
+                                   try
+                                   {
+                                       // Only a key that moves the view UP leaves the end; End, Down and PageDown keep following it.
+                                       const auto key = e.Key();
+                                       if (key != VirtualKey::Up && key != VirtualKey::PageUp && key != VirtualKey::Home && key != VirtualKey::GamepadDPadUp)
+                                       {
+                                           return;
+                                       }
+                                       if (const auto self = weak.get())
+                                       {
+                                           self->_CancelFollowEnd(sender);
+                                       }
+                                   }
+                                   catch (...)
+                                   {
+                                       // Rule #18. Recovery: the end-follow goes on (the build's end stops it anyway).
+                                       ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay follow key");
+                                   }
+                               } }),
+                               true /* handledEventsToo */);
         _bodyHost.Children().Append(view.scroll);
     }
 
@@ -1409,14 +2202,18 @@ namespace winrt::TerminalApp::implementation
         auto& view = _levels[level];
         view.state = LevelState::Loading;
         _SetLevelMessage(level, L"Rendering the transcript\x2026");
-        _LoadLevelAsync(get_weak(), _dispatcher, _source, level, _generation);
+        // The view's options are taken NOW, on the UI thread (a box tab's ticks live here), and travel with the render, as
+        // does the view's epoch: a box click while it runs re-renders the view, and this result must then be dropped.
+        _LoadLevelAsync(get_weak(), _dispatcher, _source, level, _generation, _viewEpochs[static_cast<size_t>(level)], _ViewOptions(level));
     }
 
     winrt::fire_and_forget AgentTranscriptOverlay::_LoadLevelAsync(winrt::weak_ref<AgentTranscriptOverlay> weak,
                                                                    DispatcherQueue dispatcher,
                                                                    TranscriptOverlaySource source,
                                                                    int level,
-                                                                   uint64_t generation)
+                                                                   uint64_t generation,
+                                                                   uint64_t epoch,
+                                                                   ::Agentmaster::TurnsOptions options)
     {
         // Every parameter is BY VALUE: the coroutine outlives the call that started it. It holds NO
         // strong reference to the overlay while on the pool thread — only `weak` — so the overlay (and
@@ -1426,15 +2223,15 @@ namespace winrt::TerminalApp::implementation
             co_await winrt::resume_background(); // reads + renders the transcript: never on the UI thread
             auto render = std::make_shared<LevelRender>();
             const auto started = std::chrono::steady_clock::now();
-            _RenderLevel(source, level, *render);
+            _RenderLevel(source, level, options, *render);
             render->elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
-            const bool queued = dispatcher && dispatcher.TryEnqueue([weak, render, level, generation]() {
+            const bool queued = dispatcher && dispatcher.TryEnqueue([weak, render, level, generation, epoch]() {
                 // A throw escaping a DispatcherQueue handler is reported against the UI thread: contain it.
                 try
                 {
                     if (const auto self = weak.get())
                     {
-                        self->_ApplyLevelRender(level, generation, std::move(*render));
+                        self->_ApplyLevelRender(level, generation, epoch, std::move(*render));
                     }
                 }
                 catch (...)
@@ -1456,11 +2253,21 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    void AgentTranscriptOverlay::_RenderLevel(const TranscriptOverlaySource& source, int level, LevelRender& out) noexcept
+    void AgentTranscriptOverlay::_RenderLevel(const TranscriptOverlaySource& source, int level, const ::Agentmaster::TurnsOptions& options, LevelRender& out) noexcept
     {
         try
         {
+            const bool boxTab = ::Agentmaster::IsTranscriptBoxView(level);
+            // The level a Codex rollout is read at (a box tab never reads one: below).
             const auto turnsLevel = static_cast<::Agentmaster::TurnsLevel>(std::clamp(level, 0, ::Agentmaster::kTurnsLevelCount - 1));
+            if (source.codex && boxTab)
+            {
+                // A box tab builds on Claude's turns view (sides, boxes), which a Codex rollout does not have - its levels read
+                // its plain conversation instead. Say so rather than show a level's text under a tab that promises a side.
+                out.message = L"Custom, User Only and Assistant Only need Claude's turns view, which a Codex session does not have - "
+                              L"its Minimal and Compact tabs show each of your messages with its final reply, Default, Full and Max the whole conversation.";
+                return;
+            }
             if (source.codex)
             {
                 if (!source.codexRolloutId.empty())
@@ -1484,7 +2291,8 @@ namespace winrt::TerminalApp::implementation
                 return;
             }
             // The SAME text the Copy menu's level copies (CopyTranscriptTurnsAsync): the turns view for
-            // Claude; for a Codex rollout the brief (Minimal / Compact) or the whole conversation.
+            // Claude; for a Codex rollout the brief (Minimal / Compact) or the whole conversation. A box tab is the
+            // turns view under the options its boxes and its sides make (TranscriptViewOptions, taken on the UI thread).
             std::wstring text;
             if (source.codex)
             {
@@ -1494,11 +2302,12 @@ namespace winrt::TerminalApp::implementation
             }
             else
             {
-                text = ::Agentmaster::RenderTranscriptTurnsFile(out.path, ::Agentmaster::TurnsOptionsForLevel(turnsLevel), /*utc*/ false).value_or(std::wstring{});
+                text = ::Agentmaster::RenderTranscriptTurnsFile(out.path, options, /*utc*/ false).value_or(std::wstring{});
             }
             if (text.empty())
             {
-                out.message = L"Nothing to show - the transcript could not be read, or it holds no messages at this level.";
+                out.message = boxTab ? L"Nothing to show - the transcript could not be read, or it holds nothing for this tab." :
+                                       L"Nothing to show - the transcript could not be read, or it holds no messages at this level.";
                 return;
             }
             if (!out.forkSourceId.empty())
@@ -1517,22 +2326,24 @@ namespace winrt::TerminalApp::implementation
                 toParse = toParse.substr(0, cut == std::wstring_view::npos ? kMaxMarkdownChars : cut);
                 out.truncated = true;
             }
-            ::Agentmaster::MdParseOptions options;
-            options.maxBlocks = kMaxBlocks;
-            options.maxBlockChars = kMaxBlockChars;
+            ::Agentmaster::MdParseOptions parseOptions; // (not `options`: that is the render's, a parameter)
+            parseOptions.maxBlocks = kMaxBlocks;
+            parseOptions.maxBlockChars = kMaxBlockChars;
             // GitHub-style pipe tables become Table blocks (drawn by _BuildTable) instead of paragraphs of '|' lines -
             // Claude writes its comparisons that way, and cmark alone is CommonMark only.
-            options.tables = true;
-            auto parsed = ::Agentmaster::ParseMarkdownBlocks(toParse, options);
+            parseOptions.tables = true;
+            auto parsed = ::Agentmaster::ParseMarkdownBlocks(toParse, parseOptions);
             out.blocks = std::move(parsed.blocks);
             out.truncated = out.truncated || parsed.truncatedBlocks;
             out.failed = parsed.failed;
             out.markdown = std::move(text); // after the parse — `toParse` viewed it
             // The tool-call lists the build folds (here, off the UI thread, with the parse: one linear pass
-            // over the blocks, and the UI thread then only follows the indices). Only from Default up: Compact's
-            // lists hold its calls' REASON lines (transcript_turns v10) - the very thing that level exists to show
-            // at a glance, so folding them would hide its point - and Minimal has no lists at all.
-            if (turnsLevel >= ::Agentmaster::TurnsLevel::Default)
+            // over the blocks, and the UI thread then only follows the indices). Only where the FULL call lines
+            // show (options.ops: among the levels exactly Default, Full and Max; a box tab with "Tool calls with
+            // outcome" ticked): Compact's lists hold its calls' REASON lines (transcript_turns v10) - the very thing
+            // that level exists to show at a glance, so folding them would hide its point - and Minimal has no lists
+            // at all. A Codex rollout has no speaker headers, so nothing would fold there anyway.
+            if (options.ops)
             {
                 out.areas = ::Agentmaster::MdFindToolAreas(out.blocks);
             }
@@ -1542,8 +2353,11 @@ namespace winrt::TerminalApp::implementation
             if (out.blocks.empty())
             {
                 // A failed parse already logged its exception (ParseMarkdownBlocks, Rule #18) — say so
-                // instead of claiming the level is empty.
-                out.message = out.failed ? L"The transcript could not be rendered (the details are in hooks.log)." : L"Nothing to show at this level.";
+                // instead of claiming the level is empty. A box tab can be empty for real: User Only of a
+                // conversation whose every turn a teammate started, with no box adding anything.
+                out.message = out.failed ? L"The transcript could not be rendered (the details are in hooks.log)." :
+                              boxTab     ? L"Nothing to show on this tab - the boxes above can add more." :
+                                           L"Nothing to show at this level.";
             }
         }
         catch (...)
@@ -1558,11 +2372,15 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    void AgentTranscriptOverlay::_ApplyLevelRender(int level, uint64_t generation, LevelRender&& render)
+    void AgentTranscriptOverlay::_ApplyLevelRender(int level, uint64_t generation, uint64_t epoch, LevelRender&& render)
     {
         if (generation != _generation || !_open || level < 0 || level >= static_cast<int>(_levels.size()))
         {
             return; // retargeted, refreshed or closed since this render started: it describes nothing on screen
+        }
+        if (epoch != _viewEpochs[static_cast<size_t>(level)])
+        {
+            return; // a box click re-rendered this one view since: the result shows the OLD boxes
         }
         auto& view = _levels[level];
         if (view.state != LevelState::Loading)
@@ -1574,11 +2392,24 @@ namespace winrt::TerminalApp::implementation
         view.lines = render.lines;
         view.truncated = render.truncated;
         view.failed = render.failed;
-        const std::wstring head = L"[transcript] " + ::Agentmaster::ShortId(_source.sessionId) + L" show " +
-                                  ::Agentmaster::TurnsLevelName(static_cast<::Agentmaster::TurnsLevel>(level)) + L": ";
+        // The view's settings name ("compact", "user-only"); a box tab also names the boxes it was rendered with, so a
+        // report about a box tab's text can be read back in hooks.log ("boxes=ops,narration", "boxes=none").
+        std::wstring viewName{ ::Agentmaster::TranscriptViewName(level) };
+        if (::Agentmaster::IsTranscriptBoxView(level))
+        {
+            std::wstring names;
+            for (const auto& name : _BoxesOf(level))
+            {
+                names += (names.empty() ? L"" : L",") + name;
+            }
+            viewName += L" boxes=" + (names.empty() ? std::wstring{ L"none" } : names);
+        }
+        const std::wstring head = L"[transcript] " + ::Agentmaster::ShortId(_source.sessionId) + L" show " + viewName + L": ";
         if (render.blocks.empty())
         {
             view.state = LevelState::Empty;
+            // Nothing will be built: a box click's keep-the-turn jump has no turn to land on.
+            view.pendingTurnJump = 0;
             _SetLevelMessage(level, render.message.empty() ? std::wstring{ L"Nothing to show at this level." } : render.message);
             ::Agentmaster::AppendStateLog(L"hooks.log", head + L"nothing to show (" + view.message + L")" +
                                                             (render.path.empty() ? std::wstring{} : L" path=" + render.path) + L"\n");
@@ -1692,9 +2523,45 @@ namespace winrt::TerminalApp::implementation
                 view.pendingSessionJump = 0;
                 _ScrollToSessionHeading(view, pending);
             }
+            // A box click re-rendered this view while the reader was on turn N: the moment a heading of turn N or a LATER
+            // one is built, it goes to the top (the new view may skip turn N itself - User Only skips a turn with nothing
+            // of the user's). The headings are recorded in build order, so their numbers rise and the last one says
+            // whether such a heading exists yet; the first of them is found by a binary search.
+            if (const int pendingTurn = view.pendingTurnJump;
+                pendingTurn > 0 && !view.turnHeadings.empty() && view.turnHeadings.back().first >= pendingTurn)
+            {
+                const auto at = std::lower_bound(view.turnHeadings.begin(), view.turnHeadings.end(), pendingTurn, [](const auto& entry, int number) {
+                    return entry.first < number;
+                });
+                view.pendingTurnJump = 0;
+                _ScrollToTurnHeading(view, static_cast<size_t>(at - view.turnHeadings.begin()));
+            }
             if (view.built >= view.blocks.size())
             {
+                // The build ends with the turn jump still waiting: the new view has no heading of turn N or later (it
+                // skipped the last turns) - the last turn it does have is the nearest place to the old one.
+                if (view.pendingTurnJump > 0)
+                {
+                    view.pendingTurnJump = 0;
+                    if (!view.turnHeadings.empty())
+                    {
+                        _ScrollToTurnHeading(view, view.turnHeadings.size() - 1);
+                    }
+                }
                 _FinishLevel(view);
+                // A ↓ during the build lands on the REAL last line now: laid out (UpdateLayout) after the closing note
+                // _FinishLevel may have added.
+                if (view.followEnd)
+                {
+                    view.followEnd = false;
+                    _ScrollViewToEnd(view, true);
+                }
+            }
+            else if (view.followEnd)
+            {
+                // Still building after a ↓: keep on the end as it grows. The extent of the LAST layout (this slice's blocks
+                // are laid out next frame, and the next slice follows them) - no forced layout per slice.
+                _ScrollViewToEnd(view, false);
             }
         }
         catch (...)
@@ -1702,6 +2569,9 @@ namespace winrt::TerminalApp::implementation
             // Rule #18. Recovery: stop building this level (what is built stays) and say so.
             ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay::_Pump");
             view.failed = true;
+            // Nothing more will be built: the waiting jumps have nothing to wait for.
+            view.pendingTurnJump = 0;
+            view.followEnd = false;
             try
             {
                 _FinishLevel(view);
@@ -1713,6 +2583,9 @@ namespace winrt::TerminalApp::implementation
             }
         }
         _UpdateStatus();
+        // The view grew (and may have jumped): the buttons follow. The content's SizeChanged does too, after the layout; this
+        // is the belt for a slice whose growth that layout has not reported yet.
+        _UpdateJumpButtons();
         if (view.state == LevelState::Building)
         {
             _SchedulePump();
@@ -1858,6 +2731,13 @@ namespace winrt::TerminalApp::implementation
                 }
                 view.sessionHeadings[session] = element;
             }
+        }
+        // A turn's heading ("### Turn N · …", top level only): recorded with its number, so a box click can tell which turn
+        // the reader is on and the re-render can bring that turn back to the top (_TopTurnNumber, the pending turn jump).
+        // Headings are never inside a fold (a fold holds one list), so every recorded one has a position once laid out.
+        if (const int turn = TurnHeadingNumber(view.blocks[index]); turn > 0)
+        {
+            view.turnHeadings.emplace_back(turn, element);
         }
         ++view.built;
     }
@@ -2671,7 +3551,9 @@ namespace winrt::TerminalApp::implementation
 
         // --- the comparison table: a text column, then one column per level, least detailed first ---
         constexpr int levelCount = ::Agentmaster::kTurnsLevelCount;
-        const int current = std::clamp(_current, 0, levelCount - 1);
+        // The column of the level on screen; none (-1) while a box tab is on screen - those tabs are no column of the table
+        // (the paragraph under it describes them).
+        const int current = (_current >= 0 && _current < levelCount) ? _current : -1;
         const auto rowCount = static_cast<int32_t>(std::size(::Agentmaster::kTranscriptLevelGuide));
         Grid table;
         {
@@ -2692,7 +3574,9 @@ namespace winrt::TerminalApp::implementation
             }
         }
         // The current level's column: one tinted band behind its head and every cell (added first, so the
-        // text draws over it). Childless, so it costs no composition node (the rounded-element gotcha).
+        // text draws over it). Childless, so it costs no composition node (the rounded-element gotcha). No band
+        // while a box tab is on screen.
+        if (current >= 0)
         {
             const auto accent = _accentBrush.Color();
             Border band;
@@ -2715,11 +3599,11 @@ namespace winrt::TerminalApp::implementation
             label.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
             label.HorizontalAlignment(HorizontalAlignment::Center);
             head.Children().Append(label);
-            const auto tab = std::find(_tabLevels.begin(), _tabLevels.end(), level);
-            if (tab != _tabLevels.end())
+            const auto tab = std::find(_tabViews.begin(), _tabViews.end(), level);
+            if (tab != _tabViews.end())
             {
                 TextBlock key;
-                key.Text(L"key " + winrt::to_hstring(static_cast<int64_t>(tab - _tabLevels.begin()) + 1));
+                key.Text(L"key " + winrt::to_hstring(static_cast<int64_t>(tab - _tabViews.begin()) + 1));
                 key.FontSize(kGuideSmallFontSize);
                 key.Foreground(_dimBrush);
                 key.HorizontalAlignment(HorizontalAlignment::Center);
@@ -2779,9 +3663,15 @@ namespace winrt::TerminalApp::implementation
         };
         addList(L"Also in every level", ::Agentmaster::kTranscriptLevelGuideEveryLevel);
         addList(L"In no level", ::Agentmaster::kTranscriptLevelGuideNoLevel);
+        // The box tabs after the separator (TRANSCRIPT_OVERLAY.md §3j): no column of the table, one paragraph of their own.
+        {
+            const auto head = addText(L"Custom, User Only and Assistant Only", kGuideTextFontSize, _bodyBrush, Thickness{ 0, 14, 0, 2 });
+            head.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+            addText(::Agentmaster::kTranscriptViewsGuideNote, 12.5, _bodyBrush, Thickness{ 8, 2, 0, 0 });
+        }
         addText(::Agentmaster::kTranscriptLevelGuideCodexNote, 12.0, _dimBrush, Thickness{ 0, 14, 0, 0 });
-        addText(L"Keys 1-5 pick a tab. The level you pick is the one the transcript opens at next time, in every window. "
-                L"Hover a tab for its own list.",
+        addText(L"Keys 1-" + std::to_wstring(_tabViews.size()) +
+                    L" pick a tab. The tab you pick is the one the transcript opens at next time, in every window. Hover a tab for its own list.",
                 12.0,
                 _dimBrush,
                 Thickness{ 0, 6, 0, 0 });
@@ -2847,9 +3737,9 @@ namespace winrt::TerminalApp::implementation
 
     void AgentTranscriptOverlay::_UpdateTabVisuals()
     {
-        for (size_t i = 0; i < _tabLevels.size(); ++i)
+        for (size_t i = 0; i < _tabViews.size(); ++i)
         {
-            const bool current = _tabLevels[i] == _current;
+            const bool current = _tabViews[i] == _current;
             // Opacity + underline only — no weight change, which would shift every tab to its right.
             _tabLabels[i].Opacity(current ? 1.0 : 0.62);
             _tabUnderlines[i].Background(current ? Brush{ _accentBrush } : Brush{ _transparentBrush });
@@ -2906,7 +3796,8 @@ namespace winrt::TerminalApp::implementation
     void AgentTranscriptOverlay::_CopyCurrentLevel()
     {
         const auto& view = _levels[_current];
-        const auto levelName = ::Agentmaster::TurnsLevelName(static_cast<::Agentmaster::TurnsLevel>(_current));
+        // The view's settings name: a level's ("compact") or a box tab's ("user-only") - its text is what the boxes made it.
+        const auto levelName = ::Agentmaster::TranscriptViewName(_current);
         if (view.markdown.empty())
         {
             ::Agentmaster::LogNav(L"transcript-copy " + ::Agentmaster::ShortId(_source.sessionId) + L" " + levelName + L" (nothing rendered yet)");
@@ -2925,11 +3816,11 @@ namespace winrt::TerminalApp::implementation
 
     void AgentTranscriptOverlay::_Refresh()
     {
-        ::Agentmaster::LogNav(L"transcript-refresh " + ::Agentmaster::ShortId(_source.sessionId) + L" " +
-                              ::Agentmaster::TurnsLevelName(static_cast<::Agentmaster::TurnsLevel>(_current)));
+        ::Agentmaster::LogNav(L"transcript-refresh " + ::Agentmaster::ShortId(_source.sessionId) + L" " + ::Agentmaster::TranscriptViewName(_current));
         ++_generation; // a render still running for the old views is dropped when it lands
-        // A refresh re-renders the text, not the reader's choice: each level keeps its "Expand all".
-        std::array<bool, static_cast<size_t>(::Agentmaster::kTurnsLevelCount)> expandAll{}; // == _levels.size() (static_assert above)
+        // A refresh re-renders the text, not the reader's choice: each view keeps its "Expand all" (and a box tab its
+        // boxes, which live outside the views).
+        std::array<bool, static_cast<size_t>(::Agentmaster::kTranscriptViewCount)> expandAll{}; // == _levels.size() (static_assert above)
         for (size_t i = 0; i < _levels.size(); ++i)
         {
             expandAll[i] = _levels[i].expandAll;

@@ -7,7 +7,9 @@ second pass: 85% wide, folded tool calls (§3b), the remembered level (§3a) —
 the Session chain links (§3d, fifth ask, same day) — not built; then a fork with no messages yet shows the
 transcript it was forked from (§3e, a sixth report, same day) — not built. 2026-10-31: the (i) level guide and
 the tabs' cheat-sheet tooltips (§3f, the seventh ask), Compact's reason lines (§3g, the eighth), plain dashes
-(§3h, the ninth) and Markdown tables (§3i, the tenth) — not built.
+(§3h, the ninth) and Markdown tables (§3i, the tenth) — not built. 2026-11-18: the box tabs Custom · User Only ·
+Assistant Only after a separator, with their row of twelve boxes (§3j, the eleventh ask), and the ↑ / ↓ jump buttons
+(§3k) — not built.
 
 ## 1. The ask (verbatim)
 
@@ -55,10 +57,30 @@ level shows, what no level shows):
 > add a (i) after the levels tabs so user can see what each tab and the comparison you did
 > and tooltips showing info of each level tab that will show like a cheatsheet.
 
+And the eleventh (2026-11-18):
+
+> In Transcript panel after Minimal add a new named "User Only" and "Assistant Only" which are inherietly minimal by
+> default but they get checkboxes at the top that enable different visibility that belong to other layers (not Minimal
+> ones)
+> Also add to bottom-right corner absolute position "<Down arrow>" Jumps to bottom.
+
+The user's picks, from two rounds of mockups the same day:
+
+- **The boxes:** "Same 12 on both tabs" — every feature Compact, Default, Full and Max add; each tab only drops the other
+  side's MINIMAL part, and a box from the other side brings that piece in anyway. With it: *"Also add tab "Custom" which has
+  Max tab's capabilities but in checkboxes … and custom checkboxes (and user and assistant only tabs also) persist globally.
+  Add a separator to the left of User Only and between separator and User Only add the All"* — then, asked whether Custom
+  and All are one tab: one tab, *"Name it Custom"*. It starts as Minimal (every box clear), like the two side tabs.
+- **Remembered:** per tab, in every window (like ↵ Wrap and the level).
+- **The ↓ button:** shown only while there is more below; *"Also a button at the top"* — ↑ stacked right above ↓, *"make
+  them 40% smaller and more to right bottom"*.
+- **Teammates' messages in User Only:** left out — only what the user typed; a turn only a teammate started is skipped.
+
 ## 2. Where it opens
 
 Every entry opens the overlay over **whatever is on screen** (a terminal tab, the Agent Manager page, the
-Sessions page), at the level the user **last picked**, in any window (§3a — Default until a first pick):
+Sessions page), at the tab the user **last picked** — a level or a box tab (§3j) — in any window (§3a — Default
+until a first pick):
 
 | Menu | Entry |
 |---|---|
@@ -79,15 +101,19 @@ Labels, tooltip and glyph (`\xE736` ReadingMode) are shared constants in `AgentC
   code, it follows every resize through layout. (60% wide at first, then 85%, then 90% — the follow-ups.)
 - **Header**: reading-mode icon · "Transcript" · the session line (title · short id · "Codex") · then, at
   the top-right, **↵ Wrap** (§3c) · Copy · Refresh · Close (✕).
-- **Tabs**, one per level in the Copy menu's order — **Default · Max · Full · Compact · Minimal** — the
-  current one bright with an accent underline, then the **(i) level guide** (§3f). Each tab's tooltip is that
-  level's cheat sheet (§3f), with its digit key. A status line to the right shows progress, then
+- **Tabs**, one per level in the Copy menu's order — **Default · Max · Full · Compact · Minimal** — then a
+  hairline separator and the three **box tabs — Custom · User Only · Assistant Only** (§3j) — the current one
+  bright with an accent underline, then the **(i) level guide** (§3f). Each level tab's tooltip is that
+  level's cheat sheet (§3f), each box tab's says which side it shows, all with their digit key. A status line to the right shows progress, then
   "N lines · rendered in X". At the far right, **Expand all / Collapse all** (link-colored) — shown only
   while the current level has folded tool calls (§3b).
-- **Body**: one scroll view per level (each keeps its own scroll position; switching back is instant).
-- **Keyboard**: Esc closes; 1–5 pick a tab by position; PageUp / PageDown / Home / End / arrows scroll;
-  Tab cycles inside the card (through the fold rows too — Enter / Space opens one — and the Session chain
-  links, §3d); the app's
+- **The box row** (box tabs only, §3j): "Also show:" and twelve check boxes, grouped Compact · Default · Full ·
+  Max, wrapping onto a second line on a narrow window.
+- **Body**: one scroll view per tab (each keeps its own scroll position; switching back is instant), with the
+  **↑ / ↓ jump buttons** stacked in its bottom-right corner (§3k).
+- **Keyboard**: Esc closes; 1–8 pick a tab by position; PageUp / PageDown / Home / End / arrows scroll;
+  Tab cycles inside the card (through the boxes and the fold rows too — Enter / Space opens a fold, Space
+  ticks a box — and the Session chain links, §3d); the app's
   tab-switching chords (Ctrl+Tab, …) still work — and close it.
 - Always dark (the Agentmaster surface convention), explicit brushes.
 
@@ -95,8 +121,9 @@ Labels, tooltip and glyph (`\xE736` ReadingMode) are shared constants in `AgentC
 
 - Every tab pick — a click or a digit key, **the tab already showing included** — is written to
   settings.json as `AppSettings::transcriptOverlayLevel`: the level's NAME (`minimal` / `compact` /
-  `default` / `full` / `max`, `TurnsLevelName`), so a future reorder of the levels can't remap a saved
-  choice. The write is a **freshest-disk read-modify-write of that one field**
+  `default` / `full` / `max`, `TurnsLevelName`), or a box tab's (`custom` / `user-only` / `assistant-only`,
+  `TranscriptViewName`, §3j), so a future reorder of the levels can't remap a saved
+  choice. A build older than the box tabs reads their names as unknown and opens at Default. The write is a **freshest-disk read-modify-write of that one field**
   (`AgentTranscriptOverlay::_RememberLevel`, the `ColorPickupFlyout` idiom), skipped when the file already
   holds it — never a stale in-memory copy over a cog Save or another window's change.
 - Every open (`Show(source, kRememberedLevel)` — what every menu passes) **reads it fresh from disk**
@@ -426,15 +453,88 @@ The tenth ask (2026-10-31), about a comparison table in one of Claude's replies 
   (ConversationImage, since 2026-11-17), which draw a table as Claude Code's own box (MESSAGING.md §21.39.1). A caller
   that leaves it off keeps its blocks byte for byte.
 
+### 3j. The box tabs: Custom, User Only, Assistant Only
+
+The eleventh ask (§1, with the user's picks). After Minimal, a hairline separator, then three tabs that each start
+from **Minimal** and add what the user ticks in a row of boxes:
+
+    Default · Max · Full · Compact · Minimal │ Custom · User Only · Assistant Only  ⓘ
+    Also show:  COMPACT ☐ Slash commands ☐ Compaction markers ☐ Your answers ☐ Agents ☐ Tool calls with reasons
+                DEFAULT ☐ Tool calls with outcome ☐ Remarks between calls
+                FULL ☐ Exact Bash commands ☐ First output line ☐ Call durations   MAX ☐ Written files ☐ Stats per turn
+
+- **What each tab shows of every turn** (the turn headings, the Session chain list and the session headings stay):
+  - **Custom** — both sides: the user's messages and each turn's final reply. **Every box ticked is exactly Max**, and a
+    level's own boxes ticked are exactly that level (the m5 harness renders all 55 goldens that way, byte for byte).
+  - **User Only** — what the user said: their messages and what they typed while Claude worked (the "_This transcript
+    opens mid-turn_" note too, where their lost prompt was). **No final reply, and no message a teammate or another
+    session sent** (✉ <name>). A turn left with nothing — one a teammate started and Claude answered — is **skipped**,
+    heading and all; the others keep their numbers in the whole conversation, so the gap shows where it was.
+  - **Assistant Only** — Claude's side: no message that reached a turn, the user's or anyone else's. Every turn stays.
+- **The same twelve boxes on all three tabs** — one per feature a higher level adds (the user's pick "Same 12 on both
+  tabs"), grouped under the level that first shows it. A box from the OTHER side brings that piece in anyway: User Only +
+  "Tool calls with reasons" lists Claude's calls under "● Claude" with no reply; User Only + "Your answers" shows "● Claude"
+  with the user's answers to its questions; Assistant Only + "Slash commands" shows the user's command notes.
+  Claude's part on User Only is drawn only when a box leaves something under its label.
+- **Greyed boxes** keep their tick but change nothing: the Full / Max call details (exact Bash, first output line,
+  durations, written files) print only under a call's full line, so they wait for "Tool calls with outcome"; "Tool calls
+  with reasons" is the one-line form of those lines, so it gives way to them. A Codex session greys every box: it has no
+  turns view, and the three tabs say so in the body instead of showing a level's text under a tab that promises a side.
+- **Folds**: a box tab folds its tool-call lists exactly when "Tool calls with outcome" is ticked — the rule the levels
+  follow (Default, Full, Max fold; Compact, Minimal never), now read off the options (`TurnsOptions::ops`).
+- **A click re-renders that tab** (off the UI thread, like any level) and **keeps the reader on the same turn**: the turn
+  whose heading was at the top of the view (`_TopTurnNumber`, a binary search over the built headings) is scrolled back
+  to the top the moment the new render builds it — or the first later turn when the new view skips it, or the last turn
+  when it skips every later one. Keyboard focus stays on the box, so several boxes can be ticked in a row. The tab's old
+  view leaves the screen at once and the tree on a later low-priority tick (a long view's teardown must not stall the
+  click); a render still running for the old boxes is dropped when it lands (a per-view epoch, `_viewEpochs`).
+- **Remembered per tab, in every window**: `AppSettings::transcriptOverlayCustomBoxes` / `…UserOnlyBoxes` /
+  `…AssistantOnlyBoxes`, each the ticked boxes' NAMES (the `TurnsOptions` member each turns on: `ops`, `narration`, …).
+  Every click is a freshest-disk read-modify-write of that one tab's list that adds or removes that one name
+  (`TranscriptViewWithBox`): another window's ticks and a newer build's unknown names survive. Every open of a new
+  conversation reads all three back; both cog-Save preserve blocks keep them. Empty (the default) = every box clear.
+- **How it renders**: three Agentmaster-only switches of `TranscriptTurns` (`TurnsOptions::userInputs`, `peerInputs`,
+  `finalReplies`; on in every level and preset, so every level is still the reference's text, byte for byte) and the
+  ladder features. `AgentMaster/TranscriptViews.h` (pure, harness-tested) holds the views, their settings names, the
+  twelve boxes with their groups and gates, `TranscriptViewOptions` (a tab's render options from its ticks), the ticks a
+  click leaves and the tooltips (a box's tooltip is the level guide's own sentence for its feature, its level, and when
+  it is greyed).
+- **The header's Copy** copies the tab's text as rendered (with its boxes); the Copy ▸ Transcript menus keep the five
+  levels. The (i) guide's table stays the five levels (no column is tinted while a box tab shows); a paragraph under it
+  describes the three tabs, and its footer says "Keys 1-8".
+- Unlogged clicks, like ↵ Wrap and the folds — a pure view toggle; the re-render's `[transcript] … show user-only
+  boxes=answers,ops: …` line names the boxes it rendered with.
+
+### 3k. The jump buttons (↑ / ↓)
+
+- Two small round buttons (20 DIPs, Segoe Fluent Icons' Up / Down arrows) stacked in the **body's bottom-right corner**,
+  ↑ right above ↓, 16 DIPs in from the right (clear of the vertical scroll bar's widest state) and 10 up from the
+  bottom — the user's picks: stacked, "40% smaller and more to right bottom".
+- **↓ shows while there is more below**, **↑ while the view is scrolled down from the top**; neither shows on a view too
+  short to scroll, while loading, or on an empty tab. They show and hide through Opacity + hit testing + tab stop, never
+  Visibility, so the body never re-lays out for them; each update sets only what changed, so it can run on every
+  `ViewChanged` / `SizeChanged` of the view (the view's offset, its content growing as the build appends, its viewport).
+- **A click** scrolls the tab on screen to its top or its last line with no animation, moves keyboard focus into the view
+  (Home / End / PageUp go on from there) and drops any jump still waiting there (a chain link clicked early, a box
+  click's keep-the-turn jump).
+- **↓ while the tab is still being laid out FOLLOWS the end**: every build slice scrolls on to the new end (the extent
+  of the last layout — no forced layout per slice), and the end of the build settles on the real last line (laid out
+  after the closing note). The reader's own move stops it — a wheel turn, a press in the view (the scroll bar, a touch, a
+  link, a selection), an upward key (Up, PageUp, Home) — and so do ↑ and a switch to another tab. ↓ hides while it follows.
+- Tooltips: "Jump to the top (Home)" / "Jump to the bottom (End) - …"; screen-reader names "Jump to the top" / "Jump
+  to the bottom". Unlogged — pure view navigation.
+
 ## 4. Rendering
 
 1. **Off the UI thread** (`AgentTranscriptOverlay::_LoadLevelAsync`, holding only a weak reference): the
    level's text is exactly what **Copy ▸ Transcript ▸ <level>** copies — `RenderTranscriptTurnsFile` for a
    Claude transcript (local time; for a fork with no messages yet, its source's transcript under the §3e
    note), and for a Codex rollout `ReadConversationFollowupText` (Minimal /
-   Compact) or `ReadConversationText` (Default / Full / Max). Then `ParseMarkdownBlocks`
+   Compact) or `ReadConversationText` (Default / Full / Max). A box tab (§3j) is the same turns view under
+   the options its boxes and its side make (`TranscriptViewOptions`, taken on the UI thread when the render
+   starts). Then `ParseMarkdownBlocks`
    (`AgentMaster/MarkdownBlocks.{h,cpp}`, cmark) flattens it into render blocks, `MdFindToolAreas`
-   marks the tool-call lists to fold (§3b), and `MdFindSessionChain` finds the Session chain list and the
+   marks the tool-call lists to fold (§3b; wherever the full call lines show), and `MdFindSessionChain` finds the Session chain list and the
    session headings its links point to (§3d).
 2. **On the UI thread, time-sliced** (`_Pump`): low-priority dispatcher items build blocks into XAML for
    ~12 ms each (at least 16 blocks), then yield. The top of a long transcript shows at once; the window
@@ -497,17 +597,23 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
 
 - `[nav] transcript-show <sid8> [codex] (from <menu>)` — `tab menu`, `session menu`, `tab badge`,
   `side panel summary`.
-- `[nav] transcript-level <sid8> <Level>`, `[nav] transcript-copy <sid8> <Level> chars=N`,
-  `[nav] transcript-refresh <sid8> <Level>`, `[nav] transcript-close <sid8> (<reason>)` — reasons
+- `[nav] transcript-level <sid8> <name>`, `[nav] transcript-copy <sid8> <name> chars=N`,
+  `[nav] transcript-refresh <sid8> <name>` — `<name>` the tab's settings name (`compact`, `user-only`, …) —
+  `[nav] transcript-close <sid8> (<reason>)` — reasons
   `esc`, `click outside`, `close button`, `tab switch`, `agent manager page`, `tab move`, `tab drag`,
   `tab moved to another window`.
-- `[transcript] <sid8> show <Level>: chars=N blocks=M rendered in Xms` (+ `(capped)` /
+- `[transcript] <sid8> show <name>: chars=N blocks=M rendered in Xms` — a box tab's name followed by
+  ` boxes=<its ticked names, or none>` — (+ `(capped)` /
   `(parse failed part-way)`, + ` from the fork source <src8>'s transcript (this fork has no messages yet)`
   for §3e), or `: nothing to show (<why>) path=…`. A Copy ▸ Transcript of such a fork ends its
   `[transcript] <sid8> copy <level>: chars=N …` line with ` from the fork source <src8>'s transcript`.
 - A level pick is the `transcript-level` line (the remembered-level write adds no line; a failed write is
-  an `[exc]` line). Opening / closing a fold, Expand all, the ↵ line-wrap toggle and a Session chain link
-  click are pure view actions and are deliberately unlogged (the CLAUDE.md logging convention); a failed
+  an `[exc]` line). Opening / closing a fold, Expand all, the ↵ line-wrap toggle, a box click (§3j), the ↑ / ↓
+  jump buttons (§3k) and a Session chain link
+  click are pure view actions and are deliberately unlogged (the CLAUDE.md logging convention); a failed box read
+  or write, re-render or jump is an `[exc]` line (`AgentTranscriptOverlay remembered boxes` / `remember box` /
+  `box click` / `reset view` / `release reset view` / `top turn` / `turn jump` / `scroll to end` / `jump button` /
+  `jump buttons` / `follow key`); a failed
   wrap-state read or write, or a failed re-layout, is an `[exc]` line (`AgentTranscriptOverlay remembered
   wrap` / `remember wrap` / `sync wrap mode` / `find scroll anchor` / `restore scroll anchor`), and so is a
   failed session jump (`AgentTranscriptOverlay session jump`, the view stays where it was; `AgentTranscriptOverlay
@@ -521,6 +627,14 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
   tables" checks — the rules, a quoted table, an item's table, the cap, the user's own comparison table). cmark comes from the vcpkg manifest's `terminal` feature (UIMarkdown's port) and is auto-linked
   into TerminalApp.dll.
 - `src/cascadia/TerminalApp/AgentTranscriptOverlay.{h,cpp}` — the overlay (`winrt::implements`).
+- `src/cascadia/TerminalApp/AgentMaster/TranscriptViews.h` — the box tabs (§3j), pure: the views and their settings
+  names, the twelve boxes (`kTranscriptViewBoxes`: name, label, feature, group, gate), `TranscriptViewOptions`,
+  `TranscriptViewWithBox`, the box and tab tooltips, the guide's paragraph. The one-sided switches live in
+  `TranscriptTurns` (`TurnsOptions::userInputs` / `peerInputs` / `finalReplies`: `RenderTurn`, `SpeakerBlock`'s
+  `withReply`, `Document`'s skipped turns). Harness: `tests/tests_turns.cpp` (`TestTranscriptTurnsSides`: both one-sided
+  renders against all 55 goldens and the synthetic cases; `TestTranscriptViews`: names, boxes vs the ladder, options,
+  ticks, tips, Custom with each level's boxes == that level's golden for all 55) and `tests/tests_persistence.cpp` (the
+  three lists' round trip, an unknown name kept, and their empty defaults).
 - `src/cascadia/TerminalApp/AgentMaster/TranscriptLevelGuide.h` — the level guide's one table (§3f): the
   (i) panel's rows, every-level and no-level lists, the Codex note, `TranscriptLevelTip` (a tab's cheat sheet).
   Harness: `tests/tests_turns.cpp` (`TestTranscriptLevelGuide`: each row's option against
@@ -541,9 +655,10 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
   (`SetShowTranscriptHandler`, the session + external menus), `AgentTabOverlay.*`
   (`SetShowTranscriptHandler`, the badge submenu + the summary menu), `TerminalPage.AgentObserver.cpp` /
   `TerminalPage.AgentSidePanel.cpp` (the badge / side-panel wiring), `AgentCopyActions.h` (the labels).
-- The remembered level and the line-wrap state: `AgentMaster/SessionModels.h`
-  (`AppSettings::transcriptOverlayLevel`, `AppSettings::transcriptOverlayWrapLines`),
-  `AgentMaster/Persistence.cpp` (the `transcriptOverlayLevel` and `transcriptOverlayWrapLines` keys), and
+- The remembered level, the line-wrap state and the box tabs' boxes: `AgentMaster/SessionModels.h`
+  (`AppSettings::transcriptOverlayLevel`, `AppSettings::transcriptOverlayWrapLines`,
+  `AppSettings::transcriptOverlayCustomBoxes` / `…UserOnlyBoxes` / `…AssistantOnlyBoxes`),
+  `AgentMaster/Persistence.cpp` (the `transcriptOverlayLevel`, `transcriptOverlayWrapLines` and the three `…Boxes` keys), and
   the two cog-Save preserve blocks (`AgentManagerContent.Settings.cpp`, `TerminalPage.AgentEngine.cpp`).
 - Harness: `tests/tests_markdown.cpp` (`TestMarkdownBlocks`, incl. the tool areas over an inline fixture and
   five goldens, and the Session chain links over an inline fixture, the edge cases and four chain goldens —
@@ -593,6 +708,16 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
   while the fork stays unprompted does not refresh it. The fork's first message does.
 - Codex forks (§3e) are not covered, and neither is alt+↑ / alt+↓ prompt navigation in a fresh fork's
   terminal (it reads the fork's own transcript, so it finds no prompts until the first message).
+- The box tabs (§3j) are the overlay's only: the Copy ▸ Transcript menus, Telegram's `/transcript` and All Screen keep
+  the five levels. A Codex session has no turns view, so its three box tabs show a message instead.
+- A box click renders the tab again from the top and THEN scrolls the reader's turn back to the top once it is built
+  (like a Session chain link clicked early): on a long tab the top shows for a moment first. The place kept is the TURN,
+  not the line inside it.
+- A box tab's text is never skipped to match the boxes BEFORE a turn: a turn with only a note before it (a slash
+  command the user ran) stays on User Only with its heading and nothing under it.
+- The ↓ end-follow (§3k) learns the reader moved only from their input on the view (wheel, press, Up / PageUp / Home);
+  dragging the scroll bar's thumb starts with a press, so it counts, but a scroll caused by anything else (a screen
+  reader's scroll pattern) does not stop it before the build ends.
 
 ## 9. Verification checklist (nothing here has been built)
 
@@ -656,3 +781,25 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
     striped. Narrow the window → the Content column wraps while the level columns keep their width; turn ↵ wrap
     OFF → the table keeps its full width, cut at the right edge. Select a cell's text → Copy works. A code span
     or a link inside a cell keeps its style.
+16. The box tabs (§3j): the tab row reads "Default Max Full Compact Minimal │ Custom User Only Assistant Only ⓘ";
+    keys 6 / 7 / 8 pick the three; each tab's tooltip names its side and its key. On a box tab the "Also show:" row
+    shows twelve boxes under COMPACT / DEFAULT / FULL / MAX (a narrow window wraps them); on a level it is gone.
+    - User Only, every box clear: only "❯ User" messages under the turn headings, no "● Claude"; in a team lead's
+      session the turns a teammate started are missing and the numbers jump. Assistant Only: only "● Claude" with its
+      replies, every turn there. Custom, every box clear: exactly the Minimal tab.
+    - Tick "Tool calls with outcome" on Custom: the folds appear as at Default, and "Exact Bash commands", "First
+      output line", "Call durations" and "Written files" turn from grey to live while "Tool calls with reasons" greys.
+      Tick all twelve: the tab reads exactly like Max (Copy both and compare).
+    - Scroll to the middle of a long session's tab, tick a box: the view re-renders and comes back to the same turn at
+      the top; keyboard focus stays on the box (Tab to the next, Space ticks it).
+    - Close, reopen in another window → each tab's boxes as left; restart → still; a cog Save → still
+      (`transcriptOverlayCustomBoxes` / `…UserOnlyBoxes` / `…AssistantOnlyBoxes` in settings.json). Pick User Only,
+      reopen → it opens on User Only (`transcriptOverlayLevel` = `user-only`).
+    - A Codex tab: the three box tabs show the "need Claude's turns view" message, every box greyed.
+    - hooks.log: `[transcript] <sid8> show user-only boxes=…: chars=…`.
+17. The jump buttons (§3k): on a long level, at the top only ↓ shows, in the middle both (↑ right above ↓, small,
+    in the corner, clear of the scroll bar even while hovered), at the end only ↑; a short level shows neither.
+    Click ↓ → the last line; ↑ → the first; then Home / End still work (focus is in the view). Open a big Max level
+    and click ↓ at once while the status still says "Laying out …" → the view rides the end and stops on the real last
+    line when the build ends; do it again and turn the wheel up during the build → the following stops there.
+    Tab reaches a button only while it shows.

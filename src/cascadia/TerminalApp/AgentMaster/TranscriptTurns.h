@@ -57,9 +57,10 @@
 // summary panel's "whole conversation" view. It reuses the port's chain walk (fork + plan restart)
 // and adds the links only Agentmaster can know (a /clear in the same tab, a /handover origin) — a
 // default-constructed walk is exactly the reference's, so the Copy ▸ Transcript goldens are untouched.
-// TWO options are not part of the port either: TurnsOptions::editDiffs and TurnsOptions::lastTurnOnly
-// (📜 All Screen's File Diffs and Last Turn boxes). No level and no preset sets them, so with both off
-// every render is still the reference's, byte for byte.
+// FIVE options are not part of the port either: TurnsOptions::editDiffs and TurnsOptions::lastTurnOnly
+// (📜 All Screen's File Diffs and Last Turn boxes), and TurnsOptions::userInputs / peerInputs /
+// finalReplies (the transcript overlay's one-sided tabs, User Only and Assistant Only). No level and no
+// preset changes them from their defaults, so every level still renders the reference's text, byte for byte.
 
 #pragma once
 
@@ -151,6 +152,30 @@ namespace Agentmaster
         // number needs them - so it costs the whole parse and saves only the rendering. For 📜 All Screen's "Last Turn"
         // (MESSAGING.md section 21.39, the user's request of 2026-10-29); Copy > Transcript never sets it.
         bool lastTurnOnly = false;
+        // --- Agentmaster-only: WHICH SIDE of each turn a render keeps (NOT in the reference) ---
+        // The transcript overlay's box tabs (TRANSCRIPT_OVERLAY.md section 3j: Custom, User Only, Assistant Only) build
+        // their view from Minimal, the boxes the user ticked, and these three switches. Each one DROPS a part of every
+        // turn that Minimal shows, whatever the ladder features add; ON in every level and preset, so every level still
+        // renders the reference's text, byte for byte. A turn left with NOTHING of its own - no message, no part of
+        // Claude's, no agent entry - and no note before it is skipped whole: its heading goes, and so does its session's
+        // heading when no later turn of that session is shown either; the turns after it keep their numbers in the whole
+        // conversation, so the gap in the numbers shows where the skipped turns were.
+        //
+        // The messages the USER sent that reached each turn: "**❯ User**" (and "**❯ User, typed while it worked**") with
+        // its quote, and the "_This transcript opens mid-turn_" note that stands where a turn's lost prompt was. Off: the
+        // Assistant Only tab. The user's ANSWERS to Claude's questions are not this: they are `answers`, printed in
+        // Claude's timeline.
+        bool userInputs = true;
+        // The messages a TEAMMATE or ANOTHER SESSION sent that reached each turn ("**✉ <name>**" and its quote: what
+        // peerMessages attributes to a sender; with peerMessages off they read as the user's and follow userInputs). Off:
+        // User Only ("only what I typed") and Assistant Only. An agent's own entry lists the messages that reached THAT
+        // agent in its timeline, which `agents` decides, not this.
+        bool peerInputs = true;
+        // Each turn's FINAL REPLY under "**● Claude**" - the quote of its last text, or its stand-in "(no text - the turn
+        // ended on a tool call)" / "(no reply)". Off: User Only. Claude's part keeps whatever the features print under its
+        // label (calls, remarks, compactions, the user's answers, the stats line) and disappears, label and all, only when
+        // nothing is left under it. An agent's entry keeps its final report: that belongs to `agents`, not to the turn.
+        bool finalReplies = true;
         // --- correctness rules (on in every preset; off only to inspect raw behavior) ---
         bool liveBranch = true; // follow only the live branch (a rewound prompt and what it produced are dropped)
         bool skipTaskNotices = true; // Claude Code's background-task notices are not user input

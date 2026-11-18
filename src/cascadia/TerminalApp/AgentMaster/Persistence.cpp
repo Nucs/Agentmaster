@@ -996,6 +996,19 @@ namespace Agentmaster
         o.Set(L"tabColorPickerAdvancedOpen", json::Value::MkBool(s.tabColorPickerAdvancedOpen));
         o.Set(L"transcriptOverlayLevel", json::Value::MkStr(s.transcriptOverlayLevel)); // the level the transcript overlay opens at (the overlay's own RMW)
         o.Set(L"transcriptOverlayWrapLines", json::Value::MkBool(s.transcriptOverlayWrapLines)); // the transcript overlay's ↵ line-wrap toggle (the overlay's own RMW)
+        // The transcript overlay's box tabs (TRANSCRIPT_OVERLAY.md §3j): each tab's ticked box names, written verbatim (a name
+        // this build does not know stays: a newer build's box keeps its tick). The overlay's own RMW, per click.
+        const auto boxNames = [](const std::vector<std::wstring>& names) {
+            auto list = json::Value::MkArr();
+            for (const auto& name : names)
+            {
+                list.Push(json::Value::MkStr(name));
+            }
+            return list;
+        };
+        o.Set(L"transcriptOverlayCustomBoxes", boxNames(s.transcriptOverlayCustomBoxes));
+        o.Set(L"transcriptOverlayUserOnlyBoxes", boxNames(s.transcriptOverlayUserOnlyBoxes));
+        o.Set(L"transcriptOverlayAssistantOnlyBoxes", boxNames(s.transcriptOverlayAssistantOnlyBoxes));
         o.Set(L"launcherKind", json::Value::MkStr(s.launcherKind)); // the kind the launcher card opens on (the card's own RMW; TAB_STRIP.md "The + button: the launcher")
         o.Set(L"sessionsAiThinkingLevel", json::Value::MkStr(s.sessionsAiThinkingLevel)); // the Sessions AI search's thinking level (the page's own RMW)
         // The AI search's park delay (the cog's SESSIONS tab, "AI SEARCH"): written clamped, so the file never holds a value
@@ -1273,6 +1286,25 @@ namespace Agentmaster
         // The transcript overlay's ↵ line-wrap toggle (absent => ON: long lines wrap, the view as it was
         // before the toggle existed).
         s.transcriptOverlayWrapLines = v.BoolAt(L"transcriptOverlayWrapLines", true);
+        // The transcript overlay's box tabs (TRANSCRIPT_OVERLAY.md §3j): each tab's ticked box names, kept verbatim - the
+        // overlay maps the names it knows and ignores the rest, so a newer build's box (or a hand edit) never breaks an open.
+        // Absent (every settings.json from before the tabs) => empty => every box clear, the tab's side of Minimal. An entry
+        // that is not a non-empty string is skipped (it can name no box).
+        const auto readBoxNames = [&v](const wchar_t* key, std::vector<std::wstring>& names) {
+            if (const auto* list = v.Find(key); list && list->type == json::Value::Type::Arr)
+            {
+                for (const auto& e : list->arr)
+                {
+                    if (e.type == json::Value::Type::Str && !e.str.empty())
+                    {
+                        names.push_back(e.str);
+                    }
+                }
+            }
+        };
+        readBoxNames(L"transcriptOverlayCustomBoxes", s.transcriptOverlayCustomBoxes);
+        readBoxNames(L"transcriptOverlayUserOnlyBoxes", s.transcriptOverlayUserOnlyBoxes);
+        readBoxNames(L"transcriptOverlayAssistantOnlyBoxes", s.transcriptOverlayAssistantOnlyBoxes);
         // The launcher card's remembered kind, kept verbatim: the card parses the word (ParseLaunchKindToken) and opens an
         // unknown one, or a profile that is gone, on Claude — so a hand-edited value can never break an open (absent =>
         // "claude", what every launcher opened on before the kind chip).

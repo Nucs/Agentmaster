@@ -357,7 +357,11 @@ Every color surface — tabs, board bands, Sessions chips, the pending dots — 
 - The summary panel: `showSummaryPanel` (true), `summaryPanelWrapNewlines` (false),
   `summaryPanelTruncate` (true), `summaryPanelShowHistory` (true), `summaryPanelWidthFraction` /
   `summaryPanelHeightFraction` (0 = the default size).
-- The transcript view: `transcriptOverlayLevel` (`default`), `transcriptOverlayWrapLines` (true).
+- The transcript view: `transcriptOverlayLevel` (`default`; a level's name or a box tab's: `custom`, `user-only`,
+  `assistant-only`), `transcriptOverlayWrapLines` (true), and the box tabs' ticked boxes `transcriptOverlayCustomBoxes`,
+  `transcriptOverlayUserOnlyBoxes`, `transcriptOverlayAssistantOnlyBoxes` (each an empty list: every box clear), each a list
+  of box names (`ops`, `narration`, …) kept verbatim. All written by the overlay itself (freshest-disk RMWs; both cog-Save
+  preserve blocks keep them) and read at every open (TRANSCRIPT_OVERLAY.md §3j).
 - `launcherKind` (`claude`): the kind the launcher card (the tab strip's and the side panel's `+`) opens on — the last
   kind picked on its kind chip, in any window: `claude`, `codex` or `profile:{guid}` (a Windows Terminal profile). Written
   by the card itself (a freshest-disk RMW; both cog-Save preserve blocks keep it); a profile gone since, or an unknown

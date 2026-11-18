@@ -835,6 +835,11 @@ void TestAppSettings()
         in.tabColorPickerAdvancedOpen = false; // non-default (default true = ... and its More/Less "advanced" inputs expanded)
         in.transcriptOverlayLevel = L"compact"; // non-default (default "default") — the transcript overlay's last-picked level tab
         in.transcriptOverlayWrapLines = false; // non-default (default true = long lines wrap) — the transcript overlay's line-wrap toggle
+        // Non-default (default: every list empty = every box clear) — the transcript overlay's box tabs (TRANSCRIPT_OVERLAY.md §3j),
+        // each its own list; "futureBox" stands for a newer build's box this one does not know, which must survive verbatim.
+        in.transcriptOverlayCustomBoxes = { L"ops", L"narration" };
+        in.transcriptOverlayUserOnlyBoxes = { L"answers", L"futureBox" };
+        in.transcriptOverlayAssistantOnlyBoxes = { L"stats" };
         in.launcherKind = L"profile:{574e775e-4f2a-5b96-ac1e-a2962a402336}"; // non-default (default "claude") — the launcher card's remembered kind (a shell)
         in.sessionsAiThinkingLevel = L"xhigh"; // non-default (default "low") — the Sessions AI search's strip toggle
         in.sessionsAiParkMinutes = 45; // non-default (default 120) — the AI search's park delay (the cog's SESSIONS tab, "AI SEARCH")
@@ -954,6 +959,13 @@ void TestAppSettings()
         CHECK(out.tabColorPickerAdvancedOpen == false, "settings tabColorPickerAdvancedOpen round-trip");
         CHECK(out.transcriptOverlayLevel == L"compact", "settings transcriptOverlayLevel round-trip (the remembered level name)");
         CHECK(out.transcriptOverlayWrapLines == false, "settings transcriptOverlayWrapLines round-trip (the transcript overlay's line-wrap toggle)");
+        // Named first: a braced list's commas would split CHECK's macro arguments (braces do not shield commas from the preprocessor).
+        const std::vector<std::wstring> wantCustomBoxes{ L"ops", L"narration" };
+        const std::vector<std::wstring> wantUserOnlyBoxes{ L"answers", L"futureBox" };
+        const std::vector<std::wstring> wantAssistantOnlyBoxes{ L"stats" };
+        CHECK(out.transcriptOverlayCustomBoxes == wantCustomBoxes && out.transcriptOverlayUserOnlyBoxes == wantUserOnlyBoxes &&
+                  out.transcriptOverlayAssistantOnlyBoxes == wantAssistantOnlyBoxes,
+              "settings transcriptOverlay<Tab>Boxes round-trip (each box tab's ticks, in order, an unknown name kept verbatim)");
         CHECK(out.launcherKind == L"profile:{574e775e-4f2a-5b96-ac1e-a2962a402336}", "settings launcherKind round-trip (the launcher card's remembered kind, kept verbatim)");
         CHECK(out.sessionsAiThinkingLevel == L"xhigh", "settings sessionsAiThinkingLevel round-trip (the AI search's thinking level word)");
         CHECK(out.sessionsAiParkMinutes == 45, "settings sessionsAiParkMinutes round-trip (the AI search's park delay)");
@@ -1086,6 +1098,8 @@ void TestAppSettings()
         CHECK(out.tabColorPickerCustomOpen == true && out.tabColorPickerAdvancedOpen == true, "settings tab color picker opens with Custom + advanced expanded by default on empty");
         CHECK(out.transcriptOverlayLevel == L"default", "settings transcriptOverlayLevel default \"default\" (the overlay opens at Default) on empty");
         CHECK(out.transcriptOverlayWrapLines == true, "settings transcriptOverlayWrapLines default true (long lines wrap) on empty");
+        CHECK(out.transcriptOverlayCustomBoxes.empty() && out.transcriptOverlayUserOnlyBoxes.empty() && out.transcriptOverlayAssistantOnlyBoxes.empty(),
+              "settings transcriptOverlay<Tab>Boxes default empty (every box clear: each box tab starts at its side of Minimal) on empty");
         CHECK(out.launcherKind == L"claude", "settings launcherKind default \"claude\" (every launcher opened on Claude before the kind chip) on empty");
         CHECK(out.sessionsAiThinkingLevel == L"low", "settings sessionsAiThinkingLevel default \"low\" (the fastest level that works: off fails every request on Claude Code 2.1.310) on empty");
         CHECK(out.sessionsAiParkMinutes == 120, "settings sessionsAiParkMinutes default 120 (2 hours) on empty");

@@ -4536,12 +4536,24 @@ namespace Agentmaster
                         {
                             continue;
                         }
+                        // Agentmaster (userInputs / peerInputs / finalReplies, not in the reference): the turn is rendered
+                        // BEFORE its session's heading is decided, because a one-sided render can leave it with nothing to
+                        // show (RenderTurn then answers no chunk at all). Such a turn is skipped whole, and its session's
+                        // heading waits for that session's first turn that IS shown - a heading over nothing would point
+                        // the Session chain links at an empty part. Neither call reads what the other writes (the heading
+                        // reads only the chain; the turn records the temp-folder prefixes the legend names), so with
+                        // every switch on - every level - the text is the reference's, byte for byte, in its order.
+                        std::vector<std::wstring> chunks = RenderTurn(number, turn);
+                        if (chunks.empty())
+                        {
+                            continue;
+                        }
                         if (headed && !_opt.lastTurnOnly && turn.origin && turn.origin != shownOrigin && static_cast<size_t>(*turn.origin) < links.size())
                         {
                             body.push_back(SessionHeader(links, static_cast<size_t>(*turn.origin)));
                             shownOrigin = turn.origin;
                         }
-                        for (auto& chunk : RenderTurn(number, turn))
+                        for (auto& chunk : chunks)
                         {
                             body.push_back(std::move(chunk));
                         }
@@ -5496,7 +5508,13 @@ namespace Agentmaster
                 // last text. Claude's part of every turn goes through here, and so does each agent's
                 // entry (over its merged turn). `unfinished`: (agent entries) its transcript stops
                 // mid-work, so its last text is a remark, not a final report.
-                std::vector<std::wstring> SpeakerBlock(const std::wstring& label, const Turn& turn, bool unfinished)
+                //   withReply - Agentmaster (TurnsOptions::finalReplies, not in the reference): false leaves the last text
+                //               out (its quote, or the "(no text ...)" / "(no reply)" stand-in) and answers NO chunk when the
+                //               label would be all that is left. Only Claude's part of a turn passes false (User Only); an
+                //               agent's entry always keeps its report, which `agents` shows.
+                // Returns the block's chunks (label first), or none when withReply is false and nothing else is shown.
+                // Throws std::bad_alloc only.
+                std::vector<std::wstring> SpeakerBlock(const std::wstring& label, const Turn& turn, bool unfinished, bool withReply = true)
                 {
                     std::vector<std::wstring> out{ label };
                     if (_opt.stats)
@@ -5556,6 +5574,17 @@ namespace Agentmaster
                     {
                         out.push_back(L"");
                     }
+                    if (!withReply)
+                    {
+                        // Agentmaster (User Only): no reply. What the features printed stays - it ends in the blank chunk
+                        // pushed above, so the next turn's heading still starts after a blank line - and a block with
+                        // nothing under its label is no block at all (a bare "● Claude" would say nothing).
+                        if (out.size() <= 1)
+                        {
+                            return {};
+                        }
+                        return out;
+                    }
                     if (unfinished && !turn.last.empty())
                     {
                         out.push_back(L"_Its transcript ends mid-work (no final report); its last remark:_");
@@ -5611,6 +5640,14 @@ namespace Agentmaster
 
                 // turn(): one turn — its header, what started it, Claude's part, then (agents) an entry
                 // per agent it spawned, in the order it spawned them.
+                // Agentmaster (userInputs / peerInputs / finalReplies, not in the reference): a side switched off drops
+                // its part, and a turn left with nothing of its own and no note before it answers NO chunk at all, so
+                // Document skips it whole (heading included) while its number still counts.
+                //   number - the turn's number in the whole conversation (unused for the pre-prompt pseudo-turn).
+                //   turn   - the parsed turn.
+                // Returns the turn's Markdown chunks, joined by Document with "\n"; empty only when the turn is skipped,
+                // which no level can cause (every turn has at least one message, and every level shows them all).
+                // Throws std::bad_alloc only.
                 std::vector<std::wstring> RenderTurn(int number, const Turn& turn)
                 {
                     std::vector<std::wstring> out;
@@ -5633,8 +5670,18 @@ namespace Agentmaster
                         header += L" · the user interrupted it";
                     }
                     out.push_back(header + L"\n");
+                    // Agentmaster: how many chunks the turn shows of its OWN (a message, Claude's part, an agent entry) -
+                    // the header and the note before it are not counted. Zero only when a side is switched off.
+                    size_t own = 0;
                     for (const TurnInput& input : turn.inputs)
                     {
+                        // Agentmaster: the user's messages follow userInputs (the mid-turn opening note included: it stands
+                        // where the user's lost prompt was), a teammate's or another session's follow peerInputs.
+                        if (!(input.sender.empty() ? _opt.userInputs : _opt.peerInputs))
+                        {
+                            continue;
+                        }
+                        ++own;
                         if (input.kind == L"continued")
                         {
                             out.push_back(L"_This transcript opens mid-turn: the prompt that started this work is not in the file (it was compacted away, or the session was resumed)._\n");
@@ -5642,8 +5689,11 @@ namespace Agentmaster
                         }
                         out.push_back(InputLabel(input) + L"\n" + Quote(input.text) + L"\n");
                     }
-                    for (auto& chunk : SpeakerBlock(L"**● Claude**", turn, false))
+                    // Agentmaster: finalReplies off (User Only) keeps Claude's part without its reply - or drops the part
+                    // whole when its label would be all that is left.
+                    for (auto& chunk : SpeakerBlock(L"**● Claude**", turn, false, _opt.finalReplies))
                     {
+                        ++own;
                         out.push_back(std::move(chunk));
                     }
                     if (_opt.agents)
@@ -5654,10 +5704,18 @@ namespace Agentmaster
                             {
                                 for (auto& chunk : AgentEntry(*ev.op->agent))
                                 {
+                                    ++own;
                                     out.push_back(std::move(chunk));
                                 }
                             }
                         }
+                    }
+                    // Agentmaster: nothing of its own and no note before it (User Only: a turn a teammate started and Claude
+                    // answered) - the turn is not shown at all. A note keeps it: the note says when something happened,
+                    // and the heading under it says before which turn.
+                    if (own == 0 && before.empty())
+                    {
+                        return {};
                     }
                     return out;
                 }

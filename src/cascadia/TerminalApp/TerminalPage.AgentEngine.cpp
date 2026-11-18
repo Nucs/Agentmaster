@@ -2726,6 +2726,11 @@ namespace winrt::TerminalApp::implementation
                     // form — a Save must not reset them.
                     s.transcriptOverlayLevel = disk.transcriptOverlayLevel;
                     s.transcriptOverlayWrapLines = disk.transcriptOverlayWrapLines;
+                    // The overlay's three box tabs (TRANSCRIPT_OVERLAY.md §3j): each tab's ticked boxes, written by the
+                    // overlay itself on every click (freshest-disk RMW), never by this form - a Save must not clear them.
+                    s.transcriptOverlayCustomBoxes = disk.transcriptOverlayCustomBoxes;
+                    s.transcriptOverlayUserOnlyBoxes = disk.transcriptOverlayUserOnlyBoxes;
+                    s.transcriptOverlayAssistantOnlyBoxes = disk.transcriptOverlayAssistantOnlyBoxes;
                     // The launcher card's remembered kind (TAB_STRIP.md "The + button: the launcher"): written by the card's
                     // own RMW on a pick on its kind chip, never by this form — a Save must not reset it.
                     s.launcherKind = disk.launcherKind;

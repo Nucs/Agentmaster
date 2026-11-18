@@ -11,10 +11,29 @@
 // Shape: a card 90% of the window wide and 80% tall, centered over a dimmed backdrop that covers the
 // page (the terminal, the Agent Manager page, or the Sessions page — "wherever you are"). The card has a
 // header (title · Wrap · Copy · Refresh · Close), one TAB per transcript detail level in the Copy menu's
-// order (Default · Max · Full · Compact · Minimal) followed by the (i) level guide, an "Expand all" switch
-// for the level's folded tool calls, and a scrolling body. It opens at the level the user LAST PICKED, in any window: every tab pick
+// order (Default · Max · Full · Compact · Minimal), a separator, the three BOX TABS (Custom · User Only ·
+// Assistant Only — below), the (i) level guide, an "Expand all" switch for the level's folded tool calls,
+// the box tabs' row of check boxes (shown only on those tabs), and a scrolling body with the two JUMP
+// buttons in its bottom-right corner (below). It opens at the tab the user LAST PICKED, in any window: every tab pick
 // is remembered in settings.json (AppSettings::transcriptOverlayLevel, a freshest-disk read-modify-write
 // done here) and every open reads it back fresh — Default until a first pick.
+//
+// THE BOX TABS (TRANSCRIPT_OVERLAY.md §3j; the rules in AgentMaster/TranscriptViews.h): Custom shows both sides of
+// each turn, User Only the user's own messages (no final reply, no teammate's message; a turn with nothing of
+// theirs is skipped), Assistant Only Claude's side (no message that reached a turn) — each starting from Minimal.
+// Above the body a row of TWELVE BOXES, one per feature the higher levels add, grouped by the level they come from
+// (Compact · Default · Full · Max), adds any of them to the tab on screen; every box ticked on Custom is exactly Max.
+// A box that would change nothing is greyed with its tick kept (the Full / Max call details while the full call
+// lines are off; the one-line call reasons while they are on). Each tab keeps its OWN boxes, remembered in
+// settings.json for every window (AppSettings::transcriptOverlay<Tab>Boxes, the same freshest-disk RMW per click).
+// A click re-renders that tab off the UI thread and keeps the reader on the same turn: the turn whose heading was at
+// the top of the view is scrolled back to the top the moment the new render builds it (_ToggleBox → _Pump).
+//
+// THE JUMP BUTTONS: two small round buttons stacked in the body's bottom-right corner — ↑ (to the top) shows while
+// the view is scrolled down from the top, ↓ (to the bottom) while there is more below; neither shows on a view too
+// short to scroll. They show and hide through Opacity + IsHitTestVisible + IsTabStop, never Visibility, so the body
+// never re-lays out for them. A ↓ while the level is still being laid out FOLLOWS the end until the build is done
+// (a wheel, a press or an upward key in the view cancels that), so it lands on the real last line.
 //
 // LINE WRAP: the header's ↵ toggle (the first of its buttons, ON by default) decides what a line wider
 // than the body does. ON, it wraps at the body's right edge. OFF, it keeps its length and the part past
@@ -90,12 +109,14 @@
 #include <winrt/Microsoft.Terminal.UI.h> // TextMenuFlyout — the multi-window-safe text context menu
 
 #include "AgentMaster/MarkdownBlocks.h" // MdBlock — the render blocks a level is built from
+#include "AgentMaster/TranscriptViews.h" // kTranscriptViewCount / kTranscriptViewBoxes / TurnsOptions — the tabs, the boxes, a view's render options
 
 #include <array>
 #include <cstdint>
 #include <functional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace winrt::TerminalApp::implementation
@@ -129,8 +150,8 @@ namespace winrt::TerminalApp::implementation
     class AgentTranscriptOverlay : public winrt::implements<AgentTranscriptOverlay, winrt::Windows::Foundation::IInspectable>
     {
     public:
-        // Show's `level` for "open at the level the user last picked" (AppSettings::transcriptOverlayLevel,
-        // read fresh from settings.json at that moment) — what every menu passes.
+        // Show's `level` for "open at the tab the user last picked" — a level or a box tab
+        // (AppSettings::transcriptOverlayLevel, read fresh from settings.json at that moment) — what every menu passes.
         static constexpr int kRememberedLevel = -1;
 
         AgentTranscriptOverlay();
@@ -151,15 +172,17 @@ namespace winrt::TerminalApp::implementation
 
         // Open the overlay on `source` at `level`, or — when it is already open on the same
         // conversation — just switch to `level` (the levels already rendered stay). A DIFFERENT
-        // conversation discards every rendered level and starts over. Takes keyboard focus (one
+        // conversation discards every rendered level and starts over, and reads the box tabs' remembered
+        // boxes fresh (an overlay already open keeps its own). Takes keyboard focus (one
         // dispatcher tick later, once the view is laid out). UI thread. No-op before Attach.
         // Parameters:
         //   source — the conversation (see TranscriptOverlaySource).
-        //   level  — a TurnsLevel value 0..4 (Minimal..Max; above 4 is clamped), or kRememberedLevel (any
-        //            negative value) for the level last picked in any window — read from settings.json
-        //            right now, Default when nothing was picked yet or the stored name is unknown. The
-        //            menus pass kRememberedLevel. Opening does NOT itself remember anything: only a tab
-        //            pick does.
+        //   level  — a VIEW index 0..7 (TranscriptViews.h TranscriptView: a TurnsLevel value 0..4 for
+        //            Minimal..Max, then 5 Custom, 6 User Only, 7 Assistant Only; above 7 is clamped), or
+        //            kRememberedLevel (any negative value) for the tab last picked in any window — read from
+        //            settings.json right now, Default when nothing was picked yet or the stored name is
+        //            unknown. The menus pass kRememberedLevel. Opening does NOT itself remember anything:
+        //            only a tab pick does.
         // Never throws: a XAML failure is logged (Rule #18) and the overlay stays closed.
         void Show(const TranscriptOverlaySource& source, int level) noexcept;
 
@@ -214,7 +237,8 @@ namespace winrt::TerminalApp::implementation
             winrt::Windows::UI::Xaml::Controls::FontIcon chevron{ nullptr };
         };
 
-        // One detail level's state + view. Indexed by TurnsLevel value (0 Minimal .. 4 Max).
+        // One tab's state + view: a detail level's, or a box tab's. Indexed by VIEW (TranscriptViews.h TranscriptView: the
+        // TurnsLevel value 0 Minimal .. 4 Max, then 5 Custom, 6 User Only, 7 Assistant Only).
         struct LevelView
         {
             LevelState state = LevelState::Idle;
@@ -294,6 +318,20 @@ namespace winrt::TerminalApp::implementation
             // lay past the block cap and will never exist), and so does a switch to another level
             // (_SelectLevel — the jump would otherwise fire when the reader comes back).
             size_t pendingSessionJump = 0;
+            // The BUILT turn headings ("### Turn N · …", top level only), in build order — so their numbers rise — each
+            // with its number in the whole conversation. A box click reads which turn sits at the top of the view
+            // (_TopTurnNumber) and the re-render scrolls that turn back to the top (pendingTurnJump). Kept for the view's
+            // life; released with it.
+            std::vector<std::pair<int, winrt::Windows::UI::Xaml::FrameworkElement>> turnHeadings;
+            // A box click re-rendered this view while the reader was on turn N: scroll the first BUILT heading numbered N
+            // or later to the top the moment it exists (_Pump) — later, because the new view may skip turn N (User Only
+            // skips a turn with nothing of the user's). 0 == none. When the build ends without one, the last heading built
+            // is taken. Dropped by a switch to another tab and by a jump button (an explicit move outranks it).
+            int pendingTurnJump = 0;
+            // The ↓ jump button was clicked while this view was still being built: every build slice scrolls on to the new
+            // end, and the end of the build settles on the real last line (_Pump). The reader's own scroll — a wheel turn,
+            // a press, an upward key in the view (_CancelFollowEnd) — the ↑ button and a switch to another tab all stop it.
+            bool followEnd = false;
         };
 
         // What the background render hands the UI thread for one level.
@@ -314,60 +352,153 @@ namespace winrt::TerminalApp::implementation
 
         // Build every piece of the overlay's XAML (Attach). Throws winrt::hresult_error on a XAML failure.
         void _BuildUi();
-        // Make `level` current: drop the left level's pending session jump (it would fire when the reader
-        // comes back), tab visuals, view visibility, bring its view up to the current line-wrap mode
-        // (_SyncWrapMode — a view laid out under the other mode re-lays out at once, keeping its passage),
-        // start its render or resume its build, and (focusBody) move keyboard focus into its scroll view on
-        // the next tick.
+        // Make `level` (a view index) current: drop the left view's pending session jump, pending turn jump and
+        // end-follow (each would fire when the reader comes back), tab visuals, the box row (_SyncBoxesRow — shown and
+        // filled for a box tab, hidden for a level), view visibility, bring its view up to the current line-wrap mode
+        // (_SyncWrapMode — a view laid out under the other mode re-lays out at once, keeping its passage), start its
+        // render or resume its build, the jump buttons (_UpdateJumpButtons), and (focusBody) move keyboard focus into its
+        // scroll view on the next tick.
         void _SelectLevel(int level, bool focusBody);
-        // A tab button / digit key: select the level at TAB POSITION `position` (0 == the first tab,
-        // Default), log the switch, and REMEMBER the level for the next open in any window
+        // A tab button / digit key: select the view at TAB POSITION `position` (0 == the first tab,
+        // Default), log the switch, and REMEMBER the view for the next open in any window
         // (_RememberLevel — on every pick, the tab already showing included). Out-of-range positions are
         // ignored.
         void _SelectTabPosition(size_t position);
-        // The level the user last picked (AppSettings::transcriptOverlayLevel, read fresh from
-        // settings.json) as a TurnsLevel value; Default when the stored name is empty / unknown or the
-        // read fails (logged). UI thread (a small file read, the ColorPickupFlyout idiom).
+        // The tab the user last picked (AppSettings::transcriptOverlayLevel, read fresh from settings.json) as a view
+        // index (TranscriptViewFromName: a level's or a box tab's name); Default when the stored name is empty / unknown
+        // or the read fails (logged). UI thread (a small file read, the ColorPickupFlyout idiom).
         static int _RememberedLevel() noexcept;
-        // Store `level` as the level the next open uses: a FRESHEST-DISK read-modify-write of just that
-        // field (never a stale in-memory copy — a cog Save or another window's pick is never clobbered),
-        // skipped when the file already holds it. Best-effort: a failed write (logged) costs only the
-        // remembered level, never the switch the user just made.
-        // Parameters: level — the TurnsLevel value picked (0..4).
+        // Store `level` (a view index) as the tab the next open uses, by its name (TranscriptViewName): a FRESHEST-DISK
+        // read-modify-write of just that field (never a stale in-memory copy — a cog Save or another window's pick is
+        // never clobbered), skipped when the file already holds it. Best-effort: a failed write (logged) costs only the
+        // remembered tab, never the switch the user just made.
+        // Parameters: level — the view index picked (0..7).
         static void _RememberLevel(int level) noexcept;
+        // The ticked boxes of the box tab `view` (the in-memory copy Show read from settings.json and each click updates).
+        // Parameters: view — a box tab's view index (5..7); any other view reads as an empty list.
+        // Returns the tab's ticked names (or a static empty list). Never throws.
+        const std::vector<std::wstring>& _BoxesOf(int view) const noexcept;
+        // The render options of `view`: a level's own (TurnsOptionsForLevel), or a box tab's from its ticked boxes and its
+        // sides (TranscriptViewOptions). Never throws.
+        ::Agentmaster::TurnsOptions _ViewOptions(int view) const noexcept;
+        // Show or hide the box row for the CURRENT view: hidden on a level; on a box tab shown, every box's check set to
+        // the tab's own ticks, and each box enabled only while it would change the render (TranscriptViewBoxTakesEffect;
+        // a Codex session has no turns view, so every box is disabled there). Programmatic IsChecked changes raise no
+        // Click, so this never re-enters _ToggleBox. No-op before _BuildUi made the row.
+        // Throws winrt::hresult_error on a XAML failure (every caller contains it).
+        void _SyncBoxesRow();
+        // A click on box `index` (kTranscriptViewBoxes) of the box tab on screen: the CheckBox already flipped itself, so
+        // its IsChecked is the new state. Updates the tab's ticks, remembers the click for every window (_RememberBox),
+        // re-greys the dependent boxes (_SyncBoxesRow), then re-renders the tab (_ResetView + _SelectLevel) with the
+        // turn at the top of the view as its pending turn jump — the reader stays on the same turn. Keyboard focus stays
+        // on the box, so several boxes can be clicked or toggled with Space in a row. Deliberately unlogged — a view
+        // toggle like ↵ Wrap (the CLAUDE.md logging convention); the re-render's [transcript] line names the boxes.
+        // Parameters: index — the box's position in kTranscriptViewBoxes.
+        // Throws winrt::hresult_error on a XAML failure (the box's Click handler contains it).
+        void _ToggleBox(size_t index);
+        // The three box tabs' ticked lists as settings.json holds them now (fresh from disk), in view order (Custom, User
+        // Only, Assistant Only). Every list empty when the read fails (logged) — every box clear, the tabs' Minimal sides.
+        // UI thread (a small file read, the ColorPickupFlyout idiom).
+        static std::array<std::vector<std::wstring>, ::Agentmaster::kTranscriptBoxViewCount> _RememberedBoxes() noexcept;
+        // Store one click on a box for every window's next open: a FRESHEST-DISK read-modify-write of just that tab's list
+        // — the box's own name added or removed (TranscriptViewWithBox), every other entry kept, so another window's ticks
+        // and a newer build's unknown names survive — skipped when the file already says so. Best-effort: a failed write
+        // (logged) costs only the remembered tick; the view on screen has already changed.
+        // Parameters: view — the box tab (5..7); name — the box's name; on — its new state.
+        static void _RememberBox(int view, std::wstring_view name, bool on) noexcept;
+        // Discard ONE view's render and XAML so it renders anew — a box click changed what it shows. Its scroll view leaves
+        // the screen at once (Collapsed) and the tree on a later LOW-priority tick (tearing a long view's thousands of
+        // elements down inside the click would stall it); its "Expand all" is kept; its epoch is bumped, so a render still
+        // running for the old boxes is dropped when it lands (_ApplyLevelRender). The other views are untouched.
+        // Parameters: view — the view index (0..7).
+        // Never throws: a XAML failure is logged (Rule #18); the view is reset either way.
+        void _ResetView(int view) noexcept;
+        // The number of the turn the reader is on in `view`: the last BUILT turn heading at or above the top edge of the
+        // view, found by a binary search over view.turnHeadings (their tops rise with their numbers) — each probe one
+        // TransformToVisual of a laid-out element of the view on screen. 0 when the view sits at its top, when the top
+        // edge is above the first turn (the chain list, the notes before the first turn), or when nothing is built.
+        // Parameters: view — the CURRENT view (laid out; a hidden view's positions are not real).
+        // Never throws: a failure is logged (Rule #18) and answers 0 (the re-render then starts at the top).
+        int _TopTurnNumber(LevelView& view) noexcept;
+        // Scroll `view` so its built turn heading at `index` (view.turnHeadings) sits a few pixels below the top edge —
+        // the session jump's recipe (_ScrollToSessionHeading: UpdateLayout first, then ChangeView with no animation),
+        // without moving keyboard focus (the box that asked for it keeps it).
+        // Parameters: view — the current view; index — a position in view.turnHeadings (out of range: no-op).
+        // Never throws: a failure is logged (Rule #18) and the view stays where it was — it runs inside a build slice,
+        // whose catch would otherwise stop the build.
+        void _ScrollToTurnHeading(LevelView& view, size_t index) noexcept;
+        // A jump button's click: scroll the current view to its top (`toEnd` false) or to its last line (`toEnd` true),
+        // with no animation, and move keyboard focus to the view (Home / End / PageUp keep working, and the button that
+        // is about to hide never keeps focus). An explicit jump drops the view's pending session and turn jumps. ↓ on a
+        // view still building also starts its end-follow (LevelView::followEnd); ↑ stops it.
+        // Parameters: toEnd — true for ↓ (the bottom), false for ↑ (the top).
+        // Throws winrt::hresult_error on a XAML failure (the button's Click handler contains it).
+        void _JumpToEdge(bool toEnd);
+        // Scroll `view` to its last line, with no animation. `settle` lays the view out first (UpdateLayout), so the extent
+        // ChangeView clamps to is the real one — a click and the end of a build settle; a build slice's end-follow does not
+        // (it takes the extent of the last layout, one slice behind, and the next slice catches up), so a long build never
+        // pays a forced layout per slice.
+        // Parameters: view — the current view; settle — force the layout first.
+        // Never throws: a failure is logged (Rule #18) and the view stays where it was — it runs inside a build slice too.
+        void _ScrollViewToEnd(LevelView& view, bool settle) noexcept;
+        // Show or hide the two jump buttons for the CURRENT view: ↑ while it is scrolled down from the top, ↓ while there is
+        // more below (not while the view follows its end — the next build slice would only hide it again). Opacity +
+        // IsHitTestVisible + IsTabStop only, each set only when it changes, so it is cheap enough for every ViewChanged /
+        // SizeChanged and never re-lays anything out. Both hidden while the overlay is closed or the view has no scroll.
+        // Never throws: a failure is logged (Rule #18) and the buttons keep their last state.
+        void _UpdateJumpButtons() noexcept;
+        // The reader moved the view whose scroll view is `scroll` themself (a wheel turn, a press — the scroll bar, a
+        // touch, a link — or an upward key): stop that view's end-follow, so the next build slice does not drag them
+        // back down. Called from the view's input handlers (handledEventsToo: the scroll view handles all of them).
+        // Parameters: scroll — the event's sender.
+        // Never throws.
+        void _CancelFollowEnd(const winrt::Windows::Foundation::IInspectable& scroll) noexcept;
         // Create `level`'s scroll view + content stack (once), set to the current line-wrap mode
         // (_wrapLines), and put it in the body.
         void _EnsureLevelView(int level);
         // Show `text` in place of `level`'s content (Loading / Empty), creating the placeholder once.
         void _SetLevelMessage(int level, const std::wstring& text);
-        // Start `level`'s background render (state Loading).
+        // Start `level`'s (a view's) background render (state Loading), with the view's render options as they stand now
+        // (_ViewOptions — a box tab's ticks are read HERE, on the UI thread, never by the pool thread) and its epoch.
         void _StartLoad(int level);
         // The background half: render + parse on a pool thread, then hand the result to
         // _ApplyLevelRender on the UI thread. Static so it holds NO reference to the overlay while off
         // the UI thread — only `weak`, resolved back on the UI thread (the last-ref-on-a-pool-thread
         // teardown gotcha). Never lets an exception escape (a fire_and_forget escape is a process kill).
+        // Parameters: weak / dispatcher — the overlay and its UI thread; source — the conversation; level — the view
+        //   index; generation / epoch — the overlay's and the view's stamps at the start (_ApplyLevelRender drops a
+        //   result whose stamps are stale); options — the view's render options (a copy: the pool thread owns it).
         static winrt::fire_and_forget _LoadLevelAsync(winrt::weak_ref<AgentTranscriptOverlay> weak,
                                                       winrt::Windows::System::DispatcherQueue dispatcher,
                                                       TranscriptOverlaySource source,
                                                       int level,
-                                                      uint64_t generation);
-        // Render `level` of `source` into `out` (path resolve, the level text, the block parse). Runs on
-        // the pool thread; touches no member. Never throws (contained + logged).
-        static void _RenderLevel(const TranscriptOverlaySource& source, int level, LevelRender& out) noexcept;
+                                                      uint64_t generation,
+                                                      uint64_t epoch,
+                                                      ::Agentmaster::TurnsOptions options);
+        // Render view `level` of `source` into `out` (path resolve, the view's text under `options`, the block parse; the
+        // tool areas are folded wherever the full call lines show — options.ops, which is exactly Default, Full and Max
+        // among the levels). A box tab of a Codex session has nothing to render (Codex has no turns view): `out` gets a
+        // message saying so. Runs on the pool thread; touches no member. Never throws (contained + logged).
+        static void _RenderLevel(const TranscriptOverlaySource& source, int level, const ::Agentmaster::TurnsOptions& options, LevelRender& out) noexcept;
         // UI thread: adopt a finished render — unless the overlay was retargeted, refreshed or closed
-        // since (`generation` mismatch) — and start building its XAML.
-        void _ApplyLevelRender(int level, uint64_t generation, LevelRender&& render);
+        // since (`generation` mismatch) or this one view was reset by a box click (`epoch` mismatch) — and start
+        // building its XAML.
+        void _ApplyLevelRender(int level, uint64_t generation, uint64_t epoch, LevelRender&& render);
         // Queue one build slice (Low priority), unless one is already queued.
         void _SchedulePump();
         // One build slice: turn blocks of the CURRENT level into XAML for ~kSliceBudget, do the level's
         // pending session jump once its heading exists (a chain link clicked before the build reached it),
-        // then queue the next slice if blocks remain. Stale (`generation` mismatch) or closed: does nothing.
+        // its pending turn jump once a heading of that turn or a later one exists (a box click; the last
+        // heading built when the build ends without one), keep a ↓-followed view on its end (settled on the
+        // real last line when the build ends), refresh the jump buttons, then queue the next slice if blocks
+        // remain. Stale (`generation` mismatch) or closed: does nothing.
         void _Pump(uint64_t generation);
         // Build the level's next block (view.built) — or, at the start of a tool area, its fold row first
         // (then the block goes into the fold's panel), or for an empty area its one-line note (skipping
         // the "(no tool calls)" item) — and advance view.built past what was built. A block of the Session
         // chain list gets its "session N" links (only for sessions with a heading in this level), and a
-        // session heading is recorded in view.sessionHeadings for those links.
+        // session heading is recorded in view.sessionHeadings for those links. A top-level "### Turn N"
+        // heading is recorded in view.turnHeadings (a box click's keep-the-turn jump).
         void _BuildNext(LevelView& view);
         // Start a folded tool area: append its summary row (a button: chevron + MdToolAreaSummary) and
         // the panel its blocks go into (Collapsed unless the level's expandAll is on) to the level's
@@ -425,6 +556,8 @@ namespace winrt::TerminalApp::implementation
         static void _RememberWrapLines(bool wrap) noexcept;
         // The level ran out of blocks: add the closing notes (cut / failed), free the blocks, the areas and
         // the chain, drop a pending session jump whose heading never came (cut by the block cap), mark Done.
+        // (A pending turn jump and an end-follow are settled by _Pump around this call: both need the last
+        // blocks built, and the end-follow the closing note too.)
         void _FinishLevel(LevelView& view);
         // Append one built element to the level's current chunk (opening a new chunk when full).
         void _AppendElement(LevelView& view, const winrt::Windows::UI::Xaml::UIElement& element);
@@ -535,10 +668,32 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Border _wrapButtonFace{ nullptr };
         winrt::Windows::UI::Xaml::Controls::FontIcon _wrapGlyph{ nullptr }; // that toggle's ↵ glyph: bright while ON, dim while OFF
         winrt::Windows::UI::Xaml::Controls::Grid _tabsRow{ nullptr }; // the level tabs + the status line
-        std::vector<winrt::Windows::UI::Xaml::Controls::Button> _tabButtons; // one per kTranscriptCopyMenu entry, in its order
+        std::vector<winrt::Windows::UI::Xaml::Controls::Button> _tabButtons; // one per tab: the kTranscriptCopyMenu levels in its order, then Custom, User Only, Assistant Only
         std::vector<winrt::Windows::UI::Xaml::Controls::TextBlock> _tabLabels; // each tab's label (dim / bright)
         std::vector<winrt::Windows::UI::Xaml::Controls::Border> _tabUnderlines; // each tab's underline (accent when current)
-        std::vector<int> _tabLevels; // the TurnsLevel value behind each tab position
+        std::vector<int> _tabViews; // the VIEW index behind each tab position (a TurnsLevel value, or a box tab's 5..7) — the digit keys and the guide's "key N" read it
+        // The BOX ROW under the tabs (TRANSCRIPT_OVERLAY.md §3j): "Also show:" and the twelve boxes grouped by level, in a
+        // wrapping panel. Collapsed unless a box tab is current (_SyncBoxesRow); built once with the overlay.
+        winrt::Windows::UI::Xaml::Controls::Grid _boxesRow{ nullptr };
+        std::vector<winrt::Windows::UI::Xaml::Controls::CheckBox> _boxChecks; // one per kTranscriptViewBoxes entry, in its order
+        // Each box tab's ticked box names, in view order (Custom, User Only, Assistant Only): read fresh from settings.json by
+        // every Show of a new conversation (_RememberedBoxes), changed by every box click (_ToggleBox) — the in-memory copy the
+        // renders use; settings.json gets each click through its own RMW (_RememberBox).
+        std::array<std::vector<std::wstring>, ::Agentmaster::kTranscriptBoxViewCount> _boxes{};
+        // Each view's render epoch: bumped by _ResetView (a box click re-renders ONE view), carried by its render, and checked
+        // when the render lands — the overlay-wide _generation would also throw away the other views' renders. Never reset
+        // with the views, so an epoch never repeats while the overlay lives.
+        std::array<uint64_t, ::Agentmaster::kTranscriptViewCount> _viewEpochs{};
+        // The body's layer: the level views' host (_bodyHost) with the jump buttons drawn over its bottom-right corner. A
+        // separate grid, so releasing the views (_bodyHost's Clear) never takes the buttons with them.
+        winrt::Windows::UI::Xaml::Controls::Grid _bodyLayer{ nullptr };
+        // The JUMP buttons, stacked at the body's bottom-right: ↑ to the top, ↓ to the bottom (_JumpToEdge). Hidden until the
+        // current view can be scrolled that way (_UpdateJumpButtons).
+        winrt::Windows::UI::Xaml::Controls::Button _jumpTopButton{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Button _jumpEndButton{ nullptr };
+        // What each jump button was last set to (-1 never, 0 hidden, 1 shown), so an update that changes nothing sets nothing.
+        int8_t _jumpTopShown = -1;
+        int8_t _jumpEndShown = -1;
         // The level guide: the (i) button right after the last level tab, and the Flyout it opens (its
         // Button::Flyout, so a click or Enter / Space opens it with no handler of ours). The Flyout is built
         // once with the overlay and refills its content on every Opening (_BuildLevelGuidePanel).
@@ -576,9 +731,9 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Media::SolidColorBrush _transparentBrush{ nullptr };
         winrt::Windows::UI::Xaml::Media::FontFamily _monoFont{ nullptr };
 
-        std::array<LevelView, 5> _levels{}; // by TurnsLevel value (kTurnsLevelCount)
+        std::array<LevelView, ::Agentmaster::kTranscriptViewCount> _levels{}; // by view index (TranscriptViews.h: the five levels, then the three box tabs)
         TranscriptOverlaySource _source; // what is shown
-        int _current = 2; // the current level (TurnsLevel::Default)
+        int _current = 2; // the current view (TurnsLevel::Default)
         // Whether long lines WRAP (true, the default) or keep their length and are cut off at the body's
         // right edge. GLOBAL: Show reads it from settings.json on every open
         // (AppSettings::transcriptOverlayWrapLines) and the ↵ toggle writes it, so every window opens with

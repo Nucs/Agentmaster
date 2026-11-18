@@ -19,8 +19,10 @@
 #include "../SummaryConversation.h" // BuildSummaryConversation / CodexSummaryConversation / SummarySeparatorLabel (TestSummaryConversation, TestConversationUpstream)
 #include "../TranscriptLevelGuide.h" // kTranscriptLevelGuide / TranscriptLevelTip (TestTranscriptLevelGuide)
 #include "../TranscriptTurns.h"
+#include "../TranscriptViews.h" // the overlay's box tabs: names, boxes, options, ticks, tips (TestTranscriptViews)
 
 #include <algorithm> // std::find (the conversation-chain tests), std::any_of (the level guide's coverage)
+#include <set> // TestTranscriptViews: the names seen
 #include <cwchar> // std::swprintf
 #include <fstream>
 #include <iterator> // std::size
@@ -1465,4 +1467,476 @@ void TestConversationUpstream()
 
     std::error_code ec;
     fs::remove_all(root, ec);
+}
+
+namespace
+{
+    // ---- the transcript overlay's box tabs (TranscriptViews.h) and the one-sided switches (TurnsOptions::userInputs /
+    // peerInputs / finalReplies, TRANSCRIPT_OVERLAY.md section 3j) ----
+
+    // make_goldens.py's FIXTURES, as TestTranscriptTurns lists them, and the five levels with the names their goldens carry.
+    constexpr const wchar_t* kViewFixtures[] = {
+        L"fixture_session.jsonl",
+        L"fixture_compaction.jsonl",
+        L"fixture_malformed.jsonl",
+        L"fixture_questions.jsonl",
+        L"fixture_preserved.jsonl",
+        L"chain/a4a4a4a4-0000-4000-8000-000000000004.jsonl",
+        L"chain/a1a1a1a1-0000-4000-8000-000000000001.jsonl",
+        L"chain/b2b2b2b2-0000-4000-8000-000000000002.jsonl",
+        L"chain/b3b3b3b3-0000-4000-8000-000000000003.jsonl",
+        L"agents/c1c1c1c1-0000-4000-8000-000000000001.jsonl",
+        L"agents/c2c2c2c2-0000-4000-8000-000000000002.jsonl",
+    };
+    const std::pair<const wchar_t*, TurnsLevel> kViewLevels[] = {
+        { L"minimal", TurnsLevel::Minimal },
+        { L"compact", TurnsLevel::Compact },
+        { L"default", TurnsLevel::Default },
+        { L"full", TurnsLevel::Full },
+        { L"max", TurnsLevel::Max },
+    };
+
+    // Renders one reference fixture under `opts` exactly as TestTranscriptTurns renders it for its golden: a chained fixture
+    // (a folder with births.json) from its FILE with the pinned creation times, so the chain and the agents are found; any
+    // other from its lines alone.
+    // Parameters: root - the harness's turns folder; fixture - a kViewFixtures entry; opts - the render's options.
+    // Returns the render, "<the render failed>" when the file render failed. Throws std::bad_alloc only.
+    std::wstring RenderTurnsFixture(const fs::path& root, const wchar_t* fixture, const TurnsOptions& opts)
+    {
+        const fs::path file = root / fs::path{ fixture };
+        const fs::path birthsFile = file.parent_path() / L"births.json";
+        if (!fs::is_regular_file(birthsFile))
+        {
+            return RenderTranscriptTurns(ParseTranscriptJsonl(ReadTurnsFileBytes(file)), opts, /*utc*/ true);
+        }
+        const auto births = LoadTurnsBirths(birthsFile);
+        const TurnsBirthFn born = [births](const fs::path& path) -> std::optional<double> {
+            const auto it = births.find(path.stem().wstring());
+            return it == births.end() ? std::nullopt : std::optional<double>{ it->second };
+        };
+        return RenderTranscriptTurnsFile(file, opts, /*utc*/ true, born).value_or(L"<the render failed>");
+    }
+
+    // Whether two option sets are the same in EVERY member - the reference's features and rules and Agentmaster's own. The
+    // members are listed by hand; TestTranscriptViews checks sizeof(TurnsOptions), so a member added later fails loudly
+    // there instead of being skipped here.
+    bool SameTurnsOptions(const TurnsOptions& a, const TurnsOptions& b)
+    {
+        return a.notes == b.notes && a.times == b.times && a.ops == b.ops && a.shortPaths == b.shortPaths && a.fullBash == b.fullBash &&
+               a.stats == b.stats && a.opMeta == b.opMeta && a.opDuration == b.opDuration && a.opOutput == b.opOutput && a.bgEvents == b.bgEvents &&
+               a.narration == b.narration && a.compactions == b.compactions && a.answers == b.answers && a.nestedBlocks == b.nestedBlocks &&
+               a.compactedHistory == b.compactedHistory && a.chain == b.chain && a.agents == b.agents && a.peerMessages == b.peerMessages &&
+               a.reasons == b.reasons && a.plainDashes == b.plainDashes && a.fullWrite == b.fullWrite && a.editDiffs == b.editDiffs &&
+               a.lastTurnOnly == b.lastTurnOnly && a.userInputs == b.userInputs && a.peerInputs == b.peerInputs && a.finalReplies == b.finalReplies &&
+               a.liveBranch == b.liveBranch && a.skipTaskNotices == b.skipTaskNotices && a.skipSidechains == b.skipSidechains &&
+               a.skipSynthetic == b.skipSynthetic && a.keepPrePromptWork == b.keepPrePromptWork;
+    }
+    // How many TurnsOptions members SameTurnsOptions compares (all of them bools, so this is also its size in bytes).
+    constexpr size_t kTurnsOptionsMembers = 31;
+
+    // The ticked list that names exactly the boxes whose features `opts` turns on - what a box tab ticks to show a level.
+    std::vector<std::wstring> TicksFor(const TurnsOptions& opts)
+    {
+        std::vector<std::wstring> ticks;
+        for (const auto& box : kTranscriptViewBoxes)
+        {
+            if (opts.*box.feature)
+            {
+                ticks.emplace_back(box.name);
+            }
+        }
+        return ticks;
+    }
+
+    // How many lines of `text` start with `prefix`.
+    size_t CountLinesStartingWith(const std::wstring& text, std::wstring_view prefix)
+    {
+        size_t count = 0;
+        for (const auto& line : SplitTurnsLines(text))
+        {
+            if (line.size() >= prefix.size() && std::wstring_view{ line }.substr(0, prefix.size()) == prefix)
+            {
+                ++count;
+            }
+        }
+        return count;
+    }
+}
+
+// Agentmaster (TurnsOptions::userInputs / peerInputs / finalReplies - the transcript overlay's User Only and Assistant Only
+// tabs, TRANSCRIPT_OVERLAY.md section 3j): NOT part of the port, so no golden covers them directly - but each only REMOVES
+// parts of a turn, so every one of the 11 reference fixtures at each of the 5 levels pins them: a one-sided render's lines
+// are the golden's lines in order with some left out, and what is left out is exactly its side. User Only (peerInputs and
+// finalReplies off) keeps every message of the user's and no teammate's; Assistant Only (userInputs and peerInputs off)
+// keeps every turn and every "● Claude" part and no message at all. Then the synthetic cases: turns a teammate started are
+// skipped with their numbers kept; Claude's part without its reply keeps the boxes' lines; a level never switches a side off.
+void TestTranscriptTurnsSides()
+{
+    std::wprintf(L"\n[TranscriptTurns] one side of each turn (userInputs / peerInputs / finalReplies: the overlay's User Only, Assistant Only)\n");
+
+    // ---- no level and no preset switches a side off: every level is still the reference's text ----
+    {
+        const TurnsOptions latest{};
+        bool allOn = latest.userInputs && latest.peerInputs && latest.finalReplies;
+        for (const auto& [name, level] : kViewLevels)
+        {
+            const TurnsOptions opts = TurnsOptionsForLevel(level);
+            allOn = allOn && opts.userInputs && opts.peerInputs && opts.finalReplies;
+        }
+        CHECK(allOn, "TurnsSides: neither the preset nor any level switches a side off (userInputs, peerInputs, finalReplies all on)");
+    }
+
+    const fs::path root = TurnsHarnessDir() / L"turns";
+    if (!fs::is_directory(root / L"expected"))
+    {
+        CHECK(false, "TurnsSides: tests\\turns\\expected is missing (the fixtures ship beside m5_tests.exe)");
+        return;
+    }
+
+    // ---- every golden: a one-sided render only REMOVES lines, and removes what its side says ----
+    int matched = 0;
+    int total = 0;
+    for (const wchar_t* fixture : kViewFixtures)
+    {
+        for (const auto& [levelName, level] : kViewLevels)
+        {
+            ++total;
+            const std::wstring golden = WidenTurnsUtf8(ReadTurnsFileBytes(root / L"expected" / TurnsGoldenName(fixture, levelName)));
+            TurnsOptions userOnly = TurnsOptionsForLevel(level);
+            userOnly.peerInputs = false;
+            userOnly.finalReplies = false;
+            TurnsOptions assistantOnly = TurnsOptionsForLevel(level);
+            assistantOnly.userInputs = false;
+            assistantOnly.peerInputs = false;
+            const std::wstring user = RenderTurnsFixture(root, fixture, userOnly);
+            const std::wstring assistant = RenderTurnsFixture(root, fixture, assistantOnly);
+            const std::string tag = NarrowAsciiForCheck(TurnsGoldenName(fixture, levelName));
+            // User Only: the golden's lines in order; every "❯ User" label kept, no "✉ <sender>" label; at Minimal (where
+            // Claude's part is its reply alone) no "● Claude" label left at all.
+            const bool userOk = !golden.empty() && TurnsLinesKeptInOrder(user, golden) &&
+                                CountLinesStartingWith(user, L"**\x276F User") == CountLinesStartingWith(golden, L"**\x276F User") &&
+                                CountLinesStartingWith(user, L"**\x2709 ") == 0 &&
+                                (level != TurnsLevel::Minimal || CountLinesStartingWith(user, L"**\x25CF Claude**") == 0);
+            // Assistant Only: the golden's lines in order; no message label and no mid-turn opening note; every turn heading
+            // (and the session headings with them) and every "● Claude" part kept.
+            const bool assistantOk = !golden.empty() && TurnsLinesKeptInOrder(assistant, golden) &&
+                                     CountLinesStartingWith(assistant, L"**\x276F User") == 0 && CountLinesStartingWith(assistant, L"**\x2709 ") == 0 &&
+                                     assistant.find(L"_This transcript opens mid-turn") == std::wstring::npos &&
+                                     CountLinesStartingWith(assistant, L"#") == CountLinesStartingWith(golden, L"#") &&
+                                     CountLinesStartingWith(assistant, L"**\x25CF Claude**") == CountLinesStartingWith(golden, L"**\x25CF Claude**");
+            CHECK(userOk, ("TurnsSides: User Only of " + tag + " is the golden less Claude's replies and the teammates' messages").c_str());
+            CHECK(assistantOk, ("TurnsSides: Assistant Only of " + tag + " is the golden less every message that reached a turn").c_str());
+            if (userOk && assistantOk)
+            {
+                ++matched;
+            }
+        }
+    }
+    std::wprintf(L"  %d of %d goldens hold both one-sided renders\n", matched, total);
+
+    // ---- a team lead (agents/c1): User Only skips the turns teammates started, and the others keep their numbers ----
+    {
+        TurnsOptions userOnly = TurnsOptionsForLevel(TurnsLevel::Minimal);
+        userOnly.peerInputs = false;
+        userOnly.finalReplies = false;
+        const std::wstring user = RenderTurnsFixture(root, L"agents/c1c1c1c1-0000-4000-8000-000000000001.jsonl", userOnly);
+        CHECK(user.rfind(L"### Turn 1 ", 0) == 0 && user.find(L"\n### Turn 5 ") != std::wstring::npos && user.find(L"### Turn 2 ") == std::wstring::npos &&
+                  user.find(L"### Turn 3 ") == std::wstring::npos && user.find(L"### Turn 4 ") == std::wstring::npos,
+              "TurnsSides: User Only of a team lead shows turns 1 and 5 (the user's) and skips 2-4 (finder-a, finder-b, system started them)");
+        CHECK(user.find(L"> review the commit with a team") != std::wstring::npos && user.find(L"finder-a") == std::wstring::npos &&
+                  user.find(L"Got finder-a's findings") == std::wstring::npos,
+              "TurnsSides: ...with the user's messages, no teammate's message and no reply");
+        TurnsOptions assistantOnly = TurnsOptionsForLevel(TurnsLevel::Minimal);
+        assistantOnly.userInputs = false;
+        assistantOnly.peerInputs = false;
+        const std::wstring assistant = RenderTurnsFixture(root, L"agents/c1c1c1c1-0000-4000-8000-000000000001.jsonl", assistantOnly);
+        CHECK(CountLinesStartingWith(assistant, L"### Turn ") == 5 && assistant.find(L"> Got finder-a's findings: 1 leak.") != std::wstring::npos &&
+                  assistant.find(L"review the commit with a team") == std::wstring::npos && assistant.find(L"is idle (available)") == std::wstring::npos,
+              "TurnsSides: Assistant Only of the team lead keeps all 5 turns with their replies and none of the messages");
+    }
+
+    // ---- a box from the other side: Claude's part without its reply keeps the boxes' lines ----
+    {
+        TurnsOptions userAnswers = TurnsOptionsForLevel(TurnsLevel::Minimal);
+        userAnswers.answers = true;
+        userAnswers.peerInputs = false;
+        userAnswers.finalReplies = false;
+        const std::wstring answers = RenderTurnsFixture(root, L"fixture_questions.jsonl", userAnswers);
+        CHECK(answers.find(L"> no need, ask me again\n\n**\x25CF Claude**\n- \x276F Which island first? \x2192 **A**\n- \x276F How many trials? \x2192 **8**\n") !=
+                      std::wstring::npos &&
+                  answers.find(L"Stopping here until you say how to proceed.") == std::wstring::npos &&
+                  answers.find(L"What would you like to clarify?") == std::wstring::npos,
+              "TurnsSides: User Only + answers keeps Claude's part as the user's answers, without its replies");
+        TurnsOptions userReasons = TurnsOptionsForLevel(TurnsLevel::Minimal);
+        userReasons.reasons = true;
+        userReasons.peerInputs = false;
+        userReasons.finalReplies = false;
+        const std::wstring reasons = RenderTurnsFixture(root, L"fixture_session.jsonl", userReasons);
+        CHECK(reasons.find(L"> also check the tests\n\n**\x25CF Claude**\n- **Bash**: List files\n") != std::wstring::npos &&
+                  reasons.find(L"Done: 2 files") == std::wstring::npos && reasons.find(L"> second try question\n\n### Turn 3") != std::wstring::npos,
+              "TurnsSides: User Only + call reasons lists Claude's calls under the user's messages, no reply, and a turn with no call shows no Claude part");
+        TurnsOptions assistantReasons = TurnsOptionsForLevel(TurnsLevel::Minimal);
+        assistantReasons.reasons = true;
+        assistantReasons.userInputs = false;
+        assistantReasons.peerInputs = false;
+        const std::wstring claude = RenderTurnsFixture(root, L"fixture_session.jsonl", assistantReasons);
+        CHECK(claude.find(L"\n\n**\x25CF Claude**\n- **Bash**: List files\n") != std::wstring::npos && claude.find(L"> Done: 2 files") != std::wstring::npos &&
+                  claude.find(L"List the files and run the scan") == std::wstring::npos && claude.find(L"also check the tests") == std::wstring::npos,
+              "TurnsSides: Assistant Only + call reasons lists the calls and the replies, no message");
+    }
+
+    // ---- a three-session chain: every session heading stays over its turns ----
+    {
+        TurnsOptions userOnly = TurnsOptionsForLevel(TurnsLevel::Minimal);
+        userOnly.peerInputs = false;
+        userOnly.finalReplies = false;
+        const std::wstring user = RenderTurnsFixture(root, L"chain/a4a4a4a4-0000-4000-8000-000000000004.jsonl", userOnly);
+        CHECK(user.find(L"## Session 2 of 3 \x00B7 `a3a3a3a3`") != std::wstring::npos && user.find(L"\n\n### Turn 4 ") != std::wstring::npos &&
+                  user.find(L"**Session chain**") != std::wstring::npos && user.find(L"MSFT: Sharpe 0.9.") == std::wstring::npos,
+              "TurnsSides: User Only of a chain keeps the chain list and each session's heading, without the replies");
+    }
+}
+
+// Agentmaster - the transcript overlay's box tabs (TranscriptViews.h, TRANSCRIPT_OVERLAY.md section 3j): the views' names
+// (what settings.json stores), the twelve boxes against the level ladder, the options each tab renders with, the ticks a
+// click leaves, the greyed boxes, the tips - and, end to end over every golden, that Custom with a level's own boxes ticked
+// renders EXACTLY that level (so "every box ticked is Max" is a fact, not a promise).
+void TestTranscriptViews()
+{
+    std::wprintf(L"\n[TranscriptViews] the overlay's box tabs: names, boxes, options, ticks, tips, Custom == each level\n");
+    const auto custom = static_cast<int>(TranscriptView::Custom);
+    const auto userOnly = static_cast<int>(TranscriptView::UserOnly);
+    const auto assistantOnly = static_cast<int>(TranscriptView::AssistantOnly);
+
+    // ---- the views: names, labels, which ones are box tabs ----
+    {
+        bool roundTrip = true;
+        std::set<std::wstring> seen;
+        bool unique = true;
+        for (int view = 0; view < kTranscriptViewCount; ++view)
+        {
+            const std::wstring name = TranscriptViewName(view);
+            roundTrip = roundTrip && TranscriptViewFromName(name) == view;
+            unique = unique && seen.insert(name).second;
+        }
+        CHECK(roundTrip, "TranscriptViews: every view's settings name reads back as that view");
+        CHECK(unique, "TranscriptViews: no two views share a settings name");
+        bool levelsKeepTheirNames = true;
+        for (const auto& [name, level] : kViewLevels)
+        {
+            levelsKeepTheirNames = levelsKeepTheirNames && std::wstring{ TranscriptViewName(static_cast<int>(level)) } == name &&
+                                   std::wstring{ TranscriptViewLabel(static_cast<int>(level)) } == TranscriptLevelLabel(level);
+        }
+        CHECK(levelsKeepTheirNames, "TranscriptViews: a level's view keeps the level's own name (TurnsLevelName) and label - an older remembered level still opens");
+        CHECK(std::wstring{ TranscriptViewName(custom) } == L"custom" && std::wstring{ TranscriptViewName(userOnly) } == L"user-only" &&
+                  std::wstring{ TranscriptViewName(assistantOnly) } == L"assistant-only",
+              "TranscriptViews: the box tabs' settings names");
+        CHECK(std::wstring{ TranscriptViewLabel(custom) } == L"Custom" && std::wstring{ TranscriptViewLabel(userOnly) } == L"User Only" &&
+                  std::wstring{ TranscriptViewLabel(assistantOnly) } == L"Assistant Only",
+              "TranscriptViews: the box tabs' labels");
+        CHECK(TranscriptViewFromName(L"USER-ONLY") == userOnly && TranscriptViewFromName(L"Compact") == static_cast<int>(TurnsLevel::Compact),
+              "TranscriptViews: a stored name is read without case (a hand-edited settings.json)");
+        CHECK(TranscriptViewFromName(L"") == -1 && TranscriptViewFromName(L"user only") == -1 && TranscriptViewFromName(L"everything") == -1,
+              "TranscriptViews: an empty or unknown name finds no view (the overlay opens at Default)");
+        CHECK(IsTranscriptBoxView(custom) && IsTranscriptBoxView(userOnly) && IsTranscriptBoxView(assistantOnly) && !IsTranscriptBoxView(static_cast<int>(TurnsLevel::Max)) &&
+                  !IsTranscriptBoxView(-1) && !IsTranscriptBoxView(kTranscriptViewCount),
+              "TranscriptViews: exactly the three tabs after the levels are box tabs");
+    }
+
+    // ---- the boxes: one per ladder feature, each in the group of the level that first shows it ----
+    {
+        // The twelve LADDER features (TurnsOptionsForLevel sets them; TestTranscriptLevelGuide lists the same).
+        const std::pair<bool TurnsOptions::*, const char*> ladder[] = {
+            { &TurnsOptions::reasons, "reasons" },
+            { &TurnsOptions::notes, "notes" },
+            { &TurnsOptions::ops, "ops" },
+            { &TurnsOptions::fullBash, "fullBash" },
+            { &TurnsOptions::stats, "stats" },
+            { &TurnsOptions::opDuration, "opDuration" },
+            { &TurnsOptions::opOutput, "opOutput" },
+            { &TurnsOptions::narration, "narration" },
+            { &TurnsOptions::compactions, "compactions" },
+            { &TurnsOptions::answers, "answers" },
+            { &TurnsOptions::agents, "agents" },
+            { &TurnsOptions::fullWrite, "fullWrite" },
+        };
+        CHECK(std::size(kTranscriptViewBoxes) == std::size(ladder), "TranscriptViews: twelve boxes, one per ladder feature");
+        for (const auto& [feature, name] : ladder)
+        {
+            const auto count = std::count_if(std::begin(kTranscriptViewBoxes), std::end(kTranscriptViewBoxes), [feature](const TranscriptViewBox& box) {
+                return box.feature == feature;
+            });
+            // The box's stored name is the member's own name: what settings.json keeps must never drift from the option.
+            const bool named = std::any_of(std::begin(kTranscriptViewBoxes), std::end(kTranscriptViewBoxes), [feature, name](const TranscriptViewBox& box) {
+                return box.feature == feature && NarrowAsciiForCheck(box.name) == name;
+            });
+            const std::string label = std::string{ "TranscriptViews: the ladder feature " } + name + " has exactly one box, named after it";
+            CHECK(count == 1 && named, label.c_str());
+        }
+        std::set<std::wstring> names;
+        bool uniqueNames = true;
+        bool ordered = true;
+        int previous = static_cast<int>(TurnsLevel::Compact);
+        for (const auto& box : kTranscriptViewBoxes)
+        {
+            uniqueNames = uniqueNames && names.insert(box.name).second;
+            ordered = ordered && static_cast<int>(box.level) >= previous;
+            previous = static_cast<int>(box.level);
+            // The box's group is the FIRST level that turns its feature on.
+            int first = -1;
+            for (const auto& [levelName, level] : kViewLevels)
+            {
+                if (first < 0 && TurnsOptionsForLevel(level).*box.feature)
+                {
+                    first = static_cast<int>(level);
+                }
+            }
+            const std::string label = "TranscriptViews: the box " + NarrowAsciiForCheck(box.name) + " sits in the group of the level that first shows it";
+            CHECK(first == static_cast<int>(box.level), label.c_str());
+        }
+        CHECK(uniqueNames, "TranscriptViews: no two boxes share a name");
+        CHECK(ordered, "TranscriptViews: the boxes run Compact, Default, Full, Max (the row reads like the level guide)");
+        // The gates: the full call lines' box; what prints only under them; the reason line they replace.
+        bool gates = true;
+        for (const auto& box : kTranscriptViewBoxes)
+        {
+            const std::wstring name = box.name;
+            const bool needsCalls = name == L"fullBash" || name == L"opOutput" || name == L"opDuration" || name == L"fullWrite";
+            const auto want = needsCalls ? TranscriptBoxGate::NeedsCalls : name == L"reasons" ? TranscriptBoxGate::WithoutCalls : TranscriptBoxGate::Always;
+            gates = gates && box.gate == want;
+        }
+        CHECK(gates && std::wstring{ kTranscriptCallsBoxName } == L"ops",
+              "TranscriptViews: the call details wait for the full call lines (\"ops\"), and the reason line gives way to them");
+    }
+
+    // ---- the options each tab renders with ----
+    {
+        CHECK(sizeof(TurnsOptions) == kTurnsOptionsMembers, "TranscriptViews: SameTurnsOptions compares every TurnsOptions member (a new member: add it there)");
+        const auto minimal = TurnsOptionsForLevel(TurnsLevel::Minimal);
+        const auto max = TurnsOptionsForLevel(TurnsLevel::Max);
+        CHECK(SameTurnsOptions(TranscriptViewOptions(custom, {}), minimal), "TranscriptViews: Custom with no box is exactly Minimal");
+        std::vector<std::wstring> every;
+        for (const auto& box : kTranscriptViewBoxes)
+        {
+            every.emplace_back(box.name);
+        }
+        CHECK(SameTurnsOptions(TranscriptViewOptions(custom, every), max), "TranscriptViews: Custom with every box is exactly Max");
+        bool eachLevel = true;
+        for (const auto& [name, level] : kViewLevels)
+        {
+            const auto options = TurnsOptionsForLevel(level);
+            eachLevel = eachLevel && SameTurnsOptions(TranscriptViewOptions(custom, TicksFor(options)), options);
+        }
+        CHECK(eachLevel, "TranscriptViews: Custom with a level's own boxes is exactly that level's options");
+        auto userWant = minimal;
+        userWant.peerInputs = false;
+        userWant.finalReplies = false;
+        CHECK(SameTurnsOptions(TranscriptViewOptions(userOnly, {}), userWant), "TranscriptViews: User Only = Minimal without the replies and the teammates' messages");
+        auto assistantWant = minimal;
+        assistantWant.userInputs = false;
+        assistantWant.peerInputs = false;
+        CHECK(SameTurnsOptions(TranscriptViewOptions(assistantOnly, {}), assistantWant), "TranscriptViews: Assistant Only = Minimal without any message");
+        auto assistantStats = assistantWant;
+        assistantStats.stats = true;
+        CHECK(SameTurnsOptions(TranscriptViewOptions(assistantOnly, { L"stats" }), assistantStats), "TranscriptViews: a box adds its feature to its tab");
+        CHECK(SameTurnsOptions(TranscriptViewOptions(static_cast<int>(TurnsLevel::Default), { L"stats", L"fullWrite" }), TurnsOptionsForLevel(TurnsLevel::Default)),
+              "TranscriptViews: a level's view ignores ticks (a level is its own options)");
+        CHECK(SameTurnsOptions(TranscriptViewOptions(custom, { L"futureBox" }), minimal) && TranscriptViewOptions(custom, { L"OPS" }).ops,
+              "TranscriptViews: an unknown stored name ticks nothing, and a known one ticks without case");
+    }
+
+    // ---- the ticks a click leaves, and which boxes are greyed ----
+    {
+        auto ticks = TranscriptViewWithBox({}, L"ops", true);
+        CHECK(ticks == std::vector<std::wstring>{ L"ops" }, "TranscriptViews: ticking a box adds its name");
+        ticks = TranscriptViewWithBox(ticks, L"ops", true);
+        CHECK(ticks == std::vector<std::wstring>{ L"ops" }, "TranscriptViews: ticking a ticked box adds nothing");
+        CHECK(TranscriptViewWithBox({ L"OPS", L"futureBox", L"ops" }, L"ops", false) == std::vector<std::wstring>{ L"futureBox" },
+              "TranscriptViews: clearing a box removes every copy of its name, in any case, and keeps the rest");
+        CHECK(TranscriptViewWithBox({ L"futureBox", L"stats" }, L"ops", true) == std::vector<std::wstring>({ L"futureBox", L"stats", L"ops" }),
+              "TranscriptViews: a tick keeps a newer build's name and the order, and goes last");
+        CHECK(TranscriptViewTicks({ L"Narration" }, L"narration") && !TranscriptViewTicks({ L"narrations" }, L"narration"),
+              "TranscriptViews: ticks compare whole names without case");
+        const auto box = [](const wchar_t* name) -> const TranscriptViewBox& {
+            for (const auto& entry : kTranscriptViewBoxes)
+            {
+                if (std::wstring{ entry.name } == name)
+                {
+                    return entry;
+                }
+            }
+            return kTranscriptViewBoxes[0];
+        };
+        CHECK(!TranscriptViewBoxTakesEffect(box(L"fullBash"), {}) && TranscriptViewBoxTakesEffect(box(L"fullBash"), { L"ops" }),
+              "TranscriptViews: the exact Bash commands take effect only with the full call lines");
+        CHECK(TranscriptViewBoxTakesEffect(box(L"reasons"), {}) && !TranscriptViewBoxTakesEffect(box(L"reasons"), { L"ops" }),
+              "TranscriptViews: the reason lines take effect only without the full call lines");
+        CHECK(TranscriptViewBoxTakesEffect(box(L"stats"), {}) && TranscriptViewBoxTakesEffect(box(L"stats"), { L"ops" }),
+              "TranscriptViews: a box with no gate always takes effect");
+    }
+
+    // ---- the tips ----
+    {
+        bool plainDashes = true;
+        const auto noEmDash = [&plainDashes](const std::wstring& text) {
+            plainDashes = plainDashes && text.find(L'\x2014') == std::wstring::npos;
+        };
+        for (const auto& box : kTranscriptViewBoxes)
+        {
+            const std::wstring tip = TranscriptViewBoxTip(box);
+            noEmDash(tip);
+            noEmDash(box.label);
+            const std::string label = "TranscriptViews: the box " + NarrowAsciiForCheck(box.name) + "'s tip says what it shows and where it comes from";
+            CHECK(tip.find(std::wstring{ L"\nFrom " } + TranscriptLevelLabel(box.level) + L".") != std::wstring::npos && tip.size() > 40, label.c_str());
+        }
+        CHECK(TranscriptViewBoxTip(kTranscriptViewBoxes[5]).rfind(L"Every tool call's main arguments", 0) == 0 &&
+                  TranscriptViewBoxTip(kTranscriptViewBoxes[5]).find(L"\nWhen each background task finished") != std::wstring::npos,
+              "TranscriptViews: the full call lines' tip is the guide's own rows for the feature, both of them");
+        const std::wstring user = TranscriptViewTip(userOnly, 7);
+        const std::wstring all = TranscriptViewTip(custom, 6);
+        const std::wstring claude = TranscriptViewTip(assistantOnly, 8);
+        noEmDash(user);
+        noEmDash(all);
+        noEmDash(claude);
+        noEmDash(kTranscriptViewsGuideNote);
+        CHECK(user.rfind(L"User Only (key 7)\n", 0) == 0 && all.rfind(L"Custom (key 6)\n", 0) == 0 && claude.rfind(L"Assistant Only (key 8)\n", 0) == 0,
+              "TranscriptViews: a box tab's tip opens with its label and its key");
+        CHECK(all.find(L"Every box ticked shows exactly what Max shows.") != std::wstring::npos &&
+                  user.find(L"a turn with nothing of yours is skipped") != std::wstring::npos && claude.find(L"Leaves out every message") != std::wstring::npos,
+              "TranscriptViews: each box tab's tip says which side it shows");
+        CHECK(TranscriptViewTip(static_cast<int>(TurnsLevel::Default), 1) == TranscriptLevelTip(TurnsLevel::Default, 1),
+              "TranscriptViews: a level's tab keeps the level's own cheat sheet");
+        CHECK(plainDashes, "TranscriptViews: every text uses the plain hyphen, never an em dash");
+    }
+
+    // ---- end to end: Custom with a level's own boxes renders EXACTLY that level's golden ----
+    const fs::path root = TurnsHarnessDir() / L"turns";
+    if (!fs::is_directory(root / L"expected"))
+    {
+        CHECK(false, "TranscriptViews: tests\\turns\\expected is missing (the fixtures ship beside m5_tests.exe)");
+        return;
+    }
+    int matched = 0;
+    int total = 0;
+    for (const wchar_t* fixture : kViewFixtures)
+    {
+        for (const auto& [levelName, level] : kViewLevels)
+        {
+            ++total;
+            const std::wstring golden = WidenTurnsUtf8(ReadTurnsFileBytes(root / L"expected" / TurnsGoldenName(fixture, levelName)));
+            const std::wstring got = RenderTurnsFixture(root, fixture, TranscriptViewOptions(custom, TicksFor(TurnsOptionsForLevel(level))));
+            const bool ok = !golden.empty() && got == golden;
+            const std::string label = "TranscriptViews: Custom with the boxes of " + NarrowAsciiForCheck(TurnsGoldenName(fixture, levelName)) + " renders that golden";
+            CHECK(ok, label.c_str());
+            if (ok)
+            {
+                ++matched;
+            }
+            else if (!golden.empty())
+            {
+                PrintFirstTurnsDifference(got, golden);
+            }
+        }
+    }
+    std::wprintf(L"  %d of %d goldens rendered by Custom with their level's boxes\n", matched, total);
 }

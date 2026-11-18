@@ -3178,13 +3178,27 @@ namespace Agentmaster
         bool tabColorPickerAdvancedOpen{ true };
         // Agentmaster (TRANSCRIPT_OVERLAY.md): the detail level the transcript overlay OPENS at — the name
         // of the LAST level tab the user picked, in any window ("minimal" / "compact" / "default" / "full"
-        // / "max", TranscriptTurns' TurnsLevelName). Stored as the name rather than the TurnsLevel number
-        // so a future reorder of the levels can't silently remap a saved choice. GLOBAL + persisted like
-        // the tab color picker states: each pick is a freshest-disk RMW written by the overlay itself
-        // (never the cog form — so both cog-Save preserve blocks restore it), and every open re-reads it
+        // / "max", TranscriptTurns' TurnsLevelName — or one of the three box tabs, "custom" / "user-only" /
+        // "assistant-only", TranscriptViews.h TranscriptViewName, §3j). Stored as the name rather than the
+        // TurnsLevel number so a future reorder of the levels can't silently remap a saved choice. GLOBAL +
+        // persisted like the tab color picker states: each pick is a freshest-disk RMW written by the overlay
+        // itself (never the cog form — so both cog-Save preserve blocks restore it), and every open re-reads it
         // from disk, so a pick in one window decides the next open in every window. The engine stores it
-        // opaquely; the overlay maps it, and an unknown or empty name opens at Default. Default "default".
+        // opaquely; the overlay maps it, and an unknown or empty name (a build older than a tab opens at
+        // Default too) opens at Default. Default "default".
         std::wstring transcriptOverlayLevel{ L"default" };
+        // Agentmaster (TRANSCRIPT_OVERLAY.md §3j): the BOXES ticked on each of the transcript overlay's three box tabs —
+        // Custom, User Only and Assistant Only — as a list of the boxes' NAMES ("ops", "narration", "answers", …: the
+        // TurnsOptions member each box turns on, TranscriptViews.h kTranscriptViewBoxes). Empty (the default) == every box
+        // clear == the tab's side of Minimal. Kept VERBATIM: a name this build does not know (a newer build's box) stays in
+        // the list, and a click on a box only adds or removes that box's own name (TranscriptViewWithBox), so no version
+        // loses another's tick. GLOBAL + persisted like transcriptOverlayLevel: each click is a freshest-disk RMW of that
+        // one tab's list, written by the overlay itself (never the cog form — so both cog-Save preserve blocks restore
+        // all three), and every open re-reads them, so a tick in one window is there at the next open in every window (an
+        // overlay already open in another window keeps its own until it is opened again). Each tab keeps its own list.
+        std::vector<std::wstring> transcriptOverlayCustomBoxes{};
+        std::vector<std::wstring> transcriptOverlayUserOnlyBoxes{};
+        std::vector<std::wstring> transcriptOverlayAssistantOnlyBoxes{};
         // Agentmaster (TRANSCRIPT_OVERLAY.md §3c): whether the transcript overlay WRAPS long lines — its
         // header's ↵ toggle. ON (the default): a line wider than the body continues on the next line. OFF:
         // every line keeps its length and the part past the body's right edge is hidden — not a sideways
