@@ -221,7 +221,9 @@ model's answer and its list of sessions instead of the session cards; the summar
   as on the board (without an anchor it opened at the window's top-left). Right under its **Jump to Tab**, the card's
   own two items (§2j, 2026-11-06, NOT BUILT yet): **Pin to Top**, and **Unpin** on a pinned card — the board card and
   the tree row do not have them. Its **Open New Session Here ▸** and **Fork session ▸** open the new tab right after the
-  card's tab, in the window that hosts that tab (§2k, 2026-11-07, NOT BUILT yet). The menu ends with
+  card's tab, in the window that hosts that tab (§2k, 2026-11-07, NOT BUILT yet). Its **Rename** opens a small floating
+  rename card under the card (§2o, 2026-11-18, NOT BUILT yet) — it opened the Explorer tree's editor on the hidden Agent
+  Manager page before, so nothing showed. The menu ends with
   **Deactivate ▸** over **Close ▸**, the WT tab menu's two submenus with its items in its order
   (2026-10-23, NOT BUILT yet; CLAUDE.md *C1 UI*, `AgentManagerContent::_MakeSessionScopeSubmenu`):
   Deactivate Tab / Close Tab · Tabs to the Left · Tabs to the Right · Other Tabs · Of Same Folder ·
@@ -2391,6 +2393,113 @@ The whole feature is [`SESSION_NOTES.md`](SESSION_NOTES.md); what it changes on 
   Card if Sum is off.").
 - **The session menu** of every card has "Set Note… (F3)" / "Edit Note… (F3)" right under Rename.
 
+### 2o. Rename on the card — a floating rename card (2026-11-18, NOT BUILT yet)
+
+The user's report: "In sidemenu, the rename function doesn't work. please refactor the sidemenu's rename to be at the card
+and update all (tab, telegram, like a regular rename does)". The cause: a card's right-click menu is the Agent Manager's
+shared session menu (§2), and its **Rename** opened the Explorer tree's in-place editor (`AgentManagerContent::
+_OnRenameSession`), which lives on the Agent Manager page — hidden behind the terminal tab the panel sits beside, so
+nothing showed until the page was opened with Home (`BuildSessionMenuFor`'s documented caveat). Their pick the same day,
+from three rendered mockups (the title band turning into the box · a box under the band · a floating card): **Floating
+rename card**.
+
+```
+┌──────────────────────────────────────────┐
+│ Fix the flaky login test               ▮ │  ← the side panel card: right-click ▸ Rename
+│ ● Waiting  created 4d1h, active 2m4s ago │
+│ webapp / fix-login                       │
+└──────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│ ✎  Rename · Fix the flaky login test             │  ← the rename card, floating under it
+│ ┌──────────────────────────────────────────────┐ │
+│ │ Fix the flaky login test                     │ │  ← the whole title, selected: the first key replaces it
+│ └──────────────────────────────────────────────┘ │
+│ Enter: rename · Shift+Enter: new line · Esc: cancel │
+│                              [ Cancel ] [ Rename ] │
+└──────────────────────────────────────────────────┘
+```
+
+- **What opens it.** The shared session menu's host (`AgentManagerContent::SessionMenuHost`, §2j / §2k) has two more
+  optional members, `rename` and `renameTip`. When `rename` is set, the menu's **Rename** item calls it (after the menu's
+  one-tick defer) instead of the content's `_OnRenameSession`, reads **Rename** — no "(F2)": F2 renames the focused TAB,
+  which need not be the card's session — and shows `renameTip` (what the card does, and its keys). The side panel's
+  session cards and its AI search result cards of OPEN sessions set both, each holding its card weakly (the card's subtree
+  owns the menu); the Triage Board card, its ⋯ button and the Explorer tree row pass no host and keep the tree editor.
+- **The open** (`_SidePanelOpenRenameCard`): the card's place is read at the click (the list edits its cards in place
+  and virtualizes them, so the clicked card can be recycled by the next tick); one tick later the rename card is filled
+  from the session as it is then (one lean `GetWithoutQueue`): the header "Rename · <the title's first line>", the box
+  the whole title with every line break respelled as the TextBox's lone CR (`SessionTitleBoxText`: an LF shows as no
+  break at all), so a two-line title shows both lines. One more tick later the box takes the keyboard with the whole
+  title selected — the first key replaces it, the tab renamer's and the tree editor's way. A session closed since the menu
+  opened opens nothing. A card open for ANOTHER session renames that one first (what was typed is never dropped); Rename
+  again on the same session keeps what is typed.
+- **The card** (`_SidePanelEnsureRenameCard`, built once): a Root()-parented `Popup` in the note editor's look
+  (SESSION_NOTES.md §3c) — 300 DIP wide, `#262626` with a `#3A3A3A` border, always dark — under the side panel card's
+  bottom-left, moved inside the window near its right or bottom edge (where it then covers its anchor, as the note
+  editor does). The box wraps and grows to about five lines (`kSidePanelRenameBoxMaxHeight`), then scrolls its text.
+  **Rename** wears the Agent Manager's accent blue (`PaintHoldButton`, so the color holds through hover and press), as in
+  the mockup; **Cancel** the default face; both tips wait 3 s (`kSidePanelButtonTipDelay`).
+- **The keys.** **Enter** renames and **Esc** cancels, both on the KEY-UP and only for a key whose key-down the card saw
+  (the box arms Enter, the card's hook arms Esc): closing on the key-down would hand the keystroke's CR / ESC to the
+  terminal that gets the keyboard back — a submit, an interrupt (TCM-K2). Enter without Shift is claimed in the box's
+  TUNNELING `PreviewKeyDown`, before the box inserts a line break; an Enter on a focused button is that button's own
+  click. **Shift+Enter** starts a new line: the box is `AcceptsReturn`, because a title can have two lines (187 of
+  production's 1,731 titles on 2026-10-18 had a lone-CR break) and a single-line box shows and returns only the first
+  line — its commit would cut the second one off. (The picked mockup called the box "one-line": it stays one line tall
+  until a title needs a second.)
+- **A press outside the card renames** (the mockup's "a click outside renames"; a tab rename's "clicking away always
+  commits"): one handledEventsToo `PointerPressed` hook on Root(), inert while the card is closed, tells inside from
+  outside with the bounded `AgentIsUnderElement` walk. A tab switch renames too (`_ApplyAgentTabSelection`, beside the note
+  editor's close), and so does a collapse of the panel (a belt: the press on ⋯ already did it). **Cancel** drops the edit.
+- **The commit writes only a change** (`AgentMaster/SessionTitleEdit.h`, pure — `SessionTitleToCommit`): the typed text
+  without the spaces, tabs and line breaks at its ends (the set every rename path trims), its inner breaks kept. A blank
+  box renames nothing (a title never goes empty). A text equal to the title the card OPENED with, its line breaks spelled
+  any way (CR, LF, CR LF), renames nothing: a card closed untouched never rewrites a title for its breaks, and never undoes
+  a rename made meanwhile on the tab, in another window or from Telegram; an edit wins like any later rename. A case-only
+  change is a rename.
+- **The rename is the one rename seam**, `TerminalPage::_RenameClaudeSession` (Rule #11), on its own dispatcher tick after
+  the close (a close runs inside a key-up, a press or a tab switch): the registry title, which sessions.json saves and
+  every window's cards, Triage Board and Explorer tree follow; this window's tab title at once (pinned, so the tab →
+  registry mirror does not echo it), and the tab of a session another window hosts re-pinned there by that window's
+  registry observer (`_SyncClaudeTabTitleFromRegistry`); the Telegram topic's name through the bot's topic sync (a `Rename`
+  op once the session's title differs from the topic's, MESSAGING.md §21); a pending AI title stands down (the title
+  moved, AI_TITLES.md); a window whose caption follows the focused tab shows the new title. This window's card list
+  updates at once, past the drain's 500 ms throttle (`_SidePanelRenameSession`, the pin's way), so the card shows its new
+  name while the user watches; behind the AI view the result cards refresh at once. A session closed meanwhile is renamed
+  all the same (its record — the Sessions page's Edit Title renames closed sessions too); one gone from the registry is not.
+- **The keyboard** goes back where it was when the card opened — normally the terminal beside the panel — when the card
+  held it at the close (TCM-K2: `AgentCaptureFocusReturn` at the open, `AgentPanelHoldsKeyboard` before the close,
+  `_ReturnKeyboardAfterPanel` after it); a press that closed the card keeps the focus that press gave.
+- **Log:** `[nav] sidepanel rename card open <sid8>`; `[nav] sidepanel rename card close (<why>, <outcome>) <sid8>` — why:
+  enter · esc · click outside · tab switch · rename button · cancel · panel collapsed · another session's rename; outcome:
+  renaming · unchanged: nothing renamed · blank: nothing renamed · dropped —; then the seam's own `[nav] rename <sid8> ->
+  "<title>"`. `[focus] the side panel's rename card closed: …` when it gave the keyboard back; `[sidepanel] rename card:
+  <sid8> is gone from the registry (nothing renamed)`; `[nav] sidepanel rename card <sid8>: not opened (the session was
+  closed or is gone)`.
+- **Ids** (E2E_TESTING.md §6.3): the menu item `am.sessionmenu.rename` (on every surface), the card's `am.side.rename.box`,
+  `am.side.rename.ok` and `am.side.rename.cancel`. The box is named by its placeholder, "The session's new title".
+- **Tested** (no build): `TestSessionTitleEdit` (`tests_sidepanel.cpp`, 34 checks) — the trim, the box's CR breaks, the
+  line-break-blind comparison, the commit's verdict (blank; untouched; an LF- and a CR LF-stored two-line title handed back
+  with CRs; an edit; a case change; a second line added; two lines joined; an untitled session) and the header's first line.
+  The whole m5 harness, isolated (HEAD + only this change, in a scratch folder with its own profile): 14,071 checks on
+  3b7131d0d (13,826 on b1f8164e2), the 3 known TaskbarBadge failures only; a negative control (the comparison made
+  line-break-sensitive) failed exactly the 3 line-break checks. `cl /Zs` against the 2026-11-10 Release worktree build's PCH (`Q:\tmp\am-release-wt`, ad89700e3), on
+  a shadow of HEAD + this change: `TerminalPage.AgentSidePanel.cpp`, `AgentManagerContent.Tree.cpp`,
+  `TerminalPage.AgentEngine.cpp` and `AgentManagerContent.cpp` pass; an unknown name planted in the rename card's build
+  and one in the menu's host call failed at exactly those lines; `TerminalPage.AgentNotes.cpp` and `TerminalPage.cpp`
+  fail with HEAD's own headers too, on members newer than that build's generated projection (the note action and
+  `AgentNoteVisible`, `TabRowMenuButton`) — the same errors with and without this change. No e2e test is written (SP-18).
+- **Check after the build** (a PURGED build: `TerminalPage.h` gained members and `AgentManagerContent.h`'s
+  `SessionMenuHost` gained two): flows/02 SP-18 — right-click a card ▸ **Rename**: the card opens under it with the title
+  selected; Enter renames (the card's band, the tab, the Agent Manager page's board and tree, another window's tab with
+  the list on GLOBAL, the Telegram topic within a sync tick); Esc cancels and claude gets no ESC (a running turn keeps
+  running); a click into the terminal renames and keeps the terminal's focus; Shift+Enter makes a two-line title, which
+  reopens with both lines; an emptied or untouched box renames nothing (`blank` / `unchanged` in the close line); Ctrl+Tab
+  renames; a card near the window's bottom or a right-docked panel keeps the rename card inside the window; an AI search
+  result card of an open session opens the same card; the board card's and the tree row's Rename still open the tree's
+  editor and read "Rename (F2)". No `[exc] _SidePanelOpenRenameCard`, `[exc] _SidePanelCloseRenameCard`, `[exc]
+  _SidePanelRenameSession` or `[exc] session menu: Rename` line in hooks.log.
+
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 
 The bottom area hosts a REAL `AgentTabOverlay` whose summary panel is switched into the new
@@ -2614,6 +2723,10 @@ below).
   (updates owed, reveal owed, icons still); its result cards are the model's handful, rebuilt per list and refreshed at
   most once per periodic tick; its disk reads run on a pool thread that holds the page weakly; its claude.exe starts only
   at a click into the box or a request, and parks after `sessionsAiParkMinutes`.
+- The rename card (§2o) is ONE popup per window, built at the first Rename and never rebuilt; it costs a card nothing
+  (no element, handler or flyout per card — the menu's host holds its card weakly); its keys act on the KEY-UP; its
+  outside-press hook is one handler on Root(), inert while it is closed; the rename runs on its own dispatcher tick,
+  never inside the key, press or tab-switch handler that closed the card.
 - The `+` launcher card (§2e) is built on the first click and never rebuilt; its placement runs on a
   coalesced dispatcher tick (never inside `SizeChanged`), writes the popup offsets only on a real
   move, and its keys act on the KEY-UP, so no CR / ESC of a key that closes the card can reach a
@@ -2779,3 +2892,11 @@ below).
   `TerminalPage.AgentEngine.cpp` (`~TerminalPage` stops the watch), `TerminalAppLib.vcxproj` (the header),
   `tests/tests_sidepanel.cpp` (`TestSidePanelStripReveal`), `tests/m5_tests.{h,cpp}`, `e2e/amdriver/ui/sidepanel.py`
   (`strip_hidden`, `wait_strip`), `e2e/suites/test_side_panel.py` (SP-16).
+  The rename card (§2o): `AgentMaster/SessionTitleEdit.h` (the trim, the box's copy of a title, the line-break-blind
+  comparison and the commit's verdict — pure; new), `AgentManagerContent.{h,Tree.cpp}` (`SessionMenuHost::rename` /
+  `renameTip`, used by `_PopulateSessionMenu`'s Rename item, which also gained the id `am.sessionmenu.rename` and a
+  contained, deferred click), `TerminalPage.AgentSidePanel.cpp` (both card menus' hosts, `_SidePanelOpenRenameCard`,
+  `_SidePanelEnsureRenameCard`, `_SidePanelCloseRenameCard`, `_SidePanelRenameSession`, the collapse's close, the
+  `kSidePanelRename*` constants), `TerminalPage.h` (the declarations and members), `TerminalPage.AgentEngine.cpp` (the
+  tab-switch close), `TerminalAppLib.vcxproj` (the header), `tests/tests_sidepanel.cpp` (`TestSessionTitleEdit`),
+  `tests/m5_tests.{h,cpp}`.

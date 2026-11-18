@@ -4682,6 +4682,75 @@ namespace winrt::TerminalApp::implementation
         // from every Telegram action word and the session menu's own, so nothing else can send one by accident.
         static constexpr const wchar_t* kSidePanelNewSessionNextAction{ L"sidepanel-new-session-next" };
         static constexpr const wchar_t* kSidePanelForkNextAction{ L"sidepanel-fork-next" };
+
+        // ===== Agentmaster: the side panel card's RENAME CARD (SIDE_PANEL.md §2o; TerminalPage.AgentSidePanel.cpp) =====
+        // The user's report of 2026-11-18, "In sidemenu, the rename function doesn't work. please refactor the sidemenu's rename
+        // to be at the card and update all (tab, telegram, like a regular rename does)", and their pick on mockups the same day,
+        // "Floating rename card". The session menu's "Rename" on a side panel card (and on an AI search result card of an open
+        // session) used to open the Explorer tree's in-place editor, which lives on the Agent Manager page — hidden behind the
+        // terminal tab the side panel sits beside, so nothing showed. It now opens a small card UNDER the side panel card:
+        // "Rename · <title>", the title in a box, a key hint, Cancel / Rename. A Root()-parented Popup built once, the note
+        // editor's recipe (a ContentDialog's or a Flyout's text box gets no keypresses under XAML Islands). Enter renames,
+        // Shift+Enter starts a new line (a title can have two lines), Esc cancels — both on the key-UP, so neither key's CR / ESC
+        // reaches claude once the keyboard goes back to the terminal —, and a press outside the card or a tab switch renames.
+        // The rename is the ONE rename seam, _RenameClaudeSession (Rule #11): the registry title, the tab title (re-pinned in
+        // whichever window hosts it), every window's cards and the Manager page, and the Telegram topic's name.
+
+        // Open the rename card for `sessionId` just under `anchor` (the shared session menu's SessionMenuHost::rename) — one
+        // dispatcher tick later, so the invoking menu's close has handed the focus back first; its box takes the keyboard with
+        // the whole title selected a tick after that (a TextBox never laid out yet can refuse a same-tick focus). A card already
+        // open for ANOTHER session renames that session first (the click-away rule: what was typed is never dropped); a reopen
+        // for the same session keeps what is typed.
+        //   sessionId - the session to rename. "" opens nothing; a session the registry no longer knows, or no longer has open,
+        //               opens nothing (logged).
+        //   anchor    - the side panel card the menu was opened on. Null, or recycled since the click (its transform throws),
+        //               keeps the window's top-left default spot.
+        //   returns   - nothing.
+        //   throws    - nothing: a failure is logged (Rule #18) and no card opens.
+        void _SidePanelOpenRenameCard(const std::wstring& sessionId, const winrt::Windows::UI::Xaml::FrameworkElement& anchor) noexcept;
+        // Build the rename card ONCE and parent its Popup into Root(): the header, the box, the hint line, Cancel / Rename, the
+        // card's key hooks (Esc / Enter act on the key-UP) and the Root() outside-press hook (a press outside renames). A no-op
+        // once built. UI thread only.
+        //   throws - what XAML object creation throws (winrt::hresult_error) and std::bad_alloc; its one caller (the open tick)
+        //            contains it.
+        void _SidePanelEnsureRenameCard();
+        // Close the rename card. With `commit`, the session is renamed when the box differs from the title the card opened
+        // with (::Agentmaster::SessionTitleToCommit: trimmed; a blank or untouched box renames nothing) — the rename itself one
+        // dispatcher tick later (_SidePanelRenameSession), since a close can run inside a key or pointer handler. The keyboard
+        // goes back where it was when the card opened, when the card held it (TCM-K2: AgentPanelHoldsKeyboard asked before the
+        // close, then _ReturnKeyboardAfterPanel). Idempotent: a closed card does nothing. UI thread only.
+        //   commit - true: rename first (Enter, Rename, a press outside, a tab switch, another session's card). false: drop the
+        //            edit (Esc, Cancel).
+        //   reason - why it closes, for the one [nav] line in hooks.log ("enter", "esc", "click outside", "tab switch", …).
+        //   throws - nothing: each step is contained and logged, and the card closes whatever failed.
+        void _SidePanelCloseRenameCard(bool commit, std::wstring_view reason) noexcept;
+        // The rename card's commit, on its own dispatcher tick: _RenameClaudeSession (the registry title, this window's tab,
+        // and through the registry every other window's tab, cards and Manager page, and the Telegram topic), then THIS window's
+        // side panel list at once (the drain's 500 ms throttle would leave the card on its old title while the user watches —
+        // the pin's way, _SidePanelSetPinned): a collapsed panel owes its update, the AI view refreshes its result cards.
+        //   sessionId - the session; one closed or gone since the card opened is not renamed (logged).
+        //   title     - the new title, already trimmed and different (SessionTitleToCommit's answer).
+        //   returns   - nothing.
+        //   throws    - nothing: a failure is logged (Rule #18) and the list is marked dirty for the periodic tick.
+        void _SidePanelRenameSession(const std::wstring& sessionId, const std::wstring& title) noexcept;
+        winrt::Windows::UI::Xaml::Controls::Primitives::Popup _sidePanelRenamePopup{ nullptr }; // the rename card's popup (parented into Root(), top-left aligned so its offsets are root-relative); built once
+        winrt::Windows::UI::Xaml::Controls::Border _sidePanelRenameCard{ nullptr }; // the card: the outside-press boundary, the key hooks' host, and the root _SidePanelCloseRenameCard ends the tooltips under
+        winrt::Windows::UI::Xaml::Controls::TextBlock _sidePanelRenameHeader{ nullptr }; // "Rename · <the title's first line>"
+        winrt::Windows::UI::Xaml::Controls::TextBox _sidePanelRenameBox{ nullptr }; // the title box: AcceptsReturn (a title's second line survives the round trip), Enter claimed for the commit in its PreviewKeyDown
+        std::wstring _sidePanelRenameSessionId; // the session the open card renames ("" = closed)
+        std::wstring _sidePanelRenameOpenedTitle; // the title the card opened with: a commit that changed nothing renames nothing, so a rename made meanwhile elsewhere stands
+        bool _sidePanelRenameOutsideHooked{ false }; // the Root() outside-press hook is registered (once per page; inert while the card is closed)
+        // TCM-K2: the Control that held the keyboard when the card opened (AgentCaptureFocusReturn: normally the terminal the side
+        // panel sits beside), where the close gives it back when the card held it. Empty = the current tab gets it. Weak: the
+        // target may be rebuilt or closed while the card is up. Cleared by every close.
+        winrt::weak_ref<winrt::Windows::UI::Xaml::Controls::Control> _sidePanelRenameReturnFocus;
+        // An Escape went DOWN inside the open card (anywhere in it), so its key-UP cancels; an Enter without Shift went down IN
+        // THE BOX, so its key-UP renames. Closing on the key-down would hand the rest of the keystroke — its ESC or CR — to what
+        // gets the keyboard next, which is claude (an interrupt, a submit). An Enter on a focused button is the button's own
+        // click, never armed here. Set by the hooks, consumed by the card's key-up hook, disarmed by any other key-down and by
+        // every open and close, so a key-up whose key-down happened before the card opened never acts.
+        bool _sidePanelRenameEscArmed{ false };
+        bool _sidePanelRenameCommitArmed{ false };
         winrt::Windows::UI::Xaml::Controls::StackPanel _SidePanelMakeTagStrip(const std::vector<std::wstring>& tags,
                                                                               const std::vector<winrt::Windows::UI::Color>& colors,
                                                                               bool darkInk,

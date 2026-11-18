@@ -1618,20 +1618,59 @@ namespace winrt::TerminalApp::implementation
         menu.Items().Append(MenuFlyoutSeparator{});
 
         MenuFlyoutItem rename;
-        rename.Text(L"Rename (F2)");
+        // SIDE_PANEL.md §2o: a host with its own rename editor (the side panel's floating rename card) gets a plain "Rename" —
+        // F2 renames the focused TAB, which need not be this card's session — and its own tip naming its editor's keys. Every
+        // other surface (the board card, its ⋯ button, the tree row) keeps the tree editor's label and tip.
+        rename.Text(host.rename ? L"Rename" : L"Rename (F2)");
         rename.Icon(glyphIcon(L"\xE8AC")); // Rename (matches the WT tab menu)
-        // Advertise the in-place editor's commit keys + that they're configurable. Which key commits
-        // (Enter vs Shift+Enter) follows the GLOBAL TabRenameCommitMode setting; the other inserts a
-        // newline (titles can be multi-line), Esc cancels, and clicking away always commits.
-        AgentSetTip(rename, L"Rename this session \x2014 its Explorer name and tab title.\nBy default, Shift+Enter commits the new name and Enter inserts a line break (swap them in Settings (\x2699) \x2192 \x201CTab rename: commit with\x201D).\nEsc cancels; clicking away always commits.");
-        rename.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+        if (host.rename)
+        {
+            AgentSetTip(rename, host.renameTip.empty() ? winrt::hstring{ L"Rename this session \x2014 its tab title, its cards in every window and its Telegram topic." } : winrt::hstring{ host.renameTip });
+        }
+        else
+        {
+            // Advertise the in-place editor's commit keys + that they're configurable. Which key commits
+            // (Enter vs Shift+Enter) follows the GLOBAL TabRenameCommitMode setting; the other inserts a
+            // newline (titles can be multi-line), Esc cancels, and clicking away always commits.
+            AgentSetTip(rename, L"Rename this session \x2014 its Explorer name and tab title.\nBy default, Shift+Enter commits the new name and Enter inserts a line break (swap them in Settings (\x2699) \x2192 \x201CTab rename: commit with\x201D).\nEsc cancels; clicking away always commits.");
+        }
+        // Accessibility (E2E_TESTING.md §6.3): the item's id, the same on every surface (the e2e driver opens the side panel's
+        // rename card through it). A menu item exists only while its menu is open.
+        AgentSetAutomationId(rename, L"am.sessionmenu.rename");
+        rename.Click([weak, disp, id, hostRename = host.rename](const IInspectable&, const RoutedEventArgs&) {
+            // Deferred one tick like every item of this menu: the closing menu hands the focus back to its target as it closes,
+            // and that must land BEFORE an editor takes the keyboard into its box.
+            auto act = [weak, id, hostRename]() {
+                // Contained (Rule #18): a dispatcher callback must never let an exception out — a failure costs this one
+                // rename, logged with its throw site, never the window.
+                try
+                {
+                    const auto self = weak.get();
+                    if (!self)
+                    {
+                        return; // the content is gone (its window is closing): its menu's actions go with it
+                    }
+                    if (hostRename)
+                    {
+                        // SIDE_PANEL.md §2o: the host's editor (the side panel's rename card under the card), not the tree's
+                        // in-place box, which lives on the Agent Manager page and shows nothing while that page is hidden.
+                        hostRename();
+                        return;
+                    }
+                    self->_OnRenameSession(id);
+                }
+                catch (...)
+                {
+                    AgentLogCaughtException(L"session menu: Rename");
+                }
+            };
             if (disp)
             {
-                disp.TryEnqueue([weak, id]() { if (auto self = weak.get()) { self->_OnRenameSession(id); } });
+                disp.TryEnqueue(act);
             }
-            else if (auto self = weak.get())
+            else
             {
-                self->_OnRenameSession(id);
+                act();
             }
         });
         menu.Items().Append(rename);

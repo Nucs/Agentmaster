@@ -92,6 +92,7 @@
 #include "AgentTipHelpers.h" // AgentSetTip / AgentSetTitledTip — the islands-safe hover tooltips
 #include "AgentAutomation.h" // the panel's AutomationIds, its glyph buttons' names, the cards' ItemStatus (E2E_TESTING.md §6.3)
 #include "AgentMenuHeaderClick.h" // AgentWireSubmenuHeaderClick — the Filter menu's Folder line answers a click on itself (SIDE_PANEL.md §2l)
+#include "AgentPanelFocus.h" // AgentCaptureFocusReturn / AgentPanelHoldsKeyboard / AgentIsUnderElement — the rename card gives the keyboard back where it was (TCM-K2, SIDE_PANEL.md §2o)
 #include "AgentStatusColors.h" // PendingDotsColorFor / CacheWarmSparkColorFor — the status icon's contrast picks (the tab strip's rules, SIDE_PANEL.md §2g); AgentAnimationsEnabled
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / LogNav / ShortId
 #include "AgentMaster/Engine.h" // BroadcastSettingsChanged — the ⌖ scroll-to-tab toggle reaches every OTHER open window live; CurrentUnreadSessionIds — which cards' status icons ring (SIDE_PANEL.md §2g)
@@ -114,6 +115,7 @@
 #include "AgentMaster/TabRowAutoHide.h" // kTabRowLauncherPeekMs — the auto-hidden tab row comes out before the launcher anchors under + (TAB_STRIP.md "Auto-hiding the tab row")
 #include "AgentMaster/SessionFolderFilter.h" // CollectSessionFolders / SortFoldersByUse — the folder card's "folders of the sessions" section (SIDE_PANEL.md §2l)
 #include "AgentMaster/SessionStore.h" // GetSessionTags / LoadAllTagColors / SessionTagsEpoch — the cards' bookmark-tag strip (cached per card until a tag changes)
+#include "AgentMaster/SessionTitleEdit.h" // SessionTitleToCommit / SessionTitleBoxText / FirstSessionTitleLine — what the rename card writes (SIDE_PANEL.md §2o)
 
 #include <algorithm>
 #include <bit> // std::popcount — how many filters a facet mask holds (the build's log line, the [nav] lines; SIDE_PANEL.md §2l)
@@ -1211,6 +1213,31 @@ namespace
     // enough that sweeping the pointer across the list opens nothing, the close long enough to cross the gap into the card.
     constexpr std::chrono::milliseconds kSidePanelNoteCardOpenDelay{ 160 };
     constexpr std::chrono::milliseconds kSidePanelNoteCardGraceClose{ 300 };
+
+    // --- The cards' RENAME CARD (the session menu's "Rename" on a side panel card — SIDE_PANEL.md §2o) ---------------------------
+    // The user's pick of 2026-11-18 from three mockups, "Floating rename card": a small card floating under the side panel card, in
+    // the note editor's look (SESSION_NOTES.md §3c) — a header, the title box, a key hint, Cancel / Rename. Nothing in the list
+    // moves while it is open (the in-band box they did not pick would have grown the card).
+    // Its width: the mockup's — about a side panel card at the panel's default width, with room for the hint line's three keys.
+    constexpr double kSidePanelRenameCardWidth = 300.0;
+    // An estimate of the whole card's height with a one-line title (the header, the box, the hint, the buttons, the paddings),
+    // used only to keep a card opened near the window's bottom inside the window — it is then lifted over its anchor.
+    constexpr double kSidePanelRenameCardEstimatedHeight = 150.0;
+    // The air between the side panel card and the rename card under it, and between the rename card and the window's edges.
+    constexpr double kSidePanelRenameCardGapPx = 2.0;
+    constexpr double kSidePanelRenameCardEdgePx = 8.0;
+    // The box's tallest: about five lines before it scrolls its own text (a title has one or two lines; a paste can have more).
+    constexpr double kSidePanelRenameBoxMaxHeight = 104.0;
+    // The header's glyph: the icon font's Rename (U+E8AC), the glyph the session menu's and the tab menu's "Rename" items wear.
+    // Drawn from kSidePanelPinFont (Segoe Fluent Icons, then Segoe MDL2 Assets).
+    constexpr const wchar_t* kSidePanelRenameGlyph = L"\xE8AC";
+    // The session menu's "Rename" tip on a side panel card (AgentManagerContent::SessionMenuHost::renameTip): what the card does
+    // and its keys — the content's own tip names the tree editor's keys, which follow the "commit with" setting instead.
+    constexpr const wchar_t* kSidePanelRenameMenuTip =
+        L"Rename this session \x2014 its tab title, its cards in every window and its Telegram topic follow.\n"
+        L"A small rename card opens under this card: Enter renames, Shift+Enter starts a new line, Esc cancels; a click outside the card renames too.";
+    // The card's key hint, under the box: the three keys, in the order they are used.
+    constexpr const wchar_t* kSidePanelRenameHint = L"Enter: rename \x00B7 Shift+Enter: new line \x00B7 Esc: cancel";
 
     // --- The in-place card list (SIDE_PANEL.md §2c) ----------------------------------------------
 
@@ -3118,6 +3145,9 @@ namespace winrt::TerminalApp::implementation
             _SidePanelCloseLaunchCard(L"panel collapsed");
             // The funnel's panel and the folder card hang from the same header (SIDE_PANEL.md §2l): the same belt.
             _SidePanelCloseFilterSurfaces(L"panel collapsed");
+            // The rename card floats under a card that is going away (SIDE_PANEL.md §2o): it closes and RENAMES, its click-away
+            // rule — the press on ⋯ already did that; this is the belt for a collapse with no press. noexcept.
+            _SidePanelCloseRenameCard(/*commit*/ true, L"panel collapsed");
         }
         _SidePanelApplyLayout();
         // The floating strip (SIDE_PANEL.md §2m). A collapse shows it and starts its linger, so the user sees where the
@@ -5187,7 +5217,20 @@ namespace winrt::TerminalApp::implementation
                                 page->_SidePanelLaunchNextToTab(id, /*fork*/ true, std::wstring{ model });
                             }
                         };
-                        auto menu = mgr->BuildSessionMenuFor(id, cwd, sender.try_as<FrameworkElement>(), std::move(host));
+                        // SIDE_PANEL.md §2o: "Rename" opens the floating rename card under THIS card. Without it the menu opened
+                        // the Explorer tree's in-place editor, which lives on the Agent Manager page — hidden behind the terminal
+                        // tab beside the panel, so nothing showed (the user's report of 2026-11-18). The card is held WEAKLY: its
+                        // subtree owns this menu, which keeps the function for its life (a strong capture would be a cycle).
+                        const auto cardElement = sender.try_as<FrameworkElement>();
+                        const auto renameAnchor = cardElement ? winrt::make_weak(cardElement) : winrt::weak_ref<FrameworkElement>{};
+                        host.rename = [weakThis, id, renameAnchor]() {
+                            if (const auto page = weakThis.get())
+                            {
+                                page->_SidePanelOpenRenameCard(id, renameAnchor.get()); // noexcept; a dead anchor resolves null: the default spot
+                            }
+                        };
+                        host.renameTip = kSidePanelRenameMenuTip;
+                        auto menu = mgr->BuildSessionMenuFor(id, cwd, cardElement, std::move(host));
                         if (const auto fe = sender.try_as<UIElement>())
                         {
                             menu.ShowAt(fe, e.GetPosition(fe));
@@ -5467,6 +5510,521 @@ namespace winrt::TerminalApp::implementation
         _LaunchFromManagerPage(L"side panel new session", [&]() {
             return _SpawnClaudeSession(winrt::hstring{ dir }, winrt::hstring{}, insertPosition, winrt::hstring{ model });
         });
+    }
+
+    // ===== the RENAME CARD (SIDE_PANEL.md §2o) ======================================================================================
+    // The session menu's "Rename" on a side panel card — and on an AI search result card of an open session — opens a small card
+    // floating under the card (the user's pick of 2026-11-18, "Floating rename card"), where it opened the Explorer tree's in-place
+    // editor on the hidden Agent Manager page before. The commit is the one rename seam, _RenameClaudeSession. The contracts are
+    // the declarations' (TerminalPage.h); the bodies follow the note editor's (TerminalPage.AgentNotes.cpp), the card it sits
+    // beside in the same menu.
+
+    void TerminalPage::_SidePanelOpenRenameCard(const std::wstring& sessionId, const FrameworkElement& anchor) noexcept
+    {
+        if (sessionId.empty())
+        {
+            return;
+        }
+        try
+        {
+            // Where the card goes: under the anchor's bottom-left, root-relative (a top/left-aligned parented Popup's offsets are
+            // root-relative — the Tags panel's and the note editor's recipe). Read NOW, not in the tick: the list edits its cards in
+            // place and virtualizes, so the clicked card can be recycled by then. A transform of a card already out of the tree
+            // throws, and the default spot (the window's top-left) holds.
+            double x = kSidePanelRenameCardEdgePx;
+            double y = 40.0;
+            try
+            {
+                if (anchor)
+                {
+                    const auto pt = anchor.TransformToVisual(Root()).TransformPoint(Point{ 0, 0 });
+                    x = pt.X;
+                    y = pt.Y + anchor.ActualHeight() + kSidePanelRenameCardGapPx;
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"_SidePanelOpenRenameCard: place the card under the side panel card");
+            }
+            const winrt::hstring sidH{ sessionId };
+            // DEFERRED one tick: the caller sits inside the session menu's click handling, and a closing menu returns the focus to
+            // its target as it closes — that refocus must land BEFORE the card focuses its box, or it takes the keyboard back.
+            Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weak = get_weak(), sidH, x, y]() {
+                const auto page = weak.get();
+                if (!page)
+                {
+                    return;
+                }
+                // Contained (Rule #18): a failed open costs this one open, never the window — an exception escaping a dispatcher
+                // callback could fail the whole app.
+                try
+                {
+                    const std::wstring id{ sidH };
+                    // The session as it is NOW (a lean read: the queue is the costliest part of a record copy, and no part of
+                    // the card needs it). Its title fills the box. One closed or gone since the menu opened has no card to be
+                    // renamed from any more (the Sessions page's Edit Title renames a closed session).
+                    std::optional<::Agentmaster::SessionInfo> lean;
+                    if (page->_sessionRegistry)
+                    {
+                        lean = page->_sessionRegistry->GetWithoutQueue(id);
+                    }
+                    if (!lean || !lean->live)
+                    {
+                        ::Agentmaster::LogNav(L"sidepanel rename card " + ::Agentmaster::ShortId(id) + L": not opened (the session was closed or is gone)");
+                        return;
+                    }
+                    // A card already open for ANOTHER session renames that one first (the click-away rule): what was typed is never
+                    // dropped by asking for a second rename.
+                    if (page->_sidePanelRenamePopup && page->_sidePanelRenamePopup.IsOpen() && page->_sidePanelRenameSessionId != id)
+                    {
+                        page->_SidePanelCloseRenameCard(/*commit*/ true, L"another session's rename"); // noexcept
+                    }
+                    page->_SidePanelEnsureRenameCard();
+                    if (!page->_sidePanelRenamePopup)
+                    {
+                        return;
+                    }
+                    const bool wasOpen = page->_sidePanelRenamePopup.IsOpen();
+                    if (!wasOpen)
+                    {
+                        // A fresh open fills the card from the session; a reopen of the same session's card (Rename again while it is
+                        // up) keeps what is being typed.
+                        page->_sidePanelRenameSessionId = id;
+                        page->_sidePanelRenameOpenedTitle = lean->title;
+                        const std::wstring firstLine = ::Agentmaster::FirstSessionTitleLine(lean->title);
+                        page->_sidePanelRenameHeader.Text(winrt::hstring{ L"Rename  \x00B7  " + (firstLine.empty() ? ::Agentmaster::ShortId(id) : firstLine) });
+                        // The box's copy spells every line break as the TextBox's lone CR, so a two-line title shows both lines
+                        // (an LF would show none, and a single-line box would drop the second line); the commit compares break
+                        // spellings away (SessionTitleToCommit), so an untouched title is never rewritten for them.
+                        page->_sidePanelRenameBox.Text(winrt::hstring{ ::Agentmaster::SessionTitleBoxText(lean->title) });
+                    }
+                    // Keep the card inside the window: an anchor near the right or bottom edge moves it in, never off screen (a card
+                    // lifted near the bottom covers its anchor, as the note editor's does). An unmeasured window (0) clamps nothing.
+                    double cx = x;
+                    double cy = y;
+                    const double rootW = page->Root().ActualWidth();
+                    const double rootH = page->Root().ActualHeight();
+                    if (rootW > kSidePanelRenameCardWidth + 2 * kSidePanelRenameCardEdgePx && cx > rootW - kSidePanelRenameCardWidth - kSidePanelRenameCardEdgePx)
+                    {
+                        cx = rootW - kSidePanelRenameCardWidth - kSidePanelRenameCardEdgePx;
+                    }
+                    if (rootH > kSidePanelRenameCardEstimatedHeight + 2 * kSidePanelRenameCardEdgePx && cy > rootH - kSidePanelRenameCardEstimatedHeight - kSidePanelRenameCardEdgePx)
+                    {
+                        cy = rootH - kSidePanelRenameCardEstimatedHeight - kSidePanelRenameCardEdgePx;
+                    }
+                    page->_sidePanelRenamePopup.HorizontalOffset(std::max(0.0, cx));
+                    page->_sidePanelRenamePopup.VerticalOffset(std::max(0.0, cy));
+                    // A key that went down before this open must not rename or cancel the new card on its release.
+                    page->_sidePanelRenameEscArmed = false;
+                    page->_sidePanelRenameCommitArmed = false;
+                    page->_sidePanelRenamePopup.IsOpen(true);
+                    ::Agentmaster::LogNav(L"sidepanel rename card open " + ::Agentmaster::ShortId(id) + (wasOpen ? L" (already open)" : L""));
+                    // Focus the box one tick AFTER the open: on the first open the popup's child has only just been realized, and a
+                    // same-tick Focus on a TextBox that was never laid out can do nothing (the note editor's and the Tags panel's way).
+                    page->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weak, wasOpen]() {
+                        const auto p = weak.get();
+                        if (!p)
+                        {
+                            return;
+                        }
+                        try
+                        {
+                            if (p->_sidePanelRenamePopup && p->_sidePanelRenamePopup.IsOpen() && p->_sidePanelRenameBox)
+                            {
+                                // TCM-K2: where the keyboard is right before the box takes it — read now, after the menu's close
+                                // returned the focus (normally the terminal beside the panel; a tab header answers "the current
+                                // tab": AgentCaptureFocusReturn's rule).
+                                if (!wasOpen)
+                                {
+                                    p->_sidePanelRenameReturnFocus = AgentCaptureFocusReturn(p->Root().XamlRoot(), p->_sidePanelRenameCard, p->_tabView);
+                                }
+                                p->_sidePanelRenameBox.Focus(FocusState::Programmatic);
+                                if (!wasOpen)
+                                {
+                                    // The whole title selected, so the first keystroke replaces it — the tab renamer's and the tree
+                                    // editor's way; an arrow key keeps it and moves the caret.
+                                    p->_sidePanelRenameBox.SelectAll();
+                                }
+                            }
+                        }
+                        catch (...)
+                        {
+                            ::Agentmaster::AgentLogCaughtException(L"_SidePanelOpenRenameCard: focus the box");
+                        }
+                    });
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"_SidePanelOpenRenameCard (the open tick)");
+                }
+            });
+        }
+        catch (...)
+        {
+            // The dispatcher refused the tick (a closing window): no card opens.
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelOpenRenameCard");
+        }
+    }
+
+    void TerminalPage::_SidePanelEnsureRenameCard()
+    {
+        if (_sidePanelRenamePopup)
+        {
+            return;
+        }
+
+        StackPanel body;
+        body.Spacing(7);
+
+        // The header: the Rename glyph (the menus' own) and "Rename · <title>", trimmed to one line.
+        Grid header;
+        {
+            ColumnDefinition iconCol;
+            iconCol.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            ColumnDefinition textCol;
+            textCol.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            header.ColumnDefinitions().Append(iconCol);
+            header.ColumnDefinitions().Append(textCol);
+        }
+        FontIcon glyph;
+        glyph.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ kSidePanelPinFont });
+        glyph.Glyph(kSidePanelRenameGlyph);
+        glyph.FontSize(14);
+        glyph.Foreground(SolidColorBrush{ Color{ 0xFF, 0xD0, 0xD0, 0xD0 } });
+        glyph.Margin(ThicknessHelper::FromLengths(0, 0, 7, 0));
+        glyph.VerticalAlignment(VerticalAlignment::Center);
+        Grid::SetColumn(glyph, 0);
+        header.Children().Append(glyph);
+        _sidePanelRenameHeader = TextBlock{};
+        _sidePanelRenameHeader.FontSize(12.5);
+        _sidePanelRenameHeader.TextTrimming(TextTrimming::CharacterEllipsis);
+        _sidePanelRenameHeader.TextWrapping(TextWrapping::NoWrap);
+        _sidePanelRenameHeader.VerticalAlignment(VerticalAlignment::Center);
+        Grid::SetColumn(_sidePanelRenameHeader, 1);
+        header.Children().Append(_sidePanelRenameHeader);
+        body.Children().Append(header);
+
+        // The title box. AcceptsReturn, so a two-line title — its line break a lone CR, the everyday case — round-trips whole: a
+        // single-line TextBox shows and returns only a title's first line, and the commit would cut the second one off. Wrapping,
+        // so a long title is read whole; capped at about five lines, past which the box scrolls its own text.
+        _sidePanelRenameBox = TextBox{};
+        _sidePanelRenameBox.AcceptsReturn(true);
+        _sidePanelRenameBox.TextWrapping(TextWrapping::Wrap);
+        _sidePanelRenameBox.FontSize(12.5);
+        _sidePanelRenameBox.MaxHeight(kSidePanelRenameBoxMaxHeight);
+        _sidePanelRenameBox.PlaceholderText(L"The session's new title"); // shown once the box is emptied — also the box's accessible name
+        ScrollViewer::SetVerticalScrollBarVisibility(_sidePanelRenameBox, ScrollBarVisibility::Auto);
+        AgentSetAutomationId(_sidePanelRenameBox, L"am.side.rename.box");
+        // Enter without Shift is the RENAME: claimed in the TUNNELING PreviewKeyDown, which runs before the box's own key handling
+        // would insert the AcceptsReturn line break (the tab renamer's and the tree editor's recipe). The rename itself waits for
+        // the key-UP (the card's hook below): by then the keystroke's CR has gone nowhere, so the terminal that gets the keyboard
+        // back receives none of it. Shift+Enter passes through: the box's own line break. Armed HERE, in the box only — an Enter
+        // on a focused button is that button's click, never a rename by the hook.
+        _sidePanelRenameBox.PreviewKeyDown([weak = get_weak()](const IInspectable&, const KeyRoutedEventArgs& e) {
+            const auto page = weak.get();
+            if (!page || e.Key() != VirtualKey::Enter)
+            {
+                return;
+            }
+            if (::GetKeyState(VK_SHIFT) & 0x8000)
+            {
+                return; // Shift+Enter: a new line in the title
+            }
+            e.Handled(true); // no line break, and the key-down goes no further
+            page->_sidePanelRenameCommitArmed = true;
+            page->_sidePanelRenameEscArmed = false;
+        });
+        // Escape: swallow the key-down only (the box would otherwise act on it); the card's key-up hook cancels.
+        _sidePanelRenameBox.KeyDown([](const IInspectable&, const KeyRoutedEventArgs& e) {
+            if (e.Key() == VirtualKey::Escape)
+            {
+                e.Handled(true);
+            }
+        });
+        body.Children().Append(_sidePanelRenameBox);
+
+        // The key hint, under the box.
+        TextBlock hint;
+        hint.FontSize(11);
+        hint.Opacity(0.6);
+        hint.TextTrimming(TextTrimming::CharacterEllipsis);
+        hint.Text(kSidePanelRenameHint);
+        body.Children().Append(hint);
+
+        // The buttons at the right: Cancel, then Rename in the house accent blue (the Agent Manager's primary paint, PaintHoldButton,
+        // so its color holds through hover and press — the picked mockup's blue Rename). Each DEFERS one tick: a press handler is no
+        // place for the close's focus hand-back, and the rename after it re-pins a tab title and edits this window's card list.
+        Grid buttons;
+        {
+            ColumnDefinition gapCol;
+            gapCol.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            ColumnDefinition cancelCol;
+            cancelCol.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            ColumnDefinition renameCol;
+            renameCol.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            buttons.ColumnDefinitions().Append(gapCol);
+            buttons.ColumnDefinitions().Append(cancelCol);
+            buttons.ColumnDefinitions().Append(renameCol);
+        }
+        Button cancel;
+        cancel.Content(winrt::box_value(winrt::hstring{ L"Cancel" }));
+        cancel.Margin(ThicknessHelper::FromLengths(0, 0, 8, 0));
+        AgentSetTip(cancel, L"Close without renaming (Esc)", kSidePanelButtonTipDelay);
+        AgentSetAutomationId(cancel, L"am.side.rename.cancel");
+        cancel.Click([weak = get_weak()](const IInspectable&, const RoutedEventArgs&) {
+            if (const auto page = weak.get())
+            {
+                page->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weak]() {
+                    if (const auto p = weak.get())
+                    {
+                        p->_SidePanelCloseRenameCard(/*commit*/ false, L"cancel"); // noexcept
+                    }
+                });
+            }
+        });
+        Grid::SetColumn(cancel, 1);
+        buttons.Children().Append(cancel);
+        Button rename;
+        rename.Content(winrt::box_value(winrt::hstring{ L"Rename" }));
+        PaintHoldButton(rename, 0xFF356AB8, 0xFF3E7DCE, 0xFF2B5391); // accent blue, lighter on hover / darker on press
+        AgentSetTip(rename, L"Rename the session (Enter) \x2014 its tab title, its cards in every window and its Telegram topic follow. A click outside the card renames too; an empty or unchanged title renames nothing.", kSidePanelButtonTipDelay);
+        AgentSetAutomationId(rename, L"am.side.rename.ok");
+        rename.Click([weak = get_weak()](const IInspectable&, const RoutedEventArgs&) {
+            if (const auto page = weak.get())
+            {
+                page->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weak]() {
+                    if (const auto p = weak.get())
+                    {
+                        p->_SidePanelCloseRenameCard(/*commit*/ true, L"rename button"); // noexcept
+                    }
+                });
+            }
+        });
+        Grid::SetColumn(rename, 2);
+        buttons.Children().Append(rename);
+        body.Children().Append(buttons);
+
+        _sidePanelRenameCard = Border{};
+        _sidePanelRenameCard.RequestedTheme(ElementTheme::Dark); // Agentmaster surfaces are always dark
+        _sidePanelRenameCard.Width(kSidePanelRenameCardWidth);
+        _sidePanelRenameCard.Background(SolidColorBrush{ Color{ 0xFF, 0x26, 0x26, 0x26 } }); // the note editor's card colors
+        _sidePanelRenameCard.BorderBrush(SolidColorBrush{ Color{ 0xFF, 0x3A, 0x3A, 0x3A } });
+        _sidePanelRenameCard.BorderThickness(ThicknessHelper::FromUniformLength(1));
+        _sidePanelRenameCard.CornerRadius(CornerRadiusHelper::FromUniformRadius(6)); // one card at a time, built once: its composition node costs nothing per card
+        _sidePanelRenameCard.Padding(ThicknessHelper::FromLengths(11, 10, 11, 11));
+        _sidePanelRenameCard.Child(body);
+        // The keys, anywhere in the card: Escape cancels and Enter (armed by the box) renames — both on the KEY-UP. Closing on the
+        // key-down handed the rest of the keystroke (its ESC / CR) to whatever got the keyboard next, and once the card gives it
+        // back to the terminal that is claude: an interrupt, a submit (the Tags panel's TCM-K2 lesson). The pair acts only on a key
+        // whose key-DOWN it saw inside the open card, so a key-up whose key-down happened before the card opened never acts.
+        // handledEventsToo: the box marks its own Escape and its claimed Enter handled.
+        _sidePanelRenameCard.AddHandler(
+            UIElement::KeyDownEvent(),
+            winrt::box_value(KeyEventHandler{ [weak = get_weak()](const IInspectable&, const KeyRoutedEventArgs& e) {
+                const auto page = weak.get();
+                if (!page)
+                {
+                    return;
+                }
+                const auto key = e.Key();
+                // Any other key-down disarms both: the next key-up must belong to the key that went down last. An Enter keeps
+                // what the box's PreviewKeyDown armed (the box arms only an Enter it claimed; a button's Enter stays unarmed).
+                page->_sidePanelRenameEscArmed = key == VirtualKey::Escape;
+                if (key != VirtualKey::Enter)
+                {
+                    page->_sidePanelRenameCommitArmed = false;
+                }
+                if (page->_sidePanelRenameEscArmed)
+                {
+                    e.Handled(true);
+                }
+            } }),
+            true /* handledEventsToo */);
+        _sidePanelRenameCard.AddHandler(
+            UIElement::KeyUpEvent(),
+            winrt::box_value(KeyEventHandler{ [weak = get_weak()](const IInspectable&, const KeyRoutedEventArgs& e) {
+                const auto page = weak.get();
+                if (!page)
+                {
+                    return;
+                }
+                const auto key = e.Key();
+                const bool cancel = key == VirtualKey::Escape && page->_sidePanelRenameEscArmed;
+                const bool commit = key == VirtualKey::Enter && page->_sidePanelRenameCommitArmed;
+                if (!cancel && !commit)
+                {
+                    return; // not one of the two, or its key-down was not seen inside the open card
+                }
+                page->_sidePanelRenameEscArmed = false;
+                page->_sidePanelRenameCommitArmed = false;
+                e.Handled(true); // set before acting: the close removes the focused element at once
+                page->_SidePanelCloseRenameCard(/*commit*/ commit, commit ? L"enter" : L"esc"); // noexcept; the rename itself runs a tick later
+            } }),
+            true /* handledEventsToo */);
+
+        _sidePanelRenamePopup = winrt::Windows::UI::Xaml::Controls::Primitives::Popup{};
+        _sidePanelRenamePopup.Child(_sidePanelRenameCard);
+        // Top/left aligned so HorizontalOffset/VerticalOffset are root-relative (the Tags panel's and the note editor's recipe).
+        _sidePanelRenamePopup.HorizontalAlignment(HorizontalAlignment::Left);
+        _sidePanelRenamePopup.VerticalAlignment(VerticalAlignment::Top);
+        Grid::SetRow(_sidePanelRenamePopup, 0);
+        Grid::SetRowSpan(_sidePanelRenamePopup, 3); // span the whole Root grid (tab row + infobars + content)
+        Root().Children().Append(_sidePanelRenamePopup);
+
+        // The click-away RENAMES (the user's picked mockup: "a click outside renames"; a tab rename's rule, "clicking away always
+        // commits"): ONE handledEventsToo hook on Root(), registered once and inert while the card is closed. A press whose source
+        // reaches the card is inside (the card stays open); anything else — the terminal, the tab strip, another side panel card,
+        // this card's own side panel card — renames and closes. The close itself only hides the card and moves no focus the press
+        // already moved (AgentPanelHoldsKeyboard); the rename runs a tick later, so this is safe inside the press.
+        if (!_sidePanelRenameOutsideHooked)
+        {
+            _sidePanelRenameOutsideHooked = true;
+            Root().AddHandler(
+                UIElement::PointerPressedEvent(),
+                winrt::box_value(PointerEventHandler{ [weak = get_weak()](const IInspectable&, const PointerRoutedEventArgs& e) {
+                    const auto page = weak.get();
+                    if (!page || !page->_sidePanelRenamePopup || !page->_sidePanelRenamePopup.IsOpen())
+                    {
+                        return;
+                    }
+                    try
+                    {
+                        // The bounded walk (AgentPanelFocus.h: 1024 steps; a text element starts from the control hosting its text).
+                        if (AgentIsUnderElement(e.OriginalSource().try_as<DependencyObject>(), page->_sidePanelRenameCard))
+                        {
+                            return; // pressed inside the card: it stays open
+                        }
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"side panel rename card: the outside-press walk");
+                        return; // undecided: keep the card open (the next press decides again)
+                    }
+                    page->_SidePanelCloseRenameCard(/*commit*/ true, L"click outside"); // noexcept
+                } }),
+                true /* handledEventsToo — the terminal, the tab items and the cards handle their presses */);
+        }
+    }
+
+    void TerminalPage::_SidePanelCloseRenameCard(const bool commit, const std::wstring_view reason) noexcept
+    {
+        // A key held across the close must not act on its release in a later card.
+        _sidePanelRenameEscArmed = false;
+        _sidePanelRenameCommitArmed = false;
+        try
+        {
+            if (_sidePanelRenamePopup && _sidePanelRenamePopup.IsOpen())
+            {
+                const std::wstring id = _sidePanelRenameSessionId;
+                const std::wstring opened = _sidePanelRenameOpenedTitle;
+                // Read the box BEFORE the close: the close takes the box out of the live tree.
+                const std::wstring typed = (commit && _sidePanelRenameBox) ? std::wstring{ _sidePanelRenameBox.Text() } : std::wstring{};
+                // End the card's tooltips before it leaves the tree: a 3 s wait armed on a button would otherwise end on the NEXT
+                // open (the controls are built once), over a button the pointer is no longer on.
+                try
+                {
+                    if (_sidePanelRenameCard)
+                    {
+                        AgentCloseTipsIn(_sidePanelRenameCard);
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"_SidePanelCloseRenameCard: end the card's tooltips");
+                }
+                // TCM-K2: asked BEFORE the close — the close moves the focus at once, and the answer is lost after it. A press that
+                // closed the card already focused what it hit (the terminal, a card's peek): then nothing is moved.
+                const bool heldKeyboard = AgentPanelHoldsKeyboard(Root().XamlRoot(), _sidePanelRenameCard); // noexcept
+                // The card counts as closed BEFORE the popup closes, so anything the close sets off (the focus manager moving the
+                // keyboard, an outside press) finds no card to close a second time.
+                _sidePanelRenameSessionId.clear();
+                _sidePanelRenameOpenedTitle.clear();
+                _sidePanelRenamePopup.IsOpen(false);
+                std::wstring outcome = L"dropped";
+                if (commit)
+                {
+                    if (const auto title = ::Agentmaster::SessionTitleToCommit(opened, typed))
+                    {
+                        outcome = L"renaming";
+                        // The rename on its own tick: this close runs inside a key-up, a pointer press or a tab switch, and the
+                        // rename re-pins a tab title and edits this window's card list (_SidePanelRenameSession, noexcept).
+                        Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weak = get_weak(), id, newTitle = *title]() {
+                            if (const auto page = weak.get())
+                            {
+                                page->_SidePanelRenameSession(id, newTitle);
+                            }
+                        });
+                    }
+                    else
+                    {
+                        outcome = ::Agentmaster::TrimEditedSessionTitle(typed).empty() ? L"blank: nothing renamed" : L"unchanged: nothing renamed";
+                    }
+                }
+                ::Agentmaster::LogNav(L"sidepanel rename card close (" + std::wstring{ reason } + L", " + outcome + L") " + ::Agentmaster::ShortId(id));
+                if (heldKeyboard)
+                {
+                    _ReturnKeyboardAfterPanel(_sidePanelRenameReturnFocus, L"the side panel's rename card"); // noexcept
+                }
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the state below is cleared whatever happened, so the next open starts clean.
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelCloseRenameCard");
+        }
+        _sidePanelRenameReturnFocus = nullptr; // the next open captures its own target
+        _sidePanelRenameSessionId.clear();
+        _sidePanelRenameOpenedTitle.clear();
+    }
+
+    void TerminalPage::_SidePanelRenameSession(const std::wstring& sessionId, const std::wstring& title) noexcept
+    {
+        try
+        {
+            if (!_sessionRegistry || sessionId.empty() || title.empty())
+            {
+                return;
+            }
+            // A session gone from the registry since the card opened has nothing left to rename. One closed meanwhile is still a
+            // record, and the user's typed name still applies to it (as the Sessions page's Edit Title renames a closed session):
+            // _RenameClaudeSession renames the record and finds no tab to re-pin.
+            if (!_sessionRegistry->GetWithoutQueue(sessionId))
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[sidepanel] rename card: " + ::Agentmaster::ShortId(sessionId) + L" is gone from the registry (nothing renamed)\n");
+                return;
+            }
+            // THE rename seam (Rule #11; [nav] rename <sid8> -> "<title>"): the registry title — sessions.json saves it, every
+            // window's cards, board and tree follow its notify, the window hosting the tab re-pins the tab title
+            // (_SyncClaudeTabTitleFromRegistry), the Telegram topic is renamed by the bot's sync, a pending AI title stands down
+            // (the title moved) — and this window's own tab at once.
+            _RenameClaudeSession(winrt::hstring{ sessionId }, winrt::hstring{ title });
+            // This window's list at once, past the drain's 500 ms throttle — the card should show its new name while the user
+            // watches (the pin's way, _SidePanelSetPinned): a collapsed list only owes its update (the expand pays it), and behind
+            // the AI view the hidden list owes its update while the result cards, which can show this session, take it now.
+            if (!_sidePanelBuilt)
+            {
+                return;
+            }
+            if (_sidePanelCollapsed)
+            {
+                _sidePanelDirty = true;
+            }
+            else if (_sidePanelAiMode)
+            {
+                _sidePanelDirty = true;
+                _SidePanelAiRefreshResults();
+            }
+            else
+            {
+                _SidePanelRebuildCards();
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the list catches up on the periodic tick (the rename, when it landed, stands).
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelRenameSession");
+            _sidePanelDirty = true;
+        }
     }
 
     // Write `model` into a card IN PLACE: every value that differs from the one the card shows now (its
@@ -14132,6 +14690,17 @@ namespace winrt::TerminalApp::implementation
                                     page->_SidePanelLaunchNextToTab(id, /*fork*/ true, std::wstring{ model });
                                 }
                             };
+                            // SIDE_PANEL.md §2o: "Rename" opens the floating rename card under THIS result card, as on a session
+                            // card (the tree's editor lives on the hidden Agent Manager page). The card is held weakly: its subtree
+                            // owns this menu.
+                            const auto renameAnchor = winrt::make_weak(anchor);
+                            host.rename = [weakThis, id, renameAnchor]() {
+                                if (const auto page = weakThis.get())
+                                {
+                                    page->_SidePanelOpenRenameCard(id, renameAnchor.get()); // noexcept; a dead anchor resolves null: the default spot
+                                }
+                            };
+                            host.renameTip = kSidePanelRenameMenuTip;
                             auto menu = mgr->BuildSessionMenuFor(id, cwd, anchor, std::move(host));
                             menu.ShowAt(anchor, e.GetPosition(anchor));
                         }

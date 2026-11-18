@@ -17,7 +17,9 @@ with the dock — **⋯** · **Sum** · **+** from the window's left edge docked
 menu hangs from ⋯'s outer edge, and the dock item sits below the separator, just above the collapse (SP-10).
 2026-11-06 (NOT BUILT): a card's menu pins it to the top of the list, right under Jump to Tab (SP-11); the filter box's
 tip waits 3 s like the buttons'. 2026-11-07 (NOT BUILT): a card's Open New Session Here and Fork session open the new tab
-right after the card's tab, in that tab's window (SP-12).
+right after the card's tab, in that tab's window (SP-12). 2026-11-18 (NOT BUILT): a card's Rename opens a floating rename
+card under the card, and its rename reaches the tab, every window and the Telegram topic (SP-18; it did nothing visible
+before: SP-K4).
 
 ## Lifecycle model
 
@@ -739,6 +741,51 @@ it drops the filter. Branch and fork family are filters of their own, with a chi
 
 ---
 
+### SP-18 · A card's Rename opens a floating rename card
+
+> **Since** 2026-11-18 (NOT BUILT) · **P1** · **Needs** F-S2 (+ F-W2 for E3, Telegram on for E4) · **Spec** SIDE_PANEL.md §2o
+
+**Promise.** A side panel card's right-click ▸ **Rename** opens a small card floating right under the card, with the whole
+title in a box, selected. Enter renames, Esc cancels — both on the key-UP, so claude gets neither key —, Shift+Enter starts
+a new line, and a click outside the card (or a tab switch) renames. The rename is a regular rename: the tab title, every
+window's cards and the Agent Manager page, and the Telegram topic follow. An untouched or emptied box renames nothing.
+SP-K4 was the defect it replaces.
+
+**Phases**
+1. **It opens.** *Do:* right-click t1's card (not the focused tab's) ▸ Rename. *Expect:* the item reads "Rename" (no F2,
+   `am.sessionmenu.rename`); a card under t1's card: "Rename · `<t1's title>`", the box (`am.side.rename.box`) holding the
+   title, all of it selected, with the keyboard; the key hint; Cancel and a blue Rename; `[nav] sidepanel rename card open
+   <t1 sid8>`. The Agent Manager page stays hidden.
+2. **Enter renames.** *Do:* type `renamed by card`, Enter. *Expect:* the card closes; t1's card, t1's tab title and the tree /
+   board (open Home to look) read `renamed by card` within a second; the terminal that had the keyboard has it again, and
+   claude received no Enter (its box keeps any draft, no turn starts); `[nav] sidepanel rename card close (enter, renaming)`
+   then `[nav] rename <sid8> -> "renamed by card"`; sessions.json holds the title.
+3. **Esc cancels.** *Do:* Rename again, type `xyz`, Esc. *Expect:* the card closes, the title is unchanged; claude got no ESC
+   (a running turn keeps running); `close (esc, dropped)`.
+4. **A click outside renames.** *Do:* Rename, type `clicked away`, click into the terminal. *Expect:* the title is `clicked
+   away`; the terminal has the keyboard (the click gave it); `close (click outside, renaming)`.
+5. **A second line.** *Do:* Rename, End, Shift+Enter, type `second line`, Enter. *Expect:* a two-line title (the tab's two
+   lines, the card's first line); Rename again shows both lines in the box. *Do:* Enter at once. *Expect:* `close (enter,
+   unchanged: nothing renamed)`.
+6. **Blank and untouched.** *Do:* Rename, empty the box (Ctrl+A, Delete), Enter. *Expect:* the title is unchanged; `blank:
+   nothing renamed`. *Do:* Rename, click Cancel. *Expect:* `close (cancel, dropped)`.
+7. **A tab switch.** *Do:* Rename, type `switched`, Ctrl+Tab. *Expect:* the card closes and the title is `switched`.
+
+**Edge cases**
+- **E1 The AI view** → an AI search result card of an OPEN session has Rename too, opening the same card under the result card;
+  the result card shows the new title at once. A closed session's result card keeps its own menu (no Rename).
+- **E2 Near the window's edges** → a card near the bottom or a right-docked panel near the right edge: the rename card is
+  moved inside the window (it may cover its anchor).
+- **E3 Another window's session** (the card list on GLOBAL) → the rename card opens in THIS window; the tab in the other
+  window takes the new title within ~2.5 s (its registry observer).
+- **E4 Telegram** → the session's topic is renamed by the bot's next topic sync (MESSAGING.md §21).
+- **E5 The board and the tree** → their Rename still reads "Rename (F2)" and opens the tree's in-place editor.
+- **E6 A second Rename** → Rename on another card while one is open renames the first (`another session's rename`), then opens
+  the second.
+- **E7 The panel collapsed** while the card is open (⋯ ▸ Collapse) → the click on ⋯ renames and closes it.
+
+---
+
 ## Known defects (expected failures until fixed)
 
 ### SP-K1 · In the + card, Launch needs a second click while its presets menu is open — FIXED in code 2026-10-23 (NOT BUILT into a release)
@@ -798,6 +845,18 @@ outside the menu): the card the menu was about is deselected, the focused tab's 
 list jumps to that card. The same happens when **Show Transcript**'s reading view closes. **Repro:** 10+ sessions,
 the focused tab's card at the top, the list scrolled down, right-click a lower card → Move to Idle/Done (or Esc).
 **Expected:** SP-02 phase 8.
+
+### SP-K4 · A card's Rename does nothing visible — FIXED in code 2026-11-18 (NOT BUILT into a release)
+> **P1** · Reported by the user on 2026-11-18: "In sidemenu, the rename function doesn't work. please refactor the
+> sidemenu's rename to be at the card and update all (tab, telegram, like a regular rename does)". Read from the code.
+> **The cause:** a side panel card's right-click menu is the Agent Manager's shared session menu, and its **Rename (F2)**
+> opened the Explorer tree's in-place editor (`AgentManagerContent::_OnRenameSession`), which lives on the Agent Manager
+> page. Beside a terminal tab that page is hidden, so the editor showed nowhere; it was there (and still open) only after
+> Home. `BuildSessionMenuFor` documented it as a caveat for hosts outside the page.
+> **The fix** (SIDE_PANEL.md §2o; the user's pick "Floating rename card"): the side panel passes its own Rename through the
+> session menu's host (`SessionMenuHost::rename`), a floating rename card under the card whose commit is the regular rename
+> seam (`_RenameClaudeSession`). **Expected:** SP-18. **Repro on 0.8.0.15:** right-click a card ▸ Rename (F2): nothing
+> shows; Home shows the tree's open editor.
 
 ## Reclassified: not defects
 

@@ -336,6 +336,11 @@
          (within 40 DIPs of the strip) and the strip's next state for one pointer event (pure, header-only;
          TestSidePanelStripReveal). -->
     <ClInclude Include="AgentMaster\SidePanelStripReveal.h" />
+    <!-- Agentmaster (SIDE_PANEL.md section 2o): the side panel's floating RENAME CARD - what its commit hands the one rename seam:
+         the trim every rename path applies, the box's copy of a title (its line breaks as the TextBox's lone CR), the
+         line-break-blind comparison, and the verdict (blank or untouched renames nothing) (pure, header-only;
+         TestSessionTitleEdit). -->
+    <ClInclude Include="AgentMaster\SessionTitleEdit.h" />
     <!-- Agentmaster (TAB_STRIP.md "Auto-hiding the tab row"): WHEN the auto-hiding title bar row shows - the top edge band,
          the rest before it comes out, the hide delay, drags, the hold, peeks, the keyboard, popups, a finger (pure,
          header-only; TestTabRowAutoHide). WindowsTerminal.exe's NonClientIslandWindow applies it; the page reads its peeks. -->

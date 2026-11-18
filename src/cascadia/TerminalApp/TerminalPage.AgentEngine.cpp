@@ -3244,6 +3244,10 @@ namespace winrt::TerminalApp::implementation
         // with the tag hover panel. Both are noexcept.
         _CloseNoteEditorPopup(/*save*/ true, L"tab switch");
         _CloseNoteHoverCard();
+        // Agentmaster (SIDE_PANEL.md §2o): the side panel's floating rename card closes too, and RENAMES — the same click-away
+        // rule (a tab switch is a move away from it); what was typed is never lost to a Ctrl+Tab. noexcept; the rename itself
+        // runs a tick later.
+        _SidePanelCloseRenameCard(/*commit*/ true, L"tab switch");
         // Agentmaster (side panel "+" launcher, SIDE_PANEL.md §2e): a tab switch closes the launcher card too — the user
         // moved away from it (a tab, a close successor, the Agent Manager page). It runs BEFORE _SyncManagerSelectionToTab
         // below: the card's last text goes into the Agent Manager's box first, and the selection pre-aim then sets that

@@ -548,6 +548,10 @@ differs from the plan above, and why:
   TAB STRIP);
   a card's session menu adds `am.side.pin` ("Pin to Top", right under Jump to Tab) and `am.side.unpin` ("Unpin", on a
   pinned card only) — SIDE_PANEL.md §2j, 2026-11-06, NOT BUILT; a menu item exists only while its menu is open;
+  the session menu's Rename item is `am.sessionmenu.rename` on every surface ("Rename (F2)" on the board and the tree,
+  "Rename" on a side panel card), and on a side panel card it opens the floating rename card (SIDE_PANEL.md §2o,
+  2026-11-18, NOT BUILT): `am.side.rename.box` (the title box, named by its placeholder "The session's new title"),
+  `am.side.rename.ok` (Rename) and `am.side.rename.cancel` (Cancel) — in the tree only while the card is open;
   the side panel's `⋯` menu (SIDE_PANEL.md §2i; in dev 0.0.1.42 and production 0.8.0.9): `am.side.more` (the header's
   `⋯` button, named "More options"), and `scope` / `sort` / `scrollToTab` / `dock` / `collapse` move from header buttons
   to that menu's items (the same ids; their texts carry the state: "Card scope: LOCAL", "Dock on the right"), plus the

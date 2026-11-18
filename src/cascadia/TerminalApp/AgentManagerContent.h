@@ -448,6 +448,21 @@ namespace winrt::TerminalApp::implementation
             // card's tab, in that tab's window.
             //   model - the pick ("" = Default).
             std::function<void(winrt::hstring model)> forkSession;
+            // §2o "Rename on the card": the menu's "Rename". When set, the item calls THIS instead of the content's own editor
+            // (_OnRenameSession: the Explorer tree's in-place box on the Agent Manager page — which shows nothing while that
+            // page is hidden behind a terminal tab, the side panel's usual place; the user's report of 2026-11-18, "the rename
+            // function doesn't work"). The side panel opens its floating rename card under the card the menu was opened on; the
+            // card's commit goes through the same rename seam as the tree's (TerminalPage::_RenameClaudeSession), so the tab
+            // title, every window's cards and the Telegram topic follow. Called on the UI thread one dispatcher tick after the
+            // click (the menu's own defer: the closing menu hands the focus back first), and only while the content is alive.
+            // The item then reads "Rename" — no "(F2)": that key renames the focused TAB, which need not be this card's
+            // session — and its tip is renameTip. ⚠ Hold the host WEAKLY here too (the struct's rule), and the anchor card as
+            // well: the card's subtree owns the menu that keeps this function.
+            std::function<void()> rename;
+            // §2o: the Rename item's tip while `rename` is set: the host's editor and its keys (the content's own tip names the
+            // tree editor's keys, which differ: Enter renames on the card, where the tree follows the "commit with" setting).
+            // Empty: a plain "Rename this session" tip. Unused while `rename` is empty.
+            std::wstring renameTip;
         };
         // Agentmaster (SIDE PANEL): build the full session context menu — the SAME lazily-populated
         // MenuFlyout the Triage-Board card / Explorer-tree row shows (_MakeLazySessionMenu: Jump to
@@ -456,19 +471,22 @@ namespace winrt::TerminalApp::implementation
         // Exposed so a side-panel card offers the identical action set with zero drift — every item
         // routes through this content's already-wired callbacks (activate / rename / close / spawn),
         // exactly as if the user had right-clicked the board card. CAVEAT for hosts outside the
-        // Manager page: Rename opens the Explorer tree's in-place editor, which lives on the (possibly
-        // hidden) Agent Manager page — the rename works, but the editor is only visible after opening
-        // the page (Home). `id` = the managed session; `cwd` = its effective working dir (feeds the
+        // Manager page: without a host override, Rename opens the Explorer tree's in-place editor, which
+        // lives on the (possibly hidden) Agent Manager page — nothing shows until the page is opened
+        // (Home), which read as "Rename does nothing" from the side panel; so a host outside the page
+        // passes its own editor (SessionMenuHost::rename — the side panel's floating rename card,
+        // SIDE_PANEL.md §2o). `id` = the managed session; `cwd` = its effective working dir (feeds the
         // folder-wide items); `anchor` = the element the menu was opened on (the side-panel card) —
         // the menu's Tags item opens the tag panel right UNDER it, like a board card's; held weakly,
         // so a card rebuilt away before the click just falls back to the panel's default spot (the
         // window's top-left, which is also what an omitted anchor gets). Returns a menu the caller
         // shows via ShowAt; never null. UI thread only. Throws winrt::hresult_error only if the empty
         // flyout itself can't be created (the items are built later, guarded, at Opening).
-        // `host` (SIDE_PANEL.md §2j / §2k): what the menu's HOST adds or changes — its own items right under "Jump to
-        // Tab" (the side panel's "Pin to Top" / "Unpin") and where "Open New Session Here" / "Fork session" open the new
-        // tab (the side panel: next to the card's tab, in its window). The board card and the tree row pass none and get
-        // the menu as it always was; see SessionMenuHost.
+        // `host` (SIDE_PANEL.md §2j / §2k / §2o): what the menu's HOST adds or changes — its own items right under "Jump to
+        // Tab" (the side panel's "Pin to Top" / "Unpin"), where "Open New Session Here" / "Fork session" open the new
+        // tab (the side panel: next to the card's tab, in its window) and what "Rename" opens (the side panel: its
+        // floating rename card under the card). The board card and the tree row pass none and get the menu as it always
+        // was; see SessionMenuHost.
         winrt::Windows::UI::Xaml::Controls::MenuFlyout BuildSessionMenuFor(const std::wstring& id,
                                                                            const std::wstring& cwd,
                                                                            const winrt::Windows::UI::Xaml::FrameworkElement& anchor = nullptr,

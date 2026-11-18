@@ -246,7 +246,9 @@ folder with its subfolders, and a tab's right-click menu has the same Filter ›
 side panel's cards on screen (SP-17 phases 10–11, TCM-10; SIDE_PANEL.md §2l; no test written yet) · the session menu
 (a side panel card, a board card, a tree row) reads in the tab menu's order and gains Mark Unread, Open In Explorer and
 Favorite, and a click on Deactivate itself — there and in the tab menu — parks that one tab (SP-02 phases 9–10, TCM-11;
-AGENT_MANAGER.md *The session menu*, *Deactivating sessions*; no test written yet).
+AGENT_MANAGER.md *The session menu*, *Deactivating sessions*; no test written yet) · a side-panel card's Rename opens a
+floating rename card under the card — Enter renames, Esc cancels, a click outside renames — whose rename reaches the tab,
+every window and the Telegram topic; it did nothing visible before (SP-18, SP-K4; SIDE_PANEL.md §2o; no test written yet).
 
 **The regression base** — older behaviors the recent releases build on, covered because every new feature leans on
 them: the /handover family (HND-01, HND-03, HND-04, HND-05, HND-07, HND-08), the Sessions browser (SES-01, SES-02,
@@ -283,6 +285,7 @@ the Explorer tree, templates. They belong to the suite's later breadth (E2E_TEST
 | CLI-K2 | An unpackaged release CLI reads the DEV profile — **fixed in code** by 4950ece21, verified on the test build 0.8.1.1 (run `fixall-0811`; not in a release) | measured, CLI.md §11 |
 | MGR-K1 | A session launched from the Agent Manager page is not selected on the page (Home offers no way back) until a tab switch — **fixed in code 2026-10-23**, verified on the test build 0.8.1.1 (run `fixall-0811`; MGR-07; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_manager_page.py`) |
 | SP-K1 | The + card's Launch needs a second click while its presets menu is open (the page's own Launch takes one) — **fixed in code 2026-10-23**, verified on the test build 0.8.1.1 (run `fixall-0811`; SP-05 phase 5; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_side_panel.py`) |
+| SP-K4 | A side panel card's Rename does nothing visible: it opens the Explorer tree's editor on the hidden Agent Manager page — **fixed in code 2026-11-18** (NOT BUILT: a floating rename card under the card, SIDE_PANEL.md §2o; SP-18; no test written yet) | the user's report, 2026-11-18 |
 | TCM-K1 | A blank tab rename leaves the tab showing Claude Code's own terminal title (the session keeps its title) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
 | TCM-K2 | Tags from the tab menu leaves the keyboard in the terminal (typed text and Esc reach claude) — **fixed in code 2026-10-23**, verified on the test build 0.8.1.1 (run `fixall-0811`; TCM-05 phase 5; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
 | TAB-K1 | A window close can save its Claude tabs as plain shell tabs (an autosave still pending at the close fired after the teardown archive) — **fixed in code 2026-10-23**, verified on the test build 0.8.1.1 (run `fixall-0811`: 9 of 9; TAB-10 E2, E3; not in a release) | e2e suite, 2026-10-23 (seen once, then reproduced on 0.8.0: 3 of 9 closes in the first sweep, 6 of 9 in run `nf-080`; `e2e/suites/test_workspace.py`) |

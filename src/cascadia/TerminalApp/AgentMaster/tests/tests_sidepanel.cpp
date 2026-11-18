@@ -102,6 +102,13 @@
 // shows it, away hides it, a drag passing by and a press beside the button keep it away until the pointer has left, a press
 // on the button keeps it, a finger's taps, the watch that only hides, the after-collapse linger; all 288 input combinations
 // against a second statement of the rule; one user's visit event by event.
+//
+// TestSessionTitleEdit pins what the side panel's floating RENAME CARD writes (AgentMaster/SessionTitleEdit.h, SIDE_PANEL.md
+// section 2o; the user's request of 2026-11-18, "refactor the sidemenu's rename to be at the card and update all"): the trim
+// every rename path applies (spaces, tabs and line breaks at the ends; inner breaks kept); the box's copy of a title (CR LF and
+// LF respelled as the TextBox's lone CR, a CR title untouched); the line-break-blind comparison; the commit's verdict - blank
+// writes nothing, an untouched card writes nothing whatever breaks the title was stored with, an edit (a case change too)
+// writes the trimmed text; and the header's first line.
 
 #include "m5_tests.h"
 
@@ -109,6 +116,7 @@
 #include "../LauncherRules.h" // the launcher's kind token, shell choices, rows, folder and labels (TestLauncherRules)
 #include "../PointerCardPlacement.h" // the "+" launcher card's tooltip-like placement (TestPointerCardPlacement)
 #include "../SessionTimingText.h" // the cards' and rows' "created 4d1h, active 2m4s ago" (TestSessionTimingText)
+#include "../SessionTitleEdit.h" // the rename card's trim, box text, comparison and commit verdict (TestSessionTitleEdit)
 #include "../SidePanelAiList.h" // the AI view's list rule: only a request's end or a reset changes it (TestSidePanelAiList)
 #include "../SidePanelAiCopy.h" // the crossed circle's refill and the copy button's Markdown (TestSidePanelAiCopy)
 #include "../SidePanelFilters.h" // the funnel's FILTERS: facets, matcher, edits, chips, the record's JSON (TestSidePanelFilters)
@@ -3454,4 +3462,74 @@ void TestLauncherRules()
     CHECK(LaunchButtonLabel(LaunchKind::Shell, L"PowerShell", false) == L"Open PowerShell", "launcher label: a shell OPENS");
     CHECK(LaunchButtonLabel(LaunchKind::Shell, L"Command Prompt", true) == L"Create & Open Command Prompt", "launcher label: a shell in a folder to create");
     CHECK(LaunchButtonLabel(LaunchKind::Shell, L"", false) == L"Open shell", "launcher label: a nameless profile reads \"shell\"");
+}
+
+// TestSessionTitleEdit pins what the side panel's floating RENAME CARD hands the one rename seam (AgentMaster/SessionTitleEdit.h,
+// SIDE_PANEL.md section 2o): the trim every rename path applies, the box's copy of a title (the TextBox shows a line break only as
+// a lone CR), the line-break-blind comparison, the commit's verdict (blank or untouched writes nothing, an edit writes the
+// trimmed text) and the header's first line. Two-line titles with a lone CR are the user's everyday titles (187 of production's
+// 1,731 on 2026-10-18), so every rule is checked on one too.
+void TestSessionTitleEdit()
+{
+    std::wprintf(L"Session title edit (SessionTitleEdit.h, SIDE_PANEL.md section 2o):\n");
+
+    // --- the trim: the same " \t\r\n" set the tree's editor, the tab renamer and the tab -> registry mirror trim ---
+    CHECK(TrimEditedSessionTitle(L"  Fix the login test \t") == L"Fix the login test", "title trim: spaces and tabs at both ends go");
+    CHECK(TrimEditedSessionTitle(L"\r\nrelease notes\r\n\r") == L"release notes", "title trim: line breaks at both ends go (a habitual Return after the name)");
+    CHECK(TrimEditedSessionTitle(L"  BetterClipboard\ron-launch  ") == L"BetterClipboard\ron-launch", "title trim: a two-line title keeps its inner lone CR");
+    CHECK(TrimEditedSessionTitle(L"a  \t b") == L"a  \t b", "title trim: blanks INSIDE the title are the user's");
+    CHECK(TrimEditedSessionTitle(L"").empty() && TrimEditedSessionTitle(L" \t\r\n \r").empty(), "title trim: an empty or all-blank text trims to nothing");
+    CHECK(TrimEditedSessionTitle(L"x") == L"x" && TrimEditedSessionTitle(L" x") == L"x" && TrimEditedSessionTitle(L"x ") == L"x", "title trim: one-character titles");
+    CHECK(TrimEditedSessionTitle(L"\x00A0name\x00A0") == L"\x00A0name\x00A0", "title trim: a no-break space is not in the set (no rename path trims it)");
+
+    // --- the box's copy: every break a lone CR, so the TextBox shows the title's lines ---
+    CHECK(SessionTitleBoxText(L"one line") == L"one line", "title box: a one-line title is unchanged");
+    CHECK(SessionTitleBoxText(L"a\rb") == L"a\rb", "title box: a lone-CR title (the TextBox's own spelling) is unchanged");
+    CHECK(SessionTitleBoxText(L"a\nb") == L"a\rb", "title box: a lone LF becomes a CR (the TextBox shows no LF break)");
+    CHECK(SessionTitleBoxText(L"a\r\nb") == L"a\rb", "title box: a CR LF pair is ONE break, one CR");
+    CHECK(SessionTitleBoxText(L"a\n\rb") == L"a\r\rb", "title box: LF then CR are two breaks (an LF, then a lone CR)");
+    CHECK(SessionTitleBoxText(L"a\r\n\r\nb\n") == L"a\r\rb\r", "title box: several pairs and a trailing LF");
+    CHECK(SessionTitleBoxText(L"\r") == L"\r" && SessionTitleBoxText(L"\n") == L"\r" && SessionTitleBoxText(L"").empty(), "title box: a bare break and the empty title");
+
+    // --- the comparison: the same characters, breaks spelled any way ---
+    CHECK(SessionTitlesMatch(L"a\rb", L"a\r\nb") && SessionTitlesMatch(L"a\nb", L"a\rb") && SessionTitlesMatch(L"a\r\nb", L"a\nb"), "title match: CR, LF and CR LF are one break");
+    CHECK(!SessionTitlesMatch(L"a\rb", L"a\r\rb"), "title match: one break is not two");
+    CHECK(!SessionTitlesMatch(L"Release notes", L"release notes"), "title match: case counts (a case change is a rename)");
+    CHECK(!SessionTitlesMatch(L"ab", L"a b") && !SessionTitlesMatch(L"ab", L"a\rb"), "title match: a space or a break inserted is a change");
+    CHECK(SessionTitlesMatch(L"", L""), "title match: two empty titles match");
+
+    // --- the commit's verdict ---
+    {
+        const auto unchanged = SessionTitleToCommit(L"Fix the login test", L"Fix the login test");
+        CHECK(!unchanged.has_value(), "title commit: an untouched card (Enter at once, a click away) writes nothing");
+        const auto padded = SessionTitleToCommit(L"Fix the login test", L"  Fix the login test\r");
+        CHECK(!padded.has_value(), "title commit: the same title with blanks at its ends is no change either");
+        const auto lfStored = SessionTitleToCommit(L"BetterClipboard\non-launch", L"BetterClipboard\ron-launch");
+        CHECK(!lfStored.has_value(), "title commit: an LF-stored two-line title the box handed back with a CR is NOT a rename (no rewrite of its breaks)");
+        const auto crlfStored = SessionTitleToCommit(L"ab\r\ncd", L"ab\rcd");
+        CHECK(!crlfStored.has_value(), "title commit: the same for a CR LF title");
+        const auto blank = SessionTitleToCommit(L"Fix the login test", L" \t\r ");
+        CHECK(!blank.has_value(), "title commit: a blank box renames nothing (a title never goes empty)");
+        const auto emptyBox = SessionTitleToCommit(L"Fix the login test", L"");
+        CHECK(!emptyBox.has_value(), "title commit: an emptied box renames nothing");
+
+        const auto edited = SessionTitleToCommit(L"Fix the login test", L"  Fix the flaky login test \r");
+        CHECK(edited.has_value() && *edited == L"Fix the flaky login test", "title commit: an edit writes the TRIMMED text");
+        const auto caseOnly = SessionTitleToCommit(L"release notes", L"Release notes");
+        CHECK(caseOnly.has_value() && *caseOnly == L"Release notes", "title commit: a case-only change is a rename");
+        const auto secondLine = SessionTitleToCommit(L"BetterClipboard", L"BetterClipboard\ron-launch");
+        CHECK(secondLine.has_value() && *secondLine == L"BetterClipboard\ron-launch", "title commit: adding a second line writes it with the box's lone CR");
+        const auto oneLine = SessionTitleToCommit(L"BetterClipboard\ron-launch", L"BetterClipboard on-launch");
+        CHECK(oneLine.has_value() && *oneLine == L"BetterClipboard on-launch", "title commit: joining two lines into one is a rename");
+        const auto fromEmpty = SessionTitleToCommit(L"", L"kvnode bench");
+        CHECK(fromEmpty.has_value() && *fromEmpty == L"kvnode bench", "title commit: a session without a title gets the typed one");
+        const auto paddedOpened = SessionTitleToCommit(L"  kvnode bench ", L"kvnode bench");
+        CHECK(!paddedOpened.has_value(), "title commit: the opened title is trimmed too before the comparison");
+    }
+
+    // --- the header's first line ---
+    CHECK(FirstSessionTitleLine(L"BetterClipboard\ron-launch") == L"BetterClipboard", "title header: the first line of a lone-CR title");
+    CHECK(FirstSessionTitleLine(L"a\nb") == L"a" && FirstSessionTitleLine(L"a\r\nb") == L"a", "title header: the first line of an LF and a CR LF title");
+    CHECK(FirstSessionTitleLine(L"one line") == L"one line" && FirstSessionTitleLine(L"").empty() && FirstSessionTitleLine(L"\rsecond").empty(),
+          "title header: a one-line title whole, an empty one empty, a title that starts with a break has an empty first line");
 }

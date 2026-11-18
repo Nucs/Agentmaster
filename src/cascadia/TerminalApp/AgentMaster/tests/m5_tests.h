@@ -20,7 +20,7 @@
 //   tests_taskbar.cpp         - NOTIFICATIONS.md sections 8 + 9: the taskbar unread badge (TaskbarBadge.h's label / size / disc + digit composition / GDI icon, drawn like the shell draws it) + the engine's process-wide unread census + the unread frame on a window's taskbar preview (TaskbarThumbnail.h)
 //   tests_turns.cpp           - the Copy > Transcript levels: TranscriptTurns (the C++ port of the am-agentmaster-cli skill's transcript_turns.py v11) vs the reference's own goldens in turns\expected, byte for byte; + the summary's whole-conversation chain (CollectConversationUpstream / BuildSummaryConversation); + the transcript overlay's box tabs (TranscriptViews.h) and one-sided renders, against the same goldens
 //   tests_markdown.cpp        - the transcript overlay's Markdown flattener (MarkdownBlocks — cmark -> flat render blocks); compiled only when the vcpkg cmark of a full build is present (AM_HAVE_CMARK), else it reports a skip
-//   tests_sidepanel.cpp       - SIDE_PANEL.md §2c: the side panel's in-place card list — the order planner (KeyedListDiff.h): reaches the target, indexes in range, minimal; + the cards' and rows' timing line (SessionTimingText.h); + §2j the cards' Pin to Top (SidePanelPins.h)
+//   tests_sidepanel.cpp       - SIDE_PANEL.md §2c: the side panel's in-place card list — the order planner (KeyedListDiff.h): reaches the target, indexes in range, minimal; + the cards' and rows' timing line (SessionTimingText.h); + §2j the cards' Pin to Top (SidePanelPins.h); + §2o the rename card's commit rule (SessionTitleEdit.h)
 //   tests_tabrow.cpp          - TAB_STRIP.md "Auto-hiding the tab row": WHEN the auto-hiding title bar row shows (TabRowAutoHide.h) — the screen bands, the rest at the top edge, the hide delay, drags, the hold, peeks, the keyboard, popups, a finger, an exhaustive sweep against a second statement of the rule
 //   tests_harness.cpp         - SDK_HARNESS.md + SESSIONS.md section 9: the agent harness's model-free half (AgentHarnessCore — the record, the digest, the --settings text, the child's environment, the readers of Claude Code's lines) and the Sessions page's AI search tools (SessionSearchTools — arguments, one search, the result text, the two tool handlers, the stepwise catalog gather)
 //   tests_presets.cpp         - HARNESSES.md: PRESETS (LaunchPresets.h, pure) — the empty initial list + "Add presets…", the one-click template adds, the 0.6.8.18 cleanup, launch-presets.json, the value tiers, the session snapshot (launchArgs), every OpenRouter template's compile vs its launcher profile (MiMo, Kimi, Qwen, GLM), effort, top_k / require_parameters, refusals, the menus, the /handover hint's preset rule
@@ -322,6 +322,11 @@ void TestSidePanelFilters();
 // beside the button keep it away until the pointer has left; a press on the button; a finger's taps; the watch that only
 // hides; the after-collapse linger), all 288 input combinations against a second statement of it (tests_sidepanel.cpp)
 void TestSidePanelStripReveal();
+// SessionTitleEdit.h (SIDE_PANEL.md §2o): what the side panel's floating RENAME CARD writes — the user's "refactor the sidemenu's
+// rename to be at the card and update all" (2026-11-18): the trim every rename path applies (inner line breaks kept), the box's
+// copy of a title (CR LF and LF as the TextBox's lone CR), the line-break-blind comparison, the commit's verdict (blank or
+// untouched writes nothing, an edit — a case change too — writes the trimmed text) and the header's first line (tests_sidepanel.cpp)
+void TestSessionTitleEdit();
 // TabRowAutoHide.h (TAB_STRIP.md "Auto-hiding the tab row"; the user's request of 2026-11-15 and their picks: the Windows
 // taskbar's behavior with no line left behind, a 1.5 s peek on a keyboard tab switch, the row out on the Agent Manager page):
 // the screen bands (the top edge band, a finger's band, the stay band; DIPs to pixels at every scale and for broken inputs),

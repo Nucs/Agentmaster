@@ -234,7 +234,7 @@ One menu for a board card, a tree row and a side-panel card (`_MakeLazySessionMe
  Jump to Tab
  Pin to Top · Unpin              the side panel card only (SessionMenuHost::afterJumpToTab, SIDE_PANEL.md §2j)
  ─────────────
- Rename (F2)
+ Rename (F2)                     on a side panel card "Rename": its floating rename card (SessionMenuHost::rename, SIDE_PANEL.md §2o)
  Set Note… (F3) · Edit Note… (F3)   2026-11-16, SESSION_NOTES.md §3a (the WT tab menu's twin, under Rename)
  Copy                         ›  Session Id, Path, Branch, Current Prompt, Launch CLI, Summary, Transcript ▸
  Show Transcript
@@ -274,6 +274,12 @@ One menu for a board card, a tree row and a side-panel card (`_MakeLazySessionMe
 
 - A board-invoked Rename first makes the tree row renderable (un-collapses its folder, widens a LOCAL
   scope to GLOBAL for a session hosted elsewhere): the in-place editor lives in the tree.
+- **A side panel card's Rename** (2026-11-18, SIDE_PANEL.md §2o) does not use that editor: the tree is on this page, which is
+  hidden while the side panel sits beside a terminal tab, so the rename showed nothing there. The card's host passes its own
+  (`SessionMenuHost::rename` + `renameTip`): the item reads "Rename" (F2 renames the focused tab, not the card's session) and
+  opens the side panel's floating rename card under the card, whose commit is the same `_RenameClaudeSession` the tree's
+  `_renameHandler` calls. The Rename item's click is deferred and contained on every surface, and its id is
+  `am.sessionmenu.rename`.
 - **Deactivate ▸ and Close ▸** list the tab menu's scopes row for row: Deactivate Tab / Close Tab ·
   Tabs to the Left · Tabs to the Right · Other Tabs · Of Same Folder · Other of Same Folder · All Tabs,
   plus **★ Favorite & Close All Tabs** under Close and the two state items under Deactivate, **Deactivate
