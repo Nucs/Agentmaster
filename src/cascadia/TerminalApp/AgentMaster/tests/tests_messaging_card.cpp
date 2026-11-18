@@ -247,9 +247,10 @@ void TestMessagingCard()
         CHECK(HasData(page, L"c:screenimg:" + kCardSid) && HasLabel(page, L"Screen Image"), "Session: Screen Image");
         CHECK(page.size() == 8 && page[4].size() == 2 && page[4][0].second == L"c:screen:" + kCardSid && page[4][1].second == L"c:screenimg:" + kCardSid,
               "Session: Screen Text and Screen Image keep their row (21.39 and 21.41 moved no existing button)");
-        CHECK(page.size() == 8 && page[5].size() == 1 && page[5][0].second == L"c:allscreen:" + kCardSid && page[5][0].first.find(L"All Screen") != std::wstring::npos &&
-                  page[5][0].first.rfind(L"\U0001F4DC", 0) == 0,
-              "Session: All Screen alone on its own row under the screen buttons, with the scroll emoji (21.39)");
+        // 21.59 (the user's pick of 2026-11-18): Note takes the free half of All Screen's row - All Screen keeps its place, first.
+        CHECK(page.size() == 8 && page[5].size() == 2 && page[5][0].second == L"c:allscreen:" + kCardSid && page[5][0].first.find(L"All Screen") != std::wstring::npos &&
+                  page[5][0].first.rfind(L"\U0001F4DC", 0) == 0 && page[5][1].second == L"c:note:" + kCardSid,
+              "Session: All Screen first on its row under the screen buttons, with the scroll emoji (21.39), and Note beside it (21.59)");
         CHECK(page.size() == 8 && page[6].size() == 2 && page[6][0].second == L"c:esc:" + kCardSid && page[6][0].first == L"\x238B Esc" &&
                   page[6][1].second == L"c:deactivate:" + kCardSid && page[6][1].first == L"\U0001F319 Deactivate",
               "Session: the Esc and Deactivate row right above Back, Esc first (21.41)");
@@ -360,19 +361,25 @@ void TestMessagingCard()
         bool twoARow = true;
         for (const SessionInfo* s : { &waiting, &error, &exited, &parked, &parkedError })
         {
-            for (const CardPage p : { CardPage::Main, CardPage::Session, CardPage::AllScreen, CardPage::AllScreenDiffs, CardPage::AllScreenLast, CardPage::AllScreenLastDiffs })
+            for (const CardPage p : { CardPage::Main, CardPage::Session, CardPage::AllScreen, CardPage::AllScreenDiffs, CardPage::AllScreenLast, CardPage::AllScreenLastDiffs,
+                                      CardPage::Note, CardPage::NoteRemove })
             {
                 for (const bool picture : { false, true }) // 21.49: with and without the picture button
                 {
-                    CardButtonFacts pf = CardButtonFactsFor(*s);
-                    pf.pictureButton = picture;
-                    for (const auto& row : BuildCardButtonRows(kCardSid, pf, p))
+                    for (const int note : { 0, 1, 2, 3 }) // 21.59: with and without a note, with and without an open note prompt
                     {
-                        twoARow = twoARow && row.size() <= 2;
-                        for (const auto& [label, data] : row)
+                        CardButtonFacts pf = CardButtonFactsFor(*s);
+                        pf.pictureButton = picture;
+                        pf.hasNote = (note & 1) != 0;
+                        pf.notePromptOpen = (note & 2) != 0;
+                        for (const auto& row : BuildCardButtonRows(kCardSid, pf, p))
                         {
-                            fits = fits && Utf8Length(data) <= 64 && Utf8Length(data) == data.size();
-                            labeled = labeled && !label.empty();
+                            twoARow = twoARow && row.size() <= 2;
+                            for (const auto& [label, data] : row)
+                            {
+                                fits = fits && Utf8Length(data) <= 64 && Utf8Length(data) == data.size();
+                                labeled = labeled && !label.empty();
+                            }
                         }
                     }
                 }
@@ -471,12 +478,13 @@ void TestMessagingCard()
         CHECK(!ParseAllScreenArgs(L"lastturn", TurnsLevel::Full) && !ParseAllScreenArgs(L"last turn", TurnsLevel::Full),
               "/allscreen: only the word last is the box (lastturn, or last turn as two words, gets the usage line)");
 
-        // The Session page's button opens the picker: its label says so with the arrow.
+        // The Session page's button opens the picker: its label says so with the arrow. MESSAGING.md 21.59 put Note beside it on the
+        // same row (Note opens a page too, so its label ends with the arrow as well); All Screen keeps the row's first place.
         const SessionInfo waiting = CardSession(SessionState::WaitingForInput);
         const Rows session = BuildCardButtonRows(kCardSid, CardButtonFactsFor(waiting), CardPage::Session);
-        CHECK(session.size() == 8 && session[5].size() == 1 && session[5][0].second == L"c:allscreen:" + kCardSid && session[5][0].first.size() > 1 &&
-                  session[5][0].first.back() == L'\x25B8',
-              "All Screen: the Session page's button opens the picker (its label ends with the page arrow)");
+        CHECK(session.size() == 8 && session[5].size() == 2 && session[5][0].second == L"c:allscreen:" + kCardSid && session[5][0].first.size() > 1 &&
+                  session[5][0].first.back() == L'\x25B8' && session[5][1].second == L"c:note:" + kCardSid && session[5][1].first.back() == L'\x25B8',
+              "All Screen: the Session page's button opens the picker (its label ends with the page arrow), Note beside it (21.59) likewise");
 
         // The picker: the File Diffs box first and the Last Turn box under it (both unchecked), one level a row, least to most,
         // the default (Full) with the star, then Back to the Session page.

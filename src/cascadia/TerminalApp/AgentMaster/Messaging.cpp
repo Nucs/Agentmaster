@@ -2727,6 +2727,11 @@ namespace Agentmaster::Msg
                 // §21.43: the voice lanes — a transcribed note read as its text, the messages that waited behind it handed over
                 // in order (Messaging.Voice.cpp); quick when nothing is ready.
                 _voiceTick();
+                // §21.59: the session notes - an open note prompt past its five minutes ends with its expiration message (a voice
+                // note sent in time is waited for: the voice tick above may just have read it), and when a note was written since
+                // the last pass every topic's note is read again (a change made at the PC is told in its topic). After the voice
+                // tick and before the per-topic pass below, so the cards of this pass render the notes it read (Messaging.Note.cpp).
+                _noteTick(now);
                 // Threaded Mode: topics need it; until it is on, getMe is re-asked every minute and the owner
                 // gets one note with the switch's location.
                 if (!_topicsEnabled.load())
@@ -5294,6 +5299,11 @@ namespace Agentmaster::Msg
         // a flip changes every card's hash; _refreshCard asks for the other value to tell that change from a real one and sends it
         // through the slow upgrade.
         withLevel.pictureButton = pictureButton.value_or(_cardPictureButtonWanted());
+        // §21.59: the NOTE page's buttons follow the note the cards show (✏️ Edit · ➕ · 🗑, or ✏️ Write a note alone) and an open
+        // note prompt (✖ Cancel the prompt). Not SessionInfo facts: the service's own notes cache and windows, under `_notesMtx`
+        // alone (no caller holds `_mtx` here). Only the Note page reads them, so every other page's hash is unchanged by them.
+        withLevel.hasNote = !_noteShownFor(sessionId).empty();
+        withLevel.notePromptOpen = _notePromptOpenFor(sessionId);
         markupOut = _buttons(BuildCardButtonRows(sessionId, withLevel, page));
         return {};
     }
@@ -5408,6 +5418,7 @@ namespace Agentmaster::Msg
                     { L"btw", L"a side question about the session, answered here while it works: /btw <question>" }, // §21.56
                     { L"btw_clear", L"start the /btw thread over" }, // §21.56
                     { L"enter", L"press Enter at the PC: submit the prompt waiting in the input box" }, // §21.47
+                    { L"note", L"the session's note: /note <text> writes it, /note + <text> adds a line, /note - removes it" }, // §21.59
                     { L"runner", L"runner auto|paused" },
                     { L"pin", L"never idle: keep this topic" },
                     { L"unpin", L"let the session idle again" },
@@ -8957,6 +8968,9 @@ namespace Agentmaster::Msg
         // and a color change edits the card in the rename's own refresh (a topic named before the square gets it then too).
         extras.colorSquare = topic.nameColor;
         extras.threadId = topic.threadId; // §21.17: the card's title links to its topic (in the chat's "All" view, the way in)
+        // §21.59: the session's note under the card's title - the note the service SHOWS (its cache: one record read at a session's
+        // first card, then kept true by _noteTick's epoch pass), so a render reads no file.
+        extras.noteText = _noteShownFor(sessionId);
         const std::wstring text = BuildCardText(*s, now, idleLeaves, _scheduler ? _scheduler->GlobalPaused() : false, &extras);
         const CardButtonFacts facts = CardButtonFactsFor(*s);
         // §21.49: whether Main shows 🖼️, read ONCE for this refresh: the slow upgrade below compares this card with its twin that

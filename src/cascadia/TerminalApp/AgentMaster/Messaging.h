@@ -69,6 +69,7 @@
 #include "MessagingEnter.h" // §21.47: /enter, ONE Enter in the terminal (the window action, its decision, the read-back, the answers and texts)
 #include "MessagingFromQueue.h" // §21.44: a topic message that waited in the queue (when it waits, the mirror's test, its 🫡)
 #include "MessagingQueueTickets.h" // §21.57: queue management from a topic (the tickets, their buttons, the ❌ / ➕ replies, an edit's reading)
+#include "MessagingNote.h" // §21.59: the session's note in Telegram (the prompt's window and its verdicts, /note, the texts)
 #include "MessagingOutbox.h" // §21.50: the durable outbox's pure core (the journal's lines and fold, the answer table, the classes, lanes, probes)
 #include "MessagingOutboxJournal.h" // §21.50: the durable outbox's files (the journal, dead.jsonl, .lock, the flusher)
 #include "TuiMenus.h" // §21.34: a local command's dialog answered from Telegram (/add-dir: the screen parser, the press, the card)
@@ -4603,8 +4604,8 @@ namespace Agentmaster::Msg
 
         /// <summary>
         /// Takes a message of a session's topic when it is a /btw (MessagingBtw.h ParseBtwMessage) — checked FIRST in
-        /// _handleTopicMessage, before a question card's text and before any command reading, because "/clear btw" must never
-        /// reach Claude Code's /clear. Answers the usage and the clear at once; a question goes to _askBtw. Poll thread (the
+        /// _handleTopicMessage (after only an open note prompt's text, §21.59, which lets every /command through), before a
+        /// question card's text and before any command reading, because "/clear btw" must never reach Claude Code's /clear. Answers the usage and the clear at once; a question goes to _askBtw. Poll thread (the
         /// voice thread for a voice note's transcript).
         /// </summary>
         /// <param name="sessionId">The topic's session.</param>
@@ -4661,5 +4662,134 @@ namespace Agentmaster::Msg
         std::mutex _btwMtx; // guards _btwQueue and _btwRunning (a LEAF lock: nothing else is locked under it, no reply sent)
         std::deque<BtwJob> _btwQueue; // questions waiting, oldest first
         std::set<std::wstring> _btwRunning; // the sessions with a question running now
+
+        // ----- §21.59: the session's NOTE on the card, its Note page, its prompt and /note (Messaging.Note.cpp; MessagingNote.h).
+        //       The note itself is SESSION_NOTES.md's: the session store's `note` key, the one place the PC's editor writes too. -----
+
+        /// <summary>How a note prompt ends (_endNotePrompt): its text came, it was cancelled, or nothing came in time.</summary>
+        enum class NotePromptEnd
+        {
+            Written, // the text came (the window's message, /note): the prompt goes, nothing is posted
+            Cancelled, // ✖ Cancel the prompt, or a lone ❌: the prompt goes, nothing is posted (the toast or the 👌 says so)
+            Expired, // nothing came in kNoteWindowMs (and no voice note sent in time waits): the prompt goes, NoteExpiredHtml is posted
+        };
+
+        /// <summary>
+        /// Takes a message of a session's topic when the session's open NOTE PROMPT reads it (DecideNoteWindowMessage) - checked
+        /// FIRST in _handleTopicMessage, before /btw, the queue's gestures and a question card's text, because the user asked to write
+        /// a note and is writing it. A Note verdict writes the note (replaced or appended: NoteWriteMode), reacts 👌 on the message,
+        /// replies when the cap cut it, and ends the window (its prompt goes; the card is refreshed); a Cancel ends the window with
+        /// the note unchanged (👌 on the ❌). Poll thread (the tick thread for a voice note's transcript, _voiceDeliver).
+        /// </summary>
+        /// <param name="sessionId">The topic's session.</param>
+        /// <param name="msg">The message (its text, reply_to_message, date, message_id).</param>
+        /// <param name="threadId">The topic.</param>
+        /// <param name="held">A new thread held it (written before its session existed): never a note.</param>
+        /// <returns>True when the message was the note or the prompt's cancel (handled here); false for any other message.</returns>
+        /// <exception cref="std::bad_alloc">If a text or a reply cannot be allocated.</exception>
+        bool _takeNoteText(const std::wstring& sessionId, const json::Value& msg, int64_t threadId, bool held);
+
+        /// <summary>
+        /// A NOTE page button (§21.59): ✏️ Edit note / Write a note and ➕ Add a line open a note prompt (_openNotePrompt); 🗑 Yes,
+        /// remove the note removes the note and flips the card back to the Note page; ✖ Cancel the prompt ends the open prompt. The
+        /// session is the sticky card's OWNER when the tap came from it (a /clear may have moved the card to the tab's next session),
+        /// else the one the button's data names. Poll thread, inside the tap's scope.
+        /// </summary>
+        /// <param name="sessionId">The session the button's data names.</param>
+        /// <param name="verb">kCardVerbNoteEdit, kCardVerbNoteAdd, kCardVerbNoteRemoveYes or kCardVerbNoteCancel.</param>
+        /// <param name="threadId">The topic the button sits in.</param>
+        /// <param name="messageId">The message the button sits on (the sticky card or a /status copy of it).</param>
+        /// <returns>The toast ("" = none).</returns>
+        /// <exception cref="std::bad_alloc">If a text cannot be allocated.</exception>
+        std::wstring _noteFromCard(const std::wstring& sessionId, std::wstring_view verb, int64_t threadId, int64_t messageId);
+
+        /// <summary>
+        /// /note in a session's topic (§21.59, ParseNoteCommandArgs): bare = the whole note (NoteShowHtml); "/note &lt;text&gt;" writes
+        /// it, "/note + &lt;text&gt;" adds a line, "/note -" removes it - 👌 on the command when it wrote, the cut line when the cap cut
+        /// the text. An open note prompt for the session ends (its text came by the command). Poll thread.
+        /// </summary>
+        /// <param name="sessionId">The topic's session.</param>
+        /// <param name="args">The command's words (RemoteCommand::args).</param>
+        /// <param name="messageId">The command's message (the reaction and the replies quote it).</param>
+        /// <param name="threadId">The topic.</param>
+        /// <exception cref="std::bad_alloc">If a text or a reply cannot be allocated.</exception>
+        void _runNoteCommand(const std::wstring& sessionId, const std::wstring& args, int64_t messageId, int64_t threadId);
+
+        /// <summary>
+        /// Opens a NOTE PROMPT for the session (§21.59): a window of kNoteWindowMs - an open one is REPLACED (its prompt message goes)
+        /// - and the prompt posted in the topic with ForceReply (NotePromptHtml, NotePromptPlaceholder), silent, at an answer's
+        /// priority, outside the sticky card's clock. The card is refreshed, so its Note page shows ✖ Cancel the prompt. Any thread;
+        /// never called under `_notesMtx` or `_mtx`.
+        /// </summary>
+        /// <param name="sessionId">The session whose note the text writes.</param>
+        /// <param name="threadId">Its topic.</param>
+        /// <param name="mode">Replace (✏️) or Append (➕).</param>
+        /// <returns>The toast (NoteOpenToast).</returns>
+        /// <exception cref="std::bad_alloc">If a text or the outbox item cannot be allocated.</exception>
+        std::wstring _openNotePrompt(const std::wstring& sessionId, int64_t threadId, NoteWriteMode mode);
+
+        /// <summary>
+        /// Ends the session's note prompt when one is open (§21.59): its prompt message goes (or, still on its way, goes the moment
+        /// its post is answered), Expired also posts NoteExpiredHtml, and the card is refreshed (its Note page loses ✖ Cancel).
+        /// `seq` != 0 ends only that window, so a tick's verdict on a window a tap has replaced meanwhile ends nothing. Never called
+        /// under `_notesMtx` or `_mtx`.
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="how">Written, Cancelled or Expired.</param>
+        /// <param name="seq">0 = whatever window is open; else only the window with this NoteWindow::seq.</param>
+        /// <returns>True when a window ended here.</returns>
+        /// <exception cref="std::bad_alloc">If a text or the outbox item cannot be allocated.</exception>
+        bool _endNotePrompt(const std::wstring& sessionId, NotePromptEnd how, uint64_t seq = 0);
+
+        /// <summary>
+        /// Writes the session's note (§21.59) - the Telegram side's ONE writer (the prompt's text, /note, 🗑): the note the cards show
+        /// is recorded FIRST (so _noteTick's epoch pass reads this write as the service's own, never as a change at the PC), then
+        /// SetSessionNote (normalized, stamped now, AtomicWriteUtf8 - which refuses to replace an unreadable record, Rule #16), then
+        /// the card is refreshed at an answer's priority. A refused write puts the shown note back. Logs `[msg] <sid8> note …`
+        /// (the size, never the text).
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="raw">The new note as composed ("" or blank = remove it).</param>
+        /// <param name="cut">Out: the cap (kMaxSessionNoteLength) cut the text.</param>
+        /// <param name="via">What wrote it, for the log ("prompt", "/note", "remove").</param>
+        /// <returns>True when the store took the write.</returns>
+        /// <exception cref="std::bad_alloc">If a text cannot be allocated.</exception>
+        bool _writeSessionNote(const std::wstring& sessionId, const std::wstring& raw, bool& cut, std::wstring_view via);
+
+        /// <summary>
+        /// The note the cards SHOW for a session (§21.59): the service's cache - read from the store (one record read) the first time
+        /// the session is asked about, and again for every topic whenever SessionNotesEpoch() moves (_noteTick). Any thread; takes
+        /// `_notesMtx` only, never across the store read. Const because _cardMarkupFor asks it: the cache is mutable.
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <returns>The note ("" = none).</returns>
+        /// <exception cref="std::bad_alloc">If the copy cannot be allocated.</exception>
+        std::wstring _noteShownFor(const std::wstring& sessionId) const;
+
+        /// <summary>Whether a note prompt is open for the session (the Note page's ✖ Cancel the prompt). Any thread; `_notesMtx` only.</summary>
+        /// <param name="sessionId">The session.</param>
+        /// <returns>True while its window is open.</returns>
+        bool _notePromptOpenFor(const std::wstring& sessionId) const;
+
+        /// <summary>
+        /// The tick's note work (§21.59): every open prompt's expiry (DecideNoteWindowTick - a voice note sent inside the window and
+        /// still in its topic's transcription lane is waited for), and, when SessionNotesEpoch() moved since the last pass, every
+        /// topic's note read again - a changed note refreshes its card, and one written AT THE PC (ClassifyNoteChange: Changed or
+        /// Removed) posts NotePcChangeHtml in its topic. Run by the tick before its per-topic pass, so a card renders the note of this
+        /// pass. Tick thread.
+        /// </summary>
+        /// <param name="nowMs">The wall clock (Unix ms).</param>
+        void _noteTick(int64_t nowMs) noexcept;
+
+        /// <summary>Deletes a note prompt's message (one cheap call, at an answer's priority); a failed delete is a log line, and the prompt stays.</summary>
+        /// <param name="messageId">The message (&lt;= 0 = nothing to do).</param>
+        void _deleteNoteMessage(int64_t messageId);
+
+        // §21.59's state. `_notesMtx` is a LEAF lock: nothing else is locked under it, no store read or Telegram call is made under it.
+        mutable std::mutex _notesMtx;
+        mutable std::unordered_map<std::wstring, std::wstring> _notesShown; // session id -> the note its cards show (absent = never asked)
+        std::unordered_map<std::wstring, NoteWindow> _noteWindows; // session id -> its open note prompt (at most one per session)
+        uint64_t _noteWindowSeq{ 0 }; // the windows opened this run (NoteWindow::seq); under `_notesMtx`
+        uint64_t _notesEpochSeen{ UINT64_MAX }; // the SessionNotesEpoch() of the last every-topic pass; the tick thread's own (no lock)
     };
 }

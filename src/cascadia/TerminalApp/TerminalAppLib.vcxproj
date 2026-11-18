@@ -240,6 +240,10 @@
          buttons, why a message waits, the merge text, the X / plus reply gestures, an edit's reading, the /queue list and the
          tickets' state-file form (header-only, pure). -->
     <ClInclude Include="AgentMaster\MessagingQueueTickets.h" />
+    <!-- Agentmaster (MESSAGING.md section 21.59, SESSION_NOTES.md): the session's NOTE in Telegram - the note prompt's window and
+         what it does with a message, /note's reading, the composed note, the texts, the PC-change and expiry verdicts
+         (header-only, pure). -->
+    <ClInclude Include="AgentMaster\MessagingNote.h" />
     <!-- Agentmaster (MESSAGING.md section 21.43, VOICE.md): VOICE NOTES - the session vocabulary and the dictionary pass
          (VoiceVocabulary.h, pure), the voice worker protocol (VoiceProtocol.h, pure), the transcriber seam (VoiceBridge.h),
          the worker process, the endpoint client, the spell checker word test, the correction layer (VoiceCorrect.h: its
@@ -700,6 +704,12 @@
          the queue buttons (Steer, Delete, Move Up, Merge, Undo, Retry, Dismiss, the /queue list's), the X / plus replies and the
          check that leaves a message deleted in Telegram out of its send. Plain C++, no PCH. -->
     <ClCompile Include="AgentMaster\Messaging.Queue.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <!-- Agentmaster (MESSAGING.md section 21.59): the session's NOTE - the note the cards show, the note prompt (opened by the
+         card's Note page, read by the topic's next message or a reply, ended by its text, a cancel or its expiry), /note, the
+         Telegram side's one note writer and the tick's pass that tells the topic about a change made at the PC. Plain C++, no PCH. -->
+    <ClCompile Include="AgentMaster\Messaging.Note.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <!-- Agentmaster (MESSAGING.md section 21.32.4): the service's FILE LINKS - the linked set, the session keys, the server's

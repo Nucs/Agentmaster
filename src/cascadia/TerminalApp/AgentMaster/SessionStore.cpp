@@ -1021,8 +1021,12 @@ namespace Agentmaster
         }
     }
 
-    std::wstring NormalizeSessionNote(std::wstring_view raw)
+    std::wstring NormalizeSessionNote(std::wstring_view raw, bool* wasCut)
     {
+        if (wasCut)
+        {
+            *wasCut = false; // set before anything can throw, so a caller never reads a stale answer
+        }
         std::wstring out;
         out.reserve(raw.size() < kMaxSessionNoteLength + 1 ? raw.size() : kMaxSessionNoteLength + 1);
         for (size_t i = 0; i < raw.size(); ++i)
@@ -1064,6 +1068,10 @@ namespace Agentmaster
         out = out.substr(begin, end - begin);
         if (out.size() > kMaxSessionNoteLength)
         {
+            if (wasCut)
+            {
+                *wasCut = true; // the trimmed text is over the cap: whatever follows, its tail is lost
+            }
             size_t cut = kMaxSessionNoteLength;
             // Never split a surrogate pair: a high surrogate left last would be invalid UTF-16 (and draw as a box).
             if (out[cut - 1] >= 0xD800 && out[cut - 1] <= 0xDBFF)

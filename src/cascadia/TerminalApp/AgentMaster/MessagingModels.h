@@ -4243,6 +4243,10 @@ namespace Agentmaster::Msg
         L"steer", // §21.33: /steer <message> sends the words NOW, into a running turn too (kSteerCommand, MessagingSteer.h)
         L"download", // §21.32.4: /download <path>, a file's download link and "📤 Send as file" (Messaging.Files.cpp)
         L"enter", // §21.47: /enter presses ONE Enter in the terminal, submitting the prompt that sits in its box (kEnterCommand, MessagingEnter.h)
+        // §21.59: /note shows the session's note; /note <text> writes it, /note + <text> adds a line, /note - removes it (kNoteCommand,
+        // MessagingNote.h). Claude Code 2.1.322 has no /note or /notes (no such name in its command table, checked 2026-11-18), so
+        // the name hides nothing of Claude Code's.
+        L"note",
         // §21.56: /btw <question> — a side question answered in the topic (MessagingBtw.h; the service takes it before this list is
         // read, so these entries matter where a message is classified without it: the 🔎 Search topic refuses them as a session's).
         L"btw", L"btw_clear", L"clear_btw"
@@ -5312,7 +5316,63 @@ namespace Agentmaster::Msg
         // §21.17: the topic the card sits in — its title links to it (0 = no link). In the chat's "All" view, where the card is
         // the topic's newest message, the link is the way into the thread.
         int64_t threadId{ 0 };
+        // §21.59 (the user's request of 2026-11-18, "We need note in telegram bottom pinned message"): the session's NOTE as the
+        // session store holds it (NormalizeSessionNote's form), shown right under the title in an expandable quote (CardNoteBlockHtml);
+        // "" = no note, no block. The service passes the note it SHOWS (its cache, refreshed when SessionNotesEpoch() moves), so a
+        // render reads no file. ⚠ A member added to a struct every card-rendering unit shares: a build over older intermediates
+        // must purge.
+        std::wstring noteText;
     };
+
+    /// <summary>
+    /// How much of the note the CARD carries (§21.59): the first 1,000 UTF-16 units, then "…" and a line naming /note. A note may
+    /// hold 2,000 (kMaxSessionNoteLength), but the card is a status message within Telegram's 4,096-character text limit, and its
+    /// other parts can take ~1,900 already (the recap alone is capped at 1,200), so the whole of a long note is /note's answer.
+    /// </summary>
+    inline constexpr size_t kCardNoteMaxChars = 1000;
+
+    /// <summary>
+    /// The card's NOTE block (§21.59, the user's pick of 2026-11-18, "Under the title"): "\n" + an EXPANDABLE quote holding "🗒️ " and
+    /// the note, so a short note shows whole and a long one folds after about three lines until it is tapped - the place the PC's
+    /// hover card shows the note (SESSION_NOTES.md §4). A note past kCardNoteMaxChars is cut there (never inside a surrogate pair)
+    /// and ends with "…" and "/note shows all of it" (a command Telegram turns into a link: a tap sends it).
+    /// </summary>
+    /// <remarks>
+    /// The quote is a BLOCK in both of the card's forms: Telegram's HTML takes &lt;blockquote expandable&gt;, and the rich converter
+    /// (TgRichFromClassicCore) passes the tag through whole with the quote's line breaks as &lt;br&gt;. It is part of the text the
+    /// card's hash covers, so a changed note is one edit of the card, and an unchanged note costs nothing.
+    /// </remarks>
+    /// <param name="note">The note as stored ("" = none).</param>
+    /// <returns>The block with its leading line break, or "" for no note.</returns>
+    /// <exception cref="std::bad_alloc">If the block cannot be allocated.</exception>
+    inline std::wstring CardNoteBlockHtml(std::wstring_view note)
+    {
+        if (note.empty())
+        {
+            return {};
+        }
+        std::wstring_view shown = note;
+        bool cut = false;
+        if (shown.size() > kCardNoteMaxChars)
+        {
+            size_t at = kCardNoteMaxChars;
+            // Never split a surrogate pair: a high surrogate left last is invalid UTF-16, which Telegram refuses outright.
+            if (shown[at - 1] >= 0xD800 && shown[at - 1] <= 0xDBFF)
+            {
+                --at;
+            }
+            shown = shown.substr(0, at);
+            cut = true;
+        }
+        std::wstring out = L"\n<blockquote expandable>\U0001F5D2\xFE0F ";
+        out += TgEscapeHtml(shown);
+        if (cut)
+        {
+            out += L"\x2026\n/note shows all of it";
+        }
+        out += L"</blockquote>";
+        return out;
+    }
 
     /// <summary>
     /// The moment the card's "since" names, from PERSISTED stamps only: the turn's start while it runs (or waits
@@ -5447,6 +5507,13 @@ namespace Agentmaster::Msg
         AllScreenDiffs, // §21.39: the same picker with ☑️ File Diffs checked - its levels draw every file change as a diff, whatever the level
         AllScreenLast, // §21.39: the same picker with ☑️ Last Turn checked (the user's request of 2026-10-29) - its levels draw the newest turn only
         AllScreenLastDiffs, // §21.39: the same picker with both boxes checked - the newest turn only, every file change in it as a diff
+        // §21.59 (the user's request of 2026-11-18: "through cog icon we can edit the note and such"): the NOTE page 🗒️ Note ▸ opens -
+        // ✏️ Edit note · ➕ Add a line · 🗑 Remove note while the session has a note, ✏️ Write a note alone while it has none, ✖ Cancel
+        // the prompt on top while a note prompt waits for the text, ◀ Back (to Session).
+        Note,
+        // §21.59: 🗑 Remove note's confirmation on the same card - 🗑 Yes, remove the note · ◀ Keep it (to Note). The user picked no
+        // ↩ Undo, so a stray tap must not lose the note in one step: removing takes this second tap.
+        NoteRemove,
     };
 
     /// <summary>The picker's two boxes as one of its pages shows them (§21.39): File Diffs and Last Turn.</summary>
@@ -5491,7 +5558,7 @@ namespace Agentmaster::Msg
         return diffs ? CardPage::AllScreenDiffs : CardPage::AllScreen;
     }
 
-    /// <summary>A page's word in hooks.log's "[nav] remote telegram card-page" line ("main", "allscreen+diffs+last").</summary>
+    /// <summary>A page's word in hooks.log's "[nav] remote telegram card-page" line ("main", "allscreen+diffs+last", "note").</summary>
     /// <param name="page">The page.</param>
     /// <returns>The word (a static string).</returns>
     inline const wchar_t* CardPageLogWord(CardPage page) noexcept
@@ -5500,6 +5567,10 @@ namespace Agentmaster::Msg
         {
         case CardPage::Session:
             return L"session";
+        case CardPage::Note:
+            return L"note"; // §21.59
+        case CardPage::NoteRemove:
+            return L"note-remove"; // §21.59: the removal's confirmation
         case CardPage::AllScreen:
             return L"allscreen";
         case CardPage::AllScreenDiffs:
@@ -5689,6 +5760,13 @@ namespace Agentmaster::Msg
         // neither `deactivatable` nor `takesEsc`).
         // ⚠ A member added to a struct every card-rendering unit shares: a build over older intermediates must purge.
         bool pictureButton{ false };
+        // §21.59 (the user's request of 2026-11-18): the session has a NOTE (SessionStore's `note` key) - the NOTE page offers ✏️ Edit
+        // note · ➕ Add a line · 🗑 Remove note instead of ✏️ Write a note alone. Not a SessionInfo fact (the note lives in the session
+        // store): CardButtonFactsFor leaves it false and the service sets it from the notes it shows (MessagingService::_cardMarkupFor).
+        bool hasNote{ false };
+        // §21.59: a NOTE PROMPT waits for this session's text (MessagingNote.h's window: the next message or a reply to the prompt
+        // becomes the note) - the NOTE page shows ✖ Cancel the prompt on top. Set by the service like hasNote.
+        bool notePromptOpen{ false };
     };
 
     /// <summary>Reads the card's button facts from a session: its pin, its runner's mode, whether its state has an action of its own (an error, an exit, a parked tab), and whether ⎋ Esc and 🌙 Deactivate apply (§21.41).</summary>
@@ -5792,6 +5870,27 @@ namespace Agentmaster::Msg
     /// of 2026-10-26, "after picking which, reset menu to main view").
     /// </summary>
     inline constexpr std::wstring_view kCardVerbAllScreenLevelPrefix = L"allscreen-";
+    /// <summary>
+    /// 🗒️ Note ▸ (§21.59, the Session page, beside 📜 All Screen ▸; the user's pick of 2026-11-18): opens the NOTE page on the message
+    /// the button sits on - a page flip like ⚙️ Session's, nothing posted. ◀ Keep it on the removal's confirmation names it too (back
+    /// to the Note page). "c:note:" with a 36-character id is 43 bytes of Telegram's 64.
+    /// </summary>
+    inline constexpr std::wstring_view kCardVerbNotePage = L"note";
+    /// <summary>
+    /// ✏️ Edit note / ✏️ Write a note (§21.59, the NOTE page): opens a NOTE PROMPT - the bot asks for the note in the topic (Telegram's
+    /// ForceReply opens the reply box), and the user's next message there, or a reply to the prompt, REPLACES the note, within
+    /// kNoteWindowMs (MessagingNote.h). The toast says until when. "c:noteedit:" + 36 is 47 bytes.
+    /// </summary>
+    inline constexpr std::wstring_view kCardVerbNoteEdit = L"noteedit";
+    /// <summary>➕ Add a line (§21.59, the NOTE page, a session with a note): the same prompt, whose text is ADDED on a line of its own under the note. "c:noteadd:" + 36 is 46 bytes.</summary>
+    inline constexpr std::wstring_view kCardVerbNoteAdd = L"noteadd";
+    /// <summary>🗑 Remove note (§21.59, the NOTE page): shows the removal's CONFIRMATION page (CardPage::NoteRemove) - nothing is removed yet. "c:noterm:" + 36 is 45 bytes.</summary>
+    inline constexpr std::wstring_view kCardVerbNoteRemove = L"noterm";
+    /// <summary>🗑 Yes, remove the note (§21.59, the confirmation page): removes the session's note at once, and the card goes back to the NOTE page. "c:notermok:" + 36 is 47 bytes.</summary>
+    inline constexpr std::wstring_view kCardVerbNoteRemoveYes = L"notermok";
+    /// <summary>✖ Cancel the prompt (§21.59, the NOTE page while a note prompt waits): closes the prompt with the note unchanged; the prompt message goes. "c:notecancel:" + 36 is 49 bytes.</summary>
+    inline constexpr std::wstring_view kCardVerbNoteCancel = L"notecancel";
+
     /// <summary>The ending of a level verb (and of kCardVerbAllScreenDiffs) that means "File Diffs" is checked.</summary>
     inline constexpr std::wstring_view kAllScreenDiffsSuffix = L"+d";
     /// <summary>The ending of a level verb (and of kCardVerbAllScreenLast) that means "Last Turn" is checked.</summary>
@@ -5915,6 +6014,10 @@ namespace Agentmaster::Msg
     /// session's claude runs (each button only where it applies: no Esc for Codex or an exited claude, no Deactivate for an adopted
     /// shell tab; no row at all for a parked tab, whose ▶ Reactivate is on Main). ⎋ Esc is ONLY there (the user's rule of
     /// 2026-10-28, "The ESC button should be only inside Sessions menu"): MAIN never shows it, a turn in flight included.
+    /// §21.59 (the user's request of 2026-11-18): SESSION's All Screen row gets 🗒️ Note ▸ in its free half, which opens NOTE:
+    /// ✖ Cancel the prompt first while a note prompt waits (facts.notePromptOpen), then ✏️ Edit note · ➕ Add a line and 🗑 Remove
+    /// note for a session with a note (facts.hasNote), or ✏️ Write a note alone, then ◀ Back (to Session). NOTE REMOVE is 🗑 Remove
+    /// note's confirmation: 🗑 Yes, remove the note · ◀ Keep it (to Note).
     /// </summary>
     /// <remarks>
     /// ▶ Reactivate restarts a session in Error or one whose claude exited, exactly as 🔄 Restart Session does there, so it is
@@ -6021,6 +6124,39 @@ namespace Agentmaster::Msg
             rows.push_back({ { L"\x25C0 Back", CardCallbackData(kCardVerbSessionPage, sessionId) } });
             return rows;
         }
+        if (page == CardPage::NoteRemove)
+        {
+            // §21.59: the removal's confirmation - the user picked no ↩ Undo (2026-11-18), so removing takes this second tap; the
+            // "keep" side names the Note page, so it is a page flip back with nothing changed.
+            rows.push_back({ { L"\U0001F5D1\xFE0F Yes, remove the note", CardCallbackData(kCardVerbNoteRemoveYes, sessionId) } });
+            rows.push_back({ { L"\x25C0 Keep it", CardCallbackData(kCardVerbNotePage, sessionId) } });
+            return rows;
+        }
+        if (page == CardPage::Note)
+        {
+            // §21.59: the NOTE page (the user's pick of 2026-11-18, "🗒️ Note ▸ page"). While a note prompt waits for the text, its
+            // way out comes FIRST (a ForceReply prompt cannot carry a button of its own: Telegram's reply_markup is the reply box or
+            // a keyboard, never both). The edit buttons stay below it: tapping one again opens a fresh prompt (the old one goes).
+            if (facts.notePromptOpen)
+            {
+                rows.push_back({ { L"\x2716\xFE0F Cancel the prompt", CardCallbackData(kCardVerbNoteCancel, sessionId) } });
+            }
+            if (facts.hasNote)
+            {
+                // ✏️ = U+270F + U+FE0F (alone it may be drawn as a text glyph, like the cog); ➕ U+2795 is an emoji by default.
+                rows.push_back({ { L"\x270F\xFE0F Edit note", CardCallbackData(kCardVerbNoteEdit, sessionId) },
+                                 { L"\x2795 Add a line", CardCallbackData(kCardVerbNoteAdd, sessionId) } });
+                rows.push_back({ { L"\U0001F5D1\xFE0F Remove note", CardCallbackData(kCardVerbNoteRemove, sessionId) } });
+            }
+            else
+            {
+                // Nothing to add to or remove: writing is the one action (the same prompt as Edit, replacing nothing).
+                rows.push_back({ { L"\x270F\xFE0F Write a note", CardCallbackData(kCardVerbNoteEdit, sessionId) } });
+            }
+            // Back to where the page was opened from (⚙ Session's page), like the All Screen picker's ◀ Back.
+            rows.push_back({ { L"\x25C0 Back", CardCallbackData(kCardVerbSessionPage, sessionId) } });
+            return rows;
+        }
         // The user's placement (2026-10-18): ⑂ Fork and 🆕 New Session come right after ⚙ Session is tapped, at the top of its page.
         rows.push_back({ { L"\x2442 Fork", CardCallbackData(kCardVerbFork, sessionId) },
                          { L"\U0001F195 New Session", CardCallbackData(kCardVerbNewSession, sessionId) } });
@@ -6038,8 +6174,11 @@ namespace Agentmaster::Msg
         rows.push_back({ { L"\U0001F5A5 Screen Text", CardCallbackData(L"screen", sessionId) },
                          { L"\U0001F5BC Screen Image", CardCallbackData(kCardVerbScreenImage, sessionId) } });
         // §21.39: under the two screen buttons it extends (the visible screen -> the whole conversation), on a row of its own; the
-        // ▸ says it opens a page (the level picker), as "More ▸" does.
-        rows.push_back({ { L"\U0001F4DC All Screen \x25B8", CardCallbackData(kCardVerbAllScreen, sessionId) } });
+        // ▸ says it opens a page (the level picker), as "More ▸" does. §21.59 (the user's pick of 2026-11-18): 🗒️ Note ▸ takes the
+        // row's free half, so no existing button moves, and opens the NOTE page the same way (its ▸ says so too). 🗒️ = U+1F5D2 +
+        // U+FE0F, the spiral notepad drawn as the emoji.
+        rows.push_back({ { L"\U0001F4DC All Screen \x25B8", CardCallbackData(kCardVerbAllScreen, sessionId) },
+                         { L"\U0001F5D2\xFE0F Note \x25B8", CardCallbackData(kCardVerbNotePage, sessionId) } });
         // §21.41: the session's stopping buttons, on their own row above ◀ Back (the remarks say why there). Each is offered only
         // where it can act; the row goes when neither can (a parked tab, a closed session), so a card never shows a button whose
         // only answer would be "nothing to do".
@@ -6064,7 +6203,8 @@ namespace Agentmaster::Msg
     /// <summary>
     /// The topic's STICKY card (MESSAGING.md §6.1, §21.5, §21.6, §21.26, §21.27), as Telegram HTML: the state and since when (a
     /// clock time from persisted stamps, CardStateSinceMs) on the first line, the title on the second (§21.26: the state leads,
-    /// the user's request of 2026-10-19), a line naming the state's own action — 🔄 Restart Session
+    /// the user's request of 2026-10-19), the session's NOTE right under it in an expandable quote (§21.59, CardNoteBlockHtml; no
+    /// note, no quote), a line naming the state's own action — 🔄 Restart Session
     /// for a session in Error or one whose claude exited (§21.24), ▶ Reactivate for a parked tab —, the place line (§21.27:
     /// "/source/Agentmaster · agentmaster · opus-5-5 · max · 427K" — folder, branch, model, effort, context size),
     /// the runner and the queue unless they are the
@@ -6086,7 +6226,7 @@ namespace Agentmaster::Msg
     /// <param name="nowMs">The clock.</param>
     /// <param name="idleLeavesAtMs">When an Idle topic leaves the list (0 = not idle).</param>
     /// <param name="globalPause">The runner's process-wide pause.</param>
-    /// <param name="extras">The recap and its freshness, the history line, the title's color square (CardExtras); null = none of them.</param>
+    /// <param name="extras">The recap and its freshness, the history line, the title's color square, the note (CardExtras); null = none of them.</param>
     /// <returns>The HTML text, with the title as a title token.</returns>
     /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
     inline std::wstring BuildCardText(const SessionInfo& s, int64_t nowMs, int64_t idleLeavesAtMs, bool globalPause, const CardExtras* extras = nullptr)
@@ -6116,6 +6256,13 @@ namespace Agentmaster::Msg
         // re-post on, in the ordinary traffic (no form flag, no slow upgrade).
         out += TgTitleToken(TgTitleForm::Bold, extras ? std::wstring_view{ extras->colorSquare } : std::wstring_view{}, s.title.empty() ? s.id.substr(0, 8) : s.title,
                             extras ? extras->threadId : 0, true);
+        // §21.59 (the user's pick of 2026-11-18, "Under the title"): the session's note right under the title, where the PC's hover
+        // card shows it, in a quote that folds a long note; every line below keeps its order. No note, no block, no change to the
+        // text of an un-noted card (so no card is edited because this build added the block).
+        if (extras)
+        {
+            out += CardNoteBlockHtml(extras->noteText);
+        }
         // The user is not supposed to care whether a tab is "activated" (§21.5): a message here starts a parked
         // tab by itself, and ▶ Reactivate (the card's button, /reactivate) does it on demand. §21.24 (the user's rule of
         // 2026-10-19): a session in ERROR, or one whose claude EXITED, names 🔄 Restart Session instead - the one button

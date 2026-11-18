@@ -9037,6 +9037,108 @@ step; the AI title line; the refusal latch; the wizard's new fields' round trip.
    open; refuse a launch (a preset that cannot start): the wizard comes back and asks every step ("paused for this thread").
 5. Restart Agentmaster with a timer running: it still runs (`[msg] timed picks restored`).
 
+### 21.59 The session's NOTE on the card: shown under the title, edited from ⚙️ Session → 🗒️ Note ▸ and /note (2026-11-18; NOT BUILT — the next build must purge: `MessagingModels.h`'s `CardExtras`, `CardButtonFacts` and `CardPage` and `Messaging.h`'s `MessagingService` changed)
+
+> The user's request (2026-11-18): "We need note in telegram bottom pinned message and through cog icon we can edit the note
+> and such". The note is the PC's session note ([SESSION_NOTES.md](SESSION_NOTES.md): the session store's `note` key, written
+> from the tab menu's "Set Note… (F3)"), so the phone and the PC read and write one text.
+>
+> Decided with the user the same day, on Telegram-style mockups (an HTML question; `scratchpad/tg-notes/`): the note sits
+> **under the card's title** (an expandable quote); the cog's page gets a **🗒️ Note ▸ page**; the text comes as **"Reply or
+> next message"**, the user's comment "with expiration msg"; the extras **➕ Add a line**, **/note** and **a line when the PC
+> changes it** (not picked: ↩ Undo after Remove).
+
+**What the user sees.**
+- **The card** shows the note right under its title, where the PC's hover card shows it: `🗒️ <the note>` in an EXPANDABLE quote
+  (`CardNoteBlockHtml`), so a short note shows whole and a long one folds after about three lines until it is tapped. The card
+  carries the first 1,000 characters (`kCardNoteMaxChars`; the card is a status message within Telegram's 4,096); a longer
+  note ends with "…" and "/note shows all of it". An un-noted card's text is exactly what it was, so no card is edited because
+  this build came. The `/status` copy of the card shows the note too.
+- **⚙️ Session** gets **🗒️ Note ▸** in the free half of 📜 All Screen ▸'s row (no existing button moves), opening the NOTE
+  page on the same card: **✏️ Edit note · ➕ Add a line / 🗑 Remove note / ◀ Back** for a session with a note, **✏️ Write a note /
+  ◀ Back** for one without; while a note prompt waits, **✖️ Cancel the prompt** comes first. **🗑 Remove note** asks once more on
+  the card (**🗑️ Yes, remove the note / ◀ Keep it**): with no ↩ Undo, a stray tap must not lose the note in one step.
+- **The NOTE PROMPT** (✏️ / ➕): the bot posts "🗒️ New note" (or "Write a note", or "➕ Add a line to the note") with the title
+  row, "Send it now — your next message here, or a reply to this one, until 14:11. ❌ cancels." and, for ✏️ on a noted session,
+  the note in a code block a phone copies with one tap (to paste and change: Telegram cannot pre-fill the input box). It goes
+  with ForceReply, so the phone opens its reply box under it (placeholder "The new note" / "The line to add"); the toast says
+  the same. For **five minutes** (`kNoteWindowMs`) the user's NEXT message in the topic — or a reply to the prompt — is the
+  note: ✏️ replaces it, ➕ adds the text on a line of its own. The message gets 👌, the prompt goes, the card shows the new
+  note. A note past 2,000 characters is cut, and a reply says so.
+- **The expiration message** (the user's "with expiration msg"): a prompt nothing answered in five minutes ends — its message
+  goes, and a new silent message says "⌛ Note prompt expired · 14:11 … No note came in time: the note is unchanged, and your
+  messages go to Claude again. ⚙️ Session → 🗒️ Note ▸ asks again." (a new message, because an edit of the prompt would not be
+  noticed).
+- **/note** (in the "/" menu and the topic's help): bare = the whole note with its edit time; `/note <text>` writes it,
+  `/note + <text>` adds a line, `/note -` (or a dash a phone made of it) removes it; 👌 on the command when it wrote. An open
+  prompt ends when /note writes.
+- **A change at the PC** (the editor in any window, F3): the topic gets a silent "🗒️ Note changed at the PC" with the note's
+  first line, or "🗒️ Note removed at the PC", and the card shows the new note.
+
+**The prompt's rules** (`DecideNoteWindowMessage`, MessagingNote.h; checked FIRST in `_handleTopicMessage`, before /btw, the
+queue's gestures and a question card's text, because the user asked to write and is writing):
+- a reply to the prompt is the note whatever its date (the clearest answer); a ❌ (the queue's X vocabulary,
+  `ClassifyQueueReply`) as that reply, or alone, cancels the prompt (👌 on it);
+- every /command keeps its meaning (`/note <text>` writes the note itself; /status, /steer, /cc still work);
+- a ❌ / ➕ reply to ANOTHER message is the queue's gesture (§21.57.7), never the note;
+- any other message counts when it was SENT inside the window (its own `date`, 5 s of slack for the two clocks), so a voice
+  note spoken in time still counts when its transcript comes later; "btw …" is the note, not a side question;
+- a message a new thread held, and one with no text (a sticker, a bare photo), are never the note;
+- one message takes the window: the claim ends it by its `seq` before anything is written, so a voice transcript (tick
+  thread) and a typed message (poll thread) decided at once cannot both write.
+- **The expiry** (`DecideNoteWindowTick`, the service's tick): past the five minutes the prompt ends — unless a voice note of
+  the topic, sent inside the window, is still in its transcription lane: then up to three more minutes
+  (`kNoteWindowVoiceGraceMs`).
+
+**How it works** (Messaging.Note.cpp):
+- **The note the cards show** is a cache (`_notesShown`, under the leaf lock `_notesMtx`): read from the store at a session's
+  first card, then kept true by the tick's **epoch pass** — when `SessionNotesEpoch()` moved (every write that changed a note,
+  by either side), every topic's note is read again (`ClassifyNoteChange`): a first sight is shown silently, a change refreshes
+  the card, and a change the service did not make posts the PC-change line. The epoch is recorded only after a whole pass. A
+  quiet tick reads no file.
+- **The one writer** (`_writeSessionNote`): the shown note is recorded FIRST, then `SetSessionNote` (normalized, stamped,
+  `AtomicWriteUtf8`, which refuses an unreadable record, Rule #16), then the card is refreshed at an answer's priority — so the
+  epoch pass reads the service's own write as no change. A refused write puts the shown note back and says so in the topic
+  ("The note could not be saved…"); the words are still in the user's message.
+- **The window** (`_noteWindows`, one per session, in memory: a restart forgets it): opened by ✏️ / ➕ (a second tap replaces
+  the first; its prompt goes), ended by its text, ✖ / ❌, /note or the expiry (`_endNotePrompt`, by `seq`). The prompt is
+  posted outside the sticky card's clock (the question card's ✍️ recipe); a prompt whose post is answered after its window
+  ended is deleted at once.
+- **The card**: `CardExtras::noteText` (the cache) → `CardNoteBlockHtml` right after the title token in `BuildCardText`;
+  `CardButtonFacts::hasNote` / `notePromptOpen` are set by `_cardMarkupFor` (the service's facts, like the picture button);
+  `CardPage::Note` / `NoteRemove`; the verbs `note`, `noteedit`, `noteadd`, `noterm`, `notermok`, `notecancel` (the longest,
+  `c:notecancel:` + 36, is 49 bytes). A tap acts on the sticky card's OWNER (a /clear moves the card to the tab's next
+  session). The quote passes the rich converter whole (`<blockquote expandable>` through, its line breaks as `<br>`).
+- `NormalizeSessionNote(raw, &wasCut)` reports a cut (the Telegram side did not see the text typed).
+- Claude Code 2.1.322 has no /note or /notes (its command table, checked 2026-11-18), so `note` in `kAgentmasterCommands`
+  hides nothing.
+- **Logs**: `[msg] <sid8> note written, N chars (prompt|/note|remove)` (the size, never the text), `… note prompt opened (edit,
+  until 14:11)` / `ended (written|cancelled|expired)`, `… note changed at the PC: the topic is told`; `[nav] remote telegram
+  note-prompt <sid8> edit|add|-> …`, `… note <sid8> -> written|removed`, `… /note <sid8> -> shown|written|line added|removed`,
+  `card-page <sid8> note|note-remove`.
+
+**Checked without a build:** `tests_messaging_note.cpp` (`TestMessagingNote`: the window's every verdict and its slack, the
+expiry and the voice wait, /note's reading, the composed note, the change verdict, the texts' escaping and row markers, the
+card's block, its cap and surrogate safety, its place under the title, the un-noted card unchanged, the Note pages and their
+data) and `tests_messaging_card.cpp` (the Session page's All Screen row now holds 🗒️ Note ▸; every page × note fact within 64
+bytes, two buttons a row) - the m5 harness compiled and run from a Q: scratch folder with a scratch profile: 14,347 checks, the
+only failures the 3 known TaskbarBadge ones (the baseline). `cl /Zs` with the app's own flags (a clean worktree build's recorded
+command lines): `SessionStore.cpp`, every `Messaging*.cpp` (the new `Messaging.Note.cpp`, `Messaging.Btw.cpp` and
+`Messaging.Queue.cpp` on `Messaging.Questions.cpp`'s line), `MessagingSearchBridge.cpp` and `TerminalPage.AgentMessaging.cpp`
+pass with no warning; a `static_assert` planted in `_noteTick` fails with exactly C2338 at its line. Nothing in Telegram itself
+can be checked without a build: the list below is owed.
+
+**Checks after the build** (the dev bot):
+1. A noted session's card shows the note under its title, folded when long; an un-noted card did not change.
+2. ⚙️ Session → 🗒️ Note ▸ → ✏️ Edit note: the prompt comes with the note to copy, the phone's reply box opens; send a plain
+   message: 👌, the prompt goes, the card shows it; the PC's tab hover card and side-panel glyph show it within seconds.
+3. ➕ Add a line, then a reply to the prompt: the line is added under the note. A ❌ cancels; ✖️ Cancel the prompt cancels.
+4. Let a prompt expire: the expiration message comes, and the next message goes to Claude.
+5. 🗑 Remove note → 🗑️ Yes, remove the note: the card loses the note; ◀ Keep it keeps it.
+6. /note, /note text, /note + text, /note - — and a 2,500-character /note: cut, and said.
+7. Change the note at the PC (F3): the topic gets "Note changed at the PC" and the card follows.
+8. A voice note as the note's text, sent in the window: its transcript becomes the note.
+
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
 > The user's questions (2026-10-17, session 0b1f8635): "Lets discover how can we make forums/groups to: Can you make groups

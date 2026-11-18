@@ -1143,7 +1143,16 @@ namespace Agentmaster::Msg
         _registry->UpdateQuiet(sessionId, [](SessionInfo& s) { s.readUnixMs = WallMs(); });
         // The user's own message is now the bottom of the topic: the sticky card follows it (§21.5).
         _noteTopicPosted(threadId);
-        // §21.56: a SIDE QUESTION (/btw <question>, "btw …", "by the way …", and its clear and usage forms) is taken FIRST: it is
+        // §21.59: while a NOTE PROMPT waits for this session's text (✏️ / ➕ on the card's Note page), the next message here - or a
+        // reply to the prompt - is the note (the user's pick "Reply or next message", 2026-11-18). Taken before everything else,
+        // /btw's "btw …" included: the user asked to write and is writing. A /command, a ❌ / ➕ reply to another message (the
+        // queue's gesture) and a message a new thread held go their usual way (DecideNoteWindowMessage).
+        if (_takeNoteText(sessionId, msg, threadId, held))
+        {
+            return;
+        }
+        // §21.56: a SIDE QUESTION (/btw <question>, "btw …", "by the way …", and its clear and usage forms) is taken FIRST (after an
+        // open note prompt's text above, which lets every /command through, so "/clear btw" still lands here): it is
         // never the session's next prompt, never a question card's answer, and "/clear btw" must never reach Claude Code's /clear
         // (which would clear the session itself). A message a new thread held counts only as a typed /btw.
         if (_takeBtwMessage(sessionId, msg, threadId, held))
@@ -1543,6 +1552,12 @@ namespace Agentmaster::Msg
             _sendHelp(threadId, false);
             return;
         }
+        if (name == kNoteCommand)
+        {
+            // §21.59: /note shows the session's note, /note <text> writes it, /note + <text> adds a line, /note - removes it.
+            _runNoteCommand(sessionId, cmd.args, msgId, threadId);
+            return;
+        }
         if (name == L"status" || name == L"card")
         {
             int64_t idleLeaves = 0;
@@ -1558,6 +1573,7 @@ namespace Agentmaster::Msg
             CardExtras extras;
             extras.colorSquare = _titleSquare(&*s); // §21.13: the title with the tab's color, as the tab shows it now
             extras.threadId = _threadOf(sessionId); // §21.17: the title links to the session's topic
+            extras.noteText = _noteShownFor(sessionId); // §21.59: the copy shows the note under its title, as the sticky card does
             _reply(threadId, BuildCardText(*s, WallMs(), idleLeaves, _scheduler ? _scheduler->GlobalPaused() : false, &extras), false, markup);
             // §21.40: /status then sends what Claude Code's own /status shows (its Status tab, the account, the plan usage), read on
             // a worker thread and sent as a reply to the command; /card stays the card copy alone.
@@ -3094,6 +3110,20 @@ namespace Agentmaster::Msg
                 // goes on.
                 cmd.name = L"screenimage";
                 _runSessionCommand(sid, cmd, fake, threadId);
+                return;
+            }
+            else if (verb == kCardVerbNotePage || verb == kCardVerbNoteRemove)
+            {
+                // §21.59: 🗒️ Note ▸ (and ◀ Keep it) shows the NOTE page, 🗑 Remove note its confirmation - page flips on the message
+                // the button sits on, like ⚙ Session's; nothing is posted and nothing is removed yet.
+                answer(L"");
+                _showCardPage(sid, messageId, verb == kCardVerbNotePage ? CardPage::Note : CardPage::NoteRemove);
+                return;
+            }
+            else if (verb == kCardVerbNoteEdit || verb == kCardVerbNoteAdd || verb == kCardVerbNoteRemoveYes || verb == kCardVerbNoteCancel)
+            {
+                // §21.59: the NOTE page's actions - a prompt opened (its toast says until when), the note removed, the prompt closed.
+                answer(_noteFromCard(sid, verb, threadId, messageId));
                 return;
             }
             else if (verb == kCardVerbAllScreen)
@@ -7295,6 +7325,8 @@ namespace Agentmaster::Msg
                    // §21.57: the ticket under a waiting message, and the two reply gestures.
                    L"A message that has to wait gets a ticket under it (its number, why it waits): \x26A1 Steer sends it now, \U0001F5D1 Delete takes it out (\x21A9 Undo for 2 minutes), \x23EB Move Up, \U0001F517 Merge \x2191 joins it to the one above (after a preview). Reply \x274C to a waiting message (or voice note) to remove it, \x2795 to any earlier message to queue it again; deleting your message drops it before it is sent; an edit changes it\n"
                    L"/queue \x00B7 /sendnow \x00B7 /steer &lt;text&gt; \x00B7 /unqueue n\n/runner auto|paused\n/pin \x00B7 /unpin \x2014 never idle\n/wake \x00B7 /moveidle \x00B7 /markunread\n/rename &lt;title&gt;\n/favorite \x00B7 /tags \x00B7 /tag x \x00B7 /untag x\n"
+                   // §21.59: the session's note - the card shows it under its title, and its 🗒️ Note ▸ page (in ⚙️ Session) edits it.
+                   L"/note \x2014 the session's note \x00B7 /note &lt;text&gt; writes it \x00B7 /note + &lt;text&gt; adds a line \x00B7 /note - removes it (the card shows it under its title; \x2699\xFE0F Session \x2192 \U0001F5D2\xFE0F Note \x25B8 edits it too)\n"
                    L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /screenimage\n"
                    // §21.40: /status sends the card copy, then what Claude Code's own /status dialog shows.
                    L"/status \x2014 the card, then what Claude Code's /status shows: version, model, MCP servers, memory, account, plan usage\n"

@@ -259,9 +259,12 @@ namespace Agentmaster
     //   - the result is cut to kMaxSessionNoteLength code units, never inside a surrogate pair (a cut that would split one
     //     drops its high half too, so the stored text is always valid UTF-16).
     //   raw     - the text as typed or read.
+    //   wasCut  - optional: set to true when the cap cut the text (after the ends were trimmed), else false — so a writer
+    //             that did not see the text typed (Telegram's /note, the note prompt: MESSAGING.md §21.59) can say the note
+    //             lost its tail. Null = not asked.
     //   returns - the stored form; "" means "no note" (the setter removes the keys).
     //   throws  - std::bad_alloc.
-    std::wstring NormalizeSessionNote(std::wstring_view raw);
+    std::wstring NormalizeSessionNote(std::wstring_view raw, bool* wasCut = nullptr);
 
     // A session's stored note as one value: the text and when it was last saved.
     struct StoredSessionNote

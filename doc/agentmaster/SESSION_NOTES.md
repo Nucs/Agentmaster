@@ -347,6 +347,16 @@ marker; the hover) and an SP flow (the glyph; its card beside the panel in both 
 
 ## 10. Not in this design
 
-The note on the Sessions page (a column, a search scope), on the board card's and the tree row's tips, on Telegram's
-sticky card, in the AI search's tab tools, in the session database's `am_*` tables and on the side panel's AI result
-cards; notes on shell tabs (they would live in the window record, the shell tab's only store).
+The note on the Sessions page (a column, a search scope), on the board card's and the tree row's tips, in the AI search's
+tab tools, in the session database's `am_*` tables and on the side panel's AI result cards; notes on shell tabs (they would
+live in the window record, the shell tab's only store).
+
+## 11. In Telegram
+
+The note is on the topic's sticky card too, and edited from the phone: [MESSAGING.md §21.59](MESSAGING.md) (the user's
+request of 2026-11-18, "We need note in telegram bottom pinned message and through cog icon we can edit the note and such").
+The card shows it under its title in an expandable quote; ⚙️ Session → 🗒️ Note ▸ opens a Note page (✏️ Edit note · ➕ Add a
+line · 🗑 Remove note); a note prompt takes the topic's next message (or a reply) for five minutes, then expires with a
+message; `/note` shows, writes, adds a line, removes; a change made here at the PC is told in the topic. Both sides write the
+same SessionStore keys, so the PC's belts (the tab markers, the side panel's cards, an open hover card) follow a note written
+from the phone as they follow another window's (`SessionNotesEpoch()`), and the bot follows the PC's the same way.
