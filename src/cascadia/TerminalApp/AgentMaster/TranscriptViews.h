@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster - the transcript overlay's TABS beyond the five detail levels: the three BOX TABS Custom, User Only and
-// Assistant Only (doc/agentmaster/TRANSCRIPT_OVERLAY.md 3j). The tab row reads
-//     Default · Max · Full · Compact · Minimal | Custom · User Only · Assistant Only  (i)
+// Assistant Only (doc/agentmaster/TRANSCRIPT_OVERLAY.md 3j), and the DIFF tab (3l: the conversation with each turn's net
+// file changes; its text is TranscriptTurns.h RenderTranscriptDiffFile's, its diff rules TranscriptDiff.h). The tab row reads
+//     Default · Max · Full · Compact · Minimal | Custom · User Only · Assistant Only | Diff  (i)
 // and each box tab is Minimal's view of ONE or BOTH sides of every turn, plus whatever the user ticks in a row of
 // twelve BOXES above the transcript - one per feature the higher levels add (Compact's slash commands, compaction
 // markers, answers, agents and call reasons; Default's full call lines and remarks; Full's Bash commands, first output
@@ -51,20 +52,34 @@ namespace Agentmaster
         Custom = 5, // both sides of each turn, from Minimal, plus the ticked boxes
         UserOnly = 6, // the user's own messages, from Minimal, plus the ticked boxes (no final reply, no teammate's message)
         AssistantOnly = 7, // Claude's side, from Minimal, plus the ticked boxes (no message that reached a turn)
+        // The conversation with each turn's NET file changes as GitHub-style diff cards (TRANSCRIPT_OVERLAY.md 3l):
+        // Minimal's messages, one row per different Bash reason (xN), a card per file a turn changed; an outline of the
+        // turns and files beside it. Its text is TranscriptTurns.h RenderTranscriptDiffFile's, not a TurnsOptions render.
+        Diff = 8,
     };
 
-    // How many views exist (the overlay's view array); the first box tab's index; how many box tabs there are.
-    inline constexpr int kTranscriptViewCount = 8;
+    // How many views exist (the overlay's view array); the first box tab's index; how many box tabs there are (they run
+    // from kTranscriptFirstBoxView; the Diff tab follows them and is no box tab).
+    inline constexpr int kTranscriptViewCount = 9;
     inline constexpr int kTranscriptFirstBoxView = static_cast<int>(TranscriptView::Custom);
-    inline constexpr int kTranscriptBoxViewCount = kTranscriptViewCount - kTranscriptFirstBoxView;
+    inline constexpr int kTranscriptBoxViewCount = 3;
     static_assert(kTranscriptFirstBoxView == kTurnsLevelCount, "the box tabs follow the five levels: a level's view index is its TurnsLevel value");
+    static_assert(kTranscriptFirstBoxView + kTranscriptBoxViewCount == static_cast<int>(TranscriptView::Diff), "the Diff tab follows the three box tabs");
 
     // Whether `view` is one of the three box tabs (Custom, User Only, Assistant Only).
-    // Parameters: view - a view index; any int (out-of-range values are simply not box tabs).
+    // Parameters: view - a view index; any int (out-of-range values - and the Diff tab - are simply not box tabs).
     // Returns true for 5..7. Never throws.
     constexpr bool IsTranscriptBoxView(int view) noexcept
     {
-        return view >= kTranscriptFirstBoxView && view < kTranscriptViewCount;
+        return view >= kTranscriptFirstBoxView && view < kTranscriptFirstBoxView + kTranscriptBoxViewCount;
+    }
+
+    // Whether `view` is the Diff tab.
+    // Parameters: view - a view index.
+    // Returns true for 8. Never throws.
+    constexpr bool IsTranscriptDiffView(int view) noexcept
+    {
+        return view == static_cast<int>(TranscriptView::Diff);
     }
 
     // When a box has any effect on the render - the ladder features are not all independent: some print only under a
@@ -149,6 +164,8 @@ namespace Agentmaster
             return L"user-only";
         case static_cast<int>(TranscriptView::AssistantOnly):
             return L"assistant-only";
+        case static_cast<int>(TranscriptView::Diff):
+            return L"diff";
         default:
             return TurnsLevelName(static_cast<TurnsLevel>(view));
         }
@@ -184,6 +201,8 @@ namespace Agentmaster
             return L"User Only";
         case static_cast<int>(TranscriptView::AssistantOnly):
             return L"Assistant Only";
+        case static_cast<int>(TranscriptView::Diff):
+            return L"Diff";
         default:
             return TranscriptLevelLabel(static_cast<TurnsLevel>(view));
         }
@@ -255,10 +274,18 @@ namespace Agentmaster
     // ticks ignored. A box tab is Minimal with each ladder feature its box decides (ticked = on, everything else off), then
     // its sides: Custom keeps both, User Only drops the final replies and the messages teammates and other sessions sent,
     // Assistant Only drops every message that reached a turn.
+    // The Diff tab renders through its own document (TranscriptTurns.h RenderTranscriptDiffFile), which parses with Minimal's
+    // options and the agents on; that is what it answers here (only its `ops` is read by the overlay: no fold areas).
     // Parameters: view - a view index (out of range: Default's options); ticked - the box tab's ticked list.
     // Returns the options. Never throws (nothing in it allocates).
     inline TurnsOptions TranscriptViewOptions(int view, const std::vector<std::wstring>& ticked) noexcept
     {
+        if (IsTranscriptDiffView(view))
+        {
+            TurnsOptions diff = TurnsOptionsForLevel(TurnsLevel::Minimal);
+            diff.agents = true;
+            return diff;
+        }
         if (!IsTranscriptBoxView(view))
         {
             return TurnsOptionsForLevel(static_cast<TurnsLevel>(view));
@@ -343,6 +370,20 @@ namespace Agentmaster
     // Returns the tooltip text. Throws std::bad_alloc only.
     inline std::wstring TranscriptViewTip(int view, size_t shortcut)
     {
+        if (IsTranscriptDiffView(view))
+        {
+            std::wstring tip = L"Diff";
+            if (shortcut > 0)
+            {
+                tip += L" (key " + std::to_wstring(shortcut) + L")";
+            }
+            tip += L"\nThe conversation with the code it changed, turn by turn: your messages and each final reply, as in Minimal."
+                   L"\nUnder each turn: one row per different reason its Bash calls gave (repeats counted), and a GitHub-style card per file"
+                   L" it changed - the turn's net change, its agents' edits included."
+                   L"\nThe outline on the left jumps to a turn or a file; Expand on a card shows more lines, read from the file as it is now."
+                   L"\nOnly edits made with Edit, MultiEdit, Write and NotebookEdit show: a file a shell command changed does not.";
+            return tip;
+        }
         if (!IsTranscriptBoxView(view))
         {
             return TranscriptLevelTip(static_cast<TurnsLevel>(view), shortcut);
@@ -373,6 +414,13 @@ namespace Agentmaster
                L"\nEach tab keeps its own boxes, in every window.";
         return tip;
     }
+
+    // The (i) panel's paragraph about the Diff tab (TRANSCRIPT_OVERLAY.md 3l).
+    inline constexpr const wchar_t* kTranscriptDiffGuideNote =
+        L"Diff shows the conversation with the code it changed: your messages and each final reply, as in Minimal; under each turn one "
+        L"row per different reason its Bash calls gave (\x00D7" L"5 when one repeats) and a GitHub-style card per file it changed - the turn's net "
+        L"change, its agents' edits included - with Expand reading more lines from the file as it is now. Edits made by shell commands "
+        L"do not show.";
 
     // The (i) panel's paragraph about the box tabs (the comparison table covers the five levels only).
     inline constexpr const wchar_t* kTranscriptViewsGuideNote =

@@ -12,7 +12,8 @@
 // page (the terminal, the Agent Manager page, or the Sessions page — "wherever you are"). The card has a
 // header (title · Wrap · Copy · Refresh · Close), one TAB per transcript detail level in the Copy menu's
 // order (Default · Max · Full · Compact · Minimal), a separator, the three BOX TABS (Custom · User Only ·
-// Assistant Only — below), the (i) level guide, an "Expand all" switch for the level's folded tool calls,
+// Assistant Only — below), a second separator, the DIFF tab (below), the (i) level guide, an "Expand all" switch for
+// the level's folded tool calls,
 // the box tabs' row of check boxes (shown only on those tabs), and a scrolling body with the two JUMP
 // buttons in its bottom-right corner (below). It opens at the tab the user LAST PICKED, in any window: every tab pick
 // is remembered in settings.json (AppSettings::transcriptOverlayLevel, a freshest-disk read-modify-write
@@ -28,6 +29,17 @@
 // settings.json for every window (AppSettings::transcriptOverlay<Tab>Boxes, the same freshest-disk RMW per click).
 // A click re-renders that tab off the UI thread and keeps the reader on the same turn: the turn whose heading was at
 // the top of the view is scrolled back to the top the moment the new render builds it (_ToggleBox → _Pump).
+//
+// THE DIFF TAB (TRANSCRIPT_OVERLAY.md §3l; after a second separator, key 9): the conversation with the code it changed.
+// Its text is TranscriptTurns.h RenderTranscriptDiffFile's Markdown - every turn as Minimal draws it, one "`$` reason ×N"
+// row per different Bash reason, one ```diff block per file the turn changed (its NET change, TranscriptDiff.h) - and the
+// build draws that text differently: the Bash rows as chips with a count pill, each diff block as a GitHub-style card
+// (_BuildDiffCard: a header bar with the file, +a -d, a Viewed box; numbered rows on red / green bands; an expand row
+// above each hunk and below the last that reveals more lines read from the file AS IT IS NOW, marked with a yellow edge).
+// Diff code never wraps, whatever the ↵ toggle says (a wrapped line would break the number columns): with ↵ on, a card
+// whose lines are wider than the page scrolls sideways on its own; with ↵ off, its long lines are cut at the right edge
+// like every other line. Left of the page an OUTLINE lists the turns that changed files with their files; a click jumps
+// there, and the entry of the turn on top of the page is lit as it scrolls.
 //
 // THE JUMP BUTTONS: two small round buttons stacked in the body's bottom-right corner — ↑ (to the top) shows while
 // the view is scrolled down from the top, ↓ (to the bottom) while there is more below; neither shows on a view too
@@ -109,13 +121,17 @@
 #include <winrt/Microsoft.Terminal.UI.h> // TextMenuFlyout — the multi-window-safe text context menu
 
 #include "AgentMaster/MarkdownBlocks.h" // MdBlock — the render blocks a level is built from
+#include "AgentMaster/TranscriptDiff.h" // DiffHunk — the Diff tab's cards (TRANSCRIPT_OVERLAY.md §3l)
 #include "AgentMaster/TranscriptViews.h" // kTranscriptViewCount / kTranscriptViewBoxes / TurnsOptions — the tabs, the boxes, a view's render options
 
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -177,8 +193,8 @@ namespace winrt::TerminalApp::implementation
         // dispatcher tick later, once the view is laid out). UI thread. No-op before Attach.
         // Parameters:
         //   source — the conversation (see TranscriptOverlaySource).
-        //   level  — a VIEW index 0..7 (TranscriptViews.h TranscriptView: a TurnsLevel value 0..4 for
-        //            Minimal..Max, then 5 Custom, 6 User Only, 7 Assistant Only; above 7 is clamped), or
+        //   level  — a VIEW index 0..8 (TranscriptViews.h TranscriptView: a TurnsLevel value 0..4 for
+        //            Minimal..Max, then 5 Custom, 6 User Only, 7 Assistant Only, 8 Diff; above 8 is clamped), or
         //            kRememberedLevel (any negative value) for the tab last picked in any window — read from
         //            settings.json right now, Default when nothing was picked yet or the stored name is
         //            unknown. The menus pass kRememberedLevel. Opening does NOT itself remember anything:
@@ -237,8 +253,59 @@ namespace winrt::TerminalApp::implementation
             winrt::Windows::UI::Xaml::Controls::FontIcon chevron{ nullptr };
         };
 
+        // The Diff tab's OUTLINE (TRANSCRIPT_OVERLAY.md §3l): every turn that changed files, with its files - computed off the
+        // UI thread from the parsed blocks (_RenderLevel), drawn in the column left of the page when the render lands.
+        struct DiffOutlineFile
+        {
+            std::wstring path; // as the card names it
+            int added = 0;
+            int removed = 0;
+            size_t block = 0; // the card's block index (the jump target, LevelView::diffCards)
+        };
+        struct DiffOutlineTurn
+        {
+            int number = 0; // the turn's number in the whole conversation (0 = the work before the first prompt)
+            std::wstring title; // the first line of the user's message that started it, cut to fit
+            std::vector<DiffOutlineFile> files;
+        };
+
+        // One GitHub-style DIFF CARD of the Diff tab (_BuildDiffCard): what it shows and the parts its clicks change. Owned by
+        // its view (LevelView::diffCards); every handler on the card reaches it through a weak_ptr, so no delegate keeps the
+        // card - or its XAML - alive (the CLAUDE.md "handler that captures its own element" gotcha).
+        struct DiffCard
+        {
+            size_t block = 0; // its block index in the view (the outline's jump target)
+            std::wstring filePath; // the file on disk ("+++" side) Expand reads; "" when there is none (nothing to expand from)
+            std::vector<::Agentmaster::DiffHunk> hunks; // the parsed hunks (numbered; an unnumbered card has no Expand)
+            bool numbered = true; // false: the change carried no line numbers (an older Claude Code): no Expand
+            bool truncated = false; // the block was cut at the view's block-size cap: its last hunk is partial (a note says so)
+            bool bodyBuilt = false; // the body exists (a big card builds it on its first open)
+            bool open = true; // the body shows
+            double numberWidth = 0.0; // the line-number columns' width, sized once for the card's biggest number
+            winrt::Windows::UI::Xaml::FrameworkElement root{ nullptr }; // the whole card (what the outline scrolls to)
+            winrt::Windows::UI::Xaml::Controls::StackPanel body{ nullptr }; // the hunks' panels, expand rows and notes
+            winrt::Windows::UI::Xaml::Controls::FontIcon chevron{ nullptr }; // ▾ open / ▸ closed
+            winrt::Windows::UI::Xaml::Controls::CheckBox viewed{ nullptr }; // GitHub's "Viewed": ticked closes the card
+            // Per hunk: the panel holding its header row and its lines - context revealed from the file goes in at its top
+            // (above the header row) or its bottom - and how many lines above / below it were already revealed.
+            std::vector<winrt::Windows::UI::Xaml::Controls::StackPanel> hunkPanels;
+            std::vector<int> revealedAbove;
+            std::vector<int> revealedBelow;
+            // The expand rows and their labels: index h is the row ABOVE hunk h (the gap from the previous hunk, or the file's
+            // start); index hunks.size() is the row below the last hunk. A row that has nothing (more) to show is collapsed;
+            // a null entry was never built (an unnumbered card, no file).
+            std::vector<winrt::Windows::UI::Xaml::Controls::Button> expandRows;
+            std::vector<winrt::Windows::UI::Xaml::Controls::TextBlock> expandLabels;
+            // Where each hunk's new side sits in the file as it is now (LocateHunkNewSide): -2 not looked up yet, -1 not
+            // there (the file changed since), else the 0-based line.
+            std::vector<int> located;
+            // The card's legend under the hunks ("yellow edge: from the file now", "the file cannot be read"), made on the
+            // first expansion that needs it.
+            winrt::Windows::UI::Xaml::Controls::TextBlock note{ nullptr };
+        };
+
         // One tab's state + view: a detail level's, or a box tab's. Indexed by VIEW (TranscriptViews.h TranscriptView: the
-        // TurnsLevel value 0 Minimal .. 4 Max, then 5 Custom, 6 User Only, 7 Assistant Only).
+        // TurnsLevel value 0 Minimal .. 4 Max, then 5 Custom, 6 User Only, 7 Assistant Only, then 8 Diff).
         struct LevelView
         {
             LevelState state = LevelState::Idle;
@@ -332,6 +399,30 @@ namespace winrt::TerminalApp::implementation
             // end, and the end of the build settles on the real last line (_Pump). The reader's own scroll — a wheel turn,
             // a press, an upward key in the view (_CancelFollowEnd) — the ↑ button and a switch to another tab all stop it.
             bool followEnd = false;
+            // --- the Diff tab only (TRANSCRIPT_OVERLAY.md §3l) ---
+            // This view is the Diff tab: its frame holds the outline beside the page, its code blocks of language "diff"
+            // become diff cards, its Bash rows become chips.
+            bool isDiff = false;
+            // What the body holds for this view: the scroll view itself, or (the Diff tab) a grid of the outline and the
+            // scroll view. _SelectLevel shows / hides it; _ResetView takes it out of the tree.
+            winrt::Windows::UI::Xaml::FrameworkElement frame{ nullptr };
+            // The outline column (the Diff tab): its own scroll view and the stack its entries go in.
+            winrt::Windows::UI::Xaml::Controls::ScrollViewer outlineScroll{ nullptr };
+            winrt::Windows::UI::Xaml::Controls::StackPanel outline{ nullptr };
+            // The outline's turn entries with their turn numbers, in rising order (the highlight follows the turn on top of
+            // the page), and the file entries by their card's block index, in rising order (a card ticked "Viewed" dims its
+            // entry).
+            std::vector<std::pair<int, winrt::Windows::UI::Xaml::Controls::Button>> outlineTurns;
+            std::vector<std::pair<size_t, winrt::Windows::UI::Xaml::Controls::Button>> outlineFiles;
+            // The outline entry highlighted now (an index into outlineTurns; -1 none).
+            int outlineLit = -1;
+            // The diff cards built so far, in block order (shared: their handlers hold weak_ptrs).
+            std::vector<std::shared_ptr<DiffCard>> diffCards;
+            // A file entry clicked before its card was built: the card's block index + 1 to scroll to the moment it exists
+            // (_Pump), 0 == none. Dropped like the other pending jumps.
+            size_t pendingCardJump = 0;
+            // The status line's words for a Diff view that is done ("23 turns · 9 with changes · 14 files · +412 -87").
+            std::wstring diffSummary;
         };
 
         // What the background render hands the UI thread for one level.
@@ -348,6 +439,8 @@ namespace winrt::TerminalApp::implementation
             std::wstring forkSourceId; // set when `path` is the FORK SOURCE's transcript (the session has none of its own yet), for the log
             std::vector<::Agentmaster::MdToolArea> areas; // the tool areas among `blocks` (MdFindToolAreas)
             ::Agentmaster::MdSessionChain chain; // the Session chain list + the session headings among `blocks` (MdFindSessionChain)
+            std::vector<DiffOutlineTurn> outline; // the Diff tab: its turns that changed files, with their files (BuildDiffOutline)
+            std::wstring diffSummary; // the Diff tab: its status line's words
         };
 
         // Build every piece of the overlay's XAML (Attach). Throws winrt::hresult_error on a XAML failure.
@@ -372,7 +465,7 @@ namespace winrt::TerminalApp::implementation
         // read-modify-write of just that field (never a stale in-memory copy — a cog Save or another window's pick is
         // never clobbered), skipped when the file already holds it. Best-effort: a failed write (logged) costs only the
         // remembered tab, never the switch the user just made.
-        // Parameters: level — the view index picked (0..7).
+        // Parameters: level — the view index picked (0..8).
         static void _RememberLevel(int level) noexcept;
         // The ticked boxes of the box tab `view` (the in-memory copy Show read from settings.json and each click updates).
         // Parameters: view — a box tab's view index (5..7); any other view reads as an empty list.
@@ -406,11 +499,11 @@ namespace winrt::TerminalApp::implementation
         // (logged) costs only the remembered tick; the view on screen has already changed.
         // Parameters: view — the box tab (5..7); name — the box's name; on — its new state.
         static void _RememberBox(int view, std::wstring_view name, bool on) noexcept;
-        // Discard ONE view's render and XAML so it renders anew — a box click changed what it shows. Its scroll view leaves
-        // the screen at once (Collapsed) and the tree on a later LOW-priority tick (tearing a long view's thousands of
+        // Discard ONE view's render and XAML so it renders anew — a box click changed what it shows. Its frame (its scroll
+        // view; the Diff tab's grid) leaves the screen at once (Collapsed) and the tree on a later LOW-priority tick (tearing a long view's thousands of
         // elements down inside the click would stall it); its "Expand all" is kept; its epoch is bumped, so a render still
         // running for the old boxes is dropped when it lands (_ApplyLevelRender). The other views are untouched.
-        // Parameters: view — the view index (0..7).
+        // Parameters: view — the view index (0..8).
         // Never throws: a XAML failure is logged (Rule #18); the view is reset either way.
         void _ResetView(int view) noexcept;
         // The number of the turn the reader is on in `view`: the last BUILT turn heading at or above the top edge of the
@@ -453,6 +546,124 @@ namespace winrt::TerminalApp::implementation
         // Parameters: scroll — the event's sender.
         // Never throws.
         void _CancelFollowEnd(const winrt::Windows::Foundation::IInspectable& scroll) noexcept;
+
+        // ---- the Diff tab (TRANSCRIPT_OVERLAY.md §3l) ----
+
+        // Fill the Diff view's outline column from its render's turns: per turn a button ("Turn 4 · <its message's first
+        // words>", the files' total +/-) and under it a button per file (its path, +a -d). A click scrolls the page to that
+        // turn's heading or that file's card - at once when it is built, else the moment the build reaches it (the pending
+        // turn / card jumps, _Pump). Built once per render (the outline is short: one entry per changed file); a turn
+        // without changes is not listed - it stays in the page as its messages.
+        // Parameters: view — the Diff view; turns — its outline (LevelRender::outline).
+        // Throws winrt::hresult_error / std::bad_alloc (_ApplyLevelRender's callers contain them).
+        void _BuildDiffOutline(LevelView& view, const std::vector<DiffOutlineTurn>& turns);
+        // Light the outline entry of the turn at the top of the Diff page (the last turn heading at or above the edge,
+        // _TopTurnNumber - only an exact match: a turn without changes has no entry, and lighting a neighbour would say the
+        // reader is somewhere they are not), and scroll the outline to keep it in sight. Runs on the page's ViewChanged and
+        // after a jump; sets only on a change.
+        // Never throws: a failure is logged (Rule #18) and the highlight stays as it was.
+        void _UpdateDiffOutlineHighlight() noexcept;
+        // An outline turn entry's click: scroll the Diff page to turn `number`'s heading (_ScrollToTurnHeading), or - not
+        // built yet - make it the view's pending turn jump, done by _Pump the moment the heading exists. "Work before the
+        // first prompt" has no number (0): its first file's card is the target instead (`firstBlock`).
+        // Parameters: number — the turn's number (0: the work before the first prompt); firstBlock — that turn's first card's
+        //             block index.
+        // Throws winrt::hresult_error on a XAML failure (the entry's Click handler contains it).
+        void _JumpToDiffTurn(int number, size_t firstBlock);
+        // An outline file entry's click: scroll the Diff page to the card of block `block` (_ScrollElementToTop), or - not
+        // built yet - make it the view's pending card jump (_Pump). A newer click replaces an older one.
+        // Parameters: block — the card's block index.
+        // Throws winrt::hresult_error on a XAML failure (the entry's Click handler contains it).
+        void _JumpToDiffCard(size_t block);
+        // A turn heading of the Diff page ("### Turn 4 · <times> · 2 files · +9 -1"): the heading as every view draws it, with
+        // its trailing counts drawn the GitHub way - the "2 files" dim, "+9" green, "-1" red. A heading without counts (a turn
+        // that changed nothing, a session heading) is drawn as usual.
+        // Parameters: view — the Diff view (a heading resets its speaker bar); block — the heading.
+        // Returns the heading's text block. Throws winrt::hresult_error / std::bad_alloc (the build's catch contains them).
+        winrt::Windows::UI::Xaml::FrameworkElement _BuildDiffHeading(LevelView& view, const ::Agentmaster::MdBlock& block);
+        // A Bash row of the Diff page ("- `$` <reason> ×N", IsDiffBashRow): a "$" chip, the reason (its own styled runs:
+        // a command shown as code stays code), and - for a reason repeated in the turn - a "×N" pill. No list marker: the
+        // chip is the row's mark.
+        // Parameters: block — the row's list-item paragraph.
+        // Returns the row. Throws winrt::hresult_error / std::bad_alloc (the build's catch contains them).
+        winrt::Windows::UI::Xaml::FrameworkElement _BuildDiffBashRow(const ::Agentmaster::MdBlock& block);
+        // Build a GitHub-style DIFF CARD for a ```diff block of the Diff view: a header bar (chevron, the file as shown, its
+        // +a -d with five bars, what the block is, a "Viewed" box) over the hunks - each hunk's header row, its lines with the
+        // old and new line numbers on red / green bands - and an expand row above every hunk and below the last one. A card
+        // of more than kDiffCardOpenRows lines starts closed and builds its body on its first open.
+        // Parameters: view — the Diff view (the card is recorded in view.diffCards); block — the code block; index — its
+        //             block index (the outline's jump target).
+        // Returns the card's root element. Throws winrt::hresult_error / std::bad_alloc (the build's catch contains them).
+        winrt::Windows::UI::Xaml::FrameworkElement _BuildDiffCard(LevelView& view, const ::Agentmaster::MdBlock& block, size_t index);
+        // Build a card's body: per hunk its expand row (only where lines can lie above it: a hunk at the file's start has
+        // none), its header row and its lines, in a horizontal scroll view shared by the whole body (code never wraps - a
+        // line wider than the page scrolls sideways, GitHub's way); then the expand row below the last hunk, and the note of
+        // a card cut at the block cap or without line numbers. At the card's build, or on a big card's first open.
+        // Parameters: card — the card (its hunks parsed). Throws winrt::hresult_error / std::bad_alloc.
+        void _BuildDiffCardBody(const std::shared_ptr<DiffCard>& card);
+        // A run of diff lines as ONE element: four text blocks side by side - the old numbers, the new numbers, the +/- marks
+        // and the code, one line each per row, every line exactly kDiffLineHeight tall so the columns stay level - over
+        // childless bands (green under added rows, red under removed ones, a stronger tint under their numbers). Four text
+        // blocks per run instead of a grid per line: a long diff costs a few layouts, not thousands (CLAUDE.md "Per-tab XAML
+        // is multiplied"). The code column is selectable with the shared text menu, so lines copy as code without their
+        // marks. Lines read from the file as it is now (`fromFileNow`) carry a yellow left edge.
+        // Parameters: rows — the lines (NumberHunkRows' numbering: 0 = no number on that side); numberWidth — each number
+        //             column's width; fromFileNow — see above.
+        // Returns the element. Throws winrt::hresult_error / std::bad_alloc.
+        winrt::Windows::UI::Xaml::FrameworkElement _MakeDiffLines(const std::vector<::Agentmaster::DiffRow>& rows, double numberWidth, bool fromFileNow) const;
+        // Build expand row `row` of `card` (a full-width button: an arrow and its label) and record it in card.expandRows /
+        // card.expandLabels; its click runs _ExpandDiffCard. Its label says what a click shows - before the file is read, as
+        // much as the hunks' own numbers tell (_SyncDiffExpandRows refines it once the file is known).
+        // Parameters: card — the card; row — h for the row above hunk h, hunks.size() for the row below the last.
+        // Returns the button. Throws winrt::hresult_error / std::bad_alloc.
+        winrt::Windows::UI::Xaml::Controls::Button _MakeDiffExpandRow(const std::shared_ptr<DiffCard>& card, size_t row);
+        // Open or close a card: its body's visibility and its chevron, building the body first when it was never built.
+        // Parameters: card — the card; open — the new state. Throws winrt::hresult_error / std::bad_alloc.
+        void _SetDiffCardOpen(const std::shared_ptr<DiffCard>& card, bool open);
+        // The "Viewed" box's click (GitHub's: a file the reader is done with): ticked closes the card and dims its outline
+        // entry; unticked opens it again. Lives as long as the overlay's view (never remembered across opens).
+        // Parameters: card — the card; viewed — the box's new state. Throws winrt::hresult_error / std::bad_alloc.
+        void _SetDiffCardViewed(const std::shared_ptr<DiffCard>& card, bool viewed);
+        // An expand row's click: reveal more lines around a hunk from the file AS IT IS NOW (the user's pick): the file's
+        // lines when already read, else a read off the UI thread first (_LoadDiffFileAsync), the expansion queued for it
+        // (one read per file however many clicks wait for it).
+        // Parameters: card — the card; row — the expand row's index (h: above hunk h; hunks.size(): below the last).
+        // Never throws: a failure is logged (Rule #18) and the card stays as it was.
+        void _ExpandDiffCard(const std::shared_ptr<DiffCard>& card, size_t row) noexcept;
+        // Apply one expansion with the file's lines known: find each hunk in the file (LocateHunkNewSide, once per hunk),
+        // then insert up to kDiffExpandStep lines - going up from the hunk (a gap between two hunks of at most
+        // kDiffGapExpandAll lines opens whole), or down from the last one - numbered from the hunk's own numbers and marked
+        // "from the file now". A hunk the file no longer holds, or a file that cannot be read, turns the rows into a dim
+        // note saying so (_SyncDiffExpandRows).
+        // Parameters: card — the card; row — as for _ExpandDiffCard; fileLines — the current file (null: it cannot be read).
+        // Throws winrt::hresult_error / std::bad_alloc (_ExpandDiffCard and _OnDiffFileLoaded contain them).
+        void _ApplyDiffExpansion(DiffCard& card, size_t row, const std::shared_ptr<const std::vector<std::wstring>>& fileLines);
+        // Bring every expand row of `card` in line with what is known: with the file read (`fileLines`), each row's label
+        // counts the lines it can still show and a row with none left is collapsed; a row whose hunk is no longer in the file
+        // (or a file that cannot be read) is disabled with a dim label saying why. Without the file, the hunks' numbers
+        // decide (a gap of 0 lines has no row).
+        // Parameters: card — the card; fileLines — the current file, or null when it is not read yet / cannot be read;
+        //             readFailed — true when it was read and could not be.
+        // Throws winrt::hresult_error / std::bad_alloc.
+        void _SyncDiffExpandRows(DiffCard& card, const std::vector<std::wstring>* fileLines, bool readFailed);
+        // Read a file's current lines on a pool thread (UTF-8, a BOM dropped, at most kDiffFileMaxBytes), then hand them to the
+        // UI thread (_OnDiffFileLoaded). Static, holding only `weak` (the last-ref-on-a-pool-thread gotcha); never lets an
+        // exception escape (a fire_and_forget escape is a process kill).
+        // Parameters: weak / dispatcher — the overlay and its UI thread; path — the file; generation — the overlay's stamp.
+        static winrt::fire_and_forget _LoadDiffFileAsync(winrt::weak_ref<AgentTranscriptOverlay> weak,
+                                                         winrt::Windows::System::DispatcherQueue dispatcher,
+                                                         std::wstring path,
+                                                         uint64_t generation);
+        // A file read landed: cache its lines (null for a file that could not be read) and run every expansion that waited
+        // for it, in click order. A result for an older generation (the overlay was retargeted, refreshed or closed) is dropped.
+        // Parameters: path — the file; lines — its lines, or null; generation — the stamp the read started under.
+        // Never throws: a failure is logged (Rule #18).
+        void _OnDiffFileLoaded(const std::wstring& path, std::shared_ptr<const std::vector<std::wstring>> lines, uint64_t generation) noexcept;
+        // Scroll `view` so `element` sits a hair below the top edge, with no animation (an outline file entry's jump) - the
+        // session jump's recipe (UpdateLayout first: ChangeView clamps to the current extent). Focus is not moved.
+        // Parameters: view — the current view; element — a built element of its content.
+        // Never throws: a failure is logged (Rule #18) and the view stays where it was (it runs inside a build slice too).
+        void _ScrollElementToTop(LevelView& view, const winrt::Windows::UI::Xaml::FrameworkElement& element) noexcept;
         // Create `level`'s scroll view + content stack (once), set to the current line-wrap mode
         // (_wrapLines), and put it in the body.
         void _EnsureLevelView(int level);
@@ -480,6 +691,14 @@ namespace winrt::TerminalApp::implementation
         // among the levels). A box tab of a Codex session has nothing to render (Codex has no turns view): `out` gets a
         // message saying so. Runs on the pool thread; touches no member. Never throws (contained + logged).
         static void _RenderLevel(const TranscriptOverlaySource& source, int level, const ::Agentmaster::TurnsOptions& options, LevelRender& out) noexcept;
+        // The Diff tab's OUTLINE and status words, read off its parsed blocks on the pool thread (_RenderLevel): every top-level
+        // turn heading starts a turn (TurnHeadingNumber; "Work before the first prompt" is turn 0); the first line of the first
+        // message quoted under a "❯" or "✉" label is its title; every top-level ```diff block is one of its files - its shown
+        // path from the fence's info, its +/- from its rows (ParseUnifiedDiff). A turn with no diff block is counted but left
+        // out of the outline. The words: "23 turns · 9 with changes · 14 files · +412 −87" (files counted once each, by path).
+        // Parameters: blocks — the parsed Diff document; out — receives `outline` and `diffSummary`.
+        // Throws std::bad_alloc only (_RenderLevel's net contains it).
+        static void _ScanDiffOutline(const std::vector<::Agentmaster::MdBlock>& blocks, LevelRender& out);
         // UI thread: adopt a finished render — unless the overlay was retargeted, refreshed or closed
         // since (`generation` mismatch) or this one view was reset by a box click (`epoch` mismatch) — and start
         // building its XAML.
@@ -668,10 +887,10 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Border _wrapButtonFace{ nullptr };
         winrt::Windows::UI::Xaml::Controls::FontIcon _wrapGlyph{ nullptr }; // that toggle's ↵ glyph: bright while ON, dim while OFF
         winrt::Windows::UI::Xaml::Controls::Grid _tabsRow{ nullptr }; // the level tabs + the status line
-        std::vector<winrt::Windows::UI::Xaml::Controls::Button> _tabButtons; // one per tab: the kTranscriptCopyMenu levels in its order, then Custom, User Only, Assistant Only
+        std::vector<winrt::Windows::UI::Xaml::Controls::Button> _tabButtons; // one per tab: the kTranscriptCopyMenu levels in its order, then Custom, User Only, Assistant Only, then Diff
         std::vector<winrt::Windows::UI::Xaml::Controls::TextBlock> _tabLabels; // each tab's label (dim / bright)
         std::vector<winrt::Windows::UI::Xaml::Controls::Border> _tabUnderlines; // each tab's underline (accent when current)
-        std::vector<int> _tabViews; // the VIEW index behind each tab position (a TurnsLevel value, or a box tab's 5..7) — the digit keys and the guide's "key N" read it
+        std::vector<int> _tabViews; // the VIEW index behind each tab position (a TurnsLevel value, a box tab's 5..7, or the Diff tab's 8) — the digit keys and the guide's "key N" read it
         // The BOX ROW under the tabs (TRANSCRIPT_OVERLAY.md §3j): "Also show:" and the twelve boxes grouped by level, in a
         // wrapping panel. Collapsed unless a box tab is current (_SyncBoxesRow); built once with the overlay.
         winrt::Windows::UI::Xaml::Controls::Grid _boxesRow{ nullptr };
@@ -694,6 +913,12 @@ namespace winrt::TerminalApp::implementation
         // What each jump button was last set to (-1 never, 0 hidden, 1 shown), so an update that changes nothing sets nothing.
         int8_t _jumpTopShown = -1;
         int8_t _jumpEndShown = -1;
+        // The Diff tab's Expand (TRANSCRIPT_OVERLAY.md §3l): every file read so far, by its path as the card names it - its
+        // current lines, or null for a file that could not be read (gone, locked, too big) - kept for the overlay's open (a
+        // Refresh, a close or another conversation clears it: the file may have changed); and the expansions waiting for a
+        // read still in flight (the path, the card, the expand row).
+        std::unordered_map<std::wstring, std::shared_ptr<const std::vector<std::wstring>>> _diffFiles;
+        std::vector<std::tuple<std::wstring, std::weak_ptr<DiffCard>, size_t>> _diffExpandWaiting;
         // The level guide: the (i) button right after the last level tab, and the Flyout it opens (its
         // Button::Flyout, so a click or Enter / Space opens it with no handler of ours). The Flyout is built
         // once with the overlay and refills its content on every Opening (_BuildLevelGuidePanel).
@@ -730,8 +955,38 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Media::SolidColorBrush _toggleOnBorderBrush{ nullptr }; // an ON toggle's hairline: the accent at ~70%, what makes ON read at a glance
         winrt::Windows::UI::Xaml::Media::SolidColorBrush _transparentBrush{ nullptr };
         winrt::Windows::UI::Xaml::Media::FontFamily _monoFont{ nullptr };
+        // The Diff tab's colors (TRANSCRIPT_OVERLAY.md §3l: GitHub's dark diff palette), made once in _BuildUi and shared by
+        // every card, line run, chip and outline entry - a brush per element would multiply objects by the line count.
+        struct DiffPalette
+        {
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush card{ nullptr }; // a card's face (#0d1117)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush border{ nullptr }; // a card's frame and its header's rule (#30363d)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush head{ nullptr }; // a card's header bar (#161b22)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush code{ nullptr }; // the path and the code (#e6edf3)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush plus{ nullptr }; // "+a", an added square (#3fb950)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush minus{ nullptr }; // "-d", a removed square (#f85149)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush meta{ nullptr }; // what a card is, "Viewed", the hunk header (#8b949e)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush number{ nullptr }; // the line numbers (#6e7681)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush addBand{ nullptr }; // under an added line
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush addNumberBand{ nullptr }; // under an added line's numbers (stronger)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush removeBand{ nullptr }; // under a removed line
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush removeNumberBand{ nullptr }; // under a removed line's numbers (stronger)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush hunkBand{ nullptr }; // under a hunk's "@@" header row
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush expandBand{ nullptr }; // an expand row's face
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush expandText{ nullptr }; // an expand row's words and arrow (#9ecbff)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush now{ nullptr }; // the yellow edge of lines read from the file now (#d29922)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush chipBorder{ nullptr }; // a Bash row's "$" chip frame (#3a3a3a)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush chipText{ nullptr }; // the "$" (#8a8a8a)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush reason{ nullptr }; // a Bash row's reason (#c8c8c8)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush count{ nullptr }; // a Bash row's "×N" (#9ecbff)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush outlineRule{ nullptr }; // the line between the outline and the page (#2c2c2c)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush outlineTurn{ nullptr }; // an outline turn entry's words (#cfcfcf)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush outlineFile{ nullptr }; // an outline file entry's name (#a8a8a8)
+            winrt::Windows::UI::Xaml::Media::SolidColorBrush outlineLit{ nullptr }; // the lit turn entry's face (the accent at ~18%)
+        };
+        DiffPalette _diff;
 
-        std::array<LevelView, ::Agentmaster::kTranscriptViewCount> _levels{}; // by view index (TranscriptViews.h: the five levels, then the three box tabs)
+        std::array<LevelView, ::Agentmaster::kTranscriptViewCount> _levels{}; // by view index (TranscriptViews.h: the five levels, then the three box tabs, then the Diff tab)
         TranscriptOverlaySource _source; // what is shown
         int _current = 2; // the current view (TurnsLevel::Default)
         // Whether long lines WRAP (true, the default) or keep their length and are cut off at the body's

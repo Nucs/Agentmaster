@@ -49,6 +49,7 @@
 #include "ClaudeSpawn.h" // LogSwallowedException — Rule #18: a contained render failure still reaches hooks.log
 #include "ProcessInspect.h" // ScrubLargeBase64Payloads — pasted-image payloads elided before parsing
 #include "SummaryConversation.h" // BuildSummaryConversation / CodexSummaryConversation — defined at the end of this file (the consumers of section 8)
+#include "TranscriptDiff.h" // the Diff tab (Agentmaster, not in the reference): ParseUnifiedDiff / TurnFileComposer / DedupeInOrder / UnifiedDiffText
 
 namespace Agentmaster
 {
@@ -4584,6 +4585,416 @@ namespace Agentmaster
                     return Join(head, L"\n") + L"\n";
                 }
 
+                // ---- Agentmaster, NOT in the reference: the transcript overlay's DIFF tab (TRANSCRIPT_OVERLAY.md 3l) ----
+
+                // The Diff tab's document: every turn as Minimal draws it - its messages and its final reply - with, between
+                // them, the turn's Bash reasons (one row per DIFFERENT reason, "x5" for its repeats) and one ```diff block per
+                // file the turn changed: the turn's NET change to it (TranscriptDiff.h TurnFileComposer; the edits its agents
+                // made included), or - when the edits cannot be composed - each edit's own block. The chain list and the
+                // session headings as Document writes them; no notes and no path legend (Minimal shows neither).
+                //   session - the parsed session, agents attached; cwd - the session's working folder ("" when unknown): a file
+                //             inside it is named relative to it.
+                // Returns the Markdown. Throws std::bad_alloc only.
+                std::wstring DiffDocument(const TurnsSession& session, const std::wstring& cwd)
+                {
+                    static const std::vector<ChainLink> kNoLinks;
+                    const std::vector<ChainLink>& links = session.links != nullptr ? *session.links : kNoLinks;
+                    const bool chained = links.size() > 1 || (!links.empty() && !links[0].missingParent.empty());
+                    const bool headed = links.size() > 1;
+                    std::vector<std::wstring> body;
+                    int number = 0; // real turns only, numbered across the whole chain (Document's rule)
+                    std::optional<int> shownOrigin;
+                    for (const Turn& turn : session.turns)
+                    {
+                        if (!turn.continued)
+                        {
+                            ++number;
+                        }
+                        std::vector<std::wstring> chunks = DiffTurn(number, turn, cwd);
+                        if (headed && turn.origin && turn.origin != shownOrigin && static_cast<size_t>(*turn.origin) < links.size())
+                        {
+                            body.push_back(SessionHeader(links, static_cast<size_t>(*turn.origin)));
+                            shownOrigin = turn.origin;
+                        }
+                        for (auto& chunk : chunks)
+                        {
+                            body.push_back(std::move(chunk));
+                        }
+                    }
+                    std::vector<std::wstring> head;
+                    if (chained)
+                    {
+                        head.push_back(ChainBlock(links));
+                    }
+                    head.push_back(Join(body, L"\n"));
+                    return Join(head, L"\n") + L"\n";
+                }
+
+            private:
+                // One file's part of a turn on the Diff tab: what it is called there, its ```diff blocks, and its net counts.
+                struct DiffFileOut
+                {
+                    std::wstring display; // the path as the tab names it (relative to the session's folder when inside it)
+                    std::vector<std::wstring> blocks; // ```diff blocks, each ending in "\n"; empty when the change cancelled out
+                    int added = 0; // '+' rows of its blocks
+                    int removed = 0; // '-' rows of its blocks
+                    bool noNetChange = false; // the turn changed it and changed it back: nothing to show but a note
+                };
+
+                // One file-changing call of a turn (Claude's own, or an agent's), as the Diff tab collects them.
+                struct DiffChange
+                {
+                    std::wstring ts; // when the call was made: the changes of a turn and of its agents are ordered by it
+                    std::wstring by; // who made it: "" for Claude, else the agent's label
+                    std::shared_ptr<TurnOp> op; // the call (shared: an agent's merged turn is a temporary)
+                };
+
+                // The turn's file-changing calls that went through (a refused or unanswered one changed nothing), Claude's own
+                // and those of every agent it spawned (nested agents too, at most 8 deep), in the order they were made.
+                //   turn - the turn (or an agent's merged turn); by - who made its calls ("" = Claude); out - appended to;
+                //   depth - the agent nesting reached (a guard against a cycle in malformed data).
+                // Throws std::bad_alloc only.
+                void CollectDiffChanges(const Turn& turn, const std::wstring& by, std::vector<DiffChange>& out, int depth)
+                {
+                    for (const TurnEvent& ev : turn.events)
+                    {
+                        if (ev.kind != TurnEvent::Kind::Op || !ev.op)
+                        {
+                            continue;
+                        }
+                        const TurnOp& op = *ev.op;
+                        if (IsFileChangeCall(op) && !op.resultTs.empty() && !op.isError)
+                        {
+                            out.push_back(DiffChange{ op.ts, by, ev.op });
+                        }
+                        if (op.agent && depth < 8)
+                        {
+                            CollectDiffChanges(MergedTurn(op.agent->session), op.agent->label, out, depth + 1);
+                        }
+                    }
+                }
+
+                // The file a change touched: the call's file_path (a NotebookEdit's notebook_path).
+                static std::wstring DiffPathOf(const TurnOp& op)
+                {
+                    std::wstring path = StrOr(JGet(op.inp, L"file_path"));
+                    if (path.empty())
+                    {
+                        path = StrOr(JGet(op.inp, L"notebook_path"));
+                    }
+                    return path;
+                }
+
+                // A path with its separators as '/' and, on this case-insensitive file system, lower-cased: the key one file's
+                // changes are grouped by, whichever way each call spelled it.
+                static std::wstring DiffPathKey(std::wstring_view path)
+                {
+                    std::wstring key{ path };
+                    for (auto& ch : key)
+                    {
+                        ch = ch == L'\\' ? L'/' : static_cast<wchar_t>(std::towlower(ch));
+                    }
+                    return key;
+                }
+
+                // How the tab names a file: relative to the session's folder when it lies inside it, else whole - with '/'
+                // separators either way (the way a diff names files).
+                static std::wstring DiffDisplayPath(std::wstring_view path, const std::wstring& cwd)
+                {
+                    std::wstring shown{ path };
+                    std::replace(shown.begin(), shown.end(), L'\\', L'/');
+                    if (!cwd.empty())
+                    {
+                        std::wstring root = DiffPathKey(cwd);
+                        while (!root.empty() && root.back() == L'/')
+                        {
+                            root.pop_back();
+                        }
+                        const std::wstring key = DiffPathKey(path);
+                        if (!root.empty() && key.size() > root.size() + 1 && key.compare(0, root.size(), root) == 0 && key[root.size()] == L'/')
+                        {
+                            shown.erase(0, root.size() + 1);
+                        }
+                    }
+                    return shown;
+                }
+
+                // A fenced block holding `content` verbatim with the info string `info` - its fence one mark longer than the
+                // longest run of that mark inside (at least three), so a diff of a Markdown file can never close it early. The
+                // mark is the backtick, or the tilde when the info itself holds a backtick (a file named with one): CommonMark
+                // refuses a backtick fence whose info string holds a backtick, and the block would not be a block at all.
+                static std::wstring DiffFence(std::wstring_view info, std::wstring_view content)
+                {
+                    const wchar_t mark = info.find(L'`') == std::wstring_view::npos ? L'`' : L'~';
+                    size_t longest = 0;
+                    size_t run = 0;
+                    for (const wchar_t ch : content)
+                    {
+                        run = ch == mark ? run + 1 : 0;
+                        longest = std::max(longest, run);
+                    }
+                    const std::wstring fence(std::max<size_t>(3, longest + 1), mark);
+                    std::wstring out = fence + L"diff";
+                    if (!info.empty())
+                    {
+                        out += L' ';
+                        out += info;
+                    }
+                    out += L'\n';
+                    out += content;
+                    if (!content.empty() && content.back() != L'\n')
+                    {
+                        out += L'\n';
+                    }
+                    out += fence;
+                    out += L'\n';
+                    return out;
+                }
+
+                // The turn's files on the Diff tab, each with its blocks: the changes grouped by file in the order each file was
+                // first changed; a file's changes composed into its net change when they fit (TurnFileComposer: from the whole
+                // original when Claude Code kept it, else from the hunks alone), else one block per change ("edit 2 of 3").
+                // A Write over an existing file that records no hunks changed nothing (Claude Code's own verdict) and is left
+                // out. The info string after "diff" carries the shown path and what the block is: "new file", "N edits",
+                // "by <agent>", "edit k of N".
+                //   turn - the turn; cwd - the session's folder (DiffDisplayPath).
+                // Returns the files, in order. Throws std::bad_alloc only.
+                std::vector<DiffFileOut> TurnFileDiffs(const Turn& turn, const std::wstring& cwd)
+                {
+                    std::vector<DiffChange> changes;
+                    CollectDiffChanges(turn, std::wstring{}, changes, 0);
+                    std::stable_sort(changes.begin(), changes.end(), [](const DiffChange& a, const DiffChange& b) { return a.ts < b.ts; });
+                    // Group by file, keeping the order each file was first changed in.
+                    std::vector<std::pair<std::wstring, std::vector<const DiffChange*>>> groups;
+                    for (const auto& change : changes)
+                    {
+                        const std::wstring path = DiffPathOf(*change.op);
+                        if (path.empty())
+                        {
+                            continue;
+                        }
+                        // A Write over an existing file with no hunks: Claude Code found nothing changed.
+                        if (change.op->name == L"Write" && StrEq(JGet(change.op->tur, L"type"), L"update"))
+                        {
+                            const Value* patch = JGet(change.op->tur, L"structuredPatch");
+                            if (IsArr(patch) && patch->arr.empty())
+                            {
+                                continue;
+                            }
+                        }
+                        const std::wstring key = DiffPathKey(path);
+                        auto it = std::find_if(groups.begin(), groups.end(), [&key](const auto& group) { return group.first == key; });
+                        if (it == groups.end())
+                        {
+                            groups.emplace_back(key, std::vector<const DiffChange*>{});
+                            it = groups.end() - 1;
+                        }
+                        it->second.push_back(&change);
+                    }
+                    std::vector<DiffFileOut> files;
+                    for (const auto& entry : groups)
+                    {
+                        const auto& group = entry.second; // (the key only grouped them)
+                        const TurnOp& first = *group.front()->op;
+                        const std::wstring path = DiffPathOf(first);
+                        std::wstring shownPath = path;
+                        std::replace(shownPath.begin(), shownPath.end(), L'\\', L'/');
+                        DiffFileOut file;
+                        file.display = DiffDisplayPath(path, cwd);
+                        // The file did not exist before the turn when the turn's first change to it created it.
+                        const bool created = first.name == L"Write" && StrEq(JGet(first.tur, L"type"), L"create");
+                        const Value* original = JGet(first.tur, L"originalFile");
+                        const std::wstring* originalText = (!created && IsStr(original)) ? &original->str : nullptr;
+                        TurnFileComposer composer(originalText, created);
+                        std::vector<std::pair<std::wstring, ParsedDiff>> edits; // each change's own diff text, parsed
+                        std::vector<std::wstring> agents; // the agents among the file's changers, each once
+                        bool composed = true;
+                        for (const DiffChange* change : group)
+                        {
+                            auto text = EditDiffText(*change->op);
+                            if (!text)
+                            {
+                                continue;
+                            }
+                            ParsedDiff parsed = ParseUnifiedDiff(*text);
+                            if (composed && (parsed.unnumbered || !composer.Apply(parsed.hunks)))
+                            {
+                                composed = false; // shown one by one (the composer says why it could not)
+                            }
+                            if (!change->by.empty() && std::find(agents.begin(), agents.end(), change->by) == agents.end())
+                            {
+                                agents.push_back(change->by);
+                            }
+                            edits.emplace_back(std::move(*text), std::move(parsed));
+                        }
+                        if (edits.empty())
+                        {
+                            continue;
+                        }
+                        std::wstring byWhom;
+                        for (const auto& agent : agents)
+                        {
+                            byWhom += (byWhom.empty() ? L"by " : L", ") + agent;
+                        }
+                        const std::wstring oldSide = created ? std::wstring{ L"/dev/null" } : shownPath;
+                        if (composed)
+                        {
+                            const auto hunks = composer.NetHunks(3);
+                            if (hunks.empty())
+                            {
+                                file.noNetChange = true;
+                                files.push_back(std::move(file));
+                                continue;
+                            }
+                            std::vector<std::wstring> meta;
+                            if (created)
+                            {
+                                meta.push_back(L"new file");
+                            }
+                            if (edits.size() > 1)
+                            {
+                                meta.push_back(std::to_wstring(edits.size()) + L" edits");
+                            }
+                            if (!byWhom.empty())
+                            {
+                                meta.push_back(byWhom);
+                            }
+                            std::wstring info = file.display;
+                            for (const auto& part : meta)
+                            {
+                                info += L" \x00B7 " + part;
+                            }
+                            const ParsedDiff net = ParseUnifiedDiff(UnifiedDiffText(oldSide, shownPath, hunks));
+                            file.added = net.added;
+                            file.removed = net.removed;
+                            file.blocks.push_back(DiffFence(info, UnifiedDiffText(oldSide, shownPath, hunks)));
+                            files.push_back(std::move(file));
+                            continue;
+                        }
+                        // One block per change, each as Claude Code recorded it: the hunks with their numbers, or the
+                        // call's own strings (no numbers) when it recorded none.
+                        for (size_t k = 0; k < edits.size(); ++k)
+                        {
+                            const auto& [text, parsed] = edits[k];
+                            std::wstring info = file.display;
+                            if (edits.size() > 1)
+                            {
+                                info += L" \x00B7 edit " + std::to_wstring(k + 1) + L" of " + std::to_wstring(edits.size());
+                            }
+                            if (k == 0 && created)
+                            {
+                                info += L" \x00B7 new file";
+                            }
+                            if (!byWhom.empty())
+                            {
+                                info += L" \x00B7 " + byWhom;
+                            }
+                            file.added += parsed.added;
+                            file.removed += parsed.removed;
+                            file.blocks.push_back(DiffFence(info, L"--- " + (k == 0 ? oldSide : shownPath) + L"\n+++ " + shownPath + L"\n" + text));
+                        }
+                        files.push_back(std::move(file));
+                    }
+                    return files;
+                }
+
+                // A Bash call's row on the Diff tab: the reason Claude gave for it (its description, whitespace-collapsed, at
+                // most 200 characters), else the command's first 80 characters as code.
+                std::wstring DiffBashReason(const TurnOp& op) const
+                {
+                    const std::wstring description = PyStrip(StrOr(JGet(op.inp, L"description")));
+                    if (!description.empty())
+                    {
+                        return Flat(description, 200);
+                    }
+                    const std::wstring command = Flat(StrOr(JGet(op.inp, L"command")), 80);
+                    return command.empty() ? std::wstring{ L"(no command)" } : Code(command);
+                }
+
+                // One turn of the Diff tab: its heading (with the files it changed and its net +/- when it changed any), the
+                // messages that reached it (as Minimal draws them), its Bash rows, its files' blocks (and a note per file it
+                // changed back), then Claude's final reply (Minimal's "● Claude" part).
+                //   number - its number in the whole conversation; turn - the turn; cwd - the session's folder.
+                // Returns the turn's chunks, joined by DiffDocument with "\n". Throws std::bad_alloc only.
+                std::vector<std::wstring> DiffTurn(int number, const Turn& turn, const std::wstring& cwd)
+                {
+                    const auto files = TurnFileDiffs(turn, cwd);
+                    std::vector<std::wstring> reasons;
+                    for (const TurnEvent& ev : turn.events)
+                    {
+                        if (ev.kind == TurnEvent::Kind::Op && ev.op && ev.op->name == L"Bash")
+                        {
+                            reasons.push_back(DiffBashReason(*ev.op));
+                        }
+                    }
+                    std::vector<std::wstring> out;
+                    std::wstring header = turn.continued ? std::wstring{ L"### Work before the first prompt" } : L"### Turn " + std::to_wstring(number);
+                    if (_opt.times)
+                    {
+                        header += L" \x00B7 " + When(turn.inputs[0].ts);
+                        if (!turn.lastTs.empty())
+                        {
+                            header += L" \x2192 last reply " + When(turn.lastTs);
+                        }
+                    }
+                    if (turn.interrupted)
+                    {
+                        header += L" \x00B7 the user interrupted it";
+                    }
+                    int changed = 0;
+                    int added = 0;
+                    int removed = 0;
+                    for (const auto& file : files)
+                    {
+                        if (!file.noNetChange)
+                        {
+                            ++changed;
+                            added += file.added;
+                            removed += file.removed;
+                        }
+                    }
+                    if (changed > 0)
+                    {
+                        header += L" \x00B7 " + std::to_wstring(changed) + (changed == 1 ? L" file" : L" files") + L" \x00B7 +" + std::to_wstring(added) + L" -" + std::to_wstring(removed);
+                    }
+                    out.push_back(header + L"\n");
+                    for (const TurnInput& input : turn.inputs)
+                    {
+                        if (input.kind == L"continued")
+                        {
+                            out.push_back(L"_This transcript opens mid-turn: the prompt that started this work is not in the file (it was compacted away, or the session was resumed)._\n");
+                            continue;
+                        }
+                        out.push_back(InputLabel(input) + L"\n" + Quote(input.text) + L"\n");
+                    }
+                    if (!reasons.empty())
+                    {
+                        std::vector<std::wstring> rows;
+                        for (const auto& [reason, count] : DedupeInOrder(reasons))
+                        {
+                            rows.push_back(L"- `$` " + reason + (count > 1 ? L" \x00D7" + std::to_wstring(count) : std::wstring{}));
+                        }
+                        out.push_back(Join(rows, L"\n") + L"\n");
+                    }
+                    for (const auto& file : files)
+                    {
+                        if (file.noNetChange)
+                        {
+                            out.push_back(L"_" + file.display + L": changed and changed back in this turn - no net change._\n");
+                            continue;
+                        }
+                        for (const auto& block : file.blocks)
+                        {
+                            out.push_back(block);
+                        }
+                    }
+                    for (auto& chunk : SpeakerBlock(L"**\x25CF Claude**", turn, false))
+                    {
+                        out.push_back(std::move(chunk));
+                    }
+                    return out;
+                }
+
             private:
                 const TurnsOptions& _opt;
                 bool _utc = false;
@@ -5862,6 +6273,61 @@ namespace Agentmaster
                 return renderer.Document(session);
             }
 
+            // render_history()'s twin for the transcript overlay's Diff tab (Agentmaster, NOT in the reference): the same walk,
+            // parse and agents, then Renderer::DiffDocument. The session's working folder (the files inside it are named
+            // relative to it) is the last "cwd" a line of the history names.
+            //   history - one transcript or a merged chain; opt - Minimal's options with agents on (RenderTranscriptDiffFile);
+            //   utc - print times in UTC instead of local time.
+            // Returns the Markdown. Throws std::bad_alloc only.
+            std::wstring RenderDiffHistory(const History& history, const TurnsOptions& opt, bool utc)
+            {
+                std::optional<UuidSet> live;
+                if (opt.liveBranch)
+                {
+                    const EdgeMap* extra = history.extraEdges.empty() ? nullptr : &history.extraEdges;
+                    live = opt.compactedHistory ? DeepLiveUuids(history.edgeLines, extra) : LiveUuids(history.edgeLines, extra);
+                }
+                TurnsSession session = ParseTurns(history.lines, opt, live ? &*live : nullptr, history.origins.empty() ? nullptr : &history.origins, history.headId ? &*history.headId : nullptr);
+                session.links = &history.links;
+                if (opt.agents)
+                {
+                    AttachAgents(session, history, opt);
+                }
+                std::vector<std::wstring> ids;
+                if (!history.links.empty())
+                {
+                    for (const auto& link : history.links)
+                    {
+                        ids.push_back(link.sessionId);
+                    }
+                }
+                else
+                {
+                    ids.push_back(session.sessionId);
+                }
+                std::wstring cwd;
+                for (auto it = history.lines.rbegin(); it != history.lines.rend(); ++it)
+                {
+                    const Value* folder = JGet(*it, L"cwd");
+                    if (IsStr(folder) && !folder->str.empty())
+                    {
+                        cwd = folder->str;
+                        break;
+                    }
+                }
+                Renderer renderer(opt, std::move(ids), utc);
+                return renderer.DiffDocument(session, cwd);
+            }
+
+            // The options the Diff tab renders with: Minimal (its messages and replies, Bash and file changes added by the Diff
+            // document itself), with agents ON - an agent's file changes belong to the turn that spawned it.
+            TurnsOptions DiffDocumentOptions() noexcept
+            {
+                TurnsOptions opt = TurnsOptionsForLevel(TurnsLevel::Minimal);
+                opt.agents = true;
+                return opt;
+            }
+
             // =====================================================================================
             // 8. Conversation upstream — NOT in the reference (Agentmaster: the summary panel's
             //    whole-conversation view, TranscriptTurns.h CollectConversationUpstream)
@@ -6276,6 +6742,47 @@ namespace Agentmaster
         {
             // Rule #18: never lose a swallowed exception. Recovery = no render (the caller copies nothing).
             LogSwallowedException(L"RenderTranscriptTurnsFile");
+            return std::nullopt;
+        }
+    }
+
+    std::wstring RenderTranscriptDiff(const std::vector<json::Value>& lines, bool utc) noexcept
+    {
+        try
+        {
+            const TurnsOptions opts = tt::DiffDocumentOptions();
+            tt::History history;
+            history.lines = tt::PointersTo(lines);
+            history.edgeLines = history.lines;
+            return tt::RenderDiffHistory(history, opts, utc);
+        }
+        catch (...)
+        {
+            // Rule #18: never lose a swallowed exception. Recovery = an empty render (the tab says it could not render).
+            LogSwallowedException(L"RenderTranscriptDiff");
+            return {};
+        }
+    }
+
+    std::optional<std::wstring> RenderTranscriptDiffFile(const std::filesystem::path& transcript, bool utc, const TurnsBirthFn& born) noexcept
+    {
+        try
+        {
+            const TurnsOptions opts = tt::DiffDocumentOptions();
+            const TurnsBirthFn birth = born ? born : TurnsBirthFn{ [](const std::filesystem::path& path) { return TranscriptFileBirth(path); } };
+            const tt::History history = tt::LoadHistory(transcript, opts, birth);
+            return tt::RenderDiffHistory(history, opts, utc);
+        }
+        catch (const tt::TurnsReadError&)
+        {
+            // Expected control flow, not a fault: the transcript (or its creation time) can't be read - gone, locked, or
+            // never written. The overlay says there is nothing to show.
+            return std::nullopt;
+        }
+        catch (...)
+        {
+            // Rule #18: never lose a swallowed exception. Recovery = no render (the tab says it could not render).
+            LogSwallowedException(L"RenderTranscriptDiffFile");
             return std::nullopt;
         }
     }

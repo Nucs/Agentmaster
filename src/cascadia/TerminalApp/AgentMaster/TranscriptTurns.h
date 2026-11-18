@@ -53,10 +53,12 @@
 // Plain C++ + Win32 (file reads, file times, the CRT's local time zone), no WinRT and no PCH, so it
 // links into the standalone test harness unchanged. Every entry point is NEVER-THROW.
 //
-// ONE entry point is NOT part of the port: CollectConversationUpstream (the end of this header), the
-// summary panel's "whole conversation" view. It reuses the port's chain walk (fork + plan restart)
+// THREE entry points are NOT part of the port (the end of this header): CollectConversationUpstream, the
+// summary panel's "whole conversation" view — it reuses the port's chain walk (fork + plan restart)
 // and adds the links only Agentmaster can know (a /clear in the same tab, a /handover origin) — a
-// default-constructed walk is exactly the reference's, so the Copy ▸ Transcript goldens are untouched.
+// default-constructed walk is exactly the reference's, so the Copy ▸ Transcript goldens are untouched;
+// and RenderTranscriptDiff / RenderTranscriptDiffFile, the transcript overlay's Diff tab (the same parse,
+// a document of its own: messages, Bash reasons, each turn's net file changes).
 // FIVE options are not part of the port either: TurnsOptions::editDiffs and TurnsOptions::lastTurnOnly
 // (📜 All Screen's File Diffs and Last Turn boxes), and TurnsOptions::userInputs / peerInputs /
 // finalReplies (the transcript overlay's one-sided tabs, User Only and Assistant Only). No level and no
@@ -252,6 +254,33 @@ namespace Agentmaster
                                                           const TurnsOptions& opts,
                                                           bool utc,
                                                           const TurnsBirthFn& born = {}) noexcept;
+
+    // =============================================================================================
+    // Agentmaster — the transcript overlay's DIFF tab (TRANSCRIPT_OVERLAY.md §3l). NOT part of the port.
+    // =============================================================================================
+
+    // Renders a transcript's already-parsed lines as the Diff tab's Markdown (no file is known, so no chain and no agent is
+    // found) — the harness's way in; the overlay uses RenderTranscriptDiffFile.
+    //   lines — every line of the transcript, in file order (ParseTranscriptJsonl).
+    //   utc   — print times in UTC (the tests) instead of this machine's local time.
+    // Returns the Markdown — at least "\n" for a transcript with no turns; EMPTY when the render failed (logged to hooks.log,
+    // Rule #18). Never throws.
+    std::wstring RenderTranscriptDiff(const std::vector<json::Value>& lines, bool utc) noexcept;
+
+    // Reads a transcript FILE and renders the Diff tab's Markdown: every turn as Minimal draws it — its heading (plus "· N
+    // files · +a -d" when it changed files), the messages that reached it and its final reply — with, between them, one
+    // "- `$` <reason> ×N" row per DIFFERENT reason its Bash calls gave (else a command's first 80 characters), and one fenced
+    // ```diff block per file it changed: the turn's NET change to that file (TranscriptDiff.h TurnFileComposer, the edits of
+    // the agents it spawned included), with "--- / +++" paths (the old side "/dev/null" for a file the turn created), or —
+    // when the edits do not compose — one block per edit. Each fence's info string after "diff" names the file as shown
+    // (relative to the session's folder when inside it) and what the block is: " · new file", " · N edits", " · by <agent>",
+    // " · edit k of N". A file the turn changed and changed back gets a one-line note instead of a block. The chain walk is
+    // RenderTranscriptTurnsFile's (the sessions this one was forked or restarted from, numbered as one conversation).
+    // COST: the same as RenderTranscriptTurnsFile at Minimal with agents on — call it OFF the UI thread.
+    //   transcript — the session's .jsonl; utc — print times in UTC; born — file creation times (empty = TranscriptFileBirth).
+    // Returns the Markdown, or nullopt when the transcript can't be read or the render failed (a failure other than an
+    // unreadable file is logged, Rule #18). Never throws.
+    std::optional<std::wstring> RenderTranscriptDiffFile(const std::filesystem::path& transcript, bool utc, const TurnsBirthFn& born = {}) noexcept;
 
     // =============================================================================================
     // Agentmaster — the summary panel's conversation chain. NOT part of the transcript_turns.py port.

@@ -23,7 +23,14 @@
 //   * _BuildBlockElement  — one MdBlock -> one element: text / code / rule, wrapped in its quote bars
 //                           and list indents; a Session chain row's "session N" become hyperlinks
 //                           (_AppendSessionLinks), each scrolling session N's heading to the top
-//                           (_JumpToSession / _ScrollToSessionHeading, or a pending jump done by _Pump).
+//                           (_JumpToSession / _ScrollToSessionHeading, or a pending jump done by _Pump);
+//   * _BuildDiffCard      — the Diff tab (TRANSCRIPT_OVERLAY.md §3l): a ```diff block as a GitHub-style card
+//                           (_BuildDiffCardBody, _MakeDiffLines: four text blocks per run of lines over
+//                           childless bands), the Bash rows as chips (_BuildDiffBashRow), the turn headings'
+//                           counts (_BuildDiffHeading), the outline beside the page (_ScanDiffOutline on the
+//                           pool thread, _BuildDiffOutline, _UpdateDiffOutlineHighlight, the jumps) and Expand
+//                           from the file as it is now (_ExpandDiffCard -> _LoadDiffFileAsync ->
+//                           _OnDiffFileLoaded -> _ApplyDiffExpansion / _SyncDiffExpandRows).
 #include "pch.h"
 #include "AgentTranscriptOverlay.h"
 
@@ -45,6 +52,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath> // std::lround - the Diff cards' five diffstat squares (DiffBarSquares)
 #include <cwctype> // iswspace / towlower
 #include <limits> // std::numeric_limits - a table cell measured at an unbounded size (_BuildTable)
 
@@ -256,6 +264,159 @@ namespace
     // button that would scroll a pixel.
     constexpr double kJumpEdgeSlack = 1.0;
 
+    // The DIFF tab (TRANSCRIPT_OVERLAY.md 3l): the outline column's width and the most entries it lists (a pathological
+    // session must not cost thousands of buttons at once); a card's line limit before it starts closed (its body is then
+    // built on its first open - GitHub's "large diffs are not rendered by default"); the biggest file Expand reads; the
+    // narrowest line-number column, the +/- column, the line pitch every column keeps, and the code's text size. (The
+    // Expand step, the gap opened whole and the longest line drawn are TranscriptDiff.h's: kDiffExpandStep, ....)
+    constexpr double kDiffOutlineWidth = 240.0;
+    constexpr size_t kDiffOutlineMaxEntries = 3000;
+    constexpr size_t kDiffCardOpenRows = 400;
+    constexpr uint64_t kDiffFileMaxBytes = 32ull * 1024 * 1024;
+    constexpr double kDiffNumberWidth = 46.0;
+    constexpr double kDiffMarkWidth = 16.0;
+    constexpr double kDiffLineHeight = 19.0;
+    constexpr double kDiffFontSize = 12.0;
+    // Segoe Fluent Icons for the expand rows: Up, Down, and the double arrow between two hunks.
+    constexpr const wchar_t* kDiffExpandUpGlyph = L"\xE74A";
+    constexpr const wchar_t* kDiffExpandDownGlyph = L"\xE74B";
+    constexpr const wchar_t* kDiffExpandBothGlyph = L"\xE8CB";
+    // What an expand row says before a click (its tooltip) and the card's legend once it showed lines from the file.
+    constexpr const wchar_t* kDiffExpandTip = L"Show more of the file around this change. The lines are read from the file as it is NOW - a later turn, "
+                                              L"or you, may have changed them since this turn. They carry a yellow edge.";
+    constexpr const wchar_t* kDiffNowNote = L"Lines with a yellow edge are read from the file as it is now - a later turn may have changed them since this turn.";
+
+    // The Diff tab's card arithmetic lives in AgentMaster/TranscriptDiff.h (pure, so the m5 harness tests it); this unit
+    // calls it unqualified like its own helpers.
+    using ::Agentmaster::DiffBarSquares;
+    using ::Agentmaster::DiffDisplayLine;
+    using ::Agentmaster::DiffExpandLabel;
+    using ::Agentmaster::DiffExpandTake;
+    using ::Agentmaster::DiffLinesAboveHunk;
+    using ::Agentmaster::DiffNewFirst;
+    using ::Agentmaster::DiffOldFirst;
+    using ::Agentmaster::DiffOutlineTitle;
+    using ::Agentmaster::DiffRemainingAbove;
+    using ::Agentmaster::DiffRemainingBelow;
+    using ::Agentmaster::DiffSideCount;
+    using ::Agentmaster::kDiffExpandStep;
+    using ::Agentmaster::SplitDiffInfo;
+    using ::Agentmaster::TakeDiffRepeatCount;
+
+    // The text of a block's runs, joined (a heading's or a paragraph's words). Throws std::bad_alloc only.
+    std::wstring BlockText(const ::Agentmaster::MdBlock& block)
+    {
+        std::wstring text;
+        for (const auto& run : block.runs)
+        {
+            text += run.text;
+        }
+        return text;
+    }
+
+    // Whether a block is one of the Diff tab's Bash rows: a top-level list item ("- `$` <reason> ×N") whose first words are
+    // the code span "$". Never throws.
+    bool IsDiffBashRow(const ::Agentmaster::MdBlock& block) noexcept
+    {
+        if (block.kind != ::Agentmaster::MdBlockKind::Paragraph || block.containers.size() != 1 || block.containers[0].kind != ::Agentmaster::MdContainerKind::Item)
+        {
+            return false;
+        }
+        for (const auto& run : block.runs)
+        {
+            if (run.text.find_first_not_of(L" \t") == std::wstring::npos)
+            {
+                continue;
+            }
+            return (run.style & ::Agentmaster::kMdCode) != 0 && run.text == L"$";
+        }
+        return false;
+    }
+
+    // A file's current lines, for the Diff tab's Expand: read whole (at most kDiffFileMaxBytes), UTF-8 with a BOM dropped
+    // (bytes that are not UTF-8 are read as the ANSI code page), split at "\n" with each line's trailing CR dropped; a final
+    // line break makes no empty last line. Shared reads: an editor holding the file open does not block it.
+    // Parameters: path - the file (either separator).
+    // Returns the lines, or null when the file cannot be opened or read, or is bigger than the cap. Throws std::bad_alloc only.
+    std::shared_ptr<const std::vector<std::wstring>> ReadDiffFileLines(const std::wstring& path)
+    {
+        wil::unique_hfile file{ ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr) };
+        if (!file)
+        {
+            return nullptr;
+        }
+        LARGE_INTEGER size{};
+        if (!::GetFileSizeEx(file.get(), &size) || size.QuadPart < 0 || static_cast<uint64_t>(size.QuadPart) > kDiffFileMaxBytes)
+        {
+            return nullptr;
+        }
+        std::string bytes(static_cast<size_t>(size.QuadPart), '\0');
+        size_t done = 0;
+        while (done < bytes.size())
+        {
+            DWORD got = 0;
+            const DWORD want = static_cast<DWORD>(std::min<size_t>(bytes.size() - done, 1u << 24));
+            if (!::ReadFile(file.get(), bytes.data() + done, want, &got, nullptr) || got == 0)
+            {
+                break; // a file that shrank while read: what was read is the file
+            }
+            done += got;
+        }
+        bytes.resize(done);
+        std::string_view view{ bytes };
+        if (view.size() >= 3 && static_cast<unsigned char>(view[0]) == 0xEF && static_cast<unsigned char>(view[1]) == 0xBB && static_cast<unsigned char>(view[2]) == 0xBF)
+        {
+            view.remove_prefix(3);
+        }
+        std::wstring text;
+        if (!view.empty())
+        {
+            const int length = static_cast<int>(std::min<size_t>(view.size(), INT_MAX));
+            UINT codePage = CP_UTF8;
+            int wide = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, view.data(), length, nullptr, 0);
+            if (wide <= 0)
+            {
+                codePage = CP_ACP; // not UTF-8: the machine's ANSI code page reads every byte
+                wide = ::MultiByteToWideChar(CP_ACP, 0, view.data(), length, nullptr, 0);
+            }
+            if (wide > 0)
+            {
+                text.resize(static_cast<size_t>(wide));
+                ::MultiByteToWideChar(codePage, 0, view.data(), length, text.data(), wide);
+            }
+        }
+        auto lines = std::make_shared<std::vector<std::wstring>>();
+        size_t start = 0;
+        while (start < text.size())
+        {
+            size_t end = text.find(L'\n', start);
+            if (end == std::wstring::npos)
+            {
+                end = text.size();
+            }
+            size_t stop = end;
+            if (stop > start && text[stop - 1] == L'\r')
+            {
+                --stop;
+            }
+            lines->emplace_back(text, start, stop - start);
+            start = end + 1;
+        }
+        return lines;
+    }
+
+    // A diff card's line-number column width: room for `largest`'s digits (at least three) in the 12 DIP monospace font,
+    // plus the column's padding; never narrower than kDiffNumberWidth. Never throws.
+    double DiffNumberColumnWidth(int largest) noexcept
+    {
+        int digits = 1;
+        for (int value = std::max(largest, 0); value >= 10; value /= 10)
+        {
+            ++digits;
+        }
+        return std::max(kDiffNumberWidth, 7.3 * std::max(digits, 3) + 16.0);
+    }
+
     // Point a level's scroll view at a line-wrap mode — the whole mechanism of the ↵ toggle, one property:
     //   wrap ON  -> HorizontalScrollBarVisibility DISABLED: the content is measured at the viewport's width,
     //               so every text block (TextWrapping::Wrap) wraps to it — the view as it always was;
@@ -419,10 +580,10 @@ namespace
     }
 
     // The view keeps one LevelView per VIEW in a fixed array: the five TranscriptTurns levels by their TurnsLevel value, then
-    // the three box tabs (TranscriptViews.h); settings.json stores the remembered tab by NAME (TranscriptViewName). Both
-    // assume these counts - a new level or tab must update TranscriptViews.h's table and names first.
+    // the three box tabs, then the Diff tab (TranscriptViews.h); settings.json stores the remembered tab by NAME
+    // (TranscriptViewName). Both assume these counts - a new level or tab must update TranscriptViews.h's table and names first.
     static_assert(::Agentmaster::kTurnsLevelCount == 5, "AgentTranscriptOverlay::_levels starts with the 5 levels; update it with the TurnsLevel set");
-    static_assert(::Agentmaster::kTranscriptViewCount == 8, "AgentTranscriptOverlay::_levels holds 8 views (5 levels + 3 box tabs); update it with TranscriptView");
+    static_assert(::Agentmaster::kTranscriptViewCount == 9, "AgentTranscriptOverlay::_levels holds 9 views (5 levels + 3 box tabs + Diff); update it with TranscriptView");
 
     // The BOX ROW's layout: a code-only Panel that lays its children out left to right and WRAPS onto a new line when the next
     // one does not fit - UWP XAML has no WrapPanel, and a horizontal StackPanel would cut the last boxes off on a narrow
@@ -791,6 +952,32 @@ namespace winrt::TerminalApp::implementation
         _toggleOnBorderBrush = SolidColorBrush{ ColorHelper::FromArgb(kToggleOnBorderAlpha, accent.R, accent.G, accent.B) };
         _monoFont = FontFamily{ L"Cascadia Mono, Cascadia Code, Consolas" };
         _textMenu = winrt::Microsoft::Terminal::UI::TextMenuFlyout{};
+        // The Diff tab's palette: GitHub's dark diff colors (the user picked "like GitHub review"); the translucent bands as
+        // GitHub's alphas (.15 = 0x26, .3 = 0x4D, .1 = 0x1A, .06 = 0x0F). DiffPalette in the header says what each colors.
+        _diff.card = MakeBrush(0xFF, 0x0D, 0x11, 0x17);
+        _diff.border = MakeBrush(0xFF, 0x30, 0x36, 0x3D);
+        _diff.head = MakeBrush(0xFF, 0x16, 0x1B, 0x22);
+        _diff.code = MakeBrush(0xFF, 0xE6, 0xED, 0xF3);
+        _diff.plus = MakeBrush(0xFF, 0x3F, 0xB9, 0x50);
+        _diff.minus = MakeBrush(0xFF, 0xF8, 0x51, 0x49);
+        _diff.meta = MakeBrush(0xFF, 0x8B, 0x94, 0x9E);
+        _diff.number = MakeBrush(0xFF, 0x6E, 0x76, 0x81);
+        _diff.addBand = MakeBrush(0x26, 0x2E, 0xA0, 0x43);
+        _diff.addNumberBand = MakeBrush(0x4D, 0x3F, 0xB9, 0x50);
+        _diff.removeBand = MakeBrush(0x1A, 0xF8, 0x51, 0x49);
+        _diff.removeNumberBand = MakeBrush(0x4D, 0xF8, 0x51, 0x49);
+        _diff.hunkBand = MakeBrush(0x1A, 0x38, 0x8B, 0xFD);
+        _diff.expandBand = MakeBrush(0x0F, 0x38, 0x8B, 0xFD);
+        _diff.expandText = MakeBrush(0xFF, 0x9E, 0xCB, 0xFF);
+        _diff.now = MakeBrush(0xFF, 0xD2, 0x99, 0x22);
+        _diff.chipBorder = MakeBrush(0xFF, 0x3A, 0x3A, 0x3A);
+        _diff.chipText = MakeBrush(0xFF, 0x8A, 0x8A, 0x8A);
+        _diff.reason = MakeBrush(0xFF, 0xC8, 0xC8, 0xC8);
+        _diff.count = MakeBrush(0xFF, 0x9E, 0xCB, 0xFF);
+        _diff.outlineRule = MakeBrush(0xFF, 0x2C, 0x2C, 0x2C);
+        _diff.outlineTurn = MakeBrush(0xFF, 0xCF, 0xCF, 0xCF);
+        _diff.outlineFile = MakeBrush(0xFF, 0xA8, 0xA8, 0xA8);
+        _diff.outlineLit = SolidColorBrush{ ColorHelper::FromArgb(0x2E, accent.R, accent.G, accent.B) };
 
         // --- the host: a 3x3 star grid whose middle cell IS the card's 90% x 80% (no size math, no
         // SizeChanged handler — it follows every window resize through layout alone) ---
@@ -1028,7 +1215,7 @@ namespace winrt::TerminalApp::implementation
         tabs.Spacing(2);
         // Every tab, in the row's order: the five levels in the Copy menu's order (Default first, its words from the menu's
         // own table), then — after a separator — the three box tabs (TRANSCRIPT_OVERLAY.md §3j; their words from
-        // TranscriptViews.h). A tab's position is its digit key (1-8).
+        // TranscriptViews.h), then — after a second separator — the Diff tab (§3l). A tab's position is its digit key (1-9).
         struct TabEntry
         {
             const wchar_t* label;
@@ -1047,10 +1234,11 @@ namespace winrt::TerminalApp::implementation
         for (const auto& item : entries)
         {
             const int level = item.view;
-            if (level == ::Agentmaster::kTranscriptFirstBoxView)
+            if (level == ::Agentmaster::kTranscriptFirstBoxView || ::Agentmaster::IsTranscriptDiffView(level))
             {
                 // The SEPARATOR the user asked for left of the box tabs: the five levels on its left, the tabs whose boxes
-                // the user picks on its right. A childless Border (no composition node), out of the tab order and of what
+                // the user picks on its right; and a second one left of the Diff tab, which is neither (a page of its own
+                // over the same conversation). A childless Border (no composition node), out of the tab order and of what
                 // a screen reader reads (Raw).
                 Border separator;
                 separator.Width(1);
@@ -1381,7 +1569,7 @@ namespace winrt::TerminalApp::implementation
         }
         layout.Children().Append(_bodyLayer);
 
-        // --- keyboard: Esc closes; 1..8 pick a tab by position (bubbling from whatever inside the card
+        // --- keyboard: Esc closes; 1..9 pick a tab by position (bubbling from whatever inside the card
         // has focus — the scroll view, a selected text block, a button, a box) ---
         _card.KeyDown([weak = get_weak()](const winrt::Windows::Foundation::IInspectable&, const KeyRoutedEventArgs& e) {
             try
@@ -1806,35 +1994,44 @@ namespace winrt::TerminalApp::implementation
         }
         auto& stale = _levels[static_cast<size_t>(view)];
         const bool expandAll = stale.expandAll; // the reader's choice, not the text's: kept, as a Refresh keeps it
-        const auto oldScroll = stale.scroll;
+        // What the body holds for the view: its frame (the Diff tab's grid), else its scroll view.
+        FrameworkElement oldFrame{ nullptr };
+        if (stale.frame)
+        {
+            oldFrame = stale.frame;
+        }
+        else if (stale.scroll)
+        {
+            oldFrame = stale.scroll;
+        }
         // The epoch FIRST: a render still running for the old boxes is dropped when it lands (_ApplyLevelRender).
         ++_viewEpochs[static_cast<size_t>(view)];
         stale = LevelView{};
         stale.expandAll = expandAll;
-        if (!oldScroll)
+        if (!oldFrame)
         {
             return;
         }
         try
         {
             // Off the screen at once: the new view is made beside it right away (_EnsureLevelView), in the body's one cell.
-            oldScroll.Visibility(Visibility::Collapsed);
+            oldFrame.Visibility(Visibility::Collapsed);
             if (_dispatcher)
             {
                 // Out of the tree LATER, at low priority: a long view's thousands of elements cost their teardown on the UI
                 // thread (XAML's event-table walk per element, CLAUDE.md "XAML's event table"), which must not stall the
                 // click. Weak both ways: the overlay may close first (its _ReleaseLevels' Clear then took the view out).
-                _dispatcher.TryEnqueue(DispatcherQueuePriority::Low, [weak = get_weak(), weakScroll = winrt::make_weak(oldScroll)]() {
+                _dispatcher.TryEnqueue(DispatcherQueuePriority::Low, [weak = get_weak(), weakFrame = winrt::make_weak(oldFrame)]() {
                     try
                     {
                         const auto self = weak.get();
-                        const auto scroll = weakScroll.get();
-                        if (!self || !scroll || !self->_bodyHost)
+                        const auto frame = weakFrame.get();
+                        if (!self || !frame || !self->_bodyHost)
                         {
                             return;
                         }
                         uint32_t at = 0;
-                        if (self->_bodyHost.Children().IndexOf(scroll, at))
+                        if (self->_bodyHost.Children().IndexOf(frame, at))
                         {
                             self->_bodyHost.Children().RemoveAt(at);
                         }
@@ -1849,7 +2046,7 @@ namespace winrt::TerminalApp::implementation
             else
             {
                 uint32_t at = 0;
-                if (_bodyHost && _bodyHost.Children().IndexOf(oldScroll, at))
+                if (_bodyHost && _bodyHost.Children().IndexOf(oldFrame, at))
                 {
                     _bodyHost.Children().RemoveAt(at);
                 }
@@ -1964,9 +2161,10 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         // An explicit jump outranks whatever was waiting to scroll this view (a chain link clicked early, a box click's
-        // keep-the-turn jump): the reader asked for an edge.
+        // keep-the-turn jump, a Diff outline click): the reader asked for an edge.
         view.pendingSessionJump = 0;
         view.pendingTurnJump = 0;
+        view.pendingCardJump = 0;
         if (toEnd)
         {
             _ScrollViewToEnd(view, true);
@@ -2049,10 +2247,11 @@ namespace winrt::TerminalApp::implementation
         {
             auto& left = _levels[static_cast<size_t>(_current)];
             left.pendingSessionJump = 0;
-            // The same for a box click's keep-the-turn jump and a ↓'s end-follow: both belong to the moment the reader
-            // left, and would scroll the view when they come back.
+            // The same for a box click's keep-the-turn jump, a ↓'s end-follow and a Diff outline click's card jump: each
+            // belongs to the moment the reader left, and would scroll the view when they come back.
             left.pendingTurnJump = 0;
             left.followEnd = false;
+            left.pendingCardJump = 0;
         }
         _current = level;
         _UpdateTabVisuals();
@@ -2062,9 +2261,20 @@ namespace winrt::TerminalApp::implementation
         _EnsureLevelView(level);
         for (int i = 0; i < static_cast<int>(_levels.size()); ++i)
         {
-            if (const auto& scroll = _levels[i].scroll)
+            // The view's FRAME is what the body holds: its scroll view, or the Diff tab's grid of the outline and the page.
+            const auto& entry = _levels[i];
+            FrameworkElement shown{ nullptr };
+            if (entry.frame)
             {
-                scroll.Visibility(i == level ? Visibility::Visible : Visibility::Collapsed);
+                shown = entry.frame;
+            }
+            else if (entry.scroll)
+            {
+                shown = entry.scroll;
+            }
+            if (shown)
+            {
+                shown.Visibility(i == level ? Visibility::Visible : Visibility::Collapsed);
             }
         }
         auto& view = _levels[level];
@@ -2096,6 +2306,9 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        // The Diff tab: its frame holds an outline column beside the page, and its build draws cards and chips (§3l).
+        const bool diff = ::Agentmaster::IsTranscriptDiffView(level);
+        view.isDiff = diff;
         view.content = StackPanel{};
         view.scroll = ScrollViewer{};
         view.scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
@@ -2115,10 +2328,15 @@ namespace winrt::TerminalApp::implementation
         // resize, the box row showing). _UpdateJumpButtons reads the CURRENT view and sets only what changed, so a hidden
         // view's events cost a comparison. Each handler reaches the overlay weakly and none captures its own element (a
         // delegate that holds its element keeps it alive - CLAUDE.md "A handler that captures its own element").
-        view.scroll.ViewChanged([weak = get_weak()](const winrt::Windows::Foundation::IInspectable&, const ScrollViewerViewChangedEventArgs&) {
+        view.scroll.ViewChanged([weak = get_weak(), diff](const winrt::Windows::Foundation::IInspectable&, const ScrollViewerViewChangedEventArgs&) {
             if (const auto self = weak.get())
             {
                 self->_UpdateJumpButtons(); // noexcept: contains its own failures
+                if (diff)
+                {
+                    // The Diff outline lights the turn on top of the page as it scrolls (noexcept too).
+                    self->_UpdateDiffOutlineHighlight();
+                }
             }
         });
         view.scroll.SizeChanged([weak = get_weak()](const winrt::Windows::Foundation::IInspectable&, const SizeChangedEventArgs&) {
@@ -2174,7 +2392,41 @@ namespace winrt::TerminalApp::implementation
                                    }
                                } }),
                                true /* handledEventsToo */);
-        _bodyHost.Children().Append(view.scroll);
+        if (!diff)
+        {
+            view.frame = view.scroll;
+            _bodyHost.Children().Append(view.scroll);
+            return;
+        }
+        // The Diff tab's frame (the user's "Outline + long page"): [outline | hairline | the page]. The outline scrolls on
+        // its own - it never sideways (its entries trim) - and is filled when the render lands (_BuildDiffOutline).
+        Grid frame;
+        for (const auto width : { GridLength{ kDiffOutlineWidth, GridUnitType::Pixel }, GridLength{ 1, GridUnitType::Pixel }, GridLength{ 1, GridUnitType::Star } })
+        {
+            ColumnDefinition column;
+            column.Width(width);
+            frame.ColumnDefinitions().Append(column);
+        }
+        view.outline = StackPanel{};
+        view.outline.Padding(Thickness{ 8, 10, 8, 14 });
+        view.outlineScroll = ScrollViewer{};
+        view.outlineScroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+        view.outlineScroll.HorizontalScrollMode(ScrollMode::Disabled);
+        view.outlineScroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+        view.outlineScroll.ZoomMode(ZoomMode::Disabled);
+        view.outlineScroll.IsTabStop(false); // its entries are the stops; the column itself is no place to rest
+        view.outlineScroll.Content(view.outline);
+        winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(view.outlineScroll, winrt::hstring{ L"Turns that changed files" });
+        Grid::SetColumn(view.outlineScroll, 0);
+        frame.Children().Append(view.outlineScroll);
+        Border rule; // childless: no composition node
+        rule.Background(_diff.outlineRule);
+        Grid::SetColumn(rule, 1);
+        frame.Children().Append(rule);
+        Grid::SetColumn(view.scroll, 2);
+        frame.Children().Append(view.scroll);
+        view.frame = frame;
+        _bodyHost.Children().Append(frame);
     }
 
     void AgentTranscriptOverlay::_SetLevelMessage(int level, const std::wstring& text)
@@ -2258,7 +2510,8 @@ namespace winrt::TerminalApp::implementation
         try
         {
             const bool boxTab = ::Agentmaster::IsTranscriptBoxView(level);
-            // The level a Codex rollout is read at (a box tab never reads one: below).
+            const bool diffTab = ::Agentmaster::IsTranscriptDiffView(level);
+            // The level a Codex rollout is read at (a box tab and the Diff tab never read one: below).
             const auto turnsLevel = static_cast<::Agentmaster::TurnsLevel>(std::clamp(level, 0, ::Agentmaster::kTurnsLevelCount - 1));
             if (source.codex && boxTab)
             {
@@ -2266,6 +2519,13 @@ namespace winrt::TerminalApp::implementation
                 // its plain conversation instead. Say so rather than show a level's text under a tab that promises a side.
                 out.message = L"Custom, User Only and Assistant Only need Claude's turns view, which a Codex session does not have - "
                               L"its Minimal and Compact tabs show each of your messages with its final reply, Default, Full and Max the whole conversation.";
+                return;
+            }
+            if (source.codex && diffTab)
+            {
+                // The Diff tab reads Claude Code's own record of each edit (its hunks), which a Codex rollout does not keep.
+                out.message = L"Diff needs Claude Code's record of each edit, which a Codex session does not have - "
+                              L"its Default, Full and Max tabs show the whole conversation, its patches included.";
                 return;
             }
             if (source.codex)
@@ -2300,14 +2560,22 @@ namespace winrt::TerminalApp::implementation
                 text = brief ? ::Agentmaster::ReadConversationFollowupText(out.path, true, 0 /* whole file */) :
                                ::Agentmaster::ReadConversationText(out.path, true, 0 /* whole file */);
             }
+            else if (diffTab)
+            {
+                // The Diff tab's own document (TranscriptTurns.h): Minimal's turns with each turn's Bash reasons and the net
+                // change to every file it touched, as ```diff blocks the build draws as cards. Its options are its own
+                // (Minimal + agents), so `options` is not read.
+                text = ::Agentmaster::RenderTranscriptDiffFile(out.path, /*utc*/ false).value_or(std::wstring{});
+            }
             else
             {
                 text = ::Agentmaster::RenderTranscriptTurnsFile(out.path, options, /*utc*/ false).value_or(std::wstring{});
             }
             if (text.empty())
             {
-                out.message = boxTab ? L"Nothing to show - the transcript could not be read, or it holds nothing for this tab." :
-                                       L"Nothing to show - the transcript could not be read, or it holds no messages at this level.";
+                out.message = boxTab  ? L"Nothing to show - the transcript could not be read, or it holds nothing for this tab." :
+                              diffTab ? L"Nothing to show - the transcript could not be read, or it holds no turns yet." :
+                                        L"Nothing to show - the transcript could not be read, or it holds no messages at this level.";
                 return;
             }
             if (!out.forkSourceId.empty())
@@ -2350,6 +2618,11 @@ namespace winrt::TerminalApp::implementation
             // The Session chain list and the session headings its links point to (one more linear pass;
             // an ordinary one-session transcript yields an empty chain).
             out.chain = ::Agentmaster::MdFindSessionChain(out.blocks);
+            if (diffTab)
+            {
+                // The outline column and the status words, read here off the UI thread like the areas and the chain.
+                _ScanDiffOutline(out.blocks, out);
+            }
             if (out.blocks.empty())
             {
                 // A failed parse already logged its exception (ParseMarkdownBlocks, Rule #18) — say so
@@ -2357,6 +2630,7 @@ namespace winrt::TerminalApp::implementation
                 // conversation whose every turn a teammate started, with no box adding anything.
                 out.message = out.failed ? L"The transcript could not be rendered (the details are in hooks.log)." :
                               boxTab     ? L"Nothing to show on this tab - the boxes above can add more." :
+                              diffTab    ? L"Nothing to show on this tab." :
                                            L"Nothing to show at this level.";
             }
         }
@@ -2392,6 +2666,7 @@ namespace winrt::TerminalApp::implementation
         view.lines = render.lines;
         view.truncated = render.truncated;
         view.failed = render.failed;
+        view.diffSummary = std::move(render.diffSummary); // the Diff tab's status words ("" for every other view)
         // The view's settings name ("compact", "user-only"); a box tab also names the boxes it was rendered with, so a
         // report about a box tab's text can be read back in hooks.log ("boxes=ops,narration", "boxes=none").
         std::wstring viewName{ ::Agentmaster::TranscriptViewName(level) };
@@ -2410,6 +2685,19 @@ namespace winrt::TerminalApp::implementation
             view.state = LevelState::Empty;
             // Nothing will be built: a box click's keep-the-turn jump has no turn to land on.
             view.pendingTurnJump = 0;
+            if (view.isDiff)
+            {
+                // The Diff tab's outline column still says why it lists nothing (never a blank column beside the message).
+                try
+                {
+                    _BuildDiffOutline(view, {});
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: the column stays blank; the page's message says what happened.
+                    ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay diff outline (empty)");
+                }
+            }
             _SetLevelMessage(level, render.message.empty() ? std::wstring{ L"Nothing to show at this level." } : render.message);
             ::Agentmaster::AppendStateLog(L"hooks.log", head + L"nothing to show (" + view.message + L")" +
                                                             (render.path.empty() ? std::wstring{} : L" path=" + render.path) + L"\n");
@@ -2431,6 +2719,22 @@ namespace winrt::TerminalApp::implementation
             view.chain = std::move(render.chain);
             view.sessionHeadings.clear();
             view.pendingSessionJump = 0;
+            view.diffCards.clear();
+            view.pendingCardJump = 0;
+            if (view.isDiff)
+            {
+                // The outline column, all of it now (its entries are few - one per changed file - and every click on one must
+                // find its target, built or pending).
+                try
+                {
+                    _BuildDiffOutline(view, render.outline);
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: the page still builds - with the part of the outline that was made, or none.
+                    ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay diff outline");
+                }
+            }
             view.state = LevelState::Building;
             // The placeholder gives way to content.
             if (view.messageText && view.content)
@@ -2445,7 +2749,8 @@ namespace winrt::TerminalApp::implementation
             view.message.clear();
             ::Agentmaster::AppendStateLog(L"hooks.log", head + L"chars=" + std::to_wstring(view.markdown.size()) + L" blocks=" +
                                                             std::to_wstring(view.blocks.size()) + (view.truncated ? L" (capped)" : L"") +
-                                                            (view.failed ? L" (parse failed part-way)" : L"") + L" rendered in " +
+                                                            (view.failed ? L" (parse failed part-way)" : L"") +
+                                                            (view.diffSummary.empty() ? std::wstring{} : L" (" + view.diffSummary + L")") + L" rendered in " +
                                                             std::to_wstring(view.renderMs) + L"ms" +
                                                             (render.forkSourceId.empty() ? std::wstring{} :
                                                                                            L" from the fork source " + ::Agentmaster::ShortId(render.forkSourceId) +
@@ -2536,6 +2841,20 @@ namespace winrt::TerminalApp::implementation
                 view.pendingTurnJump = 0;
                 _ScrollToTurnHeading(view, static_cast<size_t>(at - view.turnHeadings.begin()));
             }
+            // A Diff outline file entry clicked before its card was built: this slice may have built it. The cards are recorded
+            // in block order, so the last one says whether the build got that far.
+            if (const size_t pendingCard = view.pendingCardJump;
+                pendingCard > 0 && !view.diffCards.empty() && view.diffCards.back()->block >= pendingCard - 1)
+            {
+                view.pendingCardJump = 0;
+                const auto at = std::lower_bound(view.diffCards.begin(), view.diffCards.end(), pendingCard - 1, [](const std::shared_ptr<DiffCard>& card, size_t block) {
+                    return card->block < block;
+                });
+                if (at != view.diffCards.end() && (*at)->root)
+                {
+                    _ScrollElementToTop(view, (*at)->root);
+                }
+            }
             if (view.built >= view.blocks.size())
             {
                 // The build ends with the turn jump still waiting: the new view has no heading of turn N or later (it
@@ -2611,6 +2930,8 @@ namespace winrt::TerminalApp::implementation
         // the block cap): drop it rather than keep a target that can never exist.
         view.chain = ::Agentmaster::MdSessionChain{};
         view.pendingSessionJump = 0;
+        // A Diff outline click whose card never came (cut by the block cap): nothing left to wait for.
+        view.pendingCardJump = 0;
         if (view.truncated || view.failed)
         {
             auto note = _MakeTextBlock(kStatusFontSize);
@@ -2692,6 +3013,39 @@ namespace winrt::TerminalApp::implementation
             }
             // Otherwise (Compact's own content: answers, compactions, an agent's messages) the list is
             // built open, exactly as before folding existed.
+        }
+        // The Diff tab draws three of its kinds of blocks its own way (TRANSCRIPT_OVERLAY.md §3l): a top-level ```diff block
+        // is a GitHub-style card, a Bash row ("- `$` reason ×N") a chip row, a turn heading carries its colored counts. Only
+        // top-level ones: the same shapes QUOTED in a message (a user pasting a diff) stay plain text and code. Never inside
+        // a fold (the Diff tab's Minimal options fold nothing - the belt is the areaPanel test).
+        if (view.isDiff && !view.areaPanel)
+        {
+            const auto& block = view.blocks[index];
+            FrameworkElement special{ nullptr };
+            if (block.kind == ::Agentmaster::MdBlockKind::Code && block.containers.empty() && block.info == L"diff")
+            {
+                special = _BuildDiffCard(view, block, index);
+            }
+            else if (IsDiffBashRow(block))
+            {
+                special = _BuildDiffBashRow(block);
+            }
+            else if (TurnHeadingNumber(block) > 0)
+            {
+                special = _BuildDiffHeading(view, block);
+            }
+            if (special)
+            {
+                AddMargin(special, 0, ::Agentmaster::MdGapAbove(above, block));
+                _AppendElement(view, special);
+                // A turn heading is recorded as every view records it: the outline's jumps and its highlight read them.
+                if (const int turn = TurnHeadingNumber(block); turn > 0)
+                {
+                    view.turnHeadings.emplace_back(turn, special);
+                }
+                ++view.built;
+                return;
+            }
         }
         // A row of the Session chain list: its "session N" mentions become links — only those whose session
         // has a heading in this level (a one-session chain has none, so nothing there links). Only the
@@ -3669,6 +4023,12 @@ namespace winrt::TerminalApp::implementation
             head.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
             addText(::Agentmaster::kTranscriptViewsGuideNote, 12.5, _bodyBrush, Thickness{ 8, 2, 0, 0 });
         }
+        // The Diff tab after the second separator (TRANSCRIPT_OVERLAY.md §3l): no column of the table either.
+        {
+            const auto head = addText(L"Diff", kGuideTextFontSize, _bodyBrush, Thickness{ 0, 14, 0, 2 });
+            head.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+            addText(::Agentmaster::kTranscriptDiffGuideNote, 12.5, _bodyBrush, Thickness{ 8, 2, 0, 0 });
+        }
         addText(::Agentmaster::kTranscriptLevelGuideCodexNote, 12.0, _dimBrush, Thickness{ 0, 14, 0, 0 });
         addText(L"Keys 1-" + std::to_wstring(_tabViews.size()) +
                     L" pick a tab. The tab you pick is the one the transcript opens at next time, in every window. Hover a tab for its own list.",
@@ -3698,7 +4058,10 @@ namespace winrt::TerminalApp::implementation
             status = L"Laying out " + WithThousands(view.built) + L" of " + WithThousands(view.blocks.size()) + L" blocks\x2026";
             break;
         case LevelState::Done:
-            status = WithThousands(view.lines) + L" lines \x00B7 rendered in " + FormatDurationMs(view.renderMs);
+            // The Diff tab counts what it is about - turns, the ones that changed files, the files, the lines - where the
+            // other views count the text's lines.
+            status = (view.diffSummary.empty() ? WithThousands(view.lines) + L" lines" : view.diffSummary) + L" \x00B7 rendered in " +
+                     FormatDurationMs(view.renderMs);
             if (view.truncated)
             {
                 status += L" \x00B7 the view is cut short";
@@ -3763,6 +4126,10 @@ namespace winrt::TerminalApp::implementation
         {
             view = LevelView{};
         }
+        // The Diff tab's file reads go with the views: the next render may be minutes later and the files changed since (a
+        // Refresh exists for exactly that). A read still in flight lands under an older generation and is dropped.
+        _diffFiles.clear();
+        _diffExpandWaiting.clear();
     }
 
     void AgentTranscriptOverlay::_FocusBodyDeferred()
@@ -3831,6 +4198,1352 @@ namespace winrt::TerminalApp::implementation
             _levels[i].expandAll = expandAll[i];
         }
         _SelectLevel(_current, true);
+    }
+
+    // ---- the Diff tab (TRANSCRIPT_OVERLAY.md §3l) ----
+
+    void AgentTranscriptOverlay::_ScanDiffOutline(const std::vector<::Agentmaster::MdBlock>& blocks, LevelRender& out)
+    {
+        std::vector<DiffOutlineTurn> turns;
+        DiffOutlineTurn current;
+        bool inTurn = false; // a turn heading was seen: the blocks below belong to it
+        bool wantTitle = false; // a "❯" / "✉" label was seen in this turn: the next quoted block is its message
+        int turnCount = 0; // numbered turns ("Work before the first prompt" is no turn of the user's)
+        int plus = 0;
+        int minus = 0;
+        std::vector<std::wstring> files; // every changed file once, by its lower-cased shown path (few: a linear find is fine)
+        const auto flush = [&]() {
+            if (inTurn && !current.files.empty())
+            {
+                turns.push_back(std::move(current));
+            }
+            current = DiffOutlineTurn{};
+        };
+        for (size_t index = 0; index < blocks.size(); ++index)
+        {
+            const auto& block = blocks[index];
+            if (block.kind == ::Agentmaster::MdBlockKind::Heading && block.headingLevel == 3 && block.containers.empty())
+            {
+                const int number = TurnHeadingNumber(block);
+                // DiffTurn's other turn heading: the work a transcript opens with, before any prompt of its own.
+                const bool before = number == 0 && BlockText(block).rfind(L"Work before the first prompt", 0) == 0;
+                if (number > 0 || before)
+                {
+                    flush();
+                    inTurn = true;
+                    wantTitle = false;
+                    current.number = number;
+                    if (number > 0)
+                    {
+                        ++turnCount;
+                    }
+                    else
+                    {
+                        current.title = L"Work before the first prompt";
+                    }
+                    continue;
+                }
+            }
+            if (!inTurn)
+            {
+                continue; // the Session chain list, a fork note: before any turn
+            }
+            if (block.containers.empty() && ::Agentmaster::MdIsLabelParagraph(block))
+            {
+                // The user's own message ("❯") or a teammate's ("✉") titles the turn; Claude's reply ("●") never does.
+                const wchar_t glyph = LabelGlyph(block);
+                wantTitle = current.title.empty() && (glyph == L'\x276F' || glyph == L'\x2709');
+                continue;
+            }
+            if (wantTitle && !block.containers.empty() && block.containers.front().kind == ::Agentmaster::MdContainerKind::Quote)
+            {
+                wantTitle = false;
+                current.title = DiffOutlineTitle(block.kind == ::Agentmaster::MdBlockKind::Code ? block.code : BlockText(block));
+                continue;
+            }
+            if (block.kind == ::Agentmaster::MdBlockKind::Code && block.containers.empty() && block.info == L"diff")
+            {
+                wantTitle = false;
+                const auto parsed = ::Agentmaster::ParseUnifiedDiff(block.code);
+                DiffOutlineFile file;
+                std::wstring meta;
+                SplitDiffInfo(block.infoRest, file.path, meta);
+                if (file.path.empty())
+                {
+                    file.path = parsed.newPath; // a fence without its info: the diff's own "+++" path
+                }
+                file.added = parsed.added;
+                file.removed = parsed.removed;
+                file.block = index;
+                plus += parsed.added;
+                minus += parsed.removed;
+                std::wstring key = file.path;
+                std::transform(key.begin(), key.end(), key.begin(), [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+                if (std::find(files.begin(), files.end(), key) == files.end())
+                {
+                    files.push_back(std::move(key));
+                }
+                current.files.push_back(std::move(file));
+            }
+        }
+        flush();
+        std::wstring summary = std::to_wstring(turnCount) + (turnCount == 1 ? L" turn" : L" turns");
+        if (files.empty())
+        {
+            summary += L" \x00B7 no file changed";
+        }
+        else
+        {
+            summary += L" \x00B7 " + std::to_wstring(turns.size()) + L" with changes \x00B7 " + std::to_wstring(files.size()) +
+                       (files.size() == 1 ? L" file" : L" files") + L" \x00B7 +" + std::to_wstring(plus) + L" \x2212" + std::to_wstring(minus);
+        }
+        out.outline = std::move(turns);
+        out.diffSummary = std::move(summary);
+    }
+
+    void AgentTranscriptOverlay::_BuildDiffOutline(LevelView& view, const std::vector<DiffOutlineTurn>& turns)
+    {
+        view.outlineTurns.clear();
+        view.outlineFiles.clear();
+        view.outlineLit = -1;
+        if (!view.outline)
+        {
+            return;
+        }
+        view.outline.Children().Clear();
+        // An entry: a plain, square button (a stock rounded template is a composition node per instance - CLAUDE.md "A
+        // rounded element WITH children"), its words trimmed to the column.
+        const auto makeEntry = [this](const UIElement& content, const Thickness& padding) {
+            Button entry;
+            entry.Background(_transparentBrush); // transparent (not null): hit-testable, and the template still shows hover
+            entry.BorderThickness(Thickness{ 0, 0, 0, 0 });
+            entry.CornerRadius(CornerRadius{ 0, 0, 0, 0 });
+            entry.Padding(padding);
+            entry.MinWidth(0);
+            entry.MinHeight(0);
+            entry.HorizontalAlignment(HorizontalAlignment::Stretch);
+            entry.HorizontalContentAlignment(HorizontalAlignment::Stretch);
+            entry.Content(content);
+            return entry;
+        };
+        TextBlock head;
+        head.Text(turns.empty() ? L"No turn changed a file with Edit, MultiEdit, Write or NotebookEdit." : L"CHANGED FILES BY TURN");
+        head.FontSize(11);
+        head.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+        head.Foreground(_dimBrush);
+        head.TextWrapping(TextWrapping::Wrap);
+        head.Margin(Thickness{ 6, 0, 0, 6 });
+        view.outline.Children().Append(head);
+        size_t entries = 0;
+        for (size_t t = 0; t < turns.size(); ++t)
+        {
+            const auto& turn = turns[t];
+            if (entries >= kDiffOutlineMaxEntries)
+            {
+                // A pathological session: the page still holds every card; the outline stops listing them.
+                TextBlock more;
+                more.Text(L"+ " + std::to_wstring(turns.size() - t) + L" more turns with changes - scroll the page to see them");
+                more.FontSize(12);
+                more.FontStyle(winrt::Windows::UI::Text::FontStyle::Italic);
+                more.Foreground(_dimBrush);
+                more.TextWrapping(TextWrapping::Wrap);
+                more.Margin(Thickness{ 6, 8, 0, 0 });
+                view.outline.Children().Append(more);
+                break;
+            }
+            // The turn: "Turn 4 · <its message's first words>" (the work before the first prompt has its own words).
+            const std::wstring words = turn.number > 0 ? L"Turn " + std::to_wstring(turn.number) + (turn.title.empty() ? std::wstring{} : L" \x00B7 " + turn.title) :
+                                                         turn.title;
+            TextBlock label;
+            label.Text(winrt::hstring{ words });
+            label.FontSize(12.5);
+            label.Foreground(_diff.outlineTurn);
+            label.TextWrapping(TextWrapping::NoWrap);
+            label.TextTrimming(TextTrimming::CharacterEllipsis);
+            const auto entry = makeEntry(label, Thickness{ 6, 4, 6, 4 });
+            entry.Margin(Thickness{ 0, t == 0 ? 0.0 : 6.0, 0, 0 });
+            AgentSetTip(entry, winrt::hstring{ words + L"\nClick to scroll the page to this turn." });
+            winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(entry, winrt::hstring{ words });
+            // By value: the turn's number and its first card (the jump target of the work before the first prompt). The
+            // overlay weakly; no element is captured (CLAUDE.md "A handler that captures its own element").
+            entry.Click([weak = get_weak(), number = turn.number, firstBlock = turn.files.empty() ? size_t{ 0 } : turn.files.front().block](
+                            const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                try
+                {
+                    if (const auto self = weak.get())
+                    {
+                        self->_JumpToDiffTurn(number, firstBlock);
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay diff outline turn"); // the page stays where it was
+                }
+            });
+            view.outline.Children().Append(entry);
+            view.outlineTurns.emplace_back(turn.number, entry);
+            ++entries;
+            for (const auto& file : turn.files)
+            {
+                // The file: its NAME (the folder is in the tooltip - the column is narrow, and a trimmed path would lose the
+                // name) and its +a -d.
+                const size_t slash = file.path.find_last_of(L"/\\");
+                TextBlock name;
+                name.Text(winrt::hstring{ slash == std::wstring::npos ? file.path : file.path.substr(slash + 1) });
+                name.FontFamily(_monoFont);
+                name.FontSize(11.5);
+                name.Foreground(_diff.outlineFile);
+                name.TextWrapping(TextWrapping::NoWrap);
+                name.TextTrimming(TextTrimming::CharacterEllipsis);
+                Grid::SetColumn(name, 0);
+                TextBlock counts;
+                counts.FontSize(11.5);
+                counts.Margin(Thickness{ 8, 0, 0, 0 });
+                if (file.added > 0 || file.removed == 0)
+                {
+                    Run added;
+                    added.Text(L"+" + std::to_wstring(file.added));
+                    added.Foreground(_diff.plus);
+                    counts.Inlines().Append(added);
+                }
+                if (file.removed > 0)
+                {
+                    Run removed;
+                    removed.Text(std::wstring{ file.added > 0 ? L" " : L"" } + L"\x2212" + std::to_wstring(file.removed));
+                    removed.Foreground(_diff.minus);
+                    counts.Inlines().Append(removed);
+                }
+                Grid::SetColumn(counts, 1);
+                Grid line;
+                ColumnDefinition nameColumn;
+                nameColumn.Width(GridLength{ 1, GridUnitType::Star });
+                ColumnDefinition countsColumn;
+                countsColumn.Width(GridLength{ 0, GridUnitType::Auto });
+                line.ColumnDefinitions().Append(nameColumn);
+                line.ColumnDefinitions().Append(countsColumn);
+                line.Children().Append(name);
+                line.Children().Append(counts);
+                const auto fileEntry = makeEntry(line, Thickness{ 20, 2, 6, 2 });
+                AgentSetTip(fileEntry, winrt::hstring{ file.path + L"\nClick to scroll the page to this file's changes." });
+                winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(fileEntry, winrt::hstring{ file.path });
+                fileEntry.Click([weak = get_weak(), block = file.block](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                    try
+                    {
+                        if (const auto self = weak.get())
+                        {
+                            self->_JumpToDiffCard(block);
+                        }
+                    }
+                    catch (...)
+                    {
+                        ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay diff outline file"); // the page stays where it was
+                    }
+                });
+                view.outline.Children().Append(fileEntry);
+                view.outlineFiles.emplace_back(file.block, fileEntry);
+                ++entries;
+            }
+        }
+    }
+
+    void AgentTranscriptOverlay::_UpdateDiffOutlineHighlight() noexcept
+    {
+        try
+        {
+            if (!_open || _current < 0 || _current >= static_cast<int>(_levels.size()))
+            {
+                return;
+            }
+            auto& view = _levels[static_cast<size_t>(_current)];
+            if (!view.isDiff || view.outlineTurns.empty() || !view.scroll)
+            {
+                return;
+            }
+            const int top = _TopTurnNumber(view);
+            int lit = -1;
+            if (top > 0)
+            {
+                // Linear: the entries are few, and "Work before the first prompt" entries (number 0) can sit anywhere in a
+                // chain, so the numbers are not sorted for a binary search.
+                for (size_t i = 0; i < view.outlineTurns.size(); ++i)
+                {
+                    if (view.outlineTurns[i].first == top)
+                    {
+                        lit = static_cast<int>(i);
+                        break;
+                    }
+                }
+            }
+            if (lit == view.outlineLit)
+            {
+                return; // the same entry (or none) - ViewChanged fires every frame of a scroll: set nothing
+            }
+            const auto paint = [this](const Button& entry, bool on) {
+                if (!entry)
+                {
+                    return;
+                }
+                entry.Background(on ? Brush{ _diff.outlineLit } : Brush{ _transparentBrush });
+                if (const auto label = entry.Content().try_as<TextBlock>())
+                {
+                    label.Foreground(on ? _bodyBrush : _diff.outlineTurn);
+                }
+            };
+            if (view.outlineLit >= 0 && view.outlineLit < static_cast<int>(view.outlineTurns.size()))
+            {
+                paint(view.outlineTurns[static_cast<size_t>(view.outlineLit)].second, false);
+            }
+            view.outlineLit = lit;
+            if (lit < 0)
+            {
+                return;
+            }
+            const auto& entry = view.outlineTurns[static_cast<size_t>(lit)].second;
+            paint(entry, true);
+            // Keep the lit entry in sight: scroll the outline only when it lies outside the outline's viewport.
+            if (view.outlineScroll && view.outline && entry)
+            {
+                const double y = entry.TransformToVisual(view.outline).TransformPoint(winrt::Windows::Foundation::Point{ 0.0f, 0.0f }).Y;
+                const double height = entry.ActualHeight();
+                const double offset = view.outlineScroll.VerticalOffset();
+                const double viewport = view.outlineScroll.ViewportHeight();
+                if (y < offset)
+                {
+                    view.outlineScroll.ChangeView(nullptr, std::max(0.0, y - 8.0), nullptr, true);
+                }
+                else if (y + height > offset + viewport)
+                {
+                    view.outlineScroll.ChangeView(nullptr, y + height - viewport + 8.0, nullptr, true);
+                }
+            }
+        }
+        catch (...)
+        {
+            // Rule #18 (throttled). Recovery: the highlight stays as it was until the next scroll.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay diff outline highlight");
+        }
+    }
+
+    void AgentTranscriptOverlay::_JumpToDiffTurn(int number, size_t firstBlock)
+    {
+        if (!_open)
+        {
+            return;
+        }
+        auto& view = _levels[static_cast<size_t>(_current)];
+        if (!view.isDiff)
+        {
+            return;
+        }
+        if (number <= 0)
+        {
+            _JumpToDiffCard(firstBlock); // the work before the first prompt has no numbered heading: its first card
+            return;
+        }
+        // An explicit move: whatever was waiting to scroll this view is dropped.
+        view.pendingSessionJump = 0;
+        view.pendingTurnJump = 0;
+        view.pendingCardJump = 0;
+        view.followEnd = false;
+        const auto at = std::lower_bound(view.turnHeadings.begin(), view.turnHeadings.end(), number, [](const auto& entry, int wanted) {
+            return entry.first < wanted;
+        });
+        if (at != view.turnHeadings.end() && at->first == number)
+        {
+            _ScrollToTurnHeading(view, static_cast<size_t>(at - view.turnHeadings.begin()));
+            return;
+        }
+        if (view.state == LevelState::Building)
+        {
+            view.pendingTurnJump = number; // _Pump scrolls it to the top the moment the build reaches it
+        }
+    }
+
+    void AgentTranscriptOverlay::_JumpToDiffCard(size_t block)
+    {
+        if (!_open)
+        {
+            return;
+        }
+        auto& view = _levels[static_cast<size_t>(_current)];
+        if (!view.isDiff)
+        {
+            return;
+        }
+        view.pendingSessionJump = 0;
+        view.pendingTurnJump = 0;
+        view.pendingCardJump = 0;
+        view.followEnd = false;
+        // The cards are recorded in block order.
+        const auto at = std::lower_bound(view.diffCards.begin(), view.diffCards.end(), block, [](const std::shared_ptr<DiffCard>& card, size_t wanted) {
+            return card->block < wanted;
+        });
+        if (at != view.diffCards.end() && (*at)->block == block && (*at)->root)
+        {
+            _ScrollElementToTop(view, (*at)->root);
+            return;
+        }
+        if (view.state == LevelState::Building)
+        {
+            view.pendingCardJump = block + 1; // _Pump scrolls to it the moment the build reaches it
+        }
+    }
+
+    void AgentTranscriptOverlay::_ScrollElementToTop(LevelView& view, const FrameworkElement& element) noexcept
+    {
+        try
+        {
+            if (!view.scroll || !view.content || !element)
+            {
+                return;
+            }
+            // The session jump's recipe: lay out first (an element built in this very slice has no position yet, and
+            // ChangeView clamps to the current extent), then the element's top in the content's coordinates is the offset.
+            view.scroll.UpdateLayout();
+            const auto at = element.TransformToVisual(view.content).TransformPoint(winrt::Windows::Foundation::Point{ 0.0f, 0.0f });
+            view.scroll.ChangeView(nullptr, std::max(0.0, static_cast<double>(at.Y) - kSessionJumpGap), nullptr, true /* disableAnimation: a jump, not a glide */);
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the view stays where it was. Contained here: a pending jump runs inside a build slice.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay diff card jump");
+        }
+    }
+
+    FrameworkElement AgentTranscriptOverlay::_BuildDiffHeading(LevelView& view, const ::Agentmaster::MdBlock& block)
+    {
+        view.speakerBar = nullptr; // a heading starts a new turn: no speaker yet (as _BuildBlockContent does)
+        auto text = _MakeTextBlock(HeadingFontSize(block.headingLevel));
+        text.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+        const std::wstring all = BlockText(block);
+        // DiffTurn ends the heading of a turn that changed files with " · N file(s) · +A -D". Read it off the end; anything
+        // that does not match exactly is drawn as it is.
+        const size_t plusAt = all.rfind(L" \x00B7 +");
+        if (plusAt != std::wstring::npos && plusAt > 0)
+        {
+            const std::wstring tail = all.substr(plusAt + 4); // "A -D"
+            const size_t space = tail.find(L" -");
+            const auto digits = [](std::wstring_view part) {
+                return !part.empty() && std::all_of(part.begin(), part.end(), [](wchar_t ch) { return ch >= L'0' && ch <= L'9'; });
+            };
+            const size_t filesAt = all.rfind(L" \x00B7 ", plusAt - 1);
+            if (space != std::wstring::npos && digits(std::wstring_view{ tail }.substr(0, space)) && digits(std::wstring_view{ tail }.substr(space + 2)) &&
+                filesAt != std::wstring::npos)
+            {
+                const std::wstring files = all.substr(filesAt + 3, plusAt - (filesAt + 3)); // "N files"
+                if (files.size() > 5 && (files.ends_with(L" file") || files.ends_with(L" files")))
+                {
+                    Run headRun;
+                    headRun.Text(winrt::hstring{ all.substr(0, filesAt) });
+                    text.Inlines().Append(headRun);
+                    // The counts the GitHub way: the files dim, "+A" green, "−D" red - a lighter weight than the heading.
+                    Run filesRun;
+                    filesRun.Text(winrt::hstring{ L" \x00B7 " + files + L" \x00B7 " });
+                    filesRun.Foreground(_dimBrush);
+                    filesRun.FontWeight(winrt::Windows::UI::Text::FontWeights::Normal());
+                    text.Inlines().Append(filesRun);
+                    Run added;
+                    added.Text(winrt::hstring{ L"+" + tail.substr(0, space) });
+                    added.Foreground(_diff.plus);
+                    added.FontWeight(winrt::Windows::UI::Text::FontWeights::Normal());
+                    text.Inlines().Append(added);
+                    Run removed;
+                    removed.Text(winrt::hstring{ L" \x2212" + tail.substr(space + 2) });
+                    removed.Foreground(_diff.minus);
+                    removed.FontWeight(winrt::Windows::UI::Text::FontWeights::Normal());
+                    text.Inlines().Append(removed);
+                    return text;
+                }
+            }
+        }
+        text.Text(winrt::hstring{ all });
+        return text;
+    }
+
+    FrameworkElement AgentTranscriptOverlay::_BuildDiffBashRow(const ::Agentmaster::MdBlock& block)
+    {
+        // The reason's runs: everything after the "$" code span (IsDiffBashRow found it first), its leading blank dropped,
+        // and the " ×N" DiffTurn appends to a repeated reason taken off the end into the count.
+        std::vector<::Agentmaster::MdRun> runs;
+        bool sawChip = false;
+        for (const auto& run : block.runs)
+        {
+            if (!sawChip)
+            {
+                if (run.text.find_first_not_of(L" \t") != std::wstring::npos)
+                {
+                    sawChip = true; // the "$" itself: drawn as the chip
+                }
+                continue;
+            }
+            runs.push_back(run);
+        }
+        while (!runs.empty())
+        {
+            auto& first = runs.front();
+            const size_t at = first.text.find_first_not_of(L" \t");
+            if (at == std::wstring::npos)
+            {
+                runs.erase(runs.begin());
+                continue;
+            }
+            first.text.erase(0, at);
+            break;
+        }
+        int count = 1;
+        if (!runs.empty() && (runs.back().style & ::Agentmaster::kMdCode) == 0)
+        {
+            count = TakeDiffRepeatCount(runs.back().text);
+        }
+        Grid row;
+        ColumnDefinition chipColumn;
+        chipColumn.Width(GridLength{ 0, GridUnitType::Auto });
+        ColumnDefinition reasonColumn;
+        reasonColumn.Width(GridLength{ 1, GridUnitType::Star });
+        row.ColumnDefinitions().Append(chipColumn);
+        row.ColumnDefinitions().Append(reasonColumn);
+        // The "$" chip: a childless rounded frame BEHIND the text in the same cell (a rounded element WITH children is a
+        // composition node every frame walks - CLAUDE.md), level with the reason's first line.
+        Grid chip;
+        chip.VerticalAlignment(VerticalAlignment::Top);
+        chip.Margin(Thickness{ 0, 2, 8, 0 });
+        Border frame;
+        frame.BorderBrush(_diff.chipBorder);
+        frame.BorderThickness(Thickness{ 1, 1, 1, 1 });
+        frame.CornerRadius(CornerRadius{ 3, 3, 3, 3 });
+        TextBlock dollar;
+        dollar.Text(L"$");
+        dollar.FontFamily(_monoFont);
+        dollar.FontSize(11);
+        dollar.Foreground(_diff.chipText);
+        dollar.Margin(Thickness{ 5, 0, 5, 1 });
+        chip.Children().Append(frame);
+        chip.Children().Append(dollar);
+        Grid::SetColumn(chip, 0);
+        row.Children().Append(chip);
+        // The reason: selectable, its own styles (a command shown as code stays code) - a table cell's run rules.
+        auto reason = _MakeTextBlock(12.5);
+        reason.Foreground(_diff.reason);
+        _AppendCellRuns(reason, runs);
+        if (count > 1)
+        {
+            Run times;
+            times.Text(winrt::hstring{ L"  \x00D7" + std::to_wstring(count) });
+            times.Foreground(_diff.count);
+            times.FontSize(11.5);
+            times.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+            reason.Inlines().Append(times);
+        }
+        Grid::SetColumn(reason, 1);
+        row.Children().Append(reason);
+        return row;
+    }
+
+    FrameworkElement AgentTranscriptOverlay::_BuildDiffCard(LevelView& view, const ::Agentmaster::MdBlock& block, size_t index)
+    {
+        auto card = std::make_shared<DiffCard>();
+        card->block = index;
+        auto parsed = ::Agentmaster::ParseUnifiedDiff(block.code);
+        card->hunks = std::move(parsed.hunks);
+        card->numbered = !parsed.unnumbered;
+        card->truncated = block.truncated;
+        // The file Expand reads: the "+++" side - none for "/dev/null" (nothing is left of it).
+        if (!parsed.newPath.empty() && parsed.newPath != L"/dev/null")
+        {
+            card->filePath = parsed.newPath;
+        }
+        std::wstring shown;
+        std::wstring meta;
+        SplitDiffInfo(block.infoRest, shown, meta);
+        if (shown.empty())
+        {
+            shown = card->filePath.empty() ? std::wstring{ L"(a file)" } : card->filePath;
+        }
+        size_t lineCount = 0;
+        int largest = 0;
+        for (const auto& hunk : card->hunks)
+        {
+            lineCount += hunk.rows.size();
+            largest = std::max({ largest, hunk.oldStart + hunk.oldLines, hunk.newStart + hunk.newLines });
+        }
+        // Room for the numbers a few expansions below the last hunk reach too, so the columns never widen mid-card.
+        card->numberWidth = DiffNumberColumnWidth(largest + 4 * kDiffExpandStep);
+        // GitHub's "large diffs are not rendered by default": a long card starts closed and builds its body on its first open.
+        card->open = lineCount <= kDiffCardOpenRows;
+
+        // --- the frame: square - a rounded element with children is a composition node every frame walks ---
+        Border frame;
+        frame.Background(_diff.card);
+        frame.BorderBrush(_diff.border);
+        frame.BorderThickness(Thickness{ 1, 1, 1, 1 });
+        StackPanel stack;
+        frame.Child(stack);
+
+        // --- the header bar: [the toggle: chevron · +a -d · five squares · path · what it is] [Viewed] ---
+        Grid head;
+        head.Background(_diff.head);
+        {
+            ColumnDefinition toggleColumn;
+            toggleColumn.Width(GridLength{ 1, GridUnitType::Star });
+            ColumnDefinition viewedColumn;
+            viewedColumn.Width(GridLength{ 0, GridUnitType::Auto });
+            head.ColumnDefinitions().Append(toggleColumn);
+            head.ColumnDefinitions().Append(viewedColumn);
+        }
+        // Nothing inside the toggle takes hits: the button must be the only target (the badge's mkIconBtn lesson).
+        FontIcon chevron;
+        chevron.FontFamily(FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+        chevron.Glyph(card->open ? kFoldOpenGlyph : kFoldClosedGlyph);
+        chevron.FontSize(9);
+        chevron.Width(kFoldChevronWidth);
+        chevron.Foreground(_diff.meta);
+        chevron.VerticalAlignment(VerticalAlignment::Center);
+        chevron.IsHitTestVisible(false);
+        Grid::SetColumn(chevron, 0);
+        TextBlock counts;
+        counts.FontSize(12);
+        counts.VerticalAlignment(VerticalAlignment::Center);
+        counts.Margin(Thickness{ 8, 0, 0, 0 });
+        counts.IsHitTestVisible(false);
+        if (parsed.added > 0 || parsed.removed == 0)
+        {
+            Run added;
+            added.Text(L"+" + std::to_wstring(parsed.added));
+            added.Foreground(_diff.plus);
+            counts.Inlines().Append(added);
+        }
+        if (parsed.removed > 0)
+        {
+            Run removed;
+            removed.Text(std::wstring{ parsed.added > 0 ? L" " : L"" } + L"\x2212" + std::to_wstring(parsed.removed));
+            removed.Foreground(_diff.minus);
+            counts.Inlines().Append(removed);
+        }
+        Grid::SetColumn(counts, 1);
+        // GitHub's five diffstat squares: childless (rounded but childless is no composition node of its own).
+        StackPanel bars;
+        bars.Orientation(Orientation::Horizontal);
+        bars.Spacing(1);
+        bars.VerticalAlignment(VerticalAlignment::Center);
+        bars.Margin(Thickness{ 6, 0, 10, 0 });
+        bars.IsHitTestVisible(false);
+        {
+            const auto [green, red] = DiffBarSquares(parsed.added, parsed.removed);
+            for (int square = 0; square < 5; ++square)
+            {
+                Border cell;
+                cell.Width(7);
+                cell.Height(7);
+                cell.CornerRadius(CornerRadius{ 1, 1, 1, 1 });
+                cell.Background(square < green ? _diff.plus : square < green + red ? _diff.minus : _diff.border);
+                bars.Children().Append(cell);
+            }
+        }
+        Grid::SetColumn(bars, 2);
+        TextBlock path;
+        path.Text(winrt::hstring{ shown });
+        path.FontFamily(_monoFont);
+        path.FontSize(12);
+        path.Foreground(_diff.code);
+        path.TextWrapping(TextWrapping::NoWrap);
+        path.TextTrimming(TextTrimming::CharacterEllipsis);
+        path.VerticalAlignment(VerticalAlignment::Center);
+        path.IsHitTestVisible(false);
+        Grid::SetColumn(path, 3);
+        TextBlock what;
+        what.Text(winrt::hstring{ meta });
+        what.FontSize(11.5);
+        what.Foreground(_diff.meta);
+        what.TextWrapping(TextWrapping::NoWrap);
+        what.VerticalAlignment(VerticalAlignment::Center);
+        what.Margin(Thickness{ 10, 0, 0, 0 });
+        what.IsHitTestVisible(false);
+        Grid::SetColumn(what, 4);
+        Grid toggleContent;
+        for (const auto width : { GridLength{ 0, GridUnitType::Auto }, GridLength{ 0, GridUnitType::Auto }, GridLength{ 0, GridUnitType::Auto }, GridLength{ 1, GridUnitType::Star }, GridLength{ 0, GridUnitType::Auto } })
+        {
+            ColumnDefinition column;
+            column.Width(width);
+            toggleContent.ColumnDefinitions().Append(column);
+        }
+        toggleContent.Children().Append(chevron);
+        toggleContent.Children().Append(counts);
+        toggleContent.Children().Append(bars);
+        toggleContent.Children().Append(path);
+        toggleContent.Children().Append(what);
+        Button toggle;
+        toggle.Background(_transparentBrush); // transparent (not null): hit-testable, and the template still shows hover
+        toggle.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        toggle.CornerRadius(CornerRadius{ 0, 0, 0, 0 });
+        toggle.Padding(Thickness{ 10, 6, 10, 6 });
+        toggle.MinWidth(0);
+        toggle.MinHeight(0);
+        toggle.HorizontalAlignment(HorizontalAlignment::Stretch);
+        toggle.HorizontalContentAlignment(HorizontalAlignment::Stretch);
+        toggle.Content(toggleContent);
+        AgentSetTip(toggle, winrt::hstring{ (card->filePath.empty() ? shown : card->filePath) + L"\nClick to open or close this file's changes." });
+        winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(toggle, winrt::hstring{ L"Changes to " + shown + (meta.empty() ? std::wstring{} : L", " + meta) });
+        Grid::SetColumn(toggle, 0);
+        head.Children().Append(toggle);
+        CheckBox viewed;
+        viewed.Content(winrt::box_value(winrt::hstring{ L"Viewed" }));
+        viewed.FontSize(11.5);
+        viewed.Foreground(_diff.meta);
+        viewed.MinWidth(0);
+        viewed.MinHeight(0);
+        viewed.VerticalAlignment(VerticalAlignment::Center);
+        viewed.Margin(Thickness{ 6, 0, 10, 0 });
+        AgentSetTip(viewed, winrt::hstring{ L"Viewed: closes this file's changes and dims it in the outline, while the transcript stays open." });
+        Grid::SetColumn(viewed, 1);
+        head.Children().Append(viewed);
+        stack.Children().Append(head);
+
+        // --- the body: the header's rule, then the hunks (built now, or on the first open of a long card) ---
+        StackPanel body;
+        body.Visibility(card->open ? Visibility::Visible : Visibility::Collapsed);
+        Border headRule; // childless: no composition node
+        headRule.Height(1);
+        headRule.Background(_diff.border);
+        body.Children().Append(headRule);
+        stack.Children().Append(body);
+
+        card->root = frame;
+        card->body = body;
+        card->chevron = chevron;
+        card->viewed = viewed;
+        view.diffCards.push_back(card);
+        if (card->open)
+        {
+            _BuildDiffCardBody(card);
+        }
+        // The handlers reach the overlay and the card WEAKLY: the card owns its XAML, the XAML owns the handlers - a strong
+        // reference here would be a cycle nothing frees (CLAUDE.md "A handler that captures its own element").
+        toggle.Click([weak = get_weak(), weakCard = std::weak_ptr<DiffCard>{ card }](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+            try
+            {
+                const auto self = weak.get();
+                const auto target = weakCard.lock();
+                if (self && target)
+                {
+                    self->_SetDiffCardOpen(target, !target->open);
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay diff card toggle"); // the card stays as it was
+            }
+        });
+        // Click, never Checked / Unchecked: only the user's own click (a press, Space) means "viewed".
+        viewed.Click([weak = get_weak(), weakCard = std::weak_ptr<DiffCard>{ card }](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+            try
+            {
+                const auto self = weak.get();
+                const auto target = weakCard.lock();
+                if (self && target && target->viewed)
+                {
+                    const auto checked = target->viewed.IsChecked();
+                    self->_SetDiffCardViewed(target, checked && checked.Value());
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay diff card viewed"); // the card stays as it was
+            }
+        });
+        return frame;
+    }
+
+    void AgentTranscriptOverlay::_BuildDiffCardBody(const std::shared_ptr<DiffCard>& card)
+    {
+        if (!card || card->bodyBuilt || !card->body)
+        {
+            return;
+        }
+        // Marked FIRST: a failure part-way leaves what was built, never a second copy on the next open.
+        card->bodyBuilt = true;
+        const size_t count = card->hunks.size();
+        card->hunkPanels.assign(count, StackPanel{ nullptr });
+        card->revealedAbove.assign(count, 0);
+        card->revealedBelow.assign(count, 0);
+        card->located.assign(count, -2);
+        card->expandRows.assign(count + 1, Button{ nullptr });
+        card->expandLabels.assign(count + 1, TextBlock{ nullptr });
+        // Expand reads the file as it is now (the user's pick), so it needs a file and line numbers to find the hunk by.
+        const bool expandable = card->numbered && !card->filePath.empty();
+        StackPanel lines; // everything that scrolls sideways together
+        for (size_t h = 0; h < count; ++h)
+        {
+            const auto& hunk = card->hunks[h];
+            // An expand row only where lines lie above the hunk (one at the file's first line has none).
+            if (expandable && DiffLinesAboveHunk(card->hunks, h) > 0)
+            {
+                lines.Children().Append(_MakeDiffExpandRow(card, h));
+            }
+            StackPanel hunkPanel;
+            if (card->numbered)
+            {
+                // GitHub's "@@" row on its blue band, its words where the code starts.
+                Grid header;
+                header.Background(_diff.hunkBand);
+                header.Height(kDiffLineHeight);
+                TextBlock words;
+                words.Text(winrt::hstring{ DiffDisplayLine(::Agentmaster::FormatHunkHeader(hunk)) });
+                words.FontFamily(_monoFont);
+                words.FontSize(kDiffFontSize);
+                words.Foreground(_diff.meta);
+                words.TextWrapping(TextWrapping::NoWrap);
+                words.VerticalAlignment(VerticalAlignment::Center);
+                words.Margin(Thickness{ 2 * card->numberWidth + kDiffMarkWidth, 0, 12, 0 });
+                header.Children().Append(words);
+                hunkPanel.Children().Append(header);
+            }
+            hunkPanel.Children().Append(_MakeDiffLines(::Agentmaster::NumberHunkRows(hunk), card->numberWidth, false));
+            lines.Children().Append(hunkPanel);
+            card->hunkPanels[h] = hunkPanel;
+        }
+        if (expandable && count > 0)
+        {
+            lines.Children().Append(_MakeDiffExpandRow(card, count));
+        }
+        // Code never wraps (a wrapped line would break the number columns): the whole body scrolls sideways as one, GitHub's
+        // way, only when a line is wider than the page. It cannot scroll vertically, so a wheel turn over it goes on to the
+        // page; with the ↵ toggle off the page measures it at its full width and clips it like every other line.
+        ScrollViewer sideways;
+        sideways.HorizontalScrollMode(ScrollMode::Auto);
+        sideways.HorizontalScrollBarVisibility(ScrollBarVisibility::Auto);
+        sideways.VerticalScrollMode(ScrollMode::Disabled);
+        sideways.VerticalScrollBarVisibility(ScrollBarVisibility::Disabled);
+        sideways.ZoomMode(ZoomMode::Disabled);
+        sideways.IsTabStop(false);
+        sideways.Content(lines);
+        card->body.Children().Append(sideways);
+        const auto addNote = [this, &card](std::wstring_view words) {
+            TextBlock note;
+            note.Text(winrt::hstring{ words });
+            note.FontSize(11.5);
+            note.Foreground(_diff.meta);
+            note.TextWrapping(TextWrapping::Wrap);
+            note.Margin(Thickness{ 10, 4, 10, 6 });
+            card->body.Children().Append(note);
+        };
+        if (!card->numbered)
+        {
+            addNote(L"No line numbers: Claude Code recorded only the replaced text of this change, so nothing around it can be shown.");
+        }
+        if (card->truncated)
+        {
+            addNote(L"This change is cut here - it is too long to show in full. The header's Copy button copies the whole text.");
+        }
+        // The file may be read already (another card of it expanded): the rows say what they can show right away.
+        if (expandable)
+        {
+            if (const auto known = _diffFiles.find(card->filePath); known != _diffFiles.end())
+            {
+                _SyncDiffExpandRows(*card, known->second.get(), known->second == nullptr);
+            }
+        }
+    }
+
+    FrameworkElement AgentTranscriptOverlay::_MakeDiffLines(const std::vector<::Agentmaster::DiffRow>& rows, double numberWidth, bool fromFileNow) const
+    {
+        Grid grid;
+        for (const auto width : { GridLength{ numberWidth, GridUnitType::Pixel }, GridLength{ numberWidth, GridUnitType::Pixel }, GridLength{ kDiffMarkWidth, GridUnitType::Pixel }, GridLength{ 1, GridUnitType::Star } })
+        {
+            ColumnDefinition column;
+            column.Width(width);
+            grid.ColumnDefinitions().Append(column);
+        }
+        // Exactly one pitch per line: the bands below are placed by it, and every column's text keeps it (BlockLineHeight),
+        // so a line's number, mark and code always sit on the same band whatever font fallback a character needs.
+        grid.Height(static_cast<double>(rows.size()) * kDiffLineHeight);
+        // The bands first (drawn under the text): one per run of added / removed lines across the whole width (the code
+        // column is a star, so the band reaches the card's right edge), and a stronger one under their numbers. Childless
+        // and never hit-tested.
+        for (size_t first = 0; first < rows.size();)
+        {
+            const wchar_t kind = rows[first].kind;
+            size_t end = first + 1;
+            while (end < rows.size() && rows[end].kind == kind)
+            {
+                ++end;
+            }
+            if (kind == L'+' || kind == L'-')
+            {
+                const bool added = kind == L'+';
+                const double top = static_cast<double>(first) * kDiffLineHeight;
+                const double height = static_cast<double>(end - first) * kDiffLineHeight;
+                Border band;
+                band.Background(added ? _diff.addBand : _diff.removeBand);
+                band.Height(height);
+                band.VerticalAlignment(VerticalAlignment::Top);
+                band.Margin(Thickness{ 0, top, 0, 0 });
+                band.IsHitTestVisible(false);
+                Grid::SetColumnSpan(band, 4);
+                grid.Children().Append(band);
+                Border numbers;
+                numbers.Background(added ? _diff.addNumberBand : _diff.removeNumberBand);
+                numbers.Height(height);
+                numbers.VerticalAlignment(VerticalAlignment::Top);
+                numbers.Margin(Thickness{ 0, top, 0, 0 });
+                numbers.IsHitTestVisible(false);
+                Grid::SetColumnSpan(numbers, 2);
+                grid.Children().Append(numbers);
+            }
+            first = end;
+        }
+        if (fromFileNow)
+        {
+            // The yellow edge of lines read from the file as it is now (they may be newer than the turn).
+            Border edge;
+            edge.Width(3);
+            edge.HorizontalAlignment(HorizontalAlignment::Left);
+            edge.Background(_diff.now);
+            edge.IsHitTestVisible(false);
+            grid.Children().Append(edge);
+        }
+        // The four columns' text, one line per row (an empty line where a side has no number).
+        std::wstring oldNumbers;
+        std::wstring newNumbers;
+        std::wstring marks;
+        std::wstring code;
+        for (size_t k = 0; k < rows.size(); ++k)
+        {
+            if (k > 0)
+            {
+                oldNumbers += L'\n';
+                newNumbers += L'\n';
+                marks += L'\n';
+                code += L'\n';
+            }
+            const auto& row = rows[k];
+            if (row.oldNo > 0)
+            {
+                oldNumbers += std::to_wstring(row.oldNo);
+            }
+            if (row.newNo > 0)
+            {
+                newNumbers += std::to_wstring(row.newNo);
+            }
+            marks += (row.kind == L'+' || row.kind == L'-') ? row.kind : L' ';
+            if (row.kind == L'\\')
+            {
+                code += L'\\'; // "\ No newline at end of file" keeps its backslash
+            }
+            code += DiffDisplayLine(row.text);
+        }
+        const auto addColumn = [&](const std::wstring& text, int32_t column, const Brush& brush, bool selectable, const Thickness& padding, TextAlignment alignment) {
+            // The code is selectable with the shared text menu (lines copy as code, without their marks); the numbers and
+            // marks are not - a drag over them selects nothing.
+            TextBlock block = selectable ? _MakeTextBlock(kDiffFontSize) : TextBlock{};
+            block.Text(winrt::hstring{ text });
+            block.FontFamily(_monoFont);
+            block.FontSize(kDiffFontSize);
+            block.Foreground(brush);
+            block.TextWrapping(TextWrapping::NoWrap);
+            block.LineHeight(kDiffLineHeight);
+            block.LineStackingStrategy(LineStackingStrategy::BlockLineHeight);
+            block.VerticalAlignment(VerticalAlignment::Top);
+            block.TextAlignment(alignment);
+            block.Padding(padding);
+            Grid::SetColumn(block, column);
+            grid.Children().Append(block);
+        };
+        addColumn(oldNumbers, 0, _diff.number, false, Thickness{ 0, 0, 8, 0 }, TextAlignment::Right);
+        addColumn(newNumbers, 1, _diff.number, false, Thickness{ 0, 0, 8, 0 }, TextAlignment::Right);
+        addColumn(marks, 2, _diff.code, false, Thickness{ 4, 0, 0, 0 }, TextAlignment::Left);
+        addColumn(code, 3, _diff.code, true, Thickness{ 0, 0, 12, 0 }, TextAlignment::Left);
+        return grid;
+    }
+
+    Button AgentTranscriptOverlay::_MakeDiffExpandRow(const std::shared_ptr<DiffCard>& card, size_t row)
+    {
+        const size_t count = card->hunks.size();
+        const bool below = row >= count;
+        const bool first = row == 0 && !below;
+        // Before the file is read, the hunks' numbers say how many lines lie above (a gap or the file's start); below the
+        // last hunk nothing is known yet.
+        const std::wstring words = below ? DiffExpandLabel(true, false, -1) : DiffExpandLabel(false, first, DiffLinesAboveHunk(card->hunks, row));
+        FontIcon arrow;
+        arrow.FontFamily(FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+        arrow.Glyph(below ? kDiffExpandDownGlyph : first ? kDiffExpandUpGlyph : kDiffExpandBothGlyph);
+        arrow.FontSize(10);
+        arrow.Foreground(_diff.expandText);
+        arrow.HorizontalAlignment(HorizontalAlignment::Center);
+        arrow.VerticalAlignment(VerticalAlignment::Center);
+        arrow.IsHitTestVisible(false); // the button must be the only target (the badge's mkIconBtn lesson)
+        Grid::SetColumn(arrow, 0);
+        TextBlock label;
+        label.Text(winrt::hstring{ words });
+        label.FontSize(12);
+        label.Foreground(_diff.expandText);
+        label.TextWrapping(TextWrapping::NoWrap);
+        label.VerticalAlignment(VerticalAlignment::Center);
+        label.IsHitTestVisible(false);
+        Grid::SetColumn(label, 1);
+        Grid content;
+        ColumnDefinition arrowColumn; // the numbers' width: the arrow sits in the number columns, the words where code starts
+        arrowColumn.Width(GridLength{ 2 * card->numberWidth + kDiffMarkWidth, GridUnitType::Pixel });
+        ColumnDefinition labelColumn;
+        labelColumn.Width(GridLength{ 1, GridUnitType::Star });
+        content.ColumnDefinitions().Append(arrowColumn);
+        content.ColumnDefinitions().Append(labelColumn);
+        content.Children().Append(arrow);
+        content.Children().Append(label);
+        Button button;
+        button.Background(_diff.expandBand);
+        button.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        button.CornerRadius(CornerRadius{ 0, 0, 0, 0 }); // square: a rounded template is a composition node per row
+        button.Padding(Thickness{ 0, 3, 0, 3 });
+        button.MinWidth(0);
+        button.MinHeight(0);
+        button.HorizontalAlignment(HorizontalAlignment::Stretch);
+        button.HorizontalContentAlignment(HorizontalAlignment::Stretch);
+        button.Content(content);
+        AgentSetTip(button, winrt::hstring{ kDiffExpandTip });
+        winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(button, winrt::hstring{ words });
+        // The row by its INDEX and the card weakly (the card owns the button: a strong reference would be a cycle).
+        button.Click([weak = get_weak(), weakCard = std::weak_ptr<DiffCard>{ card }, row](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+            try
+            {
+                const auto self = weak.get();
+                const auto target = weakCard.lock();
+                if (self && target)
+                {
+                    self->_ExpandDiffCard(target, row);
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay diff expand row"); // the card stays as it was
+            }
+        });
+        if (row < card->expandRows.size())
+        {
+            card->expandRows[row] = button;
+            card->expandLabels[row] = label;
+        }
+        return button;
+    }
+
+    void AgentTranscriptOverlay::_SetDiffCardOpen(const std::shared_ptr<DiffCard>& card, bool open)
+    {
+        if (!card)
+        {
+            return;
+        }
+        if (open && !card->bodyBuilt)
+        {
+            _BuildDiffCardBody(card); // a long card's first open: its body is made now
+        }
+        card->open = open;
+        if (card->body)
+        {
+            card->body.Visibility(open ? Visibility::Visible : Visibility::Collapsed);
+        }
+        if (card->chevron)
+        {
+            card->chevron.Glyph(open ? kFoldOpenGlyph : kFoldClosedGlyph);
+        }
+    }
+
+    void AgentTranscriptOverlay::_SetDiffCardViewed(const std::shared_ptr<DiffCard>& card, bool viewed)
+    {
+        if (!card)
+        {
+            return;
+        }
+        // GitHub's rule: a file marked viewed folds away; unmarked, it opens again.
+        _SetDiffCardOpen(card, !viewed);
+        // Its outline entry dims while it is viewed (only the Diff view has cards).
+        const auto& view = _levels[static_cast<size_t>(::Agentmaster::TranscriptView::Diff)];
+        for (const auto& entry : view.outlineFiles)
+        {
+            if (entry.first == card->block && entry.second)
+            {
+                entry.second.Opacity(viewed ? 0.45 : 1.0);
+                break;
+            }
+        }
+    }
+
+    void AgentTranscriptOverlay::_ExpandDiffCard(const std::shared_ptr<DiffCard>& card, size_t row) noexcept
+    {
+        try
+        {
+            if (!_open || !card || card->filePath.empty() || !card->numbered || row > card->hunks.size())
+            {
+                return;
+            }
+            if (const auto known = _diffFiles.find(card->filePath); known != _diffFiles.end())
+            {
+                _ApplyDiffExpansion(*card, row, known->second);
+                return;
+            }
+            // Not read yet: this click waits for the read - one read per file, however many clicks queue behind it.
+            const bool reading = std::any_of(_diffExpandWaiting.begin(), _diffExpandWaiting.end(), [&card](const auto& waiting) {
+                return std::get<0>(waiting) == card->filePath;
+            });
+            _diffExpandWaiting.emplace_back(card->filePath, std::weak_ptr<DiffCard>{ card }, row);
+            if (row < card->expandLabels.size() && card->expandLabels[row])
+            {
+                card->expandLabels[row].Text(L"Reading the file\x2026");
+            }
+            if (!reading)
+            {
+                _LoadDiffFileAsync(get_weak(), _dispatcher, card->filePath, _generation);
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the card stays as it was; another click tries again.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay diff expand");
+        }
+    }
+
+    void AgentTranscriptOverlay::_ApplyDiffExpansion(DiffCard& card, size_t row, const std::shared_ptr<const std::vector<std::wstring>>& fileLines)
+    {
+        const size_t count = card.hunks.size();
+        if (count == 0 || row > count || !card.bodyBuilt || card.located.size() != count)
+        {
+            return;
+        }
+        if (!fileLines)
+        {
+            _SyncDiffExpandRows(card, nullptr, true); // the file cannot be read: every row says so
+            return;
+        }
+        const auto& lines = *fileLines;
+        // Every hunk's place in the file now, once: a gap's count needs the hunk above it too.
+        for (size_t h = 0; h < count; ++h)
+        {
+            if (card.located[h] == -2)
+            {
+                card.located[h] = ::Agentmaster::LocateHunkNewSide(lines, card.hunks[h]);
+            }
+        }
+        const size_t h = row < count ? row : count - 1;
+        const auto& hunk = card.hunks[h];
+        const int at = card.located[h];
+        if (at >= 0 && card.hunkPanels[h])
+        {
+            // A file the change CREATED had no old side: its expanded lines get no old numbers.
+            const bool oldSide = DiffSideCount(hunk, L'-') > 0;
+            std::vector<::Agentmaster::DiffRow> rows;
+            if (row < count)
+            {
+                const int remaining = DiffRemainingAbove(card.hunks, card.located, card.revealedAbove, h);
+                if (remaining > 0)
+                {
+                    // A short gap between two hunks opens whole (GitHub's way); otherwise one step, read upwards.
+                    const int take = DiffExpandTake(remaining, h > 0);
+                    const int end = at - card.revealedAbove[h]; // one past the last line this step shows
+                    for (int j = end - take; j < end; ++j)
+                    {
+                        ::Agentmaster::DiffRow line;
+                        line.kind = L' ';
+                        line.text = lines[static_cast<size_t>(j)];
+                        line.newNo = DiffNewFirst(hunk) - (at - j);
+                        line.oldNo = oldSide ? DiffOldFirst(hunk) - (at - j) : 0;
+                        rows.push_back(std::move(line));
+                    }
+                    // Under the hunk's "@@" row, above the lines shown before: the file is read upwards.
+                    card.hunkPanels[h].Children().InsertAt(card.numbered ? 1u : 0u, _MakeDiffLines(rows, card.numberWidth, true));
+                    card.revealedAbove[h] += take;
+                }
+            }
+            else
+            {
+                const int end = at + DiffSideCount(hunk, L'+'); // the file line right after the hunk
+                const int remaining = DiffRemainingBelow(lines.size(), at, hunk, card.revealedBelow[h]);
+                if (remaining > 0)
+                {
+                    const int take = DiffExpandTake(remaining, false);
+                    const int first = end + card.revealedBelow[h];
+                    for (int j = first; j < first + take; ++j)
+                    {
+                        ::Agentmaster::DiffRow line;
+                        line.kind = L' ';
+                        line.text = lines[static_cast<size_t>(j)];
+                        line.newNo = DiffNewFirst(hunk) + DiffSideCount(hunk, L'+') + (j - end);
+                        line.oldNo = oldSide ? DiffOldFirst(hunk) + DiffSideCount(hunk, L'-') + (j - end) : 0;
+                        rows.push_back(std::move(line));
+                    }
+                    card.hunkPanels[h].Children().Append(_MakeDiffLines(rows, card.numberWidth, true));
+                    card.revealedBelow[h] += take;
+                }
+            }
+            if (!rows.empty() && !card.note && card.body)
+            {
+                // The legend, once per card: what the yellow edge means.
+                card.note = TextBlock{};
+                card.note.Text(kDiffNowNote);
+                card.note.FontSize(11.5);
+                card.note.Foreground(_diff.meta);
+                card.note.TextWrapping(TextWrapping::Wrap);
+                card.note.Margin(Thickness{ 10, 4, 10, 6 });
+                card.body.Children().Append(card.note);
+            }
+        }
+        _SyncDiffExpandRows(card, &lines, false);
+    }
+
+    void AgentTranscriptOverlay::_SyncDiffExpandRows(DiffCard& card, const std::vector<std::wstring>* fileLines, bool readFailed)
+    {
+        const size_t count = card.hunks.size();
+        if (count == 0 || card.located.size() != count)
+        {
+            return;
+        }
+        if (fileLines)
+        {
+            for (size_t h = 0; h < count; ++h)
+            {
+                if (card.located[h] == -2)
+                {
+                    card.located[h] = ::Agentmaster::LocateHunkNewSide(*fileLines, card.hunks[h]);
+                }
+            }
+        }
+        for (size_t row = 0; row <= count && row < card.expandRows.size() && row < card.expandLabels.size(); ++row)
+        {
+            const auto& button = card.expandRows[row];
+            const auto& label = card.expandLabels[row];
+            if (!button || !label)
+            {
+                continue; // no row there (a hunk at the file's start)
+            }
+            const bool below = row >= count;
+            const size_t h = below ? count - 1 : row;
+            int remaining = -1; // -1: not known yet
+            std::wstring why; // set: the row can show nothing, and says why
+            if (readFailed)
+            {
+                why = L"The file cannot be read now - it was moved, deleted or is locked";
+            }
+            else if (fileLines)
+            {
+                if (card.located[h] < 0)
+                {
+                    why = L"These lines are no longer in the file - it changed after this turn";
+                }
+                else if (below)
+                {
+                    remaining = DiffRemainingBelow(fileLines->size(), card.located[h], card.hunks[h], card.revealedBelow[h]);
+                }
+                else
+                {
+                    remaining = DiffRemainingAbove(card.hunks, card.located, card.revealedAbove, h);
+                }
+            }
+            else if (!below)
+            {
+                remaining = std::max(DiffLinesAboveHunk(card.hunks, h) - card.revealedAbove[h], 0);
+            }
+            if (why.empty() && remaining == 0)
+            {
+                // Nothing (more) to show: the row goes, and the lines on both sides of it meet.
+                if (button.Visibility() != Visibility::Collapsed)
+                {
+                    button.Visibility(Visibility::Collapsed);
+                }
+                continue;
+            }
+            const std::wstring words = why.empty() ? DiffExpandLabel(below, row == 0, remaining) : why;
+            label.Text(winrt::hstring{ words });
+            label.Opacity(why.empty() ? 1.0 : 0.6);
+            button.IsEnabled(why.empty());
+            winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(button, winrt::hstring{ words });
+        }
+    }
+
+    winrt::fire_and_forget AgentTranscriptOverlay::_LoadDiffFileAsync(winrt::weak_ref<AgentTranscriptOverlay> weak,
+                                                                       DispatcherQueue dispatcher,
+                                                                       std::wstring path,
+                                                                       uint64_t generation)
+    {
+        // Every parameter BY VALUE (the coroutine outlives its caller) and only a WEAK overlay off the UI thread - the
+        // last reference must never drop on a pool thread (CLAUDE.md "A fire_and_forget coroutine can drop the LAST page
+        // reference").
+        try
+        {
+            co_await winrt::resume_background(); // a file of up to 32 MB: never on the UI thread
+            std::shared_ptr<const std::vector<std::wstring>> lines;
+            try
+            {
+                lines = ReadDiffFileLines(path);
+            }
+            catch (...)
+            {
+                // Rule #18. Recovery: null - the card says the file cannot be read.
+                ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay read diff file");
+            }
+            const bool queued = dispatcher && dispatcher.TryEnqueue([weak, path, lines, generation]() {
+                if (const auto self = weak.get())
+                {
+                    self->_OnDiffFileLoaded(path, lines, generation); // noexcept: contains its own failures
+                }
+            });
+            if (!queued)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[transcript] diff expand: the window closed before the file was read path=" + path + L"\n");
+            }
+        }
+        catch (...)
+        {
+            // Rule #18 - and the terminate-net every fire_and_forget needs (an escape IS winrt::terminate()).
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay::_LoadDiffFileAsync");
+        }
+    }
+
+    void AgentTranscriptOverlay::_OnDiffFileLoaded(const std::wstring& path, std::shared_ptr<const std::vector<std::wstring>> lines, uint64_t generation) noexcept
+    {
+        try
+        {
+            if (generation != _generation || !_open)
+            {
+                return; // the overlay was retargeted, refreshed or closed since: the cards it was read for are gone
+            }
+            _diffFiles[path] = lines;
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[transcript] " + ::Agentmaster::ShortId(_source.sessionId) + L" diff expand read " +
+                                                            (lines ? std::to_wstring(lines->size()) + L" lines" : std::wstring{ L"nothing (the file cannot be read)" }) +
+                                                            L" path=" + path + L"\n");
+            // The expansions that waited for this file, in click order; the others keep waiting for theirs.
+            std::vector<std::tuple<std::wstring, std::weak_ptr<DiffCard>, size_t>> ready;
+            for (auto it = _diffExpandWaiting.begin(); it != _diffExpandWaiting.end();)
+            {
+                if (std::get<0>(*it) == path)
+                {
+                    ready.push_back(std::move(*it));
+                    it = _diffExpandWaiting.erase(it);
+                }
+                else
+                {
+                    ++it;
+                }
+            }
+            for (const auto& item : ready)
+            {
+                const auto card = std::get<1>(item).lock();
+                if (!card)
+                {
+                    continue; // its view was released since
+                }
+                try
+                {
+                    _ApplyDiffExpansion(*card, std::get<2>(item), lines);
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: that card stays as it was; the next waiting expansion still runs.
+                    ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay diff expansion");
+                }
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the waiting cards keep their rows; another click reads again.
+            ::Agentmaster::AgentLogCaughtException(L"AgentTranscriptOverlay diff file loaded");
+        }
     }
 
     bool AgentTranscriptOverlay::_IsUnder(const DependencyObject& element, const DependencyObject& ancestor) noexcept

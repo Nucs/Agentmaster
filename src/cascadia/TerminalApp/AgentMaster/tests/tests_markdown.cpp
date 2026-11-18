@@ -261,6 +261,18 @@ void TestMarkdownBlocks()
         CHECK(code.blocks.size() == 1 && code.blocks[0].kind == MdBlockKind::Code, "md: a fenced block is Code");
         CHECK(code.blocks.size() == 1 && code.blocks[0].code == L"ls -la\npwd", "md: code without the trailing newline");
         CHECK(code.blocks.size() == 1 && code.blocks[0].info == L"bash", "md: the info string's first word is the language");
+        // The rest of the info string (MdBlock::infoRest): the transcript overlay's Diff tab reads its file and what the block
+        // is from it ("```diff <file> · <what>", TRANSCRIPT_OVERLAY.md 3l) - a tilde fence carries a backtick in it.
+        CHECK(code.blocks.size() == 1 && code.blocks[0].infoRest == L"title=x", "md: the info string after its first word is kept too");
+        const auto diff = ParseMarkdownBlocks(L"````diff src/a b.py \x00B7 2 edits\n--- a\n+++ b\n````\n");
+        CHECK(diff.blocks.size() == 1 && diff.blocks[0].info == L"diff" && diff.blocks[0].infoRest == L"src/a b.py \x00B7 2 edits" &&
+                  diff.blocks[0].code == L"--- a\n+++ b",
+              "md: a diff fence's info keeps its file (spaces and all) and its description");
+        const auto tilde = ParseMarkdownBlocks(L"~~~diff we`ird.txt\n-a\n+b\n~~~\n");
+        CHECK(tilde.blocks.size() == 1 && tilde.blocks[0].kind == MdBlockKind::Code && tilde.blocks[0].info == L"diff" && tilde.blocks[0].infoRest == L"we`ird.txt",
+              "md: a tilde fence's info may hold a backtick");
+        const auto bare = ParseMarkdownBlocks(L"```\nx\n```\n");
+        CHECK(bare.blocks.size() == 1 && bare.blocks[0].info.empty() && bare.blocks[0].infoRest.empty(), "md: a fence with no info has neither part");
         const auto rule = ParseMarkdownBlocks(L"a\n\n---\n\nb\n");
         CHECK(rule.blocks.size() == 3 && rule.blocks[1].kind == MdBlockKind::Rule, "md: a thematic break is a Rule");
         CHECK(rule.blocks.size() == 3 && MdGapAbove(&rule.blocks[0], rule.blocks[1]) == 6.0, "md: a rule gets a little more air");

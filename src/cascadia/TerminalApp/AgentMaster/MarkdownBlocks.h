@@ -156,6 +156,10 @@ namespace Agentmaster
         std::wstring code;
         // Code only: the first word of the fence's info string (the language, e.g. "bash"), or empty.
         std::wstring info;
+        // Code only: the rest of the fence's info string after that first word, trimmed (at most 400 characters), or empty.
+        // The transcript overlay's Diff tab writes a diff block's file and what it is there ("```diff src/a.py · 2 edits",
+        // TRANSCRIPT_OVERLAY.md §3l); every other reader ignores it.
+        std::wstring infoRest;
         // Table only: one alignment per column (the delimiter row's), so its size is the column count (>= 1).
         std::vector<MdAlign> tableAlign;
         // Table only: the rows, the HEADER row first (always present), then the body rows (possibly none). Each row

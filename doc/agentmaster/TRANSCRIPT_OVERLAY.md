@@ -9,7 +9,7 @@ transcript it was forked from (§3e, a sixth report, same day) — not built. 20
 the tabs' cheat-sheet tooltips (§3f, the seventh ask), Compact's reason lines (§3g, the eighth), plain dashes
 (§3h, the ninth) and Markdown tables (§3i, the tenth) — not built. 2026-11-18: the box tabs Custom · User Only ·
 Assistant Only after a separator, with their row of twelve boxes (§3j, the eleventh ask), and the ↑ / ↓ jump buttons
-(§3k) — not built.
+(§3k) — not built; then the Diff tab after a second separator (§3l, the twelfth ask, same day) — not built.
 
 ## 1. The ask (verbatim)
 
@@ -76,6 +76,23 @@ The user's picks, from two rounds of mockups the same day:
   them 40% smaller and more to right bottom"*.
 - **Teammates' messages in User Only:** left out — only what the user typed; a turn only a teammate started is skipped.
 
+And the twelfth (2026-11-18, the same session):
+
+> What about Diff tab, that is a page that helps go over the diffs made per turn, showing the user and assistant messages
+> (like minimal) and shows only the reason of bash calls (deduplicated to x5 in one row for example)
+> This way we can see the conversation and code changes. the code changes should be shown formatted in a diff block with
+> ability to expand code area like on github review
+> Propose me designs in ask user questions html tool
+
+The user's picks, from one round of mockups (four questions, each option a drawn page):
+
+- **Layout:** "Outline + long page" — an outline column on the left lists the turns that changed files and their files,
+  like GitHub's file tree; one long page on the right.
+- **Grouping:** "Net diff per file" — each turn shows, per file, its NET change (like a commit), not every edit in order.
+- **Bash rows:** "Row per reason, ×N" — one row per different reason the turn's Bash calls gave, a repeat counted.
+- **Expand:** "The file as it is now" — the lines around a change are read from the file on disk now, marked as such
+  (a later turn may have changed them); no rewinding of the file to the turn.
+
 ## 2. Where it opens
 
 Every entry opens the overlay over **whatever is on screen** (a terminal tab, the Agent Manager page, the
@@ -102,16 +119,19 @@ Labels, tooltip and glyph (`\xE736` ReadingMode) are shared constants in `AgentC
 - **Header**: reading-mode icon · "Transcript" · the session line (title · short id · "Codex") · then, at
   the top-right, **↵ Wrap** (§3c) · Copy · Refresh · Close (✕).
 - **Tabs**, one per level in the Copy menu's order — **Default · Max · Full · Compact · Minimal** — then a
-  hairline separator and the three **box tabs — Custom · User Only · Assistant Only** (§3j) — the current one
+  hairline separator and the three **box tabs — Custom · User Only · Assistant Only** (§3j), then a second separator
+  and the **Diff** tab (§3l) — the current one
   bright with an accent underline, then the **(i) level guide** (§3f). Each level tab's tooltip is that
-  level's cheat sheet (§3f), each box tab's says which side it shows, all with their digit key. A status line to the right shows progress, then
-  "N lines · rendered in X". At the far right, **Expand all / Collapse all** (link-colored) — shown only
+  level's cheat sheet (§3f), each box tab's says which side it shows, Diff's what it shows, all with their digit key. A
+  status line to the right shows progress, then
+  "N lines · rendered in X" (on Diff: "23 turns · 9 with changes · 14 files · +412 −87 · rendered in X"). At the far
+  right, **Expand all / Collapse all** (link-colored) — shown only
   while the current level has folded tool calls (§3b).
 - **The box row** (box tabs only, §3j): "Also show:" and twelve check boxes, grouped Compact · Default · Full ·
   Max, wrapping onto a second line on a narrow window.
 - **Body**: one scroll view per tab (each keeps its own scroll position; switching back is instant), with the
   **↑ / ↓ jump buttons** stacked in its bottom-right corner (§3k).
-- **Keyboard**: Esc closes; 1–8 pick a tab by position; PageUp / PageDown / Home / End / arrows scroll;
+- **Keyboard**: Esc closes; 1–9 pick a tab by position; PageUp / PageDown / Home / End / arrows scroll;
   Tab cycles inside the card (through the boxes and the fold rows too — Enter / Space opens a fold, Space
   ticks a box — and the Session chain links, §3d); the app's
   tab-switching chords (Ctrl+Tab, …) still work — and close it.
@@ -122,8 +142,8 @@ Labels, tooltip and glyph (`\xE736` ReadingMode) are shared constants in `AgentC
 - Every tab pick — a click or a digit key, **the tab already showing included** — is written to
   settings.json as `AppSettings::transcriptOverlayLevel`: the level's NAME (`minimal` / `compact` /
   `default` / `full` / `max`, `TurnsLevelName`), or a box tab's (`custom` / `user-only` / `assistant-only`,
-  `TranscriptViewName`, §3j), so a future reorder of the levels can't remap a saved
-  choice. A build older than the box tabs reads their names as unknown and opens at Default. The write is a **freshest-disk read-modify-write of that one field**
+  `TranscriptViewName`, §3j), or the Diff tab's (`diff`, §3l), so a future reorder of the levels can't remap a saved
+  choice. A build older than these tabs reads their names as unknown and opens at Default. The write is a **freshest-disk read-modify-write of that one field**
   (`AgentTranscriptOverlay::_RememberLevel`, the `ColorPickupFlyout` idiom), skipped when the file already
   holds it — never a stale in-memory copy over a cog Save or another window's change.
 - Every open (`Show(source, kRememberedLevel)` — what every menu passes) **reads it fresh from disk**
@@ -501,7 +521,7 @@ from **Minimal** and add what the user ticks in a row of boxes:
   it is greyed).
 - **The header's Copy** copies the tab's text as rendered (with its boxes); the Copy ▸ Transcript menus keep the five
   levels. The (i) guide's table stays the five levels (no column is tinted while a box tab shows); a paragraph under it
-  describes the three tabs, and its footer says "Keys 1-8".
+  describes the three tabs (and one more the Diff tab, §3l), and its footer says "Keys 1-9".
 - Unlogged clicks, like ↵ Wrap and the folds — a pure view toggle; the re-render's `[transcript] … show user-only
   boxes=answers,ops: …` line names the boxes it rendered with.
 
@@ -524,6 +544,98 @@ from **Minimal** and add what the user ticks in a row of boxes:
 - Tooltips: "Jump to the top (Home)" / "Jump to the bottom (End) - …"; screen-reader names "Jump to the top" / "Jump
   to the bottom". Unlogged — pure view navigation.
 
+### 3l. The Diff tab
+
+The twelfth ask (§1, with the user's picks). After the box tabs a second hairline separator, then **Diff** (key 9): the
+conversation with the code it changed.
+
+    … Assistant Only │ Diff  ⓘ                      23 turns · 9 with changes · 14 files · +412 −87 · rendered in 1.2 s
+    ┌ CHANGED FILES BY TURN ──┐ ### Turn 4 · Nov 18 10:02 → last reply 10:09 · 2 files · +9 −1
+    │ Turn 2 · make the scan… │ ❯ User
+    │   scan.py       +40 −6  │ ┃ The scan crashes on empty lines - fix it and add a test.
+    │▌Turn 4 · the scan cras… │ [$] Run the scan tests  ×3
+    │   scan.py        +3 −1  │ [$] Commit the fix
+    │   test_scan.py      +6  │ ┌──────────────────────────────────────────────────────────────────────┐
+    │ Turn 7 · speed it up    │ │ ▾ +3 −1 ■■■■□ src/scan.py                          2 edits ☐ Viewed │
+    │   …                     │ │ ↑ Show 20 more lines above (from the file now)                       │
+    │                         │ │ @@ -38,7 +38,9 @@ def scan(rows):                                     │
+    │                         │ │ 39  39    for row in rows:                                           │
+    │                         │ │ 40      -     value = parse(row)                                     │
+    │                         │ │     40  +     if not row.strip():                                    │
+    │                         │ │ ↓ Show the last 4 lines (from the file now)                          │
+    └─────────────────────────┘ ● Claude ┃ Fixed: empty rows are skipped before parsing, and a test covers it.
+
+- **The page is a document of its own** (`TranscriptTurns.h` `RenderTranscriptDiffFile`, Agentmaster's, not part of the
+  port; `DiffDocument`): every turn as Minimal draws it — the user's message(s), then Claude's final reply — and between
+  them the turn's **Bash rows** and its **diff blocks**. Its options are Minimal's with the agents on, so a turn's file
+  changes include the ones its agents made (each card says "by <agent>"). The header's Copy copies this document.
+- **Bash rows** (the pick "Row per reason, ×N"): one row per DIFFERENT reason the turn's Bash calls gave (`description`,
+  whitespace-collapsed, ≤ 200 characters; a call with none shows its command as code, ≤ 80), in first-seen order, a
+  repeated one with "×N" (`DedupeInOrder`). In the Markdown: `- `$` Run the tests ×3`. The build draws each as a "$"
+  chip (a childless rounded frame behind the "$") and the reason with its own styles, the count in the accent blue.
+- **One ```diff block per file** (the pick "Net diff per file"): the turn's NET change to it — `TranscriptDiff.h`'s
+  `TurnFileComposer` replays the turn's edits (Claude Code's `structuredPatch` hunks, each numbered against the file right
+  before that edit, with 3 lines of context) on a SPARSE model of the file: only the lines some hunk showed are known,
+  every other line is a run of known length but unknown text. The net change reads off the model: the original lines
+  removed, the lines added and still there, with up to 3 KNOWN lines of context (fewer where no hunk showed the
+  neighbours). No file content is needed; when Claude Code kept the whole original (`originalFile`, files under 10 KB),
+  the model starts from it and every context line is there.
+  - A file the turn **created** (its first change a `Write` of type `create`) is all added lines from `/dev/null`.
+  - A file the turn **changed back** gets no card but a note: "_other.py: changed and changed back in this turn - no net
+    change._".
+  - When the edits **do not fit together** — a hunk's context or removed lines differ from what an earlier hunk showed
+    (the file changed between two edits: a shell command, an editor, a formatter) — or an edit carries **no line
+    numbers** (an older Claude Code, a NotebookEdit's source), the composition is void and the file's edits show **one
+    by one**, each as Claude Code recorded it ("edit 2 of 3").
+  - A `Write` over an existing file with no hunks changed nothing (Claude Code's own verdict) and is left out; a refused
+    or unanswered call changed nothing.
+  - The fence's info after `diff` is the file (relative to the session's folder when inside it) and what the block is:
+    `new file`, `N edits`, `by <agent>`, `edit k of N`. A file name holding a backtick gets a tilde fence (CommonMark
+    refuses a backtick fence whose info holds one); MarkdownBlocks keeps the info after its first word (`MdBlock::infoRest`).
+- **The turn headings** end with their files and net counts: "### Turn 4 · … · 2 files · +9 -1" — drawn with the files
+  dim, "+9" green and "−1" red.
+- **Each block is a GitHub-style card** (`_BuildDiffCard`, GitHub's dark palette): a header bar — a chevron, "+a −d",
+  five diffstat squares (one per line up to five, else in proportion), the file, what the block is, and a **Viewed** box
+  (GitHub's: ticked closes the card and dims its outline entry; for this open of the transcript only) — over the hunks:
+  each hunk's "@@ … @@" row on a blue band, then its lines with the OLD and NEW line numbers, removed lines on red bands
+  and added ones on green (a stronger tint under their numbers). A click on the header opens / closes the card. A card of
+  more than 400 lines starts closed and builds its lines on its first open (GitHub's "large diffs are not rendered by
+  default").
+  - **Cheap at any size**: a run of lines is ONE element — four text blocks side by side (old numbers, new numbers, the
+    +/- marks, the code), every line exactly 19 DIPs (`LineStackingStrategy::BlockLineHeight`), over childless bands
+    placed by line — not a grid per line (CLAUDE.md "Per-tab XAML is multiplied"). The code column is selectable (lines
+    copy as code, without their marks).
+  - **Code never wraps** (a wrapped line would put the number columns out of step): with ↵ on, a card whose lines are
+    wider than the page scrolls sideways on its own (one horizontal scroll view per card body; the wheel goes on to the
+    page); with ↵ off, its long lines are cut at the right edge like every other line. A line longer than 2,000
+    characters is drawn cut with an ellipsis, and any character a text block would break a line at is drawn as its
+    control picture (␍, ␤, …).
+- **Expand** (the pick "The file as it is now"): an expand row above each hunk (where lines lie above it) and one below
+  the last. A click reads the file from disk NOW (off the UI thread, once per file per open: `_LoadDiffFileAsync`, ≤ 32 MB,
+  UTF-8 or the ANSI code page), finds the hunk's new side in it by its text (`LocateHunkNewSide`: of several places, the
+  one nearest the hunk's own number) and reveals up to 20 lines — upwards from the hunk; a gap between two hunks of at
+  most 40 lines opens whole (GitHub's way) — numbered from the hunk's own numbers. It never reveals more than the hunks'
+  numbers say lay there (a later turn's inserted lines never push a number below 1 or past the gap). Revealed lines carry
+  a **yellow left edge** and the card gains a legend: "Lines with a yellow edge are read from the file as it is now - a
+  later turn may have changed them since this turn." A row's label counts what it can still show ("Show the 12 lines
+  hidden here", "Show 20 more lines above", "Show the last 4 lines", all "(from the file now)"); a row with nothing left
+  goes, and its two sides meet. A hunk the file no longer holds says "These lines are no longer in the file - it changed
+  after this turn"; a file that cannot be read (moved, deleted, locked, too big) says so. An unnumbered card has no
+  expand rows and says why. The arithmetic is `TranscriptDiff.h`'s (`DiffRemainingAbove`, `DiffRemainingBelow`,
+  `DiffExpandTake`, `DiffExpandLabel`), harness-tested.
+- **The outline** (the pick "Outline + long page"): a 240 DIP column left of the page, "CHANGED FILES BY TURN" — per turn
+  that changed files "Turn 4 · <its message's first line>" and under it each file's NAME with its "+a −d" (the full path
+  in its tooltip). A click on a turn scrolls its heading to the top of the page, on a file its card — at once when built,
+  else the moment the build reaches it (the pending turn / card jumps). The entry of the turn whose heading is at the top
+  of the page is lit (the accent at ~18 %) as the page scrolls, and the outline scrolls to keep it in sight; a turn with no
+  change has no entry, so nothing is lit while the reader is in one. Computed off the UI thread with the parse
+  (`_ScanDiffOutline`); at most 3,000 entries.
+- **Status**: "23 turns · 9 with changes · 14 files · +412 −87 · rendered in X" (files counted once each by path).
+- **Not on Diff**: the box row, Expand all (nothing folds). A Codex session has no Claude Code edit record: the tab says so.
+- Logs: the render's `[transcript] <sid8> show diff: chars=… blocks=… (23 turns · …) rendered in …` and each file read
+  `[transcript] <sid8> diff expand read N lines path=…` (or `nothing (the file cannot be read)`). Card clicks, Viewed and
+  the outline are unlogged view actions; their failures are `[exc]` lines (`AgentTranscriptOverlay diff …`).
+
 ## 4. Rendering
 
 1. **Off the UI thread** (`AgentTranscriptOverlay::_LoadLevelAsync`, holding only a weak reference): the
@@ -532,7 +644,8 @@ from **Minimal** and add what the user ticks in a row of boxes:
    note), and for a Codex rollout `ReadConversationFollowupText` (Minimal /
    Compact) or `ReadConversationText` (Default / Full / Max). A box tab (§3j) is the same turns view under
    the options its boxes and its side make (`TranscriptViewOptions`, taken on the UI thread when the render
-   starts). Then `ParseMarkdownBlocks`
+   starts); the Diff tab (§3l) is `RenderTranscriptDiffFile`'s own document, whose outline and status words
+   are read off its parsed blocks here too (`_ScanDiffOutline`). Then `ParseMarkdownBlocks`
    (`AgentMaster/MarkdownBlocks.{h,cpp}`, cmark) flattens it into render blocks, `MdFindToolAreas`
    marks the tool-call lists to fold (§3b; wherever the full call lines show), and `MdFindSessionChain` finds the Session chain list and the
    session headings its links point to (§3d).
@@ -603,7 +716,8 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
   `esc`, `click outside`, `close button`, `tab switch`, `agent manager page`, `tab move`, `tab drag`,
   `tab moved to another window`.
 - `[transcript] <sid8> show <name>: chars=N blocks=M rendered in Xms` — a box tab's name followed by
-  ` boxes=<its ticked names, or none>` — (+ `(capped)` /
+  ` boxes=<its ticked names, or none>`; the Diff tab's line carries its status words before "rendered":
+  ` (23 turns · 9 with changes · 14 files · +412 −87)` — (+ `(capped)` /
   `(parse failed part-way)`, + ` from the fork source <src8>'s transcript (this fork has no messages yet)`
   for §3e), or `: nothing to show (<why>) path=…`. A Copy ▸ Transcript of such a fork ends its
   `[transcript] <sid8> copy <level>: chars=N …` line with ` from the fork source <src8>'s transcript`.
@@ -619,6 +733,13 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
   failed session jump (`AgentTranscriptOverlay session jump`, the view stays where it was; `AgentTranscriptOverlay
   session link`, the click handler's belt) or a failed chain scan (`MdFindSessionChain` / `MdFindSessionRefs`
   — what was found so far still links).
+- The Diff tab (§3l): each file Expand reads is one line, `[transcript] <sid8> diff expand read N lines path=<file>` (or
+  `read nothing (the file cannot be read)`; `[transcript] diff expand: the window closed before the file was read` when
+  the window went first). A card's open / close, Viewed, an expand click and the outline's jumps are unlogged view
+  actions; their failures are `[exc]` lines (`AgentTranscriptOverlay diff outline` / `diff outline (empty)` / `diff
+  outline turn` / `diff outline file` / `diff outline highlight` / `diff card jump` / `diff card toggle` / `diff card
+  viewed` / `diff expand row` / `diff expand` / `diff expansion` / `diff file loaded` / `read diff file` /
+  `::_LoadDiffFileAsync`).
 
 ## 7. Files
 
@@ -635,6 +756,17 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
   renders against all 55 goldens and the synthetic cases; `TestTranscriptViews`: names, boxes vs the ladder, options,
   ticks, tips, Custom with each level's boxes == that level's golden for all 55) and `tests/tests_persistence.cpp` (the
   three lists' round trip, an unknown name kept, and their empty defaults).
+- `src/cascadia/TerminalApp/AgentMaster/TranscriptDiff.h` — the Diff tab's pure half (§3l): unified diff text read and
+  written (`ParseUnifiedDiff`, `FormatHunkHeader`, `UnifiedDiffText`), each hunk row's numbers (`NumberHunkRows`), the
+  per-turn net change (`TurnFileComposer`: the sparse file model), the Bash reasons once each (`DedupeInOrder`), where a
+  hunk sits in the file now (`LocateHunkNewSide`), and the cards' arithmetic (`DiffRemainingAbove` / `…Below`,
+  `DiffExpandTake`, `DiffExpandLabel`, `DiffDisplayLine`, `SplitDiffInfo`, `TakeDiffRepeatCount`, `DiffBarSquares`,
+  `DiffOutlineTitle`). Its document is `TranscriptTurns`' (`RenderTranscriptDiff` / `RenderTranscriptDiffFile` →
+  `Renderer::DiffDocument` / `DiffTurn` / `TurnFileDiffs` / `DiffFence`: Agentmaster's, not part of the port). Harness:
+  `tests/tests_turns.cpp` (`TestTranscriptDiff`: the pure half case by case, the document of a synthetic session — Bash
+  rows, a net diff of two edits, a created file, a file changed back, misfit edits one by one, a tilde fence, the
+  headings' counts — and of the editDiffs one; `TestTranscriptViews`: the tab's name, label, options and tip) and
+  `tests/tests_markdown.cpp` (`MdBlock::infoRest`).
 - `src/cascadia/TerminalApp/AgentMaster/TranscriptLevelGuide.h` — the level guide's one table (§3f): the
   (i) panel's rows, every-level and no-level lists, the Codex note, `TranscriptLevelTip` (a tab's cheat sheet).
   Harness: `tests/tests_turns.cpp` (`TestTranscriptLevelGuide`: each row's option against
@@ -718,6 +850,27 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
 - The ↓ end-follow (§3k) learns the reader moved only from their input on the view (wheel, press, Up / PageUp / Home);
   dragging the scroll bar's thumb starts with a press, so it counts, but a scroll caused by anything else (a screen
   reader's scroll pattern) does not stop it before the build ends.
+- The Diff tab (§3l) shows only what Claude Code RECORDED as an edit (Edit, MultiEdit, Write, NotebookEdit): a file a
+  shell command changed (`sed -i`, a formatter, `git checkout`) has no card — its Bash row is the only trace — and such a
+  change between two edits voids that file's net diff (shown edit by edit instead).
+- The net diff's context is what the hunks showed: without Claude Code's copy of the original (files of 10 KB and up),
+  two changes far apart are two hunks with an unknown gap between them, and a change at a hunk's edge can have fewer than
+  3 context lines on that side. Expand fills in from the file as it is NOW, not as it was then.
+- Expand's lines may be newer than the turn (the user's pick); a hunk the file no longer holds verbatim cannot be found,
+  so it cannot expand (it says so). Two places holding the same lines: the one nearest the hunk's own number wins, which
+  can pick the wrong one in a heavily reshuffled file. Files over 32 MB, and paths past MAX_PATH, are not read. A file
+  is read once per open of the transcript: ↻ Refresh reads again.
+- "Viewed" lives as long as this open of the transcript (no remembered review state), and so do opened / closed cards.
+- Diff code never wraps; a long line is cut at 2,000 characters with an ellipsis (Copy on the header still has the
+  whole text). Selection works inside one run of lines (a hunk, a block of expanded lines), not across a card.
+- The outline lists a file by its name (the folder is in the tooltip); its highlight follows the TURN at the top of the
+  page, not the file. A turn without changes has no entry.
+- Agents' edits are folded into their turn's net change ("by <agent>" on the card); an agent that edited a file the
+  main session edited too in the same turn is composed with it in time order, which voids the composition when they
+  raced.
+- The Diff tab's Telegram twin does not exist (`/transcript` and All Screen keep the levels).
+- Each OPEN card body is one horizontal scroll view (its template's elements included): a session with a thousand
+  changed-file cards pays a thousand of them; cards over 400 lines start closed and pay nothing until opened.
 
 ## 9. Verification checklist (nothing here has been built)
 
@@ -803,3 +956,24 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
     and click ↓ at once while the status still says "Laying out …" → the view rides the end and stops on the real last
     line when the build ends; do it again and turn the wheel up during the build → the following stops there.
     Tab reaches a button only while it shows.
+18. The Diff tab (§3l): the tab row ends "… Assistant Only │ Diff ⓘ"; key 9 picks it; its tooltip says what it shows.
+    Open a session that edited files across several turns:
+    - The status reads "N turns · M with changes · F files · +a −d · rendered in …"; the outline lists only the turns
+      with changes, each with its files' names and counts; hover a file → its full path.
+    - Each turn: its heading with "· 2 files · +9 −1" (green / red), the user's message, the Bash rows ("$" chip, a
+      repeated reason once with "×3"), a card per changed file, then Claude's reply. A file edited twice in one turn is
+      ONE card ("2 edits") with the net change; a file created in the turn reads "new file", all green from line 1; a
+      line added and removed again in one turn leaves the dim "changed and changed back" note.
+    - A card: click its header → it closes / opens; tick Viewed → it closes and its outline entry dims; untick → opens.
+      A card of more than 400 lines starts closed and opens on a click.
+    - Expand: click "Show 20 more lines above" → 20 lines with a yellow edge appear under the "@@" row, numbered on
+      from the hunk, and the legend appears under the card; the row's count drops; a gap of ≤ 40 lines opens whole and
+      its row goes; "Show the last N lines" reaches the end of the file. Edit the file so a hunk's lines change, ↻
+      Refresh, expand → "These lines are no longer in the file"; rename the file → "The file cannot be read now".
+    - A long line scrolls sideways inside its card (↵ on); with ↵ off it is cut at the right edge. Select code across
+      several lines of a hunk → Copy gives the code without the +/- marks.
+    - Scroll the page → the outline lights the turn on top and follows it; click a file entry before the build reaches
+      it (a big session) → the page jumps there the moment it is built.
+    - A Codex tab → the Diff tab's message; a session that never edited a file → "No turn changed a file …" in the
+      outline and every turn's messages on the page.
+    - hooks.log: `[transcript] <sid8> show diff: … (N turns · …) rendered in …`, and a `diff expand read` line per file.

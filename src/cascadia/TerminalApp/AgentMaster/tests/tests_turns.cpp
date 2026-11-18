@@ -13,12 +13,14 @@
 // Plus the summary panel's WHOLE-CONVERSATION view, which reuses this port's chain walk (section 8):
 // TestSummaryConversation (SummaryConversation.h's numbered list, pure) and TestConversationUpstream
 // (CollectConversationUpstream end to end on synthetic transcripts — every kind of link, never downstream,
-// the cache rules). Shared CHECK/fixtures/decls live in m5_tests.h.
+// the cache rules). Plus the transcript overlay's DIFF tab (TestTranscriptDiff: TranscriptDiff.h's pure half and the
+// RenderTranscriptDiff document on a synthetic session). Shared CHECK/fixtures/decls live in m5_tests.h.
 #include "m5_tests.h"
 
 #include "../SummaryConversation.h" // BuildSummaryConversation / CodexSummaryConversation / SummarySeparatorLabel (TestSummaryConversation, TestConversationUpstream)
 #include "../TranscriptLevelGuide.h" // kTranscriptLevelGuide / TranscriptLevelTip (TestTranscriptLevelGuide)
 #include "../TranscriptTurns.h"
+#include "../TranscriptDiff.h" // the overlay's Diff tab: unified diffs, the net change per turn, the cards' arithmetic (TestTranscriptDiff)
 #include "../TranscriptViews.h" // the overlay's box tabs: names, boxes, options, ticks, tips (TestTranscriptViews)
 
 #include <algorithm> // std::find (the conversation-chain tests), std::any_of (the level guide's coverage)
@@ -1741,6 +1743,12 @@ void TestTranscriptViews()
         CHECK(IsTranscriptBoxView(custom) && IsTranscriptBoxView(userOnly) && IsTranscriptBoxView(assistantOnly) && !IsTranscriptBoxView(static_cast<int>(TurnsLevel::Max)) &&
                   !IsTranscriptBoxView(-1) && !IsTranscriptBoxView(kTranscriptViewCount),
               "TranscriptViews: exactly the three tabs after the levels are box tabs");
+        // The Diff tab (TRANSCRIPT_OVERLAY.md 3l): the last view, after the box tabs, and no box tab itself.
+        const auto diff = static_cast<int>(TranscriptView::Diff);
+        CHECK(diff == kTranscriptViewCount - 1 && std::wstring{ TranscriptViewName(diff) } == L"diff" && std::wstring{ TranscriptViewLabel(diff) } == L"Diff" &&
+                  TranscriptViewFromName(L"DIFF") == diff && IsTranscriptDiffView(diff) && !IsTranscriptBoxView(diff) && !IsTranscriptDiffView(assistantOnly) &&
+                  !IsTranscriptDiffView(kTranscriptViewCount),
+              "TranscriptViews: the Diff tab - the last view, its settings name and label, no box tab");
     }
 
     // ---- the boxes: one per ladder feature, each in the group of the level that first shows it ----
@@ -1843,6 +1851,10 @@ void TestTranscriptViews()
               "TranscriptViews: a level's view ignores ticks (a level is its own options)");
         CHECK(SameTurnsOptions(TranscriptViewOptions(custom, { L"futureBox" }), minimal) && TranscriptViewOptions(custom, { L"OPS" }).ops,
               "TranscriptViews: an unknown stored name ticks nothing, and a known one ticks without case");
+        auto diffWant = minimal;
+        diffWant.agents = true;
+        CHECK(SameTurnsOptions(TranscriptViewOptions(static_cast<int>(TranscriptView::Diff), { L"ops", L"stats" }), diffWant),
+              "TranscriptViews: the Diff tab is Minimal's turns with the agents' edits, whatever a box tab ticked (its ops off: nothing folds)");
     }
 
     // ---- the ticks a click leaves, and which boxes are greyed ----
@@ -1906,6 +1918,12 @@ void TestTranscriptViews()
               "TranscriptViews: each box tab's tip says which side it shows");
         CHECK(TranscriptViewTip(static_cast<int>(TurnsLevel::Default), 1) == TranscriptLevelTip(TurnsLevel::Default, 1),
               "TranscriptViews: a level's tab keeps the level's own cheat sheet");
+        const std::wstring diffTip = TranscriptViewTip(static_cast<int>(TranscriptView::Diff), 9);
+        noEmDash(diffTip);
+        noEmDash(kTranscriptDiffGuideNote);
+        CHECK(diffTip.rfind(L"Diff (key 9)\n", 0) == 0 && diffTip.find(L"MultiEdit") != std::wstring::npos &&
+                  std::wstring{ kTranscriptDiffGuideNote }.find(L"as it is now") != std::wstring::npos,
+              "TranscriptViews: the Diff tab's tip opens with its label and its key and names the edits it shows; the guide says where Expand reads");
         CHECK(plainDashes, "TranscriptViews: every text uses the plain hyphen, never an em dash");
     }
 
@@ -1939,4 +1957,344 @@ void TestTranscriptViews()
         }
     }
     std::wprintf(L"  %d of %d goldens rendered by Custom with their level's boxes\n", matched, total);
+}
+
+namespace
+{
+    // ---- the Diff tab (TRANSCRIPT_OVERLAY.md 3l): a synthetic transcript ----
+
+    // Three turns in the folder C:/w (so its files are named relative to it). Turn 1: two Bash calls with the same reason and
+    // one with only a command, two Edits of app.py (the second changes a line the first added: the net is one hunk), a Write
+    // that creates notes.txt. Turn 2: an Edit that adds a line to other.py and one that removes it again (no net change).
+    // Turn 3: two Edits of lib.py that do not fit together (the file changed between them, as a shell command would change
+    // it: shown one by one), and an Edit of a file whose name holds a backtick (its fence must be tildes). The raw strings
+    // use the delimiter J (a close parenthesis right before a quote would end a raw string without one).
+    // Returns the transcript's bytes (28 lines).
+    std::string DiffTabTranscript()
+    {
+        return R"J({"type":"user","uuid":"t01","parentUuid":null,"isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:00:00.000Z","message":{"role":"user","content":"Fix the greeting"}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"t02","parentUuid":"t01","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:00:01.000Z","message":{"id":"m1","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"pytest -q","description":"Run the tests"}}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"t03","parentUuid":"t02","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:00:02.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"b1","content":"2 passed"}]},"toolUseResult":{"stdout":"2 passed","stderr":"","interrupted":false}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"t04","parentUuid":"t03","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:00:03.000Z","message":{"id":"m2","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"e1","name":"Edit","input":{"file_path":"C:/w/app.py","old_string":"print('hi')","new_string":"print('hello')\nprint('bye')"}}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"t05","parentUuid":"t04","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:00:04.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"e1","content":"The file C:/w/app.py has been updated."}]},"toolUseResult":{"filePath":"C:/w/app.py","structuredPatch":[{"oldStart":3,"oldLines":2,"newStart":3,"newLines":3,"lines":[" import sys","-print('hi')","+print('hello')","+print('bye')"]}]}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"t06","parentUuid":"t05","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:00:05.000Z","message":{"id":"m3","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"e2","name":"Edit","input":{"file_path":"C:/w/app.py","old_string":"print('bye')","new_string":"print('farewell')"}}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"t07","parentUuid":"t06","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:00:06.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"e2","content":"The file C:/w/app.py has been updated."}]},"toolUseResult":{"filePath":"C:/w/app.py","structuredPatch":[{"oldStart":4,"oldLines":2,"newStart":4,"newLines":2,"lines":[" print('hello')","-print('bye')","+print('farewell')"]}]}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"t08","parentUuid":"t07","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:00:07.000Z","message":{"id":"m4","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"w1","name":"Write","input":{"file_path":"C:/w/notes.txt","content":"one\ntwo\n"}}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"t09","parentUuid":"t08","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:00:08.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"w1","content":"File created successfully at: C:/w/notes.txt"}]},"toolUseResult":{"type":"create","filePath":"C:/w/notes.txt","content":"one\ntwo\n","structuredPatch":[]}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"t10","parentUuid":"t09","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:00:09.000Z","message":{"id":"m5","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"b2","name":"Bash","input":{"command":"pytest -q","description":"Run the tests"}}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"t11","parentUuid":"t10","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:00:10.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"b2","content":"2 passed"}]},"toolUseResult":{"stdout":"2 passed","stderr":"","interrupted":false}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"t12","parentUuid":"t11","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:00:11.000Z","message":{"id":"m6","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"b3","name":"Bash","input":{"command":"git status"}}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"t13","parentUuid":"t12","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:00:12.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"b3","content":"clean"}]},"toolUseResult":{"stdout":"clean","stderr":"","interrupted":false}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"t14","parentUuid":"t13","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:00:13.000Z","message":{"id":"m7","role":"assistant","model":"claude-test-1","stop_reason":"end_turn","content":[{"type":"text","text":"Greeting fixed."}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"t15","parentUuid":"t14","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:01:00.000Z","message":{"role":"user","content":"Try a temporary line"}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"t16","parentUuid":"t15","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:01:01.000Z","message":{"id":"m8","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"e3","name":"Edit","input":{"file_path":"C:/w/other.py","old_string":"a\nb","new_string":"a\ntmp\nb"}}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"t17","parentUuid":"t16","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:01:02.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"e3","content":"The file C:/w/other.py has been updated."}]},"toolUseResult":{"filePath":"C:/w/other.py","structuredPatch":[{"oldStart":1,"oldLines":2,"newStart":1,"newLines":3,"lines":[" a","+tmp"," b"]}]}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"t18","parentUuid":"t17","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:01:03.000Z","message":{"id":"m9","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"e4","name":"Edit","input":{"file_path":"C:/w/other.py","old_string":"a\ntmp\nb","new_string":"a\nb"}}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"t19","parentUuid":"t18","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:01:04.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"e4","content":"The file C:/w/other.py has been updated."}]},"toolUseResult":{"filePath":"C:/w/other.py","structuredPatch":[{"oldStart":1,"oldLines":3,"newStart":1,"newLines":2,"lines":[" a","-tmp"," b"]}]}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"t20","parentUuid":"t19","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:01:05.000Z","message":{"id":"m10","role":"assistant","model":"claude-test-1","stop_reason":"end_turn","content":[{"type":"text","text":"Reverted."}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"t21","parentUuid":"t20","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:02:00.000Z","message":{"role":"user","content":"Edit after a shell change"}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"t22","parentUuid":"t21","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:02:01.000Z","message":{"id":"m11","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"e5","name":"Edit","input":{"file_path":"C:/w/lib.py","old_string":"x = 1","new_string":"x = 2"}}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"t23","parentUuid":"t22","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:02:02.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"e5","content":"The file C:/w/lib.py has been updated."}]},"toolUseResult":{"filePath":"C:/w/lib.py","structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":1,"lines":["-x = 1","+x = 2"]}]}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"t24","parentUuid":"t23","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:02:03.000Z","message":{"id":"m12","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"e6","name":"Edit","input":{"file_path":"C:/w/lib.py","old_string":"x = 5","new_string":"x = 6"}}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"t25","parentUuid":"t24","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:02:04.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"e6","content":"The file C:/w/lib.py has been updated."}]},"toolUseResult":{"filePath":"C:/w/lib.py","structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":1,"lines":["-x = 5","+x = 6"]}]}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"t26","parentUuid":"t25","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:02:05.000Z","message":{"id":"m13","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"e7","name":"Edit","input":{"file_path":"C:/w/we`ird.txt","old_string":"a","new_string":"b"}}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"t27","parentUuid":"t26","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:02:06.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"e7","content":"The file C:/w/we`ird.txt has been updated."}]},"toolUseResult":{"filePath":"C:/w/we`ird.txt","structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":1,"lines":["-a","+b"]}]}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"t28","parentUuid":"t27","isSidechain":false,"cwd":"C:/w","sessionId":"eeeeeeee-0000-4000-8000-0000000000e1","timestamp":"2026-01-03T10:02:07.000Z","message":{"id":"m14","role":"assistant","model":"claude-test-1","stop_reason":"end_turn","content":[{"type":"text","text":"Done."}]}})J"
+               "\n";
+    }
+
+    // The line of `text` that starts with `prefix` ("" when none): a turn heading's whole line, wherever its times put its end.
+    std::wstring DiffLineStartingWith(const std::wstring& text, std::wstring_view prefix)
+    {
+        for (const auto& line : SplitTurnsLines(text))
+        {
+            if (line.rfind(prefix, 0) == 0)
+            {
+                return line;
+            }
+        }
+        return {};
+    }
+}
+
+// Agentmaster (TRANSCRIPT_OVERLAY.md 3l - the transcript overlay's DIFF tab): NOT part of the port, so no golden covers it.
+// Pins its pure half (TranscriptDiff.h: unified-diff text in and out, the numbered rows, the per-turn NET change composed from
+// a turn's edits, the Bash reasons once each with their count, where a hunk sits in the file now, the cards' expand arithmetic,
+// labels, display lines, fence info, counts, squares and titles) and its document (RenderTranscriptDiff) on a synthetic
+// transcript: the Bash rows, a net diff of two edits, a created file, a turn that changed a file back, edits that do not fit
+// together shown one by one, a file name a backtick fence could not carry, the turn headings' counts.
+void TestTranscriptDiff()
+{
+    std::wprintf(L"\n[TranscriptDiff] the overlay's Diff tab: unified diffs, the net change per turn, the cards' arithmetic, the document\n");
+    const auto has = [](const std::wstring& text, std::wstring_view part) { return text.find(part) != std::wstring::npos; };
+    const auto expect = [](bool ok, const char* label, const std::wstring& text) {
+        CHECK(ok, label);
+        if (!ok)
+        {
+            for (const auto& line : SplitTurnsLines(text))
+            {
+                std::wprintf(L"      | %ls\n", EscapeForConsole(line).c_str());
+            }
+        }
+    };
+    const auto hunksOf = [](std::wstring_view text) { return ParseUnifiedDiff(text).hunks; };
+    // A composer's net change as diff text (no file lines), "" when it has none.
+    const auto netOf = [](const TurnFileComposer& composer) { return UnifiedDiffText(L"", L"", composer.NetHunks(3)); };
+
+    // ---- reading and writing unified diff text ----
+    {
+        const auto parsed = ParseUnifiedDiff(L"--- C:/w/a.py\n+++ C:/w/a.py\n@@ -3,2 +3,3 @@ def f():\n import sys\n-print('hi')\n+print('hello')\n+print('bye')\n");
+        CHECK(parsed.oldPath == L"C:/w/a.py" && parsed.newPath == L"C:/w/a.py" && !parsed.unnumbered && parsed.added == 2 && parsed.removed == 1,
+              "Diff: a unified diff's paths and its +/- counts");
+        CHECK(parsed.hunks.size() == 1 && parsed.hunks[0].oldStart == 3 && parsed.hunks[0].oldLines == 2 && parsed.hunks[0].newStart == 3 &&
+                  parsed.hunks[0].newLines == 3 && parsed.hunks[0].section == L"def f():" && parsed.hunks[0].rows.size() == 4,
+              "Diff: a hunk's four numbers, its section and its rows");
+        const auto shortHeader = ParseUnifiedDiff(L"@@ -5 +7 @@\n-a\n+b\n");
+        CHECK(shortHeader.hunks.size() == 1 && shortHeader.hunks[0].oldLines == 1 && shortHeader.hunks[0].newLines == 1 && shortHeader.hunks[0].newStart == 7,
+              "Diff: an omitted count is 1 (unified diff's rule)");
+        const auto crlf = ParseUnifiedDiff(L"@@ -1,2 +1,2 @@\r\n-a\r\n+b\r\n\r\n");
+        CHECK(crlf.hunks.size() == 1 && crlf.hunks[0].rows == std::vector<std::wstring>({ L"-a", L"+b", L" " }),
+              "Diff: CRLF line ends are read, and an empty line inside a hunk is an empty context row");
+        const auto unnumbered = ParseUnifiedDiff(L"-a = 1\n+a = 2\n");
+        CHECK(unnumbered.unnumbered && unnumbered.hunks.size() == 1 && unnumbered.hunks[0].oldStart == 0 && unnumbered.hunks[0].newStart == 0 &&
+                  unnumbered.added == 1 && unnumbered.removed == 1,
+              "Diff: change rows with no header are one unnumbered hunk (an older Claude Code's old_string / new_string)");
+        DiffHunk header;
+        CHECK(!Agentmaster::detail::ParseHunkHeader(L"@@ -a,1 +1 @@", header) && !Agentmaster::detail::ParseHunkHeader(L"@@ -1,1 +1,1", header) && !Agentmaster::detail::ParseHunkHeader(L"@ -1 +1 @@", header),
+              "Diff: a line that only looks like a hunk header is no header");
+        CHECK(FormatHunkHeader(parsed.hunks[0]) == L"@@ -3,2 +3,3 @@ def f():", "Diff: a hunk header is written back with its section");
+        const std::wstring written = UnifiedDiffText(L"/dev/null", L"C:/w/b.py", parsed.hunks);
+        CHECK(written.rfind(L"--- /dev/null\n+++ C:/w/b.py\n@@ -3,2 +3,3 @@ def f():\n import sys\n", 0) == 0 && written.back() == L'\n',
+              "Diff: diff text is written with both paths, every line ended");
+        const auto again = ParseUnifiedDiff(written);
+        CHECK(again.hunks.size() == 1 && again.hunks[0].rows == parsed.hunks[0].rows && again.newPath == L"C:/w/b.py", "Diff: written diff text reads back as the same hunks");
+    }
+
+    // ---- a hunk's rows with their numbers, as a card draws them ----
+    {
+        const auto rows = NumberHunkRows(hunksOf(L"@@ -3,2 +3,3 @@\n import sys\n-print('hi')\n+print('hello')\n+print('bye')\n").front());
+        CHECK(rows.size() == 4 && rows[0].kind == L' ' && rows[0].oldNo == 3 && rows[0].newNo == 3 && rows[0].text == L"import sys",
+              "Diff: a context row carries both numbers, its text without its mark");
+        CHECK(rows.size() == 4 && rows[1].oldNo == 4 && rows[1].newNo == 0 && rows[2].oldNo == 0 && rows[2].newNo == 4 && rows[3].newNo == 5,
+              "Diff: a removed row carries its old number, an added one its new number");
+        const auto created = NumberHunkRows(hunksOf(L"@@ -0,0 +1,2 @@\n+one\n+two\n").front());
+        CHECK(created.size() == 2 && created[0].newNo == 1 && created[1].newNo == 2 && created[0].oldNo == 0, "Diff: a created file's lines are numbered from 1");
+        const auto plain = NumberHunkRows(ParseUnifiedDiff(L"-a\n+b\n").hunks.front());
+        CHECK(plain.size() == 2 && plain[0].oldNo == 0 && plain[1].newNo == 0, "Diff: an unnumbered hunk numbers nothing");
+    }
+
+    // ---- the turn's NET change to a file, composed from its edits (the user's pick "Net diff per file") ----
+    {
+        const std::wstring edit1 = L"@@ -3,2 +3,3 @@\n import sys\n-print('hi')\n+print('hello')\n+print('bye')\n";
+        TurnFileComposer single(nullptr, false);
+        CHECK(single.Apply(hunksOf(edit1)) && netOf(single) == edit1, "Diff: one edit's net change is that edit");
+
+        TurnFileComposer apart(nullptr, false);
+        const bool apartOk = apart.Apply(hunksOf(edit1)) && apart.Apply(hunksOf(L"@@ -40,3 +40,3 @@\n a\n-b\n+B\n c\n"));
+        CHECK(apartOk && netOf(apart) == edit1 + L"@@ -39,3 +40,3 @@\n a\n-b\n+B\n c\n",
+              "Diff: two edits far apart are two hunks - the later one's old side counted in the file before the turn");
+
+        TurnFileComposer onTop(nullptr, false);
+        const bool onTopOk = onTop.Apply(hunksOf(L"@@ -1,3 +1,4 @@\n a\n b\n+x\n c\n")) && onTop.Apply(hunksOf(L"@@ -2,3 +2,3 @@\n b\n-x\n+y\n c\n"));
+        CHECK(onTopOk && netOf(onTop) == L"@@ -1,3 +1,4 @@\n a\n b\n+y\n c\n", "Diff: an edit of a line an earlier edit added shows only the line as it ends up");
+
+        TurnFileComposer undone(nullptr, false);
+        const bool undoneOk = undone.Apply(hunksOf(L"@@ -1,3 +1,4 @@\n a\n b\n+x\n c\n")) && undone.Apply(hunksOf(L"@@ -2,3 +2,2 @@\n b\n-x\n c\n"));
+        CHECK(undoneOk && !undone.IsVoid() && undone.NetHunks(3).empty(), "Diff: a line added and removed again in one turn is no change at all");
+
+        TurnFileComposer created(nullptr, true);
+        const bool createdOk = created.Apply(hunksOf(L"@@ -0,0 +1,2 @@\n+one\n+two\n")) && created.Apply(hunksOf(L"@@ -1,2 +1,2 @@\n-one\n+uno\n two\n"));
+        CHECK(createdOk && netOf(created) == L"@@ -0,0 +1,2 @@\n+uno\n+two\n", "Diff: a file the turn created is all added lines, as they end up");
+
+        TurnFileComposer misfit(nullptr, false);
+        const bool firstFits = misfit.Apply(hunksOf(L"@@ -1,2 +1,2 @@\n a\n-b\n+B\n"));
+        const bool secondFits = misfit.Apply(hunksOf(L"@@ -1,2 +1,2 @@\n zzz\n-B\n+C\n"));
+        CHECK(firstFits && !secondFits && misfit.IsVoid() && misfit.NetHunks(3).empty() && !misfit.Apply(hunksOf(edit1)),
+              "Diff: an edit whose lines differ from what an earlier edit showed (the file changed between them) voids the composition");
+
+        TurnFileComposer noNumbers(nullptr, false);
+        CHECK(!noNumbers.Apply(ParseUnifiedDiff(L"-a = 1\n+a = 2\n").hunks) && noNumbers.IsVoid(), "Diff: an edit without line numbers cannot be placed: void");
+
+        std::wstring original;
+        for (int line = 1; line <= 10; ++line)
+        {
+            original += L"l" + std::to_wstring(line) + L"\n";
+        }
+        TurnFileComposer known(&original, false);
+        CHECK(known.Apply(hunksOf(L"@@ -5,1 +5,1 @@\n-l5\n+L5\n")) && netOf(known) == L"@@ -2,7 +2,7 @@\n l2\n l3\n l4\n-l5\n+L5\n l6\n l7\n l8\n",
+              "Diff: with the original file known, the net change gets its full 3 lines of context even when an edit carried none");
+
+        TurnFileComposer twoHunks(nullptr, false);
+        CHECK(twoHunks.Apply(hunksOf(L"@@ -2,1 +2,2 @@\n a\n+x\n@@ -10,1 +11,1 @@\n-b\n+c\n")) && netOf(twoHunks) == L"@@ -2,1 +2,2 @@\n a\n+x\n@@ -10,1 +11,1 @@\n-b\n+c\n",
+              "Diff: an edit's later hunk is placed by the line-count change of its earlier ones");
+
+        TurnFileComposer classic(nullptr, false);
+        TurnFileComposer jsdiff(nullptr, false);
+        const bool insertsOk = classic.Apply(hunksOf(L"@@ -5,0 +6,2 @@\n+x\n+y\n")) && jsdiff.Apply(hunksOf(L"@@ -6,0 +6,2 @@\n+x\n+y\n"));
+        CHECK(insertsOk && netOf(classic) == L"@@ -5,0 +6,2 @@\n+x\n+y\n" && netOf(jsdiff) == netOf(classic),
+              "Diff: an insertion with no context lands in the same place whether its empty old side is numbered the unified or the jsdiff way");
+        const std::wstring empty;
+        TurnFileComposer emptyFile(&empty, false);
+        CHECK(emptyFile.Apply(hunksOf(L"@@ -1,0 +1,2 @@\n+x\n+y\n")) && netOf(emptyFile) == L"@@ -0,0 +1,2 @@\n+x\n+y\n",
+              "Diff: lines written into an empty file are numbered from 1");
+    }
+
+    // ---- the Bash reasons once each, and where a hunk sits in the file now ----
+    {
+        const auto rows = DedupeInOrder({ L"Run the tests", L"Build", L"Run the tests", L"Run the tests", L"`git status`" });
+        // Named first: CHECK is a macro, and the comma inside a template's arguments would split its arguments.
+        const std::vector<std::pair<std::wstring, int>> wantRows{ { L"Run the tests", 3 }, { L"Build", 1 }, { L"`git status`", 1 } };
+        CHECK(rows == wantRows, "Diff: each different reason once, in first-seen order, with how many times it ran");
+        const std::vector<std::wstring> file{ L"a", L"b", L"c", L"x", L"y", L"a", L"b", L"c" };
+        const auto hunkAt = [&hunksOf](int newStart) {
+            auto hunk = hunksOf(L"@@ -1,3 +1,3 @@\n a\n b\n+c\n").front();
+            hunk.newStart = newStart;
+            return hunk;
+        };
+        CHECK(LocateHunkNewSide(file, hunkAt(6)) == 5 && LocateHunkNewSide(file, hunkAt(1)) == 0,
+              "Diff: of two places that hold a hunk's lines, the one nearest its own number wins");
+        CHECK(LocateHunkNewSide(file, hunksOf(L"@@ -1,2 +1,2 @@\n q\n+r\n").front()) == -1, "Diff: a hunk the file no longer holds is not found");
+        CHECK(LocateHunkNewSide({ L"a\r", L"b" }, hunksOf(L"@@ -1,2 +1,2 @@\n a\n b\n").front()) == 0, "Diff: a CRLF file's lines match");
+        CHECK(LocateHunkNewSide(file, hunksOf(L"@@ -1,1 +0,0 @@\n-a\n").front()) == -1, "Diff: a hunk with no new side has no place in the file");
+    }
+
+    // ---- the cards' expand arithmetic: what a row can still show and how many lines one click shows ----
+    {
+        const auto hunks = hunksOf(L"@@ -3,2 +3,3 @@\n import sys\n-print('hi')\n+print('hello')\n+print('bye')\n@@ -20,3 +21,3 @@\n a\n-b\n+B\n c\n");
+        CHECK(hunks.size() == 2 && DiffNewFirst(hunks[0]) == 3 && DiffOldFirst(hunks[1]) == 20 && DiffSideCount(hunks[0], L'+') == 3 && DiffSideCount(hunks[0], L'-') == 2,
+              "Diff: a hunk's first numbers and each side's row count");
+        const auto emptySides = hunksOf(L"@@ -0,0 +1,2 @@\n+one\n+two\n@@ -4,2 +3,0 @@\n-p\n-q\n");
+        CHECK(DiffOldFirst(emptySides[0]) == 1 && DiffNewFirst(emptySides[1]) == 4, "Diff: an empty side's first line is one past the line its change follows");
+        CHECK(DiffLinesAboveHunk(hunks, 0) == 2 && DiffLinesAboveHunk(hunks, 1) == 15 && DiffLinesAboveHunk(hunks, 2) == 0,
+              "Diff: the lines above a hunk, by its own numbers - from the file's start, or from the end of the hunk before it");
+        CHECK(DiffRemainingAbove(hunks, { 10, 30 }, { 0, 0 }, 0) == 2 && DiffRemainingAbove(hunks, { 10, 30 }, { 0, 0 }, 1) == 15,
+              "Diff: a row shows no more than the hunks' numbers say lay there, however much the file holds now");
+        CHECK(DiffRemainingAbove(hunks, { 10, 20 }, { 0, 0 }, 1) == 7, "Diff: ...and no more than the file now holds there");
+        CHECK(DiffRemainingAbove(hunks, { 10, 30 }, { 2, 5 }, 0) == 0 && DiffRemainingAbove(hunks, { 10, 30 }, { 2, 5 }, 1) == 10,
+              "Diff: what was revealed already is taken off");
+        CHECK(DiffRemainingAbove(hunks, { -1, 30 }, { 0, 0 }, 1) == 15 && DiffRemainingAbove(hunks, { 10, -1 }, { 0, 0 }, 1) == 0 &&
+                  DiffRemainingAbove(hunks, { 10 }, { 0, 0 }, 1) == 0,
+              "Diff: a hunk the file no longer holds has nothing to show (its neighbour then counts from the file's start)");
+        const auto& last = hunks[1];
+        CHECK(DiffRemainingBelow(100, 30, last, 0) == 67 && DiffRemainingBelow(100, 30, last, 60) == 7 && DiffRemainingBelow(100, 30, last, 70) == 0 &&
+                  DiffRemainingBelow(100, -1, last, 0) == 0 && DiffRemainingBelow(20, 30, last, 0) == 0,
+              "Diff: the lines below the last hunk: the rest of the file now, never below 0");
+        CHECK(DiffExpandTake(5, false) == 5 && DiffExpandTake(kDiffExpandStep, false) == kDiffExpandStep && DiffExpandTake(kDiffExpandStep + 1, false) == kDiffExpandStep &&
+                  DiffExpandTake(35, true) == 35 && DiffExpandTake(kDiffGapExpandAll, true) == kDiffGapExpandAll && DiffExpandTake(kDiffGapExpandAll + 1, true) == kDiffExpandStep &&
+                  DiffExpandTake(0, true) == 0,
+              "Diff: one click shows a step, a short gap between hunks whole, or what is left");
+    }
+
+    // ---- what the cards say and draw ----
+    {
+        CHECK(DiffExpandLabel(true, false, -1) == L"Show more lines below (from the file now)" && DiffExpandLabel(true, false, 4) == L"Show the last 4 lines (from the file now)" &&
+                  DiffExpandLabel(true, false, 1) == L"Show the last line (from the file now)" && DiffExpandLabel(true, false, 50) == L"Show 20 more lines below (from the file now)",
+              "Diff: the row below the last hunk says what a click shows");
+        CHECK(DiffExpandLabel(false, true, 2) == L"Show the first 2 lines (from the file now)" && DiffExpandLabel(false, true, 30) == L"Show 20 more lines above (from the file now)" &&
+                  DiffExpandLabel(false, false, 12) == L"Show the 12 lines hidden here (from the file now)" &&
+                  DiffExpandLabel(false, false, 99) == L"Show 20 more lines (99 hidden) (from the file now)" && DiffExpandLabel(false, false, 1) == L"Show the line hidden here (from the file now)",
+              "Diff: the rows above a hunk say what a click shows");
+        CHECK(DiffDisplayLine(L"a\tb\r\r") == L"a\tb" && DiffDisplayLine(L"x\ny") == L"x\x2424y" && DiffDisplayLine(L"x\ry") == L"x\x240Dy" &&
+                  DiffDisplayLine(L"p\x2028q\vr") == L"p\x2424q\x240Br",
+              "Diff: a drawn line keeps its tabs, drops its trailing CRs, and shows every break inside it as a symbol");
+        const std::wstring longLine(kDiffMaxLineChars + 500, L'a');
+        const std::wstring cutLine = DiffDisplayLine(longLine);
+        std::wstring pairAtCut(kDiffMaxLineChars - 1, L'a');
+        pairAtCut += L"\xD83D\xDE00tail";
+        const std::wstring cutPair = DiffDisplayLine(pairAtCut);
+        CHECK(cutLine.size() == kDiffMaxLineChars + 1 && cutLine.back() == L'\x2026' && cutPair.size() == kDiffMaxLineChars && cutPair[kDiffMaxLineChars - 2] == L'a' &&
+                  cutPair.back() == L'\x2026',
+              "Diff: a very long line is cut with an ellipsis, never in the middle of a surrogate pair");
+        std::wstring path;
+        std::wstring meta;
+        SplitDiffInfo(L"src/app.py \x00B7 2 edits \x00B7 by finder-a", path, meta);
+        CHECK(path == L"src/app.py" && meta == L"2 edits \x00B7 by finder-a", "Diff: the fence info is the file, then what the block is");
+        SplitDiffInfo(L"notes.txt", path, meta);
+        CHECK(path == L"notes.txt" && meta.empty(), "Diff: a fence info with no description is the file alone");
+        std::wstring reason = L"Run the tests \x00D7" L"5";
+        std::wstring words = L"Run \x00D7 tests";
+        std::wstring huge = L"x \x00D7" L"1234567";
+        CHECK(TakeDiffRepeatCount(reason) == 5 && reason == L"Run the tests" && TakeDiffRepeatCount(words) == 1 && words == L"Run \x00D7 tests" &&
+                  TakeDiffRepeatCount(huge) == 1 && huge == L"x \x00D7" L"1234567",
+              "Diff: a Bash row's count comes off its end; text that only looks like one stays");
+        // A named pair type: CHECK is a macro, and "std::pair<int, int>" written inside it would split its arguments.
+        using Squares = std::pair<int, int>;
+        CHECK(DiffBarSquares(0, 0) == Squares(0, 0) && DiffBarSquares(3, 1) == Squares(3, 1) && DiffBarSquares(100, 0) == Squares(5, 0) &&
+                  DiffBarSquares(0, 100) == Squares(0, 5) && DiffBarSquares(99, 1) == Squares(4, 1) && DiffBarSquares(1, 99) == Squares(1, 4) &&
+                  DiffBarSquares(50, 50) == Squares(3, 2),
+              "Diff: the five squares - one per line up to five, else in proportion, each side with lines keeps one");
+        const std::wstring title = DiffOutlineTitle(L"  Fix   the\tgreeting \nand then the farewell");
+        const std::wstring longTitle = DiffOutlineTitle(std::wstring(300, L'w'));
+        CHECK(title == L"Fix the greeting" && longTitle.size() == 121 && longTitle.back() == L'\x2026' && DiffOutlineTitle(L"   ").empty(),
+              "Diff: an outline title is the message's first line, its blanks collapsed, cut at 120 characters");
+    }
+
+    // ---- the document: a synthetic session, every kind of change ----
+    const auto lines = ParseTranscriptJsonl(DiffTabTranscript());
+    CHECK(lines.size() == 28, "Diff: the synthetic transcript parses to its 28 lines");
+    const std::wstring doc = RenderTranscriptDiff(lines, /*utc*/ true);
+    expect(!doc.empty() && CountTurnsOccurrences(doc, L"### Turn ") == 3, "Diff: the document has the session's three turns", doc);
+    const std::wstring turn1 = DiffLineStartingWith(doc, L"### Turn 1");
+    const std::wstring turn2 = DiffLineStartingWith(doc, L"### Turn 2");
+    const std::wstring turn3 = DiffLineStartingWith(doc, L"### Turn 3");
+    expect(turn1.ends_with(L" \x00B7 2 files \x00B7 +4 -1") && turn3.ends_with(L" \x00B7 2 files \x00B7 +3 -3") && !turn2.empty() && !has(turn2, L" file"),
+           "Diff: a turn heading ends with the files it changed and its net +/- (none for a turn that changed nothing)", doc);
+    expect(has(doc, L"- `$` Run the tests \x00D7" L"2\n- `$` `git status`\n"),
+           "Diff: the Bash calls are one row per different reason, the repeated one with its count, a call without a reason as its command", doc);
+    const std::wstring app = L"```diff app.py \x00B7 2 edits\n--- C:/w/app.py\n+++ C:/w/app.py\n@@ -3,2 +3,3 @@\n import sys\n-print('hi')\n+print('hello')\n+print('farewell')\n```\n";
+    const std::wstring notes = L"```diff notes.txt \x00B7 new file\n--- /dev/null\n+++ C:/w/notes.txt\n@@ -0,0 +1,2 @@\n+one\n+two\n```\n";
+    expect(has(doc, app), "Diff: two edits of one file are its net change, the file named inside the session's folder", doc);
+    expect(has(doc, notes), "Diff: a file the turn created is a new file from /dev/null", doc);
+    const size_t asked = doc.find(L"Fix the greeting");
+    const size_t ran = doc.find(L"- `$` Run the tests");
+    const size_t changed = doc.find(app);
+    const size_t created = doc.find(notes);
+    const size_t replied = doc.find(L"Greeting fixed.");
+    expect(asked < ran && ran < changed && changed < created && created < replied && replied != std::wstring::npos,
+           "Diff: a turn reads its message, its Bash rows, its files in the order they were first changed, then the reply", doc);
+    expect(!has(doc, L"**Bash**") && !has(doc, L"**Edit**") && !has(doc, L"**Write**"), "Diff: no call lines - Minimal's view with the changes", doc);
+    expect(has(doc, L"_other.py: changed and changed back in this turn - no net change._"), "Diff: a file changed back says so instead of an empty card", doc);
+    expect(has(doc, L"```diff lib.py \x00B7 edit 1 of 2\n--- C:/w/lib.py\n+++ C:/w/lib.py\n") && has(doc, L"-x = 1\n+x = 2\n") &&
+               has(doc, L"```diff lib.py \x00B7 edit 2 of 2\n") && has(doc, L"-x = 5\n+x = 6\n"),
+           "Diff: edits that do not fit together are shown one by one, as Claude Code recorded them", doc);
+    expect(has(doc, L"~~~diff we`ird.txt\n--- C:/w/we`ird.txt\n+++ C:/w/we`ird.txt\n@@ -1,1 +1,1 @@\n-a\n+b\n~~~\n"),
+           "Diff: a file name with a backtick gets a tilde fence (a backtick fence's info may hold none)", doc);
+    expect(CountTurnsOccurrences(doc, L"```diff ") == 4 && CountTurnsOccurrences(doc, L"~~~diff ") == 1, "Diff: one block per file, one per edit where they do not fit", doc);
+    const auto appDiff = ParseUnifiedDiff(L"--- C:/w/app.py\n+++ C:/w/app.py\n@@ -3,2 +3,3 @@\n import sys\n-print('hi')\n+print('hello')\n+print('farewell')\n");
+    CHECK(appDiff.newPath == L"C:/w/app.py" && appDiff.added == 2 && appDiff.removed == 1, "Diff: a card reads its block back: the file Expand opens and its counts");
+
+    // ---- the editDiffs transcript: refused and unanswered edits change nothing; unnumbered ones show as recorded ----
+    const std::wstring older = RenderTranscriptDiff(ParseTranscriptJsonl(EditDiffsTranscript()), /*utc*/ true);
+    expect(!has(older, L"locked.py") && has(older, L"```diff C:/w/old.py\n--- C:/w/old.py\n+++ C:/w/old.py\n-a = 1\n+a = 2\n```\n"),
+           "Diff: a refused Edit shows no card; an Edit without hunks shows its own strings (no folder known: the whole path)", older);
+    expect(has(older, L"```diff C:/w/nb.ipynb") && has(older, L"```diff C:/w/multi.py"), "Diff: a NotebookEdit and a MultiEdit are cards too", older);
+    const std::wstring olderTurn2 = DiffLineStartingWith(older, L"### Turn 2");
+    expect(!olderTurn2.empty() && !has(olderTurn2, L" file"), "Diff: an Edit that never got a result changed nothing", older);
 }

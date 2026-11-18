@@ -358,7 +358,7 @@ Every color surface — tabs, board bands, Sessions chips, the pending dots — 
   `summaryPanelTruncate` (true), `summaryPanelShowHistory` (true), `summaryPanelWidthFraction` /
   `summaryPanelHeightFraction` (0 = the default size).
 - The transcript view: `transcriptOverlayLevel` (`default`; a level's name or a box tab's: `custom`, `user-only`,
-  `assistant-only`), `transcriptOverlayWrapLines` (true), and the box tabs' ticked boxes `transcriptOverlayCustomBoxes`,
+  `assistant-only`; or `diff`, the Diff tab, TRANSCRIPT_OVERLAY.md §3l), `transcriptOverlayWrapLines` (true), and the box tabs' ticked boxes `transcriptOverlayCustomBoxes`,
   `transcriptOverlayUserOnlyBoxes`, `transcriptOverlayAssistantOnlyBoxes` (each an empty list: every box clear), each a list
   of box names (`ops`, `narration`, …) kept verbatim. All written by the overlay itself (freshest-disk RMWs; both cog-Save
   preserve blocks keep them) and read at every open (TRANSCRIPT_OVERLAY.md §3j).

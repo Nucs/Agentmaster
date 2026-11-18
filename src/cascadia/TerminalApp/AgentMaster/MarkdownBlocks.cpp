@@ -184,6 +184,32 @@ namespace Agentmaster
             return info.substr(start, end - start);
         }
 
+        // What a fence's info string says AFTER its first word, trimmed ("diff src/a.py · 2 edits" -> "src/a.py · 2 edits"),
+        // capped at 400 characters: the transcript overlay's Diff tab names a block's file there (MdBlock::infoRest).
+        // Empty when the info string is one word or none. Throws std::bad_alloc only.
+        std::wstring InfoAfterFirstWord(const std::wstring& info)
+        {
+            size_t at = 0;
+            while (at < info.size() && iswspace(info[at]))
+            {
+                ++at;
+            }
+            while (at < info.size() && !iswspace(info[at]))
+            {
+                ++at; // the first word (FirstWord's, uncapped: a longer one is still not part of the rest)
+            }
+            while (at < info.size() && iswspace(info[at]))
+            {
+                ++at;
+            }
+            size_t end = info.size();
+            while (end > at && iswspace(info[end - 1]))
+            {
+                --end;
+            }
+            return info.substr(at, std::min<size_t>(end - at, 400));
+        }
+
         // Cut `text` to at most `maxChars` UTF-16 units without splitting a surrogate pair (a lone
         // high surrogate at the end would draw as a replacement glyph).
         // Returns true when anything was cut.
@@ -506,7 +532,11 @@ namespace Agentmaster
                         block->code.pop_back();
                     }
                     block->truncated = CutAt(block->code, _options.maxBlockChars);
-                    block->info = FirstWord(FromUtf8(cmark_node_get_fence_info(node)));
+                    {
+                        const std::wstring fenceInfo = FromUtf8(cmark_node_get_fence_info(node));
+                        block->info = FirstWord(fenceInfo);
+                        block->infoRest = InfoAfterFirstWord(fenceInfo);
+                    }
                     break;
                 }
 
