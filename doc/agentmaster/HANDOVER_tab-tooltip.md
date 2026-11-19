@@ -67,6 +67,12 @@ load-bearing.
 > routing only). The cost: a click on an open card stays on the card (it used to fall through to the terminal under it).
 > §3, §4b, §4b-bis, §4c, §8, §10 and §13 below say how it runs now.
 
+> **2026-11-19, later — the scrollbar is SHOWN whenever the card can scroll (NOT BUILT yet).** The owner: "if tooltip
+> has a scrollbar, have it shown always and not only after scrolling". `kTtScrollBarRestOpacity` 0 → 0.6: the bar sits
+> at that look from the card's first layout (and the fresh-hover reset) while the body overflows, the wheel lights it
+> fully, and the settle steps it back to 0.6 — never to nothing. A body that fits still shows none. This reverses
+> `db637f992` (2026-07-27, "the bar shows ONLY while you scroll"). §4b-bis item 5.
+
 ---
 
 ## 0. Scope & what this is NOT
@@ -233,8 +239,8 @@ _agentToolTipHost` (created lazily by `AgentToolTipHost()`, label `"item"`, cont
   `_tooltipWheelClaimed`) → the shared `_ScrollSessionToolTipBody(surfaceKey, sessionId, delta, src)` →
   `_SyncTabTooltipScrollBar(surfaceKey, offset, opacity)` (the render-only apply) +
   `_ResetTabAgentToolTipScroll(surfaceKey)` / `_ArmTabTooltipScrollBarFade(surfaceKey)` /
-  `_OnTabTooltipScrollBarFadeTick()` (the auto-hide). The card's pieces come back from
-  `TtBuildTooltipCard`'s `TtCardScrollParts& scrollOut`.
+  `_OnTabTooltipScrollBarFadeTick()` (the settle from the lit bar back to its rest look). The card's pieces
+  come back from `TtBuildTooltipCard`'s `TtCardScrollParts& scrollOut`.
 
 **`src/cascadia/TerminalApp/TerminalPage.AgentSidePanel.cpp`** — the second owner (SIDE_PANEL.md §2d): one host
 per card (`AgentSidePanelCardView::tipHost`, label `"card"`), `_UpdateSidePanelCardToolTip` (the card surface),
@@ -255,7 +261,7 @@ per card (`AgentSidePanelCardView::tipHost`, label `"card"`), `_UpdateSidePanelC
   + `std::unordered_map<std::wstring,_AgentTooltipScroll> _tabTooltipScroll` — each surface's card scroll
   state (§4b-bis), re-adopted on every rebuild; **weak** element refs so a superseded card is never pinned.
 - `_tabTooltipScrollFadeTimer` / `_tabTooltipScrollFadeSession` (a surface key) / `_tabTooltipScrollFadeHolding`
-  — the ONE per-window scrollbar auto-hide (hold, then step-down fade).
+  — the ONE per-window scrollbar settle (hold, then a step-down to the rest opacity, where the bar stays).
 
 ---
 
@@ -344,10 +350,17 @@ it stays inert inside, per invariant 6a — and the wheel is read in TWO places:
    stop, because the card IS the scroller under the pointer — so a card whose whole body fits leaves the
    owner's notch to the tab strip's own horizontal scroll (or, for a side-panel card, to the card list). A
    notch on the card has nothing else under it: unhandled, it is simply unused.
-5. The bar exists **only while you scroll**: invisible at rest (even on a card that *can* scroll), lit
-   on the first notch, then one per-window `DispatcherTimer` holds `kTtScrollBarHoldMs` and steps the
-   opacity back to 0 (`_ArmTabTooltipScrollBarFade` / `_OnTabTooltipScrollBarFadeTick`). It is feedback
-   for the gesture, not chrome — a bar sitting permanently on a hover card is just noise.
+5. The bar is **shown whenever the body can scroll** (since 2026-11-19 — the owner: "if tooltip has a
+   scrollbar, have it shown always and not only after scrolling"): at rest it sits at
+   `kTtScrollBarRestOpacity` (0.6), so the reader sees at once that the summary goes on; a body that fits
+   shows none. The first notch lights it fully (`kTtScrollBarActiveOpacity`), then one per-window
+   `DispatcherTimer` holds `kTtScrollBarHoldMs` and steps the opacity back down to the rest look — never
+   below it (`_ArmTabTooltipScrollBarFade` / `_OnTabTooltipScrollBarFadeTick`; the tick only ever lowers a
+   bar, so it never shows one on a card that cannot scroll). Two rest-look writers paint it: the viewport's
+   first layout (`SizeChanged` — the moment a card learns whether it overflows) and the fresh-hover reset
+   (`_ResetTabAgentToolTipScroll` — a card re-shown unchanged gets no `SizeChanged`). From 2026-07-27
+   (`db637f992`, the owner's report then: the bar "is always visible when it should appear only while
+   scrolling") to 2026-11-19 the rest opacity was 0: the bar existed only while the wheel turned.
 
 **Two handlers on the strip, deliberately** (plus the card's own). The per-tab one is the precise path; a
 **belt** on the whole tab ROW (`_WireTabStripTooltipWheel`) catches a notch that MUX's tab-strip internals
@@ -371,8 +384,10 @@ opened click-through; hit testing turned back on` says the framework switched th
 at an open and the host's `Opened` turned it back on (§4b's `_WireCardInput`).
 
 **Check after the build** (the change of 2026-11-19): hover a managed tab with a long summary, move the
-pointer DOWN onto its card (it stays open) and spin the wheel — the body scrolls and the slim bar shows
-(`item-tip: … open=1`, `src=item-tip`); the same on a "Sum" off side-panel card's card (`card-tip`); the
+pointer DOWN onto its card (it stays open) — the slim bar is already there at its rest look (item 5) — and
+spin the wheel: the body scrolls and the bar lights fully, settling back to the rest look ~2 s after the
+last notch (`item-tip: … open=1`, `src=item-tip`); a card whose summary fits shows no bar; the same on a
+"Sum" off side-panel card's card (`card-tip`) and on the note glyph's card; the
 wheel over the tab itself still scrolls the card (`src=item`); with no card up, the wheel over the strip
 still scrolls the strip; moving off the card closes it; a click on the card does nothing (it no longer
 reaches the terminal under the card).
@@ -879,8 +894,9 @@ retired (§9 RESOLUTION).
   CARD (the hit-testable ToolTip's own handler, `_WireCardInput` — Windows keeps the card open while the pointer
   rests on it) → `TerminalPage::_ScrollTabAgentToolTip` / `_ScrollSidePanelCardToolTip` → the shared
   `_ScrollSessionToolTipBody` → `_SyncTabTooltipScrollBar` (render-only writes: a `TranslateTransform` on the
-  body, a `ScaleTransform`+`TranslateTransform` on the slim bar, which auto-hides a couple of seconds after the
-  last notch). The card stays inert inside — still NO ScrollViewer (invariants 6a/6b); a click on it stays on it.
+  body, a `ScaleTransform`+`TranslateTransform` on the slim bar, shown at its rest opacity whenever the body
+  overflows, lit fully while the wheel turns, back to the rest look a couple of seconds after the last notch).
+  The card stays inert inside — still NO ScrollViewer (invariants 6a/6b); a click on it stays on it.
 - Owner-recycle safety: the owner `Unloaded → Detach` / `Loaded → Update` pair + the `Update` owner-loaded
   guard; a droppable owner calls `Shutdown` first (invariant 5a).
 - Off-thread body: `_EnsureTabTooltipSummary` (per session) + `_tabTooltipSummary` / `_tabTooltipSummaryWaiters` /

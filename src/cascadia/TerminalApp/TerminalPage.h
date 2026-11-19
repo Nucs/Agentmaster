@@ -2361,7 +2361,8 @@ namespace winrt::TerminalApp::implementation
         winrt::fire_and_forget _EnsureTabTooltipSummary(winrt::hstring sessionId, bool codex, winrt::hstring codexId, winrt::hstring forkParentId, winrt::hstring cwd); // Agentmaster (tab tooltip): off-thread resolve+stat+analyze the transcript (a fork with no messages yet: its fork source's, `forkParentId`, never cached as the path); on mtime growth render the Summary box + re-host every waiting surface (_tabTooltipSummaryWaiters); mtime-cached + in-flight-guarded. ⚠ Every re-host passes kickSummary=false — it must NEVER re-kick the analyze (an analyze outliving the 4s throttle would make every completion arm the next: the perpetual per-tab parse+rebuild loop that ground the release UI thread at ~80% of a core, 2026-08-29)
         // Agentmaster (tab tooltip — WHEEL SCROLL): a long conversation's Summary body is taller than the
         // card's height budget, so the body is a VIEWPORT the mouse wheel scrolls, with a slim overlay
-        // scrollbar that fades out a couple of seconds after the last notch. The card itself stays inert
+        // scrollbar that is SHOWN whenever the body overflows (at a rest opacity) and lit fully while the wheel
+        // turns, settling back to the rest look a couple of seconds after the last notch. The card itself stays inert
         // (HANDOVER_tab-tooltip.md invariant 6a: no ScrollViewer, ever — its DirectManipulation activation
         // inside a ToolTip popup is the proven 0xC000027B fail-fast); the wheel is read on the TAB HEADER
         // (Tab::EnsureAgentToolTipHoverHook) and on the open card's hit-testable ToolTip (Windows keeps it open
@@ -2372,7 +2373,7 @@ namespace winrt::TerminalApp::implementation
         {
             winrt::weak_ref<winrt::Windows::UI::Xaml::FrameworkElement> viewport; // the clipping host (one screenful)
             winrt::weak_ref<winrt::Windows::UI::Xaml::FrameworkElement> content; // the FULL body (its ActualHeight is the extent)
-            winrt::weak_ref<winrt::Windows::UI::Xaml::FrameworkElement> thumb; // the slim auto-hiding bar
+            winrt::weak_ref<winrt::Windows::UI::Xaml::FrameworkElement> thumb; // the slim bar: shown at rest while the body overflows, lit while the wheel turns
             winrt::Windows::UI::Xaml::Media::TranslateTransform contentShift{ nullptr }; // scroll = shift the body up
             winrt::Windows::UI::Xaml::Media::ScaleTransform thumbScale{ nullptr }; // thumb LENGTH (visible share)
             winrt::Windows::UI::Xaml::Media::TranslateTransform thumbShift{ nullptr }; // thumb POSITION (scrolled fraction)
@@ -2380,8 +2381,8 @@ namespace winrt::TerminalApp::implementation
         };
         std::unordered_map<std::wstring, _AgentTooltipScroll> _tabTooltipScroll; // keyed by SURFACE key (see _tabTooltipSig) — each surface's card has its own scroll pieces
         winrt::Windows::UI::Xaml::DispatcherTimer _tabTooltipScrollFadeTimer{ nullptr }; // ONE per window: only one tooltip is ever on screen
-        std::wstring _tabTooltipScrollFadeSession; // whose bar the timer is currently holding/fading (a SURFACE key)
-        bool _tabTooltipScrollFadeHolding{ false }; // phase 1 (hold after the last notch) vs phase 2 (step-down fade)
+        std::wstring _tabTooltipScrollFadeSession; // whose bar the timer is currently holding/settling (a SURFACE key)
+        bool _tabTooltipScrollFadeHolding{ false }; // phase 1 (hold after the last notch) vs phase 2 (step-down to the rest opacity)
         double _SyncTabTooltipScrollBar(const std::wstring& surfaceKey, std::optional<double> offset, double opacity); // Agentmaster (tab tooltip WHEEL SCROLL): apply offset (nullopt = keep current) + re-fit/paint the slim bar of the card under `surfaceKey`; returns the max scrollable offset (0 = the body fits); RENDER-only writes (it also runs from the viewport's SizeChanged, where a layout write would be the popup layout-cycle fail-fast); UI thread
         // Agentmaster (tab tooltip WHEEL SCROLL): where a notch for a tab's rich card arrived. It picks the log word
         // (src=item / row / item-tip) and decides the row belt's claim: only Item claims (_tooltipWheelClaimed), because
@@ -2400,9 +2401,9 @@ namespace winrt::TerminalApp::implementation
         bool _tabStripWheelWired{ false }; // the belt is wired once (retried while TabRow() isn't up yet)
         bool _tooltipWheelClaimed{ false }; // set by _ScrollTabAgentToolTip for a notch from the tab header (TabTooltipWheelFrom::Item) only, consumed by the belt: the per-tab handler runs FIRST (deeper in the bubble), so this de-dupes one notch across the two handlers
         uint64_t _tooltipWheelLogTick{ 0 }; // throttle for the belt's one-line-per-gesture [tooltip-wheel] trace
-        void _ResetTabAgentToolTipScroll(const std::wstring& surfaceKey); // Agentmaster (tab tooltip WHEEL SCROLL): a fresh hover starts at the top of the body of the card under `surfaceKey` (covers the unchanged-signature case, where the very same card element is re-shown); UI thread
-        void _ArmTabTooltipScrollBarFade(const std::wstring& surfaceKey); // Agentmaster (tab tooltip WHEEL SCROLL): (re)start the scrollbar's auto-hide for the card under `surfaceKey` — every notch restarts the hold, so it fades only once you stop scrolling; UI thread
-        void _OnTabTooltipScrollBarFadeTick(); // Agentmaster (tab tooltip WHEEL SCROLL): the two-phase auto-hide tick (hold, then a short step-down fade to invisible); UI thread
+        void _ResetTabAgentToolTipScroll(const std::wstring& surfaceKey); // Agentmaster (tab tooltip WHEEL SCROLL): a fresh hover starts at the top of the body of the card under `surfaceKey` (covers the unchanged-signature case, where the very same card element is re-shown) with its bar in the REST look — shown when the body overflows, hidden when it fits; UI thread
+        void _ArmTabTooltipScrollBarFade(const std::wstring& surfaceKey); // Agentmaster (tab tooltip WHEEL SCROLL): (re)start the scrollbar's settle for the card under `surfaceKey` — every notch restarts the hold, so the bar stays lit while you scroll and only steps back down to its rest look (still shown) once you stop; UI thread
+        void _OnTabTooltipScrollBarFadeTick(); // Agentmaster (tab tooltip WHEEL SCROLL): the two-phase settle tick (hold, then a short step-down from the lit bar to kTtScrollBarRestOpacity — it only ever lowers the bar, never shows one); UI thread; never throws (a XAML failure is logged and ends the settle)
         // Agentmaster (tab status-dot RED FLASH): a hosted session that goes from Running to a resting
         // state (Idle / WaitingForInput / NeedsApproval — NOT Done or Error) on an UNVISITED tab blinks a
         // RED RING around that tab's status dot (a separate ellipse behind the dot, peeking out around

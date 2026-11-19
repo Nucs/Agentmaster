@@ -321,14 +321,19 @@ namespace
     constexpr double kTtScrollBarWidth = 3.0; // the slim, collapsed-ScrollBar look
     constexpr double kTtScrollBarGutterPx = 5.0; // parked THIS far into the card's right padding, so it never covers text
     constexpr double kTtScrollThumbMinPx = 24.0; // a very deep body still leaves a visible thumb
-    // The bar exists ONLY while you are scrolling: hidden at rest (a card that merely CAN scroll shows
-    // nothing), lit on the first notch, gone again a moment after the last one. It is feedback for the
-    // gesture, not chrome — an overlay bar sitting permanently on a hover card is just noise.
-    constexpr double kTtScrollBarRestOpacity = 0.0;
-    constexpr double kTtScrollBarActiveOpacity = 1.0;
-    constexpr int kTtScrollBarHoldMs = 1800; // ... then, after the last notch, it fades out entirely
+    // The bar is SHOWN WHENEVER THE BODY CAN SCROLL (the owner's call, 2026-11-19: "if tooltip has a
+    // scrollbar, have it shown always and not only after scrolling"): at rest it sits at the rest
+    // opacity, so a reader sees at once that the summary goes on below; the wheel lights it fully, and a
+    // moment after the last notch it settles back to the rest look — never to nothing. A body that fits
+    // shows no bar at all (_SyncTabTooltipScrollBar paints 0 whatever it is asked). (2026-07-27 to
+    // 2026-11-19 the rest opacity was 0 — the bar existed only while the wheel turned, db637f992.)
+    constexpr double kTtScrollBarRestOpacity = 0.6; // a scrollable body at rest: plainly there, quieter than the lit bar (#C8C8C8 over the #202020 card reads ~#858585)
+    constexpr double kTtScrollBarActiveOpacity = 1.0; // while the wheel turns, and for kTtScrollBarHoldMs after the last notch
+    constexpr int kTtScrollBarHoldMs = 1800; // ... then, after the last notch, it steps back down to the rest opacity
     constexpr int kTtScrollBarFadeStepMs = 40;
     constexpr double kTtScrollBarFadeStep = 0.15;
+    static_assert(kTtScrollBarRestOpacity > 0.0 && kTtScrollBarRestOpacity < kTtScrollBarActiveOpacity,
+                  "a scrollable card's bar must stay visible at rest and still brighten under the wheel");
     // With the body SCROLLABLE the line cap changes meaning: it is no longer "one screenful" (the clip
     // is that) but how much of the summary we are willing to host in the card AT ALL -- the element /
     // text-measure backstop. TtBuildSummaryBody coalesces each contiguous run into ONE wrapping
@@ -345,7 +350,7 @@ namespace
     {
         winrt::Windows::UI::Xaml::FrameworkElement viewport{ nullptr }; // the clipping host (one screenful)
         winrt::Windows::UI::Xaml::FrameworkElement content{ nullptr }; // the FULL body (render-shifted by contentShift)
-        winrt::Windows::UI::Xaml::FrameworkElement thumb{ nullptr }; // the slim auto-hiding scrollbar
+        winrt::Windows::UI::Xaml::FrameworkElement thumb{ nullptr }; // the slim scrollbar (shown at rest while the body overflows, lit while the wheel turns)
         winrt::Windows::UI::Xaml::Media::TranslateTransform contentShift{ nullptr };
         winrt::Windows::UI::Xaml::Media::ScaleTransform thumbScale{ nullptr }; // thumb LENGTH (viewport/content share)
         winrt::Windows::UI::Xaml::Media::TranslateTransform thumbShift{ nullptr }; // thumb POSITION (scrolled fraction)
@@ -464,7 +469,7 @@ namespace
     // (state dot + a wrapping title, which owns the full card width), then one dim line each for the
     // folder/branch and the state (colored to match the tab dot) and the kind/model/effort/perm, and --
     // once the Summary body has loaded -- a divider + the numbered Summary box inside a WHEEL-SCROLLABLE
-    // viewport (a clipping Grid + a render-transformed body + a slim auto-hiding bar; `scrollOut` hands
+    // viewport (a clipping Grid + a render-transformed body + a slim bar, shown while the body overflows; `scrollOut` hands
     // the page the pieces it drives). maxCardHeight is the caller's window-derived budget for the WHOLE
     // card (see the constants above); <= 0 means "not measured" -> the historical fixed size. maxCardWidth
     // is the card's MaxWidth (the tab passes the flat kTtCardMaxWidth; a side-panel card passes the room
@@ -751,8 +756,9 @@ namespace
             bodyArea.Children().Append(bodyClip);
 
             // The slim overlay scrollbar (the collapsed-ScrollBar look): a 3px rounded bar in the card's
-            // right padding gutter. Hidden until there is something to scroll, then dim at rest and fully
-            // lit while you scroll -- the page owns that (see _SyncTabTooltipScrollBar / the fade timer).
+            // right padding gutter. Hidden until there is something to scroll, then SHOWN for as long as
+            // the card is up -- at the rest opacity, fully lit while you scroll -- the page owns that (see
+            // _SyncTabTooltipScrollBar / the settle timer, kTtScrollBarRestOpacity).
             // Its LENGTH and POSITION are a ScaleTransform + a TranslateTransform rather than Height and
             // Margin, so every update stays render-only (a layout write from the SizeChanged path would
             // be the popup layout-cycle hazard the tag badges hit).
@@ -763,7 +769,7 @@ namespace
             thumb.Margin(ThicknessHelper::FromLengths(0, 1, -kTtScrollBarGutterPx, 1));
             thumb.CornerRadius(CornerRadiusHelper::FromUniformRadius(kTtScrollBarWidth / 2.0));
             thumb.Background(TtFill(0xFF, 0xC8, 0xC8, 0xC8));
-            thumb.Opacity(0.0); // the first layout decides: dim hint if it overflows, stay hidden if not
+            thumb.Opacity(0.0); // the first layout decides (the viewport's SizeChanged): the rest look if the body overflows, hidden if not
             Media::ScaleTransform thumbScale;
             thumbScale.ScaleY(1.0);
             Media::TranslateTransform thumbShift;
@@ -3262,8 +3268,11 @@ namespace winrt::TerminalApp::implementation
                         ::Agentmaster::AgentLogCaughtException(L"tab tooltip scroll viewport clip");
                     }
                     // Keep whatever offset the reader is at (a resize mid-read must not yank them back
-                    // to the top); a fresh card is at 0 anyway. The bar is sized here but stays INVISIBLE
-                    // — it appears only under the wheel.
+                    // to the top); a fresh card is at 0 anyway. The bar is sized here and SHOWN at its rest
+                    // opacity when the body overflows (hidden when it fits) — this first layout is where a
+                    // card learns whether it can scroll, so this is where the reader is told. (A bar lit by
+                    // the wheel just then drops to the rest look a little early; the settle timer finds it
+                    // there and stops.)
                     self->_SyncTabTooltipScrollBar(key, std::nullopt, ::kTtScrollBarRestOpacity);
                 });
             }
@@ -3315,7 +3324,8 @@ namespace winrt::TerminalApp::implementation
     //   surfaceKey — whose card: the session id for a tab's card, SidePanelToolTipKey(id) for a side-panel
     //                card (_PushSessionToolTipCard adopts each surface's pieces under its own key).
     //   offset     — the new scroll offset (px from the top of the body); nullopt keeps the current one.
-    //   opacity    — the bar's opacity to paint (0 at rest, 1 while the wheel is turning).
+    //   opacity    — the bar's opacity to paint when the body overflows (kTtScrollBarRestOpacity at rest,
+    //                kTtScrollBarActiveOpacity while the wheel is turning); a body that fits is always painted 0.
     //   returns    — the maximum scrollable offset (0 = the body fits, or the surface has no card / body).
     //   throws     — nothing: a XAML failure is logged (Rule #18) and reads as "nothing to scroll".
     double TerminalPage::_SyncTabTooltipScrollBar(const std::wstring& surfaceKey, std::optional<double> offset, double opacity)
@@ -3405,8 +3415,8 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster (rich session tooltip — WHEEL SCROLL): the shared body of every surface's wheel scroll — the
     // tab's (_ScrollTabAgentToolTip) and the side-panel card's (_ScrollSidePanelCardToolTip). Moves the OPEN
-    // card's body by one notch's worth, logs the one [tooltip-wheel] line per notch, and (re)arms the bar's
-    // auto-hide when something scrolled.
+    // card's body by one notch's worth, logs the one [tooltip-wheel] line per notch, lights the bar fully and
+    // (re)arms its settle back to the rest look when something scrolled.
     //   surfaceKey — the card's scroll-state key (session id for a tab, SidePanelToolTipKey(id) for a card).
     //   sessionId  — the session (only for the log line: the key of a card is not a readable id).
     //   wheelDelta — the notch's wheel units (120 per notch; DOWN is negative); 0 does nothing.
@@ -3527,8 +3537,12 @@ namespace winrt::TerminalApp::implementation
     // the PointerEntered build hook, so it covers the case the rebuild does not: an UNCHANGED signature
     // re-hosts nothing, so the very same card element (still shifted where you left it last time) is what
     // the next hover would show. Shared by every surface: `surfaceKey` is the card's scroll-state key (the
-    // session id for a tab's card, SidePanelToolTipKey(id) for a side-panel card). Never throws beyond the
-    // logged-and-contained _SyncTabTooltipScrollBar.
+    // session id for a tab's card, SidePanelToolTipKey(id) for a side-panel card). It also puts the bar in its
+    // REST look (kTtScrollBarRestOpacity: shown when that card's body overflows, hidden when it fits), so a card
+    // re-shown unchanged opens with its bar already showing — such a card gets no SizeChanged to do it. A card
+    // that was never laid out reads "fits" here and is painted by its first layout instead. Never throws beyond
+    // the logged-and-contained _SyncTabTooltipScrollBar.
+    //   surfaceKey — the card whose scroll state to reset; a key with no adopted card does nothing.
     void TerminalPage::_ResetTabAgentToolTipScroll(const std::wstring& surfaceKey)
     {
         if (_tabTooltipScroll.find(surfaceKey) == _tabTooltipScroll.end())
@@ -3537,17 +3551,21 @@ namespace winrt::TerminalApp::implementation
         }
         if (_tabTooltipScrollFadeTimer)
         {
-            _tabTooltipScrollFadeTimer.Stop(); // a pending fade would erase the hint we are about to show
+            _tabTooltipScrollFadeTimer.Stop(); // a pending settle would step the rest look we are about to paint
         }
         _tabTooltipScrollFadeSession.clear();
         _SyncTabTooltipScrollBar(surfaceKey, 0.0, ::kTtScrollBarRestOpacity);
     }
 
-    // Agentmaster (tab tooltip — WHEEL SCROLL): (re)start the scrollbar's auto-hide. Every notch restarts
-    // the hold, so the bar stays lit while you are scrolling and only fades once you stop — the modern
-    // overlay-scrollbar behavior, hand-rolled because the card can host no ScrollViewer to get it for free.
-    // ONE timer per window is enough: exactly one tooltip is ever on screen (a tab's OR a side-panel card's —
-    // `surfaceKey` names whose bar the timer holds, the same key _SyncTabTooltipScrollBar takes).
+    // Agentmaster (tab tooltip — WHEEL SCROLL): (re)start the scrollbar's settle. Every notch restarts the
+    // hold, so the bar stays fully lit while you are scrolling and only steps back down to its REST look
+    // (kTtScrollBarRestOpacity — still shown: the bar of a scrollable card never disappears while the card
+    // is up) once you stop — the overlay-scrollbar behavior, hand-rolled because the card can host no
+    // ScrollViewer to get it for free. ONE timer per window is enough: exactly one tooltip is ever on screen
+    // (a tab's OR a side-panel card's — `surfaceKey` names whose bar the timer holds, the same key
+    // _SyncTabTooltipScrollBar takes).
+    //   surfaceKey — the card whose bar was just lit by the wheel.
+    //   throws     — whatever creating the DispatcherTimer throws (the wheel paths' catches contain it).
     void TerminalPage::_ArmTabTooltipScrollBarFade(const std::wstring& surfaceKey)
     {
         _tabTooltipScrollFadeSession = surfaceKey;
@@ -3571,9 +3589,13 @@ namespace winrt::TerminalApp::implementation
         _tabTooltipScrollFadeTimer.Start();
     }
 
-    // Agentmaster (tab tooltip — WHEEL SCROLL): the auto-hide tick, in two phases on one timer — first
-    // the long hold after the last notch, then a short step-down fade to fully invisible (a hand-rolled
-    // fade: an animation inside ToolTip content is more moving parts than this surface has earned).
+    // Agentmaster (tab tooltip — WHEEL SCROLL): the settle tick, in two phases on one timer — first the long
+    // hold after the last notch, then a short step-down from the lit bar to its REST opacity, where it stays
+    // for as long as the card is up (a hand-rolled fade: an animation inside ToolTip content is more moving
+    // parts than this surface has earned). It only ever LOWERS the bar: one already at or below the rest look
+    // — a body that stopped overflowing, painted 0 by a resync, or a bar the viewport's SizeChanged already
+    // put back to rest — is left as it is, so a card that cannot scroll never gets a bar from here.
+    // Throws nothing: a XAML failure is logged (Rule #18) and ends this bar's settle.
     void TerminalPage::_OnTabTooltipScrollBarFadeTick()
     {
         if (!_tabTooltipScrollFadeTimer)
@@ -3588,24 +3610,29 @@ namespace winrt::TerminalApp::implementation
             _tabTooltipScrollFadeTimer.Start();
             return;
         }
-        double left = 0.0;
+        bool settled = true; // no card / no bar any more counts as settled: nothing left to step
         try
         {
             if (const auto it = _tabTooltipScroll.find(_tabTooltipScrollFadeSession); it != _tabTooltipScroll.end())
             {
                 if (const auto thumb = it->second.thumb.get())
                 {
-                    left = std::max(0.0, thumb.Opacity() - ::kTtScrollBarFadeStep);
-                    thumb.Opacity(left);
+                    if (const double now = thumb.Opacity(); now > ::kTtScrollBarRestOpacity)
+                    {
+                        // One step down, floored at the rest look — never below it: the bar stays shown.
+                        const double left = std::max(::kTtScrollBarRestOpacity, now - ::kTtScrollBarFadeStep);
+                        thumb.Opacity(left);
+                        settled = left <= ::kTtScrollBarRestOpacity;
+                    }
                 }
             }
         }
         catch (...)
         {
             ::Agentmaster::AgentLogCaughtException(L"_OnTabTooltipScrollBarFadeTick");
-            left = 0.0; // give up on this bar rather than tick forever
+            settled = true; // give up on this bar rather than tick forever
         }
-        if (left <= 0.0)
+        if (settled)
         {
             _tabTooltipScrollFadeTimer.Stop();
             _tabTooltipScrollFadeSession.clear();
