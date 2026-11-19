@@ -33,8 +33,10 @@ The user's picks (2026-11-16), each made on a mockup:
 
 ## 1. What a note is
 
-- Plain text, several lines, at most **2,000 characters** (`kMaxSessionNoteLength`). No Markdown: what you type is what
-  shows.
+- Plain text, several lines, at most **5,000 characters** (`kMaxSessionNoteLength`; the user's request of 2026-11-19,
+  "Increase from 2k to 5k please" — it was 2,000). No Markdown: what you type is what shows. The surfaces show part of a
+  long note: the hover card stops at 12 lines, Telegram's card at 1,000 characters, and Telegram's note prompt copies a
+  note only while it fits one message (MESSAGING.md §21.59); `/note` shows it whole.
 - It belongs to a **session** — a managed Claude or Codex session id. A shell tab has no session, so it has no note:
   its menu does not offer one, and F3 passes through to the shell (§3b).
 - It outlives the session's tab: Close (an archive) keeps it, a restart keeps it, and a resumed session shows it again.
@@ -52,7 +54,7 @@ The user's picks (2026-11-16), each made on a mockup:
   it cannot read is never replaced (Rule #16).
 - **`NormalizeSessionNote`** is the stored form: CRLF and a lone CR become LF (XAML's box writes a lone CR); C0, DEL
   and C1 control characters are dropped (TAB and LF stay); the WHOLE note's ends are trimmed (spaces, tabs, line
-  breaks, U+00A0, U+3000), the inside kept as typed; the cut to 2,000 UTF-16 units never splits a surrogate pair, and
+  breaks, U+00A0, U+3000), the inside kept as typed; the cut to 5,000 UTF-16 units never splits a surrogate pair, and
   blanks the cut leaves at the end are trimmed too.
 - **Reads:** `GetSessionNoteIn` returns `StoredSessionNote { text, atUnixMs }` from ONE record-cache read (one stat);
   a stamp that does not parse, or a stamp left without its note, reads 0. `LoadAllSessionNotesIn` lists every noted
@@ -109,7 +111,7 @@ The user's picks (2026-11-16), each made on a mockup:
 │ │ Next: rerun e2e with RETRIES=0 and compare             │ │
 │ │ the timings.▌                                          │ │
 │ └────────────────────────────────────────────────────────┘ │
-│ Enter: new line · Ctrl+Enter: save · Esc: cancel 93 / 2000 │
+│ Enter: new line · Ctrl+Enter: save · Esc: cancel 93 / 5000 │
 │ [Remove note]                              [Cancel] [Save] │
 └────────────────────────────────────────────────────────────┘
 ```
@@ -120,8 +122,8 @@ The user's picks (2026-11-16), each made on a mockup:
   (`AgentCaptureFocusReturn`) and given back on close when the card held it (`_ReturnKeyboardAfterPanel`). ⚠ Never a
   ContentDialog: a text box inside one gets no keypresses under XAML Islands.
 - **Its parts:** the header ("Note · <first line of the title>", the glyph in amber), the box (`AcceptsReturn`,
-  wrapping, 118 DIPs tall, `MaxLength` 2,000, AutomationId `am.note.box`), the hint + count line ("93 / 2000", amber
-  from 1,800 on), and **Remove note** (`am.note.remove`, enabled only while a note is stored) · **Cancel**
+  wrapping, 118 DIPs tall, `MaxLength` = the cap, 5,000, AutomationId `am.note.box`), the hint + count line ("93 / 5000",
+  amber in the cap's last tenth, from 4,500 on), and **Remove note** (`am.note.remove`, enabled only while a note is stored) · **Cancel**
   (`am.note.cancel`) · **Save** (`am.note.save`); the card is 360 DIPs wide, dark, kept inside the window.
 - **Keys:** Enter is a new line; **Ctrl+Enter saves** (claimed in the box's tunneling PreviewKeyDown, so no line break
   is inserted); **Esc cancels**. Both act on the KEY-UP (the card's handledEventsToo hooks, armed only by a key-down they
@@ -342,6 +344,10 @@ precompiled header, `Q:\tmp\am-release-wt` at ad89700e3; nothing written to a bu
   through its `AgentNoteVisible`-swapped copy — pass; a `static_assert` planted in the registry's new `/branch` block fails
   with exactly C2338. The m5 harness from a Q: scratch folder: 14,383 checks, the 3 TaskbarBadge baseline failures
   (`TestSessionNotes`' fork cases clean; a first run also failed one scheduler timing check, which passed on the rerun).
+- The 5,000 cap (§1, 2026-11-19): `cl /Zs` with the app's flags — `SessionStore.cpp`, `Messaging.Inbound.cpp`,
+  `Messaging.Note.cpp`, and `TerminalPage.AgentNotes.cpp` through its swapped copy — pass. The m5 harness: 14,389 checks, the
+  3 TaskbarBadge baseline failures; the first run of the freshly built exe also failed the scheduler's "sends once the queue
+  window ran out" timing check, which passed in both reruns (a cold-start flake; the scheduler is untouched).
 
 ---
 

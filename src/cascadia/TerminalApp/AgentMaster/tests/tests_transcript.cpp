@@ -5383,13 +5383,16 @@ void TestSessionNotes()
     CHECK(NormalizeSessionNote(L"\x00A0note\x3000") == L"note", "notes: a no-break and an ideographic space trim at the ends");
     CHECK(NormalizeSessionNote(L"   \r\n\t ").empty(), "notes: a whitespace-only note normalizes to no note");
     CHECK(NormalizeSessionNote(L"").empty(), "notes: an empty note stays empty");
+    CHECK(kMaxSessionNoteLength == 5000, "notes: a note holds 5,000 characters (the user's request of 2026-11-19: 2k -> 5k)");
     {
-        const std::wstring longNote(3000, L'x');
+        const std::wstring longNote(kMaxSessionNoteLength + 1000, L'x');
         CHECK(NormalizeSessionNote(longNote).size() == kMaxSessionNoteLength, "notes: an over-long note is cut to kMaxSessionNoteLength");
+        const std::wstring fits(kMaxSessionNoteLength, L'x');
+        CHECK(NormalizeSessionNote(fits).size() == kMaxSessionNoteLength, "notes: a note of exactly kMaxSessionNoteLength is kept whole");
     }
     {
-        // 1,999 letters, then U+1F600 (a surrogate pair at code units 1,999 and 2,000), then more: a cut at 2,000 would
-        // split the pair, so the high half goes too and the note ends on the last letter.
+        // cap - 1 letters, then U+1F600 (a surrogate pair at the cap's last code unit and the one after it), then more: a cut at
+        // the cap would split the pair, so the high half goes too and the note ends on the last letter.
         std::wstring pair(kMaxSessionNoteLength - 1, L'x');
         pair += L"\xD83D\xDE00";
         pair += L"tail";

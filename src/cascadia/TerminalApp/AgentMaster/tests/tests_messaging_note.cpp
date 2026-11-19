@@ -220,6 +220,19 @@ void TestMessagingNote()
               "texts: the prompt says until when, and that a cross mark cancels");
         const std::wstring first = NotePromptHtml(NoteWriteMode::Replace, L"", now + kNoteWindowMs, now);
         CHECK(first.find(L"<b>Write a note</b>") != std::wstring::npos && first.find(L"<pre>") == std::wstring::npos, "texts: with no note, 'Write a note' and no copy block");
+        {
+            // The copy block only while the prompt stays ONE message (notes hold 5,000 since 2026-11-19; a message 4,096).
+            const std::wstring atLimit = NotePromptHtml(NoteWriteMode::Replace, std::wstring(kNotePromptCopyMaxChars, L'n'), now + kNoteWindowMs, now);
+            CHECK(atLimit.find(L"<pre>") != std::wstring::npos && atLimit.size() + 500 <= kTelegramMessageMaxChars,
+                  "texts: a note at the copy limit is copied, and the prompt keeps room for a 500-character title row in one message");
+            const std::wstring over = NotePromptHtml(NoteWriteMode::Replace, std::wstring(kNotePromptCopyMaxChars + 1, L'n'), now + kNoteWindowMs, now);
+            CHECK(over.find(L"<pre>") == std::wstring::npos && over.find(L"is " + std::to_wstring(kNotePromptCopyMaxChars + 1) + L" characters") != std::wstring::npos &&
+                      over.find(L"/note shows it") != std::wstring::npos && over.size() < 1000,
+                  "texts: a longer note is not copied - the prompt names its length and /note, and stays short");
+            const std::wstring escapedOver = NotePromptHtml(NoteWriteMode::Replace, std::wstring(kNotePromptCopyMaxChars / 2, L'<'), now + kNoteWindowMs, now);
+            CHECK(escapedOver.find(L"<pre>") == std::wstring::npos, "texts: the limit counts the ESCAPED note (a note of '<' signs grows fourfold)");
+            CHECK(kNotePromptCopyMaxChars < kMaxSessionNoteLength, "texts: the copy limit is below the note's cap (a full note is named, not copied)");
+        }
         const std::wstring add = NotePromptHtml(NoteWriteMode::Append, L"kept", now + kNoteWindowMs, now);
         CHECK(add.find(L"<b>Add a line to the note</b>") != std::wstring::npos && add.find(L"<pre>") == std::wstring::npos, "texts: Add a line shows no copy block");
         CHECK(NotePromptPlaceholder(NoteWriteMode::Replace) == L"The new note" && NotePromptPlaceholder(NoteWriteMode::Append) == L"The line to add" &&

@@ -66,8 +66,9 @@ namespace
     // The controls' tooltips wait like the Tags panel's (kTagPanelTipDelay): the card is a row of controls clicked one after
     // the other, and a tooltip on every pause would cover the next one.
     constexpr std::chrono::milliseconds kNoteEditorTipDelay{ 3000 };
-    // The count turns amber this close to the cap, so the limit is seen before typing stops at it.
-    constexpr size_t kNoteEditorCountWarnAt = 1800;
+    // The count turns amber in the cap's last tenth (4,500 of 5,000), so the limit is seen before typing stops at it. Derived
+    // from the cap, so a new cap moves it along (it was a fixed 1,800 while notes held 2,000).
+    constexpr size_t kNoteEditorCountWarnAt = ::Agentmaster::kMaxSessionNoteLength - ::Agentmaster::kMaxSessionNoteLength / 10;
 
     // Now, as unix ms (the system clock): the save stamp the hover card's "edited … ago" counts from.
     //   returns - the current time in ms since 1970.

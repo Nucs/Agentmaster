@@ -245,10 +245,13 @@ namespace Agentmaster
     // A plain-text note the user writes about a session. Pure primitives first (unit-tested standalone), then the store
     // cores (explicit store dir) and their live wrappers.
 
-    // The most UTF-16 code units a note keeps. The editor's box caps typing at this length (TextBox::MaxLength), and
-    // NormalizeSessionNote cuts anything longer that reaches the store another way (a paste into an older build's file,
-    // a hand edit). Large enough for a paragraph of context, small enough that the tab's hover card stays a card.
-    inline constexpr size_t kMaxSessionNoteLength = 2000;
+    // The most UTF-16 code units a note keeps: 5,000 (the user's request of 2026-11-19, "Increase from 2k to 5k please"; it was
+    // 2,000). The editor's box caps typing at this length (TextBox::MaxLength) and its count line names it, and
+    // NormalizeSessionNote cuts anything longer that reaches the store another way (a hand edit, a fork's added first line,
+    // an ➕ Add a line from Telegram). The cards never show it whole: the tab's hover card stops at 12 lines, Telegram's sticky
+    // card at kCardNoteMaxChars, and a Telegram note prompt copies a note only while it fits one message
+    // (kNotePromptCopyMaxChars) - /note shows the whole of it, in two messages past Telegram's 4,096 characters.
+    inline constexpr size_t kMaxSessionNoteLength = 5000;
 
     // Canonicalize a note as typed, so every writer stores the same text for the same intent and a blank note is no note:
     //   - line breaks become LF (CRLF and a lone CR alike — the editor's box writes CR; a paste may bring CRLF);
@@ -308,7 +311,7 @@ namespace Agentmaster
     // source id's first 8 characters (the form every Agentmaster log names a session by), then the source's note. A source with
     // no note (or a blank one) gives no note: there is nothing to copy, and a fork of an un-noted session must not gain the note
     // glyph. A fork of a fork gets a line per generation, the newest on top; NormalizeSessionNote caps it like any note (the
-    // 19 characters of the line can cost a 2,000-character note its last ones).
+    // 19 characters of the line can cost a note at the cap, kMaxSessionNoteLength, its last ones).
     //   sourceNote - the source session's note ("" = none).
     //   sourceId   - the source session's id.
     //   returns    - the fork's note, normalized ("" = none).

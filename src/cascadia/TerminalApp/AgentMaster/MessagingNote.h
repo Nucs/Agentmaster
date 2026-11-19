@@ -68,6 +68,17 @@ namespace Agentmaster::Msg
     inline constexpr size_t kNoteChangeLineMaxChars = 160;
 
     /// <summary>
+    /// The longest note (escaped for Telegram HTML) the NOTE PROMPT copies whole into its code block (§21.59). The prompt must stay
+    /// ONE message: its ForceReply, the id its window records and the message its end deletes are all one message's, while a text
+    /// past Telegram's 4,096 characters goes out as several (MessagingService::_htmlItems: the buttons and the callback ride only
+    /// the last), which would leave the first parts of the copy in the topic. The prompt's header, the session's title row and its
+    /// lines take the rest of the 4,096. Since notes hold 5,000 characters (kMaxSessionNoteLength), a longer note is not copied:
+    /// the prompt says so and names /note, which shows it whole (in parts), and ➕ Add a line, which needs no copy. A phone sends
+    /// at most 4,096 characters a message anyway, so such a note is never replaced in one reply.
+    /// </summary>
+    inline constexpr size_t kNotePromptCopyMaxChars = 3400;
+
+    /// <summary>
     /// The reaction on the user's message that WROTE the note (§21.59): 👌 - the note prompt's text, /note's words, a ❌ that closed a
     /// prompt. One of the emoji a bot may set (Telegram's fixed reaction list); the card showing the new note is the rest of the answer.
     /// </summary>
@@ -343,7 +354,8 @@ namespace Agentmaster::Msg
     /// <summary>
     /// The NOTE PROMPT (§21.59): a header line of the bot's own, the session's title row on line 2 (kTgTitleRowMarker: the send
     /// layer puts the row there, §21.54), how to answer and until when, and - for ✏️ on a session with a note - the note as it is,
-    /// in a code block a phone copies with one tap, to paste and change. Posted with Telegram's ForceReply, so the phone opens the
+    /// in a code block a phone copies with one tap, to paste and change, while it fits one message (kNotePromptCopyMaxChars;
+    /// a longer note is named with its length and /note instead). Posted with Telegram's ForceReply, so the phone opens the
     /// reply box under it by itself.
     /// </summary>
     /// <param name="mode">Replace (✏️ Edit note / Write a note) or Append (➕ Add a line).</param>
@@ -368,7 +380,18 @@ namespace Agentmaster::Msg
         out += L"\nSend it now \x2014 your next message here, or a reply to this one, until " + until + L". \x274C cancels.";
         if (!currentNote.empty())
         {
-            out += L"\nThe note now, to copy and change:\n<pre>" + TgEscapeHtml(currentNote) + L"</pre>";
+            // The copy only while the prompt stays ONE message (kNotePromptCopyMaxChars, measured escaped: the HTML is what the send
+            // layer splits). A longer note is named, never cut: half a note in the copy block would be pasted back as the note.
+            const std::wstring escaped = TgEscapeHtml(currentNote);
+            if (escaped.size() <= kNotePromptCopyMaxChars)
+            {
+                out += L"\nThe note now, to copy and change:\n<pre>" + escaped + L"</pre>";
+            }
+            else
+            {
+                out += L"\nThe note is " + std::to_wstring(currentNote.size()) +
+                       L" characters, more than one message can carry, so it is not copied here: /note shows it, and \x2795 Add a line adds to it.";
+            }
         }
         return out;
     }

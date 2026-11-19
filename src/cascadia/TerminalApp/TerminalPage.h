@@ -2540,7 +2540,7 @@ namespace winrt::TerminalApp::implementation
         //   forkedId - the new fork's id ("" = no tab opened: nothing to do).
         // Never throws (the store read and write and the repaint are contained and logged).
         void _CarryNoteIntoFork(const std::wstring& sourceId, const std::wstring& forkedId) noexcept;
-        // The editor's count line: "n / 2000" from the box's current text (and dimmed far from the cap). UI thread; never
+        // The editor's count line: "n / <kMaxSessionNoteLength>" from the box's current text (and dimmed far from the cap). UI thread; never
         // throws (a failed write is logged).
         void _UpdateNoteEditorCount() noexcept;
         // Low-level: show / hide a tab's NOTE marker (TabStatus.AgentNoteVisible — the header's glyph is x:Load-bound to it).
@@ -2705,7 +2705,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Border _noteEditorCard{ nullptr }; // the card: the outside-press boundary, the key hooks' host, and the root _CloseNoteEditorPopup ends the tooltips under
         winrt::Windows::UI::Xaml::Controls::TextBlock _noteEditorHeader{ nullptr }; // "Note · <session title>"
         winrt::Windows::UI::Xaml::Controls::TextBox _noteEditorBox{ nullptr }; // the multi-line note box (MaxLength = kMaxSessionNoteLength)
-        winrt::Windows::UI::Xaml::Controls::TextBlock _noteEditorCount{ nullptr }; // the "n / 2000" count at the hint line's end
+        winrt::Windows::UI::Xaml::Controls::TextBlock _noteEditorCount{ nullptr }; // the "n / <kMaxSessionNoteLength>" count at the hint line's end
         winrt::Windows::UI::Xaml::Controls::Button _noteEditorRemoveBtn{ nullptr }; // "Remove note" — enabled only while the session has a stored note
         std::wstring _noteEditorSessionId; // the session the open editor edits ("" = closed)
         std::wstring _noteEditorOpenedText; // the stored note the editor opened with — a close that saves writes only when the box differs (an unchanged click-away must not re-stamp the note)

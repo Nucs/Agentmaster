@@ -5326,7 +5326,7 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// How much of the note the CARD carries (§21.59): the first 1,000 UTF-16 units, then "…" and a line naming /note. A note may
-    /// hold 2,000 (kMaxSessionNoteLength), but the card is a status message within Telegram's 4,096-character text limit, and its
+    /// hold 5,000 (kMaxSessionNoteLength), but the card is a status message within Telegram's 4,096-character text limit, and its
     /// other parts can take ~1,900 already (the recap alone is capped at 1,200), so the whole of a long note is /note's answer.
     /// </summary>
     inline constexpr size_t kCardNoteMaxChars = 1000;

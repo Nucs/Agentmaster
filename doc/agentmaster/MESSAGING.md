@@ -9060,11 +9060,15 @@ step; the AI title line; the refusal latch; the wizard's new fields' round trip.
   the card (**🗑️ Yes, remove the note / ◀ Keep it**): with no ↩ Undo, a stray tap must not lose the note in one step.
 - **The NOTE PROMPT** (✏️ / ➕): the bot posts "🗒️ New note" (or "Write a note", or "➕ Add a line to the note") with the title
   row, "Send it now — your next message here, or a reply to this one, until 14:11. ❌ cancels." and, for ✏️ on a noted session,
-  the note in a code block a phone copies with one tap (to paste and change: Telegram cannot pre-fill the input box). It goes
-  with ForceReply, so the phone opens its reply box under it (placeholder "The new note" / "The line to add"); the toast says
-  the same. For **five minutes** (`kNoteWindowMs`) the user's NEXT message in the topic — or a reply to the prompt — is the
-  note: ✏️ replaces it, ➕ adds the text on a line of its own. The message gets 👌, the prompt goes, the card shows the new
-  note. A note past 2,000 characters is cut, and a reply says so.
+  the note in a code block a phone copies with one tap (to paste and change: Telegram cannot pre-fill the input box) — while
+  the prompt stays ONE message (`kNotePromptCopyMaxChars`, 3,400 characters of the escaped note: the prompt's ForceReply, the
+  id its window records and the message its end deletes are one message's, and a text past Telegram's 4,096 goes out as
+  several); a longer note is named with its length, "/note shows it, and ➕ Add a line adds to it". It goes with ForceReply,
+  so the phone opens its reply box under it (placeholder "The new note" / "The line to add"); the toast says the same. For
+  **five minutes** (`kNoteWindowMs`) the user's NEXT message in the topic — or a reply to the prompt — is the note: ✏️
+  replaces it, ➕ adds the text on a line of its own. The message gets 👌, the prompt goes, the card shows the new note. A
+  note past 5,000 characters (`kMaxSessionNoteLength`, 2,000 until the user's "Increase from 2k to 5k" of 2026-11-19) is
+  cut, and a reply says so; one Telegram message carries at most 4,096, so only ➕ Add a line can get there.
 - **The expiration message** (the user's "with expiration msg"): a prompt nothing answered in five minutes ends — its message
   goes, and a new silent message says "⌛ Note prompt expired · 14:11 … No note came in time: the note is unchanged, and your
   messages go to Claude again. ⚙️ Session → 🗒️ Note ▸ asks again." (a new message, because an edit of the prompt would not be
@@ -9135,7 +9139,9 @@ can be checked without a build: the list below is owed.
 3. ➕ Add a line, then a reply to the prompt: the line is added under the note. A ❌ cancels; ✖️ Cancel the prompt cancels.
 4. Let a prompt expire: the expiration message comes, and the next message goes to Claude.
 5. 🗑 Remove note → 🗑️ Yes, remove the note: the card loses the note; ◀ Keep it keeps it.
-6. /note, /note text, /note + text, /note - — and a 2,500-character /note: cut, and said.
+6. /note, /note text, /note + text, /note - — /note of a 4,500-character note answers it whole (one rich message, or two
+   classic ones when the rich form is off or refused); ➕ Add a line that takes
+   a note past 5,000 characters: cut, and said; ✏️ Edit note on a note past 3,400: the prompt names its length and /note.
 7. Change the note at the PC (F3): the topic gets "Note changed at the PC" and the card follows.
 8. A voice note as the note's text, sent in the window: its transcript becomes the note.
 
