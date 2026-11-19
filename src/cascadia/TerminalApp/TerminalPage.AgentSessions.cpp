@@ -2828,6 +2828,9 @@ namespace winrt::TerminalApp::implementation
             // Nav audit END (pairs with the adopt-external BEGIN above): the NEW managed id of the
             // forked-copy tab. A begin with no done = a crash before the managed tab was created.
             const std::wstring adoptedId = adoptedTab ? _ClaudeSessionForTab(adoptedTab) : std::wstring{};
+            // SESSION_NOTES.md §5: a fork-a-copy adoption is a fork too - the copy starts with the conversation's note (one it had
+            // while Agentmaster managed it) under "a fork of <id8>". noexcept; nothing for a conversation without a note.
+            _CarryNoteIntoFork(id, adoptedId);
             ::Agentmaster::LogNav(L"adopt-external done " + (adoptedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(adoptedId))) + L" (fork of " + ::Agentmaster::ShortId(id) + L")");
             return;
         }
@@ -4937,6 +4940,9 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[fork-managed->codex] source=" + sourceId + (forkFrom.empty() ? L" (no rollout uuid -> fresh codex)" : L"") + L"\n");
             const auto forkedTab = _LaunchCodexSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition);
             const std::wstring forkedId = forkedTab ? _ClaudeSessionForTab(forkedTab) : std::wstring{};
+            // SESSION_NOTES.md §5: the fork starts with the source's note under "a fork of <source8>" (a Codex session's note is
+            // keyed by its handle id, like a Claude one's). noexcept; nothing for an un-noted source or a failed launch.
+            _CarryNoteIntoFork(sourceId, forkedId);
             ::Agentmaster::LogNav(L"fork-managed-done " + (forkedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(forkedId))) + L" from=" + ::Agentmaster::ShortId(sourceId) + (forkFrom.empty() ? std::wstring{ L" (codex, fresh \x2014 no rollout)" } : std::wstring{ L" (codex)" }));
             if (forkedIdOut)
             {
@@ -4970,6 +4976,9 @@ namespace winrt::TerminalApp::implementation
         const auto forkedTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition, modelOverride, {}, {}, {}, extraEnv);
         const std::wstring forkedId = forkedTab ? _ClaudeSessionForTab(forkedTab) : std::wstring{};
         _CarryDraftIntoFork(sourceId, forkedId, std::move(carry)); // a no-op for an empty draft / a failed launch
+        // SESSION_NOTES.md §5: and the source's note, under "a fork of <source8>" (noexcept; nothing for an un-noted source or a
+        // failed launch). Every fork menu of the app ends here or in _ForkSessionFromDisk.
+        _CarryNoteIntoFork(sourceId, forkedId);
         // HOOKS.md "Interrupted turns": "Fork interrupted" (a running source's turn — Interrupted; an API-errored one —
         // TakeBackAndInterrupt) — persist the intent, then watch the fork (a fresh fork — no source transcript — continues
         // nothing, and its watch simply ends once the fork idles with its box up). Armed BEFORE the in-place start below, so

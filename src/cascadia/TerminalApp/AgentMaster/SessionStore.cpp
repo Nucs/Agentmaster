@@ -1152,6 +1152,45 @@ namespace Agentmaster
         return out;
     }
 
+    std::wstring ForkedSessionNote(std::wstring_view sourceNote, std::wstring_view sourceId)
+    {
+        // Normalized FIRST: a blank or control-only note is no note, so it can never leave the fork a bare "a fork of …" line.
+        const std::wstring note = NormalizeSessionNote(sourceNote);
+        if (note.empty())
+        {
+            return {};
+        }
+        std::wstring out = L"a fork of ";
+        out.append(sourceId.substr(0, 8));
+        out += L'\n';
+        out += note;
+        // Normalized again: the line may push a note that was at the cap past it (the store's form is never over the cap).
+        return NormalizeSessionNote(out);
+    }
+
+    bool CarryNoteIntoForkIn(const std::wstring& storeDir, const std::wstring& sourceId, const std::wstring& forkId, int64_t atUnixMs)
+    {
+        if (storeDir.empty() || sourceId.empty() || forkId.empty() || sourceId == forkId)
+        {
+            return false;
+        }
+        const StoredSessionNote source = GetSessionNoteIn(storeDir, sourceId);
+        const std::wstring forked = ForkedSessionNote(source.text, sourceId);
+        if (forked.empty())
+        {
+            return false; // the source has no note: the fork starts without one
+        }
+        // The fork's own note wins - unless it is exactly the source's, which only a plain carry of the same tab puts there (a
+        // /branch seen after its tab's bind): that copy becomes the fork's. The carried note itself differs from the source's, so
+        // a second call keeps it.
+        const std::wstring current = GetSessionNoteIn(storeDir, forkId).text;
+        if (!current.empty() && current != source.text)
+        {
+            return false;
+        }
+        return SetSessionNoteIn(storeDir, forkId, forked, atUnixMs);
+    }
+
     StoredSessionNote GetSessionNote(const std::wstring& sessionId)
     {
         return GetSessionNoteIn(StoreDir(), sessionId);
@@ -1163,6 +1202,10 @@ namespace Agentmaster
     std::unordered_map<std::wstring, StoredSessionNote> LoadAllSessionNotes()
     {
         return LoadAllSessionNotesIn(StoreDir());
+    }
+    bool CarryNoteIntoFork(const std::wstring& sourceId, const std::wstring& forkId, int64_t atUnixMs)
+    {
+        return CarryNoteIntoForkIn(StoreDir(), sourceId, forkId, atUnixMs);
     }
 
     // ===== typed convenience: the TAGS (bookmark tags on a session's tab) ====================

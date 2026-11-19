@@ -5484,6 +5484,41 @@ void TestSessionNotes()
     CHECK(!SetSessionNoteIn(store, L"..\\escape", L"x", 1), "notes: an id that is not a safe file stem is refused");
     CHECK(GetSessionNoteIn(L"", a).text.empty() && LoadAllSessionNotesIn(L"").empty(), "notes: an empty store dir reads no note");
 
+    // --- SESSION_NOTES.md §5: a FORK starts with its source's note under "a fork of <source8>" (the user's request of 2026-11-19) ---
+    const std::wstring src = L"ab12cd34-1111-4111-8111-111111111111";
+    const std::wstring fork1 = L"cd34ef56-2222-4222-8222-222222222222";
+    const std::wstring fork2 = L"ef56ab12-3333-4333-8333-333333333333";
+    const std::wstring plain = L"0a0b0c0d-4444-4444-8444-444444444444";
+    const std::wstring unnoted = L"1a1b1c1d-5555-4555-8555-555555555555";
+    CHECK(ForkedSessionNote(L"keep the flags", src) == L"a fork of ab12cd34\nkeep the flags", "fork note: the source's note under 'a fork of <first 8 of its id>'");
+    CHECK(ForkedSessionNote(L"", src).empty() && ForkedSessionNote(L" \r\n\t ", src).empty(), "fork note: a source with no (or a blank) note gives no note");
+    CHECK(ForkedSessionNote(L"a fork of ab12cd34\nkeep", fork1) == L"a fork of cd34ef56\na fork of ab12cd34\nkeep",
+          "fork note: a fork of a fork gets a line per generation, the newest on top");
+    CHECK(ForkedSessionNote(L"x", L"abc") == L"a fork of abc\nx", "fork note: an id shorter than 8 characters is named whole");
+    {
+        const std::wstring atCap = ForkedSessionNote(std::wstring(kMaxSessionNoteLength, L'n'), src);
+        CHECK(atCap.size() == kMaxSessionNoteLength && atCap.rfind(L"a fork of ab12cd34\n", 0) == 0, "fork note: a note at the cap keeps the line and loses its tail");
+    }
+    CHECK(SetSessionNoteIn(store, src, L"keep the flags", 5000), "fork note: the source's note is saved");
+    CHECK(CarryNoteIntoForkIn(store, src, fork1, 7000), "fork note: a new fork takes the note");
+    {
+        const auto n = GetSessionNoteIn(store, fork1);
+        CHECK(n.text == L"a fork of ab12cd34\nkeep the flags" && n.atUnixMs == 7000, "fork note: the fork's note is the prefixed copy, stamped at the fork");
+        CHECK(GetSessionNoteIn(store, src).text == L"keep the flags", "fork note: the source keeps its note as it was");
+    }
+    CHECK(!CarryNoteIntoForkIn(store, src, fork1, 8000) && GetSessionNoteIn(store, fork1).atUnixMs == 7000,
+          "fork note: a second carry keeps the carried note (idempotent, in either order)");
+    CHECK(CarryNoteIntoForkIn(store, fork1, fork2, 9000) && GetSessionNoteIn(store, fork2).text == L"a fork of cd34ef56\na fork of ab12cd34\nkeep the flags",
+          "fork note: a fork of the fork stacks a line");
+    CHECK(SetSessionNoteIn(store, plain, L"keep the flags", 5000), "fork note: a plain copy (a /branch tab's carry before the branch was known)");
+    CHECK(CarryNoteIntoForkIn(store, src, plain, 9500) && GetSessionNoteIn(store, plain).text == L"a fork of ab12cd34\nkeep the flags",
+          "fork note: the plain copy of the source's note becomes the fork's note");
+    CHECK(SetSessionNoteIn(store, plain, L"my own words", 9600) && !CarryNoteIntoForkIn(store, src, plain, 9700) && GetSessionNoteIn(store, plain).text == L"my own words",
+          "fork note: a note written on the fork itself is kept");
+    CHECK(!CarryNoteIntoForkIn(store, unnoted, fork2, 9800) && !CarryNoteIntoForkIn(store, src, src, 9800) && !CarryNoteIntoForkIn(store, L"", fork2, 9800) &&
+              !CarryNoteIntoForkIn(L"", src, fork2, 9800),
+          "fork note: nothing for an un-noted source, the same id, an empty id or an empty store");
+
     std::filesystem::remove_all(std::filesystem::path{ store }, ec);
 }
 

@@ -221,6 +221,11 @@ namespace winrt::TerminalApp::implementation
         // crash-resilience the begin/end pairing buys). The id is resolved from the just-created tab, so it
         // reflects what actually opened (a no-transcript parent degrades to a FRESH session, noted here).
         const std::wstring forkedId = forkedTab ? _ClaudeSessionForTab(forkedTab) : std::wstring{};
+        // SESSION_NOTES.md §5: the fork starts with the source's note under "a fork of <source8>" - every fork of an ON-DISK session
+        // ends here (the fork question's launch for a source the registry does not hold managed, Telegram's ⑂ Fork and
+        // /forksession, the AI search's fallback), as every managed one ends in _ForkManagedSessionById (noexcept; nothing for an
+        // un-noted source or a failed launch).
+        _CarryNoteIntoFork(forkParentId, forkedId);
         // HOOKS.md "Interrupted turns": "Fork interrupted" (a running source's turn — Interrupted; an API-errored one —
         // TakeBackAndInterrupt) — persist the intent, then watch the fork. Armed BEFORE the in-place start below, so the watch's
         // lock is on the tab before the continued turn can produce output.

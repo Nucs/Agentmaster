@@ -12,6 +12,7 @@
 #include "BackgroundSessions.h" // FollowBackgroundSessionName (OBSERVER.md §21: a detached background session's title)
 #include "ClaudeSpawn.h" // AppendStateLog (the --fork-session source-id-echo suppression trace)
 #include "Persistence.h" // DeriveForkTitle (OBSERVER.md §21: a `/branch` keeps the tab's name as a fork title)
+#include "SessionStore.h" // CarryNoteIntoFork (SESSION_NOTES.md §5: a `/branch` starts with its origin's note, "a fork of <id8>" on top)
 #include "TranscriptStore.h" // IsNoiseUserPrompt — keep teammate/control protocol out of the Typed record
 
 namespace
@@ -784,6 +785,10 @@ namespace Agentmaster
         std::wstring holdTrace; // DELIVERY.md §14: the [interrupt-resume] line (both logs), filled under the lock
         std::wstring lineageTrace; // the summary's conversation chain: the [lineage] /clear pairing line, filled under the lock
         std::wstring echoedPromptText; // DELIVERY.md §20: the text of the prompt this UPS echoed — its fill leaves the paste journal after the lock
+        // SESSION_NOTES.md §5: a `/branch` recognized below (the conversation it branched from, and the branch) — its note is
+        // carried AFTER the lock: the session store reads and writes files, never under the registry's lock.
+        std::wstring branchNoteFrom;
+        std::wstring branchNoteTo;
 
         {
             std::lock_guard guard{ _mtx };
@@ -943,6 +948,10 @@ namespace Agentmaster
                     s.titleDerivedAtBind.clear(); // the title is chosen now: a later bind keeps it
                     lineageTrace += L"[branch] " + ShortId(s.id) + L" branched in place from " + ShortId(origin->id) + L" (SessionStart fork on ConPTY " + msg.tabToken +
                                     L"): its tab keeps the name as \x201C" + s.title + L"\x201D\n";
+                    // SESSION_NOTES.md §5 (the user's request of 2026-11-19, "When user forks (anywhere) a session, copy the note
+                    // to the forked session but prepend it with 'a fork of <8 char sessid>'"): a /branch is a fork too.
+                    branchNoteFrom = origin->id;
+                    branchNoteTo = s.id;
                 }
             }
             // Agentmaster (--fork-session source-id echo): this hook is for the session's OWN id, so the
@@ -1221,6 +1230,27 @@ namespace Agentmaster
             // The summary's conversation chain: which session a /clear continued (the link the summary's
             // history then lists). Logged outside the lock, like every trace above.
             AppendStateLog(L"hooks.log", lineageTrace);
+        }
+        if (!branchNoteFrom.empty())
+        {
+            // SESSION_NOTES.md §5: the branch starts with its origin's note under "a fork of <origin8>". The tab's conversation
+            // carry (_BindClaudeSessionToTab) may run before or after this hook: CarryNoteIntoFork writes when the branch has no
+            // note yet, and turns that carry's plain copy into the fork's note when it came first - either order ends the same.
+            // Outside the lock (file reads and a write). The PC's note belts and the Telegram card follow SessionNotesEpoch().
+            try
+            {
+                if (CarryNoteIntoFork(branchNoteFrom, branchNoteTo, NowMs()))
+                {
+                    AppendStateLog(L"hooks.log", L"[branch] " + ShortId(branchNoteTo) + L" takes the note of " + ShortId(branchNoteFrom) + L" (\x201C" L"a fork of " +
+                                                     ShortId(branchNoteFrom) + L"\x201D on top)\n");
+                }
+            }
+            catch (...)
+            {
+                // Rule #18. Recovery: the branch keeps whatever note it has (none, or the tab's plain copy); the hook's notify below
+                // must still run.
+                LogSwallowedException(L"SessionRegistry::OnHookEvent (the branch's note)");
+            }
         }
         if (!echoedPromptText.empty())
         {

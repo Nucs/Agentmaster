@@ -2503,6 +2503,17 @@ namespace winrt::TerminalApp::implementation
         //               written — nothing then changed, and hooks.log says why.
         // Never throws (the write and the fan-out are contained and logged).
         bool _SaveSessionNote(const std::wstring& sessionId, const std::wstring& text) noexcept;
+        // SESSION_NOTES.md §5 (the user's request of 2026-11-19: "When user forks (anywhere) a session, copy the note to the forked
+        // session but prepend it with 'a fork of <8 char sessid>'"): give a NEW fork its source's note under "a fork of <source8>"
+        // (CarryNoteIntoFork: only when the source has a note and the fork none), then repaint THIS window's surfaces a tick later
+        // like a save (the fork's tab marker, the side panel's cards, an open hover card). Called by every Agentmaster fork right
+        // after its tab opened: _ForkManagedSessionById (Claude and Codex), _ForkSessionFromDisk (the Sessions page, the launch box,
+        // Telegram, the AI search) and _AdoptExternalClaude's fork; Claude Code's /branch is carried by the registry
+        // (SessionRegistry::OnHookEvent). UI thread.
+        //   sourceId - the session forked from.
+        //   forkedId - the new fork's id ("" = no tab opened: nothing to do).
+        // Never throws (the store read and write and the repaint are contained and logged).
+        void _CarryNoteIntoFork(const std::wstring& sourceId, const std::wstring& forkedId) noexcept;
         // The editor's count line: "n / 2000" from the box's current text (and dimmed far from the cap). UI thread; never
         // throws (a failed write is logged).
         void _UpdateNoteEditorCount() noexcept;

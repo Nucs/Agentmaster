@@ -658,6 +658,42 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    void TerminalPage::_CarryNoteIntoFork(const std::wstring& sourceId, const std::wstring& forkedId) noexcept
+    {
+        if (sourceId.empty() || forkedId.empty())
+        {
+            return; // no fork opened (a gate, a failed launch): nothing to carry into
+        }
+        try
+        {
+            // The store decides (CarryNoteIntoFork): the source's note under "a fork of <source8>", written only when the source
+            // has a note and the fork none - a fork of an un-noted session gets no note, and no glyph.
+            if (!::Agentmaster::CarryNoteIntoFork(sourceId, forkedId, NoteNowMs()))
+            {
+                return;
+            }
+            // The line names the two sessions, never the note's words (the user's text stays out of the log, as at every save).
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[note] " + forkedId + L" takes the note of " + ::Agentmaster::ShortId(sourceId) + L" (a fork)\n");
+            // THIS window's surfaces one tick later, like a save's (_SaveSessionNote): the fork's tab got its marker at launch,
+            // before the note existed; the repaint creates its x:Load glyph and the side panel's band glyph. Other windows and the
+            // Telegram card follow through the notes epoch.
+            Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), sid = forkedId]() {
+                const auto page = weak.get();
+                if (!page)
+                {
+                    return;
+                }
+                page->_RefreshTabNote(sid); // noexcept
+                page->_SidePanelNoteSessionNoteChanged(); // noexcept
+            });
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the fork keeps whatever note it has (none, most likely); the fork itself is already open.
+            ::Agentmaster::AgentLogCaughtException(L"_CarryNoteIntoFork");
+        }
+    }
+
     void TerminalPage::_UpdateNoteEditorCount() noexcept
     {
         try

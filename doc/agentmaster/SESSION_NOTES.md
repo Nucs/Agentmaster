@@ -241,7 +241,27 @@ was the suggestion.
   reach the re-home in `_BindClaudeSessionToTab`): the tab keeps its note — COPIED, text and stamp, to the successor
   when the successor has no note of its own (beside the side panel pin's carry, SIDE_PANEL.md §2j); the predecessor
   keeps its copy, so resuming it later still shows it. `[rehome] <id> keeps the note of <old>` in hooks.log.
-- **A new tab** (a fork, a `/handover` successor, Open New Session Here): starts without a note.
+- **A fork** (the user's request of 2026-11-19: "When user forks (anywhere) a session, copy the note to the forked session
+  but prepend it with 'a fork of <8 char sessid>'"): the fork starts with the source's note under a first line
+  `a fork of <the source id's first 8 characters>` — the form every log names a session by — stamped at the fork
+  (`ForkedSessionNote`, `CarryNoteIntoFork` in `SessionStore`). A fork of a fork stacks a line per generation, newest on
+  top; the cap may cost a full-length note its last characters. A source with no note gives no note (no glyph on the
+  fork). Every fork is covered:
+  - Agentmaster's own: `_ForkManagedSessionById` (the tab menu, the board card, the tree row, the side panel card, the
+    Manager's Fork, the fork question's launch for a managed source, the AI search; Claude and Codex) and
+    `_ForkSessionFromDisk` (an on-disk source: the Sessions page, the launch box, Telegram's ⑂ Fork and `/forksession`, the
+    AI search's fallback) call `TerminalPage::_CarryNoteIntoFork` right after the fork's tab opened; so does the External
+    census's Adopt → Fork a copy (`_AdoptExternalClaude`; a Codex adoption forks a rollout uuid, which keys no note).
+  - Claude Code's own `/branch` (the SAME tab switches to the fork): `SessionRegistry::OnHookEvent` recognizes it (OBSERVER.md
+    §21) and carries the origin's note after its lock. The tab's conversation carry above may run first and copy the note
+    plain; `CarryNoteIntoFork` writes when the fork has no note OR holds exactly the source's note, so the plain copy becomes
+    the fork's note, and either order ends the same. `[branch] <id8> takes the note of <origin8>` in hooks.log.
+  - Not covered: Claude Code's fleet `/fork <task>` and `/bg` move the conversation into its background daemon; the tab
+    that follows it keeps its note through the conversation carry above, unprefixed (OBSERVER.md §21).
+  The rule writes only when the source has a note and the fork none (or the plain copy): a note written on the fork is
+  never replaced, and a restore's re-fork of a never-messaged fork (same id, its note already there) changes nothing.
+  `[note] <fork id> takes the note of <source8> (a fork)` in hooks.log.
+- **A new tab that is no fork** (a `/handover` successor, Open New Session Here): starts without a note.
 - **Close** keeps it; a restore or a reopened window shows it again.
 
 ---
@@ -317,6 +337,11 @@ precompiled header, `Q:\tmp\am-release-wt` at ad89700e3; nothing written to a bu
   TestTaskbarBadge failures (the baseline), `TestSessionNotes` clean.
 - Not checked without a build: the XAML (`x:Load` bound with `x:Bind` on the tab's glyph), the IDL, and the behavior
   on screen (§9).
+- The fork carry (§5, 2026-11-19): `cl /Zs` with the app's flags — `SessionStore.cpp`, `SessionRegistry.cpp`,
+  `TerminalPage.AgentSessions.cpp`, `TerminalPage.AgentSessionsPageActions.cpp`, and `TerminalPage.AgentNotes.cpp`
+  through its `AgentNoteVisible`-swapped copy — pass; a `static_assert` planted in the registry's new `/branch` block fails
+  with exactly C2338. The m5 harness from a Q: scratch folder: 14,383 checks, the 3 TaskbarBadge baseline failures
+  (`TestSessionNotes`' fork cases clean; a first run also failed one scheduler timing check, which passed on the rerun).
 
 ---
 
@@ -337,7 +362,9 @@ precompiled header, `Q:\tmp\am-release-wt` at ad89700e3; nothing written to a bu
   summary, and it closes on leaving, on collapse, Sum, the AI view, a tab switch, and when the note is removed while
   the card is up (F3 on the same session's tab → Remove note: the glyph and its card go together).
 - **Across windows and restarts:** an edit in window A shows in window B within ~2.5 s (its tab marker and its cards);
-  a restart and a reopened window keep every note; a `/clear` keeps the tab's note; a fork starts without one.
+  a restart and a reopened window keep every note; a `/clear` keeps the tab's note; a fork (from the tab menu, the side
+  panel, the Sessions page, Telegram, the AI search, a Claude Code `/branch`) starts with the source's note under
+  `a fork of <source8>`, and a fork of an un-noted session gets none.
 - No `[exc]` line from the note paths in hooks.log; the `[note]` and `[nav] note editor` lines read right.
 
 Flows to add to the catalog (`doc/agentmaster/flows/`): a TAB flow (set, edit, remove from the tab menu and F3; the

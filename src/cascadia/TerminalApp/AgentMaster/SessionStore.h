@@ -303,10 +303,38 @@ namespace Agentmaster
     //   throws   - std::bad_alloc.
     std::unordered_map<std::wstring, StoredSessionNote> LoadAllSessionNotesIn(const std::wstring& storeDir);
 
+    // The note a FORK starts with (SESSION_NOTES.md §5; the user's request of 2026-11-19: "When user forks (anywhere) a session,
+    // copy the note to the forked session but prepend it with "a fork of <8 char sessid>""): a first line "a fork of " + the
+    // source id's first 8 characters (the form every Agentmaster log names a session by), then the source's note. A source with
+    // no note (or a blank one) gives no note: there is nothing to copy, and a fork of an un-noted session must not gain the note
+    // glyph. A fork of a fork gets a line per generation, the newest on top; NormalizeSessionNote caps it like any note (the
+    // 19 characters of the line can cost a 2,000-character note its last ones).
+    //   sourceNote - the source session's note ("" = none).
+    //   sourceId   - the source session's id.
+    //   returns    - the fork's note, normalized ("" = none).
+    //   throws     - std::bad_alloc.
+    std::wstring ForkedSessionNote(std::wstring_view sourceNote, std::wstring_view sourceId);
+
+    // Gives a fork its source's note (ForkedSessionNote), stamped `atUnixMs` — the ONE carry every fork path uses: Agentmaster's
+    // own Fork (TerminalPage::_CarryNoteIntoFork) and Claude Code's /branch (SessionRegistry::OnHookEvent). It writes only when
+    // the source has a note AND the fork has none, or holds exactly the source's note: a /branch switches the SAME tab to the
+    // fork, and the tab's conversation carry (_BindClaudeSessionToTab) may copy the note plain before the branch is known — this
+    // turns that copy into the fork's. Anything else on the fork is kept (a note somebody wrote there, or the carried one), so
+    // a second call, in either order, changes nothing.
+    //   storeDir - the store directory.
+    //   sourceId - the session forked FROM.
+    //   forkId   - the fork (a different id).
+    //   atUnixMs - the fork note's stamp (unix ms): the moment of the fork, so its "edited … ago" is the fork's own.
+    //   returns  - true when the fork's note was written here; false when nothing was to copy, the fork's own note was kept, an
+    //              id was empty or the same, or the store refused the write.
+    //   throws   - std::bad_alloc.
+    bool CarryNoteIntoForkIn(const std::wstring& storeDir, const std::wstring& sourceId, const std::wstring& forkId, int64_t atUnixMs);
+
     // ---- live wrappers (resolve <AgentmasterStateDir>\session-store) ----
     StoredSessionNote GetSessionNote(const std::wstring& sessionId);
     bool SetSessionNote(const std::wstring& sessionId, const std::wstring& text, int64_t atUnixMs);
     std::unordered_map<std::wstring, StoredSessionNote> LoadAllSessionNotes();
+    bool CarryNoteIntoFork(const std::wstring& sourceId, const std::wstring& forkId, int64_t atUnixMs);
 
     // ===== typed convenience: the TAGS (bookmark tags on a session's tab) ===================
     //
