@@ -292,15 +292,19 @@ namespace
     constexpr double kTtCardMaxWidth = 660.0; // 460 + 200 (100 per side)
     // ⚠ The ToolTip that HOSTS the card is capped narrower than this budget. WinUI 2.8's ToolTip style
     // (microsoft-ui-xaml release/2.8, dev/CommonStyles/ToolTip_rs5_themeresources.xaml — the one the app's
-    // XamlControlsResources Version2 loads on RS5+) sets MaxWidth = ToolTipMaxWidth = 320 and Padding 9,6,9,8,
-    // and nothing in this app overrides it (AgentSessionToolTipHost sets no MaxWidth on its ToolTip). So, per
-    // that source, the card renders at most ~300 px wide — on a tab and on a side-panel card alike — whatever
-    // this budget says; the budget becomes the real width only if the ToolTip's own MaxWidth is lifted (a local
-    // value outranks the style setter). Read from the source, not yet measured on screen (2026-10-05).
-    // The narrowest card a ROOM-budgeted surface gets (the side-panel card, which opens beside the panel over
-    // the terminal: TerminalPage::_PushSessionToolTipCard clamps the room to [kTtCardMinWidth, kTtCardMaxWidth]).
+    // XamlControlsResources Version2 loads on RS5+) sets MaxWidth = ToolTipMaxWidth = 320 and Padding 9,6,9,8 on
+    // EVERY ToolTip (an implicit style), so until 2026-11-19 the card rendered ~300 px wide inside a 320 px ToolTip —
+    // on a tab and on a side-panel card alike — whatever this budget said. Since then AgentSessionToolTipHost sets
+    // its ToolTip's MaxWidth locally (a local value outranks the style setter) to kToolTipMaxWidth = 384, 20% over
+    // the 320 (the owner's "make the tooltip width 20% wider"), and _PushSessionToolTipCard budgets a ToolTip card for
+    // the 364 px that leaves inside its chrome. So this 660 is the width of the note glyph's card (a Popup — no ToolTip
+    // cap) and the clamp's upper bound; a ToolTip card never reaches it.
+    // The narrowest card a ROOM-budgeted surface gets (the side-panel card and the note glyph's card, which open
+    // beside the panel over the terminal: TerminalPage::_PushSessionCard clamps the room to [kTtCardMinWidth,
+    // kTtCardMaxWidth], after _PushSessionToolTipCard took the ToolTip's chrome off a ToolTip card's room).
     // Below this a numbered prompt line would wrap every few words; a window too narrow even for this lets the
-    // framework slide / clip the popup rather than squeezing the card unreadable. The tab never uses it (flat 660).
+    // framework slide / clip the popup rather than squeezing the card unreadable. The tab has no room limit: its
+    // card gets the ToolTip's whole content width (364).
     constexpr double kTtCardMinWidth = 320.0;
     constexpr double kTtCardHeightFraction = 0.80; // "up to 80% of the screen"
     constexpr double kTtCardFallbackHeight = 460.0; // ~= the pre-budget card: the 360px body clip + its chrome
@@ -472,9 +476,10 @@ namespace
     // viewport (a clipping Grid + a render-transformed body + a slim bar, shown while the body overflows; `scrollOut` hands
     // the page the pieces it drives). maxCardHeight is the caller's window-derived budget for the WHOLE
     // card (see the constants above); <= 0 means "not measured" -> the historical fixed size. maxCardWidth
-    // is the card's MaxWidth (the tab passes the flat kTtCardMaxWidth; a side-panel card passes the room
-    // beside the panel, already clamped); <= 0 falls back to kTtCardMaxWidth. The tag-row packer's character
-    // budget follows it, so a narrower card wraps its tag chips instead of overflowing.
+    // is the card's MaxWidth (a ToolTip card gets at most the ToolTip's 364 px content width — the tab exactly
+    // that, a side-panel card the room beside the panel past the ToolTip's chrome; the note glyph's Popup card
+    // the room beside the panel; all already clamped); <= 0 falls back to kTtCardMaxWidth. The tag-row packer's
+    // character budget follows it, so a narrower card wraps its tag chips instead of overflowing.
     //
     // NO ScrollViewer -- this is a hard rule, learned from a proven fail-fast (2026-07-02, full-dump stowed
     // backtrace): when the ToolTip popup opens, its content tree ENTERs the live tree, and a ScrollViewer's
@@ -644,9 +649,10 @@ namespace
             StackPanel line{ nullptr };
             size_t lineChars = 0;
             // ~mono-11 chars that fit the card minus its padding. Derived from the card's actual width (the
-            // flat kTtCardMaxWidth on a tab, the room-clamped width on a side-panel card) so it can't drift
-            // stale beside it (it was a hand-tuned 52 back when the card was a hardcoded 460 wide -- the
-            // ratio, kept here, already allows for the 10px inter-chip gaps).
+            // ToolTip's 364 px content width on a tab, the room-clamped width on a side-panel card, up to
+            // kTtCardMaxWidth on the note glyph's card) so it can't drift stale beside it (it was a hand-tuned
+            // 52 back when the card was a hardcoded 460 wide -- the ratio, kept here, already allows for the
+            // 10px inter-chip gaps).
             const size_t kTagLineBudget = static_cast<size_t>(52.0 * cardWidth / 460.0);
             for (const auto& [tagName, tagColor] : tagChips)
             {
@@ -2964,8 +2970,11 @@ namespace winrt::TerminalApp::implementation
     //                   SnapshotLiveForCards row) is enough.
     //   tagsSpec      — the tags as a fingerprint string (rides the signature: a tag edit re-hosts the card).
     //   tagChips      — the tags as (name, resolved color) pairs, in display order.
-    //   roomWidth     — the width available beside the owner (px); nullopt (or <= 0) = the flat kTtCardMaxWidth
-    //                   (the tab). A value is clamped to [kTtCardMinWidth, kTtCardMaxWidth].
+    //   roomWidth     — the width available beside the owner for the WHOLE ToolTip (px); nullopt (or <= 0) = no
+    //                   room limit (the tab). Either way the card is budgeted for what the ToolTip really gives it:
+    //                   at most AgentSessionToolTipHost::kToolTipMaxWidth minus its chrome (364), and a room minus that
+    //                   chrome, never under kTtCardMinWidth (_PushSessionCard then clamps to [kTtCardMinWidth,
+    //                   kTtCardMaxWidth] as for every surface).
     //   swapWhileOpen — the one-shot open-swap grant (the async summary body landing in the open tip).
     //   kickSummary   — false = host the header WITHOUT kicking the transcript analyze (the arm/bind pre-hosts — the
     //                   analyze belongs to a real hover, else arming a restored 60-tab strip or a 400-card list would
@@ -2995,7 +3004,21 @@ namespace winrt::TerminalApp::implementation
         sink.setContent = [&host](const winrt::Windows::UI::Xaml::UIElement& card, const winrt::hstring& sig, bool grant) {
             host.SetContent(card, sig, grant);
         };
-        _PushSessionCard(sink, surfaceKey, s, tagsSpec, tagChips, roomWidth, swapWhileOpen, kickSummary, std::move(rehost));
+        // The card's width budget = what the ToolTip really gives it. The host caps its ToolTip at kToolTipMaxWidth
+        // (20% over WinUI's 320) with the style's padding + border inside that, so a card budgeted wider than the
+        // remaining 364 would be cut by the ToolTip anyway — and its tag rows, packed for the budget (kTagLineBudget),
+        // would run past the visible edge. A measured room (the side-panel card: the terminal's width beside the
+        // panel) pays the ToolTip's chrome first, so the WHOLE ToolTip fits the room; a room too narrow even for the
+        // minimum keeps kTtCardMinWidth (a positive value: <= 0 would read as "unmeasured" to _PushSessionCard) and
+        // lets the framework slide the popup. A ToolTip surface only: the note glyph's Popup has no such cap and
+        // keeps its own budget (_UpdateNoteHoverCard -> _PushSessionCard).
+        const double tipContentWidth = AgentSessionToolTipHost::kToolTipMaxWidth - AgentSessionToolTipHost::kToolTipChromeWidth;
+        double cardRoom = tipContentWidth;
+        if (roomWidth && *roomWidth > 0.0)
+        {
+            cardRoom = std::min(tipContentWidth, std::max(*roomWidth - AgentSessionToolTipHost::kToolTipChromeWidth, ::kTtCardMinWidth));
+        }
+        _PushSessionCard(sink, surfaceKey, s, tagsSpec, tagChips, cardRoom, swapWhileOpen, kickSummary, std::move(rehost));
     }
 
     // Agentmaster (SESSION_NOTES.md §4c): the SHARED card push — everything _PushSessionToolTipCard's doc above describes, with
@@ -3192,9 +3215,10 @@ namespace winrt::TerminalApp::implementation
         CATCH_LOG();
         sig += L'\x1f';
         sig += std::to_wstring(static_cast<int>(cardMaxHeight / 50.0));
-        // The card's width budget: the flat kTtCardMaxWidth for a tab (the card is centered under it, so width
-        // spends half to each side); the room beside the side panel for a card (it opens past the panel's edge
-        // over the terminal, so a narrow window must not push it off-screen), clamped to a readable minimum.
+        // The card's width budget: the room the surface passes — a ToolTip card's is already capped at the ToolTip's
+        // 364 px content width (_PushSessionToolTipCard: the tab's card is centered under it, so width spends half to
+        // each side; the side-panel card's room beside the panel, its chrome paid), the note glyph's Popup card the room
+        // beside the panel — else (unmeasured) the flat kTtCardMaxWidth; clamped to a readable minimum either way.
         // Rides the sig on the same 50px grain, so a panel drag or a window resize re-hosts on the next hover.
         const double cardMaxWidth = (roomWidth && *roomWidth > 0.0) ? std::clamp(*roomWidth, ::kTtCardMinWidth, ::kTtCardMaxWidth) : ::kTtCardMaxWidth;
         sig += L'\x1f';

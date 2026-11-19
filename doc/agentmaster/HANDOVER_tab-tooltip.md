@@ -73,6 +73,13 @@ load-bearing.
 > fully, and the settle steps it back to 0.6 — never to nothing. A body that fits still shows none. This reverses
 > `db637f992` (2026-07-27, "the bar shows ONLY while you scroll"). §4b-bis item 5.
 
+> **2026-11-19, later still — the card is 20% WIDER (NOT BUILT yet).** The owner: "make the tooltip width 20% wider".
+> The card rendered 320 px wide — WinUI 2.8's ToolTip style caps every tooltip there — whatever its own 660 budget
+> said. The host now sets its ToolTip's `MaxWidth` locally to 384 (`AgentSessionToolTipHost::kToolTipMaxWidth`), and
+> `_PushSessionToolTipCard` budgets the card for the 364 left inside the ToolTip's chrome (a side-panel card: the room
+> beside the panel minus that chrome, capped at 364), so the tag rows now wrap at the visible edge. The note glyph's
+> Popup card has no ToolTip cap and keeps its room / 660 budget. §6 *Sizing*.
+
 ---
 
 ## 0. Scope & what this is NOT
@@ -390,7 +397,9 @@ last notch (`item-tip: … open=1`, `src=item-tip`); a card whose summary fits s
 "Sum" off side-panel card's card (`card-tip`) and on the note glyph's card; the
 wheel over the tab itself still scrolls the card (`src=item`); with no card up, the wheel over the strip
 still scrolls the strip; moving off the card closes it; a click on the card does nothing (it no longer
-reaches the terminal under the card).
+reaches the terminal under the card). The card is 384 px wide outside (was 320; §6 *Sizing*), its summary and tag rows
+wrapping inside it; a plain tooltip elsewhere (a button's) stays 320; a "Sum" off card in a narrow window stays inside
+the room beside the panel.
 
 The per-card pieces live in `TerminalPage::_tabTooltipScroll[surfaceKey]` (**weak** element refs + the
 three transforms; the key is the session id for a tab, `"\x1F" "sidepanel:" <id>` for a side-panel card),
@@ -536,9 +545,10 @@ them or from XAML events of the owner's thread. Never call tooltip code off the 
 
 - `TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, bodyText, …, maxCardHeight,
   maxCardWidth, scrollOut)` → a dark `Border` (bg `#FF202020`, 1px `#40FFFFFF` border, corner radius 4,
-  padding 10/8, **MaxWidth = `maxCardWidth`**: the flat `kTtCardMaxWidth` = 660 for a tab, the room beside
-  the panel clamped to [`kTtCardMinWidth` 320, 660] for a side-panel card; `<= 0` = 660) wrapping a vertical
-  `StackPanel`:
+  padding 10/8, **MaxWidth = `maxCardWidth`**: the ToolTip's content width 364 for a tab, the room beside the
+  panel minus the ToolTip's chrome, capped at 364, for a side-panel card (both `_PushSessionToolTipCard`), the
+  room beside the panel for the note glyph's Popup card; clamped to [`kTtCardMinWidth` 320, 660]; `<= 0` = 660)
+  wrapping a vertical `StackPanel`:
   - **Header** (a 2-col `Grid`): left = a 9px state-colored `Ellipse` (`accent`, 1px black stroke) +
     the title (Cascadia Mono 13, semibold, ellipsized, NoWrap); right = `folderBranch` (Cascadia Mono
     11, dim `#B0B0B0`, ellipsized).
@@ -565,28 +575,30 @@ them or from XAML events of the owner's thread. Never call tooltip code off the 
       never resize or move the open popup), and the slim bar is sized by a `ScaleTransform` + positioned
       by a `TranslateTransform` (same reason — see §4b-bis).
 
-### Sizing — width is flat, height is a WINDOW FRACTION
+### Sizing — width is the ToolTip's (384), height is a WINDOW FRACTION
 
 Height is the dimension that stretches (the card grows downward with the Summary body), so it is the one
 budgeted against the window rather than hardcoded — the old flat `MaxHeight(360)` body clip topped the
 whole card out near half the screen:
 
-- **Width** — `kTtCardMaxWidth` **660** (was 460; +200, and since the card is centered under its tab that
-  spends 100 per side). `kTagLineBudget` (the tag-row greedy packer) is derived from the card's ACTUAL
-  budget (`maxCardWidth`), so it can't drift. A side-panel card passes the room beside the panel instead
-  (`_SidePanelCardToolTipRoomWidth`, clamped to [320, 660]); the width rides the re-host signature on the
-  same 50px grain as the height.
-- ⚠ **The `ToolTip` caps every card at 320 px.** WinUI 2.8's ToolTip style
-  (`microsoft-ui-xaml` release/2.8, `dev/CommonStyles/ToolTip_rs5_themeresources.xaml`, loaded by the app's
-  `XamlControlsResources ControlsResourcesVersion="Version2"`) sets `MaxWidth = ToolTipMaxWidth = 320` and
-  `Padding = 9,6,9,8` on the `ToolTip` itself, and the template's `ContentPresenter` takes
-  `MaxWidth="{TemplateBinding MaxWidth}"`. Nothing in this app sets a ToolTip `MaxWidth`, so — per that
-  source — the card renders at most ~300 px wide on a tab and on a side-panel card alike, and the
-  460 → 660 change above never showed. Found 2026-10-05 by reading the source; not yet measured on
-  screen. If the wider card is wanted, set the host's `ToolTip.MaxWidth` locally (a local value outranks
-  the style setter) — that is a visible change to every tab's card, so it is a decision, not a fix to
-  slip in. Note that `kTagLineBudget` is sized for the budget, not the cap, so a long tag row can run past
-  the visible width.
+- **Width — the ToolTip's, 384** (since 2026-11-19, the owner: "make the tooltip width 20% wider"). The
+  host sets its ToolTip's `MaxWidth` locally to `AgentSessionToolTipHost::kToolTipMaxWidth` = **384** —
+  20% over the 320 cap below — and `_PushSessionToolTipCard` budgets a ToolTip card for the **364** that
+  leaves inside the ToolTip's chrome (`kToolTipChromeWidth` 20: padding 9 + 9, border 1 + 1): the tab's card
+  exactly that; a side-panel card the room beside the panel (`_SidePanelCardToolTipRoomWidth`, the room for
+  the WHOLE popup) minus that chrome, capped at 364 and never under `kTtCardMinWidth` 320, so its whole
+  ToolTip fits the room. `kTagLineBudget` (the tag-row greedy packer) is derived from that budget
+  (`maxCardWidth`), so tag rows wrap where the card really ends. `kTtCardMaxWidth` **660** (was 460; +200)
+  remains the width of the note glyph's card (a Popup — no ToolTip cap) and the clamp's upper bound. The
+  width rides the re-host signature on the same 50px grain as the height.
+- ⚠ **WinUI's `ToolTip` style caps every tooltip at 320 px** — the cap the host lifts. WinUI 2.8's ToolTip
+  style (`microsoft-ui-xaml` release/2.8, `dev/CommonStyles/ToolTip_rs5_themeresources.xaml`, loaded by the
+  app's `XamlControlsResources ControlsResourcesVersion="Version2"`; an implicit style, so every ToolTip) sets
+  `MaxWidth = ToolTipMaxWidth = 320` and `Padding = 9,6,9,8` on the `ToolTip` itself, and the template's
+  `ContentPresenter` takes `MaxWidth="{TemplateBinding MaxWidth}"`. Until 2026-11-19 nothing in this app set a
+  ToolTip `MaxWidth`, so the card rendered ~300 px wide inside a 320 px ToolTip on a tab and on a side-panel
+  card alike (the 460 → 660 change never showed; found 2026-10-05 by reading the source), and the tag rows,
+  packed for 660, could run past the visible edge. A plain `AgentSetTip` tooltip keeps the 320.
 - **Height** — `_UpdateTabAgentToolTip` measures `Root().ActualHeight()` (the XAML island root == the window
   client area; the tooltip renders in the island's popup root, so the window bounds it regardless — and it
   IS the screen when maximized, the normal case) and passes `kTtCardHeightFraction` (**0.80**) of it as

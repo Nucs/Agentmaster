@@ -503,11 +503,13 @@ session never share a scroll position or a signature, while they DO share the on
    provider runs on every closed re-anchor, so a width drag or a dock flip applies at the next hover.
    A tab keeps the old default: `Bottom` under the tab's own bounds.
 2. **The width budget** (`_SidePanelCardToolTipRoomWidth`): the content area minus the panel, the
-   splitter, the 20 px gap and an 8 px margin, clamped to [320, 660] and carried in the signature on a
-   50 px grain. A tab passes the flat 660. ⚠ Per the WinUI 2.8 source, the `ToolTip` style itself caps
-   every tooltip at **320 px** (`ToolTipMaxWidth`, padding 9,6,9,8), and the host sets no `MaxWidth` —
-   so both the tab's card and this card render at most ~300 px wide today, whatever the budget says
-   (the `kTtCardMaxWidth` note in TerminalPage.AgentObserver.cpp). Not yet measured on screen.
+   splitter, the 20 px gap and an 8 px margin — the room for the whole popup — and carried in the
+   signature on a 50 px grain. The card's ToolTip is at most **384 px** wide: WinUI 2.8's `ToolTip` style
+   caps every tooltip at 320 (`ToolTipMaxWidth`, padding 9,6,9,8), and since 2026-11-19 the host sets its
+   ToolTip's `MaxWidth` locally to 384, 20% wider (the owner's "make the tooltip width 20% wider"; a tab's
+   card the same). So `_PushSessionToolTipCard` gives the card the room minus the ToolTip's 20 px of chrome,
+   capped at the ToolTip's 364 px content width and never under 320 (HANDOVER_tab-tooltip.md §6 *Sizing*).
+   The note glyph's card (a Popup, no ToolTip cap) takes the room clamped to [320, 660].
 3. **The wheel** stays with the card list's own `ScrollViewer` while the rich card is closed or its
    body fits, and it never sets `_tooltipWheelClaimed` (that flag de-dupes the tab ROW's belt
    handler only); its per-notch line reads `[tooltip-wheel] <sid8> src=card …` — `src=card-tip …` for a
@@ -543,7 +545,8 @@ scrolls the card list; moved ONTO the open rich card, the pointer keeps it open 
 (`card-tip`), while a click on it does nothing; a ribbon's hover panel never has the rich card behind it; a width drag or a
 dock flip is followed at the next hover; Sum ON brings the summary and the small card tips back; a
 reopened window keeps its own choice, and a new window takes the last one; measure the card's real
-width (the 320 px `ToolTip` cap above); no `[exc] Side-panel card …` lines in hooks.log.
+width (the rich card's ToolTip 384 px — a tab's card too — where a plain tooltip stays 320, and in a narrow
+window no wider than the room beside the panel); no `[exc] Side-panel card …` lines in hooks.log.
 
 ### 2e. The "+" launcher — the Agent Manager's launch box, at the click
 

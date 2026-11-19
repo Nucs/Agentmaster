@@ -123,6 +123,7 @@ namespace winrt::TerminalApp::implementation
     // re-SetToolTip on each refresh would replace — and so flicker/close — the framework's open tip while you
     // hover it. Configure it once: pinned Dark (a ToolTip renders in the popup root and does NOT inherit the
     // host theme, and ToolTipService theme propagation is unreliable under XAML Islands — see AgentTipHelpers),
+    // kToolTipMaxWidth wide at most (384: 20% over the 320 cap WinUI's ToolTip style puts on every tooltip),
     // placed by the placement provider (the tab default: BELOW the tab — the default placement would push it up
     // into the titlebar / off the top of the screen), and HIT-TESTABLE with its own wheel hook (_WireCardInput):
     // Windows keeps the open card up while the pointer rests on it, and the wheel must land on the card there.
@@ -153,6 +154,12 @@ namespace winrt::TerminalApp::implementation
             // fresh ToolTip instead of hosting cards on one that ToolTipService never saw (it could never open).
             WUX::Controls::ToolTip tip{};
             tip.RequestedTheme(WUX::ElementTheme::Dark);
+            // 20% wider than every other tooltip (the owner's call, 2026-11-19): WinUI 2.8's ToolTip style caps a
+            // tooltip at MaxWidth 320, which is the width the rich card rendered at whatever its own budget said; a
+            // LOCAL value outranks that style setter, and the template's ContentPresenter follows it (TemplateBinding).
+            // Set once, on creation: a ToolTip recreated after a Detach gets it again here. The page budgets the card
+            // for this width minus the ToolTip's chrome (kToolTipChromeWidth), so nothing inside lays out wider.
+            tip.MaxWidth(kToolTipMaxWidth);
             tip.Placement(WUX::Controls::Primitives::PlacementMode::Bottom);
             // HIT-TESTABLE, unlike every AgentSetTip tooltip (those are informational and click-through on
             // purpose): the rich card is the one tooltip a reader moves ONTO — the framework keeps it open while the

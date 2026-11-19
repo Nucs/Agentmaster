@@ -6952,12 +6952,13 @@ namespace winrt::TerminalApp::implementation
     }
 
     // The width the terminal side leaves for the rich card beside the panel: the content area minus the panel, its
-    // splitter, the framework's 20px tooltip gap and an 8px margin to the window edge. The push clamps it to
-    // [320, 660] (kTtCardMinWidth / kTtCardMaxWidth in TerminalPage.AgentObserver.cpp): never wider than a tab's card,
-    // never squeezed unreadable — a window too narrow even for 320 lets the framework slide / clip the popup. (The
-    // ToolTip itself is capped at 320 px by WinUI 2.8's ToolTip style — see the kTtCardMaxWidth note — which today
-    // bounds this card exactly like the tab's; the budget is what keeps the card inside the room if that cap is lifted.)
-    // Returns 0 while unmeasured (the push then uses the flat 660). Never throws: a XAML failure is logged, 0.
+    // splitter, the framework's 20px tooltip gap and an 8px margin to the window edge. It is the room for the WHOLE
+    // popup. For the "Sum" off card's ToolTip, _PushSessionToolTipCard takes the ToolTip's own chrome off it
+    // (AgentSessionToolTipHost::kToolTipChromeWidth) and caps the rest at the ToolTip's 364 px content width (its
+    // MaxWidth is 384: 20% over the 320 WinUI 2.8's style puts on every tooltip); the note glyph's Popup card uses it
+    // as is. The push then clamps to [320, 660] (kTtCardMinWidth / kTtCardMaxWidth in TerminalPage.AgentObserver.cpp):
+    // never squeezed unreadable — a window too narrow even for 320 lets the framework slide / clip the popup.
+    // Returns 0 while unmeasured (the push then uses its flat width). Never throws: a XAML failure is logged, 0.
     double TerminalPage::_SidePanelCardToolTipRoomWidth()
     {
         try

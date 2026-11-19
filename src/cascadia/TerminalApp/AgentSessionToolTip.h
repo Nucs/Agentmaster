@@ -98,6 +98,20 @@ namespace winrt::TerminalApp::implementation
         //                the host's handler.
         using WheelCallback = std::function<bool(int wheelDelta, AgentToolTipWheelSource source)>;
 
+        // The widest this host's ToolTip may get, in DIPs, outer edge to outer edge (its chrome included). WinUI 2.8's
+        // ToolTip style caps EVERY tooltip at 320 (microsoft-ui-xaml release/2.8, dev/CommonStyles/
+        // ToolTip_rs5_themeresources.xaml: MaxWidth = ToolTipMaxWidth = 320, its template's ContentPresenter bound to
+        // it), which is what the rich card rendered at whatever its own budget said. The host sets its ToolTip's
+        // MaxWidth LOCALLY to this value (a local value outranks the style setter): 20% wider than the style's cap —
+        // the owner's call of 2026-11-19, "make the tooltip width 20% wider". Every card this host shows (a tab's, a
+        // side-panel card's) is at most this wide; the page budgets the card inside for this minus
+        // kToolTipChromeWidth (TerminalPage::_PushSessionToolTipCard). A plain AgentSetTip tooltip keeps the 320.
+        static constexpr double kToolTipMaxWidth = 384.0;
+        // The ToolTip's own horizontal chrome around the card, in DIPs: the style's Padding (ToolTipBorderPadding
+        // 9,6,9,8 — 9 left + 9 right) and its BorderThickness (ToolTipBorderThemeThickness, 1 + 1). The card inside a
+        // kToolTipMaxWidth ToolTip is at most kToolTipMaxWidth - kToolTipChromeWidth wide (364).
+        static constexpr double kToolTipChromeWidth = 20.0;
+
         // Create the host for `owner`. Nothing is wired and nothing is attached yet: handlers are added by
         // EnsureHoverHook / the first Update, so a host that is never used costs one small heap object.
         //   owner        — the element the tooltip belongs to (held WEAKLY; its real owner keeps it alive).
@@ -248,7 +262,8 @@ namespace winrt::TerminalApp::implementation
         winrt::hstring _sig{}; // its fingerprint (identical pushes are free)
         // The ONE reused ToolTip (Content swapped only while CLOSED). Configured once: pinned Dark (a ToolTip
         // renders in the popup root and does NOT inherit the host theme; ToolTipService theme propagation is
-        // unreliable under XAML Islands), Placement Bottom (re-pointed by a provider), HIT-TESTABLE with its own
+        // unreliable under XAML Islands), MaxWidth kToolTipMaxWidth (20% over the style's 320), Placement Bottom
+        // (re-pointed by a provider), HIT-TESTABLE with its own
         // wheel hook (_WireCardInput: the pointer may rest on the open card and scroll it there; the placement
         // keeps the card off the owner, so it never opens under the cursor). Stored only once attached;
         // detached + nulled on an owner unload / Clear / Shutdown / Detach.
