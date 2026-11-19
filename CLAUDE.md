@@ -15,7 +15,7 @@
 
 | Install | Identity | Version | Runs from | Commit |
 |---|---|---|---|---|
-| production | `Agentmaster` | 0.8.0.15 | the loose layout `Q:\agentmaster-layouts\Release` (the build server's purged Release build `w20261116-2`, built on the worker site and installed by `amb install`) | `ddda0d7e9` |
+| production | `Agentmaster` | 0.8.0.16 | the loose layout `Q:\agentmaster-layouts\Release-B` (the build server's purged Release build `w20261117-2`, built on the worker site and installed by `amb install`) | `b1f8164e2` |
 | dev | `AgentmasterDev` | 0.0.1.45 | the loose layout `Q:\agentmaster-layouts\Debug-B` (the build server's Debug build `w20261113-5`, built on the worker site and installed by `amb install`) | `907bde046` |
 
 - Whether a commit is in a build: `git merge-base --is-ancestor <commit> <build commit>`.
