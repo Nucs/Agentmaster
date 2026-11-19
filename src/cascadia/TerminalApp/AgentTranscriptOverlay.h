@@ -36,10 +36,11 @@
 // build draws that text differently: the Bash rows as chips with a count pill, each diff block as a GitHub-style card
 // (_BuildDiffCard: a header bar with the file, +a -d, a Viewed box; numbered rows on red / green bands; an expand row
 // above each hunk and below the last that reveals more lines read from the file AS IT IS NOW, marked with a yellow edge).
-// Diff code never wraps, whatever the ↵ toggle says (a wrapped line would break the number columns): with ↵ on, a card
-// whose lines are wider than the page scrolls sideways on its own; with ↵ off, its long lines are cut at the right edge
-// like every other line. Left of the page an OUTLINE lists the turns that changed files with their files; a click jumps
-// there, and the entry of the turn on top of the page is lit as it scrolls.
+// Diff code WRAPS like every other line (the user's "word wrap without horizontal scrollbar"): each line is a grid row, its
+// numbers cell beside a wrapping code cell, so a long line continues under its own code; no card scrolls sideways (with
+// the ↵ toggle off, long lines are cut at the right edge like every other line). Left of the page an OUTLINE lists the
+// turns that changed files with their files; a click jumps there, and the entry of the turn on top of the page is lit as
+// it scrolls.
 //
 // THE JUMP BUTTONS: two small round buttons stacked in the body's bottom-right corner — ↑ (to the top) shows while
 // the view is scrolled down from the top, ↓ (to the bottom) while there is more below; neither shows on a view too
@@ -281,7 +282,7 @@ namespace winrt::TerminalApp::implementation
             bool truncated = false; // the block was cut at the view's block-size cap: its last hunk is partial (a note says so)
             bool bodyBuilt = false; // the body exists (a big card builds it on its first open)
             bool open = true; // the body shows
-            double numberWidth = 0.0; // the line-number columns' width, sized once for the card's biggest number
+            int numberDigits = 3; // the digits every line number is padded to (DiffNumberDigits of the card's biggest number, expansions included): the numbers column's width
             winrt::Windows::UI::Xaml::FrameworkElement root{ nullptr }; // the whole card (what the outline scrolls to)
             winrt::Windows::UI::Xaml::Controls::StackPanel body{ nullptr }; // the hunks' panels, expand rows and notes
             winrt::Windows::UI::Xaml::Controls::FontIcon chevron{ nullptr }; // ▾ open / ▸ closed
@@ -596,21 +597,23 @@ namespace winrt::TerminalApp::implementation
         // Returns the card's root element. Throws winrt::hresult_error / std::bad_alloc (the build's catch contains them).
         winrt::Windows::UI::Xaml::FrameworkElement _BuildDiffCard(LevelView& view, const ::Agentmaster::MdBlock& block, size_t index);
         // Build a card's body: per hunk its expand row (only where lines can lie above it: a hunk at the file's start has
-        // none), its header row and its lines, in a horizontal scroll view shared by the whole body (code never wraps - a
-        // line wider than the page scrolls sideways, GitHub's way); then the expand row below the last hunk, and the note of
-        // a card cut at the block cap or without line numbers. At the card's build, or on a big card's first open.
+        // none), its header row and its lines; then the expand row below the last hunk, and the note of a card cut at the
+        // block cap or without line numbers. No horizontal scroll view: the code WRAPS (the user's ask) - with the ↵ toggle
+        // on, a long line continues on the next visual line under its own code; with ↵ off the page measures it at its full
+        // width and cuts it at the right edge like every other line. At the card's build, or on a big card's first open.
         // Parameters: card — the card (its hunks parsed). Throws winrt::hresult_error / std::bad_alloc.
         void _BuildDiffCardBody(const std::shared_ptr<DiffCard>& card);
-        // A run of diff lines as ONE element: four text blocks side by side - the old numbers, the new numbers, the +/- marks
-        // and the code, one line each per row, every line exactly kDiffLineHeight tall so the columns stay level - over
-        // childless bands (green under added rows, red under removed ones, a stronger tint under their numbers). Four text
-        // blocks per run instead of a grid per line: a long diff costs a few layouts, not thousands (CLAUDE.md "Per-tab XAML
-        // is multiplied"). The code column is selectable with the shared text menu, so lines copy as code without their
-        // marks. Lines read from the file as it is now (`fromFileNow`) carry a yellow left edge.
-        // Parameters: rows — the lines (NumberHunkRows' numbering: 0 = no number on that side); numberWidth — each number
-        //             column's width; fromFileNow — see above.
-        // Returns the element. Throws winrt::hresult_error / std::bad_alloc.
-        winrt::Windows::UI::Xaml::FrameworkElement _MakeDiffLines(const std::vector<::Agentmaster::DiffRow>& rows, double numberWidth, bool fromFileNow) const;
+        // A run of diff lines as ONE grid: a row per line, each row a numbers cell (DiffNumbersText: old number, new number,
+        // +/- mark, in a monospace font) and a WRAPPING code cell, so a long line's continuation hangs under its own code
+        // and its numbers stay level with its first visual line; under them childless bands spanning a run's rows (green
+        // under added lines, red under removed ones, a stronger tint under their numbers). Two text blocks per line and a
+        // row definition - never a grid per line. The code cells are selectable with the shared text menu (a line copies as
+        // code, without its numbers or mark); a selection stays inside one line. Lines read from the file as it is now
+        // (`fromFileNow`) carry a yellow left edge.
+        // Parameters: rows — the lines (NumberHunkRows' numbering: 0 = no number on that side); digits — the card's
+        //             numberDigits; fromFileNow — see above.
+        // Returns the grid. Throws winrt::hresult_error / std::bad_alloc.
+        winrt::Windows::UI::Xaml::FrameworkElement _MakeDiffLines(const std::vector<::Agentmaster::DiffRow>& rows, int digits, bool fromFileNow) const;
         // Build expand row `row` of `card` (a full-width button: an arrow and its label) and record it in card.expandRows /
         // card.expandLabels; its click runs _ExpandDiffCard. Its label says what a click shows - before the file is read, as
         // much as the hunks' own numbers tell (_SyncDiffExpandRows refines it once the file is known).

@@ -25,8 +25,9 @@
 //                           (_AppendSessionLinks), each scrolling session N's heading to the top
 //                           (_JumpToSession / _ScrollToSessionHeading, or a pending jump done by _Pump);
 //   * _BuildDiffCard      — the Diff tab (TRANSCRIPT_OVERLAY.md §3l): a ```diff block as a GitHub-style card
-//                           (_BuildDiffCardBody, _MakeDiffLines: four text blocks per run of lines over
-//                           childless bands), the Bash rows as chips (_BuildDiffBashRow), the turn headings'
+//                           (_BuildDiffCardBody, _MakeDiffLines: a grid row per line - a numbers cell and a
+//                           WRAPPING code cell - over childless bands spanning rows; no horizontal scroll), the
+//                           Bash rows as chips (_BuildDiffBashRow), the turn headings'
 //                           counts (_BuildDiffHeading), the outline beside the page (_ScanDiffOutline on the
 //                           pool thread, _BuildDiffOutline, _UpdateDiffOutlineHighlight, the jumps) and Expand
 //                           from the file as it is now (_ExpandDiffCard -> _LoadDiffFileAsync ->
@@ -266,15 +267,19 @@ namespace
 
     // The DIFF tab (TRANSCRIPT_OVERLAY.md 3l): the outline column's width and the most entries it lists (a pathological
     // session must not cost thousands of buttons at once); a card's line limit before it starts closed (its body is then
-    // built on its first open - GitHub's "large diffs are not rendered by default"); the biggest file Expand reads; the
-    // narrowest line-number column, the +/- column, the line pitch every column keeps, and the code's text size. (The
-    // Expand step, the gap opened whole and the longest line drawn are TranscriptDiff.h's: kDiffExpandStep, ....)
+    // built on its first open - GitHub's "large diffs are not rendered by default"; a line costs two text blocks and a
+    // grid row, so the limit keeps one card's build near a build slice); the biggest file Expand reads; the advance of one
+    // character of the 12 DIP monospace font (Cascadia Mono's 0.586 em is 7.03 DIPs, Consolas' 6.6: rounded up, so the
+    // numbers cell never cuts its mark) and the numbers cell's padding; the pitch of every visual line (wrapped code
+    // included); the code's text size. (The Expand step, the gap opened whole and the longest line drawn are
+    // TranscriptDiff.h's: kDiffExpandStep, ....)
     constexpr double kDiffOutlineWidth = 240.0;
     constexpr size_t kDiffOutlineMaxEntries = 3000;
-    constexpr size_t kDiffCardOpenRows = 400;
+    constexpr size_t kDiffCardOpenRows = 300;
     constexpr uint64_t kDiffFileMaxBytes = 32ull * 1024 * 1024;
-    constexpr double kDiffNumberWidth = 46.0;
-    constexpr double kDiffMarkWidth = 16.0;
+    constexpr double kDiffCharWidth = 7.3;
+    constexpr double kDiffNumbersPadLeft = 6.0;
+    constexpr double kDiffNumbersPadRight = 6.0;
     constexpr double kDiffLineHeight = 19.0;
     constexpr double kDiffFontSize = 12.0;
     // Segoe Fluent Icons for the expand rows: Up, Down, and the double arrow between two hunks.
@@ -294,6 +299,8 @@ namespace
     using ::Agentmaster::DiffExpandTake;
     using ::Agentmaster::DiffLinesAboveHunk;
     using ::Agentmaster::DiffNewFirst;
+    using ::Agentmaster::DiffNumberDigits;
+    using ::Agentmaster::DiffNumbersText;
     using ::Agentmaster::DiffOldFirst;
     using ::Agentmaster::DiffOutlineTitle;
     using ::Agentmaster::DiffRemainingAbove;
@@ -405,16 +412,14 @@ namespace
         return lines;
     }
 
-    // A diff card's line-number column width: room for `largest`'s digits (at least three) in the 12 DIP monospace font,
-    // plus the column's padding; never narrower than kDiffNumberWidth. Never throws.
-    double DiffNumberColumnWidth(int largest) noexcept
+    // A diff card's numbers column width: room for its numbers cell (DiffNumbersText - two numbers of `digits` digits, the
+    // blanks between them and the mark: 2 * digits + 4 characters) in the 12 DIP monospace font, plus the cell's padding.
+    // The expand rows' arrow and the hunk header rows' words line up with it.
+    // Parameters: digits - the card's numberDigits (DiffNumberDigits).
+    // Returns the width in DIPs. Never throws.
+    double DiffNumbersColumnWidth(int digits) noexcept
     {
-        int digits = 1;
-        for (int value = std::max(largest, 0); value >= 10; value /= 10)
-        {
-            ++digits;
-        }
-        return std::max(kDiffNumberWidth, 7.3 * std::max(digits, 3) + 16.0);
+        return kDiffCharWidth * static_cast<double>(2 * std::max(digits, 1) + 4) + kDiffNumbersPadLeft + kDiffNumbersPadRight;
     }
 
     // Point a level's scroll view at a line-wrap mode — the whole mechanism of the ↵ toggle, one property:
@@ -4766,8 +4771,8 @@ namespace winrt::TerminalApp::implementation
             lineCount += hunk.rows.size();
             largest = std::max({ largest, hunk.oldStart + hunk.oldLines, hunk.newStart + hunk.newLines });
         }
-        // Room for the numbers a few expansions below the last hunk reach too, so the columns never widen mid-card.
-        card->numberWidth = DiffNumberColumnWidth(largest + 4 * kDiffExpandStep);
+        // Room for the numbers a few expansions below the last hunk reach too, so the numbers column never widens mid-card.
+        card->numberDigits = DiffNumberDigits(largest + 4 * kDiffExpandStep);
         // GitHub's "large diffs are not rendered by default": a long card starts closed and builds its body on its first open.
         card->open = lineCount <= kDiffCardOpenRows;
 
@@ -4970,53 +4975,46 @@ namespace winrt::TerminalApp::implementation
         card->expandLabels.assign(count + 1, TextBlock{ nullptr });
         // Expand reads the file as it is now (the user's pick), so it needs a file and line numbers to find the hunk by.
         const bool expandable = card->numbered && !card->filePath.empty();
-        StackPanel lines; // everything that scrolls sideways together
+        // The hunks go straight into the body: no horizontal scroll view - the code WRAPS (the user's "word wrap without
+        // horizontal scrollbar"), each line in its own grid row (_MakeDiffLines), so the page's width is the card's.
+        const double numbersWidth = DiffNumbersColumnWidth(card->numberDigits);
         for (size_t h = 0; h < count; ++h)
         {
             const auto& hunk = card->hunks[h];
             // An expand row only where lines lie above the hunk (one at the file's first line has none).
             if (expandable && DiffLinesAboveHunk(card->hunks, h) > 0)
             {
-                lines.Children().Append(_MakeDiffExpandRow(card, h));
+                card->body.Children().Append(_MakeDiffExpandRow(card, h));
             }
             StackPanel hunkPanel;
             if (card->numbered)
             {
-                // GitHub's "@@" row on its blue band, its words where the code starts.
+                // GitHub's "@@" row on its blue band, its words where the code starts - wrapping too (a long function name
+                // in its section), a line high at least.
                 Grid header;
                 header.Background(_diff.hunkBand);
-                header.Height(kDiffLineHeight);
+                header.MinHeight(kDiffLineHeight);
                 TextBlock words;
                 words.Text(winrt::hstring{ DiffDisplayLine(::Agentmaster::FormatHunkHeader(hunk)) });
                 words.FontFamily(_monoFont);
                 words.FontSize(kDiffFontSize);
                 words.Foreground(_diff.meta);
-                words.TextWrapping(TextWrapping::NoWrap);
+                words.TextWrapping(TextWrapping::Wrap);
+                words.LineHeight(kDiffLineHeight);
+                words.LineStackingStrategy(LineStackingStrategy::BlockLineHeight);
                 words.VerticalAlignment(VerticalAlignment::Center);
-                words.Margin(Thickness{ 2 * card->numberWidth + kDiffMarkWidth, 0, 12, 0 });
+                words.Margin(Thickness{ numbersWidth + 4.0, 0, 12, 0 });
                 header.Children().Append(words);
                 hunkPanel.Children().Append(header);
             }
-            hunkPanel.Children().Append(_MakeDiffLines(::Agentmaster::NumberHunkRows(hunk), card->numberWidth, false));
-            lines.Children().Append(hunkPanel);
+            hunkPanel.Children().Append(_MakeDiffLines(::Agentmaster::NumberHunkRows(hunk), card->numberDigits, false));
+            card->body.Children().Append(hunkPanel);
             card->hunkPanels[h] = hunkPanel;
         }
         if (expandable && count > 0)
         {
-            lines.Children().Append(_MakeDiffExpandRow(card, count));
+            card->body.Children().Append(_MakeDiffExpandRow(card, count));
         }
-        // Code never wraps (a wrapped line would break the number columns): the whole body scrolls sideways as one, GitHub's
-        // way, only when a line is wider than the page. It cannot scroll vertically, so a wheel turn over it goes on to the
-        // page; with the ↵ toggle off the page measures it at its full width and clips it like every other line.
-        ScrollViewer sideways;
-        sideways.HorizontalScrollMode(ScrollMode::Auto);
-        sideways.HorizontalScrollBarVisibility(ScrollBarVisibility::Auto);
-        sideways.VerticalScrollMode(ScrollMode::Disabled);
-        sideways.VerticalScrollBarVisibility(ScrollBarVisibility::Disabled);
-        sideways.ZoomMode(ZoomMode::Disabled);
-        sideways.IsTabStop(false);
-        sideways.Content(lines);
-        card->body.Children().Append(sideways);
         const auto addNote = [this, &card](std::wstring_view words) {
             TextBlock note;
             note.Text(winrt::hstring{ words });
@@ -5044,21 +5042,29 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    FrameworkElement AgentTranscriptOverlay::_MakeDiffLines(const std::vector<::Agentmaster::DiffRow>& rows, double numberWidth, bool fromFileNow) const
+    FrameworkElement AgentTranscriptOverlay::_MakeDiffLines(const std::vector<::Agentmaster::DiffRow>& rows, int digits, bool fromFileNow) const
     {
+        // [numbers | code]: the numbers cell a fixed width (its text is monospace and padded, DiffNumbersText), the code a
+        // star - so it takes the rest of the card's width, WRAPS inside it, and the bands below reach the card's right edge.
         Grid grid;
-        for (const auto width : { GridLength{ numberWidth, GridUnitType::Pixel }, GridLength{ numberWidth, GridUnitType::Pixel }, GridLength{ kDiffMarkWidth, GridUnitType::Pixel }, GridLength{ 1, GridUnitType::Star } })
+        ColumnDefinition numbersColumn;
+        numbersColumn.Width(GridLength{ DiffNumbersColumnWidth(digits), GridUnitType::Pixel });
+        ColumnDefinition codeColumn;
+        codeColumn.Width(GridLength{ 1, GridUnitType::Star });
+        grid.ColumnDefinitions().Append(numbersColumn);
+        grid.ColumnDefinitions().Append(codeColumn);
+        // One Auto row per line: a wrapped line's row grows to its visual lines, and the next line starts below it - the
+        // numbers of every line stay level with that line's FIRST visual line, whatever the width.
+        const auto count = static_cast<int32_t>(rows.size());
+        for (int32_t line = 0; line < count; ++line)
         {
-            ColumnDefinition column;
-            column.Width(width);
-            grid.ColumnDefinitions().Append(column);
+            RowDefinition definition;
+            definition.Height(GridLength{ 0, GridUnitType::Auto });
+            grid.RowDefinitions().Append(definition);
         }
-        // Exactly one pitch per line: the bands below are placed by it, and every column's text keeps it (BlockLineHeight),
-        // so a line's number, mark and code always sit on the same band whatever font fallback a character needs.
-        grid.Height(static_cast<double>(rows.size()) * kDiffLineHeight);
-        // The bands first (drawn under the text): one per run of added / removed lines across the whole width (the code
-        // column is a star, so the band reaches the card's right edge), and a stronger one under their numbers. Childless
-        // and never hit-tested.
+        // The bands first (drawn under the text): one per run of added / removed lines, spanning the run's rows across both
+        // columns, and a stronger one under their numbers. Childless and never hit-tested; a band spans rows (RowSpan), so it
+        // follows the lines' wrapped heights by itself.
         for (size_t first = 0; first < rows.size();)
         {
             const wchar_t kind = rows[first].kind;
@@ -5070,88 +5076,68 @@ namespace winrt::TerminalApp::implementation
             if (kind == L'+' || kind == L'-')
             {
                 const bool added = kind == L'+';
-                const double top = static_cast<double>(first) * kDiffLineHeight;
-                const double height = static_cast<double>(end - first) * kDiffLineHeight;
+                const auto top = static_cast<int32_t>(first);
+                const auto span = static_cast<int32_t>(end - first);
                 Border band;
                 band.Background(added ? _diff.addBand : _diff.removeBand);
-                band.Height(height);
-                band.VerticalAlignment(VerticalAlignment::Top);
-                band.Margin(Thickness{ 0, top, 0, 0 });
                 band.IsHitTestVisible(false);
-                Grid::SetColumnSpan(band, 4);
+                Grid::SetRow(band, top);
+                Grid::SetRowSpan(band, span);
+                Grid::SetColumnSpan(band, 2);
                 grid.Children().Append(band);
                 Border numbers;
                 numbers.Background(added ? _diff.addNumberBand : _diff.removeNumberBand);
-                numbers.Height(height);
-                numbers.VerticalAlignment(VerticalAlignment::Top);
-                numbers.Margin(Thickness{ 0, top, 0, 0 });
                 numbers.IsHitTestVisible(false);
-                Grid::SetColumnSpan(numbers, 2);
+                Grid::SetRow(numbers, top);
+                Grid::SetRowSpan(numbers, span);
                 grid.Children().Append(numbers);
             }
             first = end;
         }
-        if (fromFileNow)
+        if (fromFileNow && count > 0)
         {
-            // The yellow edge of lines read from the file as it is now (they may be newer than the turn).
+            // The yellow edge of lines read from the file as it is now (they may be newer than the turn): every row.
             Border edge;
             edge.Width(3);
             edge.HorizontalAlignment(HorizontalAlignment::Left);
             edge.Background(_diff.now);
             edge.IsHitTestVisible(false);
+            Grid::SetRowSpan(edge, count);
             grid.Children().Append(edge);
         }
-        // The four columns' text, one line per row (an empty line where a side has no number).
-        std::wstring oldNumbers;
-        std::wstring newNumbers;
-        std::wstring marks;
-        std::wstring code;
-        for (size_t k = 0; k < rows.size(); ++k)
+        // Each line: its numbers cell and its code cell, both one pitch per visual line (BlockLineHeight) and top-aligned, so
+        // the numbers sit on the code's first line whatever font fallback a character needs.
+        for (int32_t line = 0; line < count; ++line)
         {
-            if (k > 0)
-            {
-                oldNumbers += L'\n';
-                newNumbers += L'\n';
-                marks += L'\n';
-                code += L'\n';
-            }
-            const auto& row = rows[k];
-            if (row.oldNo > 0)
-            {
-                oldNumbers += std::to_wstring(row.oldNo);
-            }
-            if (row.newNo > 0)
-            {
-                newNumbers += std::to_wstring(row.newNo);
-            }
-            marks += (row.kind == L'+' || row.kind == L'-') ? row.kind : L' ';
-            if (row.kind == L'\\')
-            {
-                code += L'\\'; // "\ No newline at end of file" keeps its backslash
-            }
-            code += DiffDisplayLine(row.text);
+            const auto& row = rows[static_cast<size_t>(line)];
+            TextBlock numbers;
+            numbers.Text(winrt::hstring{ DiffNumbersText(row, digits) });
+            numbers.FontFamily(_monoFont);
+            numbers.FontSize(kDiffFontSize);
+            numbers.Foreground(_diff.number);
+            numbers.TextWrapping(TextWrapping::NoWrap);
+            numbers.LineHeight(kDiffLineHeight);
+            numbers.LineStackingStrategy(LineStackingStrategy::BlockLineHeight);
+            numbers.VerticalAlignment(VerticalAlignment::Top);
+            numbers.Padding(Thickness{ kDiffNumbersPadLeft, 0, kDiffNumbersPadRight, 0 });
+            Grid::SetRow(numbers, line);
+            grid.Children().Append(numbers);
+            // The code: selectable with the shared text menu (a line copies as code, without its numbers or mark), WRAPPING
+            // at the card's edge (the text block's own Wrap: word boundaries first, a long token broken when it must). At
+            // least a line high, so an empty line keeps its row.
+            auto code = _MakeTextBlock(kDiffFontSize);
+            code.Text(winrt::hstring{ row.kind == L'\\' ? L"\\" + DiffDisplayLine(row.text) : DiffDisplayLine(row.text) });
+            code.FontFamily(_monoFont);
+            code.Foreground(row.kind == L'\\' ? _diff.meta : _diff.code);
+            code.LineHeight(kDiffLineHeight);
+            code.LineStackingStrategy(LineStackingStrategy::BlockLineHeight);
+            code.MinHeight(kDiffLineHeight);
+            code.VerticalAlignment(VerticalAlignment::Top);
+            code.Padding(Thickness{ 4, 0, 12, 0 });
+            Grid::SetRow(code, line);
+            Grid::SetColumn(code, 1);
+            grid.Children().Append(code);
         }
-        const auto addColumn = [&](const std::wstring& text, int32_t column, const Brush& brush, bool selectable, const Thickness& padding, TextAlignment alignment) {
-            // The code is selectable with the shared text menu (lines copy as code, without their marks); the numbers and
-            // marks are not - a drag over them selects nothing.
-            TextBlock block = selectable ? _MakeTextBlock(kDiffFontSize) : TextBlock{};
-            block.Text(winrt::hstring{ text });
-            block.FontFamily(_monoFont);
-            block.FontSize(kDiffFontSize);
-            block.Foreground(brush);
-            block.TextWrapping(TextWrapping::NoWrap);
-            block.LineHeight(kDiffLineHeight);
-            block.LineStackingStrategy(LineStackingStrategy::BlockLineHeight);
-            block.VerticalAlignment(VerticalAlignment::Top);
-            block.TextAlignment(alignment);
-            block.Padding(padding);
-            Grid::SetColumn(block, column);
-            grid.Children().Append(block);
-        };
-        addColumn(oldNumbers, 0, _diff.number, false, Thickness{ 0, 0, 8, 0 }, TextAlignment::Right);
-        addColumn(newNumbers, 1, _diff.number, false, Thickness{ 0, 0, 8, 0 }, TextAlignment::Right);
-        addColumn(marks, 2, _diff.code, false, Thickness{ 4, 0, 0, 0 }, TextAlignment::Left);
-        addColumn(code, 3, _diff.code, true, Thickness{ 0, 0, 12, 0 }, TextAlignment::Left);
         return grid;
     }
 
@@ -5181,8 +5167,8 @@ namespace winrt::TerminalApp::implementation
         label.IsHitTestVisible(false);
         Grid::SetColumn(label, 1);
         Grid content;
-        ColumnDefinition arrowColumn; // the numbers' width: the arrow sits in the number columns, the words where code starts
-        arrowColumn.Width(GridLength{ 2 * card->numberWidth + kDiffMarkWidth, GridUnitType::Pixel });
+        ColumnDefinition arrowColumn; // the numbers' width: the arrow sits in the numbers column, the words where code starts
+        arrowColumn.Width(GridLength{ DiffNumbersColumnWidth(card->numberDigits), GridUnitType::Pixel });
         ColumnDefinition labelColumn;
         labelColumn.Width(GridLength{ 1, GridUnitType::Star });
         content.ColumnDefinitions().Append(arrowColumn);
@@ -5347,7 +5333,7 @@ namespace winrt::TerminalApp::implementation
                         rows.push_back(std::move(line));
                     }
                     // Under the hunk's "@@" row, above the lines shown before: the file is read upwards.
-                    card.hunkPanels[h].Children().InsertAt(card.numbered ? 1u : 0u, _MakeDiffLines(rows, card.numberWidth, true));
+                    card.hunkPanels[h].Children().InsertAt(card.numbered ? 1u : 0u, _MakeDiffLines(rows, card.numberDigits, true));
                     card.revealedAbove[h] += take;
                 }
             }
@@ -5368,7 +5354,7 @@ namespace winrt::TerminalApp::implementation
                         line.oldNo = oldSide ? DiffOldFirst(hunk) + DiffSideCount(hunk, L'-') + (j - end) : 0;
                         rows.push_back(std::move(line));
                     }
-                    card.hunkPanels[h].Children().Append(_MakeDiffLines(rows, card.numberWidth, true));
+                    card.hunkPanels[h].Children().Append(_MakeDiffLines(rows, card.numberDigits, true));
                     card.revealedBelow[h] += take;
                 }
             }

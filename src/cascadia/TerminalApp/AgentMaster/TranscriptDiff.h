@@ -20,8 +20,9 @@
 //     pick "The file as it is now": the lines around a change are read from the current file);
 //   * the overlay's card arithmetic, kept here (not in the XAML unit) so the harness tests it: how many lines an expand row
 //     can still show (DiffLinesAboveHunk, DiffRemainingAbove, DiffRemainingBelow) and how many one click shows
-//     (DiffExpandTake), the numbers expanded lines continue (DiffNewFirst, DiffOldFirst, DiffSideCount), what a row says
-//     (DiffExpandLabel), a line as a text block may draw it (DiffDisplayLine), the fence info's two parts (SplitDiffInfo), a
+//     (DiffExpandTake), the numbers expanded lines continue (DiffNewFirst, DiffOldFirst, DiffSideCount), a line's numbers
+//     cell (DiffNumberDigits, DiffNumbersText), what a row says (DiffExpandLabel), a line as a text block may draw it
+//     (DiffDisplayLine), the fence info's two parts (SplitDiffInfo), a
 //     Bash row's count (TakeDiffRepeatCount), the five diffstat squares (DiffBarSquares), an outline entry's title
 //     (DiffOutlineTitle).
 //
@@ -985,9 +986,44 @@ namespace Agentmaster
         return text + L" (from the file now)";
     }
 
+    // The digits every line number of a card is padded to: the digits of `largest` (the biggest number the card can show,
+    // its expansions included), at least three - so a card's numbers column never changes width as lines are revealed.
+    // Never throws.
+    inline int DiffNumberDigits(int largest) noexcept
+    {
+        int digits = 1;
+        for (int value = (std::max)(largest, 0); value >= 10; value /= 10)
+        {
+            ++digits;
+        }
+        return (std::max)(digits, 3);
+    }
+
+    // A line's numbers cell as a card draws it, in a monospace font: the old number and the new number, each right-aligned in
+    // `digits` characters (blank where the line has none on that side), two blanks between them, then a blank and its mark.
+    // With 3 digits: " 39   39  " for context, " 40      -" removed, "      40 +" added, all blanks for a "\ No newline"
+    // marker. One text per line, so the two numbers and the mark always line up with each other and with the first visual
+    // line of the (wrapping) code beside them.
+    // Parameters: row - the line (NumberHunkRows' numbering: 0 = none on that side); digits - DiffNumberDigits of the card.
+    // Returns the cell's text, 2 * digits + 4 characters (more only for a number wider than `digits`). Throws std::bad_alloc only.
+    inline std::wstring DiffNumbersText(const DiffRow& row, int digits)
+    {
+        const size_t width = static_cast<size_t>((std::max)(digits, 1));
+        const auto side = [width](int number) {
+            std::wstring cell = number > 0 ? std::to_wstring(number) : std::wstring{};
+            if (cell.size() < width)
+            {
+                cell.insert(0, width - cell.size(), L' ');
+            }
+            return cell;
+        };
+        const wchar_t mark = (row.kind == L'+' || row.kind == L'-') ? row.kind : L' ';
+        return side(row.oldNo) + L"  " + side(row.newNo) + L' ' + mark;
+    }
+
     // One line of diff code as a text block is handed it: at most kDiffMaxLineChars characters (an ellipsis marks a cut; a
     // cut never splits a surrogate pair), its trailing CRs dropped, and every character a text block would break the line
-    // at shown as its control picture instead - a break inside a line would put a card's four columns out of step.
+    // at shown as its control picture instead - a break inside a line would read as two lines of code beside one number.
     // Parameters: text - the line.
     // Returns the line to draw. Throws std::bad_alloc only.
     inline std::wstring DiffDisplayLine(std::wstring_view text)

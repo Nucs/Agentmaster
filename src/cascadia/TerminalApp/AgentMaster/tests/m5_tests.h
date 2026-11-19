@@ -495,7 +495,7 @@ void TestTranscriptViews();
 // read and written (paths, numbers, an omitted count, CRLF, the unnumbered form, look-alike headers), each hunk row's numbers, the NET
 // change of a turn's edits to one file (one edit, two apart, an edit of an added line, added-then-removed = none, a created file, a
 // misfit voids, no numbers voids, a known original's full context, an edit's later hunk, both empty-old-side numberings), the Bash
-// reasons once each with their count, where a hunk sits in the file now, the cards' expand arithmetic and labels, a drawn line, the
+// reasons once each with their count, where a hunk sits in the file now, the cards' expand arithmetic and labels, a line's numbers cell, a drawn line, the
 // fence info, a row's count, the five squares, an outline title; the document of a synthetic session (rows, a net diff, a new file, a
 // file changed back, misfit edits one by one, a tilde fence, the headings' counts) and of the editDiffs one (tests_turns.cpp)
 void TestTranscriptDiff();

@@ -2232,6 +2232,28 @@ void TestTranscriptDiff()
         CHECK(cutLine.size() == kDiffMaxLineChars + 1 && cutLine.back() == L'\x2026' && cutPair.size() == kDiffMaxLineChars && cutPair[kDiffMaxLineChars - 2] == L'a' &&
                   cutPair.back() == L'\x2026',
               "Diff: a very long line is cut with an ellipsis, never in the middle of a surrogate pair");
+        // A line's numbers cell (the cards wrap their code, so each line is a grid row: this cell beside the code).
+        CHECK(DiffNumberDigits(0) == 3 && DiffNumberDigits(999) == 3 && DiffNumberDigits(1000) == 4 && DiffNumberDigits(123456) == 6 &&
+                  DiffNumberDigits(-5) == 3,
+              "Diff: a card's numbers are padded to the digits of its biggest number, at least three");
+        DiffRow context;
+        context.kind = L' ';
+        context.oldNo = 39;
+        context.newNo = 39;
+        DiffRow removedRow;
+        removedRow.kind = L'-';
+        removedRow.oldNo = 40;
+        DiffRow addedRow;
+        addedRow.kind = L'+';
+        addedRow.newNo = 40;
+        DiffRow marker;
+        marker.kind = L'\\';
+        // The blanks spelled out piece by piece (adjacent literals join): two between the numbers, one before the mark.
+        CHECK(DiffNumbersText(context, 3) == L" 39" L"  " L" 39" L" " L" " && DiffNumbersText(removedRow, 3) == L" 40" L"  " L"   " L" " L"-" &&
+                  DiffNumbersText(addedRow, 3) == L"   " L"  " L" 40" L" " L"+" && DiffNumbersText(marker, 3) == std::wstring(10, L' '),
+              "Diff: a line's numbers cell - both numbers right-aligned, then its mark; blanks where a side has none");
+        CHECK(DiffNumbersText(context, 4).size() == 12 && DiffNumbersText(removedRow, 4) == L"  40" L"  " L"    " L" " L"-",
+              "Diff: the cell is 2 * digits + 4 characters, so every line of a card lines up");
         std::wstring path;
         std::wstring meta;
         SplitDiffInfo(L"src/app.py \x00B7 2 edits \x00B7 by finder-a", path, meta);

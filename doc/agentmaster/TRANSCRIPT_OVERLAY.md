@@ -10,6 +10,7 @@ the tabs' cheat-sheet tooltips (§3f, the seventh ask), Compact's reason lines (
 (§3h, the ninth) and Markdown tables (§3i, the tenth) — not built. 2026-11-18: the box tabs Custom · User Only ·
 Assistant Only after a separator, with their row of twelve boxes (§3j, the eleventh ask), and the ↑ / ↓ jump buttons
 (§3k) — not built; then the Diff tab after a second separator (§3l, the twelfth ask, same day) — not built.
+2026-11-19: the Diff tab's code wraps, no horizontal scroll bar (§3l, the thirteenth ask) — not built.
 
 ## 1. The ask (verbatim)
 
@@ -92,6 +93,11 @@ The user's picks, from one round of mockups (four questions, each option a drawn
 - **Bash rows:** "Row per reason, ×N" — one row per different reason the turn's Bash calls gave, a repeat counted.
 - **Expand:** "The file as it is now" — the lines around a change are read from the file on disk now, marked as such
   (a later turn may have changed them); no rewinding of the file to the turn.
+
+And the thirteenth (2026-11-19), about the first Diff tab's cards (their code never wrapped; a long line scrolled the
+card sideways):
+
+> In transcript tabs, File diff areas must word wrap without horizontal scrollbar
 
 ## 2. Where it opens
 
@@ -599,17 +605,21 @@ conversation with the code it changed.
   (GitHub's: ticked closes the card and dims its outline entry; for this open of the transcript only) — over the hunks:
   each hunk's "@@ … @@" row on a blue band, then its lines with the OLD and NEW line numbers, removed lines on red bands
   and added ones on green (a stronger tint under their numbers). A click on the header opens / closes the card. A card of
-  more than 400 lines starts closed and builds its lines on its first open (GitHub's "large diffs are not rendered by
+  more than 300 lines starts closed and builds its lines on its first open (GitHub's "large diffs are not rendered by
   default").
-  - **Cheap at any size**: a run of lines is ONE element — four text blocks side by side (old numbers, new numbers, the
-    +/- marks, the code), every line exactly 19 DIPs (`LineStackingStrategy::BlockLineHeight`), over childless bands
-    placed by line — not a grid per line (CLAUDE.md "Per-tab XAML is multiplied"). The code column is selectable (lines
-    copy as code, without their marks).
-  - **Code never wraps** (a wrapped line would put the number columns out of step): with ↵ on, a card whose lines are
-    wider than the page scrolls sideways on its own (one horizontal scroll view per card body; the wheel goes on to the
-    page); with ↵ off, its long lines are cut at the right edge like every other line. A line longer than 2,000
-    characters is drawn cut with an ellipsis, and any character a text block would break a line at is drawn as its
-    control picture (␍, ␤, …).
+  - **Code WRAPS, no horizontal scroll bar** (the thirteenth ask, the same week: *"In transcript tabs, File diff areas
+    must word wrap without horizontal scrollbar"*): a run of lines is ONE grid with a row per line — a numbers cell (the
+    old number, the new number and the +/- mark in one monospace text, `DiffNumbersText`, padded to the card's digits
+    so every line lines up) and a code cell that wraps at the card's edge (word boundaries first; a long token is broken
+    when it must). A wrapped line's row grows to its visual lines, its continuation hangs under its own code, and its
+    numbers stay level with its first visual line; every visual line is 19 DIPs (`LineStackingStrategy::BlockLineHeight`).
+    The bands are childless Borders spanning a run's rows (`RowSpan`), so they follow the wrapped heights by themselves.
+    Two text blocks and a row definition per line — never a grid per line (CLAUDE.md "Per-tab XAML is multiplied").
+    The "@@" rows wrap too. With ↵ off the page measures everything at its full width, so a long line is cut at the
+    right edge like every other line — still no scroll bar.
+  - The code cells are selectable (a line copies as code, without its numbers or mark); a selection stays inside one
+    line. A line longer than 2,000 characters is drawn cut with an ellipsis, and any character a text block would break
+    a line at is drawn as its control picture (␍, ␤, …).
 - **Expand** (the pick "The file as it is now"): an expand row above each hunk (where lines lie above it) and one below
   the last. A click reads the file from disk NOW (off the UI thread, once per file per open: `_LoadDiffFileAsync`, ≤ 32 MB,
   UTF-8 or the ANSI code page), finds the hunk's new side in it by its text (`LocateHunkNewSide`: of several places, the
@@ -861,16 +871,18 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
   can pick the wrong one in a heavily reshuffled file. Files over 32 MB, and paths past MAX_PATH, are not read. A file
   is read once per open of the transcript: ↻ Refresh reads again.
 - "Viewed" lives as long as this open of the transcript (no remembered review state), and so do opened / closed cards.
-- Diff code never wraps; a long line is cut at 2,000 characters with an ellipsis (Copy on the header still has the
-  whole text). Selection works inside one run of lines (a hunk, a block of expanded lines), not across a card.
+- Diff code wraps (↵ on); a line longer than 2,000 characters is still cut there with an ellipsis (Copy on the header
+  still has the whole text). A selection stays inside one line's code cell: copying several lines of a hunk at once is
+  the header's Copy (the whole tab) or one line at a time.
 - The outline lists a file by its name (the folder is in the tooltip); its highlight follows the TURN at the top of the
   page, not the file. A turn without changes has no entry.
 - Agents' edits are folded into their turn's net change ("by <agent>" on the card); an agent that edited a file the
   main session edited too in the same turn is composed with it in time order, which voids the composition when they
   raced.
 - The Diff tab's Telegram twin does not exist (`/transcript` and All Screen keep the levels).
-- Each OPEN card body is one horizontal scroll view (its template's elements included): a session with a thousand
-  changed-file cards pays a thousand of them; cards over 400 lines start closed and pay nothing until opened.
+- Each line of an OPEN card is two text blocks and a grid row (the price of wrapping with its numbers kept level): a
+  session with thousands of changed lines pays thousands of them while the tab is open; cards over 300 lines start
+  closed and pay nothing until opened.
 
 ## 9. Verification checklist (nothing here has been built)
 
@@ -965,13 +977,15 @@ every close hands focus back through `_FocusCurrentTab(true)` (the focused tab, 
       ONE card ("2 edits") with the net change; a file created in the turn reads "new file", all green from line 1; a
       line added and removed again in one turn leaves the dim "changed and changed back" note.
     - A card: click its header → it closes / opens; tick Viewed → it closes and its outline entry dims; untick → opens.
-      A card of more than 400 lines starts closed and opens on a click.
+      A card of more than 300 lines starts closed and opens on a click.
     - Expand: click "Show 20 more lines above" → 20 lines with a yellow edge appear under the "@@" row, numbered on
       from the hunk, and the legend appears under the card; the row's count drops; a gap of ≤ 40 lines opens whole and
       its row goes; "Show the last N lines" reaches the end of the file. Edit the file so a hunk's lines change, ↻
       Refresh, expand → "These lines are no longer in the file"; rename the file → "The file cannot be read now".
-    - A long line scrolls sideways inside its card (↵ on); with ↵ off it is cut at the right edge. Select code across
-      several lines of a hunk → Copy gives the code without the +/- marks.
+    - A long line WRAPS inside its card (↵ on): its continuation lines start under its own code, its numbers stay on its
+      first line, the band (green / red) covers all its visual lines, and no card shows a horizontal scroll bar; narrow
+      the window → the lines re-wrap. A long "@@ … @@ section" row wraps too. With ↵ off a long line is cut at the right
+      edge (no scroll bar). Select a line's code → Copy gives it without its numbers or +/- mark.
     - Scroll the page → the outline lights the turn on top and follows it; click a file entry before the build reaches
       it (a big session) → the page jumps there the moment it is built.
     - A Codex tab → the Diff tab's message; a session that never edited a file → "No turn changed a file …" in the
