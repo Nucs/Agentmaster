@@ -9,6 +9,10 @@
 //   3. the detach's bare `catch (...) {}` now logs (Rule #18 — "never lose a swallowed exception").
 // Plus one addition: RefreshPlacement, run by the hover hook, so a card that is not re-hosted (identical
 // signature) is still anchored to the owner's CURRENT geometry.
+// And one later change (2026-11-19, the user's report "the tooltip lets me hover it but not scroll it"): the
+// ToolTip is HIT-TESTABLE and reads the wheel on the CARD too (_WireCardInput), not only on the owner — Windows
+// keeps an open tooltip up while the pointer rests on it, and a click-through card handed that notch to the
+// terminal beneath it.
 
 #include "pch.h"
 #include "AgentSessionToolTip.h"
@@ -16,6 +20,7 @@
 #include "AgentCatchLog.h" // AgentLogCaughtException — the hooks swallow, so they must still report (Rule #18)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog — the "[tooltip-wheel] <label>:" trace
 
+#include <atomic> // the once-per-process "the card opened click-through" log latch
 #include <utility> // std::exchange — the one-shot swap grant
 
 using namespace winrt;
@@ -24,6 +29,15 @@ using namespace winrt::Windows::UI::Xaml;
 namespace winrt
 {
     namespace WUX = Windows::UI::Xaml;
+}
+
+namespace
+{
+    // Set the first time a card's Opened found its ToolTip click-through and turned hit testing back on
+    // (_WireCardInput). Logged ONCE per process: the first line proves the framework does flip the flag at open
+    // (and that the re-assert is what keeps the card's wheel alive); one line per open would only repeat it.
+    // Every window shares the Emperor's one UI thread, so the atomic is belt, not need.
+    std::atomic<bool> g_cardHitTestRestoreLogged{ false };
 }
 
 namespace winrt::TerminalApp::implementation
@@ -42,6 +56,8 @@ namespace winrt::TerminalApp::implementation
         _wheelLogLabel{ std::move(wheelLogLabel) },
         _ctxHoverBuild{ logContext + L" agent tooltip hover build" },
         _ctxWheel{ logContext + L" agent tooltip wheel scroll" },
+        _ctxCardWheel{ logContext + L" agent tooltip card wheel scroll" },
+        _ctxCardOpened{ logContext + L" agent tooltip card hit test" },
         _ctxReattach{ logContext + L" agent tooltip re-attach" },
         _ctxPlacement{ logContext + L" agent tooltip placement" },
         _ctxDetach{ logContext + L" agent tooltip detach" },
@@ -108,8 +124,12 @@ namespace winrt::TerminalApp::implementation
     // hover it. Configure it once: pinned Dark (a ToolTip renders in the popup root and does NOT inherit the
     // host theme, and ToolTipService theme propagation is unreliable under XAML Islands — see AgentTipHelpers),
     // placed by the placement provider (the tab default: BELOW the tab — the default placement would push it up
-    // into the titlebar / off the top of the screen), and hit-test-invisible (a big card sitting under the
-    // cursor as a pointer target would churn the framework's own hover tracking).
+    // into the titlebar / off the top of the screen), and HIT-TESTABLE with its own wheel hook (_WireCardInput):
+    // Windows keeps the open card up while the pointer rests on it, and the wheel must land on the card there.
+    // (It was hit-test-invisible until 2026-11-19, so that a big card under the cursor could not churn the
+    // framework's hover tracking; the placement never opens the card over its owner — the rect is the owner's
+    // own bounds, or the whole side panel, plus the framework's 20 px gap — so the pointer reaches the card only
+    // by moving onto it, which the framework's safe zone keeps open.)
     void AgentSessionToolTipHost::Update()
     {
         // Never create OR mutate the tooltip for a detached owner. If the owner has left the visual tree (a MUX
@@ -128,14 +148,22 @@ namespace winrt::TerminalApp::implementation
         }
         if (!_toolTip)
         {
-            _toolTip = WUX::Controls::ToolTip{};
-            _toolTip.RequestedTheme(WUX::ElementTheme::Dark);
-            _toolTip.Placement(WUX::Controls::Primitives::PlacementMode::Bottom);
-            // Make the tooltip popup click/hover-THROUGH: a hit-testable popup becomes a pointer target, so the
-            // large card sitting under the cursor would churn the framework's own hover tracking. A tooltip is
-            // purely informational and never needs input (the AgentTipHelpers recipe does the same).
-            _toolTip.IsHitTestVisible(false);
-            WUX::Controls::ToolTipService::SetToolTip(owner, _toolTip);
+            // Built in a LOCAL and stored only once it is attached: Attached() reads `_toolTip`, so a throw half way
+            // (a failed wiring, a refused SetToolTip) must leave it null — the next Update then starts over with a
+            // fresh ToolTip instead of hosting cards on one that ToolTipService never saw (it could never open).
+            WUX::Controls::ToolTip tip{};
+            tip.RequestedTheme(WUX::ElementTheme::Dark);
+            tip.Placement(WUX::Controls::Primitives::PlacementMode::Bottom);
+            // HIT-TESTABLE, unlike every AgentSetTip tooltip (those are informational and click-through on
+            // purpose): the rich card is the one tooltip a reader moves ONTO — the framework keeps it open while the
+            // pointer rests on it — and a click-through card handed the reader's wheel notch to whatever lay beneath
+            // it (the terminal under the card), so the body never scrolled there. Being a pointer target also means
+            // a click on the open card stays on the card. The card holds nothing manipulation-capable (no
+            // ScrollViewer — crash #7), so hit testing adds input routing only, nothing DirectManipulation drives.
+            tip.IsHitTestVisible(true);
+            _WireCardInput(tip); // the card's own wheel + the hit-test re-assert at every open — before the attach, so no open precedes them
+            WUX::Controls::ToolTipService::SetToolTip(owner, tip);
+            _toolTip = tip;
             _WireOwnerLifetime(); // wire (once) the owner Unloaded -> detach, so a recycle can't strand a stale ref
         }
 
@@ -293,7 +321,8 @@ namespace winrt::TerminalApp::implementation
     // is wired, so the caller can arm-build once (the tooltip must be hosted BEFORE the first hover for
     // ToolTipService to open it on that hover). The handlers live on the owner (stable across MUX recycles) and
     // weak-capture the host, so teardown order is safe; the callbacks weak-capture the page (dropped by Shutdown).
-    bool AgentSessionToolTipHost::EnsureHoverHook(std::function<void()> onHoverBuild, std::function<bool(int)> onWheel)
+    // `onWheel` serves the card's own wheel too (_WireCardInput, wired on every ToolTip this host creates).
+    bool AgentSessionToolTipHost::EnsureHoverHook(std::function<void()> onHoverBuild, WheelCallback onWheel)
     {
         if (_hoverWired)
         {
@@ -335,11 +364,11 @@ namespace winrt::TerminalApp::implementation
         });
 
         // WHEEL SCROLL: the rich card is TALLER than it can show for a long conversation, so the wheel scrolls its
-        // body. The wheel has to be read HERE, on the owner, because the card itself is IsHitTestVisible(false) and
-        // must stay that way — it is a popup, and making popup content input-capable (a ScrollViewer,
-        // DirectManipulation) is the proven 0xC000027B fail-fast class this whole feature was rebuilt around
-        // (HANDOVER_tab-tooltip.md crash #7 / invariant 6a). The owner is under the cursor for the tip's entire
-        // life anyway, so "hover, spin the wheel" needs no input on the card at all.
+        // body. This is the OWNER's half: the pointer on the tab header / the side-panel card while the card is up.
+        // The CARD's half lives on the ToolTip (_WireCardInput) — the pointer that moved onto the open card, which
+        // the framework keeps open there. Neither half puts anything manipulation-capable in the popup (no
+        // ScrollViewer, no DirectManipulation: the proven 0xC000027B fail-fast class this whole feature was rebuilt
+        // around — HANDOVER_tab-tooltip.md crash #7 / invariant 6a); the page applies the notch as a render shift.
         //
         // We only ever READ IsOpen (never drive it — invariant 2), and we mark the notch Handled ONLY when the page
         // reports it actually scrolled something: otherwise the owner's own scroller (the tab strip, the side
@@ -384,7 +413,7 @@ namespace winrt::TerminalApp::implementation
                     // element we KNOW is alive can't be the thing that throws on this path.
                     const auto owner = self->_owner.get();
                     const auto pt = owner ? e.GetCurrentPoint(owner) : e.GetCurrentPoint(nullptr);
-                    if (const auto delta = pt ? pt.Properties().MouseWheelDelta() : 0; delta != 0 && self->_wheelCb(delta))
+                    if (const auto delta = pt ? pt.Properties().MouseWheelDelta() : 0; delta != 0 && self->_wheelCb(delta, AgentToolTipWheelSource::Owner))
                     {
                         e.Handled(true);
                     }
@@ -397,6 +426,118 @@ namespace winrt::TerminalApp::implementation
             } }),
             true /* handledEventsToo */);
         return true;
+    }
+
+    // The CARD's own input — the other half of the wheel (EnsureHoverHook wires the owner's). Wired once per ToolTip
+    // object from Update's creation branch, before the ToolTip is attached; the header has the whole contract.
+    void AgentSessionToolTipHost::_WireCardInput(const WUX::Controls::ToolTip& tip)
+    {
+        const std::weak_ptr<AgentSessionToolTipHost> weakSelf = weak_from_this();
+
+        // THE WHEEL ON THE CARD. Windows keeps an open tooltip up while the pointer moves onto it and rests there
+        // (its safe zone — the owner, the card and the hull between them; "unless the pointer is moving towards the
+        // tooltip", in the UWP ToolTip docs), so a reader of a long summary moves ONTO the card and spins the wheel
+        // there. That notch never reaches the owner (the pointer is not over it), so the card reads it itself and
+        // hands it to the SAME page callback the owner uses, tagged AgentToolTipWheelSource::Card.
+        //
+        // Guards, in order: a live host with a pushed card (Clear / Shutdown end it); this ToolTip is still the
+        // host's CURRENT one (a detached ToolTip in its closing fade must not drive the scroll state of the card
+        // that replaced it — the page keeps ONE scroll state per surface); the card is OPEN (a safe READ —
+        // invariant 2); a page callback exists (Shutdown drops it); a VERTICAL notch (a tilt wheel has no axis in a
+        // body that only moves up and down). Handled only when the page reports it scrolled, the owner half's
+        // contract (on the card nothing else lies under the pointer, so an unhandled notch is simply unused).
+        // handledEventsToo: nothing inside the card handles the wheel today, but a future child that did must not
+        // silently kill the scroll (the owner's half learned that inside MUX's tab strip).
+        tip.AddHandler(
+            UIElement::PointerWheelChangedEvent(),
+            winrt::box_value(WUX::Input::PointerEventHandler{ [weakSelf](const winrt::Windows::Foundation::IInspectable& sender, const WUX::Input::PointerRoutedEventArgs& e) {
+                const auto self = weakSelf.lock();
+                if (!self || !self->_active)
+                {
+                    return; // the host is gone or holds no card any more — nothing of ours to scroll
+                }
+                try
+                {
+                    // COM identity, not the interface pointer: IUnknown's operator!= compares the objects.
+                    if (!self->_toolTip || sender != self->_toolTip)
+                    {
+                        return; // a superseded ToolTip (detached, still fading out) — not the card the page scrolls
+                    }
+                    const bool open = self->_toolTip.IsOpen();
+                    // ONE throttled line per gesture, like the owner's: "<label>-tip" names the CARD as the place the
+                    // notch arrived, so a trace tells "it reached the card" from "it reached the owner" ("<label>:")
+                    // and from "it never arrived at all" (no line). Newline-terminated (see the owner's line).
+                    const auto nowTick = ::GetTickCount64();
+                    if (nowTick - self->_cardWheelLogTick > 400)
+                    {
+                        self->_cardWheelLogTick = nowTick;
+                        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                                      std::wstring{ L"[tooltip-wheel] " } + self->_wheelLogLabel + L"-tip: cb=" + (self->_wheelCb ? L"1" : L"0") +
+                                                          L" open=" + (open ? L"1" : L"0") + L"\n");
+                    }
+                    if (!self->_wheelCb || !open)
+                    {
+                        return; // no page callback (the host was shut down) or the card is closing — nothing to scroll
+                    }
+                    // Relative to the ToolTip that raised the event (alive for the duration of its own event); the
+                    // delta itself is placement-independent.
+                    const auto pt = e.GetCurrentPoint(sender.try_as<UIElement>());
+                    if (!pt)
+                    {
+                        return;
+                    }
+                    const auto props = pt.Properties();
+                    if (props.IsHorizontalMouseWheel())
+                    {
+                        return; // a tilt: the body scrolls vertically only
+                    }
+                    if (const auto delta = props.MouseWheelDelta(); delta != 0 && self->_wheelCb(delta, AgentToolTipWheelSource::Card))
+                    {
+                        e.Handled(true);
+                    }
+                }
+                catch (...)
+                {
+                    // a tooltip must never take its owner down — swallow (the notch is simply lost)
+                    ::Agentmaster::AgentLogCaughtException(self->_ctxCardWheel.c_str());
+                }
+            } }),
+            true /* handledEventsToo */);
+
+        // THE HIT-TEST RE-ASSERT at every open. WinUI's own ToolTip calls put_IsHitTestVisible(FALSE) on itself in
+        // ToolTip::HookupParentPopup, on EVERY open (automatic and manual), because a tooltip is informational
+        // there. Windows' XAML shares that lineage; were it to do the same, the card would open click-through
+        // again and the wheel above would never fire. So turn hit testing back on once the popup is up — a write
+        // the framework never repeats while the card stays open. Opened is a notification only: no IsOpen write
+        // (invariant 2), no Content swap (invariant 3), nothing that re-enters layout (IsHitTestVisible is not a
+        // layout property). The pointer sits on the OWNER when the card opens (the placement keeps the card off
+        // it), so the flip changes nothing under the pointer at that moment.
+        tip.Opened([weakSelf](const winrt::Windows::Foundation::IInspectable& sender, auto&&) {
+            const auto self = weakSelf.lock();
+            if (!self)
+            {
+                return; // the host is gone — a closing ToolTip no host speaks for any more
+            }
+            try
+            {
+                const auto opened = sender.try_as<WUX::Controls::ToolTip>();
+                if (opened && !opened.IsHitTestVisible())
+                {
+                    opened.IsHitTestVisible(true);
+                    if (!g_cardHitTestRestoreLogged.exchange(true))
+                    {
+                        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                                      std::wstring{ L"[tooltip-wheel] " } + self->_wheelLogLabel +
+                                                          L"-tip: the card opened click-through; hit testing turned back on (logged once per process)\n");
+                    }
+                }
+            }
+            catch (...)
+            {
+                // a tooltip must never take its owner down — swallow (the card stays click-through for this open)
+                ::Agentmaster::AgentLogCaughtException(self->_ctxCardOpened.c_str());
+            }
+        });
     }
 
     // Was Tab::AgentToolTipOpen: is the rich card on screen right now? Reading IsOpen is safe and always was — it

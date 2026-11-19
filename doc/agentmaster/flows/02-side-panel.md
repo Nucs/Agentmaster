@@ -874,3 +874,11 @@ reaches XAML's tooltip service. What the documents and the code still say: SIDE_
 beside the panel, the code keeps its hover host for such cards (`_SidePanelArmCardToolTip`, run from
 `_SidePanelApplyCardTipMode`), and the log line above still names it. Why that card never opens was not looked into: it
 is not wanted. Whether to remove the unused host and reword the line is the owner's call.
+
+> **2026-11-19 — the user's own hover DOES open it** ("when we hover (while Sum is off) then to the right of the sidemenu
+> shows the tooltip"), and the user asked for its wheel: moved onto the open card, the pointer keeps it open, but the
+> wheel did nothing there (the tab's card the same). The card's ToolTip is hit-testable since then and reads the wheel
+> itself (SIDE_PANEL.md §2d, HANDOVER_tab-tooltip.md §4b-bis; NOT BUILT yet). This test's result on the e2e desktop is
+> untouched by that change: it never decided whether the card opens. Checks owed on a build: the wheel over the open card
+> scrolls its body (`[tooltip-wheel] card-tip: … open=1`, then `<sid8> src=card-tip …`; on a tab's card `item-tip`), the
+> wheel over the side-panel card or the tab still does, and a click on the open card stays on it.

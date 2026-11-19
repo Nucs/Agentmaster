@@ -46,6 +46,27 @@ load-bearing.
 > recipe, under the surface key `"\x1F" "sidepanel-note:" <id>`), not a ToolTip — every invariant here still applies to
 > the two ToolTip surfaces.
 
+> **2026-11-19 — the wheel on the CARD itself (NOT BUILT yet; the next build must PURGE: `AgentSessionToolTipHost`
+> gained data members).** The user's report: the card "allows mouse hovering it but it does not allow scrolling" — on
+> the side panel's "Sum" off card and on the tab's card alike. Windows keeps an open ToolTip up while the pointer moves
+> onto it and rests there (its SAFE ZONE: the owner, the card and the convex hull between them — the UWP `ToolTip` docs:
+> "unless the pointer is moving towards the tooltip"; WinUI's `ToolTipService::IsToolTipInSafeZone`, polled by a timer
+> that reads `GetCursorPos`). But the card was `IsHitTestVisible(false)`, so a notch over it went to whatever lay
+> beneath (the terminal), and the owner's wheel hook — the only reader — never saw it. Now:
+> - the host's ToolTip is **hit-testable** and reads the wheel ITSELF (`AgentSessionToolTipHost::_WireCardInput`:
+>   `PointerWheelChanged`, handledEventsToo → the same page callback with `AgentToolTipWheelSource::Card`);
+> - its `Opened` re-asserts `IsHitTestVisible(true)`: WinUI's `ToolTip::HookupParentPopup` switches a tooltip's hit
+>   testing OFF at every open, and should Windows' XAML do the same the card would turn click-through again (the first
+>   such flip in a process logs `[tooltip-wheel] <label>-tip: the card opened click-through; …`);
+> - the page's callbacks take the source: a tab's card logs `src=item-tip`, a side-panel card's `src=card-tip`, and
+>   only the TAB HEADER's notch claims the row belt (`TerminalPage::TabTooltipWheelFrom::Item`) — a claim from the
+>   belt's own scroll (it ran after its consume) or from the card (never on the row) stayed set and made the belt skip
+>   the next notch over the strip.
+>
+> Still no ScrollViewer and nothing manipulation-capable in the card (invariant 6a holds — hit testing adds input
+> routing only). The cost: a click on an open card stays on the card (it used to fall through to the terminal under it).
+> §3, §4b, §4b-bis, §4c, §8, §10 and §13 below say how it runs now.
+
 ---
 
 ## 0. Scope & what this is NOT
@@ -145,15 +166,17 @@ keeps it alive). No destructor touches XAML: owners call `Shutdown()` / `Detach(
   - `_active` — is the rich tooltip active (vs none / the tab's default)? `Active()`.
   - `_content` — the card element last handed to us by the page. `_sig` — its fingerprint (`Sig()`).
   - `_toolTip` — the ONE reused ToolTip. Framework-managed (we never drive `IsOpen`); `Content` swapped only
-    while closed; **detached + nulled** on owner recycle / `Clear` / `Shutdown`. `{ nullptr }` when none
-    (`Attached()`).
+    while closed; hit-testable, with its own wheel (`_WireCardInput`); stored only once attached; **detached +
+    nulled** on owner recycle / `Clear` / `Shutdown`. `{ nullptr }` when none (`Attached()`).
   - `_placementProvider` — optional; where the card opens (§4b). None = the tab default (`Bottom` under the
     owner's bounds).
   - `_lifetimeWired` / `_hoverWired` — the owner's Unloaded+Loaded pair and its PointerEntered+wheel pair are
-    each wired ONCE per host. `_hoverCb` / `_wheelCb` — the page's callbacks, dropped by `Shutdown`.
+    each wired ONCE per host. `_hoverCb` / `_wheelCb` — the page's callbacks, dropped by `Shutdown`; `_wheelCb`
+    (`WheelCallback`: the delta + an `AgentToolTipWheelSource`) serves the owner's notches AND the card's.
   - `_swapOpenOnce` — the one-shot open-swap grant (the summary body landing in the open card).
-  - `_wheelLogLabel` (`"item"` for a tab, `"card"` for a side-panel card) + the precomputed `[exc]` context
-    strings, so no catch handler has to allocate.
+  - `_wheelLogLabel` (`"item"` for a tab, `"card"` for a side-panel card; `"<label>-tip"` for a notch on the card) +
+    the precomputed `[exc]` context strings (`_ctxCardWheel`, `_ctxCardOpened` for the card's two handlers), so no
+    catch handler has to allocate. `_wheelLogTick` / `_cardWheelLogTick` — the owner's and the card's trace throttles.
   - *(DELETED in the rewrite: `_agentToolTipOpenTimer`, `_agentToolTipDismissTimer`, the first
     `_agentToolTipHoverWired`, and the file-scope `g_lastAgentToolTipCloseTick` / `kAgentToolTipReopenCooldownMs`
     cross-tab cooldown.)*
@@ -172,8 +195,11 @@ keeps it alive). No destructor touches XAML: owners call `Shutdown()` / `Detach(
     LOGS (the old Tab version was bare).
   - `EnsureHoverHook(onHoverBuild, onWheel)` — wire (once per host) the owner's `PointerEntered` → re-anchor +
     the page's build-now callback **and** its `PointerWheelChanged` → the page's card-scroll callback
-    (§4b-bis). Returns true only the ONE time it wires (the caller's arm-build cue). The wheel handler READS
-    `IsOpen()` to gate, and marks the notch `Handled` only when the page reports the card took it.
+    (§4b-bis, source `Owner`). Returns true only the ONE time it wires (the caller's arm-build cue). The wheel
+    handler READS `IsOpen()` to gate, and marks the notch `Handled` only when the page reports the card took it.
+  - `_WireCardInput(tip)` — wire a freshly created ToolTip's own input (from `Update`'s creation branch, before the
+    attach): its `PointerWheelChanged` → the same callback (source `Card`; only the host's CURRENT tooltip, only
+    while open, vertical notches only) and its `Opened` → re-assert `IsHitTestVisible(true)`.
   - `Shutdown()` — `Detach` + drop both callbacks (a tab's `Shutdown`; a side-panel card leaving the list).
   - *(DELETED: `_WireAgentToolTipHover`, `_SafeSetAgentToolTipOpen`, `_ForceCloseAgentToolTip`, `_ArmAgentToolTipDismiss`.)*
 
@@ -260,10 +286,12 @@ per card (`AgentSidePanelCardView::tipHost`, label `"card"`), `_UpdateSidePanelC
 - `Update`:
   1. **Owner guard**: if the owner is null / `!IsLoaded()` / no `XamlRoot()` → return (never
      build/mutate for a detached owner). The one-shot grant is consumed FIRST, even on this early-out.
-  2. `if (!_toolTip)` → **create** the ONE reused `ToolTip`: `RequestedTheme(Dark)`,
-     `Placement(Bottom)`, `IsHitTestVisible(false)`, `ToolTipService::SetToolTip(owner, it)`, then
-     `_WireOwnerLifetime()` (no-op after the first time). From here **`ToolTipService` owns
-     open/close** — hover opens (after the system delay), pointer-exit closes. We wire nothing else.
+  2. `if (!_toolTip)` → **create** the ONE reused `ToolTip` in a local: `RequestedTheme(Dark)`,
+     `Placement(Bottom)`, `IsHitTestVisible(true)`, `_WireCardInput(it)` (the card's wheel + the hit-test
+     re-assert), `ToolTipService::SetToolTip(owner, it)`, only then `_toolTip = it` (a throw half way leaves
+     nothing that `Attached()` would report), then `_WireOwnerLifetime()` (no-op after the first time). From
+     here **`ToolTipService` owns open/close** — hover opens (after the system delay), leaving the safe zone
+     closes (§4c). Our handlers on the ToolTip only read the wheel and re-assert hit testing.
   3. If `_toolTip.IsOpen()` and no open-swap grant → return (a safe READ — do NOT swap `Content` while the
      framework is showing it). Else — while CLOSED — apply the **placement** (`_ApplyPlacement`): with no
      provider (a tab), **`PlacementRect` = the owner's own bounds** (`{0,0,ActualWidth,ActualHeight}`; a
@@ -280,21 +308,32 @@ per card (`AgentSidePanelCardView::tipHost`, label `"card"`), `_UpdateSidePanelC
   offset on each side, the card is docked outside it and CENTERED on it along the other axis, then shifted
   back inside the window; a side with too little room is skipped for another one.
 
-### 4b-bis. Input = the WHEEL, read on the TAB HEADER (the body scrolls)
+### 4b-bis. Input = the WHEEL, read on the TAB HEADER and on the open CARD (the body scrolls)
 
 The card's Summary body is a **viewport** onto a much taller document, scrolled by the **mouse wheel
-only** (no drag, no keyboard, no touch/manipulation). The card itself takes **no input at all** — it
-stays `IsHitTestVisible(false)` and inert, per invariant 6a — so the wheel is read on the owner
-`TabViewItem`, which is under the cursor for the tooltip's entire life anyway:
+only** (no drag, no keyboard, no touch/manipulation). The card holds **nothing manipulation-capable** —
+it stays inert inside, per invariant 6a — and the wheel is read in TWO places:
+
+- on the owner `TabViewItem` (the pointer on the tab while the card is up), and
+- on the open card itself: Windows keeps an open tooltip up while the pointer moves onto it and rests
+  there (its **safe zone** — the owner, the card and the convex hull between them; leaving all three closes
+  it), so a reader moves onto the card and spins the wheel THERE. The ToolTip is therefore
+  **hit-testable** (since 2026-11-19 — it was click-through, and that notch went to the terminal beneath
+  the card), and its own `PointerWheelChanged` reads the notch (`_WireCardInput`).
 
 1. The host's `EnsureHoverHook` (for a tab: `Tab::EnsureAgentToolTipHoverHook`) wires
-   `PointerWheelChanged` beside the `PointerEntered` build hook (one wiring, once per host). The handler
-   only ever **reads** `IsOpen()` (invariant 2) and forwards the notch to the page callback.
-2. `TerminalPage::_ScrollTabAgentToolTip(tab, delta)` resolves the tab's **current** session (re-home
+   `PointerWheelChanged` beside the `PointerEntered` build hook (one wiring, once per host), and every
+   ToolTip the host creates wires its own (`_WireCardInput`, once per ToolTip). Both handlers only ever
+   **read** `IsOpen()` (invariant 2) and forward the notch to the page callback with its source
+   (`AgentToolTipWheelSource::Owner` / `Card`). The card's handler takes only the host's CURRENT ToolTip (a
+   detached one in its closing fade is ignored) and only a VERTICAL notch (a tilt has no axis in the body).
+2. `TerminalPage::_ScrollTabAgentToolTip(tab, delta, from)` resolves the tab's **current** session (re-home
    safe, like the hover hook) and hands the notch to the shared `_ScrollSessionToolTipBody(surfaceKey,
    sessionId, delta, src)`, which advances that surface's stored offset by `kTtScrollStepPx` per 120 units
-   and calls `_SyncTabTooltipScrollBar`. (A side-panel card's wheel callback, `_ScrollSidePanelCardToolTip`,
-   calls the same function with its own surface key and `src=card`.)
+   and calls `_SyncTabTooltipScrollBar`. `from` (`TabTooltipWheelFrom`: `Item` the header, `Row` the belt,
+   `Card` the card) picks `src=item` / `row` / `item-tip`. (A side-panel card's wheel callback,
+   `_ScrollSidePanelCardToolTip`, calls the same function with its own surface key and `src=card` /
+   `card-tip`.)
 3. `TerminalPage::_SyncTabTooltipScrollBar(surfaceKey, offset, opacity)` shifts the body's
    `TranslateTransform`, re-fits the slim scrollbar (`ScaleTransform` length + `TranslateTransform`
    position), paints it, and returns the max scrollable offset. **Every write is render-only** — never
@@ -303,26 +342,40 @@ stays `IsHitTestVisible(false)` and inert, per invariant 6a — so the wheel is 
    rewritten around (`TabHeaderControl::_PositionTagBadgesNow`).
 4. The notch is marked `Handled` **only when the open card has something to scroll** — even at an end
    stop, because the card IS the scroller under the pointer — so a card whose whole body fits leaves the
-   wheel to the tab strip's own horizontal scroll (or, for a side-panel card, to the card list).
+   owner's notch to the tab strip's own horizontal scroll (or, for a side-panel card, to the card list). A
+   notch on the card has nothing else under it: unhandled, it is simply unused.
 5. The bar exists **only while you scroll**: invisible at rest (even on a card that *can* scroll), lit
    on the first notch, then one per-window `DispatcherTimer` holds `kTtScrollBarHoldMs` and steps the
    opacity back to 0 (`_ArmTabTooltipScrollBarFade` / `_OnTabTooltipScrollBarFadeTick`). It is feedback
    for the gesture, not chrome — a bar sitting permanently on a hover card is just noise.
 
-**Two handlers, deliberately.** The per-tab one is the precise path; a **belt** on the whole tab ROW
-(`_WireTabStripTooltipWheel`) catches a notch that MUX's tab-strip internals swallowed before it reached
-the item, and scrolls whichever tab's card is open (only one can be — the tip dies on pointer-exit).
-Both use `AddHandler(..., handledEventsToo: true)`; `_tooltipWheelClaimed` de-dupes them (the per-tab
-handler is deeper in the bubble, so it always runs first and claims the notch).
+**Two handlers on the strip, deliberately** (plus the card's own). The per-tab one is the precise path; a
+**belt** on the whole tab ROW (`_WireTabStripTooltipWheel`) catches a notch that MUX's tab-strip internals
+swallowed before it reached the item, and scrolls whichever tab's card is open (only one can be — entering
+another tab closes it). Both use `AddHandler(..., handledEventsToo: true)`; `_tooltipWheelClaimed` de-dupes
+them: the per-tab handler is deeper in the bubble, so it always runs first and claims the notch, and the
+belt consumes the claim. **Only the header claims** (`TabTooltipWheelFrom::Item`): the belt's own scroll
+runs after its consume, and a notch on the card never reaches the row, so a claim from either would stay
+set and the belt would skip the next notch over the strip (an empty part of the row, the `+`).
 
 **Diagnostics — `[tooltip-wheel]` in `hooks.log`** (throttled to one line per ~400ms gesture, and only
 for a managed tab). This chain's first link is invisible from the outside, so "the scroll didn't
 register" would otherwise be indistinguishable between *the notch never arrived*, *the card wasn't
 open*, and *the body had nothing to scroll*. The lines separate exactly those:
-`item: cb=1 tip=1 open=0/1` (the notch reached the tab), `<sid> src=item|row delta=… off=A->B max=M`
-(it scrolled, and by how much), `row: no open card` (it reached the strip but no card was up). **No
-lines at all ⇒ the wheel never reached the tab strip.** A side-panel card writes the same pair with
-`card: cb=… tip=… open=…` and `src=card`.
+`item: cb=1 tip=1 open=0/1` (the notch reached the tab), `item-tip: cb=1 open=0/1` (it reached the open
+card itself), `<sid> src=item|row|item-tip delta=… off=A->B max=M` (it scrolled, and by how much),
+`row: no open card` (it reached the strip but no card was up). **No lines at all ⇒ the wheel reached
+neither the tab strip nor the card.** A side-panel card writes the same lines with `card: cb=… tip=…
+open=…` / `card-tip: cb=… open=…` and `src=card` / `card-tip`. Once per process, `<label>-tip: the card
+opened click-through; hit testing turned back on` says the framework switched the card's hit testing off
+at an open and the host's `Opened` turned it back on (§4b's `_WireCardInput`).
+
+**Check after the build** (the change of 2026-11-19): hover a managed tab with a long summary, move the
+pointer DOWN onto its card (it stays open) and spin the wheel — the body scrolls and the slim bar shows
+(`item-tip: … open=1`, `src=item-tip`); the same on a "Sum" off side-panel card's card (`card-tip`); the
+wheel over the tab itself still scrolls the card (`src=item`); with no card up, the wheel over the strip
+still scrolls the strip; moving off the card closes it; a click on the card does nothing (it no longer
+reaches the terminal under the card).
 
 The per-card pieces live in `TerminalPage::_tabTooltipScroll[surfaceKey]` (**weak** element refs + the
 three transforms; the key is the session id for a tab, `"\x1F" "sidepanel:" <id>` for a side-panel card),
@@ -348,7 +401,11 @@ Both gate on the host's `Open()` (`Tab::AgentToolTipOpen()` for a tab) — a saf
 There are no open/dismiss timers, no pointer-loss handlers, no manual `IsOpen`, and no cross-tab
 cooldown anymore — `ToolTipService` opens the tip on hover (at the system hover delay) and closes it on
 pointer-exit / window-deactivate, exactly as it does for the plain default tab tooltip (which never
-crashed). We only ever *read* `IsOpen()` (to gate the content swap); we never *set* it. This is what
+crashed). "Pointer-exit" is the framework's SAFE ZONE: an open tip stays up while the pointer is on the
+owner, on the card, or in the convex hull between them, and closes once it is outside all three (WinUI:
+`OnOwnerPointerExitedOrLostOrCanceled` keeps an open tip, and a timer checks `GetCursorPos` against the
+zone). That is what lets a reader move onto the card — and why the card reads the wheel itself (§4b-bis).
+We only ever *read* `IsOpen()` (to gate the content swap); we never *set* it. This is what
 removes the entire crash class (§9) — there is no manually-opened popup, and no reused object we drive
 across an open/close cycle.
 
@@ -590,7 +647,10 @@ Under **XAML Islands**, a `ToolTip`:
 3. **Manual driving is dual-driving** — attaching via `ToolTipService::SetToolTip` AND manually calling
    `IsOpen` meant both the framework and our code toggled the popup; that dual-drive + rapid hover was
    the deep race behind the later crashes. The rewrite removes our half — only the framework toggles now.
-   `IsHitTestVisible(false)` is still set (so the large card never sits under the cursor as a target).
+   `IsHitTestVisible(false)` stayed set after the rewrite (so the large card never sat under the cursor as a
+   target) until 2026-11-19: the framework's safe zone keeps the card open while the pointer rests on it, the
+   placement never opens it over its owner, and only a hit-testable card can take the reader's wheel there
+   (§4b-bis). The churn that rule guarded against needed a hand-driven `IsOpen`, which is gone.
 4. **Owner is a MUX `TabViewItem`** — MUX `TabView` **virtualizes/recycles** its item containers, so
    the owner (and the ToolTip's native peer) can be torn down out from under our still-valid WinRT
    strong ref → a "zombie" peer. This is the ONE fragility that survives the rewrite (a reused ref can
@@ -707,9 +767,12 @@ escape hatch is the §12 **off-switch**.
    content must be inert: TextBlocks, panels, shapes, Borders, transforms. Height is capped by line
    truncation + a plain `MaxHeight` Grid. This applies to ANY future popup-hosted content we build, not
    just this card. **The body's wheel scrolling (§4b-bis) does not bend this** — it adds no
-   manipulation-capable element and no input on the card at all: the wheel is read on the tab HEADER and
-   applied as a `RenderTransform`. If the card ever needs another interaction, that is the pattern to
-   copy — drive it from the header, keep the popup inert.
+   manipulation-capable element: the wheel is a routed event read on the tab HEADER and on the card's
+   hit-testable ToolTip (one handler on the ToolTip, none in the card's tree), and it is applied as a
+   `RenderTransform`. Hit testing is not manipulation: it routes pointer input, and DirectManipulation drives
+   only a ScrollViewer-like viewport, of which the card has none. If the card ever needs another
+   interaction, copy that pattern — a handler on the owner or on the ToolTip, nothing manipulation-capable
+   in the popup.
 6b. **Card content is mutated only through render-only properties while the tip is open.** Transform
    values, `Opacity` and `Clip` are fine (they cannot re-enter layout); `Height`/`Margin`/`Width` from a
    layout-driven handler (`SizeChanged`/`LayoutUpdated`) inside a popup is the `E_LAYOUTCYCLE`
@@ -812,11 +875,12 @@ retired (§9 RESOLUTION).
   (`SetAgentToolTip`, `ClearAgentToolTip`, `EnsureAgentToolTipHoverHook`). Second owner: the side-panel card
   ([`SIDE_PANEL.md`](SIDE_PANEL.md) §2d).
 - The one rule: `ToolTipService` owns open/close — we never drive `IsOpen`; swap `Content` only while closed.
-- Body scrolling (§4b-bis): wheel-only, read on the OWNER (the host's `PointerWheelChanged`) →
-  `TerminalPage::_ScrollTabAgentToolTip` / `_ScrollSidePanelCardToolTip` → the shared `_ScrollSessionToolTipBody`
-  → `_SyncTabTooltipScrollBar` (render-only writes: a `TranslateTransform` on the body, a
-  `ScaleTransform`+`TranslateTransform` on the slim bar, which auto-hides a couple of seconds after the last
-  notch). The card stays inert and hit-test-invisible — still NO ScrollViewer (invariants 6a/6b).
+- Body scrolling (§4b-bis): wheel-only, read on the OWNER (the host's `PointerWheelChanged`) and on the open
+  CARD (the hit-testable ToolTip's own handler, `_WireCardInput` — Windows keeps the card open while the pointer
+  rests on it) → `TerminalPage::_ScrollTabAgentToolTip` / `_ScrollSidePanelCardToolTip` → the shared
+  `_ScrollSessionToolTipBody` → `_SyncTabTooltipScrollBar` (render-only writes: a `TranslateTransform` on the
+  body, a `ScaleTransform`+`TranslateTransform` on the slim bar, which auto-hides a couple of seconds after the
+  last notch). The card stays inert inside — still NO ScrollViewer (invariants 6a/6b); a click on it stays on it.
 - Owner-recycle safety: the owner `Unloaded → Detach` / `Loaded → Update` pair + the `Update` owner-loaded
   guard; a droppable owner calls `Shutdown` first (invariant 5a).
 - Off-thread body: `_EnsureTabTooltipSummary` (per session) + `_tabTooltipSummary` / `_tabTooltipSummaryWaiters` /

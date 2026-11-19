@@ -440,6 +440,13 @@ RIGHT of a left-docked panel and to the LEFT of a right-docked one.
 > problem"). The design below is kept as the record of what was built: the hover host is still attached to every card
 > and the log line still names the rich tooltip. Why it never opens was not looked into. Removing the unused host (and
 > rewording the line) is the owner's call. [`flows/02-side-panel.md`](flows/02-side-panel.md) SP-04 and *Reclassified*.
+>
+> **2026-11-19 — in the user's own use it DOES open:** "when we hover (while Sum is off) then to the right of the
+> sidemenu shows the tooltip". The same report asked for its wheel: the card "allows mouse hovering it but it does not
+> allow scrolling" (and the tab's card the same). Windows keeps an open tooltip up while the pointer rests on it, but the
+> card was click-through, so a notch over it went to the terminal beneath. Since then (NOT BUILT yet) the card's ToolTip
+> is hit-testable and reads the wheel itself (HANDOVER_tab-tooltip.md §4b-bis, the "wheel hook" bullet below). The e2e
+> desktop's no-card result (SP-K2) stands as measured there; nothing here changes whether the card opens.
 
 - **The click** (`_SidePanelToggleSummary`): flips `_sidePanelSummaryHidden`, logs
   `[nav] sidepanel summary -> hidden (cards show the rich session tooltip)` / `-> shown`, re-pins the
@@ -467,7 +474,10 @@ crash rules (HANDOVER_tab-tooltip.md §9–§10):
 - **the hover hook**: `PointerEntered` re-anchors a CLOSED tooltip, then runs the page's build;
 - **the wheel hook**: `PointerWheelChanged` read on the OWNER (`handledEventsToo`), acted on only
   while the card is open; the notch is marked handled only when the card's body has something to
-  scroll (even at an end stop); logged `[tooltip-wheel] card: cb= tip= open=`.
+  scroll (even at an end stop); logged `[tooltip-wheel] card: cb= tip= open=`. And on the open rich card
+  ITSELF: its ToolTip is hit-testable (Windows keeps it open while the pointer rests on it), so a notch
+  over the card scrolls its body too (`AgentSessionToolTipHost::_WireCardInput`); logged
+  `[tooltip-wheel] card-tip: cb= open=`, then `<sid8> src=card-tip …`.
 
 **One content push, shared.** `_PushSessionToolTipCard` (TerminalPage.AgentObserver.cpp) is the old
 body of `_UpdateTabAgentToolTip`, now called by both surfaces: the strings, the change signature,
@@ -500,7 +510,8 @@ session never share a scroll position or a signature, while they DO share the on
    (the `kTtCardMaxWidth` note in TerminalPage.AgentObserver.cpp). Not yet measured on screen.
 3. **The wheel** stays with the card list's own `ScrollViewer` while the rich card is closed or its
    body fits, and it never sets `_tooltipWheelClaimed` (that flag de-dupes the tab ROW's belt
-   handler only); its per-notch line reads `[tooltip-wheel] <sid8> src=card …`.
+   handler only); its per-notch line reads `[tooltip-wheel] <sid8> src=card …` — `src=card-tip …` for a
+   notch over the open rich card itself.
 4. **The card's floating tips are silenced** in this mode: `AgentSuppressTip` (new in
    `AgentTipHelpers.h`) on the card and its timing text, and the `+N` gets none. The shared tip host
    would otherwise REPLACE the card's `ToolTip` on open (it attaches its own tip to the hovered
@@ -528,7 +539,8 @@ in flight finds the card by id when it lands (or finds none).
 **Check after the build:** Sum OFF hides the summary and its splitter, and the cards fill the body;
 hovering a card opens the rich card beside the panel, centered on the card's height, on the right of
 a left-docked panel and on the left after a dock flip (`⋯` ▸ Dock on the right); the wheel scrolls its Summary body and, when it can't,
-scrolls the card list; a ribbon's hover panel never has the rich card behind it; a width drag or a
+scrolls the card list; moved ONTO the open rich card, the pointer keeps it open and the wheel there scrolls its body too
+(`card-tip`), while a click on it does nothing; a ribbon's hover panel never has the rich card behind it; a width drag or a
 dock flip is followed at the next hover; Sum ON brings the summary and the small card tips back; a
 reopened window keeps its own choice, and a new window takes the last one; measure the card's real
 width (the 320 px `ToolTip` cap above); no `[exc] Side-panel card …` lines in hooks.log.

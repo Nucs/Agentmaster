@@ -461,10 +461,11 @@ namespace winrt::TerminalApp::implementation
     // the caller can arm-build once (the tooltip must be hosted BEFORE the first hover for ToolTipService to open
     // it on that hover).
     //   onHoverBuild — the page's build-now callback (resolves the tab's CURRENT session at hover time).
-    //   onWheel      — the page's body-scroll callback (true = it scrolled, so the notch is marked Handled).
+    //   onWheel      — the page's body-scroll callback (the notch's delta + where it arrived: the tab header, or
+    //                  the open card the pointer moved onto; true = it scrolled, so the notch is marked Handled).
     //   returns      — true when the hooks were wired by this call; false when already wired or no TabViewItem.
     //   throws       — std::bad_alloc / a XAML failure while wiring (the page's arm path is contained).
-    bool Tab::EnsureAgentToolTipHoverHook(std::function<void()> onHoverBuild, std::function<bool(int)> onWheel)
+    bool Tab::EnsureAgentToolTipHoverHook(std::function<void()> onHoverBuild, AgentSessionToolTipHost::WheelCallback onWheel)
     {
         ASSERT_UI_THREAD();
         if (!TabViewItem())

@@ -317,7 +317,8 @@ day the suite filed it): TAB-10 E1 expects it, and
 ([07-tabs-park-close-dock.md](07-tabs-park-close-dock.md) *Reclassified: not defects*). SP-K2 — with Sum off, a
 side-panel card's hover opens no rich card (the tab's hover does) — is a FEATURE too (the user's ruling of
 2026-10-24): SP-04 phase 2 expects it, and `e2e/suites/test_side_panel.py::test_sum_off_card_hover_opens_no_rich_card`
-proves it ([02-side-panel.md](02-side-panel.md) *Reclassified: not defects*). STA-K2, STA-K3 and STA-K4 — a
+proves it ([02-side-panel.md](02-side-panel.md) *Reclassified: not defects*; on the user's own PC the card does open,
+and its wheel works on the card itself since 2026-11-19 — SP-K2's note there). STA-K2, STA-K3 and STA-K4 — a
 status that lags ~20–30 s behind a change Claude Code made without telling (Esc before any output, the end of a
 manual `/compact`, a blocking Stop hook's continuation) — are ACCEPTED DELAYS (the user's ruling of 2026-10-24:
 "no reason to worry for 30s-ish status update delay. We sometimes use that delay for safety of pilot autorunner to

@@ -14,19 +14,26 @@
 // so its callers did not change.
 //
 // THE RULES THIS CLASS EXISTS TO KEEP (doc/agentmaster/HANDOVER_tab-tooltip.md §9-§10 has the crash history):
-//   - FRAMEWORK-MANAGED: ToolTipService opens the tip on hover and closes it on pointer exit. This class
-//     NEVER writes IsOpen (writing it was the source of crashes #1/#5/#6); it only reads it.
+//   - FRAMEWORK-MANAGED: ToolTipService opens the tip on hover and closes it once the pointer has left the owner,
+//     the card and the hull between them. This class NEVER writes IsOpen (writing it was the source of crashes
+//     #1/#5/#6); it only reads it.
 //   - ONE reused ToolTip per owner; Content is swapped only while CLOSED (swapping under the pointer flickers),
 //     with one opt-in exception per push (swapWhileOpen — the async summary body landing in the open tip).
 //   - Never create or mutate the tooltip for an owner that is not loaded (crash #4: a recycled owner's peer).
 //   - Every DETACH needs a re-attach that runs OUTSIDE a dwell: ToolTipService starts watching the owner's
 //     hover only when the tooltip is attached (RegisterToolTip), so the Loaded re-attach is load-bearing.
-//   - The card itself takes no input (IsHitTestVisible(false), no ScrollViewer inside — crash #7); the wheel
-//     is read on the OWNER and applied by the page as a render transform.
+//   - The card takes ONE input, the WHEEL, and holds nothing manipulation-capable (no ScrollViewer inside —
+//     crash #7). The wheel is read in two places and applied by the page as a render transform: on the OWNER
+//     (the pointer on the tab header / the side-panel card) and on the open CARD itself. Windows keeps an open
+//     tooltip up while the pointer moves onto it and rests there (the ToolTip's "safe zone": the owner, the
+//     card and the hull between them), so a reader reaches the card and spins the wheel THERE — which only
+//     works because the ToolTip is hit-testable: a click-through card handed that notch to whatever lay beneath
+//     it (the terminal). The price: a click on an open card stays on the card.
 //
 // OWNERSHIP: the owner element (a TabViewItem, a card Border) is held WEAKLY — its real owner (the Tab, the
 // side-panel card view) keeps it alive. The host itself lives in a std::shared_ptr; every handler it wires on
-// the owner captures a weak_ptr to it, so a host that dies before its owner leaves handlers that do nothing.
+// the owner or on its ToolTip captures a weak_ptr to it, so a host that dies before its owner (or before a
+// closing ToolTip lets go) leaves handlers that do nothing.
 // No destructor here touches XAML (a page teardown can run on a pool thread — the ~TerminalPage cascade rule);
 // owners call Shutdown() / Detach() on the UI thread instead.
 //
@@ -35,6 +42,7 @@
 
 #pragma once
 
+#include <cstdint> // uint8_t — the wheel source's underlying type; uint64_t — the trace throttles
 #include <functional> // the hover / wheel / placement callbacks
 #include <memory> // std::shared_ptr / enable_shared_from_this — stable identity for weak-capturing handlers
 #include <optional> // a placement provider may decline (the owner is not laid out yet)
@@ -42,6 +50,17 @@
 
 namespace winrt::TerminalApp::implementation
 {
+    // Where a wheel notch for a host's rich card arrived. The page scrolls the same body either way; the source
+    // matters for two things only: the "[tooltip-wheel] … src=" log word (so a trace tells a notch over the tab
+    // header from one over the card), and the TAB ROW's belt claim — a notch on the card never bubbles through the
+    // tab row, so it must never claim the notch for the belt (a claim nobody consumes would make the belt skip the
+    // next notch over the strip).
+    enum class AgentToolTipWheelSource : uint8_t
+    {
+        Owner, // the notch reached the OWNER element (the pointer is over the tab header / the side-panel card)
+        Card, // the notch reached the open CARD (the pointer moved from the owner onto the card and rests there)
+    };
+
     // Where a host's tooltip should open, in the OWNER's coordinate space. ToolTip.PlacementRect overrides
     // the pointer-relative placement an automatic (hover-opened) tooltip would otherwise use, so `mode` docks
     // the card OUTSIDE `rect` (WinUI ToolTip::PerformNonMousePlacementWithPopup: the rect is mapped to window
@@ -64,6 +83,20 @@ namespace winrt::TerminalApp::implementation
         // nullopt keeps the current placement (e.g. the owner has no size yet). Called only while the tooltip
         // is CLOSED: moving a popup the user is reading would make it jump.
         using PlacementProvider = std::function<std::optional<AgentSessionToolTipPlacement>(const winrt::Windows::UI::Xaml::FrameworkElement& owner)>;
+
+        // The page's body-scroll callback, run for a vertical notch that reached the OWNER or the open CARD while
+        // the card is on screen. UI thread; the host calls it inside a catch that logs.
+        //   wheelDelta — the notch's wheel units (120 per detent, a precision touchpad sends smaller steps; wheel
+        //                DOWN is negative). Never 0.
+        //   source     — where the notch arrived (AgentToolTipWheelSource): the log word, and whether a tab's
+        //                notch may claim the tab row's belt (Owner only).
+        //   returns    — true when the open card took the notch (its body has something to scroll — even at an
+        //                end stop); only then is the notch marked Handled. False on the OWNER leaves the wheel to
+        //                the owner's own scroller (the tab strip, the side panel's card list); on the CARD nothing
+        //                lies under the pointer but the card, so false merely leaves the notch unused.
+        //   throws     — whatever the page's scroll throws (std::bad_alloc formatting its log line); contained by
+        //                the host's handler.
+        using WheelCallback = std::function<bool(int wheelDelta, AgentToolTipWheelSource source)>;
 
         // Create the host for `owner`. Nothing is wired and nothing is attached yet: handlers are added by
         // EnsureHoverHook / the first Update, so a host that is never used costs one small heap object.
@@ -104,7 +137,9 @@ namespace winrt::TerminalApp::implementation
 
         // Create (once) + attach the reused ToolTip and host the stored card on it — the old Tab::_UpdateAgentToolTip.
         // Skipped for an owner that is not loaded (crash #4); while the tip is OPEN only the one-shot swap grant may
-        // touch Content. Placement is re-applied first, while CLOSED. Also the owner-Loaded re-attach path.
+        // touch Content. Placement is re-applied first, while CLOSED. Also the owner-Loaded re-attach path. A new
+        // ToolTip is HIT-TESTABLE and gets its card-side input (_WireCardInput) before it is attached; it is stored
+        // only once attached, so a failure on the way leaves no half-made tooltip that Attached() would report.
         //   throws — whatever a XAML call on the UI thread throws; every caller is a contained UI-thread path.
         void Update();
 
@@ -124,23 +159,24 @@ namespace winrt::TerminalApp::implementation
 
         // Wire (ONCE per host) the owner's PointerEntered -> `onHoverBuild` and PointerWheelChanged -> `onWheel`,
         // plus the owner's Unloaded/Loaded detach/re-attach pair. PointerEntered fires well BEFORE ToolTipService's
-        // open delay, so the page's rebuild + Content swap happen while the tip is still closed. The wheel is read
-        // here because the card is hit-test-invisible: the owner is the only real pointer target, and it is under
-        // the cursor the whole time the card is up. Both callbacks run inside a catch that logs (a tooltip must
-        // never take its owner down).
+        // open delay, so the page's rebuild + Content swap happen while the tip is still closed. The OWNER's wheel
+        // covers the pointer on the tab header / the side-panel card; the same `onWheel` also serves the card's
+        // own wheel, which every ToolTip this host creates wires for itself (_WireCardInput), so a reader who moved
+        // onto the card scrolls it there. Both callbacks run inside a catch that logs (a tooltip must never take
+        // its owner down).
         //   onHoverBuild — the page's build-now callback (resolves the owner's CURRENT session at call time).
-        //   onWheel      — the page's body-scroll callback: receives the wheel delta, returns true when it
-        //                  scrolled (only then is the notch marked Handled — a card that fits leaves the wheel
-        //                  to the owner's own scroller); may be empty.
+        //   onWheel      — the page's body-scroll callback (WheelCallback: the delta and where it arrived; true
+        //                  when it scrolled — only then is the notch marked Handled, so a card that fits leaves
+        //                  the wheel to the owner's own scroller); may be empty.
         //   returns      — true only the ONE time the hooks are wired (the caller's arm-build cue); false when
         //                  already wired or the owner is gone.
         //   throws       — std::bad_alloc / a XAML failure while wiring (the caller's arm path is contained).
-        bool EnsureHoverHook(std::function<void()> onHoverBuild, std::function<bool(int)> onWheel);
+        bool EnsureHoverHook(std::function<void()> onHoverBuild, WheelCallback onWheel);
 
         // Teardown on the UI thread: Detach + drop both callbacks, so a late PointerEntered or wheel notch on a
-        // dying owner invokes nothing (the callbacks weak-capture the page, but a closed tab or a dropped card
-        // must not keep the last lambda). The host stays usable (EnsureHoverHook will not re-wire: its hooks
-        // still exist on the owner and simply have no callback now).
+        // dying owner — or on its closing card — invokes nothing (the callbacks weak-capture the page, but a
+        // closed tab or a dropped card must not keep the last lambda). The host stays usable (EnsureHoverHook will
+        // not re-wire: its hooks still exist on the owner and simply have no callback now).
         //   throws — nothing (Detach contains its own failure).
         void Shutdown() noexcept;
 
@@ -175,14 +211,33 @@ namespace winrt::TerminalApp::implementation
         //   throws — whatever a XAML property write throws (callers contain it).
         void _ApplyPlacement(const winrt::Windows::UI::Xaml::FrameworkElement& owner);
 
+        // Wire a freshly created ToolTip's OWN input, once per ToolTip object (Update's creation branch, before
+        // the tooltip is attached, so no open can come first). Two handlers, both weak-capturing the host and
+        // reaching the ToolTip through `sender` (an element whose handler captured the element itself would
+        // never be freed):
+        //   - PointerWheelChanged (handledEventsToo) -> `_wheelCb(delta, Card)` while the card is OPEN and this
+        //     ToolTip is still the host's current one; a vertical notch only (the body has no horizontal axis);
+        //     Handled only when the page reports it scrolled; one throttled "[tooltip-wheel] <label>-tip:" trace.
+        //   - Opened -> re-assert IsHitTestVisible(true). WinUI's own ToolTip switches a tooltip's hit testing OFF
+        //     at EVERY open (ToolTip::HookupParentPopup: tooltips are informational there); should Windows' XAML
+        //     do the same, the card would turn click-through again and the wheel would pass it by. A no-op write
+        //     when the flag stayed on; the first flip in a process is logged once.
+        // Neither handler drives IsOpen (invariant 2) or touches Content, placement or layout.
+        //   tip    — the new, not yet attached ToolTip.
+        //   throws — std::bad_alloc / a XAML failure while wiring (Update's callers contain it; the ToolTip is
+        //            then never stored or attached, so the next Update starts over with a fresh one).
+        void _WireCardInput(const winrt::Windows::UI::Xaml::Controls::ToolTip& tip);
+
         winrt::weak_ref<winrt::Windows::UI::Xaml::FrameworkElement> _owner; // the tooltip's owner element (weak — see the file header)
-        std::wstring _wheelLogLabel; // the "[tooltip-wheel] <label>:" source word
+        std::wstring _wheelLogLabel; // the "[tooltip-wheel] <label>:" source word ("<label>-tip:" for a notch on the card)
         PlacementProvider _placementProvider; // empty == the tab default placement
         // The swallowed-exception context names, built ONCE from the log context at construction, so no catch
         // handler has to allocate a string (several of them sit in noexcept members, where a throw while
         // logging would be std::terminate). "Tab" + the suffix reproduces every historical Tab-era name.
         std::wstring _ctxHoverBuild; // "<context> agent tooltip hover build"
         std::wstring _ctxWheel; // "<context> agent tooltip wheel scroll"
+        std::wstring _ctxCardWheel; // "<context> agent tooltip card wheel scroll" (a notch on the open card)
+        std::wstring _ctxCardOpened; // "<context> agent tooltip card hit test" (the Opened re-assert)
         std::wstring _ctxReattach; // "<context> agent tooltip re-attach"
         std::wstring _ctxPlacement; // "<context> agent tooltip placement"
         std::wstring _ctxDetach; // "<context> agent tooltip detach"
@@ -193,14 +248,16 @@ namespace winrt::TerminalApp::implementation
         winrt::hstring _sig{}; // its fingerprint (identical pushes are free)
         // The ONE reused ToolTip (Content swapped only while CLOSED). Configured once: pinned Dark (a ToolTip
         // renders in the popup root and does NOT inherit the host theme; ToolTipService theme propagation is
-        // unreliable under XAML Islands), Placement Bottom (re-pointed by a provider), hit-test-invisible (a
-        // big card under the cursor would churn the framework's own hover tracking). Detached + nulled on an
-        // owner unload / Clear / Shutdown / Detach.
+        // unreliable under XAML Islands), Placement Bottom (re-pointed by a provider), HIT-TESTABLE with its own
+        // wheel hook (_WireCardInput: the pointer may rest on the open card and scroll it there; the placement
+        // keeps the card off the owner, so it never opens under the cursor). Stored only once attached;
+        // detached + nulled on an owner unload / Clear / Shutdown / Detach.
         winrt::Windows::UI::Xaml::Controls::ToolTip _toolTip{ nullptr };
         bool _lifetimeWired{ false }; // the Unloaded/Loaded pair is wired (once per host)
         std::function<void()> _hoverCb{ nullptr }; // the page's build-now callback (dropped by Shutdown)
-        std::function<bool(int)> _wheelCb{ nullptr }; // the page's body-scroll callback (dropped by Shutdown)
-        uint64_t _wheelLogTick{ 0 }; // throttle for the one-line-per-gesture "[tooltip-wheel] <label>:" trace
+        WheelCallback _wheelCb{ nullptr }; // the page's body-scroll callback, for the owner's AND the card's notches (dropped by Shutdown)
+        uint64_t _wheelLogTick{ 0 }; // throttle for the owner's one-line-per-gesture "[tooltip-wheel] <label>:" trace
+        uint64_t _cardWheelLogTick{ 0 }; // throttle for the card's one-line-per-gesture "[tooltip-wheel] <label>-tip:" trace
         bool _hoverWired{ false }; // the PointerEntered + wheel hooks are wired (once per host)
         bool _swapOpenOnce{ false }; // one-shot: let the NEXT Update swap Content while OPEN (the async summary body)
     };

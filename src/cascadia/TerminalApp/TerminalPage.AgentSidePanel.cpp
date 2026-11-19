@@ -6748,9 +6748,11 @@ namespace winrt::TerminalApp::implementation
                     self->_OnSidePanelCardToolTipHover(id);
                 }
             },
-            [weakThis = get_weak(), id](int delta) -> bool {
+            // The wheel callback serves the card's notches (source Owner) AND the open rich card's own (source Card:
+            // the host makes it hit-testable, and Windows keeps it open while the pointer rests on it).
+            [weakThis = get_weak(), id](int delta, AgentToolTipWheelSource source) -> bool {
                 const auto self = weakThis.get();
-                return self ? self->_ScrollSidePanelCardToolTip(id, delta) : false;
+                return self ? self->_ScrollSidePanelCardToolTip(id, delta, source) : false;
             });
         if (!view.tipHost->Active())
         {
@@ -6849,19 +6851,21 @@ namespace winrt::TerminalApp::implementation
     }
 
     // The card host's wheel callback: scroll the OPEN card's body one notch (the shared _ScrollSessionToolTipBody,
-    // logged "[tooltip-wheel] <sid8> src=card …"). Returning false leaves the notch to the cards list's own
-    // ScrollViewer (the host marks the event Handled only on true). Deliberately does NOT set _tooltipWheelClaimed:
-    // that flag de-dupes the tab ROW's belt against a tab's own handler, and a stale true from here would make the
-    // belt skip the next notch over the tab strip.
-    // `id`: the card's session. `wheelDelta`: the notch's wheel units. Returns true when the card took the notch.
+    // logged "[tooltip-wheel] <sid8> src=card …" for a notch over the side-panel card, "src=card-tip …" for one over
+    // the open rich card itself — the pointer moved onto it, and Windows keeps it open there). Returning false leaves
+    // an Owner notch to the cards list's own ScrollViewer (the host marks the event Handled only on true).
+    // Deliberately does NOT set _tooltipWheelClaimed: that flag de-dupes the tab ROW's belt against a tab's own
+    // handler, and a stale true from here would make the belt skip the next notch over the tab strip.
+    // `id`: the card's session. `wheelDelta`: the notch's wheel units. `source`: where it arrived (the log word only —
+    // both scroll the same body). Returns true when the card took the notch.
     // Throws std::bad_alloc while formatting the log line only — the host's wheel catch contains it.
-    bool TerminalPage::_ScrollSidePanelCardToolTip(const std::wstring& id, int wheelDelta)
+    bool TerminalPage::_ScrollSidePanelCardToolTip(const std::wstring& id, int wheelDelta, AgentToolTipWheelSource source)
     {
         if (!_sidePanelBuilt || !_sidePanelSummaryHidden)
         {
             return false;
         }
-        return _ScrollSessionToolTipBody(SidePanelToolTipKey(id), id, wheelDelta, L"card");
+        return _ScrollSessionToolTipBody(SidePanelToolTipKey(id), id, wheelDelta, source == AgentToolTipWheelSource::Card ? L"card-tip" : L"card");
     }
 
     // The card host's placement provider: dock the rich card OUTSIDE the panel, beside the hovered card. The rect is

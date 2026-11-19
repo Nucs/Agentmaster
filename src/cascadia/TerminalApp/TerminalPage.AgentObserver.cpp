@@ -339,7 +339,8 @@ namespace
     constexpr size_t kTtBodyMaxLinesCeil = 1000;
 
     // The scrollable pieces of a freshly built card, handed back to the page (which keeps WEAK refs to
-    // them, so a wheel notch over the tab header can shift the body -- TerminalPage::_ScrollTabAgentToolTip).
+    // them, so a wheel notch over the tab header -- or over the open card itself -- can shift the body:
+    // TerminalPage::_ScrollTabAgentToolTip, _ScrollSidePanelCardToolTip).
     struct TtCardScrollParts
     {
         winrt::Windows::UI::Xaml::FrameworkElement viewport{ nullptr }; // the clipping host (one screenful)
@@ -478,11 +479,12 @@ namespace
     // exception -> the 0xC000027B fail-fast that repeatedly crashed the app (see
     // doc/agentmaster/HANDOVER_tab-tooltip.md crash #7 + invariant 6a). That rule STILL STANDS, and the
     // scrolling below deliberately does not bend it: the card stays inert (panels, TextBlocks, Borders,
-    // transforms -- nothing manipulation-capable) and stays IsHitTestVisible(false). The wheel is read on
-    // the TAB HEADER instead -- a real pointer target that is under the cursor the whole time the tip is
-    // up -- and the page merely shifts a RenderTransform (Tab::EnsureAgentToolTipHoverHook ->
-    // TerminalPage::_ScrollTabAgentToolTip). Wheel-only is also the whole interaction budget: no drag, no
-    // keyboard, no manipulation.
+    // transforms -- nothing manipulation-capable). The wheel is read on the OWNER (the tab header, the
+    // side-panel card) and on the open card's ToolTip, which the host makes hit-testable because Windows keeps
+    // the card open while the pointer rests on it (AgentSessionToolTipHost::_WireCardInput); either way the
+    // page merely shifts a RenderTransform (TerminalPage::_ScrollTabAgentToolTip / _ScrollSidePanelCardToolTip
+    // -> _ScrollSessionToolTipBody). Wheel-only is also the whole interaction budget: no drag, no keyboard,
+    // no manipulation -- nothing in the card itself handles a pointer event.
     // SESSION_NOTES.md §4a: `noteText` (the session's note, "" = none) and `noteCaption` (its "NOTE · edited … ago" line) put
     // the note block right under the title; a note also takes its estimated height out of the summary body's budget, so a
     // long note shortens the summary's viewport instead of pushing the card past its height budget.
@@ -3363,16 +3365,29 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster (tab tooltip — WHEEL SCROLL): a wheel notch arrived on a tab whose rich card is OPEN
-    // (Tab's PointerWheelChanged already checked that, and only ever READS IsOpen). Move the body and
-    // report whether we consumed the notch — false leaves it to the tab strip's own horizontal scroll,
-    // which is the right answer whenever this card has nothing to scroll.
+    // Agentmaster (tab tooltip — WHEEL SCROLL): a wheel notch arrived for a tab whose rich card is OPEN — on the
+    // tab header, on the tab row (the belt) or on the open card itself (the host's handlers already checked that,
+    // and only ever READ IsOpen). Move the body and report whether we consumed the notch — false leaves an
+    // over-the-strip notch to the tab strip's own horizontal scroll, which is the right answer whenever this card
+    // has nothing to scroll.
     //
     // The tab's CURRENT session is resolved here rather than captured at wiring time, exactly like the
     // hover-build hook: a /resume re-home or a fork re-bind swaps the tab's session underneath us.
-    bool TerminalPage::_ScrollTabAgentToolTip(const TerminalApp::Tab& tab, int wheelDelta, bool fromTabItem)
+    //   tab        — the tab whose card the notch is for (null = nothing to scroll).
+    //   wheelDelta — the notch's wheel units (120 per detent; DOWN is negative); 0 does nothing.
+    //   from       — where the notch arrived: the log word (item / row / item-tip) and the belt's claim (Item only).
+    //   returns    — true when the card took the notch (its body has something to scroll), false otherwise.
+    //   throws     — std::bad_alloc while formatting the log line only (every caller runs inside a catch).
+    bool TerminalPage::_ScrollTabAgentToolTip(const TerminalApp::Tab& tab, int wheelDelta, TabTooltipWheelFrom from)
     {
-        _tooltipWheelClaimed = true; // tell the tab-row belt below that this notch is already spoken for
+        // Claim the notch for the tab-row belt ONLY from the tab header's own handler: that handler runs right
+        // before the belt in the same bubble, and the belt consumes the claim at once. A notch on the CARD never
+        // reaches the tab row, and the belt's own call comes after its consume — a claim from either would stay
+        // set, and the belt would skip the next notch over the strip (an empty part of the row, the + button).
+        if (from == TabTooltipWheelFrom::Item)
+        {
+            _tooltipWheelClaimed = true; // tell the tab-row belt below that this notch is already spoken for
+        }
         if (!tab || wheelDelta == 0)
         {
             return false;
@@ -3382,8 +3397,10 @@ namespace winrt::TerminalApp::implementation
         {
             return false;
         }
+        // The log word says where the notch arrived; "item-tip" = on the open card (the pointer moved onto it).
+        const wchar_t* const src = from == TabTooltipWheelFrom::Item ? L"item" : (from == TabTooltipWheelFrom::Row ? L"row" : L"item-tip");
         // A tab's card is keyed by the session id itself (the historical _tabTooltipScroll key).
-        return _ScrollSessionToolTipBody(sessionId, sessionId, wheelDelta, fromTabItem ? L"item" : L"row");
+        return _ScrollSessionToolTipBody(sessionId, sessionId, wheelDelta, src);
     }
 
     // Agentmaster (rich session tooltip — WHEEL SCROLL): the shared body of every surface's wheel scroll — the
@@ -3433,12 +3450,15 @@ namespace winrt::TerminalApp::implementation
     // to arrive on the TabViewItem (the element the pointer is actually over), but that path depends on
     // MUX's tab-strip internals not swallowing it first; this one sits on the whole tab ROW with
     // handledEventsToo, so it sees the event no matter who handled it on the way up. It scrolls whichever
-    // tab currently has its card open — which, since the framework closes the tip the moment you leave the
-    // tab, is always the tab you are hovering.
+    // tab currently has its card open — the tab you hover, or the one whose card is still up while the
+    // pointer crosses a part of the row inside the card's safe zone (the framework keeps a card open
+    // between its tab and itself, and entering another tab closes it).
     //
     // `_tooltipWheelClaimed` is the de-dupe: the per-tab handler runs FIRST (it is deeper in the bubble)
     // and every attempt it makes sets the flag, so this one consumes-and-skips. Both handlers being ours
-    // makes that ordering guaranteed rather than hopeful.
+    // makes that ordering guaranteed rather than hopeful. The belt's own scroll does NOT claim
+    // (TabTooltipWheelFrom::Row): nothing after it would consume the flag, so it would eat the next notch.
+    // A notch on the open card never reaches this row at all (the card's own handler takes it).
     void TerminalPage::_WireTabStripTooltipWheel()
     {
         if (_tabStripWheelWired)
@@ -3481,7 +3501,7 @@ namespace winrt::TerminalApp::implementation
                         }
                         found = true;
                         const auto pt = e.GetCurrentPoint(nullptr);
-                        if (const auto delta = pt ? pt.Properties().MouseWheelDelta() : 0; delta != 0 && page->_ScrollTabAgentToolTip(tab, delta, /* fromTabItem */ false))
+                        if (const auto delta = pt ? pt.Properties().MouseWheelDelta() : 0; delta != 0 && page->_ScrollTabAgentToolTip(tab, delta, TabTooltipWheelFrom::Row))
                         {
                             e.Handled(true);
                         }
@@ -3641,13 +3661,15 @@ namespace winrt::TerminalApp::implementation
                     }
                 }
             },
-            // WHEEL SCROLL: the same hook wires the tab header's PointerWheelChanged, because the header
-            // is the only real pointer target in this whole feature — the card is hit-test-invisible by
-            // design and can never receive input itself.
-            [weakThis = get_weak(), weakTab = winrt::make_weak(tab)](int delta) -> bool {
+            // WHEEL SCROLL: the same hook wires the tab header's PointerWheelChanged (source Owner), and every
+            // ToolTip the host creates feeds this callback too (source Card): the card is hit-testable, and
+            // the framework keeps it open while the pointer rests on it, so a reader scrolls it from the tab
+            // OR from the card itself. Only the header's notch claims the row belt (TabTooltipWheelFrom::Item).
+            [weakThis = get_weak(), weakTab = winrt::make_weak(tab)](int delta, AgentToolTipWheelSource source) -> bool {
                 const auto self = weakThis.get();
                 const auto t = weakTab.get();
-                return (self && t) ? self->_ScrollTabAgentToolTip(t, delta, /* fromTabItem */ true) : false;
+                const auto from = source == AgentToolTipWheelSource::Card ? TabTooltipWheelFrom::Card : TabTooltipWheelFrom::Item;
+                return (self && t) ? self->_ScrollTabAgentToolTip(t, delta, from) : false;
             });
         if (justWired)
         {
