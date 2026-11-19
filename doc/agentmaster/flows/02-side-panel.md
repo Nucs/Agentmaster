@@ -388,6 +388,15 @@ in Settings ▸ Sessions ▸ AI SEARCH (2 hours by default).
   a request the running one reads "still running" and the list says it is the answer before it. With the box empty the
   newest request comes back WITHOUT focus (no `process up` after a park). *Check:* [LOG] `sidepanel ai-copy chars=N
   requests=2 listed=N refill=M`.
+- **E11 AI off while a request runs** (2026-11-19, NOT BUILT; SIDE_PANEL.md §2h *The AI toggle's signals*) → the cards come
+  back and the toggle signals: blue letters, a light orbiting its outline (`am.side.ai` ItemStatus "request running"). AI on
+  again → the toggle is accent-filled and still, the strip moves.
+- **E12 The answer lands while every AI view is off** → the toggle's outline blinks green (red for a failure) in step with an
+  unread tab's ring (ItemStatus "answer waiting" / "failure waiting"), in every window and on a Sessions page's toggle; AI on
+  in any of them stops every blink at once; a new request or ⊘ also ends it. *Check:* [LOG] `[ai-search] the request was
+  answered while no AI view showed the conversation …`, then `[ai-search] the waiting answer was seen …`.
+- **E13 The answer lands while an AI view is on screen** (any window's side panel, expanded, or a Sessions page with its AI
+  search) → no toggle blinks anywhere. A collapse stops this panel's signal; an expand brings back a blink that still waits.
 
 ---
 

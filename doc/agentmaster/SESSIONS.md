@@ -560,6 +560,12 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
 > of AI so we can review and analyze? say only enabled in debug mode": there were none that keep a request whole, so in debug
 > mode every request is now written down — the plan, every tool call with its whole result, the shown sessions, the reply,
 > the time and the cost (9.17).
+>
+> **2026-11-19 (the user's request; NOT BUILT): the AI toggle signals with its view off.** "When you deselect the 'AI' button
+> and you now see the regular cards; while the AI session is running, I want the AI to have two sets of animations. one
+> while running and one when its done": from live mock-ups the user picked a light ORBITING the toggle while a request runs,
+> and its outline BLINKING WITH THE UNREAD RINGS (green answered, red failed) once it ended unseen — on every AI toggle, this
+> page's too, until any AI view shows the conversation (9.1; SIDE_PANEL.md §2h *The AI toggle's signals*).
 
 ### 9.1 What the user sees
 
@@ -581,6 +587,14 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
   follows the strip's width live (the host's `SizeChanged` → a property-set scalar its offset expression reads). Both are
   Composition animations: no XAML storyboard, no per-frame UI-thread work (UI_THREAD.md §10c). The strip's padding became
   its lines' margin, so the text sits where it did and the host can lie on the inside of the border.
+- **With the AI search OFF, the toggle itself signals the conversation** (2026-11-19, the user's picks; NOT BUILT; the side
+  panel's toggle the same way — SIDE_PANEL.md §2h *The AI toggle's signals* has the whole design): while a request runs (asked
+  here earlier, in the side panel or in another window) its letters turn blue and a light orbits its outline; when the request
+  ends while no AI view shows the conversation, its outline blinks green (answered) or red (failed) in step with the unread
+  tabs' flash rings, until any AI view — this page's, a side panel's, any window's — shows it, a new request starts or ⊘
+  resets. An answer that lands while an AI view is on screen leaves nothing to signal. The page's toggle signals only while
+  the page is on screen, and the page counts as showing the conversation while its AI search is on and it is on screen (the
+  in-use tally). Its ItemStatus says "request running", "answer waiting" or "failure waiting".
 - **The thinking toggle** (the user's request of 2026-10-14; in dev and production) sets how much the
   model thinks before it searches. A click moves to the next level: **low → medium → high → xhigh →
   max → low** (off → low → … → max → off until 2026-11-01).

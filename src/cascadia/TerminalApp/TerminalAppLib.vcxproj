@@ -329,6 +329,10 @@
          the copy button under it put back into an empty request box, and the copy's Markdown of the whole conversation and the
          listed sessions (pure, header-only; TestSidePanelAiCopy). -->
     <ClInclude Include="AgentMaster\SidePanelAiCopy.h" />
+    <!-- Agentmaster (SIDE_PANEL.md section 2h, "The AI toggle's signals"): with its AI view off, an AI toggle signals the shared
+         conversation - what a request's end leaves waiting to be read, and the signal one toggle shows (an orbit while a request
+         runs, the outline blinking with the unread rings while an answer waits) (pure, header-only; TestAiToggleSignal). -->
+    <ClInclude Include="AgentMaster\AiToggleSignal.h" />
     <!-- Agentmaster (SIDE_PANEL.md section 2j): the side panel's PIN TO TOP - pinned cards first, the newest pin on top, the
          stamp a pin gets, the pin a tab keeps when it switches conversation (pure, header-only; TestSidePanelPins). -->
     <ClInclude Include="AgentMaster\SidePanelPins.h" />

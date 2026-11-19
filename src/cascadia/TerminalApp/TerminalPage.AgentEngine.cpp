@@ -623,6 +623,11 @@ namespace winrt::TerminalApp::implementation
         // request end or focus loss will never come now). AFTER _SessionsAiDetach, so the tally it reads already counts this
         // page out. Thread-safe and noexcept, no XAML inside; a no-op for a window that never turned the AI view on.
         _SidePanelAiDetach();
+        // Agentmaster (the AI toggles' signals, SIDE_PANEL.md §2h): remove this window's signal listener from the same agent
+        // (Rule #10). Thread-safe and noexcept, no XAML inside; a no-op for a window that never attached it. The two views'
+        // detaches above already dropped their "showing" flags with their listeners (RemoveListener), so a closing window can
+        // never leave an answer counted as seen.
+        _AiToggleSignalsDetach();
         // Agentmaster (cross-window activate): drop this window's activate sink from the shared
         // engine — a stray fan-out after teardown is already a safe no-op (the sink captures
         // get_weak() + an agile dispatcher), this keeps the engine's sink list bounded (Rule #10).

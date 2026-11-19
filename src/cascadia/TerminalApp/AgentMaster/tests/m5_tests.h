@@ -300,6 +300,12 @@ void TestSidePanelAiList();
 // call as the reply, failures, stopped and running requests, the cap), the whole text byte for byte, its edges, the code
 // spans and the local time stamp (tests_sidepanel.cpp)
 void TestSidePanelAiCopy();
+// AiToggleSignal.h (SIDE_PANEL.md §2h "The AI toggle's signals", SESSIONS.md §9.1): the user's request of 2026-11-19 — with its
+// AI view off, a toggle signals the shared conversation (an orbit while a request runs, the outline blinking with the unread
+// rings while an answer waits): what a request's end leaves waiting (a view showing it, a stop: nothing; else answered or
+// failed), every input combination of one toggle's signal against an independent statement, the user's scenes, and the
+// ItemStatus words (tests_sidepanel.cpp)
+void TestAiToggleSignal();
 // SidePanelPins.h (SIDE_PANEL.md §2j): the cards' PIN TO TOP — the user's "pinning puts on top and repinning will bring a tab
 // to the top again" (2026-11-06): pinned cards first, the newest pin on top, the board's order for the rest; a pin again
 // brings a card back to the top whatever the clock says; the comparator is a strict weak ordering (seeded sweep); the

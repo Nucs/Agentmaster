@@ -40,6 +40,7 @@
 #include <vector>
 
 #include "AgentHarness.h" // HarnessState / HarnessUsage
+#include "AiToggleSignal.h" // AiSearchUnseen — the answer the AI toggles signal until a view shows it (SessionSearchSnapshot::unseen)
 #include "SessionSearchTools.h" // SessionCatalog
 #include "TranscriptStore.h" // SessionIndexEntry
 
@@ -287,6 +288,12 @@ namespace Agentmaster
         // supportedEfforts); empty until a process answered. The page's rotation skips a level
         // that is not in a non-empty list (NextHarnessThinkingLevel).
         std::vector<std::wstring> supportedEfforts;
+        // The newest request's outcome when it ended while NO surface showed the conversation (AiSearchUnseenAtTurnEnd over
+        // the listeners' SetListenerShowing flags): what every AI toggle whose own view is off signals — the outline blinking
+        // green or red with the unread rings — until it is read (SIDE_PANEL.md §2h "The AI toggle's signals"). None again
+        // once any surface shows the conversation, a new request starts (Ask) or the conversation is reset. Not persisted: a
+        // restart starts with nothing waiting (the answer itself stays in the conversation's view file).
+        AiSearchUnseen unseen{ AiSearchUnseen::None };
     };
 
     // One event, with the state after it.
@@ -330,8 +337,29 @@ namespace Agentmaster
         uint64_t AddListener(Listener listener);
 
         // Detach a listener. A stale or 0 token is a no-op. After it returns, the listener is not
-        // called again — except by a call that was already running on another thread.
+        // called again — except by a call that was already running on another thread. Its showing
+        // flag (SetListenerShowing) goes with it, so a closing window can never leave the
+        // conversation counted as seen by a view that is gone.
         void RemoveListener(uint64_t token) noexcept;
+
+        /// <summary>
+        /// Say whether the surface behind a listener SHOWS the conversation now: its AI view is on AND on screen (the side
+        /// panel's view in an expanded panel, a Sessions page with its AI search on that no tab covers). The agent reads these
+        /// flags when a request ends: with none set, the outcome WAITS (SessionSearchSnapshot::unseen) and every AI toggle
+        /// signals it (SIDE_PANEL.md §2h "The AI toggle's signals"). A flag that turns true while an outcome waits clears it —
+        /// the user is looking at the answer now — and every listener gets a StateChanged event, so every window's toggles
+        /// stop signaling it at once.
+        /// </summary>
+        /// <param name="token">The listener's token (AddListener); 0 or a token no longer registered does nothing — only a
+        /// registered listener can stand for a view that shows the answer.</param>
+        /// <param name="showing">True: the surface shows the conversation from now on; false: it does not (its view turned
+        /// off, collapsed, covered or closed).</param>
+        /// <remarks>
+        /// Idempotent: repeating the same value changes nothing and raises no event. Thread-safe (the agent's lock); the event,
+        /// when there is one, is raised outside the lock, on the calling thread, like every other Notify. Never throws: a
+        /// failure is logged (Rule #18) and the flag keeps its previous value.
+        /// </remarks>
+        void SetListenerShowing(uint64_t token, bool showing) noexcept;
 
         // The native claude.exe to run (the engine's claudeExePath). Call it from the UI thread
         // before Prewarm / Ask, and again when the path changes; it is read at each process start.
@@ -446,6 +474,18 @@ namespace Agentmaster
     //   SharedEngine(), which starts the hooks bridge and the observers. Tests construct their
     //   own SessionSearchAgent.
     SessionSearchAgent& SharedSessionSearchAgent();
+
+    /// <summary>
+    /// The process's one agent (SharedSessionSearchAgent) when something already created it, else null — it NEVER creates the
+    /// agent. For a surface that only FOLLOWS the conversation and must not be the one that starts it: the AI toggles'
+    /// signals of a window where nobody used the AI search (SIDE_PANEL.md §2h "The AI toggle's signals") listen only once
+    /// another window's AI-on or request created it, because the first creation reads the conversation's record, its view
+    /// file and settings.json from disk.
+    /// </summary>
+    /// <returns>The agent, or null before the first SharedSessionSearchAgent() call of the process returned.</returns>
+    /// <remarks>Thread-safe (an atomic load); never throws. The agent is never destroyed, so the pointer stays valid for the
+    /// life of the process.</remarks>
+    SessionSearchAgent* SharedSessionSearchAgentIfCreated() noexcept;
 
     /// <summary>The longest narration a snapshot keeps (SessionSearchSnapshot::narration): the plan and a few progress
     /// lines fit; a model that writes pages between its calls is cut, its start (the plan) kept.</summary>

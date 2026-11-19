@@ -59,6 +59,7 @@
 #include "pch.h"
 #include "TerminalPage.h"
 
+#include "AgentAutomation.h" // AgentSetItemStatus — the AI toggles' signal as their ItemStatus (SIDE_PANEL.md §2h "The AI toggle's signals")
 #include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
 #include "AgentTipHelpers.h" // AgentSetTip / AgentCloseTipsIn — the shared tooltip recipe behind SessSetTip
 #include "AgentStatusColors.h" // needed by the shared Sess* helpers (the tag ribbon colors)
@@ -220,6 +221,27 @@ namespace winrt::TerminalApp::implementation
         });
         Grid::SetColumn(_sessAiBtn, boxColumn);
         topLeft.Children().Append(_sessAiBtn); // after the box: over it
+
+        // The toggle's SIGNALS (SIDE_PANEL.md §2h "The AI toggle's signals", SESSIONS.md §9.1; the user's picks of 2026-11-19):
+        // while the AI search is OFF here, a light orbits the toggle while a request of the shared conversation runs, and its
+        // outline blinks with the unread rings while an answer waits to be read. The two overlays go into the box's cell AFTER
+        // the toggle, with its size, alignment and inset, so they draw over it and take no pointer (the toggle keeps its clicks
+        // and its tip). Nothing animates until _AiToggleSignalsRepaint decides a signal.
+        {
+            const auto overlays = AgentMakeAiToggleOverlays(kSessionsAiToggleWidth, kSessionsAiToggleHeight, _sessAiBtn.Margin(), HorizontalAlignment::Right, VerticalAlignment::Center);
+            _sessAiSignalHost = overlays.orbitHost;
+            _sessAiSignalOutline = overlays.outline;
+            Grid::SetColumn(_sessAiSignalHost, boxColumn);
+            Grid::SetColumn(_sessAiSignalOutline, boxColumn);
+            topLeft.Children().Append(_sessAiSignalHost);
+            topLeft.Children().Append(_sessAiSignalOutline);
+            _sessAiSignal = AgentAiToggleSignal{ _sessAiBtn,
+                                                 _sessAiSignalHost,
+                                                 _sessAiSignalOutline,
+                                                 static_cast<float>(kSessionsAiToggleWidth),
+                                                 static_cast<float>(kSessionsAiToggleHeight),
+                                                 static_cast<float>(_sessAiBtn.CornerRadius().TopLeft) };
+        }
 
         // The reset: a crossed circle, in a column of its own right of the box. A FontIcon, not a
         // TextBlock: a TextBlock keeps room for descenders and the glyph then sits high beside
@@ -628,6 +650,11 @@ namespace winrt::TerminalApp::implementation
                 _SessionsAiMergeExtraRows(); // removes the list's extra rows
             }
             _UpdateSessionsAiStrip(snapshot);
+            // The toggle's signals follow the mode (SIDE_PANEL.md §2h "The AI toggle's signals"): on, the strip shows the
+            // conversation and the toggle goes quiet; off, the toggle takes over — an orbit while a request runs, the blinking
+            // outline while an answer waits. An AI-on that read a waiting answer clears it through the agent (the in-use report
+            // above), which repaints every window again. Never throws.
+            _AiToggleSignalsRepaint();
             _RunSessionsSearch(); // the filter query (none while the mode is on, the box's kept text when it goes off), then the render — which applies the AI list when there is one
             if (_sessionsSearchBox)
             {
@@ -725,6 +752,9 @@ namespace winrt::TerminalApp::implementation
                 }
             });
         });
+        // The agent exists now: this window's toggles follow the conversation from here on, without waiting for the periodic
+        // belt (SIDE_PANEL.md §2h "The AI toggle's signals"). Never throws.
+        _AiToggleSignalsAttach();
     }
 
     // ~TerminalPage: remove the listener and leave the in-use tally (Rule #10: a closing window
@@ -775,6 +805,17 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         _sessionsAiInUse = inUse;
+        // "In use" IS "this page shows the conversation" (the AI search on, the page on screen): the agent reads it when a
+        // request ends — with no view showing it, the answer waits and every AI toggle signals it — and a page that starts
+        // showing while an answer waits reads it, everywhere (SIDE_PANEL.md §2h "The AI toggle's signals"). Only through this
+        // page's own listener; none during the destructor's detach (its token is already 0 then). Both calls are noexcept.
+        if (_sessionsAiListenerToken != 0)
+        {
+            if (auto* const agent = ::Agentmaster::SharedSessionSearchAgentIfCreated())
+            {
+                agent->SetListenerShowing(_sessionsAiListenerToken, inUse);
+            }
+        }
         try
         {
             if (inUse)
@@ -810,6 +851,12 @@ namespace winrt::TerminalApp::implementation
     // Never throws.
     void TerminalPage::_SessionsAiNotePageShown(bool shown)
     {
+        // FIRST, whatever the mode (SIDE_PANEL.md §2h "The AI toggle's signals"): the page coming on screen covers the side
+        // panel (it overlays the whole content area), and leaving uncovers it — so the side panel's view starts or stops
+        // showing the conversation, and both toggles' visibility changes. `shown` is passed on because the tab-switch dismiss
+        // calls this BEFORE it updates _sessionsPageVisible. Both never throw.
+        _SidePanelAiReportShowing(shown);
+        _AiToggleSignalsRepaint(shown);
         if (!_sessionsAiMode)
         {
             return;
@@ -1502,5 +1549,128 @@ namespace winrt::TerminalApp::implementation
             }
         }
         return outcome;
+    }
+
+    // ======================================================================================
+    // THE AI TOGGLES' SIGNALS (SIDE_PANEL.md §2h "The AI toggle's signals", SESSIONS.md §9.1). The user's request of 2026-11-19:
+    // "when you deselect the 'AI' button and you now see the regular cards; while the AI session is running, I want the AI to
+    // have two sets of animations, one while running and one when it's done" — and their picks from live mock-ups the same day:
+    // an ORBITING LIGHT while a request runs, the outline BLINKING WITH THE UNREAD RINGS (green answered, red failed) while an
+    // answer waits, on EVERY AI toggle (every window's side panel and Sessions page: the conversation is one), UNTIL YOU LOOK
+    // (any AI view showing the conversation reads it, everywhere). The pure rules are AgentMaster/AiToggleSignal.h; the agent
+    // decides "unseen" when a request ends (SessionSearchAgent::SetListenerShowing feeds it); AgentAiToggleSignal draws.
+    // COST: one listener per window, attached only once the agent exists; an event costs three copied facts and a compare per
+    // toggle; the motions are Composition animations that run only while a toggle can be seen.
+
+    void TerminalPage::_AiToggleSignalsAttach() noexcept
+    {
+        if (_aiSignalListenerToken != 0)
+        {
+            return; // attached already: the belt's every-tick call costs this test
+        }
+        try
+        {
+            auto* const agent = ::Agentmaster::SharedSessionSearchAgentIfCreated();
+            if (!agent)
+            {
+                return; // nobody used the AI search in this process yet: nothing to follow, and nothing created for it
+            }
+            const auto weakThis = get_weak();
+            const auto dispatcher = Dispatcher(); // agile: callable from the agent's threads
+            _aiSignalListenerToken = agent->AddListener([weakThis, dispatcher](const ::Agentmaster::SessionSearchEvent& e) {
+                // Only the three facts the signals read cross the thread hop — not the whole event, whose snapshot holds the
+                // listed ids, their whys and the plan. ⚠ No strong page reference on the agent's thread (the last one would run
+                // ~TerminalPage off the UI thread): the weak one is resolved in the dispatched call.
+                const uint64_t epoch = e.snapshot.epoch;
+                const bool busy = e.snapshot.busy;
+                const auto unseen = e.snapshot.unseen;
+                try
+                {
+                    dispatcher.RunAsync(CoreDispatcherPriority::Normal, [weakThis, epoch, busy, unseen]() {
+                        if (const auto self = weakThis.get())
+                        {
+                            self->_OnAiToggleSignalsEvent(epoch, busy, unseen); // never throws
+                        }
+                    });
+                }
+                catch (...)
+                {
+                    // The window's dispatcher is gone (it is closing): the event is for nobody. Recorded (Rule #18).
+                    ::Agentmaster::AgentLogCaughtException(L"AI toggle signals: post an agent event");
+                }
+            });
+            // Seeded from the conversation as it is NOW — a request asked in another window may run already. An event the agent
+            // raised meanwhile still arrives after this and is applied in order; every change of the three facts raises one,
+            // so the toggles end on the newest state either way.
+            const auto snapshot = agent->Snapshot();
+            _aiSignalEpoch = snapshot.epoch;
+            _aiSignalBusy = snapshot.busy;
+            _aiSignalUnseen = snapshot.unseen;
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[ai-search] window " + ::Agentmaster::ShortId(_windowId) + L": its AI toggles follow the conversation (signals)\n");
+            _AiToggleSignalsRepaint();
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: no token was kept when AddListener threw (the toggles stay plain, and the next tick's belt tries
+            // again); a later failure leaves the listener attached and its next event repaints.
+            ::Agentmaster::AgentLogCaughtException(L"_AiToggleSignalsAttach");
+        }
+    }
+
+    void TerminalPage::_AiToggleSignalsDetach() noexcept
+    {
+        if (_aiSignalListenerToken == 0)
+        {
+            return; // never attached: nothing registered
+        }
+        // A token exists only when the agent does, so the lookup cannot come back null here; RemoveListener is noexcept and
+        // thread-safe (the destructor may run on a pool thread). No XAML is touched.
+        if (auto* const agent = ::Agentmaster::SharedSessionSearchAgentIfCreated())
+        {
+            agent->RemoveListener(_aiSignalListenerToken);
+        }
+        _aiSignalListenerToken = 0;
+    }
+
+    void TerminalPage::_OnAiToggleSignalsEvent(uint64_t epoch, bool busy, ::Agentmaster::AiSearchUnseen unseen) noexcept
+    {
+        if (epoch < _aiSignalEpoch)
+        {
+            return; // an event of a conversation a reset threw away
+        }
+        _aiSignalEpoch = epoch;
+        _aiSignalBusy = busy;
+        _aiSignalUnseen = unseen;
+        _AiToggleSignalsRepaint();
+    }
+
+    void TerminalPage::_AiToggleSignalsRepaint(std::optional<bool> sessionsPageShown) noexcept
+    {
+        try
+        {
+            // The Sessions page overlays the whole content area, the side panel included: while it is on screen the side panel's
+            // toggle cannot be seen (and must not animate for nobody), and the page's own toggle can.
+            const bool sessionsOnScreen = sessionsPageShown.value_or(_sessionsPageVisible.load(std::memory_order_relaxed));
+            if (_sidePanelAiBtn)
+            {
+                // Seen while the panel is built and expanded (a collapsed panel hides its header) and not covered.
+                const bool shown = _sidePanelBuilt && !_sidePanelCollapsed && !sessionsOnScreen;
+                const auto look = ::Agentmaster::DecideAiToggleSignal(_sidePanelAiMode, shown, _aiSignalBusy, _aiSignalUnseen);
+                _sidePanelAiSignal.Show(look); // change-gated, never throws
+                AgentSetItemStatus(_sidePanelAiBtn, ::Agentmaster::AiToggleSignalStatus(look));
+            }
+            if (_sessAiBtn)
+            {
+                const auto look = ::Agentmaster::DecideAiToggleSignal(_sessionsAiMode, sessionsOnScreen, _aiSignalBusy, _aiSignalUnseen);
+                _sessAiSignal.Show(look); // change-gated, never throws
+                AgentSetItemStatus(_sessAiBtn, ::Agentmaster::AiToggleSignalStatus(look));
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the toggles keep the signal they showed (Show records before it draws); the next repaint — every
+            // agent event and every mode, collapse and page change — decides again.
+            ::Agentmaster::AgentLogCaughtException(L"_AiToggleSignalsRepaint");
+        }
     }
 }

@@ -1028,7 +1028,7 @@ controls (an unknown member planted in the glyph and in `_SidePanelRefreshIndica
 - Collapse the panel while cards ring / glow / pulse, expand it: they move again; no `[exc] status glyph …`,
   `[exc] _SidePanelRefreshIndicators` or `[sidepanel] … out of step` line in hooks.log.
 
-### 2h. The AI search — the filter box's "AI" toggle (2026-10-31; the loading icon and the end-of-request list 2026-11-05; ⊘'s refill and the copy button 2026-11-10)
+### 2h. The AI search — the filter box's "AI" toggle (2026-10-31; the loading icon and the end-of-request list 2026-11-05; ⊘'s refill and the copy button 2026-11-10; the toggle's signals 2026-11-19)
 
 The view of 2026-10-31 (commit 7bbb63137, and the box keeping its text, 7d8ed1043) is in dev 0.0.1.42 and production
 0.8.0.9. The user's two requests of 2026-11-05 — "a loading icon while the assistant is running" and "the ai assistant
@@ -1038,7 +1038,9 @@ animated options: a light sweeping along the strip's bottom edge, plus a breathi
 "the cards in sidemenu with an explanation must not be trimmed and support multiline" (the whole why, *The results*).
 The user's two requests of 2026-11-10 — ⊘ puts the newest request back into an empty box, and a copy button under ⊘
 copies the conversation — are NOT BUILT yet (*⊘ and the copy button* below); the next build must purge (`TerminalPage.h`
-gains a data member, `_sidePanelAiCopyBtn`).
+gains a data member, `_sidePanelAiCopyBtn`). The user's request of 2026-11-19 — with the AI view off, the toggle itself
+signals the conversation: one animation while a request runs, one when it is done — is NOT BUILT yet (*The AI toggle's
+signals* below); the next build must purge (`TerminalPage.h` gains data members, `SessionSearchSnapshot` a field).
 
 The user's request: "add a 'Search' area similarly how 'Sum' works … the same search agent we have, same lifecycle but
 custom UI matching a sidemenu". Their answers to the four design questions (design-ask, 2026-10-31):
@@ -1190,6 +1192,61 @@ the same setting since this change (it was a fixed 10 minutes). Logged `[ai-sear
 parks in N min (<why>)` and `[nav] sidepanel ai on box=N | ai off box=N | ai-ask turn=N chars=M | ai-stop | ai-reset box=N
 refill=M | ai-copy chars=N requests=R listed=L refill=M | ai-open <sid8> -> jump | resume here | transcript`.
 
+**The AI toggle's signals** (the user's request of 2026-11-19, NOT BUILT; the pure half is `AgentMaster/AiToggleSignal.h`,
+pinned by `TestAiToggleSignal`). Their words: "When you deselect the 'AI' button and you now see the regular cards; while
+the AI session is running, I want the AI to have two sets of animations. one while running and one when its done." Their
+picks (design-ask with live, clickable mock-ups, the same day): of five running motions (the strip's breath + sweep, an
+orbiting light, a shimmer, a spinner in place of the letters, breathing letters) the **orbiting light**; of four done
+signals (a pulsing badge dot, glowing letters, a ripple then still, a blink with the unread rings) the **blink with the
+unread rings**; the signals on **every AI toggle** (every window's side panel and Sessions page: the conversation is one);
+and the waiting signal lasts **until you look**. The Sessions page's toggle does the same (SESSIONS.md §9.1).
+
+- **What shows**, with the toggle's own AI view OFF and the toggle on screen:
+  - a request of the conversation runs → the letters turn the working blue (#4EA1FF) and a light **orbits** the toggle's
+    outline, one lap per 1.2 s: a head of 22% of the outline over a tail of 40% at 35%, 1.5 DIP wide, round ends;
+  - the newest request ended while NO AI view showed the conversation → the toggle's **outline blinks**, 0.6 s on and 0.6 s
+    off, on the unread flash rings' own clock (`AgentLockstepBlink`: in step with every unread tab's ring), green (#5CB85C,
+    the letters #86DC86) when it was answered, red (#E5533D, the letters #FF8F7D) when it failed;
+  - otherwise the plain toggle. With its AI view ON the toggle stays quiet: the strip speaks (its sweep and loading icon
+    while a request runs, its dot's color after). A running request outranks a waiting outcome.
+- **When an answer counts as read.** The agent decides it when the newest request ENDS (`SessionSearchAgent`, its
+  `TurnCompleted` → `AiSearchUnseenAtTurnEnd`), so the end event already carries it and no window shows a blink that another
+  window's view takes back a moment later: an end while some surface SHOWS the conversation (its AI view on AND on screen)
+  leaves nothing waiting, and so does a stopped request (Esc, or a newer request that replaced it). Otherwise
+  `SessionSearchSnapshot::unseen` holds Answered or Failed until any surface starts showing the conversation
+  (`SessionSearchAgent::SetListenerShowing(token, true)` clears it and raises `StateChanged`, so every window's toggles stop
+  together), a new request starts (`Ask`), or ⊘ resets the conversation. Not persisted: a restart starts with nothing
+  waiting (the answer itself is in the conversation's view file).
+- **Who reports "showing".** Each view through its own listener's flag: the side panel's `_SidePanelAiReportShowing` (AI mode
+  on, the panel expanded, no Sessions page over it — that page overlays the whole content area, the panel included), called
+  at every change of the three and when its listener appears; the Sessions page's in-use tally (`_SessionsAiSetInUse`: AI on
+  and the page on screen). A closing window's listeners take their flags with them (`RemoveListener`), so a gone view never
+  reads an answer for the user.
+- **Which toggles.** Both toggles of every window. Each window has ONE listener more for them (`_aiSignalListenerToken`),
+  apart from the two views' own — whose tokens mean "this view shows it", and whose park rules count a window's USE of the
+  search. It attaches only once the process's agent EXISTS (`SharedSessionSearchAgentIfCreated`, which never creates it: the
+  first creation reads the conversation's record, its view file and settings.json from disk) — at once when this window's
+  own view attaches, else by the side panel's periodic tick (~2.5 s, whatever the panel's state) — and copies three facts per
+  event (the epoch, busy, unseen), never the whole event. `_AiToggleSignalsRepaint` decides each toggle (`DecideAiToggleSignal`)
+  and shows it (`AgentAiToggleSignal::Show`, change-gated) with its ItemStatus: "request running", "answer waiting", "failure
+  waiting", none at rest (`AiToggleSignalStatus`; `am.side.ai`).
+- **When a toggle can be seen.** The side panel's: the panel built and expanded, no Sessions page over it. The Sessions page's:
+  the page on screen (not closed, not behind a tab — the tab-switch dismiss passes `shown` itself, since it runs before
+  `_sessionsPageVisible` changes). A toggle nobody can see shows nothing, so nothing animates for nobody; an answer that
+  still waits blinks again when the toggle comes back.
+- **How it is drawn.** Two overlays over each toggle, in its cell after it, hit-test invisible (`AgentMakeAiToggleOverlays`: the
+  toggle keeps its clicks and its tip): the orbit's host (the toggle's own size) and the outline (a childless rounded Border, 1 DIP
+  larger on every side, 1.5 DIP thick, radius 4, Collapsed at rest). The orbit is `AgentOrbitLight` (`AgentAmbientAnimation`):
+  two strokes of one rounded-rectangle path, each trimmed to its share, whose `TrimOffset` follows one "Progress" scalar that a
+  linear loop runs 0 → 1 — Composition takes the trim window modulo 1, so the light passes the path's start without a seam.
+  Composition animations only: no XAML storyboard and no per-frame UI-thread work (UI_THREAD.md §10c); the blink adds no
+  clock while any tab is unread (the rings run it anyway). The letters' color is the toggle's LOCAL Foreground, which only its
+  rest state shows (hover, pressed and checked keep their own ink), cleared at rest.
+- **Logs** (hooks.log): `[ai-search] the request was answered while no AI view showed the conversation: every AI toggle
+  signals it until a view shows it` ("failed" for a failure), `[ai-search] the waiting answer was seen (an AI view shows the
+  conversation): the AI toggles stop signaling it`, and once per window `[ai-search] window <id8>: its AI toggles follow the
+  conversation (signals)`.
+
 **While the view shows, the card list rests like a collapsed one** (`_SidePanelCardsHidden`): its updates are owed
 (`_SidePanelScheduleRebuild` / `_SidePanelRebuildCards` only mark it dirty — a forced one too, since it would write the
 count line the AI view owns), its ⌖ reveal stays owed, and its status icons hold still (`SetHostShown`). The summary area
@@ -1205,6 +1262,9 @@ past a day → 1440, a hand-edited 0, a write of an unclamped value). `tests_sid
 the refill (an empty or blank box, a box with words, no request, one line), the record's fold (the plan left out, two text
 blocks joined, a failure, a stopped and a running request, one not recorded yet, the cap and its orphaned reply, a replaced
 request's gap), the whole Markdown text byte for byte, its edges, the code spans and the local time's shape.
+`TestAiToggleSignal` (2026-11-19): what a request's end leaves waiting (a view showing it or a stop: nothing; else answered
+or failed), one toggle's signal for all 24 inputs against the rule stated again, the user's scenes in order, and the
+ItemStatus words. The app units passed `cl /Zs` against a clean build's PCH, with two planted defects failing where planted.
 
 **Check after the build:**
 - The AI toggle sits inside the filter box at its right end; the box's text and its clear button end before it.
@@ -1241,7 +1301,17 @@ request's gap), the whole Markdown text byte for byte, its edges, the code spans
   click into the box); the cards of sessions the registry does not know fill in from disk.
 - The park: after a request, hooks.log says `parks in 120 min`; with a Sessions page showing the AI search, no side-panel
   park line; Settings ▸ Sessions ▸ AI SEARCH changes the minutes.
-- No `[exc] _SidePanelAi…` / `[exc] side panel AI …` line in hooks.log.
+- The toggle's signals (2026-11-19): ask a request, then turn AI off while it runs — the letters turn blue and a light runs
+  around the toggle (ItemStatus "request running"); AI on again: the toggle is accent-filled and still, the strip moves. Let
+  it end with every AI view off: the outline blinks green in step with an unread tab's ring (ItemStatus "answer waiting";
+  hooks.log `the request was answered while no AI view showed …`); a failed request blinks red. AI on anywhere — this panel,
+  another window's, a Sessions page — stops every window's blink at once (`the waiting answer was seen`); so do a new request
+  and ⊘. An answer that lands while some AI view is on screen leaves no blink anywhere. A collapse stops the panel's signal,
+  an expand brings back a blink that still waits; a Sessions page over the panel moves the signal to the page's toggle. A
+  window where nobody used the search follows within ~2.5 s of another window's first use (`its AI toggles follow …`).
+  Hover the blinking toggle: the stock hover look; a click still turns AI on.
+- No `[exc] _SidePanelAi…` / `[exc] side panel AI …` / `[exc] _AiToggleSignals…` / `[exc] AgentAiToggleSignal…` line in
+  hooks.log.
 
 ### 2i. The `⋯` menu — the header's settings and the collapse (2026-11-03; the mirrored line and the dock item's place 2026-11-04)
 
@@ -2859,7 +2929,17 @@ below).
   pure; new), `TerminalPage.AgentSidePanel.cpp` (the ⊘ handler and the copy button in `_SidePanelAiEnsureView`, the enabled
   state in `_SidePanelAiUpdateStrip`, `_SidePanelAiCopyConversation`, `_SidePanelAiWriteRefill`, `SidePanelAiCopyRowsFor`,
   `kSidePanelAiCopyGlyph`), `TerminalPage.h` (`_sidePanelAiCopyBtn`, the declarations), `TerminalAppLib.vcxproj` (the
-  header), `tests/tests_sidepanel.cpp` (`TestSidePanelAiCopy`), `tests/m5_tests.{h,cpp}`.
+  header), `tests/tests_sidepanel.cpp` (`TestSidePanelAiCopy`), `tests/m5_tests.{h,cpp}`;
+  the toggle's signals (2026-11-19): `AgentMaster/AiToggleSignal.h` (what a request's end leaves waiting, one toggle's
+  signal, its ItemStatus words; pure, new), `AgentMaster/SessionSearchAgent.{h,cpp}` (`SessionSearchSnapshot::unseen`, the
+  listeners' showing flags, `SetListenerShowing`, the turn end's decision, `Ask`'s clear, `SharedSessionSearchAgentIfCreated`),
+  `AgentAmbientAnimation.{h,cpp}` (`AgentOrbitLight`, `AgentAiToggleSignal`, `AgentMakeAiToggleOverlays`),
+  `TerminalPage.AgentSessionsAi.cpp` (the window's signal listener: `_AiToggleSignalsAttach` / `Detach`,
+  `_OnAiToggleSignalsEvent`, `_AiToggleSignalsRepaint`; the page's overlays in `_BuildSessionsAiHeader`; its showing report in
+  `_SessionsAiSetInUse`; `_SessionsAiNotePageShown`), `TerminalPage.AgentSidePanel.cpp` (the overlays beside `_sidePanelAiBtn`,
+  `_SidePanelAiReportShowing`, the calls in `_SidePanelSetAiMode`, `_SidePanelToggleCollapsed` and `_SidePanelAiAttach`, the
+  belt in `_SidePanelPeriodicTickImpl`), `TerminalPage.AgentEngine.cpp` (the detach in `~TerminalPage`), `TerminalPage.h`,
+  `TerminalAppLib.vcxproj` (the header), `tests/tests_sidepanel.cpp` (`TestAiToggleSignal`), `tests/m5_tests.{h,cpp}`.
   The `⋯` menu (§2i): `TerminalPage.AgentSidePanel.cpp` (the button and its lazily filled menu, `_SidePanelFillMoreMenu`,
   `_SidePanelRunMenuCommand`, `_SidePanelSetScope` in place of the scope toggle, `_SidePanelSetSort`, the menu's symbols
   and `kSidePanelOrderChoices`), `TerminalPage.h` (`_sidePanelMoreBtn` in place of the four button members, the

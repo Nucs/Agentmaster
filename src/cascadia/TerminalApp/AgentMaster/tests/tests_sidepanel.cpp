@@ -69,6 +69,13 @@
 // title, a two-digit item's indent, a reply of two paragraphs, code spans around backticks, no time, nothing to copy); and the
 // local time stamp's shape.
 //
+// TestAiToggleSignal pins the AI TOGGLES' SIGNALS (AgentMaster/AiToggleSignal.h, SIDE_PANEL.md section 2h "The AI toggle's
+// signals"; the user's request and picks of 2026-11-19): what the agent leaves waiting when a request ends (nothing while an AI
+// view shows the conversation or when the request was stopped; else answered or failed), the signal ONE toggle shows for all
+// 2 x 2 x 2 x 3 inputs (its own view, whether it can be seen, a running request, the waiting outcome) against an independent
+// statement, the user's scenes (cards on screen while a request runs; the answer landing unseen, then read; a collapsed panel;
+// a failed request), and the ItemStatus words the e2e driver reads.
+//
 // TestSidePanelPins pins the cards' PIN TO TOP (AgentMaster/SidePanelPins.h, SIDE_PANEL.md section 2j): the pins first, the
 // newest on top, the board's order for the rest; a pin again bringing a card back to the top on any clock; the comparator's
 // strict weak ordering; the stamp's edges; the pin a tab keeps when it switches conversation; the sessions.json key (apart
@@ -112,6 +119,7 @@
 
 #include "m5_tests.h"
 
+#include "../AiToggleSignal.h" // the AI toggles' signals: what a request's end leaves waiting, one toggle's signal (TestAiToggleSignal)
 #include "../KeyedListDiff.h"
 #include "../LauncherRules.h" // the launcher's kind token, shell choices, rows, folder and labels (TestLauncherRules)
 #include "../PointerCardPlacement.h" // the "+" launcher card's tooltip-like placement (TestPointerCardPlacement)
@@ -3532,4 +3540,99 @@ void TestSessionTitleEdit()
     CHECK(FirstSessionTitleLine(L"a\nb") == L"a" && FirstSessionTitleLine(L"a\r\nb") == L"a", "title header: the first line of an LF and a CR LF title");
     CHECK(FirstSessionTitleLine(L"one line") == L"one line" && FirstSessionTitleLine(L"").empty() && FirstSessionTitleLine(L"\rsecond").empty(),
           "title header: a one-line title whole, an empty one empty, a title that starts with a break has an empty first line");
+}
+
+// TestAiToggleSignal pins the AI TOGGLES' SIGNALS (AgentMaster/AiToggleSignal.h, SIDE_PANEL.md section 2h "The AI toggle's
+// signals"; see the file header).
+void TestAiToggleSignal()
+{
+    std::wprintf(L"AI toggle signals (AiToggleSignal.h, SIDE_PANEL.md section 2h):\n");
+    using Unseen = AiSearchUnseen;
+    using Signal = AiToggleSignal;
+
+    // --- what a request's end leaves waiting (the agent's rule, applied at the newest request's end) ---
+    {
+        CHECK(AiSearchUnseenAtTurnEnd(false, false, false) == Unseen::Answered, "turn end: answered while no view showed it - the answer waits");
+        CHECK(AiSearchUnseenAtTurnEnd(false, true, false) == Unseen::Failed, "turn end: failed while no view showed it - the failure waits");
+        CHECK(AiSearchUnseenAtTurnEnd(true, false, false) == Unseen::None, "turn end: a view showed the answer land - nothing waits (the user's pick: having one open counts as read)");
+        CHECK(AiSearchUnseenAtTurnEnd(true, true, false) == Unseen::None, "turn end: a view showed the failure land - nothing waits");
+        bool stoppedNeverWaits = true;
+        for (const bool showing : { false, true })
+        {
+            for (const bool error : { false, true })
+            {
+                stoppedNeverWaits = stoppedNeverWaits && AiSearchUnseenAtTurnEnd(showing, error, true) == Unseen::None;
+            }
+        }
+        CHECK(stoppedNeverWaits, "turn end: a stopped request (Esc in a request box, or replaced by a newer one) never leaves anything waiting");
+    }
+
+    // --- one toggle's signal: every input against the rule stated again ---
+    {
+        size_t combinations = 0;
+        size_t mismatches = 0;
+        for (const bool viewOn : { false, true })
+        {
+            for (const bool shown : { false, true })
+            {
+                for (const bool busy : { false, true })
+                {
+                    for (const Unseen unseen : { Unseen::None, Unseen::Answered, Unseen::Failed })
+                    {
+                        ++combinations;
+                        // In other words: a toggle SPEAKS only while its own view is off and someone can see it; then a running
+                        // request comes before a waiting outcome, and the outcome picks the color.
+                        const bool speaks = !viewOn && shown;
+                        Signal expected = Signal::Rest;
+                        if (speaks && busy)
+                        {
+                            expected = Signal::Running;
+                        }
+                        else if (speaks && unseen == Unseen::Answered)
+                        {
+                            expected = Signal::Answered;
+                        }
+                        else if (speaks && unseen == Unseen::Failed)
+                        {
+                            expected = Signal::Failed;
+                        }
+                        if (DecideAiToggleSignal(viewOn, shown, busy, unseen) != expected)
+                        {
+                            ++mismatches;
+                        }
+                    }
+                }
+            }
+        }
+        CHECK(combinations == 24 && mismatches == 0, "toggle signal: all 24 input combinations match the rule stated again");
+        CHECK(DecideAiToggleSignal(false, true, false, static_cast<Unseen>(77)) == Signal::Rest, "toggle signal: an unknown outcome value shows nothing");
+    }
+
+    // --- the user's scenes, in order ---
+    {
+        CHECK(DecideAiToggleSignal(false, true, true, Unseen::None) == Signal::Running, "scene: AI off, the cards on screen, a request runs - the toggle runs (the orbit)");
+        CHECK(DecideAiToggleSignal(true, true, true, Unseen::None) == Signal::Rest, "scene: AI on while a request runs - the strip moves, the toggle stays quiet");
+        const auto waiting = AiSearchUnseenAtTurnEnd(false, false, false);
+        CHECK(DecideAiToggleSignal(false, true, false, waiting) == Signal::Answered, "scene: the answer lands while every view is off - the toggle blinks green");
+        CHECK(DecideAiToggleSignal(false, false, false, waiting) == Signal::Rest, "scene: the panel collapsed (or a Sessions page over it) - its toggle animates nothing");
+        CHECK(DecideAiToggleSignal(false, true, false, waiting) == Signal::Answered, "scene: expanded again - the waiting answer still blinks (until you look)");
+        CHECK(DecideAiToggleSignal(true, true, false, waiting) == Signal::Rest, "scene: AI on - the toggle that blinked is quiet (and the agent clears the outcome everywhere)");
+        CHECK(DecideAiToggleSignal(false, true, false, Unseen::None) == Signal::Rest, "scene: AI off again after reading it - nothing waits, the toggle is plain");
+        CHECK(DecideAiToggleSignal(false, true, true, Unseen::Answered) == Signal::Running, "scene: a new request runs while an older answer waits - running wins");
+        CHECK(DecideAiToggleSignal(false, true, false, AiSearchUnseenAtTurnEnd(false, true, false)) == Signal::Failed, "scene: the request fails unseen - the toggle blinks red");
+    }
+
+    // --- the ItemStatus words: one spelling for both toggles (the e2e driver reads them) ---
+    {
+        CHECK(std::wstring{ AiToggleSignalStatus(Signal::Running) } == L"request running", "toggle status: running");
+        CHECK(std::wstring{ AiToggleSignalStatus(Signal::Answered) } == L"answer waiting", "toggle status: an answer waits");
+        CHECK(std::wstring{ AiToggleSignalStatus(Signal::Failed) } == L"failure waiting", "toggle status: a failure waits");
+        CHECK(std::wstring{ AiToggleSignalStatus(Signal::Rest) }.empty(), "toggle status: at rest the status is cleared");
+        const wchar_t* const unknown = AiToggleSignalStatus(static_cast<Signal>(77));
+        CHECK(unknown != nullptr && std::wstring{ unknown }.empty(), "toggle status: an unknown signal reads as rest, never null");
+    }
+
+    // The rules are constexpr: the look can never come from a table filled at run time.
+    static_assert(DecideAiToggleSignal(false, true, true, AiSearchUnseen::None) == AiToggleSignal::Running, "the toggle rule is a compile-time rule");
+    static_assert(AiSearchUnseenAtTurnEnd(false, true, false) == AiSearchUnseen::Failed, "the turn-end rule is a compile-time rule");
 }

@@ -3,8 +3,9 @@
 
 // Agentmaster (UI_THREAD.md §10a #1, §10i): AMBIENT animations on the Composition API — the looping,
 // decorative motions (the unsent-draft "3 dots" pulse on tab headers and on board / side-panel cards, the
-// spark crown's glow breath + rising embers on tab headers, and the AI search strip's "the agent is running"
-// breath + sweep bar) and the unread FLASH RING's blink on tab headers
+// spark crown's glow breath + rising embers on tab headers, the AI search strip's "the agent is running"
+// breath + sweep bar, and the AI toggles' signals — a light orbiting the toggle while a request runs, its outline
+// blinking with the flash rings while an answer waits) and the unread FLASH RING's blink on tab headers
 // run as Windows.UI.Composition animations, never as XAML storyboards or as a timer that flips a XAML property.
 // Since SIDE_PANEL.md §2g the side panel's cards carry the tab's whole status icon (AgentStatusGlyph), so the
 // crown and the ring's blink run on those cards too — through these same classes, with the same parameters.
@@ -59,6 +60,8 @@
 #include <array>
 #include <chrono>
 #include <vector>
+
+#include "AgentMaster/AiToggleSignal.h" // ::Agentmaster::AiToggleSignal — the look AgentAiToggleSignal::Show draws (pure, tiny)
 
 namespace winrt::TerminalApp::implementation
 {
@@ -509,5 +512,196 @@ namespace winrt::TerminalApp::implementation
         // The sweep bar and whether the motion is switched on (the last SetRunning value).
         AgentSweepBar _sweep;
         bool _running{ false };
+    };
+
+    // ===== The AI toggles' signals (SIDE_PANEL.md §2h "The AI toggle's signals", SESSIONS.md §9.1) ===========================
+    // The user's picks of 2026-11-19, from live mock-ups of five running motions and four "done" signals: while a request of
+    // the AI search runs and a toggle's own AI view is OFF (the cards / the plain list show), a short blue light with a fading
+    // tail ORBITS the toggle's rounded outline and its letters turn the working blue; when the request ended while no AI view
+    // showed the conversation, the toggle's OUTLINE BLINKS in step with the unread tabs' flash rings (the same clock,
+    // AgentLockstepBlink) — green answered, red failed — and its letters take the outcome's ink, until any AI view shows the
+    // conversation. The rules of WHEN are pure (AgentMaster/AiToggleSignal.h); these classes only draw. The side panel's toggle
+    // and the Sessions page's share them, so the two cannot drift apart.
+
+    // The orbit: one lap of the outline per kAgentOrbitLightCycle. The light is a HEAD of kAgentOrbitLightHeadShare of the
+    // outline's length at full strength over a TAIL of kAgentOrbitLightTailShare at kAgentOrbitLightTailOpacity, both ending at
+    // the same front, kAgentOrbitLightStroke DIPs wide with round ends — the mock-up's numbers, unchanged.
+    inline constexpr std::chrono::milliseconds kAgentOrbitLightCycle{ 1200 };
+    inline constexpr float kAgentOrbitLightHeadShare = 0.22f;
+    inline constexpr float kAgentOrbitLightTailShare = 0.40f;
+    inline constexpr float kAgentOrbitLightTailOpacity = 0.35f;
+    inline constexpr float kAgentOrbitLightStroke = 1.5f;
+
+    // The ORBITING LIGHT as composition visuals of our own on a host XAML element (ElementCompositionPreview::
+    // SetElementChildVisual) — the AgentSweepBar idiom: the light moves, and XAML would follow a moving XAML element on every
+    // frame (see the file header); XAML never sees these.
+    //   - HOW IT MOVES: two strokes of the same rounded-rectangle path (the tail, then the head over it), each TRIMMED to its
+    //     share of the path (TrimStart 0, TrimEnd = the share). Their TrimOffset follows one "Progress" scalar that a linear
+    //     loop runs 0 -> 1 forever (head = Progress, tail = Progress + 1 - (tail - head), so both end at the same front): the
+    //     trimmed window slides along the path. Composition takes the window modulo 1, so it passes the path's start point
+    //     without a seam and an offset past 1 is the same window again (WinUI's rule, which Uno's Composition mirrors).
+    //   - Built on the first Start() (a window whose AI search never runs builds nothing); hidden (IsVisible false) while
+    //     stopped. UI thread only.
+    // ⚠ The host must be EXACTLY the outline's size and hold no other child visual (SetElementChildVisual replaces it).
+    class AgentOrbitLight
+    {
+    public:
+        // An inert light: SetColor / Start / Stop do nothing until a real one is assigned over it. Exists so an owner can
+        // declare the member before its XAML elements exist.
+        AgentOrbitLight() = default;
+
+        // Parameters:
+        //   host         - the XAML element the light draws on: an overlay exactly over the outline it orbits (the toggle's
+        //                  size and place), hit-test invisible. It also supplies the compositor while the thread has none cached
+        //                  (so it must not be an element whose UIElement properties are animated: AgentCompositorOf). Held
+        //                  strongly: its owner's tree holds it anyway.
+        //   width/height - the outline's size in DIPs (the toggle's); a negative or NaN value counts as 0 (nothing drawn).
+        //   cornerRadius - the outline's corner radius in DIPs (the toggle's CornerRadius); the stroke's OUTER edge follows it.
+        AgentOrbitLight(winrt::Windows::UI::Xaml::UIElement host, float width, float height, float cornerRadius);
+
+        // Set the light's color (the head's; the tail is the same color at kAgentOrbitLightTailOpacity). Kept and applied when
+        // the visuals are built; applied at once when they exist. Never throws: a refused color is logged (Rule #18) and the
+        // light keeps its previous color.
+        // Parameters: color - the light's color (opaque: its alpha is the head's).
+        void SetColor(const winrt::Windows::UI::Color& color) noexcept;
+
+        // Start (or restart) the orbit, building the visuals on the first call: the light shows and runs. A restart jumps it
+        // back to the path's start, so the owner starts only on a real change (AgentAiToggleSignal keeps the flag).
+        // Throws winrt::hresult_error when XAML or Composition refuses (a torn-down host); a later Start() retries the build.
+        void Start();
+
+        // Stop the orbit and hide the light (the visual is made invisible and both trims put back at their start, so the next
+        // Start() begins a clean lap). Safe when never started and twice in a row.
+        // Throws winrt::hresult_error when Composition refuses (a visual already closed).
+        void Stop();
+
+    private:
+        // Build the two brushes, the two trimmed paths and their shapes, the shape visual, the travel property set, the
+        // progress loop and the two offset expressions, and attach the visual to the host. Throws winrt::hresult_error on
+        // refusal; nothing half-built is kept (the next call retries the whole build).
+        void _Build();
+
+        // The XAML element the light draws on; null for an inert light.
+        winrt::Windows::UI::Xaml::UIElement _host{ nullptr };
+        // The outline's size and corner radius in DIPs, as given (sanitized by _Build).
+        float _width{ 0.0f };
+        float _height{ 0.0f };
+        float _cornerRadius{ 0.0f };
+        // The shape visual attached to the host (invisible while stopped); null until built.
+        winrt::Windows::UI::Composition::ShapeVisual _visual{ nullptr };
+        // The head's and the tail's strokes (the tail's is the head's color at kAgentOrbitLightTailOpacity), kept so SetColor
+        // recolors them in place.
+        winrt::Windows::UI::Composition::CompositionColorBrush _headBrush{ nullptr };
+        winrt::Windows::UI::Composition::CompositionColorBrush _tailBrush{ nullptr };
+        // The two trimmed paths whose TrimOffset slides (a geometry carries its own trim, so each stroke has its own path).
+        winrt::Windows::UI::Composition::CompositionGeometry _headPath{ nullptr };
+        winrt::Windows::UI::Composition::CompositionGeometry _tailPath{ nullptr };
+        // The "Progress" scalar both offsets read, the loop that runs it, and the two expressions (one object each; Composition
+        // copies an animation when it starts it).
+        winrt::Windows::UI::Composition::CompositionPropertySet _travel{ nullptr };
+        winrt::Windows::UI::Composition::ScalarKeyFrameAnimation _progress{ nullptr };
+        winrt::Windows::UI::Composition::ExpressionAnimation _headOffset{ nullptr };
+        winrt::Windows::UI::Composition::ExpressionAnimation _tailOffset{ nullptr };
+        // The light's color; the strips' working blue until the owner's SetColor.
+        winrt::Windows::UI::Color _color{ 0xFF, 0x4E, 0xA1, 0xFF };
+    };
+
+    // The "done" outline's geometry, one for both toggles (the mock-up's ring): this many DIPs larger than the toggle on every
+    // side, this thick (a Border draws its border INSIDE its bounds, so the stroke straddles the toggle's own edge: half a DIP
+    // over it, one DIP outside it), and this round (the toggle's 3 DIP corner, grown by the same DIP).
+    inline constexpr double kAgentAiToggleOutlineGrow = 1.0;
+    inline constexpr double kAgentAiToggleOutlineThickness = 1.5;
+    inline constexpr double kAgentAiToggleOutlineRadius = 4.0;
+
+    // The two overlays of an AI toggle (AgentMakeAiToggleOverlays): the orbit's host and the "done" outline.
+    struct AgentAiToggleOverlays
+    {
+        // Exactly the toggle's size and place; no background; the orbit draws on it (AgentOrbitLight's host).
+        winrt::Windows::UI::Xaml::Controls::Border orbitHost{ nullptr };
+        // kAgentAiToggleOutlineGrow larger than the toggle on every side, centered on it, Collapsed at rest (AgentAiToggleSignal
+        // shows, colors and blinks it). Its Opacity stays at the default 1.0 (AgentLockstepBlink owns it while it blinks).
+        winrt::Windows::UI::Xaml::Controls::Border outline{ nullptr };
+    };
+
+    // Build the two overlays of an AI toggle, for an owner that appends them to the toggle's own grid cell AFTER the toggle (so
+    // they draw over it) and gives them the toggle's row / column / span: both get the toggle's alignment and a margin that
+    // centers them on it, and neither takes the pointer (IsHitTestVisible false: clicks, hover and the tooltip stay the
+    // toggle's and the box's). Both are childless Borders without a corner-radiused child, so they add no composition node of
+    // their own until the orbit attaches its visual (UI_THREAD.md: a rounded element WITH children is a node every frame walks).
+    // Parameters:
+    //   toggleWidth / toggleHeight - the toggle's fixed size in DIPs.
+    //   toggleMargin               - the toggle's Margin (the inset from the box's edge it is aligned to).
+    //   horizontal / vertical      - the toggle's alignments in the cell.
+    // Returns: the overlays, not in any tree yet. Throws what XAML throws (hresult_error), std::bad_alloc.
+    AgentAiToggleOverlays AgentMakeAiToggleOverlays(double toggleWidth,
+                                                    double toggleHeight,
+                                                    const winrt::Windows::UI::Xaml::Thickness& toggleMargin,
+                                                    winrt::Windows::UI::Xaml::HorizontalAlignment horizontal,
+                                                    winrt::Windows::UI::Xaml::VerticalAlignment vertical);
+
+    // The whole signal of ONE AI toggle behind one switch (Show): the orbit (an AgentOrbitLight on an overlay of the toggle), the
+    // "done" outline (a childless rounded Border around the toggle, blinking through an AgentLockstepBlink: the unread rings'
+    // clock), and the letters' color (the toggle's LOCAL Foreground, which only the toggle's rest state shows — the stock hover,
+    // pressed and checked states keep their own ink). The owner decides the signal on every repaint (DecideAiToggleSignal) and
+    // calls Show; this object acts on changes only, so calling it on every agent event costs a compare.
+    // UI thread only (the thread that owns the elements), except the destructor (AgentLockstepBlink's off-thread release).
+    class AgentAiToggleSignal
+    {
+    public:
+        // An inert signal: Show does nothing until a real one is assigned over it. Exists so an owner can declare the member
+        // before its XAML elements exist.
+        AgentAiToggleSignal() = default;
+
+        // Parameters:
+        //   toggle       - the AI ToggleButton (any Control): its Foreground is set while a signal shows and CLEARED at rest.
+        //   orbitHost    - an element exactly over the toggle (same size and place), hit-test invisible, holding no child
+        //                  visual: the orbit draws on it, and it anchors the blink (an element that is not the outline).
+        //   outline      - a childless rounded Border one DIP larger than the toggle on every side, centered on it, hit-test
+        //                  invisible and Collapsed at rest. ⚠ Its XAML Opacity must stay at the default 1.0 and be set by
+        //                  nothing else (AgentLockstepBlink: a static Opacity set would end the blink).
+        //   width/height - the toggle's size in DIPs (the orbit's outline).
+        //   cornerRadius - the toggle's corner radius in DIPs.
+        // Throws std::bad_alloc only; nothing composition-side exists until the first Show of a running request.
+        AgentAiToggleSignal(winrt::Windows::UI::Xaml::Controls::Control toggle,
+                            winrt::Windows::UI::Xaml::UIElement orbitHost,
+                            winrt::Windows::UI::Xaml::Controls::Border outline,
+                            float width,
+                            float height,
+                            float cornerRadius);
+
+        // Not copyable (the blink holds the clock exactly once); movable, so an owner can assign a built one over its inert
+        // member.
+        AgentAiToggleSignal(const AgentAiToggleSignal&) = delete;
+        AgentAiToggleSignal& operator=(const AgentAiToggleSignal&) = delete;
+        AgentAiToggleSignal(AgentAiToggleSignal&&) noexcept = default;
+        AgentAiToggleSignal& operator=(AgentAiToggleSignal&&) noexcept = default;
+
+        // Show `signal`: Running = blue letters + the orbit; Answered / Failed = the outline in green / red joining the unread
+        // rings' blink + the outcome's ink on the letters; Rest = the plain toggle (orbit stopped, outline stopped and
+        // collapsed, the letters' local color cleared). Acts on changes only.
+        // Parameters: look - the signal to show (DecideAiToggleSignal).
+        // Never throws: each of the three parts is tried on its own and a refusal is logged (Rule #18); the signal is recorded
+        // first, so a refused part is retried at the next CHANGE, never on every repaint.
+        void Show(::Agentmaster::AiToggleSignal look) noexcept;
+
+        // The signal on screen now (Rest for an inert signal). Never throws.
+        ::Agentmaster::AiToggleSignal Shown() const noexcept
+        {
+            return _shown;
+        }
+
+    private:
+        // The toggle whose letters take the signal's ink; null for an inert signal.
+        winrt::Windows::UI::Xaml::Controls::Control _toggle{ nullptr };
+        // The "done" outline, colored per outcome and blinking.
+        winrt::Windows::UI::Xaml::Controls::Border _outline{ nullptr };
+        // The orbit on the overlay, and whether it runs now.
+        AgentOrbitLight _orbit;
+        bool _orbiting{ false };
+        // The outline's lockstep blink, and whether it follows the clock now.
+        AgentLockstepBlink _blink;
+        bool _blinking{ false };
+        // The signal shown now.
+        ::Agentmaster::AiToggleSignal _shown{ ::Agentmaster::AiToggleSignal::Rest };
     };
 }

@@ -561,7 +561,9 @@ differs from the plan above, and why:
   the tree order need not follow the screen: read the line's order from screen positions (the driver's
   `header_buttons`);
   the side panel's AI search (SIDE_PANEL.md §2h; in dev 0.0.1.42 and production 0.8.0.9): `am.side.ai` (the filter box's
-  AI toggle, named by its "AI"), `am.side.ai.{status,thinking,reset}` (the strip's text, the thinking toggle, ⊘ — named
+  AI toggle, named by its "AI"; with its view off, its ItemStatus is the toggle's signal — "request running", "answer
+  waiting", "failure waiting", none at rest — 2026-11-19, NOT BUILT; the Sessions page's AI toggle carries the same words),
+  `am.side.ai.{status,thinking,reset}` (the strip's text, the thinking toggle, ⊘ — named
   "New conversation"), `am.side.ai.copy` (2026-11-10, NOT BUILT: the copy button under ⊘, named "Copy the conversation";
   disabled, like ⊘, until the conversation has a request), `am.side.ai.busy` (2026-11-05, NOT BUILT: the strip's
   loading icon, named "The AI search is working" — in the tree only while it shows, i.e. while a request runs or the

@@ -939,6 +939,9 @@ namespace Agentmaster
         {
             uint64_t token{};
             Listener fn;
+            // The surface behind this listener shows the conversation now (SetListenerShowing): its AI view is on and on
+            // screen. Read when a request ends (AnyListenerShowingLocked): with none set, its outcome waits for the user.
+            bool showing{ false };
         };
         std::vector<ListenerEntry> listeners;
         uint64_t nextListenerToken{ 1 };
@@ -1004,6 +1007,22 @@ namespace Agentmaster
                 narration.resize(keep);
                 narration += L"...";
             }
+        }
+
+        /// <summary>Whether any listener's surface shows the conversation now (ListenerEntry::showing): the user would see a
+        /// request's answer land, so it does not wait for them (AiSearchUnseenAtTurnEnd).</summary>
+        /// <returns>True when at least one registered listener reported showing.</returns>
+        /// <remarks>The caller holds `mutex`. Never throws.</remarks>
+        bool AnyListenerShowingLocked() const noexcept
+        {
+            for (const auto& l : listeners)
+            {
+                if (l.showing)
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         // Tell every listener. Fills e.snapshot. Never throws: a listener that throws is logged.
@@ -1216,6 +1235,9 @@ namespace Agentmaster
             e.turn = h.turn;
             bool notify = false;
             bool save = false;
+            // The outcome the newest request's end left WAITING for the user (snapshot.unseen), for the [ai-search] line written
+            // after the lock (None for every other event, and for an end some view showed).
+            AiSearchUnseen unseenAtEnd = AiSearchUnseen::None;
             // A process that just came up (or answered its first turn) has reported the model's
             // effort levels: the page's thinking toggle offers only those. Read before our lock:
             // the inventory takes the conversation's own lock, and the conversation calls this
@@ -1295,6 +1317,11 @@ namespace Agentmaster
                     snapshot.activity.clear();
                     snapshot.answerIsError = h.isError;
                     snapshot.answer = !h.text.empty() ? h.text : (h.interrupted ? std::wstring{ L"Stopped." } : std::wstring{});
+                    // THE AI TOGGLES' "DONE" SIGNAL (SIDE_PANEL.md §2h "The AI toggle's signals"): decided HERE, with the end
+                    // itself, so the end event already carries it and no window shows a signal that another window's view
+                    // takes back a moment later. A surface that shows the conversation now saw the answer land: nothing waits.
+                    snapshot.unseen = AiSearchUnseenAtTurnEnd(AnyListenerShowingLocked(), h.isError, h.interrupted);
+                    unseenAtEnd = snapshot.unseen;
                     e.kind = h.isError ? SessionSearchEventKind::Failed : SessionSearchEventKind::Answer;
                     e.text = snapshot.answer;
                     notify = true;
@@ -1326,6 +1353,13 @@ namespace Agentmaster
                 default:
                     break;
                 }
+            }
+            // One hooks.log line when an end leaves its outcome waiting: a live check reads "the toggles signal it" next to the
+            // request's own lines, and "the answer was seen" (SetListenerShowing) when a view takes it back. Never throws.
+            if (unseenAtEnd != AiSearchUnseen::None)
+            {
+                LogAgent(std::wstring{ unseenAtEnd == AiSearchUnseen::Failed ? L"the request failed" : L"the request was answered" } +
+                         L" while no AI view showed the conversation: every AI toggle signals it until a view shows it");
             }
             // The conversation log (debug mode): the narration first — it was written BEFORE the call it precedes — then the
             // event itself (the log keeps only the kinds it records: calls, results, ends, process starts, compactions,
@@ -1510,6 +1544,53 @@ namespace Agentmaster
         }
     }
 
+    void SessionSearchAgent::SetListenerShowing(uint64_t token, bool showing) noexcept
+    {
+        if (token == 0)
+        {
+            return;
+        }
+        try
+        {
+            bool seen = false; // this call read the waiting answer: tell every listener, outside the lock
+            {
+                std::lock_guard lock{ _impl->mutex };
+                bool registered = false;
+                for (auto& l : _impl->listeners)
+                {
+                    if (l.token == token)
+                    {
+                        l.showing = showing;
+                        registered = true;
+                        break;
+                    }
+                }
+                // Only a REGISTERED listener stands for a view: a stale token (its window closed meanwhile) must never read
+                // the answer for a user who did not see it.
+                if (registered && showing && _impl->snapshot.unseen != AiSearchUnseen::None)
+                {
+                    _impl->snapshot.unseen = AiSearchUnseen::None;
+                    seen = true;
+                }
+            }
+            if (seen)
+            {
+                LogAgent(L"the waiting answer was seen (an AI view shows the conversation): the AI toggles stop signaling it");
+                // StateChanged, like a thinking-level change: every surface repaints from the snapshot, which now says nothing
+                // waits — so every window's toggles stop blinking in the same pass.
+                SessionSearchEvent e;
+                e.kind = SessionSearchEventKind::StateChanged;
+                _impl->Notify(std::move(e));
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the flag keeps the value it had (the lock_guard released the mutex); the owner reports its
+            // view again at its next change, and the answer keeps waiting until then.
+            LogSwallowedException(L"SessionSearchAgent::SetListenerShowing");
+        }
+    }
+
     void SessionSearchAgent::SetClaudeExePath(std::wstring path)
     {
         std::lock_guard lock{ _impl->mutex };
@@ -1541,6 +1622,9 @@ namespace Agentmaster
             _impl->snapshot.question = text;
             _impl->snapshot.answer.clear();
             _impl->snapshot.answerIsError = false;
+            // A new request supersedes the answer that waited to be read: the AI toggles show it running instead (SIDE_PANEL.md
+            // §2h "The AI toggle's signals"), and its own end decides again whether anything waits.
+            _impl->snapshot.unseen = AiSearchUnseen::None;
             _impl->snapshot.activity = L"Thinking\x2026";
             // A new request: its own plan, and the window it came from (the tabs server's asked_from).
             _impl->snapshot.narration.clear();
@@ -1753,6 +1837,19 @@ namespace Agentmaster
         return _impl->keeper ? _impl->keeper->Status() : SessionIndexStatus{};
     }
 
+    namespace
+    {
+        // The process's one agent once SharedSessionSearchAgent() has built it — what SharedSessionSearchAgentIfCreated hands
+        // out without creating it. Stored once, right after the construction returned (release), read with acquire, so a
+        // reader on any thread sees a whole agent or null, never one half built. The agent is never destroyed.
+        std::atomic<SessionSearchAgent*> g_sharedSessionSearchAgent{ nullptr };
+    }
+
+    SessionSearchAgent* SharedSessionSearchAgentIfCreated() noexcept
+    {
+        return g_sharedSessionSearchAgent.load(std::memory_order_acquire);
+    }
+
     SessionSearchAgent& SharedSessionSearchAgent()
     {
         // Leaked on purpose (see the header). A function-local static: created once, thread-safe.
@@ -1816,7 +1913,11 @@ namespace Agentmaster
                 }
                 return open;
             };
-            return new SessionSearchAgent{ std::move(options) };
+            auto* const created = new SessionSearchAgent{ std::move(options) };
+            // Published only now, whole (SharedSessionSearchAgentIfCreated): the windows whose AI toggles follow the
+            // conversation without ever creating it attach their listeners from here on (SIDE_PANEL.md §2h).
+            g_sharedSessionSearchAgent.store(created, std::memory_order_release);
+            return created;
         }();
         return *agent;
     }

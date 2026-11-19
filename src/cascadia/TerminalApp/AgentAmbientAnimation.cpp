@@ -14,7 +14,11 @@
 //   * AgentLockstepBlink                     — the flash ring's blink, every ring following ONE shared clock;
 //   * AgentEmberSparks                       — the spark crown's rising embers, as composition visuals;
 //   * AgentSweepBar                          — the AI search strip's sweeping light, as composition visuals;
-//   * AgentWorkingIndicator                  — that light plus the strip's breathing dot, behind one switch.
+//   * AgentWorkingIndicator                  — that light plus the strip's breathing dot, behind one switch;
+//   * AgentOrbitLight                        — the AI toggle's light orbiting its outline (two trimmed strokes whose
+//                                              TrimOffset slides), as composition visuals;
+//   * AgentAiToggleSignal                    — that orbit, the toggle's "done" outline blinking on the flash rings' clock,
+//                                              and the letters' ink, behind one switch.
 #include "pch.h"
 #include "AgentAmbientAnimation.h"
 
@@ -809,6 +813,325 @@ namespace winrt::TerminalApp::implementation
         catch (...)
         {
             ::Agentmaster::AgentLogCaughtException(L"AgentWorkingIndicator: the dot's breath");
+        }
+    }
+
+    // ===== The AI toggles' signals (SIDE_PANEL.md §2h "The AI toggle's signals"; the declarations explain the design) =========
+
+    namespace
+    {
+        // The signals' colors — the AI strips' own, so a toggle and a strip say the same thing in the same color: the working
+        // blue (the strip's busy dot and sweep), the answered green and the failed red (the strip dot's), each outcome with a
+        // lighter ink for the 10 px letters (the darker stroke colors read as muddy on a glyph that small, on the box's fill).
+        constexpr winrt::Windows::UI::Color kAiToggleWorking{ 0xFF, 0x4E, 0xA1, 0xFF };
+        constexpr winrt::Windows::UI::Color kAiToggleAnswered{ 0xFF, 0x5C, 0xB8, 0x5C };
+        constexpr winrt::Windows::UI::Color kAiToggleAnsweredInk{ 0xFF, 0x86, 0xDC, 0x86 };
+        constexpr winrt::Windows::UI::Color kAiToggleFailed{ 0xFF, 0xE5, 0x53, 0x3D };
+        constexpr winrt::Windows::UI::Color kAiToggleFailedInk{ 0xFF, 0xFF, 0x8F, 0x7D };
+
+        // The tail's TrimOffset lead over the head's, modulo 1: the tail window [P + lag, P + lag + tail] wraps to
+        // [P - (tail - head), P + head] — it ends exactly where the head ends, and reaches back behind it.
+        constexpr float kOrbitTailLag = 1.0f - (kAgentOrbitLightTailShare - kAgentOrbitLightHeadShare);
+
+        // The tail's stroke color: the head's at kAgentOrbitLightTailOpacity of its alpha (a sprite shape has no Opacity of
+        // its own, so the dimming is in the brush).
+        // Parameters: color - the head's color.
+        // Returns: the same color with the scaled alpha (rounded). Never throws.
+        winrt::Windows::UI::Color OrbitTailColor(const winrt::Windows::UI::Color& color) noexcept
+        {
+            return { static_cast<uint8_t>(static_cast<float>(color.A) * kAgentOrbitLightTailOpacity + 0.5f), color.R, color.G, color.B };
+        }
+    }
+
+    AgentOrbitLight::AgentOrbitLight(winrt::Windows::UI::Xaml::UIElement host, float width, float height, float cornerRadius) :
+        _host{ std::move(host) },
+        _width{ width },
+        _height{ height },
+        _cornerRadius{ cornerRadius }
+    {
+    }
+
+    void AgentOrbitLight::SetColor(const winrt::Windows::UI::Color& color) noexcept
+    {
+        try
+        {
+            _color = color;
+            if (_headBrush)
+            {
+                // Both strokes follow: the tail is the head's color, dimmed.
+                _headBrush.Color(color);
+                _tailBrush.Color(OrbitTailColor(color));
+            }
+        }
+        catch (...)
+        {
+            // The light keeps its previous color; the next SetColor retries (Rule #18: logged).
+            ::Agentmaster::AgentLogCaughtException(L"AgentOrbitLight::SetColor");
+        }
+    }
+
+    void AgentOrbitLight::_Build()
+    {
+        // The thread's cached compositor; the host is asked only by the thread's first animation.
+        const auto compositor = AgentCompositorOf(_host);
+        // `!(x > 0)` also catches NaN, which a comparison with 0 alone would hand to Composition.
+        const float width = !(_width > 0.0f) ? 0.0f : _width;
+        const float height = !(_height > 0.0f) ? 0.0f : _height;
+        const float cornerRadius = !(_cornerRadius > 0.0f) ? 0.0f : _cornerRadius;
+        // The path runs along the MIDDLE of the stroke, half a stroke inside the outline, so the whole stroke lies inside the
+        // toggle and its outer edge follows the toggle's own corner radius (the path's radius is that much smaller).
+        const float inset = kAgentOrbitLightStroke / 2.0f;
+        const float pathWidth = width > kAgentOrbitLightStroke ? width - kAgentOrbitLightStroke : 0.0f;
+        const float pathHeight = height > kAgentOrbitLightStroke ? height - kAgentOrbitLightStroke : 0.0f;
+        const float pathRadius = cornerRadius > inset ? cornerRadius - inset : 0.0f;
+        const auto makePath = [&](float share) {
+            auto path = compositor.CreateRoundedRectangleGeometry();
+            path.Offset({ inset, inset });
+            path.Size({ pathWidth, pathHeight });
+            path.CornerRadius({ pathRadius, pathRadius });
+            // Both ends STATED: WinUI reads an untouched TrimEnd as 1 (the whole path), and the window must be exactly
+            // [0, share] for the offsets to place it.
+            path.TrimStart(0.0f);
+            path.TrimEnd(share);
+            return path;
+        };
+        const auto makeStroke = [&](const WUC::CompositionGeometry& path, const WUC::CompositionColorBrush& brush) {
+            auto shape = compositor.CreateSpriteShape(path);
+            shape.StrokeBrush(brush);
+            shape.StrokeThickness(kAgentOrbitLightStroke);
+            // Round ends: the mock-up's light, a soft head instead of a cut-off bar.
+            shape.StrokeStartCap(WUC::CompositionStrokeCap::Round);
+            shape.StrokeEndCap(WUC::CompositionStrokeCap::Round);
+            return shape;
+        };
+        WUC::CompositionGeometry headPath = makePath(kAgentOrbitLightHeadShare);
+        WUC::CompositionGeometry tailPath = makePath(kAgentOrbitLightTailShare);
+        auto headBrush = compositor.CreateColorBrush(_color);
+        auto tailBrush = compositor.CreateColorBrush(OrbitTailColor(_color));
+
+        auto visual = compositor.CreateShapeVisual();
+        visual.Size({ width, height });
+        visual.Shapes().Append(makeStroke(tailPath, tailBrush)); // the tail first: the head draws over its front part
+        visual.Shapes().Append(makeStroke(headPath, headBrush));
+        visual.IsVisible(false); // shown by Start()
+
+        // The travel: "Progress" runs 0 -> 1 linearly and starts over at once — the window slides once around the path and,
+        // taken modulo 1, lands exactly where it began, so the cycles join without a seam.
+        auto travel = compositor.CreatePropertySet();
+        travel.InsertScalar(L"Progress", 0.0f);
+        auto progress = AgentMakeScalarLoop(compositor, { { 0.0f, 0.0f }, { 1.0f, 1.0f } }, kAgentOrbitLightCycle, std::chrono::milliseconds{ 0 }, nullptr);
+        auto headOffset = compositor.CreateExpressionAnimation(L"travel.Progress");
+        headOffset.SetReferenceParameter(L"travel", travel);
+        auto tailOffset = compositor.CreateExpressionAnimation(L"travel.Progress + lag");
+        tailOffset.SetReferenceParameter(L"travel", travel);
+        tailOffset.SetScalarParameter(L"lag", kOrbitTailLag);
+        // The stopped look the paths start in (Stop() puts them back here).
+        headPath.TrimOffset(0.0f);
+        tailPath.TrimOffset(kOrbitTailLag);
+
+        // Attach last, and keep the pieces only once everything is built: a refusal part-way leaves this object unbuilt, so
+        // the next Start() retries the whole build instead of using half of one.
+        winrt::Windows::UI::Xaml::Hosting::ElementCompositionPreview::SetElementChildVisual(_host, visual);
+        _visual = std::move(visual);
+        _headBrush = std::move(headBrush);
+        _tailBrush = std::move(tailBrush);
+        _headPath = std::move(headPath);
+        _tailPath = std::move(tailPath);
+        _travel = std::move(travel);
+        _progress = std::move(progress);
+        _headOffset = std::move(headOffset);
+        _tailOffset = std::move(tailOffset);
+    }
+
+    void AgentOrbitLight::Start()
+    {
+        if (!_host)
+        {
+            return; // inert
+        }
+        if (!_visual)
+        {
+            _Build(); // the first request this toggle signals: build its light now, never before
+        }
+        _visual.IsVisible(true);
+        // Property-set and geometry animations on objects XAML does not know about: no UI-thread work per frame. The loop
+        // first, so the expressions' first frame already reads a running "Progress".
+        _travel.StartAnimation(L"Progress", _progress);
+        _headPath.StartAnimation(L"TrimOffset", _headOffset);
+        _tailPath.StartAnimation(L"TrimOffset", _tailOffset);
+    }
+
+    void AgentOrbitLight::Stop()
+    {
+        if (!_visual)
+        {
+            return; // never built: nothing runs
+        }
+        _headPath.StopAnimation(L"TrimOffset");
+        _tailPath.StopAnimation(L"TrimOffset");
+        _travel.StopAnimation(L"Progress");
+        // Our own objects, so the resting state is set outright: hidden, both windows back at the path's start, "Progress" at
+        // 0 — the next Start() begins a clean lap.
+        _visual.IsVisible(false);
+        _travel.InsertScalar(L"Progress", 0.0f);
+        _headPath.TrimOffset(0.0f);
+        _tailPath.TrimOffset(kOrbitTailLag);
+    }
+
+    AgentAiToggleOverlays AgentMakeAiToggleOverlays(double toggleWidth,
+                                                    double toggleHeight,
+                                                    const winrt::Windows::UI::Xaml::Thickness& toggleMargin,
+                                                    winrt::Windows::UI::Xaml::HorizontalAlignment horizontal,
+                                                    winrt::Windows::UI::Xaml::VerticalAlignment vertical)
+    {
+        using winrt::Windows::UI::Xaml::Controls::Border;
+        AgentAiToggleOverlays overlays;
+
+        // The orbit's host: the toggle's own box, so the light's path (AgentOrbitLight's width / height) IS the toggle's outline.
+        Border host;
+        host.Width(toggleWidth);
+        host.Height(toggleHeight);
+        host.Margin(toggleMargin);
+        host.HorizontalAlignment(horizontal);
+        host.VerticalAlignment(vertical);
+        host.IsHitTestVisible(false);
+        overlays.orbitHost = host;
+
+        // The outline: grown on every side, and every side's margin shrunk by the same amount, which keeps its center on the
+        // toggle's for every alignment — an aligned edge moves out by `grow` (Right: the right margin), a centered axis grows
+        // equally at both ends, and the margin on an unaligned side only widens the slot it is placed in.
+        const double grow = kAgentAiToggleOutlineGrow;
+        winrt::Windows::UI::Xaml::Thickness margin = toggleMargin;
+        margin.Left -= grow;
+        margin.Right -= grow;
+        margin.Top -= grow;
+        margin.Bottom -= grow;
+        Border outline;
+        outline.Width(toggleWidth + 2.0 * grow);
+        outline.Height(toggleHeight + 2.0 * grow);
+        outline.Margin(margin);
+        outline.HorizontalAlignment(horizontal);
+        outline.VerticalAlignment(vertical);
+        outline.BorderThickness(winrt::Windows::UI::Xaml::ThicknessHelper::FromUniformLength(kAgentAiToggleOutlineThickness));
+        outline.CornerRadius(winrt::Windows::UI::Xaml::CornerRadiusHelper::FromUniformRadius(kAgentAiToggleOutlineRadius));
+        outline.IsHitTestVisible(false);
+        outline.Visibility(winrt::Windows::UI::Xaml::Visibility::Collapsed); // shown only while an answer waits (Show)
+        overlays.outline = outline;
+        return overlays;
+    }
+
+    AgentAiToggleSignal::AgentAiToggleSignal(winrt::Windows::UI::Xaml::Controls::Control toggle,
+                                             winrt::Windows::UI::Xaml::UIElement orbitHost,
+                                             winrt::Windows::UI::Xaml::Controls::Border outline,
+                                             float width,
+                                             float height,
+                                             float cornerRadius) :
+        _toggle{ std::move(toggle) },
+        _outline{ outline },
+        _orbit{ orbitHost, width, height, cornerRadius },
+        // The blink's anchor is the orbit host: an element of the same thread that is NOT the outline (AgentCompositorOf),
+        // held weakly by the blink.
+        _blink{ orbitHost, std::move(outline) }
+    {
+        _orbit.SetColor(kAiToggleWorking); // kept until the light is built (never throws)
+    }
+
+    void AgentAiToggleSignal::Show(::Agentmaster::AiToggleSignal look) noexcept
+    {
+        using ::Agentmaster::AiToggleSignal;
+        using winrt::Windows::UI::Xaml::Visibility;
+        if (!_toggle || look == _shown)
+        {
+            return; // inert, or nothing changed: a repaint per agent event costs this compare
+        }
+        // Recorded FIRST: a part that is refused below is retried at the next change, never on every repaint.
+        _shown = look;
+        const bool orbit = look == AiToggleSignal::Running;
+        const bool outcome = look == AiToggleSignal::Answered || look == AiToggleSignal::Failed;
+
+        // THE ORBIT — on the edges of Running only (a restart would jump the light back to the path's start). The flag is
+        // taken first, so a refused start is answered by the next change's Stop (safe on a light that never ran).
+        if (orbit != _orbiting)
+        {
+            _orbiting = orbit;
+            try
+            {
+                if (orbit)
+                {
+                    _orbit.Start();
+                }
+                else
+                {
+                    _orbit.Stop();
+                }
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(orbit ? L"AgentAiToggleSignal: start the orbit" : L"AgentAiToggleSignal: stop the orbit");
+            }
+        }
+
+        // THE OUTLINE — an outcome colors it, shows it and makes it follow the unread rings' clock (the blink joins whatever
+        // phase the rings are in: lockstep); every other signal stops the blink BEFORE collapsing it, so the outline is never
+        // left following a clock while hidden (a held clock keeps the compositor animating for nobody). Answered -> Failed
+        // without a rest only recolors it: the blink goes on.
+        try
+        {
+            if (outcome)
+            {
+                _outline.BorderBrush(winrt::Windows::UI::Xaml::Media::SolidColorBrush{ look == AiToggleSignal::Failed ? kAiToggleFailed : kAiToggleAnswered });
+                if (_outline.Visibility() != Visibility::Visible)
+                {
+                    _outline.Visibility(Visibility::Visible);
+                }
+                if (!_blinking)
+                {
+                    _blinking = true; // first, like the orbit's flag: Stop() is safe on a blink whose Start() was refused
+                    _blink.Start();
+                }
+            }
+            else
+            {
+                if (_blinking)
+                {
+                    _blinking = false;
+                    _blink.Stop(); // a static Opacity 1.0 ends the follow (AgentLockstepBlink) and releases the clock
+                }
+                if (_outline.Visibility() != Visibility::Collapsed)
+                {
+                    _outline.Visibility(Visibility::Collapsed);
+                }
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"AgentAiToggleSignal: the outline");
+        }
+
+        // THE LETTERS — a LOCAL Foreground, which only the toggle's rest state shows (its template's hover, pressed and checked
+        // states paint the content with their own brushes), cleared at rest so the toggle reads exactly as it did before.
+        try
+        {
+            switch (look)
+            {
+            case AiToggleSignal::Running:
+                _toggle.Foreground(winrt::Windows::UI::Xaml::Media::SolidColorBrush{ kAiToggleWorking });
+                break;
+            case AiToggleSignal::Answered:
+                _toggle.Foreground(winrt::Windows::UI::Xaml::Media::SolidColorBrush{ kAiToggleAnsweredInk });
+                break;
+            case AiToggleSignal::Failed:
+                _toggle.Foreground(winrt::Windows::UI::Xaml::Media::SolidColorBrush{ kAiToggleFailedInk });
+                break;
+            case AiToggleSignal::Rest:
+            default:
+                _toggle.ClearValue(winrt::Windows::UI::Xaml::Controls::Control::ForegroundProperty());
+                break;
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"AgentAiToggleSignal: the letters");
         }
     }
 }

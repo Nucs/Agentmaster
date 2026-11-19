@@ -2093,6 +2093,31 @@ namespace winrt::TerminalApp::implementation
         Grid::SetColumnSpan(_sidePanelAiBtn, static_cast<int32_t>(header.ColumnDefinitions().Size())); // the box's own cell, so HorizontalAlignment Right lands on the box's right end
         header.Children().Append(_sidePanelAiBtn); // after the box: drawn over it
 
+        // The toggle's SIGNALS (SIDE_PANEL.md §2h "The AI toggle's signals"; the user's picks of 2026-11-19): while the AI view is
+        // OFF here, a light orbits the toggle while a request of the shared conversation runs, and its outline blinks with the
+        // unread rings while an answer waits to be read. The two overlays go into the box's cell AFTER the toggle, with its size,
+        // alignment and inset, so they draw over it and take no pointer (the toggle keeps its clicks and its tip). Nothing
+        // animates until _AiToggleSignalsRepaint decides a signal.
+        {
+            const auto overlays = AgentMakeAiToggleOverlays(kSidePanelAiToggleWidth, kSidePanelAiToggleHeight, _sidePanelAiBtn.Margin(), HorizontalAlignment::Right, VerticalAlignment::Center);
+            _sidePanelAiSignalHost = overlays.orbitHost;
+            _sidePanelAiSignalOutline = overlays.outline;
+            const auto span = static_cast<int32_t>(header.ColumnDefinitions().Size());
+            for (const auto& overlay : { _sidePanelAiSignalHost, _sidePanelAiSignalOutline })
+            {
+                Grid::SetRow(overlay, 1);
+                Grid::SetColumn(overlay, 0);
+                Grid::SetColumnSpan(overlay, span);
+                header.Children().Append(overlay);
+            }
+            _sidePanelAiSignal = AgentAiToggleSignal{ _sidePanelAiBtn,
+                                                      _sidePanelAiSignalHost,
+                                                      _sidePanelAiSignalOutline,
+                                                      static_cast<float>(kSidePanelAiToggleWidth),
+                                                      static_cast<float>(kSidePanelAiToggleHeight),
+                                                      static_cast<float>(_sidePanelAiBtn.CornerRadius().TopLeft) };
+        }
+
         // The "+" LAUNCHER (SIDE_PANEL.md §2e) — the INNERMOST button of the line, on the terminal's side of the funnel (the
         // user's "Swap between filter and + button" of 2026-11-10; docked right it is the leftmost, §2e's "leftmost"; docked
         // left the line mirrors and it is the rightmost, _SidePanelApplyHeaderOrder): a click opens a card AT the click
@@ -3147,6 +3172,11 @@ namespace winrt::TerminalApp::implementation
         }
         _sidePanelCollapsed = !_sidePanelCollapsed;
         ::Agentmaster::LogNav(_sidePanelCollapsed ? L"sidepanel collapse" : L"sidepanel expand");
+        // The AI toggles' signals (SIDE_PANEL.md §2h "The AI toggle's signals"): a collapse hides the header — the toggle stops
+        // signaling (nothing animates for nobody), and an AI view in it stops showing the conversation (an answer that lands
+        // now waits); an expand brings both back (an expanded AI view reads a waiting answer). Both never throw.
+        _SidePanelAiReportShowing();
+        _AiToggleSignalsRepaint();
         // SESSION_NOTES.md §4c: a note glyph's hover card hangs beside the cards — it closes with the panel either way (noexcept).
         _CloseNoteHoverCard();
         if (_sidePanelCollapsed)
@@ -4199,6 +4229,10 @@ namespace winrt::TerminalApp::implementation
     {
         auto strongThis{ get_strong() };
         co_await wil::resume_foreground(Dispatcher());
+        // The AI toggles' listener belt (SIDE_PANEL.md §2h "The AI toggle's signals"), FIRST and whatever the panel's state (the
+        // Sessions page's toggle signals too): once ANY window created the search agent, this window's toggles follow the
+        // conversation within one tick. A pointer load and a token test while attached or before the agent exists; never throws.
+        _AiToggleSignalsAttach();
         if (!_sidePanelBuilt || _sidePanelCollapsed)
         {
             co_return; // collapsed: stay fully idle — the expand path runs the catch-up
@@ -13528,6 +13562,12 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::LogNav(std::wstring{ on ? L"sidepanel ai on box=" : L"sidepanel ai off box=" } + std::to_wstring(boxChars));
             }
             _SidePanelUpdateAiButton();
+            // The AI toggles' signals (SIDE_PANEL.md §2h "The AI toggle's signals"): the view now shows the conversation, or no
+            // longer does — the agent hears it (an AI-on reads a waiting answer, in every window) — and this window's toggles
+            // re-decide: on, this toggle goes quiet (the strip speaks); off, it signals a running request or a waiting answer.
+            // Both never throw.
+            _SidePanelAiReportShowing();
+            _AiToggleSignalsRepaint();
             // The FILTER follows the box's meaning, not its text. On: the card filter is dropped (TextChanged ignores the box in
             // AI mode, so a kept filter would narrow the cards by a text that is now a request). Off: the kept text filters the
             // cards at once, as if just typed — no TextChanged comes, since the text did not change at the switch.
@@ -13976,6 +14016,12 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::AgentLogCaughtException(L"side panel AI search: post an agent event");
             }
         });
+        // The AI toggles' signals (SIDE_PANEL.md §2h "The AI toggle's signals"): this view's listener now exists, so it can
+        // stand for "this view shows the conversation" — report it (an AI-on reports again once the mode is set) — and the
+        // agent exists, so this window's toggles follow the conversation at once, without waiting for the periodic belt.
+        // Both never throw.
+        _SidePanelAiReportShowing();
+        _AiToggleSignalsAttach();
     }
 
     void TerminalPage::_SidePanelAiDetach() noexcept
@@ -14002,6 +14048,24 @@ namespace winrt::TerminalApp::implementation
         catch (...)
         {
             ::Agentmaster::AgentLogCaughtException(L"_SidePanelAiDetach");
+        }
+    }
+
+    void TerminalPage::_SidePanelAiReportShowing(std::optional<bool> sessionsPageShown) noexcept
+    {
+        if (_sidePanelAiListenerToken == 0)
+        {
+            return; // no view listener: this window's side panel never showed the conversation, so there is nothing to report
+        }
+        // The view shows the conversation while it is ON, the panel is EXPANDED, and no Sessions page covers it (that page
+        // overlays the whole content area, the panel included). The agent keeps the flag per listener and is told every time:
+        // repeating a value costs its lock and nothing else.
+        const bool sessionsOnScreen = sessionsPageShown.value_or(_sessionsPageVisible.load(std::memory_order_relaxed));
+        const bool showing = _sidePanelBuilt && _sidePanelAiMode && !_sidePanelCollapsed && !sessionsOnScreen;
+        // A token exists only when the agent does; both calls are noexcept (a refusal is logged inside the agent).
+        if (auto* const agent = ::Agentmaster::SharedSessionSearchAgentIfCreated())
+        {
+            agent->SetListenerShowing(_sidePanelAiListenerToken, showing);
         }
     }
 

@@ -1180,6 +1180,14 @@ namespace winrt::TerminalApp::implementation
         // along the strip's bottom edge): built with the AI view (_SidePanelAiEnsureView), switched by every strip repaint and
         // by the AI toggle and the collapse — on only while a request runs AND the view can be seen. Inert until then.
         AgentWorkingIndicator _sidePanelAiWorking;
+        // The AI toggle's SIGNALS (SIDE_PANEL.md §2h "The AI toggle's signals"; the user's picks of 2026-11-19): with the AI view
+        // OFF, the toggle tells about the shared conversation — a light orbiting it while a request runs, its outline blinking
+        // with the unread rings (green answered, red failed) while an answer waits to be read. Its two overlays lie over the
+        // toggle in the filter box's cell (AgentMakeAiToggleOverlays: hit-test invisible, appended after the toggle), built with
+        // the header; the window's repaint (_AiToggleSignalsRepaint) switches them. Inert until the header is built.
+        winrt::Windows::UI::Xaml::Controls::Border _sidePanelAiSignalHost{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Border _sidePanelAiSignalOutline{ nullptr };
+        AgentAiToggleSignal _sidePanelAiSignal;
         bool _sidePanelAiBoxPadded{ false }; // the filter box's right padding grew by the toggle's reserve (once: a second Loaded must not add it again)
         bool _sidePanelAiClearButtonMoved{ false }; // the box's own clear button (the template part DeleteButton) is shifted left of the toggle (once)
         winrt::Windows::UI::Xaml::Controls::Grid _sidePanelCardsHost{ nullptr }; // the cards area's one child: holds the card list's ScrollViewer and, once built, the AI view over it (one of the two is visible)
@@ -1630,6 +1638,24 @@ namespace winrt::TerminalApp::implementation
         // along the strip's bottom edge): built with the strip (_BuildSessionsAiHeader), switched by every strip repaint and by
         // the page leaving the screen — on only while a request runs AND this page shows the AI search. Inert until built.
         AgentWorkingIndicator _sessAiWorking;
+        // The AI toggle's SIGNALS on this page (SIDE_PANEL.md §2h "The AI toggle's signals", SESSIONS.md §9.1): the side panel's
+        // signals on the page's own toggle — its two overlays built with the header (_BuildSessionsAiHeader), switched by
+        // _AiToggleSignalsRepaint. Inert until the page's shell is built.
+        winrt::Windows::UI::Xaml::Controls::Border _sessAiSignalHost{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Border _sessAiSignalOutline{ nullptr };
+        AgentAiToggleSignal _sessAiSignal;
+        // THIS WINDOW's listener for both of its toggles' signals, apart from the two views' own listeners (whose tokens stand
+        // for "this view shows the conversation", SessionSearchAgent::SetListenerShowing, and whose park rules count a window's
+        // USE of the search): attached only once the process's agent exists (SharedSessionSearchAgentIfCreated — by the
+        // periodic tick's belt, or at once when this window's own view attaches), so a window where nobody used the AI search
+        // creates nothing. Removed in ~TerminalPage (Rule #10). 0 = not attached.
+        uint64_t _aiSignalListenerToken{ 0 };
+        // The conversation facts the toggles' signals are decided from, kept from the listener's newest event (or the seeding
+        // snapshot): its epoch (an event of an older one, before a reset, is dropped), whether a request runs, and the
+        // outcome waiting to be read. UI-thread-only.
+        uint64_t _aiSignalEpoch{ 0 };
+        bool _aiSignalBusy{ false };
+        ::Agentmaster::AiSearchUnseen _aiSignalUnseen{ ::Agentmaster::AiSearchUnseen::None };
 
         // Agentmaster: IN-PLACE TITLE EDITING in the Sessions browser (the Manager's Explorer-tree
         // rename idiom, here over the Title cell). Two entry points — the row right-click "Edit
@@ -3799,6 +3825,35 @@ namespace winrt::TerminalApp::implementation
         bool _SessionsAiApplyView(std::vector<const _SessionsRow*>& view, bool& keepOrder) const; // _RenderSessionsTable: replace the view with the AI list when one is active; false = no AI list, the view is untouched
         void _UpdateSessionsAiStrip(const ::Agentmaster::SessionSearchSnapshot& snapshot); // repaint the strip, the reset button and the placeholder from the conversation's state
         void _CycleSessionsAiThinking(); // the strip's thinking toggle was clicked: the next level (skipping levels the model lacks), persisted for every window, applied by the agent from the next request
+
+        // ----- Agentmaster (SIDE_PANEL.md §2h "The AI toggle's signals", SESSIONS.md §9.1): both AI toggles of this window — the
+        // side panel's and the Sessions page's — tell about the shared conversation while their own view is off: an orbiting
+        // light while a request runs, the outline blinking with the unread rings while an answer waits to be read (the user's
+        // picks of 2026-11-19). TerminalPage.AgentSessionsAi.cpp. UI-thread-only unless a line says otherwise.
+        // Attach this window's signal listener once the process's agent EXISTS (it never creates it: the first creation reads
+        // the conversation's record from disk, and a window where nobody used the search has nothing to follow), seed the
+        // facts from the conversation as it is now (a request may already run, asked in another window), and repaint both
+        // toggles. A no-op when attached already or before the agent exists. Called by the side panel's periodic tick (the
+        // belt that catches another window's first use within one tick) and by both views' own attach. Never throws.
+        void _AiToggleSignalsAttach() noexcept;
+        // ~TerminalPage: remove the signal listener (Rule #10). Thread-safe (the destructor can run on a pool thread), touches no
+        // XAML, never throws; a no-op when it was never attached.
+        void _AiToggleSignalsDetach() noexcept;
+        // One agent event's facts, on the UI thread (the listener copies only these three, not the whole event): drop an older
+        // epoch's, keep the rest, repaint both toggles.
+        //   epoch  - the conversation epoch of the event's snapshot.
+        //   busy   - a request runs (SessionSearchSnapshot::busy).
+        //   unseen - the outcome waiting to be read (SessionSearchSnapshot::unseen).
+        // Never throws.
+        void _OnAiToggleSignalsEvent(uint64_t epoch, bool busy, ::Agentmaster::AiSearchUnseen unseen) noexcept;
+        // Decide each toggle's signal (DecideAiToggleSignal over its own view's mode and visibility and the kept facts) and show it
+        // (AgentAiToggleSignal::Show, change-gated), with its ItemStatus (AiToggleSignalStatus). The side panel's toggle counts as
+        // seen while the panel is expanded and no Sessions page covers it (that page overlays the whole content area, the panel
+        // included); the Sessions page's while the page is on screen.
+        //   sessionsPageShown - whether the Sessions page is on screen, for a caller that knows it before _sessionsPageVisible does
+        //                       (the tab-switch dismiss runs its hook before it updates the mirror); nullopt = read the mirror.
+        // Never throws: a refused write is logged (Rule #18).
+        void _AiToggleSignalsRepaint(std::optional<bool> sessionsPageShown = std::nullopt) noexcept;
         static _SessionsRow _SessionsRowFromIndexEntry(const ::Agentmaster::SessionIndexEntry& entry); // a table row from an index entry alone (no directory listing): the rows of sessions outside the page's window
         bool _AddSessionIdToHiddenList(const std::wstring& sessionId); // Agentmaster: append an id to AppSettings.hiddenSessionIds (freshest-disk RMW + in-memory copy); idempotent, returns true if newly added. Shared by the row right-click hide AND the auto-hide-on-delete seam. NO UI side effects — the caller refreshes.
         void _HideSessionFromList(const std::wstring& sessionId); // Sessions-page row right-click "Hide from list": _AddSessionIdToHiddenList + drop it from the table (the transcript on disk is untouched)
@@ -4826,6 +4881,15 @@ namespace winrt::TerminalApp::implementation
         // ~TerminalPage: remove the side-panel listener (Rule #10). Thread-safe (the destructor can run on a pool thread),
         // touches no XAML, never throws; a no-op for a window that never turned the AI view on.
         void _SidePanelAiDetach() noexcept;
+        // Tell the agent whether the side panel's AI view SHOWS the conversation now (SessionSearchAgent::SetListenerShowing on
+        // this view's listener): AI mode on, the panel expanded, and no Sessions page covering it. A request that ends while no
+        // view shows it leaves its answer waiting for every AI toggle (SIDE_PANEL.md §2h "The AI toggle's signals"); a view that
+        // starts showing while one waits reads it, everywhere. Called at every change of the three: the AI toggle, the
+        // collapse, the Sessions page coming on / off screen, and this view's listener appearing.
+        //   sessionsPageShown - the Sessions page's on-screen state when the caller knows it before the mirror does; nullopt =
+        //                       read _sessionsPageVisible.
+        // A no-op while this view has no listener (it never showed the conversation). Never throws.
+        void _SidePanelAiReportShowing(std::optional<bool> sessionsPageShown = std::nullopt) noexcept;
         // Send the box's text to the conversation (the newest request wins), remember the turn (its end arms the park), clear
         // the box. An empty box does nothing; a missing claude.exe shows the "Claude not detected" notice. Never throws.
         void _SidePanelAiAsk();
