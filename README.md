@@ -1,20 +1,34 @@
+<div align="center">
+
+<a href="https://github.com/Nucs/Agentmaster/releases/latest"><img src="doc/agentmaster/img/logo.png" alt="Agentmaster's logo: a dark terminal window with a DEV pill, its title-bar tabs in the session-state colors" width="168"></a>
+
 # Agentmaster
+
 _By developers, for developers - Never lose a session again - feel like Windows Terminal so you forget you are vibing_
 
 [![License](https://osscdn.nucs.workers.dev/agentmaster-license-WVQkXXYsGf.svg)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/Nucs/Agentmaster?label=release&color=1E90FF)](https://github.com/Nucs/Agentmaster/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/Nucs/Agentmaster/total?label=downloads&color=3CB371)](https://github.com/Nucs/Agentmaster/releases)
+[![Build](https://img.shields.io/github/actions/workflow/status/Nucs/Agentmaster/ci.yml?branch=agentmaster&label=build)](https://github.com/Nucs/Agentmaster/actions/workflows/ci.yml)
+<br>
+[![Windows 10 and 11, x64 and arm64](https://img.shields.io/badge/Windows%2010%20%7C%2011-x64%20%7C%20arm64-0078D4)](#-install)
+[![Claude Code](https://img.shields.io/badge/Claude%20Code-managed-D97757?logo=claude&logoColor=white)](https://www.anthropic.com/claude-code)
+[![Codex CLI](https://img.shields.io/badge/Codex%20CLI-managed-10A37F)](https://github.com/openai/codex)
 
-[Microsoft Windows Terminal](https://github.com/microsoft/terminal) but pumped up with observability, persistence and all the tools you need to scale up your parallel context management.<br/> Coding fast is no longer about typing faster but about holding and manuvering around and between 10 coding contextes.
+</div>
+
+[Microsoft Windows Terminal](https://github.com/microsoft/terminal) but pumped up with observability, persistence and all the tools you need to scale up your parallel context management.<br/> Coding fast is no longer about typing faster but about holding and maneuvering around and between 10 coding contexts.
 
 Each session is a real `claude.exe` on a **ConPTY** connection: a full-fidelity terminal with a shared stdin (you and the orchestrator coexist), output tapped for the UI, and semantic state from **Claude Code hooks** and an **out-of-band observer** — never screen-scraping.
 
 [![Agentmaster's main window — the side panel's session cards on the left (each with its state, age and folder / branch, the selected session's summary below them), the tab strip with every tab's state dot and its folder's color, and a Claude Code session in the terminal with its status badge at the top right (model · state · Prompt Queue Runner mode · folder / branch)](doc/agentmaster/img/main-window.png)](https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/main-window.png)
 
-## ✨ What it does for you
+## <a href="#-what-it-does-for-you"><img src="doc/agentmaster/img/icons/features.png" width="30" height="30" align="absmiddle" alt=""></a> What it does for you
 
-### 🗂️ One page to run the whole fleet
+### <a href="#-one-page-to-run-the-whole-fleet"><img src="doc/agentmaster/img/icons/fleet.png" width="24" height="24" align="absmiddle" alt=""></a> One page to run the whole fleet
 The **Agent Manager** — one click on the tab strip's **Home** button — is mission control: a **Triage Board** that sorts every session into *Running · Waiting-for-you · Needs-approval · Error · Done*, an **Explorer Tree** of your working-dirs → sessions, and a **Prompt Queue** to queue prompts per session. Click a card and its terminal tab follows — both ways, across every window — so you never lose which tab is which. A **side panel** beside the terminal keeps the session cards in view while you work: filter them by folder, state, tag, git branch or fork family (from its funnel, or a card's own right-click menu), pause the filter with one click, and pin the cards you watch to the top.
 
-### 💾 Never lose a session — ever
+### <a href="#-never-lose-a-session--ever"><img src="doc/agentmaster/img/icons/restore.png" width="24" height="24" align="absmiddle" alt=""></a> Never lose a session — ever
 Close a window and reopen it **whole**: geometry, **resumed** Claude *and* Codex conversations, shell tabs back at their real cwd, even the focused tab. And the **Sessions browser** searches *every* conversation that's ever hit disk — an instant index, then ripgrep across the actual content — so you can **Resume or Fork** anything, from any day. Closing only archives a session; your transcripts are never deleted. Your workspace also survives installs and version changes:
 - no install, update or uninstall deletes Agentmaster's state;
 - a state file that cannot be read is kept instead of saved over;
@@ -24,13 +38,13 @@ Close a window and reopen it **whole**: geometry, **resumed** Claude *and* Codex
 
 [![The Sessions browser — every Claude Code session on disk in one list (title, folder, branch, created, last active, messages · tools, context size) under the search box with its AI toggle, the scope buttons, the Open / Hidden / Favorite and Folders filters, the time range and the tag chips; on the right the selected session's details and summary, with Jump to tab · Fork here · Open New Session Here](doc/agentmaster/img/sessions-browser.png)](https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/sessions-browser.png)
 
-### 👀 Manages every agent — even the ones you didn't launch
+### <a href="#-manages-every-agent--even-the-ones-you-didnt-launch"><img src="doc/agentmaster/img/icons/observer.png" width="24" height="24" align="absmiddle" alt=""></a> Manages every agent — even the ones you didn't launch
 The **Fleet Observer** detects, correlates, and enriches *every* Claude/Codex session by reading process memory and transcripts **out-of-band** — no hooks, no setup, completely invisible to the shell. Hand-type `claude` in any tab and it's managed within seconds. Sessions running *outside* the app show up too: watch them read-only, or **adopt** them (fork a safe copy, or resume).
 
-### 🚦 Know who needs you — at a glance
+### <a href="#-know-who-needs-you--at-a-glance"><img src="doc/agentmaster/img/icons/attention.png" width="24" height="24" align="absmiddle" alt=""></a> Know who needs you — at a glance
 State is **never screen-scraped**: it's hook-derived and then self-healed from the transcript, so dropped or out-of-order events can't lie to you. It drives a **board column** and a hover card carrying the conversation's **recap** (*"what we did / what's next"*). **Waiting-for-you** works like an unread inbox: a finished turn stays flagged until you've actually looked at it.
 
-### 🔎 Observability everywhere — every tab is a status lens
+### <a href="#-observability-everywhere--every-tab-is-a-status-lens"><img src="doc/agentmaster/img/icons/lens.png" width="24" height="24" align="absmiddle" alt=""></a> Observability everywhere — every tab is a status lens
 You never have to open the Manager to read a session. Every classified tab wears a **state-colored dot** in the strip and a **top-right overlay badge** — *status · `model · effort · kind` · Prompt Queue Runner · queued · workdir/branch · the next queued prompt* — that flips live as the session moves, with a one-hover **copy** menu — also on the **tab's right-click menu** — for its id / path / branch / **real launch CLI** / summary / transcript. The badge's **pencil** unfolds a per-tab **summary panel** (plan · tasks · prompts · files read/created/edited), and a per-prompt **Jump** (or **Alt+↑/↓**) scrolls straight to where a prompt was sent. Even a plain shell tab keeps a dim `○ kind · unlinked` twin — nothing in your strip is a mystery.
 
 <table>
@@ -44,7 +58,7 @@ You never have to open the Manager to read a session. Every classified tab wears
 </tr>
 </table>
 
-### 📱 Your fleet in your pocket
+### <a href="#-your-fleet-in-your-pocket"><img src="doc/agentmaster/img/icons/pocket.png" width="24" height="24" align="absmiddle" alt=""></a> Your fleet in your pocket
 Turn on the **Telegram** bot (**Settings → Messaging**, with a bot of your own; only your account is answered) and every working session becomes a topic on your phone: its whole conversation, Claude's replies with their Markdown rendered, and a live status card with buttons. A message in a topic is queued as that session's next prompt (`/steer` sends it into the running turn). From the phone you can:
 - answer Claude's questions with a tap;
 - send a 🎤 **voice note**, transcribed with that session's own vocabulary and read as its prompt;
@@ -56,7 +70,7 @@ Turn on the **Telegram** bot (**Settings → Messaging**, with a bot of your own
 
 > **And the small stuff that adds up:** **★ favorite** a session to pin it, permanent **per-directory tab colors** (a folder keeps its color across tabs, windows, and restarts), per-install **profiles** so a from-source dev build sits beside the release, and a **Settings** cog for the knobs (model · env · Prompt Queue Runner defaults).
 
-#### Additional features
+#### <a href="#-additional-features"><img src="doc/agentmaster/img/icons/more.png" width="20" height="20" align="absmiddle" alt=""></a> Additional features
 - **Prompt Queue Runner** — auto-sends the next queued prompt on turn-complete (per session: Auto or Paused, plus one Pause for all sessions), with stop-on-error · max-sends · pause-on-input · question-guard · Enter-retry, and savable plan templates.
 - **AI search** — the Sessions page's **AI** toggle takes a request in plain words; a hosted Sonnet 5.5 reads your sessions, shows the ones that fit with the evidence, and can reopen them into the window you choose.
 - **Presets** — launch or fork a session on other models and providers (OpenRouter, Xiaomi MiMo, NanoGPT, your own RunPod endpoint, any Anthropic-compatible URL), keys kept in Windows Credential Manager.
@@ -73,7 +87,7 @@ Turn on the **Telegram** bot (**Settings → Messaging**, with a bot of your own
 - **Home / jump back** — one button in the tab strip opens the Agent Manager; while it is open, the same button turns into a back arrow that returns you to the session's tab.
 - **Hide / Unhide** — drop a session from the Sessions list (reversible; the transcript is untouched).
 
-## 🟢 Status
+## <a href="#-status"><img src="doc/agentmaster/img/icons/status.png" width="30" height="30" align="absmiddle" alt=""></a> Status
 
 In active use, shipping regular [**releases**](https://github.com/Nucs/Agentmaster/releases). The full pipeline runs end-to-end in the packaged app; the standalone engine harness passes **10,000+** checks.
 
@@ -82,7 +96,7 @@ In active use, shipping regular [**releases**](https://github.com/Nucs/Agentmast
 - **Every session** — the Observer manages them whether they fire hooks or not; external ones stay read-only until you adopt.
 - Installs **side-by-side** under its own identity — your real Windows Terminal is left untouched.
 
-## ⬇️ Install
+## <a href="#-install"><img src="doc/agentmaster/img/icons/install.png" width="30" height="30" align="absmiddle" alt=""></a> Install
 
 **One line, no download** — paste into PowerShell (administrator rights **not** needed). It grabs the latest release, verifies its checksum, and asks where Agentmaster should live:
 
@@ -94,13 +108,13 @@ In active use, shipping regular [**releases**](https://github.com/Nucs/Agentmast
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1)))
 ```
 
-Flags: `-Scope User|Machine|Package` (skip the question) · `-Version <x.y.z>` · `-ZipPath <zip>` (install a portable zip you already have) · `-Prerelease` · `-Nightly` (also consider unstable nightly builds) · `-Launch` · `-Force` · `-Uninstall` (with `-Scope`) · `-ForCurrentAccount`. Run by an administrator from another account, or as SYSTEM, it installs for the user **signed in to Windows** and starts Agentmaster as them, without administrator rights; `-ForCurrentAccount` installs for the running account instead. Unattended (a scheduled task, a deployment tool): add PowerShell's own `-NonInteractive`.
+> <sub>**Flags:** `-Scope User|Machine|Package` (skip the question) · `-Version <x.y.z>` · `-ZipPath <zip>` (install a portable zip you already have) · `-Prerelease` · `-Nightly` (also consider unstable nightly builds) · `-Launch` · `-Force` · `-Uninstall` (with `-Scope`) · `-ForCurrentAccount`. Run by an administrator from another account, or as SYSTEM, it installs for the user **signed in to Windows** and starts Agentmaster as them, without administrator rights; `-ForCurrentAccount` installs for the running account instead. Unattended (a scheduled task, a deployment tool): add PowerShell's own `-NonInteractive`.</sub>
 
 Prefer the files? Grab them from [**Releases**](https://github.com/Nucs/Agentmaster/releases): the **portable zip** (unzip, run `Agentmaster.exe` — its first launch asks the same question: **just for you** (recommended), **for all users**, **set it up for the signed-in user** when another account runs it, a folder you pick, here, keep it portable, or later) or the self-signed **`.msixbundle`** (trust that release's `Agentmaster.cer`, then `Add-AppxPackage`). For debugging, each release's zips carry a public PDB beside every binary, and its `_symbols.zip` assets hold the full PDBs, Source-Linked to the release's commit.
 
 First launch silently picks a per-install **profile folder** (`~/.agentmaster`) holding everything it persists. **Requires** Windows 10 19041+, x64/arm64, and a native [Claude Code](https://www.anthropic.com/claude-code) `claude.exe` on `PATH` (Codex optional).
 
-## 📚 Docs & building
+## <a href="#-docs--building"><img src="doc/agentmaster/img/icons/docs.png" width="30" height="30" align="absmiddle" alt=""></a> Docs & building
 
 - **Start here:** [`CLAUDE.md`](CLAUDE.md) — full working notes (status by area, build/deploy, gotchas, correctness rules) · [`DESIGN`](doc/agentmaster/DESIGN.md) · [`IMPLEMENTATION`](doc/agentmaster/IMPLEMENTATION.md)
 - **Internals:** [`OBSERVER`](doc/agentmaster/OBSERVER.md) · [`HOOKS`](doc/agentmaster/HOOKS.md) · [`STATE`](doc/agentmaster/STATE.md) · [`SESSIONS`](doc/agentmaster/SESSIONS.md) · [`PERSISTENCE`](doc/agentmaster/PERSISTENCE.md) · [`PROFILES`](doc/agentmaster/PROFILES.md) · [`CLI`](doc/agentmaster/CLI.md) · [`TAB_OVERLAY`](doc/agentmaster/TAB_OVERLAY.md)
@@ -120,9 +134,9 @@ Add-AppxPackage -Register ".\src\cascadia\CascadiaPackage\bin\x64\Debug\AppxMani
 
 Our code is additive and marked `Agentmaster`: the Manager UI in `AgentManagerContent`, the plain-C++ engine + Fleet Observer under `src/cascadia/TerminalApp/AgentMaster/`, the per-tab overlay `AgentTabOverlay`, and small touches at the `TerminalPage` / `Tab` integration points.
 
-## 🔗 Relationship to Windows Terminal & License
+## <a href="#-relationship-to-windows-terminal--license"><img src="doc/agentmaster/img/icons/upstream.png" width="30" height="30" align="absmiddle" alt=""></a> Relationship to Windows Terminal & License
 
-A fork of [`microsoft/terminal`](https://github.com/microsoft/terminal) at `v1.24.2372` — pristine upstream on `main`, the fork's work on `agentmaster`; upstream code, docs, and notices are retained ([`NOTICE.md`](NOTICE.md)).
+A fork of [`microsoft/terminal`](https://github.com/microsoft/terminal), branched from its `main` on 2026-05-21 at [`458872a01`](https://github.com/microsoft/terminal/commit/458872a01a2d8d37a43ee5c525bbcf061cb23d54): Windows Terminal **1.26** while it was still in development (1.25 had branched; 1.26 shipped later from its own branch). That upstream snapshot stays pristine on [`main`](https://github.com/Nucs/Agentmaster/tree/main), the fork's work is on `agentmaster`; upstream code, docs, and notices are retained ([`NOTICE.md`](NOTICE.md)).
 
 **License — dual.** The Agentmaster combined work is licensed under the **GNU [AGPL-3.0-or-later](LICENSE)**, with a **[commercial license](LICENSE-COMMERCIAL.md)** available for uses the AGPL doesn't fit (closed-source, or offered as a network service). Because Agentmaster forks **MIT-licensed** Windows Terminal, the upstream Microsoft code and the bundled OSS components remain under their original permissive licenses — the original `Copyright (c) Microsoft Corporation` MIT notice is retained in [`LICENSE-MIT`](LICENSE-MIT), with third-party attributions in [`NOTICE.md`](NOTICE.md). "Agentmaster" is a trademark of the project ([`TRADEMARKS.md`](TRADEMARKS.md)); this is an independent fork, not affiliated with or endorsed by Microsoft. Contributions require signing the [CLA](CLA.md). For Windows Terminal itself, see [aka.ms/terminal-docs](https://aka.ms/terminal-docs).
 

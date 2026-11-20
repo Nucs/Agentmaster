@@ -4,7 +4,8 @@
 first-class management of multiple **Claude Code** sessions across many working
 directories — with full user interaction *and* full programmatic control.
 
-- Upstream: forked at `v1.24.2372` (`main`), local work branch `agentmaster`.
+- Upstream: forked from upstream `main` at `458872a01` (2026-05-21: Windows Terminal 1.26 in development, 247
+  commits past the `v1.24.2372.0` tag; the `main` branch keeps that snapshot), local work branch `agentmaster`.
 - Build entry: **`OpenConsole.slnx`** (new XML solution format).
 - License: MIT — keep the upstream copyright/`NOTICE`. Our additions are marked
   `Agentmaster` and grouped under `doc/agentmaster/` and `src/cascadia/TerminalApp/AgentMaster/`.

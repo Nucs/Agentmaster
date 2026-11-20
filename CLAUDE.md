@@ -408,7 +408,7 @@ Detail: [`E2E_TESTING.md`](doc/agentmaster/E2E_TESTING.md), [`e2e/README.md`](e2
 
 ## Repo facts
 
-- Forked from `microsoft/terminal` @ `v1.24.2372`; work branch **`agentmaster`**.
+- Forked from `microsoft/terminal`'s `main` at `458872a01` (Windows Terminal 1.26 in development, past the `v1.24.2372.0` tag; the repository's `main` branch keeps that snapshot); work branch **`agentmaster`**.
 - Build entry: **`OpenConsole.slnx`** (slnx format). One git submodule: `refs/claude-agent-sdk-cpp` (the agent harness's SDK, pinned; `git submodule update --init refs/claude-agent-sdk-cpp`; both workflows check out with `submodules: true`).
 - Toolchain: VS 2022 + C++/UWP workloads + Windows SDK 10.0.22621/26100.
 
