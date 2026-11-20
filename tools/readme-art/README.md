@@ -10,6 +10,10 @@ image, then cut into transparent PNGs by [`readme_art.py`](readme_art.py).
 | `logo.png` (512 px, shown at 168) | [`prompts/logo.md`](prompts/logo.md) | variant 2, "STATE TABS": the title-bar tabs in the Running blue, Waiting goldenrod and Done green of `AgentStatusColors.h` |
 | `icons/<slug>.png` (128 px, shown at 30 / 24 / 20 beside an h2 / h3 / h4) | [`prompts/icons.md`](prompts/icons.md) | the one sheet it drew: twelve charcoal tiles in a 4 x 3 grid |
 
+`logo.png` is also the production install's icon: [`tools/release-icon/release_icon.py`](../release-icon/release_icon.py)
+`gen` draws the release identity's whole icon set (`res/terminal/images-Agentmaster`) from it, so after a new logo run
+that too (and its `check`).
+
 The icons' names follow the README headings they stand before (`readme_art.py`'s `SLUGS`, in the sheet's reading
 order): features · fleet · restore · observer · attention · lens · pocket · status · install · docs · upstream · more.
 

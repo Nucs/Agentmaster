@@ -3,9 +3,10 @@
 
 Agentmaster's two package identities share one branding (WT_BRANDING_DEV), and with it Windows Terminal Dev's icon:
 the terminal with a lime-green "DEV" pill (res/terminal/images-Dev, drawn from res/terminal/Terminal_Dev.svg, whose
-pill is ``fill:#9bf00b``). The release identity (``Agentmaster``) keeps that set. The dev identity (``AgentmasterDev``)
-wears res/terminal/images-AgentmasterDev, which this script derives from it, so the two installs tell apart at a glance
-on the taskbar, in Start and in Alt+Tab. CascadiaPackage.wapproj picks the package's folder by
+pill is ``fill:#9bf00b``). The dev identity (``AgentmasterDev``) wears res/terminal/images-AgentmasterDev, which this
+script derives from it; the release identity (``Agentmaster``) wears the project's logo (res/terminal/images-Agentmaster,
+drawn by tools/release-icon/release_icon.py in images-Dev's layout), so the two installs tell apart at a glance on the
+taskbar, in Start and in Alt+Tab. CascadiaPackage.wapproj picks the package's folder by
 ``AgentmasterPackageIdentity`` (its WindowsTerminalAssetSuffix), and WindowsTerminal.rc / WindowsTerminalShim.rc pick
 the exes' icon by the ``AGENTMASTER_DEV_IDENTITY`` define that build/rules/Branding.targets sets from the same property.
 
@@ -53,7 +54,8 @@ from PIL import Image
 REPO = Path(__file__).resolve().parents[2]
 #: Windows Terminal's icon sources and the sets drawn from them.
 TERMINAL = REPO / "res" / "terminal"
-#: The set the release identity wears, and the source of the dev identity's.
+#: Windows Terminal Dev's set: the source of the dev identity's, and the layout template of the release identity's
+#: (tools/release-icon/release_icon.py).
 SOURCE_DIR = TERMINAL / "images-Dev"
 #: The vector the source set was drawn from.
 SOURCE_SVG = TERMINAL / "Terminal_Dev.svg"

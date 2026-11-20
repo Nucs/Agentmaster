@@ -8,6 +8,8 @@
 #
 # Agentmaster: images-AgentmasterDev (the dev identity's set: the orange DEV pill) is not drawn by this
 # script. tools\dev-icon\dev_icon.py gen recolours it from images-Dev: run it again after regenerating images-Dev.
+# Neither is images-Agentmaster (the release identity's set: the project's logo): tools\release-icon\release_icon.py
+# gen draws it from doc\agentmaster\img\logo.png in images-Dev's names, sizes and placements, so run it again too.
 #
 # Some icons benefit from manual hints.  The most efficient way to do that is to run the script twice:
 #
