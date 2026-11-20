@@ -238,9 +238,10 @@ Folder… keeps its click and opens a submenu on hover: Pick…, then the folder
 every window), each line turning its folder on or off for that window (SP-14; SIDE_PANEL.md §2l; no test written yet) · a
 filter can be switched off without being dropped: a click on a chip pauses that one filter, Pause filter / Resume filter
 before Clear pauses the whole row (the typed text too) and brings back what applied, dimmed chips stay in the row, and a
-pick or typing resumes (SP-15; SIDE_PANEL.md §2l; no test written yet) · a collapsed side panel takes no column: its strip
-floats over the terminal's edge and hides itself, showing while the pointer is within 40 DIPs of it, and a press beside
-its chevron goes to the terminal (SP-16; SIDE_PANEL.md §2m) · a side-panel card's right-click menu has Filter › under
+pick or typing resumes (SP-15; SIDE_PANEL.md §2l; no test written yet) · a collapsed side panel takes no column: its way
+back — a 12 × 40 DIP leather card 80 DIPs down, the whole card the button (the strip until 2026-11-19) — floats over the
+terminal's edge and hides itself, showing while the pointer is within 25 DIPs of it, and a press near the edge that is
+not on the card goes to the terminal (SP-16; SIDE_PANEL.md §2m, §2q) · a side-panel card's right-click menu has Filter › under
 Tags — the card's folder and the folders above it, its state, its tags, its branch and its fork family (two new kinds of
 filter), plus Pause filter / Resume filter and Clear — and a pick starts the filter over with that one thing (SP-17;
 SIDE_PANEL.md §2l; no test written yet) · a click on that menu's Folder line itself picks the session's whole working
@@ -421,7 +422,7 @@ stalled the app's UI thread) — reruns `pqr6`–`pqr8`.
 | SP-19 | phases 1–5 (`needs_fix`: a build with ⋯ ▸ Settings over the tab — SP-F5; written 2026-11-20, never run; phase 3's Tab cycling and phase 5's kept field edit are not automated) | `…::test_more_menu_settings_opens_over_the_tab` |
 | SP-11 | phases 1–5 (`needs_fix`: a build with Pin to Top — SP-F2; written 2026-11-06, never run) | `…::test_pin_to_top` |
 | SP-12 | phases 1–2 (`needs_fix`: a build where a card's Open New Session Here / Fork session open next to its tab — SP-F3; written 2026-11-07, never run) | `…::test_card_menu_opens_next_to_its_tab` |
-| SP-16 | phases 1–6 (`needs_fix`: a build with the self-hiding collapsed strip — SP-F4; written 2026-11-12, never run; phase 5 only when the window leaves room at its left) | `…::test_collapsed_strip_hides_itself` |
+| SP-16 | phases 1–6 (`needs_fix`: a build with the collapsed LEATHER CARD — SP-F6, 2026-11-20; it replaced the self-hiding strip's SP-F4 test of 2026-11-12; never run; phase 5 only when the window leaves room at its left) | `…::test_collapsed_strip_hides_itself` |
 | TCM-01 | phases 1–3, E1 | `test_tab_menu.py::test_menu_fits_the_tab`, `…::test_triage_item_follows_the_state` |
 | TCM-02 | phases 1–3 | `…::test_position_decides_what_is_enabled` |
 | TCM-03 | phases 1–2, E2, E3; TCM-K1 | `…::test_rename_renames_the_session_everywhere`, `…::test_restart_restores_the_renamed_tab_dormant`, `…::test_known_defect_blank_rename_shows_claudes_own_title` |

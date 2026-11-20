@@ -1037,6 +1037,8 @@ namespace Agentmaster
         o.Set(L"sidePanelAiMode", json::Value::MkBool(s.sidePanelAiMode)); // the filter box's "AI" toggle ON (the card area shows the AI search) — a new-window default like "Sum"
         // The header ⌖ toggle — a GLOBAL behavior preference (no per-window copy), not a new-window default.
         o.Set(L"sidePanelScrollToSelectedTab", json::Value::MkBool(s.sidePanelScrollToSelectedTab));
+        // The collapsed card's leather (SIDE_PANEL.md §2q) — a cog FORM setting, GLOBAL; written as its word, never the integer.
+        o.Set(std::wstring{ kSidePanelCardLeatherKey }, json::Value::MkStr(std::wstring{ SidePanelCardLeatherToken(s.sidePanelCardLeather) }));
         o.Set(L"allowUpdatePrerelease", json::Value::MkBool(s.allowUpdatePrerelease));
         o.Set(L"allowUpdateNightly", json::Value::MkBool(s.allowUpdateNightly)); // NIGHTLY opt-in (warning-gated; tag contains "nightly" — Updater.h)
         o.Set(L"debugMode", json::Value::MkBool(s.debugMode)); // About-tab "Enable Debug Mode" — the durable --debug twin (ProfileBootstrap.h IsDebugPackage)
@@ -1374,6 +1376,9 @@ namespace Agentmaster
             // settings.json from before the toggle existed behaves exactly like a missing file. A PRESENT
             // false is the user's explicit OFF and wins.
             s.sidePanelScrollToSelectedTab = v.BoolAt(L"sidePanelScrollToSelectedTab", true);
+            // The collapsed card's leather (SIDE_PANEL.md §2q): a word; absent, empty or unknown (a hand edit, a newer
+            // build's leather) => Cognac, the struct default, so a file from before the setting draws the default card.
+            s.sidePanelCardLeather = SidePanelCardLeatherFromToken(v.StrAt(kSidePanelCardLeatherKey));
         }
         // Updater (Updater.h): the prerelease + nightly opt-ins + the skip/postpone state (the latter
         // two are written OUTSIDE the cog form by the updater's JSON RMW; the cog's Save preserves them).

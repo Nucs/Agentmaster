@@ -646,18 +646,21 @@ def test_pin_to_top(am, s2):
 
 @pytest.mark.p1
 @pytest.mark.flow("SP-16")
-@pytest.mark.needs_fix("SP-F4")
+@pytest.mark.needs_fix("SP-F6")
 def test_collapsed_strip_hides_itself(am, s1):
-    """SP-16 phases 1-6 (SP-F4, the user's request of 2026-11-12 - a build with the self-hiding strip; SIDE_PANEL.md
-    section 2m): a collapsed panel takes no column and its strip floats over the terminal's edge, hidden; it shows for a
-    moment after the collapse, then only while the pointer is within 40 DIPs of it; the terminal never changes size; a
-    press on the strip beside the chevron goes to the terminal and sends the strip away until the pointer has left and
-    come back; the pointer leaving the window through the edge hides it; the chevron expands the panel. The strip's state
-    is read off the chevron's ItemStatus ("hidden"; empty while it shows): UI Automation reports no opacity. (Docked
-    right, a drag passing by, touch and the Agent Manager page are not covered here.)
+    """SP-16 phases 1-6 (SP-F6, the user's request of 2026-11-20 - a build with the collapsed LEATHER CARD; SIDE_PANEL.md
+    sections 2m and 2q; until then SP-F4's full-height strip): a collapsed panel takes no column and its card - 12 x 40
+    DIPs, 80 DIPs below the content's top, the whole card the button - floats over the terminal's edge, hidden; it shows
+    for a moment after the collapse, then only while the pointer is within 25 DIPs of it (at any height); the terminal
+    never changes size; a press near the edge that is not on the card goes to the terminal and sends the card away until
+    the pointer has left and come back; the pointer leaving the window through the edge hides it; a click on the card
+    expands the panel. The card's state is read off its ItemStatus ("hidden"; empty while it shows): UI Automation reports
+    no opacity. (Docked right, a drag passing by, touch, the Agent Manager page and the leather setting are not covered
+    here.) The test keeps its name and the driver its strip_* names: the card took the strip's place, id included.
 
     The distances are in screen pixels with wide margins, so they hold at any display scale from 100% to 250%: 30 px
-    from the edge is within the 60 DIP reach at every scale, 200 px is outside it.
+    from the edge is within the 37 DIP reach at every scale (it is 30 DIPs at 100%), 200 px is outside it (80 DIPs at
+    250%). Every pointer position is at the content's middle height, well below the card.
 
     Args:
         am: The app.
@@ -676,61 +679,68 @@ def test_collapsed_strip_hides_itself(am, s1):
         """
         return w.terminal.element().rect
 
-    # 1. Collapse: the strip shows for its moment (the pointer rests far from the edge), then hides itself; the terminal
-    #    has the content's whole width - no column is left for the strip.
+    # 1. Collapse: the card shows for its moment (the pointer rests far from the edge), then hides itself; the terminal
+    #    has the content's whole width - no column is left for it.
     panel.collapse()
     left, top, width, height = w.content().rect
-    high = top + height // 5  # well above the chevron, which sits at mid-height
-    inputs.move(left + width // 2, high)
+    mid = top + height // 2  # far below the card, which sits 80 DIPs down
+    inputs.move(left + width // 2, mid)
     panel.wait_strip(hidden=True, timeout_s=6)
     hidden_rect = terminal_rect()
-    # Within 4 px on each side: far less than the 20 px column the strip used to take.
+    # Within 4 px on each side: no column is left for the collapsed panel.
     assert abs(hidden_rect[0] - left) <= 4 and abs(hidden_rect[2] - width) <= 4, (hidden_rect, (left, top, width, height))
     assert hidden_rect[2] > width_expanded, (hidden_rect, width_expanded)
-    chevron = panel.strip_button()
-    assert chevron is not None and chevron.visible and chevron.name == "Expand the side panel", chevron and chevron.line()
+    card = panel.strip_button()
+    assert card is not None and card.visible and card.name == "Expand the side panel", card and card.line()
+    # The card's geometry, scale-free: 12 x 40 DIPs (its height is 10/3 of its width, within the pixel rounding), its top
+    # 80 DIPs (twice its height) below the content's top, flush with the docked edge - and the test's pointer rows below it.
+    card_left, card_top, card_w, card_h = card.rect
+    assert abs(card_h * 12 - card_w * 40) <= 40, ("the card is 12 x 40 DIPs", card.rect)
+    assert abs((card_top - top) - 2 * card_h) <= 3, ("the card's top is 80 DIPs down", card.rect, (left, top))
+    assert abs(card_left - left) <= 2, ("the card sits on the docked edge", card.rect, left)
+    assert mid > card_top + card_h + 10, ("the pointer rows are below the card", mid, card.rect)
 
-    # 2. Far from the edge nothing shows; within reach the strip shows, at any height; the terminal does not move.
-    inputs.move(left + 200, high)
-    hold_true(lambda: panel.strip_hidden() is True, 1.0, what="the strip stays hidden with the pointer 200 px from the edge",
+    # 2. Far from the edge nothing shows; within reach the card shows, at any height; the terminal does not move.
+    inputs.move(left + 200, mid)
+    hold_true(lambda: panel.strip_hidden() is True, 1.0, what="the card stays hidden with the pointer 200 px from the edge",
               describe=panel.strip_hidden)
-    inputs.move(left + 30, high)
+    inputs.move(left + 30, mid)
     panel.wait_strip(hidden=False, timeout_s=3)
     assert terminal_rect() == hidden_rect, (terminal_rect(), hidden_rect)
-    hold_true(lambda: panel.strip_hidden() is False, 1.0, what="the strip stays while the pointer rests near it",
+    hold_true(lambda: panel.strip_hidden() is False, 1.0, what="the card stays while the pointer rests near the edge",
               describe=panel.strip_hidden)
 
     # 3. Away again: it hides.
-    inputs.move(left + 200, high)
+    inputs.move(left + 200, mid)
     panel.wait_strip(hidden=True, timeout_s=3)
 
-    # 4. A press on the strip beside the chevron belongs to the terminal: the strip steps aside, and stays away while the
-    #    pointer stays at the edge; leaving and coming back brings it in again.
-    inputs.move(left + 30, high)
+    # 4. A press near the edge that is not on the card belongs to the terminal: the card steps aside, and stays away while
+    #    the pointer stays at the edge; leaving and coming back brings it in again.
+    inputs.move(left + 30, mid)
     panel.wait_strip(hidden=False, timeout_s=3)
-    inputs.click(left + 10, high)
+    inputs.click(left + 10, mid)
     panel.wait_strip(hidden=True, timeout_s=3)
-    inputs.move(left + 25, high)
-    hold_true(lambda: panel.strip_hidden() is True, 1.0, what="the strip stays away after a press at the edge",
+    inputs.move(left + 25, mid)
+    hold_true(lambda: panel.strip_hidden() is True, 1.0, what="the card stays away after a press at the edge",
               describe=panel.strip_hidden)
-    inputs.move(left + 200, high)
+    inputs.move(left + 200, mid)
     time.sleep(0.5)  # one tick of the app's watch, so the leave is seen whichever way it is noticed
-    inputs.move(left + 30, high)
+    inputs.move(left + 30, mid)
     panel.wait_strip(hidden=False, timeout_s=3)
 
     # 5. The pointer leaves the window through the docked edge: no pointer event tells the content, the app's watch does.
     #    Only when the window leaves room on its left (a maximized window's edge is the screen's).
     if left >= 100:
-        inputs.move(left - 60, high)
+        inputs.move(left - 60, mid)
         panel.wait_strip(hidden=True, timeout_s=3)
     else:
         print(f"SP-16 phase 5 skipped: the content starts {left} px from the screen's left edge (no room to leave through it)")
 
-    # 6. The chevron brings the panel back (its real click: the pointer's arrival shows the strip before the press).
+    # 6. The card brings the panel back (its real click: the pointer's arrival shows the card before the press).
     panel.expand()
     assert panel.strip_button() is None and panel.dock_side() == "left"
     assert abs(w.terminal.element().rect[2] - width_expanded) <= 2, (w.terminal.element().rect, width_expanded)
-    assert not am.profile.hooks.find(r"\[exc\] sidepanel strip")
+    assert not am.profile.hooks.find(r"\[exc\] sidepanel (strip|card)")
 
 
 @pytest.mark.p1

@@ -24,7 +24,7 @@ editor. Tab and Shift+Tab cycle inside the card.
 | Commands | The /handover family ([COMMANDS.md](COMMANDS.md) §6). A **Reset** restores this tab's shipped defaults (form only: Save commits, Cancel discards). |
 | Notifications | Which state changes notify, the focused-tab skip, the sound. |
 | Messaging | The Telegram bot ([MESSAGING.md](MESSAGING.md) §21). |
-| Tabs & Overlay | Close affordances, tab size, the rename key and title naming, the favorite marker, tab colors, the status-flash color, overlay opacity. |
+| Tabs & Overlay | Close affordances, tab size, the rename key and title naming, the favorite marker, tab colors, the status-flash color, overlay opacity, the collapsed side panel's card. |
 | Claude | Which native `claude.exe`, how long Claude keeps session history, the mods Agentmaster loads into its Claude tabs, which tools count as questions. |
 | About | Version and build, updates, the active profile folder, Debug Mode, uninstall. |
 
@@ -276,6 +276,10 @@ editor. Tab and Shift+Tab cycle inside the card.
   / light background, picked by WCAG luminance (`PendingDotsColorFor`; the board's dark cards use the
   light color).
 - **The overlay:** `showTabOverlay` (true), `tabOverlayRestOpacity` (0.50), `tabOverlayHoverOpacity` (1.0).
+- **The side panel's collapsed card** (SIDE PANEL; [SIDE_PANEL.md](SIDE_PANEL.md) §2q): `sidePanelCardLeather` (`cognac`;
+  or `charcoal`) — the leather of the card a collapsed panel leaves on the terminal's edge, Cognac & Cream or Charcoal &
+  Silver, the card shown beside the box at twice its size and repainted at every pick. Written as its word; a missing or
+  unknown word reads `cognac`. GLOBAL: the Save and the cross-window broadcast re-skin every window's card live.
 - `alwaysShowHomeButton`: unused (Home always shows).
 
 ## Tab coloring

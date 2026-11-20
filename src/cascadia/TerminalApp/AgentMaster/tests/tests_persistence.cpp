@@ -819,6 +819,7 @@ void TestAppSettings()
         in.releaseHiddenTerminalDevicesAfterSeconds = 0; // non-default (default 60) — 0 is meaningful: release at once
         in.tabRenameCommitMode = TabRenameCommitMode::ClickAwayOrEnter; // non-default (default is ClickAwayOrShiftEnter)
         in.favoriteIcon = FavoriteIcon::Star; // non-default (default is Crown)
+        in.sidePanelCardLeather = SidePanelCardLeather::Charcoal; // non-default (default Cognac) — SIDE_PANEL.md §2q, the collapsed card's leather
         in.tabColorMode = TabColorMode::Individual; // non-default (default is WorkingDirectory) — tab color modes
         in.inferGitRoot = false; // non-default (default true) — "Use .git folder to infer" OFF
         in.flashRingColor = L"#8000FF00"; // non-default (default #CCFF0000) — 50%-opaque green flash ring (alpha byte = opacity)
@@ -944,6 +945,7 @@ void TestAppSettings()
         }
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrEnter, "settings tabRenameCommitMode round-trip");
         CHECK(out.favoriteIcon == FavoriteIcon::Star, "settings favoriteIcon round-trip");
+        CHECK(out.sidePanelCardLeather == SidePanelCardLeather::Charcoal, "settings sidePanelCardLeather round-trip (whole struct)");
         CHECK(out.tabColorMode == TabColorMode::Individual, "settings tabColorMode round-trip");
         CHECK(out.inferGitRoot == false, "settings inferGitRoot round-trip (stored OFF)");
         CHECK(out.flashRingColor == L"#8000FF00", "settings flashRingColor round-trip");
@@ -1118,6 +1120,7 @@ void TestAppSettings()
         CHECK(out.serverCacheMinutes == 5u, "settings serverCacheMinutes default 5 (server cache lifetime) on empty");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode default (Shift+Enter) on empty");
         CHECK(out.favoriteIcon == FavoriteIcon::Crown, "settings favoriteIcon default (Crown) on empty");
+        CHECK(out.sidePanelCardLeather == SidePanelCardLeather::Cognac, "settings sidePanelCardLeather default (Cognac) on empty");
         CHECK(out.tabColorMode == TabColorMode::WorkingDirectory, "settings tabColorMode default (shared per working dir) on empty");
         CHECK(out.inferGitRoot == true, "settings inferGitRoot default ON (\"Use .git folder to infer\") on empty");
         CHECK(out.flashRingColor == L"#CCFF0000", "settings flashRingColor default (80% red) on empty");
@@ -1224,6 +1227,27 @@ void TestAppSettings()
         CHECK(star.favoriteIcon == FavoriteIcon::Star, "settings favoriteIcon 'star' honored");
         const auto bad = DeserializeAppSettings(L"{\"settings\":{\"favoriteIcon\":\"bogus\"}}");
         CHECK(bad.favoriteIcon == FavoriteIcon::Crown, "settings favoriteIcon unknown -> default (Crown)");
+    }
+
+    // sidePanelCardLeather (SIDE_PANEL.md §2q): the collapsed card's leather round-trips as its WORD, never the integer; an
+    // absent, empty or unknown word (a file from before the setting, a hand edit, a newer build's leather) draws the
+    // default Cognac card.
+    {
+        AppSettings charcoal{};
+        charcoal.sidePanelCardLeather = SidePanelCardLeather::Charcoal;
+        const auto text = SerializeAppSettings(charcoal);
+        CHECK(text.find(L"\"sidePanelCardLeather\":\"charcoal\"") != std::wstring::npos, "settings sidePanelCardLeather is stored as its word");
+        CHECK(DeserializeAppSettings(text).sidePanelCardLeather == SidePanelCardLeather::Charcoal, "settings sidePanelCardLeather round-trip (charcoal)");
+        CHECK(SerializeAppSettings(AppSettings{}).find(L"\"sidePanelCardLeather\":\"cognac\"") != std::wstring::npos,
+              "settings sidePanelCardLeather: the default is written as 'cognac'");
+        CHECK(DeserializeAppSettings(L"{\"settings\":{\"sidePanelCardLeather\":\"cognac\"}}").sidePanelCardLeather == SidePanelCardLeather::Cognac,
+              "settings sidePanelCardLeather 'cognac' honored");
+        CHECK(DeserializeAppSettings(L"{\"settings\":{}}").sidePanelCardLeather == SidePanelCardLeather::Cognac,
+              "settings sidePanelCardLeather: an absent key reads Cognac (the default card)");
+        CHECK(DeserializeAppSettings(L"{\"settings\":{\"sidePanelCardLeather\":\"Charcoal\"}}").sidePanelCardLeather == SidePanelCardLeather::Cognac,
+              "settings sidePanelCardLeather: the word is case-sensitive (an unknown spelling reads Cognac)");
+        CHECK(DeserializeAppSettings(L"{\"settings\":{\"sidePanelCardLeather\":7}}").sidePanelCardLeather == SidePanelCardLeather::Cognac,
+              "settings sidePanelCardLeather: a number (never written) reads Cognac");
     }
 
     // Tab sizing (the cog's TAB SIZE section): each tabWidthMode / tabTitleFontWeight token parses to

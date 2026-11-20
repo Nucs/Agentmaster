@@ -10,7 +10,7 @@ per-tab overlay's components, so it carries their business logic verbatim instea
 Shown in the DEFAULT dock (LEFT); the header's `⋯` ▸ **Dock on the right** flips it to the mirror image (dock
 RIGHT), which also flips the header's button line (`⋯ Sum ⏷ +` from the left edge here, `+ ⏷ Sum ⋯` against the right
 edge docked right — `⋯` always at the window's edge, §2i; `⏷` is the funnel, the filters' button, §2l) and the collapse
-symbols (the menu's `«` here and the collapsed strip's `»` — the collapse always points toward the docked edge).
+symbols (the menu's `«` here and the collapsed leather card's chevron `›` — the collapse always points toward the docked edge, the card's chevron away from it).
 
 ```
 ┌ tab row ────────────────────────────────────────────────────────────┐
@@ -83,8 +83,9 @@ model's answer and its list of sessions instead of the session cards; the summar
   summary-area toggle, §2d) and **⋯** (§2i), a menu holding **Scroll to the selected tab** (`⌖`, §2a), **Card scope ▸** (LOCAL /
   GLOBAL, §2), **Card order ▸** (§2), then below a separator **Dock on the right / left** (`⇄`) and
   **Collapse the side panel**, which gives the panel's whole column back to the terminal. What is left is a
-  20 DIP expander strip that FLOATS over the terminal's docked edge and hides itself: it shows while the
-  pointer is within 40 DIPs of it, and its chevron brings the panel back (§2m). Last, below a second separator,
+  small LEATHER CARD (12 × 40 DIPs, 80 DIPs below the terminal's top, Cognac & Cream or Charcoal & Silver) that FLOATS
+  over the terminal's docked edge and hides itself: it shows while the pointer is within 25 DIPs of it, and a click on
+  it brings the panel back (§2m, §2q). Last, below a second separator,
   **Settings** (the Agent Manager's cog): Agentmaster's settings card over the tab on screen (§2i *Settings over the tab*).
 - The header is **two lines** (one 2-row grid): the buttons, at the panel's OUTER end (the window's
   edge) and in a line that mirrors with the dock — `⋯ Sum ⏷ +` left-aligned docked left, `+ ⏷ Sum ⋯`
@@ -92,8 +93,8 @@ model's answer and its list of sessions instead of the session cards; the summar
   swap of 2026-11-10, §2l *The header's swap and one icon size*) — over the filter box,
   which spans every column. Sharing one line with the buttons, the box was squeezed toward its minimum on a narrow panel
   while the buttons kept their natural widths.
-- **Two font sizes.** The worded button (Sum) is 11 px; the ICON buttons (`+`, `⋯`, the funnel and the
-  collapsed strip's chevron) are 12 px
+- **Two font sizes.** The worded button (Sum) is 11 px; the ICON buttons (`+`, `⋯` and the funnel) are 12 px
+  (the collapsed card draws its chevron as a Path, §2q)
   (`kSidePanelIconFontSize`, 2026-10-05 — they were 11 px, and a symbol reads smaller than a word at
   the same size). `+` and the funnel are Segoe Fluent Icons glyphs (*Add*, *Filter*) on ONE face
   (`SidePanelIconButtonFace`: the glyph over an invisible text `+`), so both buttons are 26 × 20 DIPs (§2l *The header's
@@ -113,7 +114,7 @@ model's answer and its list of sessions instead of the session cards; the summar
 - **The buttons' tooltips open only after 3 s of rest** (`kSidePanelButtonTipDelay`, 2026-10-10, commit
   952c246fa — the user's request; in production 0.6.8.19 since 2026-10-12 and in the v0.7.9
   pre-release): the header's `+`, **Sum** and `⋯`, every item of the `⋯` menu (§2i — the buttons it
-  replaced waited 3 s too), and the collapsed strip's expand chevron. Each tip is a paragraph, and at
+  replaced waited 3 s too), and the collapsed leather card (§2q). Each tip is a paragraph, and at
   ~133 ms it opened over the panel whenever the pointer reached a button on its way to a click. Any
   move restarts the 3 s. A new button in the panel, or a new `⋯` menu item, must pass the constant to its
   `AgentSetTip` / `AgentSetTitledTip`. Not changed on purpose: the cards (4 s), the
@@ -1472,7 +1473,7 @@ the tab on screen. Those two are unchanged.
 - **It is THE cog, moved — never a copy** (one per window: AgentManagerContent owns it, with every control of its ten
   tabs and their state). `AgentManagerContent::ShowSettingsOverlayIn(ContentArea(), closed)` moves its overlay layer out of the page's
   `_root` into the window's `ContentArea` as its LAST child; the layer's own `Row 0 / RowSpan 99 / ColumnSpan 99` make it span
-  the area's three columns, so it dims the terminal, the splitter and the side panel (its collapsed strip included) and its
+  the area's three columns, so it dims the terminal, the splitter and the side panel (its collapsed card included) and its
   920-DIP card centers in the window — where the card and its description panel (140 DIP left of it) fit better than on the
   page, whose column the side panel narrows. The tab row stays live: the tab stays selected, `_managerPageVisible` stays
   false, and the window title stays the tab's.
@@ -2455,7 +2456,11 @@ Their answers the same day (asked with mockups):
     stays with the request in the box; turning AI off later shows the filter.
   - No `[exc] … Folder line …` / `_SidePanelFillTabFilterMenu` / `_SidePanelShowCardsForTabMenu` line in hooks.log.
 
-### 2m. The collapsed strip hides itself — it floats in when the pointer comes within 40 DIPs (2026-11-12, NOT BUILT yet)
+### 2m. The collapsed strip hides itself — it floats in when the pointer comes within 40 DIPs (2026-11-12; in dev 0.0.1.45 and production 0.8.0.16)
+
+> **2026-11-20: the strip became the LEATHER CARD (§2q)** — 12 × 40 DIPs, 80 DIPs below the content's top, the whole card
+> the button — and the reach became the user's 25 DIPs. The rule below holds for the card: read "the strip" as "the
+> card", "the chevron" as "the card", and 20 / 40 / 60 DIPs as 12 / 25 / 37.
 
 The user's request: "When sidemenu is collapsed, we get a small strip with a button. The strip should autohide. If mouse
 comes close by 40pixels the strips appears." Their answer the same day to the one design question (asked with three live
@@ -2745,6 +2750,118 @@ be sticky below the parent card".
   the task's card — titled "⑂ <task>" — sits right below it in LOCAL and GLOBAL; a double-click opens a tab right after
   the tab, attached to the task; closing that tab brings the card back below its parent; no card titled with a GUID.
 
+### 2q. The collapsed card — a stitched leather card, 12 × 40 DIPs, 80 DIPs below the terminal's top (2026-11-20, NOT BUILT yet)
+
+The user's request: "The sidemenu collapse, it should not be a whole strip but a card you can click and it looks like a
+leather tailored with stickes card - (show 8 designs in ask html question). it should be a 12x40 height, from 80px top of
+the terminal". Asked the same day with eight rendered designs — each at true size over a terminal (hover and press it),
+at 8×, as the real pixels of their 100% screens, with its hover / pressed / docked-right looks and all eight side by side
+(the question tool takes six options, so two questions of four) — and one question on the auto-hide (three live mocks
+following the pointer):
+
+| Question | Answer |
+|---|---|
+| The leather, designs 1–4 | **1 Cognac & Cream** |
+| The leather, designs 5–8 | **7 Charcoal Pebble & Silver** |
+| What the card does when the panel is collapsed | **Auto-hide, as today** — "25 DIP" |
+| Which one (a follow-up: both questions got a design) | **Both, switchable** — "Switchable in settings" |
+
+```
+ collapsed, the pointer near the docked edge (at any height)
+┌ tab row ──────────────────────────────────────────┐
+├───────────────────────────────────────────────────┤ ─┬─
+│> collapse the side panel to a small leather card  │  │ 80 DIPs
+│                                                   │  │
+│● I'll look at how the collapsed side panel is…    │  │
+│                                                   │ ─┴─
+▐▌● Read(src/cascadia/TerminalApp/TerminalPage.…)   │  ← the card, 12 × 40 DIPs: square on the docked edge, its free
+▐▌  ⎿  Read 412 lines                                │    corners rounded; cream (or silver) stitches, a debossed ›;
+│                                                   │    the whole card is the button
+│● Search(pattern: "_sidePanelStripHost", …)        │
+```
+
+- **What it is.** `_sidePanelStripHost` holds the card now: 12 × 40 DIPs (`kSidePanelCardWidth`, `kSidePanelCardHeight`),
+  `VerticalAlignment Top` with a top margin of 80 DIPs (`kSidePanelCardTop`), on the docked side, over the content's edge
+  as the strip was (a `ContentArea` child spanning its three columns, appended last). Its only child is
+  `_sidePanelStripBtn`, and the whole card IS that button — `am.side.expand`, named "Expand the side panel", its 3 s
+  tooltip unchanged: padding 0, border 0, no minimum size, no band around it, no glyph button inside. The numbers live
+  in `AgentMaster/SidePanelLeatherCard.h` (pure, harness-tested).
+- **How it is drawn** (`AgentLeatherCard.h`, the UI builder): the button's BACKGROUND is the leather's body, a vertical
+  gradient. Its own PointerOver and Pressed states lighten it 13% and darken it 20% through the lightweight-styling keys
+  `ButtonBackgroundPointerOver` / `ButtonBackgroundPressed` in its Resources (`AgentInstallLeatherBodyBrushes`), so the
+  card answers the pointer with no handler of ours. ⚠ The brushes go in BEFORE the button's template is applied (the
+  build skins the card before it enters the tree), and a leather switch retints the SAME brushes in place
+  (`AgentRetintLeatherBodyBrush`): the states keep the brushes they resolved at the template's application. Its CONTENT
+  is the face (`AgentBuildLeatherCardFace`, kept as `_sidePanelStripFace`): a gloss, the grain, the burnished 1 DIP rim,
+  the thread's shadow (its holes) and the thread (two dashed Paths, flat ends), and a debossed chevron (a light lip
+  under a dark stamp) pointing away from the docked edge. Every element of the face is childless or a Shape (no
+  composition node of its own), and the face takes no input: a press anywhere on the card is the button's. A right dock
+  mirrors the face (ScaleX −1 about its middle) and flips the button's corners (`AgentLeatherCardRadius`).
+- **The grain** is value noise defined in DIPs (two octaves: the pebble, then its texture), written once per DEVICE pixel
+  into a `WriteableBitmap` the card's own size (12 × 40 at 100%, 18 × 60 at 150%) as premultiplied white or black at
+  the grain's strength (`FillSidePanelLeatherGrain`), laid over the body with an `ImageBrush` clipped by the face's
+  rounded Border. So a pebble is the same size at every display scale, and a scale change (the window moved to another
+  monitor) re-writes the bitmap before the card next shows.
+- **The two leathers** (`SidePanelLeatherSpecFor`; every number is the chosen mock's, the session's `leather.js`):
+  - **Cognac & Cream** (the default): a cognac gradient (`#B8743D` → `#8A4A20`), a 12% gloss, a fine grain, a dark brown
+    rim, cream thread all round 2.5 DIPs in (1.7 DIP stitches, 1.3 DIP gaps) over its shadow, the chevron stamped in dark
+    brown with a warm lip.
+  - **Charcoal & Silver**: pebbled charcoal (`#4D4E54` → `#2A2B2F`, Agentmaster's own grey), a stronger, finer grain,
+    silver thread on THREE sides (top, free side, bottom) running off the docked edge, as if the leather wrapped around
+    the window's edge (1.3 / 1.2 DIP stitches, 0.9 DIP thread), the chevron stamped in near-black.
+- **The setting**: `AppSettings::sidePanelCardLeather` (`sidePanelCardLeather`: `cognac` / `charcoal`, written as its
+  word; a missing, empty or unknown word reads Cognac). The cog's Tabs & Overlay → **SIDE PANEL** → **Collapsed card**,
+  with the card itself beside the box at twice its size, repainted at every pick before Save
+  (`_UpdateSidePanelCardPreview`). GLOBAL: the Save sink and the cross-window broadcast both run
+  `_SidePanelApplySettings` → `_SidePanelApplyDock` → `_SidePanelApplyLayout` → `_SidePanelStripSkin`, so every
+  window's card changes leather live.
+- **The skin** (`_SidePanelStripSkin`, change-gated on `_sidePanelStripSkinKey` — the leather, the dock, the display
+  scale in hundredths): at the build, at every layout apply (a dock flip; the deferred SizeChanged ticks write nothing),
+  before a show (a new display scale) and through the settings path above. The face is rebuilt only for a new leather or
+  scale; a dock flip only mirrors it and turns the corners. A failed skin keeps the old key and is tried again (logged
+  `[exc] sidepanel card: skin`).
+- **The auto-hide** (§2m) is the same rule with the card's numbers: the card shows while the pointer is within **25 DIPs**
+  of it horizontally — 37 DIPs from the docked edge — at ANY height (`kSidePanelStripRevealDistance`, the user's "25
+  DIP"; the card itself is only 40 DIPs tall, so the reach is the edge band, not a box around the card), lingers 1.5 s
+  after a collapse, steps aside at a press near the edge that is not on the card, and the watch hides it when the
+  pointer leaves the window. A press on the card is the button's (`onButton`), and its click expands the panel.
+- **What it covers while it shows**: 12 × 40 DIPs, 80 DIPs down. Docked left, the terminal's 8 DIP padding and the left
+  4 DIPs of the first column on two or three lines; docked right, the scroll bar beside those lines (and, when the
+  per-tab badge is tall, its lower right corner).
+- **Names**: the auto-hide's members, the reveal header and its test keep their "strip" names
+  (`_sidePanelStripHost`, `_SidePanelStripApply`, `SidePanelStripReveal.h`, …), and the e2e driver keeps `strip_button`
+  / `strip_hidden`: the card took the strip's place in every caller, and `am.side.expand` is the same id (ids are never
+  renamed).
+- **Tested** (no build): `TestSidePanelLeatherCard` (`tests_sidepanel.cpp`) — the size and place; the settings word both
+  ways (an unknown word, a wrong case, a cast integer: Cognac); each leather's numbers; the tones' exact bytes, the alpha
+  kept, a press never lightening and a hover never darkening; both thread paths step by step, inside the card, the
+  chevron between the thread's runs; the grain's hash, noise and values pinned to numbers computed from the mocks'
+  JavaScript (a separate port, cross-checked against Node on the hash), the bitmap's size, refusals, premultiplied
+  white-or-black pixels, both signs, the strength bound, determinism, each pixel equal to the noise at its center, and
+  whole-bitmap fingerprints at 100% and 150%. `TestSidePanelStripReveal` moved to the card (12 + 25 = 37 DIPs, every
+  boundary, the sweep, the visit). `TestAppSettings` round-trips the word. The whole m5 harness on an isolated copy of
+  HEAD (6ce0e6b06) plus the changed files, on a scratch profile: 14,675 checks, the 3 known taskbar-badge failures only.
+  A mutation run of that harness (Cognac's grain seed 11 → 12, the hover tone 0.13 → 0.15, the thread corner's floor
+  0.8 → 0.9) failed exactly the 7 checks aimed at them. `cl /Zs` with no build, against the Release worktree's PCH
+  (ad89700e3): all 116 TerminalAppLib units of its tlog — 107 pass; the 9 others fail on that worktree alone (the `../inc`
+  path split; the session-notes IDL members newer than its projection). In a shadow tree (HEAD + these files, an empty
+  `pch.h`) 7 of those 9 pass, as do `TerminalPage.AgentSidePanel.cpp`, `AgentManagerContent.Settings.cpp` and
+  `TerminalPage.AgentTabRow.cpp` (newer than the worktree: a borrowed line); `Tab.cpp`, `TerminalPage.cpp` and
+  `TerminalPage.AgentNotes.cpp` fail with exactly the errors of a HEAD-only shadow. The CLI's 18 units pass at `/W4 /WX` (the new header is in every one of them
+  through `SessionModels.h`). Two planted errors failed at their lines: C2338 on a wrong `kSidePanelCardTop`, C2660 on a
+  short `AgentBuildLeatherCardFace` call beside correct calls of every builder. Not seen on screen: the card itself, its
+  states, the preview and the leather switch — the checks below, after a build.
+- **Check after the build** (PURGE: `TerminalPage.h` and `AgentManagerContent.h` changed data members, and
+  `SessionModels.h` changed):
+  - Collapse the panel: the card appears at the left edge 80 DIPs below the terminal's top for about 1.5 s, then fades.
+    Move toward the edge at any height: it fades in when the pointer is within about 37 DIPs of the edge. Over it, it
+    lightens; pressed, it darkens; the click expands the panel.
+  - Settings → Tabs & Overlay → SIDE PANEL: the preview shows the cognac card at 2×; pick Charcoal & Silver — the preview
+    turns charcoal at once — and Save: every window's collapsed card is charcoal, silver thread on three sides.
+  - ⋯ → Dock on the right, collapse: the card is on the right edge, square on the right, its chevron pointing left.
+  - At 150% the grain's pebbles look the size they do at 100% (finer pixels), and the stitches stay crisp.
+  - No `[exc] sidepanel card: skin` or `[exc] cog: the collapsed card's preview` line in hooks.log.
+
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 
 The bottom area hosts a REAL `AgentTabOverlay` whose summary panel is switched into the new
@@ -2894,8 +3011,9 @@ below).
   a filter is set), so — like the panel's other per-window keys — a build from before the filters that rewrites the record
   drops it, and the older-writer repair cannot bring it back (PERSISTENCE.md §17, "What is still not covered").
 
-- **The collapsed strip's showing is not state** (§2m): only the collapsed flag is saved, as before. Whether the
-  floating strip shows follows the pointer, and a window that opens collapsed starts with it hidden.
+- **The collapsed card's showing is not state** (§2m): only the collapsed flag is saved, as before. Whether the
+  floating card shows follows the pointer, and a window that opens collapsed starts with it hidden. Its leather is the
+  GLOBAL cog setting `sidePanelCardLeather` (§2q), not a per-window value.
 - Every drag release / collapse toggle / **Sum** click: update the live members → the window-record
   autosave captures them (`_CaptureWindowRecord`) → a GRANULAR freshest-disk RMW exports ONLY the
   adjusted field as the new global default (`_SidePanelPersistDefaults` — a width drag never
@@ -2964,7 +3082,9 @@ below).
   rule, with XAML written only when the strip's state changes; its fade is an implicit opacity transition (no
   Storyboard); its 200 ms watch runs only while the strip shows or waits for the pointer to leave, holds the page
   weakly and is stopped by `~TerminalPage`; the strip is hidden by opacity, never `Visibility`, so its chevron stays in
-  the UI Automation tree.
+  the UI Automation tree. The leather card that replaced it (§2q) keeps all of that; its look costs one button
+  and seven childless elements or Shapes, a grain bitmap of the card's own pixels (12 × 40 at 100%), and a skin pass
+  that writes nothing unless the leather, the dock or the display scale changed (`_sidePanelStripSkinKey`).
 - Pin to Top (§2j): one integer comparison per sort step, one lean read per menu open, one lean snapshot per pin click;
   the pushpin exists only on a pinned card (built at its first pinned apply, dropped at unpin), is not hit-testable and
   adds no handler, and the band's rounded shape stays childless.
@@ -3151,6 +3271,15 @@ below).
   `TerminalPage.AgentEngine.cpp` (`~TerminalPage` stops the watch), `TerminalAppLib.vcxproj` (the header),
   `tests/tests_sidepanel.cpp` (`TestSidePanelStripReveal`), `tests/m5_tests.{h,cpp}`, `e2e/amdriver/ui/sidepanel.py`
   (`strip_hidden`, `wait_strip`), `e2e/suites/test_side_panel.py` (SP-16).
+  The leather card (§2q): `AgentMaster/SidePanelLeatherCard.h` (the size and place, the two leathers and their
+  settings word, the tones, the thread's path, the grain — pure; new), `AgentLeatherCard.h` (the XAML builder: the
+  body brushes, the corners, the face, the mirror, the cog's preview; new), `TerminalPage.AgentSidePanel.cpp` (the card
+  in `_InitAgentSidePanel`, `_SidePanelStripSkin`, the skin from `_SidePanelApplyLayout` and before a show, the card's
+  width in the two near tests, the collapse item's tip), `TerminalPage.h` (`_sidePanelStripFace`,
+  `_sidePanelStripSkinKey`, `_SidePanelStripSkin`), `SessionModels.h` (`AppSettings::sidePanelCardLeather`),
+  `Persistence.cpp` (its word), `AgentManagerContent.{h,Settings.cpp}` (the SIDE PANEL row and its preview),
+  `TerminalAppLib.vcxproj` (the two headers), `tests/tests_sidepanel.cpp` (`TestSidePanelLeatherCard`, the 25 DIP
+  reach in `TestSidePanelStripReveal`), `tests/tests_persistence.cpp` (the word), `tests/m5_tests.{h,cpp}`.
   The rename card (§2o): `AgentMaster/SessionTitleEdit.h` (the trim, the box's copy of a title, the line-break-blind
   comparison and the commit's verdict — pure; new), `AgentManagerContent.{h,Tree.cpp}` (`SessionMenuHost::rename` /
   `renameTip`, used by `_PopulateSessionMenu`'s Rename item, which also gained the id `am.sessionmenu.rename` and a

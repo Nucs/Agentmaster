@@ -1945,6 +1945,13 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ComboBox _setAiTitleModel{ nullptr };
         std::wstring _aiTitleModelCustom; // that model id ("" = none: the combo has its two items only)
         winrt::Windows::UI::Xaml::Controls::ComboBox _setFavoriteIcon{ nullptr }; // TABS: the FAVORITE marker glyph on a live session's tab — Crown (default) / Star (FAVORITES.md §5a); GLOBAL
+        // TABS -> SIDE PANEL (SIDE_PANEL.md §2q): the collapsed side panel's card leather — item 0 Cognac & Cream (the default),
+        // item 1 Charcoal & Silver (the SidePanelCardLeather order). GLOBAL; the Save sink and the cross-window broadcast re-skin
+        // every window's card live. Its SelectionChanged repaints _setSidePanelCardPreview.
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setSidePanelCard{ nullptr };
+        // The live preview beside that box: the picked leather's card at 2x (AgentBuildLeatherCardPreview), its child replaced
+        // at every pick (_UpdateSidePanelCardPreview). A Border so the row keeps its size whatever the child is.
+        winrt::Windows::UI::Xaml::Controls::Border _setSidePanelCardPreview{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setMaxTags{ nullptr }; // TABS: the GLOBAL cap on distinct bookmark tags (default 20, hard ceiling 40 — ClampMaxTags); GLOBAL
         winrt::Windows::UI::Xaml::Controls::Slider _setTooltipTagsOpacity{ nullptr }; // TABS: the OPACITY (10..100%) of the bookmark-tag chips in the rich tab TOOLTIP (AppSettings::tooltipTagsOpacity, default 0.9); GLOBAL. Header shows the live percent.
         winrt::Windows::UI::Xaml::Controls::ComboBox _setTabColorMode{ nullptr }; // TABS: HOW managed tabs are colored — shared per working dir (default) / individual per tab / inferred working dir / "Remove colors" (no tab colored, saved colors kept) (TabColorMode); GLOBAL, applied live on Save + cross-window broadcast
@@ -1973,6 +1980,12 @@ namespace winrt::TerminalApp::implementation
         double _overlayDragStartX{ 0.0 }; // window-X at PointerPressed (delta-accumulation, the grip idiom)
         double _overlayDragStartVal{ 0.0 }; // the dragged dot's value at PointerPressed
         void _LayoutOverlayOpacitySlider(); // position both dots + refresh the label from _overlayRest/HoverVal (no layout dependency — fixed track width)
+        // Repaint the SIDE PANEL row's preview (_setSidePanelCardPreview) with the leather the box shows now (SIDE_PANEL.md §2q):
+        // the real card's face and body at 2x, written for the page's display scale. Called by the box's SelectionChanged
+        // (the build's own seed and _ShowSettings' seed included), so the picture always matches the pick before Save.
+        //   returns - nothing; a no-op before the row is built.
+        //   throws  - nothing: a failed build is logged (Rule #18) and leaves the previous picture.
+        void _UpdateSidePanelCardPreview() noexcept;
         winrt::Windows::UI::Xaml::Controls::TextBlock _setProfileDir{ nullptr }; // the ACTIVE per-install profile dir (read-only; Change… applies on restart)
         winrt::Windows::UI::Xaml::Controls::Button _setResetHidden{ nullptr }; // BEHAVIOR: "Reset hidden sessions" — clears the Sessions browser's "Hide from list" set (fires _resetHiddenSessionsHandler; relabeled per open)
         winrt::Windows::UI::Xaml::Controls::TextBox _setEnv{ nullptr }; // ENV area: GLOBAL multi-line NAME=VALUE editor (one per line)

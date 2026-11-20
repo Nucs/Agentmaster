@@ -20,6 +20,7 @@
 #include "PendingPaste.h" // FindPasteMarkers + segment helpers (the R4 collapse-tolerant fill verify)
 #include "ReopenWindowsAtStart.h" // AppSettings::reopenWindowsAtStart (PERSISTENCE.md §18) — pure, std only; shared with the exe's startup question
 #include "QuestionTools.h" // AppSettings::questionTools' shipped default (kDefaultQuestionTools; HOOKS.md "Question tools") — pure, std only
+#include "SidePanelLeatherCard.h" // AppSettings::sidePanelCardLeather (SIDE_PANEL.md §2q: the collapsed card's leather) — pure, std only
 
 namespace Agentmaster
 {
@@ -3355,6 +3356,13 @@ namespace Agentmaster
         // fallback is ON as well — the two must agree, or a pre-toggle file and a missing file would
         // behave differently); a stored false is the user's explicit OFF and always wins.
         bool sidePanelScrollToSelectedTab{ true };
+        // Agentmaster (SIDE_PANEL.md §2q; the user's picks of 2026-11-20, "Switchable in settings"): which LEATHER the
+        // collapsed side panel's card wears — Cognac & Cream (the DEFAULT) or Charcoal Pebble & Silver
+        // (SidePanelLeatherCard.h has both designs' numbers). A FORM setting (the cog's Tabs & Overlay -> SIDE PANEL box,
+        // written by Save), GLOBAL across windows: the Save sink and the cross-window broadcast re-skin every window's card
+        // live (TerminalPage::_SidePanelStripSkin). Stored as a word (SidePanelCardLeatherToken: "cognac" / "charcoal"); a
+        // missing or unknown word reads as Cognac, so a settings.json from before the setting draws the default card.
+        SidePanelCardLeather sidePanelCardLeather{ SidePanelCardLeather::Cognac };
         // Agentmaster (updater; Updater.h): the in-app GitHub-release updater's state. allowUpdatePrerelease
         // is the Settings cog's "Allow updating to pre-release versions" toggle (default OFF — the check
         // uses /releases/latest, which excludes prereleases; ON uses the list endpoint, newest published).

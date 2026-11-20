@@ -103,12 +103,21 @@
 // record of each line, the filter started over whatever it held, the check on the line that is the whole filter (by
 // identity, only while it applies and no text is typed), the drop on its second click, a line that names nothing.
 //
-// TestSidePanelStripReveal pins WHEN the collapsed panel's strip shows (AgentMaster/SidePanelStripReveal.h, SIDE_PANEL.md
-// section 2m; the user's request of 2026-11-12): near = within 40 DIPs of the strip (60 from the docked edge of the content,
-// inclusive, any height, mirrored docked right, never outside the area, bad inputs neutralized); the rule - an approach
-// shows it, away hides it, a drag passing by and a press beside the button keep it away until the pointer has left, a press
-// on the button keeps it, a finger's taps, the watch that only hides, the after-collapse linger; all 288 input combinations
-// against a second statement of the rule; one user's visit event by event.
+// TestSidePanelStripReveal pins WHEN the collapsed panel's card shows (AgentMaster/SidePanelStripReveal.h, SIDE_PANEL.md
+// sections 2m and 2q; the user's requests of 2026-11-12 and 2026-11-20): near = within 25 DIPs of the 12 DIP card (37 from
+// the docked edge of the content, inclusive, any height, mirrored docked right, never outside the area, bad inputs
+// neutralized); the rule - an approach shows it, away hides it, a drag passing by and a press beside the card keep it away
+// until the pointer has left, a press on the card keeps it, a finger's taps, the watch that only hides, the after-collapse
+// linger; all 288 input combinations against a second statement of the rule; one user's visit event by event.
+//
+// TestSidePanelLeatherCard pins what the collapsed card LOOKS like and where it is (AgentMaster/SidePanelLeatherCard.h,
+// SIDE_PANEL.md section 2q; the user's picks of 2026-11-20 - designs 1 and 7, "Switchable in settings"): the size and place
+// (12 x 40 DIPs, 80 DIPs down); the settings word both ways (an unknown word, a wrong case, a cast integer: Cognac); each
+// leather's numbers as the chosen mocks drew them; the hover / pressed tones (exact bytes, alpha kept, the direction of each);
+// the thread's path for both layouts (start, steps, corners, inside the card, the chevron inside the stitching); the grain's
+// hash, noise and value pinned to values computed independently from the mocks' JavaScript (so the app's grain IS the
+// mocks'); and the grain bitmap - its size, its refusals, premultiplied white-or-black pixels, both signs present, the
+// strength bound, determinism, each pixel equal to the noise at its center, and whole-bitmap fingerprints at two scales.
 //
 // TestSessionTitleEdit pins what the side panel's floating RENAME CARD writes (AgentMaster/SessionTitleEdit.h, SIDE_PANEL.md
 // section 2o; the user's request of 2026-11-18, "refactor the sidemenu's rename to be at the card and update all"): the trim
@@ -129,7 +138,8 @@
 #include "../SidePanelAiCopy.h" // the crossed circle's refill and the copy button's Markdown (TestSidePanelAiCopy)
 #include "../SidePanelFilters.h" // the funnel's FILTERS: facets, matcher, edits, chips, the record's JSON (TestSidePanelFilters)
 #include "../SidePanelPins.h" // Pin to Top: pinned cards first, the newest pin on top, the pin stamp, the re-home carry (TestSidePanelPins)
-#include "../SidePanelStripReveal.h" // the collapsed strip's auto-hide: when the pointer is near it, and the strip's next state (TestSidePanelStripReveal)
+#include "../SidePanelStripReveal.h" // the collapsed card's auto-hide: when the pointer is near it, and the card's next state (TestSidePanelStripReveal)
+#include "../SidePanelLeatherCard.h" // the collapsed card's look and place: the leathers, the tones, the thread's path, the grain (TestSidePanelLeatherCard)
 #include "../StatusIconMotion.h" // the status icon's motion rule, shared by the tab header and the card icon (TestStatusIconMotion)
 #include "../VirtualListWindow.h" // the virtualized card list's realized rows (TestVirtualListWindow)
 
@@ -137,7 +147,10 @@
 #include <cmath> // std::fabs / std::nan / HUGE_VAL - TestPointerCardPlacement
 #include <cstdint>
 #include <string>
+#include <tuple> // std::make_tuple - TestSidePanelLeatherCard's grain fingerprints
 #include <unordered_map>
+#include <utility> // std::make_pair - TestSidePanelLeatherCard's pixel reads
+#include <vector>
 #include <unordered_set>
 #include <vector>
 
@@ -3062,75 +3075,78 @@ namespace
     }
 }
 
-// TestSidePanelStripReveal pins WHEN the collapsed side panel's strip shows (AgentMaster/SidePanelStripReveal.h, SIDE_PANEL.md
-// section 2m; the user's request of 2026-11-12, "The strip should autohide. If mouse comes close by 40pixels the strips
-// appears", and their pick of the floating whole strip): the geometry - the user's 40 measured from the strip, so 60 DIPs
-// from the docked edge of the content, inclusive, at any height, mirrored docked right, never outside the area, an
-// unmeasured area and every NaN / negative input neutralized, plus a seeded mirror sweep; the rule's named cases - the
-// approach, staying and leaving, a drag passing by, a press beside the button (the strip steps aside until the pointer
-// has left), a press on the button, a finger's taps, the watch that only hides, the after-collapse linger; all 288
-// combinations of the inputs against a second statement of the rule and its invariants; and one user's whole visit,
-// event by event.
+// TestSidePanelStripReveal pins WHEN the collapsed side panel's card shows (AgentMaster/SidePanelStripReveal.h, SIDE_PANEL.md
+// sections 2m and 2q; the user's request of 2026-11-12, "The strip should autohide. If mouse comes close by 40pixels the
+// strips appears", kept for the 12 x 40 DIP leather card of 2026-11-20 with their reach of "25 DIP"): the geometry - the
+// user's 25 measured from the card's inner edge, so 37 DIPs from the docked edge of the content, inclusive, at any height
+// (the rule is horizontal: the card is 40 DIPs tall at 80 DIPs down, but approaching the edge anywhere brings it in),
+// mirrored docked right, never outside the area, an unmeasured area and every NaN / negative input neutralized, plus a
+// seeded mirror sweep; the rule's named cases - the approach, staying and leaving, a drag passing by, a press beside the
+// card (it steps aside until the pointer has left), a press on the card, a finger's taps, the watch that only hides, the
+// after-collapse linger; all 288 combinations of the inputs against a second statement of the rule and its invariants;
+// and one user's whole visit, event by event. (The rule's "strip" names stay from the strip the card replaced.)
 void TestSidePanelStripReveal()
 {
-    std::wprintf(L"Collapsed strip auto-hide (SidePanelStripReveal.h, SIDE_PANEL.md section 2m):\n");
+    std::wprintf(L"Collapsed card auto-hide (SidePanelStripReveal.h, SIDE_PANEL.md sections 2m and 2q):\n");
     using Kind = SidePanelStripPointerKind;
-    constexpr double kStrip = 20.0; // the strip's width in the app (kSidePanelStripPx)
+    constexpr double kStrip = kSidePanelCardWidth; // the card's width, the one the app passes (SidePanelLeatherCard.h)
     constexpr double kW = 1000.0;
     constexpr double kH = 600.0;
 
     // --- the geometry -------------------------------------------------------------------------------------------------
-    static_assert(kSidePanelStripRevealDistance == 40.0, "the reveal distance is the user's 40");
-    // Docked left: the strip's place is x in [0, 20); "within 40 of it" reaches x = 60, inclusive.
-    CHECK(SidePanelStripPointerNear(true, kW, kH, 0.0, 300.0, kStrip), "strip near: docked left, the very edge is near");
-    CHECK(SidePanelStripPointerNear(true, kW, kH, 10.0, 300.0, kStrip), "strip near: docked left, over the strip's own place");
-    CHECK(SidePanelStripPointerNear(true, kW, kH, 59.75, 300.0, kStrip), "strip near: docked left, 39.75 from the strip");
-    CHECK(SidePanelStripPointerNear(true, kW, kH, 60.0, 300.0, kStrip), "strip near: docked left, exactly 40 from the strip is still near");
-    CHECK(!SidePanelStripPointerNear(true, kW, kH, 60.25, 300.0, kStrip), "strip near: docked left, 40.25 from the strip is away");
-    CHECK(!SidePanelStripPointerNear(true, kW, kH, 500.0, 300.0, kStrip), "strip near: docked left, the middle of the content is away");
-    CHECK(!SidePanelStripPointerNear(true, kW, kH, 990.0, 300.0, kStrip), "strip near: docked left, the OTHER edge is away");
-    // Any height along the edge - the strip is as tall as the content.
-    CHECK(SidePanelStripPointerNear(true, kW, kH, 30.0, 0.0, kStrip) && SidePanelStripPointerNear(true, kW, kH, 30.0, 599.75, kStrip),
-          "strip near: the top row and the bottom row of the content count like the middle");
-    // Outside the content area the pointer is never near, however close to the strip's place.
-    CHECK(!SidePanelStripPointerNear(true, kW, kH, -0.25, 300.0, kStrip), "strip near: a pointer that left through the docked edge (x < 0) is away");
-    CHECK(!SidePanelStripPointerNear(true, kW, kH, 30.0, -1.0, kStrip), "strip near: over the tab row above the content (y < 0) is away");
-    CHECK(!SidePanelStripPointerNear(true, kW, kH, 30.0, 600.0, kStrip), "strip near: the first row below the content (y == height) is away");
-    CHECK(!SidePanelStripPointerNear(false, kW, kH, 1000.0, 300.0, kStrip), "strip near: docked right, the first column past the content (x == width) is away");
+    static_assert(kSidePanelStripRevealDistance == 25.0, "the reveal distance is the user's 25");
+    static_assert(kSidePanelCardWidth == 12.0 && kSidePanelCardHeight == 40.0 && kSidePanelCardTop == 80.0,
+                  "the card is the user's 12 x 40, 80 below the content's top");
+    // Docked left: the card's place is x in [0, 12); "within 25 of it" reaches x = 37, inclusive.
+    CHECK(SidePanelStripPointerNear(true, kW, kH, 0.0, 300.0, kStrip), "card near: docked left, the very edge is near");
+    CHECK(SidePanelStripPointerNear(true, kW, kH, 6.0, 300.0, kStrip), "card near: docked left, over the card's own column");
+    CHECK(SidePanelStripPointerNear(true, kW, kH, 36.75, 300.0, kStrip), "card near: docked left, 24.75 from the card");
+    CHECK(SidePanelStripPointerNear(true, kW, kH, 37.0, 300.0, kStrip), "card near: docked left, exactly 25 from the card is still near");
+    CHECK(!SidePanelStripPointerNear(true, kW, kH, 37.25, 300.0, kStrip), "card near: docked left, 25.25 from the card is away");
+    CHECK(!SidePanelStripPointerNear(true, kW, kH, 500.0, 300.0, kStrip), "card near: docked left, the middle of the content is away");
+    CHECK(!SidePanelStripPointerNear(true, kW, kH, 990.0, 300.0, kStrip), "card near: docked left, the OTHER edge is away");
+    // Any height along the edge - the user's "as today": the reach is a band along the whole edge, not around the card.
+    CHECK(SidePanelStripPointerNear(true, kW, kH, 20.0, 0.0, kStrip) && SidePanelStripPointerNear(true, kW, kH, 20.0, 599.75, kStrip),
+          "card near: the top row and the bottom row of the content count like the card's own rows");
+    // Outside the content area the pointer is never near, however close to the card's place.
+    CHECK(!SidePanelStripPointerNear(true, kW, kH, -0.25, 300.0, kStrip), "card near: a pointer that left through the docked edge (x < 0) is away");
+    CHECK(!SidePanelStripPointerNear(true, kW, kH, 20.0, -1.0, kStrip), "card near: over the tab row above the content (y < 0) is away");
+    CHECK(!SidePanelStripPointerNear(true, kW, kH, 20.0, 600.0, kStrip), "card near: the first row below the content (y == height) is away");
+    CHECK(!SidePanelStripPointerNear(false, kW, kH, 1000.0, 300.0, kStrip), "card near: docked right, the first column past the content (x == width) is away");
     // Docked right: the mirror image.
-    CHECK(SidePanelStripPointerNear(false, kW, kH, 999.75, 300.0, kStrip), "strip near: docked right, the very edge is near");
-    CHECK(SidePanelStripPointerNear(false, kW, kH, 940.0, 300.0, kStrip), "strip near: docked right, exactly 40 from the strip is still near");
-    CHECK(!SidePanelStripPointerNear(false, kW, kH, 939.75, 300.0, kStrip), "strip near: docked right, 40.25 from the strip is away");
-    CHECK(!SidePanelStripPointerNear(false, kW, kH, 10.0, 300.0, kStrip), "strip near: docked right, the left edge is away");
+    CHECK(SidePanelStripPointerNear(false, kW, kH, 999.75, 300.0, kStrip), "card near: docked right, the very edge is near");
+    CHECK(SidePanelStripPointerNear(false, kW, kH, 963.0, 300.0, kStrip), "card near: docked right, exactly 25 from the card is still near");
+    CHECK(!SidePanelStripPointerNear(false, kW, kH, 962.75, 300.0, kStrip), "card near: docked right, 25.25 from the card is away");
+    CHECK(!SidePanelStripPointerNear(false, kW, kH, 10.0, 300.0, kStrip), "card near: docked right, the left edge is away");
     // Nothing to measure against: never near.
     CHECK(!SidePanelStripPointerNear(true, 0.0, kH, 0.0, 300.0, kStrip) && !SidePanelStripPointerNear(true, kW, 0.0, 0.0, 0.0, kStrip),
-          "strip near: an unmeasured content area (a 0 width or height) has no edge to be near");
-    CHECK(!SidePanelStripPointerNear(true, -5.0, kH, 0.0, 300.0, kStrip), "strip near: a negative width reads as unmeasured");
+          "card near: an unmeasured content area (a 0 width or height) has no edge to be near");
+    CHECK(!SidePanelStripPointerNear(true, -5.0, kH, 0.0, 300.0, kStrip), "card near: a negative width reads as unmeasured");
     {
         const double nan = std::nan("");
         CHECK(!SidePanelStripPointerNear(true, nan, kH, 10.0, 300.0, kStrip) && !SidePanelStripPointerNear(true, kW, nan, 10.0, 300.0, kStrip) &&
                   !SidePanelStripPointerNear(true, kW, kH, nan, 300.0, kStrip) && !SidePanelStripPointerNear(true, kW, kH, 10.0, nan, kStrip),
-              "strip near: a NaN size or coordinate is never near");
-        // A broken strip width or distance counts as 0, it never widens the reach.
-        CHECK(SidePanelStripPointerNear(true, kW, kH, 40.0, 300.0, nan) && !SidePanelStripPointerNear(true, kW, kH, 40.25, 300.0, nan),
-              "strip near: a NaN strip width counts as 0 (the reach is the 40 alone)");
-        CHECK(SidePanelStripPointerNear(true, kW, kH, 20.0, 300.0, kStrip, nan) && !SidePanelStripPointerNear(true, kW, kH, 20.25, 300.0, kStrip, nan),
-              "strip near: a NaN distance counts as 0 (only the strip's own place is near)");
+              "card near: a NaN size or coordinate is never near");
+        // A broken card width or distance counts as 0, it never widens the reach.
+        CHECK(SidePanelStripPointerNear(true, kW, kH, 25.0, 300.0, nan) && !SidePanelStripPointerNear(true, kW, kH, 25.25, 300.0, nan),
+              "card near: a NaN card width counts as 0 (the reach is the 25 alone)");
+        CHECK(SidePanelStripPointerNear(true, kW, kH, 12.0, 300.0, kStrip, nan) && !SidePanelStripPointerNear(true, kW, kH, 12.25, 300.0, kStrip, nan),
+              "card near: a NaN distance counts as 0 (only the card's own column is near)");
     }
-    CHECK(SidePanelStripPointerNear(true, kW, kH, 40.0, 300.0, -8.0) && !SidePanelStripPointerNear(true, kW, kH, 40.25, 300.0, -8.0),
-          "strip near: a negative strip width counts as 0");
-    CHECK(SidePanelStripPointerNear(true, kW, kH, 20.0, 300.0, kStrip, -1.0) && !SidePanelStripPointerNear(true, kW, kH, 20.25, 300.0, kStrip, -1.0),
-          "strip near: a negative distance counts as 0");
-    CHECK(SidePanelStripPointerNear(true, kW, kH, 100.0, 300.0, kStrip, 80.0) && !SidePanelStripPointerNear(true, kW, kH, 100.25, 300.0, kStrip, 80.0),
-          "strip near: another distance moves the boundary with it (20 + 80)");
+    CHECK(SidePanelStripPointerNear(true, kW, kH, 25.0, 300.0, -8.0) && !SidePanelStripPointerNear(true, kW, kH, 25.25, 300.0, -8.0),
+          "card near: a negative card width counts as 0");
+    CHECK(SidePanelStripPointerNear(true, kW, kH, 12.0, 300.0, kStrip, -1.0) && !SidePanelStripPointerNear(true, kW, kH, 12.25, 300.0, kStrip, -1.0),
+          "card near: a negative distance counts as 0");
+    CHECK(SidePanelStripPointerNear(true, kW, kH, 92.0, 300.0, kStrip, 80.0) && !SidePanelStripPointerNear(true, kW, kH, 92.25, 300.0, kStrip, 80.0),
+          "card near: another distance moves the boundary with it (12 + 80)");
     // A content area narrower than the reach: the whole of it is near, from either dock.
-    CHECK(SidePanelStripPointerNear(true, 50.0, kH, 49.0, 10.0, kStrip) && SidePanelStripPointerNear(false, 50.0, kH, 0.0, 10.0, kStrip),
-          "strip near: a content area narrower than 60 is near all over");
+    CHECK(SidePanelStripPointerNear(true, 30.0, kH, 29.0, 10.0, kStrip) && SidePanelStripPointerNear(false, 30.0, kH, 0.0, 10.0, kStrip),
+          "card near: a content area narrower than 37 is near all over");
     {
         // An infinite width (never produced by layout; a belt): docked left the edge is where it always is, docked right it
         // is infinitely far.
-        CHECK(SidePanelStripPointerNear(true, HUGE_VAL, kH, 30.0, 10.0, kStrip) && !SidePanelStripPointerNear(false, HUGE_VAL, kH, 30.0, 10.0, kStrip),
-              "strip near: an infinite width keeps the left edge and loses the right one");
+        CHECK(SidePanelStripPointerNear(true, HUGE_VAL, kH, 20.0, 10.0, kStrip) && !SidePanelStripPointerNear(false, HUGE_VAL, kH, 20.0, 10.0, kStrip),
+              "card near: an infinite width keeps the left edge and loses the right one");
     }
     {
         // The two docks are mirror images: a pointer x from the left edge docked left reads like one x from the right edge
@@ -3146,7 +3162,7 @@ void TestSidePanelStripReveal()
         };
         size_t cases = 0;
         size_t mirrorBroken = 0; // the docks disagree about mirrored points
-        size_t boundaryBroken = 0; // near does not equal "at most 60 from the docked edge"
+        size_t boundaryBroken = 0; // near does not equal "at most 37 from the docked edge"
         for (int i = 0; i < 20000; ++i)
         {
             const double width = static_cast<double>(1 + next(3000));
@@ -3161,13 +3177,13 @@ void TestSidePanelStripReveal()
             {
                 ++mirrorBroken;
             }
-            if (fromLeft != (x <= 60.0))
+            if (fromLeft != (x <= 37.0))
             {
                 ++boundaryBroken;
             }
         }
-        CHECK(cases == 20000 && mirrorBroken == 0, "strip near (sweep): docked right is the mirror image of docked left");
-        CHECK(boundaryBroken == 0, "strip near (sweep): near is exactly 'at most 60 DIPs from the docked edge', whatever the area's size");
+        CHECK(cases == 20000 && mirrorBroken == 0, "card near (sweep): docked right is the mirror image of docked left");
+        CHECK(boundaryBroken == 0, "card near (sweep): near is exactly 'at most 37 DIPs from the docked edge', whatever the area's size");
     }
 
     // --- the rule's named cases ----------------------------------------------------------------------------------------
@@ -3279,44 +3295,270 @@ void TestSidePanelStripReveal()
 
     // --- one visit, event by event --------------------------------------------------------------------------------------
     {
-        // The pointer positions go through the real geometry (docked left, a 1000 x 600 content area).
+        // The pointer positions go through the real geometry (docked left, a 1000 x 600 content area; the card spans rows
+        // 80..120, so the y of 300 used here is BELOW it: every press here is beside the card, never on it).
         const auto at = [&](double x) { return SidePanelStripPointerNear(true, kW, kH, x, 300.0, kStrip); };
         SidePanelStripReveal s{}; // a window that opens with its panel collapsed: hidden
         s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(400.0)));
-        CHECK(s == hidden, "strip visit: working in the middle of the terminal - nothing shows");
-        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(61.0)));
-        CHECK(s == hidden, "strip visit: 41 from the strip - still nothing");
-        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(58.0)));
-        CHECK(s == shown, "strip visit: 38 from the strip - it shows");
-        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(12.0)));
-        CHECK(s == shown, "strip visit: over the strip itself - it stays");
-        // A click on the terminal's first column, beside the button: the strip steps aside for it.
-        s = NextSidePanelStripReveal(s, StripEvent(Kind::Press, at(12.0), true));
-        CHECK(s == dismissed, "strip visit: a click beside the button - the strip steps aside");
-        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(14.0), true));
-        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(30.0)));
-        CHECK(s == dismissed, "strip visit: selecting and moving at the edge - it stays away");
+        CHECK(s == hidden, "card visit: working in the middle of the terminal - nothing shows");
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(38.0)));
+        CHECK(s == hidden, "card visit: 26 from the card - still nothing");
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(35.0)));
+        CHECK(s == shown, "card visit: 23 from the card - it shows");
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(6.0)));
+        CHECK(s == shown, "card visit: in the card's own column - it stays");
+        // A click on the terminal's first column, below the card: the card steps aside for it.
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Press, at(6.0), true));
+        CHECK(s == dismissed, "card visit: a click beside the card - it steps aside");
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(8.0), true));
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(20.0)));
+        CHECK(s == dismissed, "card visit: selecting and moving at the edge - it stays away");
         s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(200.0)));
-        CHECK(s == hidden, "strip visit: the pointer leaves the edge - armed again");
-        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(40.0)));
-        CHECK(s == shown, "strip visit: back at the edge - it shows again");
+        CHECK(s == hidden, "card visit: the pointer leaves the edge - armed again");
+        s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(30.0)));
+        CHECK(s == shown, "card visit: back at the edge - it shows again");
         // The pointer leaves the window through the edge: no move reaches the content, the watch sees it.
         s = NextSidePanelStripReveal(s, StripEvent(Kind::Watch, at(-80.0)));
-        CHECK(s == hidden, "strip visit: the pointer left the window through the edge - the watch hides the strip");
-        // Back in, onto the button, and a click on it: the strip is still there for the click.
+        CHECK(s == hidden, "card visit: the pointer left the window through the edge - the watch hides the card");
+        // Back in, onto the card, and a click on it: the card is still there for the click.
         s = NextSidePanelStripReveal(s, StripEvent(Kind::Move, at(8.0)));
         s = NextSidePanelStripReveal(s, StripEvent(Kind::Press, at(8.0), true, true, /*onButton*/ true));
-        CHECK(s == shown, "strip visit: the click on the button finds the strip shown (its click expands the panel)");
+        CHECK(s == shown, "card visit: the click on the card finds it shown (its click expands the panel)");
     }
 
     // constexpr: both functions are pure and usable at compile time.
     {
-        static_assert(SidePanelStripPointerNear(true, 1000.0, 600.0, 60.0, 0.0, 20.0), "40 DIPs from a 20 DIP strip is near");
-        static_assert(!SidePanelStripPointerNear(true, 1000.0, 600.0, 61.0, 0.0, 20.0), "41 DIPs from it is away");
+        static_assert(SidePanelStripPointerNear(true, 1000.0, 600.0, 37.0, 0.0, 12.0), "25 DIPs from the 12 DIP card is near");
+        static_assert(!SidePanelStripPointerNear(true, 1000.0, 600.0, 38.0, 0.0, 12.0), "26 DIPs from it is away");
         static_assert(NextSidePanelStripReveal(SidePanelStripReveal{}, StripEvent(SidePanelStripPointerKind::Move, true)).shown, "an approach shows the strip");
         static_assert(!NextSidePanelStripReveal(SidePanelStripReveal{}, StripEvent(SidePanelStripPointerKind::Watch, true)).shown, "the watch never does");
         static_assert(kSidePanelStripCollapseLingerMs >= 1000 && kSidePanelStripCollapseLingerMs <= 3000,
                       "the after-collapse linger is long enough to be seen (1 s) and short enough not to read as stuck (3 s)");
+    }
+}
+
+// ---- TestSidePanelLeatherCard (AgentMaster/SidePanelLeatherCard.h) --------------------------------------------------
+// The collapsed card's look and place (the file header has the list). The reference values in section 6 were computed by a
+// separate port of the mocks' leather.js (JavaScript's 32-bit Math.imul semantics, cross-checked against Node on the hash),
+// not by this C++: the app's grain must be the grain the user chose from.
+void TestSidePanelLeatherCard()
+{
+    std::wprintf(L"Collapsed card leather (SidePanelLeatherCard.h, SIDE_PANEL.md section 2q):\n");
+    using State = SidePanelCardState;
+
+    // --- 1. the size and the place: the user's numbers -----------------------------------------------------------------
+    static_assert(kSidePanelCardWidth == 12.0 && kSidePanelCardHeight == 40.0, "the card is the user's 12 x 40");
+    static_assert(kSidePanelCardTop == 80.0, "the card's top is the user's 80 below the content's top");
+
+    // --- 2. the settings word -------------------------------------------------------------------------------------------
+    CHECK(SidePanelCardLeatherToken(SidePanelCardLeather::Cognac) == L"cognac" && SidePanelCardLeatherToken(SidePanelCardLeather::Charcoal) == L"charcoal",
+          "leather word: each leather has its word");
+    CHECK(SidePanelCardLeatherFromToken(L"cognac") == SidePanelCardLeather::Cognac && SidePanelCardLeatherFromToken(L"charcoal") == SidePanelCardLeather::Charcoal,
+          "leather word: each word reads back as its leather");
+    CHECK(SidePanelCardLeatherFromToken(L"") == SidePanelCardLeather::Cognac && SidePanelCardLeatherFromToken(L"Charcoal") == SidePanelCardLeather::Cognac &&
+              SidePanelCardLeatherFromToken(L"oxblood") == SidePanelCardLeather::Cognac,
+          "leather word: empty, a wrong case or an unknown leather reads as the default (Cognac)");
+    CHECK(SidePanelCardLeatherToken(static_cast<SidePanelCardLeather>(7)) == L"cognac", "leather word: an out-of-range value writes the default's word");
+    static_assert(static_cast<int>(SidePanelCardLeather::Cognac) == 0 && static_cast<int>(SidePanelCardLeather::Charcoal) == 1,
+                  "the leathers' integers are the cog box's item order");
+
+    // --- 3. each leather's numbers, as the chosen mocks drew them --------------------------------------------------------
+    const auto cognac = SidePanelLeatherSpecFor(SidePanelCardLeather::Cognac);
+    const auto charcoal = SidePanelLeatherSpecFor(SidePanelCardLeather::Charcoal);
+    CHECK(cognac.bodyTop == 0xFFB8743Du && cognac.bodyBottom == 0xFF8A4A20u && cognac.edge == 0xFF4A240Cu && cognac.stitchColor == 0xFFF3E4C2u,
+          "leather 1 (Cognac & Cream): the mock's body, rim and cream thread");
+    CHECK(cognac.stitchLayout == SidePanelStitchLayout::Closed && cognac.stitchInset == 2.5 && cognac.stitchThickness == 1.0 &&
+              cognac.stitchDash == 1.7 && cognac.stitchGap == 1.3 && cognac.radius == 4.0,
+          "leather 1: thread all round, 2.5 in, 1.7 stitch / 1.3 gap, corners of 4");
+    CHECK(cognac.grainAmp == 0.09 && cognac.grainCell == 2.1 && cognac.grainSeed == 11 && cognac.gloss == 0.12 && cognac.glossEnd == 0.5,
+          "leather 1: the mock's grain and gloss");
+    CHECK(cognac.chevronColor == 0xFF5A2B0Fu && cognac.chevronLip == 0x8CE2A06Au && cognac.chevronWidth == 1.15 && cognac.chevronLipDy == 0.65,
+          "leather 1: the debossed chevron (#E2A06A lip at 0.55)");
+    CHECK(charcoal.bodyTop == 0xFF4D4E54u && charcoal.bodyBottom == 0xFF2A2B2Fu && charcoal.edge == 0xFF151517u && charcoal.stitchColor == 0xFFCDD1D9u,
+          "leather 7 (Charcoal & Silver): the mock's body, rim and silver thread");
+    CHECK(charcoal.stitchLayout == SidePanelStitchLayout::ThreeSided && charcoal.stitchThickness == 0.9 && charcoal.stitchDash == 1.3 && charcoal.stitchGap == 1.2,
+          "leather 7: thread on three sides, 0.9 thick, 1.3 stitch / 1.2 gap");
+    CHECK(charcoal.grainAmp == 0.16 && charcoal.grainCell == 1.45 && charcoal.grainSeed == 79 && charcoal.stitchShadow == 0xA6000000u,
+          "leather 7: the pebbled grain and the black thread shadow at 0.65");
+    {
+        const auto fallback = SidePanelLeatherSpecFor(static_cast<SidePanelCardLeather>(9));
+        CHECK(fallback.bodyTop == cognac.bodyTop && fallback.stitchColor == cognac.stitchColor && fallback.grainSeed == cognac.grainSeed,
+              "leather: an out-of-range value draws as Cognac");
+    }
+    for (const auto& spec : { cognac, charcoal })
+    {
+        // Sanity a later edit must keep: everything opaque that must be, the thread inside the card with room for the
+        // chevron between its two vertical runs, a visible but bounded grain, at least ten stitches along the 40 DIP side.
+        const bool opaque = (spec.bodyTop >> 24) == 0xFF && (spec.bodyBottom >> 24) == 0xFF && (spec.edge >> 24) == 0xFF &&
+                            (spec.stitchColor >> 24) == 0xFF && (spec.chevronColor >> 24) == 0xFF;
+        const double threadLeft = spec.stitchInset + spec.stitchThickness / 2.0;
+        const double threadRight = kSidePanelCardWidth - spec.stitchInset - spec.stitchThickness / 2.0;
+        const double chevronLeft = spec.chevronCx - spec.chevronHalfWidth - spec.chevronWidth / 2.0;
+        const double chevronRight = spec.chevronCx + spec.chevronHalfWidth + spec.chevronWidth / 2.0;
+        CHECK(opaque, "leather: the body, the rim, the thread and the chevron are opaque");
+        CHECK(spec.stitchInset - spec.stitchThickness / 2.0 >= spec.edgeWidth, "leather: the thread runs inside the rim");
+        CHECK(chevronLeft > threadLeft && chevronRight < threadRight, "leather: the chevron sits between the thread's two vertical runs");
+        CHECK(spec.chevronCy - spec.chevronHalfHeight > spec.stitchInset && spec.chevronCy + spec.chevronHalfHeight + spec.chevronLipDy < kSidePanelCardHeight - spec.stitchInset,
+              "leather: the chevron (and its lip) sits between the thread's top and bottom runs");
+        CHECK(spec.grainAmp > 0.0 && spec.grainAmp <= 0.25 && spec.grainCell > 0.5, "leather: a visible grain, never a noise that hides the leather");
+        CHECK(spec.stitchDash > 0.0 && spec.stitchGap > 0.0 && (kSidePanelCardHeight - 2.0 * spec.stitchInset) / (spec.stitchDash + spec.stitchGap) >= 10.0,
+              "leather: at least ten stitches along the card's long side");
+        CHECK(spec.radius > spec.edgeWidth && spec.radius <= kSidePanelCardWidth / 2.0, "leather: rounded free-side corners no wider than half the card");
+    }
+
+    // --- 4. the hover and pressed tones -----------------------------------------------------------------------------------
+    CHECK(SidePanelLeatherTone(0xFFB8743Du, State::Rest) == 0xFFB8743Du, "tone: rest is the color itself");
+    // Hover: 13% of white in. 184 + 71 * 0.13 = 193.23 -> 193; 116 + 139 * 0.13 = 134.07 -> 134; 61 + 194 * 0.13 = 86.22 -> 86.
+    CHECK(SidePanelLeatherTone(0xFFB8743Du, State::Hover) == 0xFFC18656u, "tone: hover lightens Cognac's top to #C18656 (the mock's rounding)");
+    // Pressed: 20% of black in. 184 * 0.8 = 147.2 -> 147; 116 * 0.8 = 92.8 -> 93; 61 * 0.8 = 48.8 -> 49.
+    CHECK(SidePanelLeatherTone(0xFFB8743Du, State::Pressed) == 0xFF935D31u, "tone: pressed darkens Cognac's top to #935D31");
+    CHECK(SidePanelLeatherTone(0xFF000000u, State::Hover) == 0xFF212121u && SidePanelLeatherTone(0xFFFFFFFFu, State::Pressed) == 0xFFCCCCCCu,
+          "tone: black lifts to #212121, white sinks to #CCCCCC");
+    CHECK((SidePanelLeatherTone(0x80123456u, State::Hover) >> 24) == 0x80u && (SidePanelLeatherTone(0x80123456u, State::Pressed) >> 24) == 0x80u,
+          "tone: the alpha is kept");
+    {
+        bool ordered = true; // every channel: pressed <= rest <= hover
+        for (const uint32_t c : { cognac.bodyTop, cognac.bodyBottom, charcoal.bodyTop, charcoal.bodyBottom, 0xFF000000u, 0xFFFFFFFFu, 0xFF7F807Fu })
+        {
+            for (int shift = 0; shift <= 16; shift += 8)
+            {
+                const auto ch = [&](uint32_t v) { return (v >> shift) & 0xFFu; };
+                ordered = ordered && ch(SidePanelLeatherTone(c, State::Pressed)) <= ch(c) && ch(c) <= ch(SidePanelLeatherTone(c, State::Hover));
+            }
+        }
+        CHECK(ordered, "tone: a press never lightens and a hover never darkens any channel");
+    }
+
+    // --- 5. the thread's path -------------------------------------------------------------------------------------------
+    {
+        // (Not named `near`: <windows.h>, which m5_tests.h includes, defines near / far as empty macros.)
+        const auto same = [](double a, double b) { return std::fabs(a - b) < 1e-9; };
+        const auto loop = SidePanelStitchPathFor(cognac);
+        // Inset 2.5, corner radius max(4 - 2.5 + 0.6, 0.8) = 2.1: the mock's rrect(2.5, 2.5, 7, 35, [0, 2.1, 2.1, 0]).
+        CHECK(loop.closed && loop.count == 5 && same(loop.startX, 2.5) && same(loop.startY, 2.5), "thread (Cognac): a closed loop from the top-left inset corner");
+        CHECK(!loop.steps[0].arc && same(loop.steps[0].x, 7.4) && same(loop.steps[0].y, 2.5), "thread (Cognac): the top line runs to the free corner's start");
+        CHECK(loop.steps[1].arc && same(loop.steps[1].x, 9.5) && same(loop.steps[1].y, 4.6) && same(loop.steps[1].radius, 2.1), "thread (Cognac): the free side's top corner, radius 2.1");
+        CHECK(!loop.steps[2].arc && same(loop.steps[2].x, 9.5) && same(loop.steps[2].y, 35.4), "thread (Cognac): down the free side");
+        CHECK(loop.steps[3].arc && same(loop.steps[3].x, 7.4) && same(loop.steps[3].y, 37.5), "thread (Cognac): the free side's bottom corner");
+        CHECK(!loop.steps[4].arc && same(loop.steps[4].x, 2.5) && same(loop.steps[4].y, 37.5), "thread (Cognac): back along the bottom to the docked side (the loop closes up it)");
+        const auto run = SidePanelStitchPathFor(charcoal);
+        CHECK(!run.closed && run.count == 5 && same(run.startX, 0.0) && same(run.startY, 2.5), "thread (Charcoal): an open run starting AT the docked edge");
+        CHECK(!run.steps[4].arc && same(run.steps[4].x, 0.0) && same(run.steps[4].y, 37.5), "thread (Charcoal): it ends at the docked edge too (three sides)");
+        bool inside = true;
+        for (const auto& path : { loop, run })
+        {
+            for (size_t i = 0; i < path.count; ++i)
+            {
+                inside = inside && path.steps[i].x >= 0.0 && path.steps[i].x <= kSidePanelCardWidth && path.steps[i].y >= 0.0 && path.steps[i].y <= kSidePanelCardHeight;
+            }
+        }
+        CHECK(inside, "thread: every point of both paths lies on the card");
+        // A tight radius never falls below the floor (a card with tiny corners still turns its thread smoothly).
+        auto tight = cognac;
+        tight.radius = 1.0;
+        CHECK(same(SidePanelStitchPathFor(tight).steps[1].radius, 0.8), "thread: the corner radius has a floor of 0.8");
+    }
+
+    // --- 6. the grain's math, pinned to the mocks' JavaScript -------------------------------------------------------------
+    CHECK(SidePanelLeatherHash(0, 0, 11) == 0x4902D654u && SidePanelLeatherHash(1, 2, 11) == 0x47A5B655u, "grain hash: the mock's values (seed 11)");
+    CHECK(SidePanelLeatherHash(5, 17, 79) == 0x52729BB2u && SidePanelLeatherHash(3, 9, 988) == 0x8AB6C975u, "grain hash: the mock's values (seeds 79, 988)");
+    CHECK(std::fabs(SidePanelLeatherValueNoise(1.25, 3.5, 11) - 0.5420102240241249) < 1e-12, "grain noise: the mock's value at (1.25, 3.5)");
+    CHECK(std::fabs(SidePanelLeatherGrainAt(6.5, 20.5, 2.1, 11) - 0.35347307706533365) < 1e-12, "grain: Cognac's value at the card's middle, as the mock");
+    CHECK(std::fabs(SidePanelLeatherGrainAt(3.25, 30.75, 1.45, 79) - (-0.5552500068905027)) < 1e-12, "grain: Charcoal's value at (3.25, 30.75), as the mock");
+    {
+        bool bounded = true; // the noise stays in [0, 1) and the grain in [-1.2, 1.2] across the card
+        for (int y = 0; y < 80; ++y)
+        {
+            for (int x = 0; x < 24; ++x)
+            {
+                const double n = SidePanelLeatherValueNoise(x * 0.37, y * 0.29, 79);
+                const double g = SidePanelLeatherGrainAt(x * 0.5, y * 0.5, 1.45, 79);
+                bounded = bounded && n >= 0.0 && n < 1.0 && g >= -1.2 && g <= 1.2;
+            }
+        }
+        CHECK(bounded, "grain: the noise stays in [0, 1) and the grain in [-1.2, 1.2]");
+    }
+
+    // --- 7. the grain bitmap --------------------------------------------------------------------------------------------
+    {
+        const auto at100 = FillSidePanelLeatherGrain(cognac, 12, 40);
+        CHECK(at100.size() == 12u * 40u * 4u, "grain bitmap: 12 x 40 pixels at 100%, four bytes each");
+        CHECK(FillSidePanelLeatherGrain(cognac, 0, 40).empty() && FillSidePanelLeatherGrain(cognac, 12, -1).empty(), "grain bitmap: a size below 1 gives nothing");
+        CHECK(FillSidePanelLeatherGrain(cognac, 3000, 2000).empty(), "grain bitmap: over 4 million pixels gives nothing (a broken scale never allocates gigabytes)");
+        auto smooth = cognac;
+        smooth.grainAmp = 0.0;
+        const auto flat = FillSidePanelLeatherGrain(smooth, 12, 40);
+        CHECK(flat.size() == 1920u && std::all_of(flat.begin(), flat.end(), [](uint8_t b) { return b == 0; }), "grain bitmap: a smooth leather is a transparent overlay");
+        CHECK(at100 == FillSidePanelLeatherGrain(cognac, 12, 40), "grain bitmap: the same leather and size give the same bytes");
+        CHECK(at100 != FillSidePanelLeatherGrain(charcoal, 12, 40), "grain bitmap: each leather has its own pattern");
+
+        // Every pixel is premultiplied white or black at its alpha, within the leather's strength. (CHECK prints its message
+        // with %S: a narrow string, so each message is built as a std::string and passed by c_str() — the temporary lives
+        // to the end of the CHECK's statement.)
+        const auto check = [](const std::vector<uint8_t>& px, double amp, const char* what) {
+            bool premultiplied = true;
+            bool withinStrength = true;
+            size_t lights = 0;
+            size_t darks = 0;
+            const auto cap = static_cast<uint8_t>(std::lround(amp * 1.2 * 255.0));
+            for (size_t i = 0; i + 3 < px.size(); i += 4)
+            {
+                const uint8_t b = px[i], g = px[i + 1], r = px[i + 2], a = px[i + 3];
+                premultiplied = premultiplied && b == g && g == r && (b == 0 || b == a);
+                withinStrength = withinStrength && a <= cap;
+                lights += (b != 0) ? 1u : 0u;
+                darks += (b == 0 && a != 0) ? 1u : 0u;
+            }
+            CHECK(premultiplied, (std::string{ "grain bitmap (" } + what + "): every pixel is premultiplied white or black (B = G = R, 0 or alpha)").c_str());
+            CHECK(withinStrength, (std::string{ "grain bitmap (" } + what + "): no pixel stronger than the leather's strength x 1.2").c_str());
+            CHECK(lights > 0 && darks > 0, (std::string{ "grain bitmap (" } + what + "): it both lightens and darkens").c_str());
+        };
+        check(at100, cognac.grainAmp, "Cognac");
+        check(FillSidePanelLeatherGrain(charcoal, 18, 60), charcoal.grainAmp, "Charcoal at 150%");
+
+        // Each pixel is the grain at its CENTER in DIPs (per axis: the bitmap spans the whole card).
+        const auto pixelAt = [](const std::vector<uint8_t>& px, int w, int x, int y) {
+            const size_t i = (static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)) * 4u;
+            return std::make_pair(px[i], px[i + 3]); // (light, alpha)
+        };
+        CHECK(pixelAt(at100, 12, 6, 20) == std::make_pair(uint8_t{ 8 }, uint8_t{ 8 }), "grain bitmap: Cognac's pixel (6, 20) at 100% is white at 8/255, as the mock");
+        {
+            const auto charcoal150 = FillSidePanelLeatherGrain(charcoal, 18, 60);
+            CHECK(pixelAt(charcoal150, 18, 4, 45) == std::make_pair(uint8_t{ 0 }, uint8_t{ 17 }), "grain bitmap: Charcoal's pixel (4, 45) at 150% is black at 17/255, as the mock");
+        }
+        {
+            bool centers = true; // a sweep: every pixel against SidePanelLeatherGrainAt at its center, at 125%
+            const auto px = FillSidePanelLeatherGrain(charcoal, 15, 50);
+            for (int y = 0; y < 50; ++y)
+            {
+                for (int x = 0; x < 15; ++x)
+                {
+                    const double t = std::clamp(SidePanelLeatherGrainAt((x + 0.5) / 1.25, (y + 0.5) / 1.25, charcoal.grainCell, charcoal.grainSeed) * charcoal.grainAmp, -1.0, 1.0);
+                    const auto alpha = static_cast<uint8_t>(std::lround(std::fabs(t) * 255.0));
+                    const auto [light, a] = pixelAt(px, 15, x, y);
+                    centers = centers && a == alpha && light == (t > 0.0 ? alpha : 0u);
+                }
+            }
+            CHECK(centers, "grain bitmap: every pixel at 125% is the grain at the pixel's center in DIPs");
+        }
+        // Whole-bitmap fingerprints, from the mocks' JavaScript: the sum of every alpha, how many pixels lighten and darken.
+        const auto fingerprint = [](const std::vector<uint8_t>& px) {
+            uint64_t alphaSum = 0;
+            size_t lights = 0;
+            size_t darks = 0;
+            for (size_t i = 0; i + 3 < px.size(); i += 4)
+            {
+                alphaSum += px[i + 3];
+                lights += px[i] != 0 ? 1u : 0u;
+                darks += (px[i] == 0 && px[i + 3] != 0) ? 1u : 0u;
+            }
+            return std::make_tuple(alphaSum, lights, darks);
+        };
+        CHECK(fingerprint(at100) == std::make_tuple(uint64_t{ 3502 }, size_t{ 246 }, size_t{ 222 }), "grain bitmap: Cognac at 100% matches the mock's fingerprint (3502 / 246 light / 222 dark)");
+        CHECK(fingerprint(FillSidePanelLeatherGrain(charcoal, 12, 40)) == std::make_tuple(uint64_t{ 6204 }, size_t{ 249 }, size_t{ 221 }),
+              "grain bitmap: Charcoal at 100% matches the mock's fingerprint (6204 / 249 / 221)");
+        CHECK(fingerprint(FillSidePanelLeatherGrain(charcoal, 18, 60)) == std::make_tuple(uint64_t{ 13554 }, size_t{ 559 }, size_t{ 497 }),
+              "grain bitmap: Charcoal at 150% matches the mock's fingerprint (13554 / 559 / 497)");
     }
 }
 

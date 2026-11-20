@@ -331,13 +331,20 @@ void TestSidePanelPins();
 // filter-folders.json file through the `...In` seams on a scratch profile, the submenu's lines and their toggle, and a
 // line's coverage equal to the matcher's verdict (tests_sidepanel.cpp)
 void TestSidePanelFilters();
-// SidePanelStripReveal.h (SIDE_PANEL.md §2m): the collapsed strip's AUTO-HIDE — the user's "The strip should autohide. If
-// mouse comes close by 40pixels the strips appears" (2026-11-12; the whole strip floating over the content's edge): the
-// geometry (40 DIPs from the strip = 60 from the docked edge, inclusive, any height, both docks, never outside the content
-// area, NaN / negative / unmeasured inputs) and the rule (the approach, staying, leaving; a drag passing by and a press
-// beside the button keep it away until the pointer has left; a press on the button; a finger's taps; the watch that only
-// hides; the after-collapse linger), all 288 input combinations against a second statement of it (tests_sidepanel.cpp)
+// SidePanelStripReveal.h (SIDE_PANEL.md §2m, §2q): the collapsed card's AUTO-HIDE — the user's "The strip should autohide. If
+// mouse comes close by 40pixels the strips appears" (2026-11-12), kept for the 12 x 40 DIP leather card of 2026-11-20 with
+// their reach of 25 DIPs: the geometry (25 DIPs from the card = 37 from the docked edge, inclusive, any height, both docks,
+// never outside the content area, NaN / negative / unmeasured inputs) and the rule (the approach, staying, leaving; a drag
+// passing by and a press beside the card keep it away until the pointer has left; a press on the card; a finger's taps; the
+// watch that only hides; the after-collapse linger), all 288 input combinations against a second statement of it
+// (tests_sidepanel.cpp)
 void TestSidePanelStripReveal();
+// SidePanelLeatherCard.h (SIDE_PANEL.md §2q): the collapsed card's LOOK and PLACE — the user's "a card you can click … a
+// leather tailored with stitches card … 12x40 … from 80px top of the terminal" (2026-11-20) and their two picks, Cognac & Cream
+// and Charcoal & Silver, "Switchable in settings": the size and place, the settings word, each leather's numbers, the hover /
+// pressed tones, the thread's path, and the grain — its hash, noise and bitmap pinned to values computed from the mocks'
+// JavaScript (tests_sidepanel.cpp)
+void TestSidePanelLeatherCard();
 // SessionTitleEdit.h (SIDE_PANEL.md §2o): what the side panel's floating RENAME CARD writes — the user's "refactor the sidemenu's
 // rename to be at the card and update all" (2026-11-18): the trim every rename path applies (inner line breaks kept), the box's
 // copy of a title (CR LF and LF as the TextBox's lone CR), the line-break-blind comparison, the commit's verdict (blank or

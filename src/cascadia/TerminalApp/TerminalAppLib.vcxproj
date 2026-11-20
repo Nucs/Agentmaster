@@ -172,6 +172,7 @@
     <ClInclude Include="AgentAmbientAnimation.h" />
     <ClInclude Include="AgentSessionToolTip.h" />
     <ClInclude Include="AgentStatusGlyph.h" />
+    <ClInclude Include="AgentLeatherCard.h" />
     <ClInclude Include="AgentLaunchBar.h" />
     <ClInclude Include="AgentClipboard.h" />
     <ClInclude Include="AgentCopyActions.h" />
@@ -341,10 +342,14 @@
          the four flags, Active within), the matcher, the edits, the chips and the window record's JSON (pure, header-only;
          TestSidePanelFilters). -->
     <ClInclude Include="AgentMaster\SidePanelFilters.h" />
-    <!-- Agentmaster (SIDE_PANEL.md section 2m): the collapsed side panel's self-hiding strip - when the pointer is near it
-         (within 40 DIPs of the strip) and the strip's next state for one pointer event (pure, header-only;
+    <!-- Agentmaster (SIDE_PANEL.md sections 2m and 2q): the collapsed side panel's self-hiding card - when the pointer is near
+         it (within 25 DIPs of the card) and the card's next state for one pointer event (pure, header-only;
          TestSidePanelStripReveal). -->
     <ClInclude Include="AgentMaster\SidePanelStripReveal.h" />
+    <!-- Agentmaster (SIDE_PANEL.md section 2q): the collapsed side panel's LEATHER CARD - its size and place, the two leathers
+         (Cognac & Cream, Charcoal & Silver) and their settings word, the hover / pressed tones, the thread's path and the
+         grain (pure, header-only; TestSidePanelLeatherCard). Drawn by AgentLeatherCard.h. -->
+    <ClInclude Include="AgentMaster\SidePanelLeatherCard.h" />
     <!-- Agentmaster (SIDE_PANEL.md section 2o): the side panel's floating RENAME CARD - what its commit hands the one rename seam:
          the trim every rename path applies, the box's copy of a title (its line breaks as the TextBox's lone CR), the
          line-break-blind comparison, and the verdict (blank or untouched renames nothing) (pure, header-only;

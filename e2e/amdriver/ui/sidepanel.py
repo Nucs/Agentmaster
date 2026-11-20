@@ -83,14 +83,20 @@ filters'. A pick STARTS THE FILTER OVER: exactly that one chip is left, and the 
 the whole filter has ItemStatus 'checked' and its words start with '✓ '; a click on it drops the filter. Branch and fork
 family are chips of their own (am.side.chip.branch, am.side.chip.family). An AI search result card's menu has no Filter.
 
-THE COLLAPSED STRIP HIDES ITSELF (SIDE_PANEL.md §2m; a build of 2026-11-12 or later — NOT BUILT on that day): a collapsed
-panel takes no column. Its 20 px strip floats over the content's docked edge, hidden, and shows while the pointer is
-within 40 px of it (60 px from the edge, at any height); it lingers ~1.5 s after a collapse. The chevron (STRIP_ID) stays
-in the tree with its rectangle while hidden — the app hides the strip by opacity — so `strip_button` and its real click
-work as before (the pointer's arrival brings the strip in before the press). Its ItemStatus is 'hidden'
-(STRIP_HIDDEN_STATUS) while the strip is hidden and empty while it shows: `strip_hidden` reads it, `wait_strip` waits for
-it. A press on the strip beside the chevron goes to the terminal and hides the strip until the pointer has left the
-60 px and come back. On an older build the strip is a 20 px column that always shows, and the status is always empty.
+THE COLLAPSED STRIP HIDES ITSELF (SIDE_PANEL.md §2m; a build of 2026-11-12 or later): a collapsed panel takes no column.
+Its 20 px strip floats over the content's docked edge, hidden, and shows while the pointer is within 40 px of it (60 px
+from the edge, at any height); it lingers ~1.5 s after a collapse. The chevron (STRIP_ID) stays in the tree with its
+rectangle while hidden — the app hides the strip by opacity — so `strip_button` and its real click work as before (the
+pointer's arrival brings the strip in before the press). Its ItemStatus is 'hidden' (STRIP_HIDDEN_STATUS) while the strip
+is hidden and empty while it shows: `strip_hidden` reads it, `wait_strip` waits for it. A press on the strip beside the
+chevron goes to the terminal and hides the strip until the pointer has left the 60 px and come back. On an older build
+the strip is a 20 px column that always shows, and the status is always empty.
+
+THE STRIP IS A LEATHER CARD (SIDE_PANEL.md §2q; a build of 2026-11-20 or later — NOT BUILT on that day): the same id
+(STRIP_ID), status and rule, but the button is a 12 x 40 DIP card on the docked edge, 80 DIPs below the content's top,
+the WHOLE card the button (no band, no chevron button inside); the reach is 25 DIPs (37 from the edge, at any height). A
+press near the edge that is not on the card goes to the terminal and sends the card away. The methods keep their strip_*
+names: `strip_button` returns the card.
 """
 from __future__ import annotations
 
@@ -113,7 +119,8 @@ they are named by what they do instead. The header's collapse chevron points tow
 CARD_ID_PREFIX = "am.side.card."
 """The AutomationId prefix of a card's title text (the session id's first 8 characters follow)."""
 STRIP_ID = "am.side.expand"
-"""The collapsed strip's chevron (» docked left, « docked right) by AutomationId."""
+"""The collapsed panel's way back by AutomationId: the strip's chevron (» docked left, « docked right) until 2026-11-19,
+the whole leather card on a build of 2026-11-20 or later (SIDE_PANEL.md §2q)."""
 STRIP_HIDDEN_STATUS = "hidden"
 """The chevron's ItemStatus while the collapsed strip is hidden (SIDE_PANEL.md §2m; a build of 2026-11-12 or later): the
 strip hides itself and shows while the pointer is near; the status is empty while it shows, and always on older builds."""
@@ -701,8 +708,9 @@ class SidePanel:
         wait_until(self.collapsed, 5.0, what="the panel collapsed")
 
     def strip_button(self) -> Optional[uia.Element]:
-        """The collapsed strip's chevron: by its AutomationId (STRIP_ID), else — 0.8.0 — by its glyph (» while docked
-        left; the header's own chevron is gone while collapsed, so the glyph is unambiguous then).
+        """The collapsed panel's way back — the strip's chevron, or the leather card on a 2026-11-20 build (the whole card
+        is the button): by its AutomationId (STRIP_ID), else — 0.8.0 — by its glyph (» while docked left; the header's own
+        chevron is gone while collapsed, so the glyph is unambiguous then).
 
         Returns:
             The button, or None while the panel is expanded.

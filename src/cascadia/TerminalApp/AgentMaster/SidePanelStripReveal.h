@@ -1,37 +1,38 @@
 // SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Agentmaster — WHEN the collapsed side panel's strip shows (SIDE_PANEL.md §2m).
+// Agentmaster — WHEN the collapsed side panel's card shows (SIDE_PANEL.md §2m, §2q).
 //
-// A collapsed side panel leaves one way back: a 20 DIP strip at the docked edge with the expand chevron in its middle.
-// The user's request of 2026-11-12: "The strip should autohide. If mouse comes close by 40pixels the strips appears."
-// Their pick, the same day, of what comes back (three live mocks): "The whole strip, floating" — "and button inside".
-// So the strip takes no column any more. It FLOATS over the docked edge of the content (the terminal never changes
-// size), hidden, and shows while the pointer is near it.
+// A collapsed side panel leaves one way back: the leather card, 12 × 40 DIPs, on the docked edge 80 DIPs below the
+// content's top, the whole card a button (its look and place: SidePanelLeatherCard.h). It FLOATS over the docked edge
+// of the content (the terminal never changes size), hidden, and shows while the pointer is near it. The user's request
+// of 2026-11-12: "The strip should autohide. If mouse comes close by 40pixels the strips appears" — for the 20 DIP strip
+// of then; on 2026-11-20 the strip became the card, and they kept this rule ("Auto-hide, as today") with a reach of
+// "25 DIP". The rule's names still say "strip": the card took the strip's place in every caller, so a rename would only
+// move code.
 //
 // This header is the rule alone, as two pure functions the m5 harness pins (TestSidePanelStripReveal,
 // tests_sidepanel.cpp); TerminalPage applies it (TerminalPage.AgentSidePanel.cpp: _SidePanelStripOnPointer,
 // _SidePanelStripWatchTick, _SidePanelStripApply):
-//   - SidePanelStripPointerNear: is the pointer within the reveal distance of the strip's place?
-//   - NextSidePanelStripReveal: the strip's next state for one pointer event.
+//   - SidePanelStripPointerNear: is the pointer within the reveal distance of the card's place?
+//   - NextSidePanelStripReveal: the card's next state for one pointer event.
 //
-// The rule in words:
-//   - The strip shows when the pointer ARRIVES near it: a move, with no button held, by a device that can hover (a
+// The rule in words ("the button" is the card: the whole card is the expand button):
+//   - The card shows when the pointer ARRIVES near it: a move, with no button held, by a device that can hover (a
 //     mouse, a pen in range). It stays while the pointer stays near, and hides when the pointer is away.
 //   - A drag that passes by never brings it in: a text selection dragged to the terminal's first column must not get a
-//     strip over the letters it is selecting. The strip then stays away until the pointer has left and come back.
-//   - A press beside the button belongs to what is under the strip (the strip's band takes no input: the terminal's
-//     first columns, or its scroll bar docked right, get the press). The strip steps aside at that press, and stays
-//     away until the pointer has left and come back, so working at the terminal's edge is one click from undisturbed.
-//   - A press on the button is the button's: the strip stays under it and its click expands the panel.
-//   - A finger cannot hover: its tap near the edge is the approach, and a tap beside the button sends the strip away.
-//     Nothing else hides a strip a tap brought in: the watch (below) follows the mouse cursor, which a finger leaves
-//     where it was.
-//   - The pointer can leave the window without one more event reaching the content (the strip's edge is usually the
-//     window's edge), so while the strip shows, or waits for the pointer to leave, a slow watch reads the cursor and
-//     applies the "away" half of the rule. It never shows the strip.
-//   - Right after a collapse the strip lingers for a moment wherever the pointer is, so the user sees where the panel
-//     went; a press anywhere but the button ends that at once.
+//     card over the letters it is selecting. The card then stays away until the pointer has left and come back.
+//   - A press near the edge that is not on the card belongs to what is there (the terminal's first columns, or its
+//     scroll bar docked right). The card steps aside at that press, and stays away until the pointer has left and come
+//     back, so working at the terminal's edge is one click from undisturbed.
+//   - A press on the card is the card's: it stays under the press, and its click expands the panel.
+//   - A finger cannot hover: its tap near the edge is the approach, and a tap beside the card sends it away. Nothing
+//     else hides a card a tap brought in: the watch (below) follows the mouse cursor, which a finger leaves where it was.
+//   - The pointer can leave the window without one more event reaching the content (the card's edge is usually the
+//     window's edge), so while the card shows, or waits for the pointer to leave, a slow watch reads the cursor and
+//     applies the "away" half of the rule. It never shows the card.
+//   - Right after a collapse the card lingers for a moment wherever the pointer is, so the user sees where the panel
+//     went; a press anywhere but the card ends that at once.
 //
 // Plain C++, header-only (the engine idiom of SidePanelPins.h / StatusIconMotion.h): no WinRT, no XAML, no
 // <windows.h>. ⚠ No identifier here is named `near` or `far`: both are macros under <windows.h> (CLAUDE.md, Gotchas
@@ -43,19 +44,22 @@
 
 namespace Agentmaster
 {
-    // How close the pointer must come to the strip for it to show, in DIPs: the user's number ("close by 40pixels").
-    // Measured from the strip's own inner edge, so the strip shows while the pointer is within
-    // (the strip's width + this) of the docked edge of the content: 60 DIPs for the 20 DIP strip.
-    inline constexpr double kSidePanelStripRevealDistance = 40.0;
+    // How close the pointer must come to the card for it to show, in DIPs: the user's number ("25 DIP", 2026-11-20; it
+    // was their 40 for the strip). Measured from the card's own inner edge, so the card shows while the pointer is
+    // within (the card's width + this) of the docked edge of the content: 37 DIPs for the 12 DIP card, at any height.
+    // Tradeoff: a smaller reach brings the card in less often while working near the edge, and a pointer heading for
+    // it must come closer before it fades in (120 ms: in by the time the pointer crosses the 25 DIPs).
+    inline constexpr double kSidePanelStripRevealDistance = 25.0;
 
-    // How long the strip stays after a collapse wherever the pointer is, in ms. Long enough to see where the panel
-    // went, short enough not to read as "the strip does not hide". Tradeoff: for this long the strip covers the first
-    // 20 DIPs of the content even though the pointer is elsewhere; a press anywhere but its button ends it at once.
+    // How long the card stays after a collapse wherever the pointer is, in ms. Long enough to see where the panel
+    // went, short enough not to read as "the card does not hide". Tradeoff: for this long the card covers its
+    // 12 × 40 DIPs of the content even though the pointer is elsewhere; a press anywhere but the card ends it at once.
     inline constexpr uint64_t kSidePanelStripCollapseLingerMs = 1500;
 
-    // Is the pointer near the strip's place: inside the content area, and within `revealDistance` of the strip?
-    // The strip's place is the `stripWidth` band along the docked edge, over the area's whole height, so only the
-    // horizontal distance counts: any height along that edge is near.
+    // Is the pointer near the card's place: inside the content area, and within `revealDistance` of the card?
+    // Only the HORIZONTAL distance counts — the band `stripWidth` wide along the docked edge, over the area's whole
+    // height: any height along that edge is near, though the card itself is 40 DIPs tall at 80 DIPs down (the user's
+    // "Auto-hide, as today": approaching the edge anywhere brings the card in at its place).
     // ⚠ A pointer OUTSIDE the area is never near — over the tab row above it, or past the window's edge. The edge the
     // strip sits on is usually the window's own edge, and a pointer that left the window through it must hide the
     // strip, not keep it.
@@ -64,7 +68,7 @@ namespace Agentmaster
     //   areaHeight     - the content area's height, DIPs.
     //   x, y           - the pointer, relative to the area's top-left corner, DIPs. Half-open like pixels: [0, width)
     //                    and [0, height) are inside.
-    //   stripWidth     - the strip's width, DIPs (a negative or NaN width counts as 0).
+    //   stripWidth     - the card's width, DIPs (kSidePanelCardWidth in the app; a negative or NaN width counts as 0).
     //   revealDistance - how near the pointer must come to the strip, DIPs (a negative or NaN distance counts as 0:
     //                    then only a pointer over the strip's own place is near).
     //   returns        - true when near. False for an unmeasured area (a width or height that is not above 0) and for
@@ -94,11 +98,11 @@ namespace Agentmaster
         return toEdge <= reach;
     }
 
-    // What the strip is doing.
+    // What the card is doing.
     struct SidePanelStripReveal
     {
-        bool shown{ false }; // the strip is on screen (and its button takes input)
-        // The strip stepped aside for a press or a drag at the edge: it stays hidden while the pointer stays near, and
+        bool shown{ false }; // the card is on screen (and takes input: the whole card is the button)
+        // The card stepped aside for a press or a drag at the edge: it stays hidden while the pointer stays near, and
         // is armed again once the pointer was seen away. Never true together with `shown`.
         bool dismissed{ false };
 
@@ -124,7 +128,7 @@ namespace Agentmaster
         // The device can move without contact: a mouse or a pen. False = touch. For the Watch kind: the device of the
         // LAST pointer event the area saw (the watch reads the mouse cursor, which a finger does not move).
         bool hovers{ true };
-        bool onButton{ false }; // (Press) the press landed on the strip's expand button
+        bool onButton{ false }; // (Press) the press landed on the card (the expand button)
         bool lingering{ false }; // the after-collapse linger is running (kSidePanelStripCollapseLingerMs)
     };
 

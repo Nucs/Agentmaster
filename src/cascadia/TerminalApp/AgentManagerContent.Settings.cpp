@@ -27,6 +27,7 @@
 #include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor — the cog's "status flashing color" picker <-> AppSettings::flashRingColor
 #include "AgentModelPrompt.h" // AgentBuildSpecifyModelCard — the shared "Specify a model..." prompt this content hosts
 #include "AgentPanelFocus.h" // AgentPanelHoldsKeyboard — the cog shown over the window's tab hands the keyboard back as it closes (SIDE_PANEL.md §2i)
+#include "AgentLeatherCard.h" // AgentBuildLeatherCardPreview — the Tabs & Overlay SIDE PANEL row's picture of the collapsed card (SIDE_PANEL.md §2q)
 
 // Agentmaster (launch-model picker -> "Specify..."): the successor-model combos' sentinel id for
 // their "Specify..." row. A control character prefix keeps it disjoint from every real model id
@@ -2893,6 +2894,34 @@ namespace winrt::TerminalApp::implementation
             _LayoutOverlayOpacitySlider(); // seed positions from the defaults; _ShowSettings re-seeds from AppSettings
         }
 
+        // SIDE PANEL (SIDE_PANEL.md §2q; the user's picks of 2026-11-20 — "Both, switchable" / "Switchable in settings"): the
+        // leather of the collapsed side panel's card, Cognac & Cream (the default) or Charcoal & Silver, with the card itself
+        // beside the box at twice its size (the real face, repainted at every pick, so the choice is made by looking).
+        // GLOBAL (AppSettings::sidePanelCardLeather); the Save sink and the cross-window broadcast re-skin every window's card
+        // (TerminalPage::_SidePanelApplySettings -> its layout apply -> _SidePanelStripSkin).
+        panel.Children().Append(SettingsSeparator(L"SIDE PANEL"));
+        {
+            auto row = StackPanel{};
+            row.Orientation(Orientation::Horizontal);
+            row.Spacing(16);
+            _setSidePanelCard = ComboBox{};
+            _setSidePanelCard.Header(winrt::box_value(L"Collapsed card"));
+            _setSidePanelCard.Items().Append(winrt::box_value(L"Cognac & Cream")); // index 0 == SidePanelCardLeather::Cognac (default)
+            _setSidePanelCard.Items().Append(winrt::box_value(L"Charcoal & Silver")); // index 1 == SidePanelCardLeather::Charcoal
+            _setSidePanelCard.VerticalAlignment(VerticalAlignment::Center);
+            AgentSetTip(_setSidePanelCard, L"The leather of the small card a collapsed side panel leaves on the terminal's edge (\x22ef \x2192 Collapse the side panel): Cognac & Cream (default, cream stitches on saddle leather) or Charcoal & Silver (silver stitches on pebbled gray, the app's own color). The card hides itself until the pointer comes near the edge; a click on it expands the panel. Every window's card follows on Save.");
+            // The preview follows the box at once (a pick before Save shows what Save will give).
+            _setSidePanelCard.SelectionChanged([this](const IInspectable&, const SelectionChangedEventArgs&) { _UpdateSidePanelCardPreview(); });
+            row.Children().Append(_setSidePanelCard);
+            _setSidePanelCardPreview = Border{};
+            _setSidePanelCardPreview.Width(::Agentmaster::kSidePanelCardWidth * 2.0);
+            _setSidePanelCardPreview.Height(::Agentmaster::kSidePanelCardHeight * 2.0);
+            _setSidePanelCardPreview.VerticalAlignment(VerticalAlignment::Center);
+            row.Children().Append(_setSidePanelCardPreview);
+            panel.Children().Append(row);
+            _setSidePanelCard.SelectedIndex(0); // the default until _ShowSettings seeds the saved leather; its SelectionChanged paints the preview
+        }
+
         // === ABOUT tab (continued) === — the version + UPDATES block led the About panel at the top of
         // this builder; the PROFILE row + the Uninstall button finish it here.
         panel = aboutPanel;
@@ -3144,7 +3173,7 @@ namespace winrt::TerminalApp::implementation
         });
         addSettingsTab(L"Notifications", L"Windows notifications when a session's status changes from Running to another state \x2014 which states notify, the focused-tab skip, and the sound.", notificationsPanel);
         addSettingsTab(L"Messaging", L"The fleet in Telegram \x2014 one topic per working session, the whole session in it, messages as queued prompts, a Search topic that revives old sessions. The bot token, your user id, the idle grace.", messagingPanel);
-        addSettingsTab(L"Tabs & Overlay", L"The terminal tab strip + the per-tab overlay badge \x2014 close affordances, tab size (width, height, title font), the rename key and title naming, the favorite marker, tab colors, the status-flash color, and overlay opacity.", tabsPanel);
+        addSettingsTab(L"Tabs & Overlay", L"The terminal tab strip + the per-tab overlay badge \x2014 close affordances, tab size (width, height, title font), the rename key and title naming, the favorite marker, tab colors, the status-flash color, overlay opacity, and the collapsed side panel's card.", tabsPanel);
         addSettingsTab(L"Claude", L"The Claude install Agentmaster drives \x2014 which native claude.exe, how long Claude keeps session history, the mods it loads into Claude tabs, and which tools count as questions.", claudePanel);
         addSettingsTab(L"About", L"Version + build, updates, the active profile folder, and uninstall.", aboutPanel);
 
@@ -3966,6 +3995,14 @@ namespace winrt::TerminalApp::implementation
         {
             // Items: 0 == Crown (default), 1 == Star.
             _setFavoriteIcon.SelectedIndex(_appSettings.favoriteIcon == FavoriteIcon::Star ? 1 : 0);
+        }
+        if (_setSidePanelCard)
+        {
+            // Items: 0 == Cognac & Cream (default), 1 == Charcoal & Silver (SIDE_PANEL.md §2q).
+            _setSidePanelCard.SelectedIndex(_appSettings.sidePanelCardLeather == SidePanelCardLeather::Charcoal ? 1 : 0);
+            // Painted again even when the index did not move (no SelectionChanged then): the build painted the preview before
+            // the page had a XamlRoot, so its grain was written for a scale of 1; now the page's real scale is known.
+            _UpdateSidePanelCardPreview();
         }
         if (_setMaxTags)
         {
@@ -5248,6 +5285,11 @@ namespace winrt::TerminalApp::implementation
             // Items: 0 == Crown (default), 1 == Star.
             _appSettings.favoriteIcon = _setFavoriteIcon.SelectedIndex() == 1 ? FavoriteIcon::Star : FavoriteIcon::Crown;
         }
+        if (_setSidePanelCard)
+        {
+            // Items: 0 == Cognac & Cream (default), 1 == Charcoal & Silver; no selection (-1) reads as the default.
+            _appSettings.sidePanelCardLeather = _setSidePanelCard.SelectedIndex() == 1 ? SidePanelCardLeather::Charcoal : SidePanelCardLeather::Cognac;
+        }
         if (_setMaxTags)
         {
             const std::wstring t{ _setMaxTags.Text() };
@@ -6009,6 +6051,37 @@ namespace winrt::TerminalApp::implementation
         // Never let a disk hiccup take the cog down; the states keep their previous value (the
         // status line then simply shows what the last successful sample said).
         ::Agentmaster::AgentLogCaughtException(L"_RefreshCommandDefinitionState");
+    }
+
+    // The SIDE PANEL row's picture of the collapsed card (SIDE_PANEL.md §2q): AgentManagerContent.h has the contract.
+    void AgentManagerContent::_UpdateSidePanelCardPreview() noexcept
+    {
+        if (!_setSidePanelCard || !_setSidePanelCardPreview)
+        {
+            return;
+        }
+        try
+        {
+            // The box's pick, read the way Save reads it (-1, nothing picked yet, is the default).
+            const auto leather = _setSidePanelCard.SelectedIndex() == 1 ? SidePanelCardLeather::Charcoal : SidePanelCardLeather::Cognac;
+            // The page's display scale, for the grain (one noise value per device pixel of the 2x picture). None before the
+            // page is in the tree (the build's own seed): 1, and _ShowSettings paints it again with the real one.
+            double scale = 1.0;
+            if (const auto root = _setSidePanelCardPreview.XamlRoot())
+            {
+                const double s = root.RasterizationScale();
+                if (s > 0.0 && s < 16.0) // a sane scale only: a broken value must not size the grain bitmap
+                {
+                    scale = s;
+                }
+            }
+            _setSidePanelCardPreview.Child(AgentBuildLeatherCardPreview(::Agentmaster::SidePanelLeatherSpecFor(leather), 2.0, scale));
+        }
+        catch (...)
+        {
+            // The previous picture stays (or none, on the first paint); the pick itself is unaffected — Save reads the box.
+            ::Agentmaster::AgentLogCaughtException(L"cog: the collapsed card's preview");
+        }
     }
 
     void AgentManagerContent::_UpdateTitleNamingPreview()
