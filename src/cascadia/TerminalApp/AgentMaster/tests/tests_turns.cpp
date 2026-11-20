@@ -1164,6 +1164,67 @@ void TestSummaryConversation()
         sep.continuedBy = L"fork";
         CHECK(SummarySeparatorLabel(sep, 8) == L"fork abc", "summary-separator-label: an id shorter than idChars shows whole");
     }
+
+    // The engine's box renderer with a CONVERSATION (RenderSessionSummaryBox's `conversation`: the rich hover card's
+    // Messages, 2026-11-20). The owner's case first: a session auto-compacted AFTER its last prompt has an EMPTY
+    // current part — the classic box listed no message at all; the conversation lists every earlier part's prompt,
+    // numbered 1..N straight through, with no separator between /compact parts of the one session.
+    {
+        SessionSummary compacted;
+        compacted.found = true;
+        ConversationSegment first;
+        first.label = L"compacted";
+        first.userMsgs = { L"rebrand KvNode", L"create GrpcAsm" };
+        first.uuids = { L"u-1", L"u-2" };
+        ConversationSegment second;
+        second.label = L"compacted";
+        second.userMsgs = { L"update docs and skills" };
+        second.uuids = { L"u-3" };
+        compacted.previousSegments = { first, second };
+        const auto classicBox = RenderSessionSummaryBox(compacted, L"", L"K:\\x", L"t.jsonl", L"", L"", L"", L"", /*full*/ false);
+        CHECK(classicBox.find(L" 1. ") == std::wstring::npos,
+              "summary-box: WITHOUT a conversation, a session compacted since its last prompt lists no message (the bug's shape)");
+        const auto convo = BuildSummaryConversation(compacted, ConversationUpstream{}, /*showHistory*/ true, {});
+        const auto box = RenderSessionSummaryBox(compacted, L"", L"K:\\x", L"t.jsonl", L"", L"", L"", L"", /*full*/ false, false, true, &convo);
+        CHECK(box.find(L" 1. rebrand KvNode") != std::wstring::npos && box.find(L" 2. create GrpcAsm") != std::wstring::npos &&
+                  box.find(L" 3. update docs and skills") != std::wstring::npos,
+              "summary-box: WITH the conversation, every compacted part's prompt is listed, numbered 1..3 straight through");
+        CHECK(box.find(kSummarySessionSepMark) == std::wstring::npos,
+              "summary-box: no session separator between /compact parts of ONE session");
+        const auto offRows = BuildSummaryConversation(compacted, ConversationUpstream{}, /*showHistory*/ false, {});
+        const auto offBox = RenderSessionSummaryBox(compacted, L"", L"K:\\x", L"t.jsonl", L"", L"", L"", L"", /*full*/ false, false, true, &offRows);
+        CHECK(offBox.find(L" 1. ") == std::wstring::npos,
+              "summary-box: the history toggle OFF keeps the classic view (the part after the last /compact only)");
+    }
+    // The rows built above (a fork's parent, a /clear predecessor, a pre-/compact part, the current part): the numbers
+    // keep counting across sessions, and each separator row is a lone `kSummarySessionSepMark + <its sessionId>` line
+    // right after the earlier session's last prompt — the field written verbatim (the hover card stores its LABEL there).
+    if (rows.size() == 7)
+    {
+        const auto box = RenderSessionSummaryBox(a, L"", L"K:\\x", L"t.jsonl", L"", L"", L"", L"", /*full*/ false, false, true, &rows);
+        const std::wstring sepA = std::wstring{ kSummarySessionSepMark } + L"aaaaaaaa-0000-4000-8000-000000000001\n";
+        const std::wstring sepB = std::wstring{ kSummarySessionSepMark } + L"bbbbbbbb-0000-4000-8000-000000000002\n";
+        const size_t p3 = box.find(L" 3. copied prompt\n");
+        const size_t pA = box.find(sepA);
+        const size_t pB = box.find(sepB);
+        const size_t p4 = box.find(L" 4. before the compaction\n");
+        const size_t p5 = box.find(L" 5. own prompt");
+        CHECK(box.find(L" 1. parent one\n") != std::wstring::npos && box.find(L" 2. parent two\n") != std::wstring::npos && p3 != std::wstring::npos &&
+                  p4 != std::wstring::npos && p5 != std::wstring::npos,
+              "summary-box: every prompt of the whole conversation is numbered 1..5 across sessions");
+        CHECK(p3 != std::wstring::npos && pA == p3 + std::wstring{ L" 3. copied prompt\n" }.size() && pB == pA + sepA.size() &&
+                  p4 == pB + sepB.size(),
+              "summary-box: each earlier session is closed by its own separator line, right after its last prompt, in row order");
+        auto labelled = rows;
+        labelled[3].sessionId = SummarySeparatorLabel(rows[3], 8);
+        const auto labelledBox = RenderSessionSummaryBox(a, L"", L"K:\\x", L"t.jsonl", L"", L"", L"", L"", /*full*/ false, false, true, &labelled);
+        CHECK(labelledBox.find(std::wstring{ kSummarySessionSepMark } + L"fork aaaaaaaa\n") != std::wstring::npos,
+              "summary-box: a separator line carries the row's sessionId verbatim (the hover card's label: \"fork aaaaaaaa\")");
+        const auto classic = RenderSessionSummaryBox(a, L"", L"K:\\x", L"t.jsonl", L"", L"", L"", L"", /*full*/ false);
+        CHECK(classic.find(L" 1. copied prompt") != std::wstring::npos && classic.find(L" 2. own prompt") != std::wstring::npos &&
+                  classic.find(kSummarySessionSepMark) == std::wstring::npos && classic.find(L"parent one") == std::wstring::npos,
+              "summary-box: with no conversation (null, the default) the box is the classic current-part list, unchanged");
+    }
 }
 
 // Agentmaster (the summary's conversation chain — TranscriptTurns.h section 8): CollectConversationUpstream

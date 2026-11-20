@@ -58,6 +58,8 @@
 #include "AgentMaster/SessionScanner.h" // PresenceIsWorking + the toast HOLD gates (ShouldHoldCompletionToast / DecideHeldToast / ShouldSuppressDuplicateToast) — System notifications
 #include "AgentMaster/SessionStore.h" // IsSessionFavorite (the FAVORITE crown on a managed tab's status dot)
 #include "AgentMaster/SidePanelPins.h" // SidePanelPinAfterRehome / IsSidePanelPinStamp — a pinned side panel card stays pinned when its tab switches conversation (SIDE_PANEL.md §2j)
+#include "AgentMaster/SummaryConversation.h" // BuildSummaryConversation / SummarySeparatorLabel — the rich card's Messages = the whole conversation, numbered like the summary panel's
+#include "AgentMaster/TranscriptTurns.h" // CollectConversationUpstream / RecordedPredecessorFn — the earlier sessions of that conversation
 #include "AgentMaster/TabDragMath.h" // DecideTabStripRevealOffset — the tab-strip reveal decision (_AdjustStripToRevealItem)
 #include "AgentMaster/TaskbarThumbnail.h" // FrameColor — the taskbar preview frame's alpha floor (NOTIFICATIONS.md section 9)
 #include "AgentMaster/TranscriptStore.h" // Agentmaster (tab color modes): LoadOrRefreshSessionIndex + InferWorkingDirectory (the inferred-workdir scan)
@@ -215,11 +217,105 @@ namespace
         return SolidColorBrush{ winrt::Windows::UI::ColorHelper::FromArgb(a, r, g, b) };
     }
 
+    // Agentmaster (the rich card's whole conversation): the recorded-predecessor lookup the conversation chain
+    // follows (TranscriptTurns.h RecordedPredecessorFn) — the /clear predecessor or /handover origin Agentmaster
+    // stored on a session's record (SessionInfo::continuedFromId / continuedVia). The twin of the summary panel's
+    // MakeRecordedPredecessorLookup (AgentTabOverlay.Internal.h, an anonymous namespace of the overlay's own TUs):
+    // the card must walk exactly the chain the panel walks, or the two would number one conversation differently —
+    // keep the two in step. Holds the registry BY shared_ptr, so the lookup stays valid on the background thread
+    // the walk runs on (SessionRegistry::Get is thread-safe).
+    //   registry — the process-wide session registry; null reads as "nothing recorded" for every session.
+    // Returns the lookup: nullopt for an unknown session or one with no recorded link. The lookup never throws
+    // beyond std::bad_alloc (Get copies one record under its lock); the walk contains and logs even that.
+    ::Agentmaster::RecordedPredecessorFn TtRecordedPredecessorLookup(std::shared_ptr<::Agentmaster::SessionRegistry> registry)
+    {
+        return [registry = std::move(registry)](const std::wstring& sessionId) -> std::optional<::Agentmaster::RecordedPredecessor> {
+            if (!registry)
+            {
+                return std::nullopt;
+            }
+            const auto s = registry->Get(sessionId);
+            if (!s || s->continuedFromId.empty())
+            {
+                return std::nullopt;
+            }
+            return ::Agentmaster::RecordedPredecessor{ s->continuedFromId, s->continuedVia };
+        };
+    }
+
+    // Agentmaster (the rich card's whole conversation): the title an EARLIER session of the chain is named by —
+    // Agentmaster's own title when the registry knows the session (Rule #11's ONE title), else the durable
+    // per-session title store, else "" (BuildSummaryConversation then uses the transcript's own title). The
+    // twin of the summary panel's SummarySessionTitleOf (AgentTabOverlay.Internal.h) — keep the two in step.
+    // The card shows no title on its separators (it has no hover text); the rows carry it for parity with the
+    // panel's. Safe off the UI thread (thread-safe registry; a file read).
+    //   registry  — the session registry (may be null).
+    //   sessionId — the earlier session.
+    // Returns the title, or "". Never throws beyond std::bad_alloc.
+    std::wstring TtSessionTitleOf(const std::shared_ptr<::Agentmaster::SessionRegistry>& registry, const std::wstring& sessionId)
+    {
+        if (registry)
+        {
+            if (const auto s = registry->Get(sessionId); s && !s->title.empty())
+            {
+                return s->title;
+            }
+        }
+        return ::Agentmaster::GetStoredSessionTitle(sessionId);
+    }
+
+    // Agentmaster (the rich card's whole conversation): one SESSION-SEPARATOR line of the card's body — a line
+    // `kSummarySessionSepMark + <label>` (the label already formatted: "358db618", or "fork 358db618" above a
+    // fork — SummarySeparatorLabel) — drawn the way the summary panel draws its separators
+    // (AgentTabOverlay::_MakeSessionSeparator): [a 10-px dash][the label][a dash to the edge], 1-px rules in the
+    // section rules' color, the label dim (a marker, not content). Inert, unlike the panel's: no button, no
+    // hover text — the card holds nothing that takes a click (the ToolTip only reads the wheel).
+    //   label — the text after the mark.
+    // Returns the element. Throws what a XAML constructor throws (the card build's callers contain it).
+    winrt::Windows::UI::Xaml::UIElement TtBuildSessionSeparator(const std::wstring& label)
+    {
+        using namespace winrt::Windows::UI::Xaml;
+        using namespace winrt::Windows::UI::Xaml::Controls;
+        Grid g;
+        g.Margin(ThicknessHelper::FromLengths(0, 4, 0, 4)); // the section rules' breathing room
+        ColumnDefinition lead;
+        lead.Width(GridLengthHelper::FromPixels(10));
+        ColumnDefinition labelColumn;
+        labelColumn.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+        ColumnDefinition rest;
+        rest.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+        g.ColumnDefinitions().Append(lead);
+        g.ColumnDefinitions().Append(labelColumn);
+        g.ColumnDefinitions().Append(rest);
+        for (const int column : { 0, 2 })
+        {
+            Border dash;
+            dash.Height(1);
+            dash.VerticalAlignment(VerticalAlignment::Center);
+            dash.Background(TtFill(0x40, 0xFF, 0xFF, 0xFF)); // the section rules' color
+            Grid::SetColumn(dash, column);
+            g.Children().Append(dash);
+        }
+        TextBlock text;
+        text.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
+        text.FontSize(10);
+        text.Foreground(TtFill(0xFF, 0x9E, 0x9E, 0x9E)); // dim: a marker, not content
+        text.Margin(ThicknessHelper::FromLengths(4, 0, 4, 0));
+        text.VerticalAlignment(VerticalAlignment::Center);
+        text.Text(winrt::hstring{ label });
+        Grid::SetColumn(text, 1);
+        g.Children().Append(text);
+        return g;
+    }
+
     // Render a Summary-box TEXT (RenderSessionSummaryBox output: a lone kSummarySepMark line = a section
-    // divider, " N. " = a numbered user message, "* " = a file row) into the tooltip BODY: a vertical
-    // StackPanel of monospace (Cascadia Mono) TextBlocks, each sentinel line a full-width hairline rule
-    // (the AgentTabOverlay::_SetSummaryContent display look, minus the jump buttons). Contiguous
-    // non-divider lines coalesce into one wrapping TextBlock.
+    // divider, " N. " = a numbered user message, "* " = a file row, a `kSummarySessionSepMark + <label>` line =
+    // where an earlier session of the conversation ends) into the tooltip BODY: a vertical StackPanel of
+    // monospace (Cascadia Mono) TextBlocks, each section sentinel a full-width hairline rule and each session
+    // separator a labeled rule (the AgentTabOverlay::_SetSummaryContent display look, minus the jump buttons and
+    // the separators' click). Contiguous plain lines coalesce into one wrapping TextBlock.
+    //   text — the box text (the cached Summary body, line-truncated by TtBuildTooltipCard).
+    // Returns the body panel. Throws what a XAML constructor throws (the card build's callers contain it).
     winrt::Windows::UI::Xaml::Controls::StackPanel TtBuildSummaryBody(const std::wstring& text)
     {
         using namespace winrt::Windows::UI::Xaml;
@@ -256,6 +352,13 @@ namespace
                 rule.Background(TtFill(0x40, 0xFF, 0xFF, 0xFF));
                 rule.Margin(ThicknessHelper::FromLengths(0, 4, 0, 4));
                 stack.Children().Append(rule);
+            }
+            else if (!lineStr.empty() && lineStr[0] == ::Agentmaster::kSummarySessionSepMark)
+            {
+                // Where an earlier session of the conversation ends: a labeled rule of its own, never part of a
+                // text run (the mark would otherwise render as a box glyph inside the message list).
+                flush();
+                stack.Children().Append(TtBuildSessionSeparator(lineStr.substr(1)));
             }
             else
             {
@@ -3791,6 +3894,12 @@ namespace winrt::TerminalApp::implementation
             // below, which already renders via SummaryEscapeMsg's truncate=true default. (Wrap still
             // follows the global toggle; only trimming is pinned ON here.)
             const bool truncate = true;
+            // Agentmaster (the rich card's whole conversation): the card lists the conversation exactly as the summary
+            // panel does, so it follows the panel's ⏮ toggle (AppSettings::summaryPanelShowHistory, default ON): ON =
+            // every prompt of the whole conversation, OFF = the part after the last /compact alone (the classic view).
+            // The registry answers the chain's recorded links and the earlier sessions' titles off the UI thread.
+            const bool showHistory = _appSettings.summaryPanelShowHistory;
+            const auto registry = _sessionRegistry;
             const std::wstring codexUuid{ codexId };
             const std::wstring forkParent{ forkParentId };
             const std::wstring dir{ cwd };
@@ -3839,7 +3948,30 @@ namespace winrt::TerminalApp::implementation
                     else
                     {
                         auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
-                        body = ::Agentmaster::RenderSessionSummaryBox(a, std::wstring{}, dir, path, std::wstring{}, std::wstring{}, std::wstring{}, a.planFilePath, /*full*/ false, wrapNewlines, truncate);
+                        // The Messages are the WHOLE conversation, numbered 1..N like the summary panel's
+                        // (BuildSummaryConversation over CollectConversationUpstream: the earlier sessions this one
+                        // continues, its own parts before each /compact, then its current part). `a.userMsgs` alone is
+                        // only the part after the LAST /compact — AnalyzeSessionTranscript restarts it at each boundary
+                        // — so a session auto-compacted since its last prompt listed no message at all (the owner's
+                        // report of 2026-11-20: session 8da2a63d, 11 prompts, its 8th auto-compaction after the last).
+                        // The walk never throws (an unreadable chain reads as none) and is cached per transcript, so a
+                        // reload pays a stat and a lookup.
+                        const auto upstream = ::Agentmaster::CollectConversationUpstream(std::filesystem::path{ path }, TtRecordedPredecessorLookup(registry));
+                        auto rows = ::Agentmaster::BuildSummaryConversation(a, upstream, showHistory, [&registry](const std::wstring& sid) {
+                            return TtSessionTitleOf(registry, sid);
+                        });
+                        // The card's separators show their LABEL ("358db618", "fork 358db618": SummarySeparatorLabel,
+                        // the panel's own rule text) on an inert rule — the panel's clickable rule copies the id, the
+                        // card has no click. The renderer writes a separator row's sessionId after the mark, so this
+                        // local copy of the rows carries the label there.
+                        for (auto& row : rows)
+                        {
+                            if (!row.sessionId.empty())
+                            {
+                                row.sessionId = ::Agentmaster::SummarySeparatorLabel(row, 8);
+                            }
+                        }
+                        body = ::Agentmaster::RenderSessionSummaryBox(a, std::wstring{}, dir, path, std::wstring{}, std::wstring{}, std::wstring{}, a.planFilePath, /*full*/ false, wrapNewlines, truncate, &rows);
                     }
                     rendered = true;
                 }

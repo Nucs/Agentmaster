@@ -80,6 +80,14 @@ load-bearing.
 > beside the panel minus that chrome, capped at 364), so the tag rows now wrap at the visible edge. The note glyph's
 > Popup card has no ToolTip cap and keeps its room / 660 budget. §6 *Sizing*.
 
+> **2026-11-20 — the card's Messages are the WHOLE conversation (NOT BUILT yet).** The owner: "The tooltip is not
+> showing 1,2,3.. messages in the summary inside the tooltip 8da2a63d-…". That session has 11 prompts and 8
+> auto-compactions, the last one AFTER its last prompt; the card listed only the part after the last `/compact`
+> (`SessionSummary::userMsgs`), which was empty. The loader now builds the conversation the per-tab summary panel
+> lists (`CollectConversationUpstream` + `BuildSummaryConversation`) and the engine's `RenderSessionSummaryBox` takes
+> those rows (its new optional `conversation`): prompts numbered 1..N straight through, the same numbers as the panel,
+> an earlier session closed by a labeled rule (`kSummarySessionSepMark`). §6 `TtBuildSummaryBody`, §7.
+
 ---
 
 ## 0. Scope & what this is NOT
@@ -615,9 +623,12 @@ whole card out near half the screen:
 - `TtBuildObserveCard` (the `○ <kind> · unlinked` twin) keeps its flat **MaxWidth 420** — it is two lines
   and never stretches.
 - `TtBuildSummaryBody(text)` → a `StackPanel` of Cascadia Mono `TextBlock`s; the sentinel line
-  `\x1F` becomes a full-width `Border` rule (the same convention the overlay's summary panel uses).
-  The text is the `RenderSessionSummaryBox(..., full=false)` output (numbered messages + files; no
-  header, since the card already shows state/title/dir).
+  `\x1F` becomes a full-width `Border` rule (the same convention the overlay's summary panel uses), and a
+  `\x1E<label>` line (`kSummarySessionSepMark`) — where an earlier session of the conversation ends — a
+  labeled rule (`TtBuildSessionSeparator`: [10-px dash][label][dash to the edge], the panel's
+  `_MakeSessionSeparator` look, inert). The text is the `RenderSessionSummaryBox(..., full=false, …,
+  &rows)` output (numbered messages + files; no header, since the card already shows state/title/dir),
+  its Messages the WHOLE conversation (§7).
 - `TtBuildObserveCard(kind, title)` → the `○ <kind> · unlinked` line over the (optional) tab title.
 - `accent` = `AgentStatusColorFor(state)` from `AgentStatusColors.h` (the ONE shared state→color table).
 
@@ -638,6 +649,20 @@ set as `Content` on two ToolTips would corrupt. Keep builders returning fresh tr
   `_UpdateTabAgentToolTip`, a side-panel card's `_UpdateSidePanelCardToolTip`), each inside its own
   try/catch (one failed surface never costs the others), all with the open-swap grant and
   `kickSummary=false`.
+- **The Messages are the WHOLE conversation** (since 2026-11-20), built exactly as the per-tab summary
+  panel builds its own (TAB_OVERLAY.md, `AgentTabOverlay.Summary.cpp`): `CollectConversationUpstream`
+  (the earlier sessions this one continues — a fork's parent, a plan-restart parent, the recorded /clear
+  and /handover predecessors — through `TtRecordedPredecessorLookup`, the twin of the panel's
+  `MakeRecordedPredecessorLookup`) → `BuildSummaryConversation(a, upstream, showHistory, TtSessionTitleOf)`
+  → `RenderSessionSummaryBox(…, &rows)`: every prompt numbered 1..N straight through — the same numbers the
+  panel shows — each earlier session closed by a `\x1E<label>` separator (the rows' ids replaced by their
+  `SummarySeparatorLabel(row, 8)`, "fork 358db618", before rendering: the card's rule is inert). It follows
+  the panel's ⏮ toggle (`summaryPanelShowHistory`, default ON; OFF = the part after the last /compact
+  alone), as of the card's last load. Before, the card listed `a.userMsgs` only — the part after the LAST
+  `/compact` (`AnalyzeSessionTranscript` restarts it at each boundary) — so a session auto-compacted since
+  its last prompt showed NO numbered message (the owner's report of 2026-11-20, session `8da2a63d`: 11
+  prompts, its 8th auto-compaction after the last one). The walk is cached per transcript and never
+  throws. Codex keeps its rollout's prompts (no chain).
 - **mtime-gated** (a quiet tab costs one stat) + **in-flight-guarded** (`_tabTooltipSummaryInFlight`,
   one load per session, however many surfaces wait) + **throttled** by the caller (`lastCheckMs`,
   ≤ every 4s). A surface that asks while a check is DUE (no body yet, or the last check is > 4 s old)

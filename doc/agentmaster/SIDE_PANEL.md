@@ -486,7 +486,10 @@ the summary kick (mtime-gated, at most every 4 s, one load per session). `_Updat
 `_UpdateSidePanelCardToolTip` are thin surfaces over it. The summary loader
 `_EnsureTabTooltipSummary` is now per SESSION, not per tab: on arrival it re-hosts every surface that
 waits for that session (`_tabTooltipSummaryWaiters[session][surface]`, each in its own catch) with
-the open-swap grant and never kicks another analysis (the 2026-08-29 loop rule). The wheel's offset
+the open-swap grant and never kicks another analysis (the 2026-08-29 loop rule). The body's Messages are
+the WHOLE conversation, numbered 1..N like the summary panel's (every part before each `/compact` and the
+earlier sessions it continues, under labeled rules; HANDOVER_tab-tooltip.md §7) — until 2026-11-20 only the
+part after the last `/compact`, so a card compacted since its last prompt listed none. The wheel's offset
 math, scrollbar sync and fade are the shared `_ScrollSessionToolTipBody`.
 
 **Surface keys.** The signature and the scroll state are kept per SURFACE: a tab's under its session

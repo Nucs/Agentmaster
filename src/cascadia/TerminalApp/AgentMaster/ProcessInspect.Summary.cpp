@@ -19,6 +19,7 @@
 //
 // Agentmaster engine TU. ProcessInspect SUMMARY: the shared summary-box renderers (RenderSessionSummaryBox / RenderCodexSummaryBox + table-rule stripping) used by the per-tab overlay AND the Sessions page -- one renderer, no drift. Partial TU of ProcessInspect.cpp.
 #include "ProcessInspect.h"
+#include "SummaryConversation.h" // SummaryConversationRow — the whole-conversation rows RenderSessionSummaryBox may list (its fields only: the builders live in TranscriptTurns.cpp, which the CLI does not link)
 
 #include <windows.h>
 #include <appmodel.h> // GetPackageFamilyName (host terminal: real WT vs Agentmaster vs Dev)
@@ -345,16 +346,17 @@ namespace Agentmaster
         return out;
     }
 
-    static std::wstring RenderSessionSummaryBoxImpl(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines, bool truncate);
+    static std::wstring RenderSessionSummaryBoxImpl(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines, bool truncate, const std::vector<SummaryConversationRow>* conversation);
     // Agentmaster (extra-safe): the renderers do NOT self-contain (the tab-tooltip lane's hardening
     // comment said exactly that) yet run on background threads / fire_and_forget coroutines with no
     // frame to catch a throw — a std::bad_alloc mid-string-build was a process kill (the v0.6.x
     // resume crash-loop class). Contain + return empty (the caller's "nothing to render" path).
-    std::wstring RenderSessionSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines, bool truncate)
+    // `conversation`: see the declaration (ProcessInspect.h) — the whole-conversation Messages list, or null.
+    std::wstring RenderSessionSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines, bool truncate, const std::vector<SummaryConversationRow>* conversation)
     {
         try
         {
-            return RenderSessionSummaryBoxImpl(a, id, cwd, transcriptPath, resumeCmd, liveGlyph, liveLabel, planFile, full, wrapNewlines, truncate);
+            return RenderSessionSummaryBoxImpl(a, id, cwd, transcriptPath, resumeCmd, liveGlyph, liveLabel, planFile, full, wrapNewlines, truncate, conversation);
         }
         catch (...)
         {
@@ -364,7 +366,7 @@ namespace Agentmaster
         }
     }
 
-    static std::wstring RenderSessionSummaryBoxImpl(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines, bool truncate)
+    static std::wstring RenderSessionSummaryBoxImpl(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines, bool truncate, const std::vector<SummaryConversationRow>* conversation)
     {
         std::wstring glyph = liveGlyph, label = liveLabel;
         const bool isPlan = a.hasPlanContent || a.hasExitPlanMode;
@@ -433,7 +435,33 @@ namespace Agentmaster
             sep();
             line(L"Recap: " + SummaryEscapeMsg(a.awaySummary, wrapNewlines, /*truncate*/ false)); // label INLINE; the recap is ALWAYS shown in FULL (never capped by the truncate toggle — only the numbered messages honor it)
         }
-        if (!a.userMsgs.empty())
+        if (conversation)
+        {
+            // Agentmaster (the summary's conversation chain): the WHOLE conversation, as the caller built it
+            // (BuildSummaryConversation) — the per-tab summary panel's Messages, line for line: every prompt
+            // numbered 1..N straight through (the numbers keep counting across /compact parts and across the
+            // earlier sessions this one continues), each earlier session closed by a lone
+            // `kSummarySessionSepMark + <full id>` line. `a.userMsgs` alone is only the part after the LAST
+            // /compact (AnalyzeSessionTranscript restarts it at each boundary), so a session compacted since
+            // its last prompt would list nothing at all.
+            if (!conversation->empty())
+            {
+                sep();
+                int n = 1;
+                for (const auto& row : *conversation)
+                {
+                    if (!row.sessionId.empty())
+                    {
+                        o += kSummarySessionSepMark;
+                        o += row.sessionId;
+                        o += L"\n";
+                        continue;
+                    }
+                    line(L" " + std::to_wstring(n++) + L". " + SummaryEscapeMsg(row.text, wrapNewlines, truncate));
+                }
+            }
+        }
+        else if (!a.userMsgs.empty())
         {
             sep();
             int i = 1;

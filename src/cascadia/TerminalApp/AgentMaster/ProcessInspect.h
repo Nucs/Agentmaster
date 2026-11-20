@@ -744,11 +744,27 @@ namespace Agentmaster
     //    caller with no live state (the Sessions page) can pass an empty label to suppress the
     //    otherwise-redundant header while STILL surfacing the plan signal.
     constexpr wchar_t kSummarySepMark = L'\x1F'; // ASCII Unit Separator — never occurs in transcript content
+    // Agentmaster (the summary's conversation chain): the SESSION-separator sentinel of a whole-conversation
+    // Messages list. RenderSessionSummaryBox, given a `conversation`, writes each separator row as a line of
+    // its own — this mark, then the earlier session's FULL id — right after that session's last prompt
+    // ("the conversation up to here is <id>"). The same mark and line shape as the per-tab summary panel's
+    // own renderer (AgentTabOverlay.Internal.h kSessionSepMark), so one display convention serves both. \x1E
+    // (ASCII Record Separator) never occurs in transcript content, and a session id never contains it.
+    constexpr wchar_t kSummarySessionSepMark = L'\x1E';
+    struct SummaryConversationRow; // SummaryConversation.h — one row of a whole-conversation Messages list
     // Agentmaster: `wrapNewlines` / `truncate` are the GLOBAL summary-panel toggles (AppSettings:
     // summaryPanelWrapNewlines / summaryPanelTruncate). The defaults reproduce the prior session-end.js
     // look (collapse newlines to a literal "\n"; cap each numbered message at ~240 chars) so existing
     // callers are unchanged; the Sessions page passes the live values so its detail honors the toggles.
-    std::wstring RenderSessionSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines = false, bool truncate = true);
+    // `conversation` (Agentmaster, the summary's conversation chain): when non-null, the Messages section
+    // lists THESE rows instead of `a.userMsgs` — the WHOLE conversation BuildSummaryConversation built (the
+    // earlier sessions it continues, its own parts before each /compact, then its current part): every
+    // prompt row numbered 1..N straight through, every separator row written as a lone
+    // `kSummarySessionSepMark + <full id>` line. Without it (null, the default) the list is `a.userMsgs`
+    // alone — only the part after the LAST /compact, so a session compacted since its last prompt lists no
+    // message at all. Each prompt honors `wrapNewlines` / `truncate` like a `userMsgs` one. The rows are
+    // only read here; the pointer is not kept.
+    std::wstring RenderSessionSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines = false, bool truncate = true, const std::vector<SummaryConversationRow>* conversation = nullptr);
 
     // Port of session-end.js formatDuration: "2h 12m (20:21 -> 22:33)" from two ISO timestamps, the
     // HH:MM shown in LOCAL time (like the hook). Empty if either timestamp is missing/unparseable.
