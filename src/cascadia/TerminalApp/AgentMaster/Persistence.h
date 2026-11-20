@@ -195,7 +195,22 @@ namespace Agentmaster
     WindowRecord DeserializeWindowRecord(std::wstring_view text);
 
     // ---- disk (state dir; best-effort) ----
+    // Agentmaster (SESSIONS_STORE.md): the LEGACY whole-file save of sessions.json. A run writes it only in FleetMode::Json —
+    // the start could not migrate the file into sessions.db (sessions.json was unusable, or the migration failed), or
+    // sessions.db exists but cannot be used (it is never written over: the file beside it is imported at the next start
+    // that can use it); every other run persists through the fleet store (FleetDb.h, FleetWriter.cpp), which never writes
+    // sessions.json. A save whose text equals the last successful save of the same file writes nothing.
+    //   sessions - the whole fleet (the registry's Snapshot()).
+    // Throws std::bad_alloc only (a failed write is logged by WriteAllUtf8 and retried at the next save).
     void SaveSessions(const std::vector<SessionInfo>& sessions);
+    // SaveSessions into an explicit profile folder: the fleet writer's Json mode writes beside the store it fell back from
+    // (the app's own profile; a scratch profile in the harness).
+    //   profileDir - the profile folder whose sessions.json to write.
+    //   sessions   - the whole fleet.
+    // Throws std::bad_alloc only.
+    void SaveSessionsIn(const std::wstring& profileDir, const std::vector<SessionInfo>& sessions);
+    // The fleet as another process reads it (the CLI, the session database service): sessions.db read-only when it exists
+    // (FleetDb.h LoadFleetReadOnlyIn), else sessions.json. Empty when nothing can be read.
     std::vector<SessionInfo> LoadSessions();
 
     // Agentmaster (PERSISTENCE.md "Unreadable state files"): the STARTUP read of the fleet, which — unlike LoadSessions,
@@ -217,11 +232,21 @@ namespace Agentmaster
     // Throws std::bad_alloc only (a read failure is a FleetLoad, not an exception).
     FleetLoad LoadSessionsForStartup();
     // LoadSessionsForStartup on an explicit profile folder — the harness's seam (AgentmasterStateDir() is resolved once
-    // per process, so a test cannot point it at a scratch folder).
-    //   profileDir - the profile folder whose sessions.json to read.
+    // per process, so a test cannot point it at a scratch folder). Since SESSIONS_STORE.md it is the fleet store's startup
+    // open (FleetDb.h OpenFleetForStartupIn): sessions.db when it exists, else the one-time migration of sessions.json into
+    // it, else (sessions.json unusable, or the migration failed) sessions.json read as before (ReadSessionsJsonForStartupIn).
+    //   profileDir - the profile folder.
     //   returns    - as LoadSessionsForStartup.
     // Throws std::bad_alloc only.
     FleetLoad LoadSessionsForStartupIn(const std::wstring& profileDir);
+    // The startup read of sessions.json ITSELF (what LoadSessionsForStartupIn was before the fleet store): the file read
+    // with the startup budget, parsed once, and marked for the state-file guard (safe to replace when it loaded, keep-before-
+    // replace when it exists but could not be used). The fleet store's open uses it to decide whether to migrate; the
+    // harness tests the JSON rules through it.
+    //   profileDir - the profile folder whose sessions.json to read.
+    //   returns    - the fleet and how the read went; never a partial fleet.
+    // Throws std::bad_alloc only.
+    FleetLoad ReadSessionsJsonForStartupIn(const std::wstring& profileDir);
     // Copy the workspace as it is on disk — sessions.json, open-windows.json, settings.json, layout.json and every
     // windows\*.json — into a new folder <profile>\recovery\<yyyyMMdd-HHmmss>, with a README.txt that says what happened
     // and how to put the files back. Called when the startup fleet read failed (FleetLoad::usable false), BEFORE the

@@ -55,6 +55,11 @@ namespace Agentmaster::StateBackups
     /// </summary>
     inline constexpr const wchar_t* kStateFiles[] = {
         L"sessions.json",
+        // The fleet store (SESSIONS_STORE.md §4.7) and its WAL, copied as a PAIR: the WAL holds commits the file has not taken
+        // in yet (a run that ended without its close checkpoint). Consistent because the snapshot runs before this start
+        // opens the store, so no writer is active; SQLite replays such a WAL when the copy is opened. (-shm is rebuilt.)
+        L"sessions.db",
+        L"sessions.db-wal",
         L"settings.json",
         L"layout.json",
         L"open-windows.json",
@@ -343,7 +348,8 @@ namespace Agentmaster::StateBackups
         inline std::wstring SnapshotReadme(const std::wstring& profileDir, std::wstring_view reason, size_t copied, const std::wstring& failed, bool storePending)
         {
             return std::wstring{ kSnapshotMarker } + L" \x2014 taken " + LocalStamp() + L"\r\n\r\n" + std::wstring{ reason } +
-                   L"\r\n\r\nThese are copies of Agentmaster's state files as they were BEFORE that start wrote anything: the sessions (sessions.json), "
+                   L"\r\n\r\nThese are copies of Agentmaster's state files as they were BEFORE that start wrote anything: the sessions (sessions.db with "
+                   L"sessions.db-wal, or sessions.json before them; copy a .db back together with its -wal), "
                    L"the windows and their tabs (windows\\), the titles, tags and favorites (session-store\\), the settings, the folder colors, "
                    L"the Telegram bot's topic map (messaging\\telegram\\) and Windows Terminal's own settings (terminal\\).\r\n\r\n"
                    L"To go back to them: close Agentmaster, copy the files from this folder back into\r\n" +

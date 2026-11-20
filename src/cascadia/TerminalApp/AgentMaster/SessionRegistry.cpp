@@ -213,8 +213,44 @@ namespace
 
 namespace Agentmaster
 {
+    void SessionRegistry::SetRecordChangeSink(RecordChangeSink sink)
+    {
+        std::lock_guard guard{ _mtx };
+        _recordChangeSink = std::move(sink);
+    }
+
+    std::vector<std::wstring> SessionRegistry::Ids() const
+    {
+        std::lock_guard guard{ _mtx };
+        return _order;
+    }
+
+    void SessionRegistry::_markChanged(const std::wstring& id) noexcept
+    {
+        try
+        {
+            RecordChangeSink sink;
+            {
+                std::lock_guard guard{ _mtx };
+                sink = _recordChangeSink;
+            }
+            if (sink)
+            {
+                sink(id); // outside the lock: the sink takes its own leaf lock and never calls back in
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: this change is not marked; the store's rolling sweep finds it within about a minute.
+            LogSwallowedException(L"SessionRegistry::_markChanged");
+        }
+    }
+
     void SessionRegistry::_notify(const SessionInfo& snapshot, HookEvent cause)
     {
+        // Agentmaster (SESSIONS_STORE.md §4.3): the fleet store's dirty mark FIRST, so an observer's immediate commit (the
+        // engine's write-through of a !live change) finds this record marked.
+        _markChanged(snapshot.id);
         std::vector<RegistryObserver> observers;
         {
             std::lock_guard guard{ _mtx };
@@ -2010,7 +2046,14 @@ namespace Agentmaster
         }
         if (flipped)
         {
-            _notify(snapshot, HookEvent::Unknown);
+            _notify(snapshot, HookEvent::Unknown); // marks the record for the fleet store too
+        }
+        else
+        {
+            // Agentmaster (SESSIONS_STORE.md §4.3): a text-only edit stays quiet for the observers, but the draft's TEXT is
+            // persisted (a restart types it back): the fleet store must save it. The stamp-only refresh above marks nothing
+            // on purpose: it changes at every draft scan, and the store's sweep saves it at most once a minute.
+            _markChanged(id);
         }
         return flipped;
     }
@@ -2023,13 +2066,18 @@ namespace Agentmaster
     // resurrect an annotation for a sent message).
     void SessionRegistry::SetPendingPasteRefs(const std::wstring& id, const std::wstring& refs)
     {
-        std::lock_guard guard{ _mtx };
-        const auto it = _sessions.find(id);
-        if (it == _sessions.end() || it->second.pendingInput.empty() || it->second.pendingPasteRefs == refs)
         {
-            return;
+            std::lock_guard guard{ _mtx };
+            const auto it = _sessions.find(id);
+            if (it == _sessions.end() || it->second.pendingInput.empty() || it->second.pendingPasteRefs == refs)
+            {
+                return;
+            }
+            it->second.pendingPasteRefs = refs;
         }
-        it->second.pendingPasteRefs = refs;
+        // Agentmaster (SESSIONS_STORE.md §4.3): the paste references are persisted with the draft (they rebind its
+        // placeholders after a restart): the fleet store saves them. Outside the lock, as the sink requires.
+        _markChanged(id);
     }
 
     // Agentmaster (PENDING_INPUT.md §2c — the PASTE JOURNAL): see the header. The caps are enforced in a

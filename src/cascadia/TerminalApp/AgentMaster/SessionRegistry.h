@@ -584,6 +584,20 @@ namespace Agentmaster
         ObserverToken AddObserver(RegistryObserver observer);
         void RemoveObserver(ObserverToken token);
         void SetAdvanceHandler(AdvanceHandler handler);
+
+        // Agentmaster (SESSIONS_STORE.md §4.3): the fleet store's DIRTY MARK. The sink is called with a session's id each time
+        // its record may have changed something the store keeps: every notified change (before the observers run, so an
+        // observer's immediate commit finds the record marked) and the quiet changes of persisted members (an unsent
+        // draft's text, its paste references). Called OUTSIDE the lock; it must be cheap and must not call back into the
+        // registry (FleetWriter.cpp's NoteFleetRecordChanged takes one leaf lock). The store's rolling sweep catches any
+        // quiet change that marks nothing (the draft's "last seen" stamp: at most once a minute by design).
+        //   sink - the sink, or an empty function to detach it. One per registry (a later call replaces it).
+        // Thread-safe; never throws (std::function's move).
+        using RecordChangeSink = std::function<void(const std::wstring& id)>;
+        void SetRecordChangeSink(RecordChangeSink sink);
+        // Every session id, in insertion order — the store's sweep reads it every two seconds, so it copies ids only, never a
+        // record. Thread-safe. May throw std::bad_alloc.
+        std::vector<std::wstring> Ids() const;
         // Agentmaster (adopt/re-home autorunner default): the Tests Autorunner MODE stamped onto a
         // session record the registry CREATES itself — the hook SessionStart adopt path and the Fleet
         // Observer's first-sight create. Every other NEW session gets the cog default at its launch
@@ -710,6 +724,9 @@ namespace Agentmaster
     private:
         // Snapshot the observer list under the lock, then invoke each outside it.
         void _notify(const SessionInfo& snapshot, HookEvent cause);
+        // Agentmaster (SESSIONS_STORE.md): calls the record change sink for `id` (copied under the lock, called outside it).
+        // Never call it while holding _mtx. Never throws: a throwing sink is logged (Rule #18) and ignored.
+        void _markChanged(const std::wstring& id) noexcept;
 
         // Agentmaster (one ConPTY = one live conversation; Rule #14 / session-id divergence): a single
         // claude.exe — one pid on one ConPTY (tabToken) — can be in exactly ONE conversation at a time.
@@ -802,6 +819,9 @@ namespace Agentmaster
         std::vector<std::pair<ObserverToken, RegistryObserver>> _observers;
         uint64_t _nextObserverId{ 1 };
         AdvanceHandler _advance;
+        // Agentmaster (SESSIONS_STORE.md): the fleet store's dirty mark (SetRecordChangeSink); empty until the engine wires it
+        // (the harness, the CLI and the session database service never do). Guarded by _mtx.
+        RecordChangeSink _recordChangeSink;
         // The creation-time autorunner mode for records the registry mints itself (hook-adopt +
         // observer first-sight) — see SetDefaultAutorunnerMode. Off until wired, so the standalone
         // harness / CLI / a release build behave exactly as before. Guarded by _mtx.

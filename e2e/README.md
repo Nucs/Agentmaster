@@ -197,7 +197,7 @@ restart: `am.claude.seed(settings={...})` before `am.launch(...)` — each claud
 | `window.tags` / `window.specify` (`amdriver.ui.popups`) | the Tags panel: `texts()`, `count()` ('N of M tags'); the Specify card: `value()` | `wait_open()`; Tags: `add(name)`; Specify: `use(model)`, `press('Cancel')` |
 | `App` | `windows()`, `window` (the first window while it lives), `popups()`, `tooltips()`, `claude_processes()`, `profile`, `claude` | `launch(name, title=…)`, `new_window()`, `close(how='window'/'all')`, `kill()`, `start()`, `restart()` (F-RS) |
 | `Dialog` (`amdriver.ui.dialogs`) | `text()`, `buttons()` | `Dialog.wait(app, title=…)`, `press(name)`; `MessageBox` for Win32 boxes |
-| `Session` (`amdriver.session`) | `record()` (sessions.json), `title`, `state`, `claude_pids()`, `running()`, `tab()` | `select()`, `ask(prompt, wait="turn"/"sent"/"none")`, `wait_state(*states)`, `wait_running()`, `wait_parked(since=mark)` |
+| `Session` (`amdriver.session`) | `record()` (the saved record: sessions.db, or sessions.json before the migration), `title`, `state`, `claude_pids()`, `running()`, `tab()` | `select()`, `ask(prompt, wait="turn"/"sent"/"none")`, `wait_state(*states)`, `wait_running()`, `wait_parked(since=mark)` |
 | `StateTimeline` (`amdriver.timeline`) | a session's side-panel state word sampled every 150 ms in the background: `states()` (the sequence a user saw), `changes()` (with times), `current()`, `seen(state)`, `describe()`; `engine_events` / `engine_story(profile, id, hooks_mark, scanner_mark)` (the hook lines and scanner reconciliations behind it), `transcript_kinds(lines)` | `with StateTimeline(window, title) as tl:` … `tl.wait(state)`, `tl.wait_seen(state)`, `tl.hold(state, s)` (nothing else sampled meanwhile), `tl.settled_at(state, within_s)` (the state shown AND kept: a settled state, not a pass through it), `tl.entered_after(state, t, within_s)`, `tl.elapsed()` (the timeline's clock, to note when the test acted) |
 
 **The oracles** — prefer one the app does not control (flows/README.md "Oracles"): the mock
@@ -232,8 +232,9 @@ since=mark)`), then the UI.
 
 ## What the driver knows (measured in the test desktop, 0.8.0, 2026-10-23)
 
-- **Read a session's state from the UI, not from sessions.json.** The file lags the registry by up to ~1 s (a test
-  that read it right after an Error read "Running"), and a read that collides with a save makes the save fail (ROB-K1).
+- **Read a session's state from the UI, not from the saved records.** The fleet store (`sessions.db`, read through
+  `amdriver/sessions_store.py`) lags the registry by up to ~250 ms, as `sessions.json` lagged it by ~1 s (a test that read
+  it right after an Error read "Running"). Its read never fails a save (ROB-K1 was the JSON file's).
   The side panel's state word (`StateTimeline`, `side_panel.card(title).state`), the board column and the tree row are
   read through UI Automation and cost the app nothing.
 - **Hooks can be slow or lost on a busy PC.** On a desktop of a loaded PC every PowerShell hook forwarder took 10–22 s;
@@ -324,7 +325,8 @@ since=mark)`), then the UI.
   `PanelCard.selected`, `compose_buttons`.
 - **A tooltip opens on a hand's arrival**: `hover(glide=True)` moves in steps; `am.tooltips()` lists what shows (a
   rich session card has no name — read its texts).
-- **A read of the app's files can make its save fail.** The app saves `sessions.json`, `windows\<id>.json`,
+- **A read of the app's JSON files can make its save fail.** (The fleet store is not one of them: a SQLite reader never
+  blocks a commit.) The app saves `windows\<id>.json`,
   `settings.json` … by replacing them, and the replace FAILS while any handle holds the file, delete sharing or not —
   `[persist-fail] … atomic replace failed` — and nothing retries it (ROB-K1; measured 2026-10-23, flows/20). Every
   read in `amdriver` goes through `win32.read_bytes_shared`, which holds the file only for the read itself (and would
@@ -376,7 +378,7 @@ since=mark)`), then the UI.
 | A11Y-K2 | every dialog | UI Automation's hit test at a dialog's button returns the terminal behind the dialog, a code-built one ("Close tab?") included; the tree walk and the keyboard reach it | `test_accessibility.py::test_known_defect_a_hit_test_passes_through_a_dialog` |
 | TAB-K4 | TAB-01 phase 4 | Shift+Click on a parked tab switches to it instead of starting it in place (its menu item names the gesture). **Fixed in code 2026-10-23** (not in a release): the tab's press handler never received a left press (the tab, a ListViewItem, takes it first); it now does, and the Shift+Click keeps its release from selecting the tab. Verified on the test build 0.8.1.1 (run `fixall-0811`: passed) | `test_tab_lifecycle.py::test_shift_click_on_a_parked_tab_starts_it_in_place` (`needs_fix`) |
 | TAB-K5 | TAB-10 E4 | With a shell tab in the window, a reopen whose focused tab was a Claude tab other than the last one starts the last Claude tab too (TAB-K2's mechanism) | `test_tab_menu.py::test_known_defect_a_claude_focused_reopen_also_starts_the_last_claude_tab` |
-| ROB-K1 | ROB-11 | A reader holding `sessions.json` makes the save fail, with or without delete sharing (measured: the app's replace fails while any handle is open); nothing re-saves until the next change | `test_robustness.py::test_known_defect_a_reader_holding_sessions_json_loses_the_save` |
+| ROB-K1 | ROB-11 | **Fixed by the fleet store (SESSIONS_STORE.md, not in a release yet):** a reader holding `sessions.json` made the save fail, with or without delete sharing, and nothing re-saved until the next change. The store commits to its WAL, which no reader blocks | `test_robustness.py::test_a_reader_holding_the_fleet_store_never_loses_a_save` (a regular test now) |
 | STA-K1 | STA-11 E3, STA-01 phase 5 | A claude that ends without its SessionEnd never reads Done; killed mid-turn (or within ~2 s after a turn) the session reads Running for good — its last `busy` heartbeat outlives the process, and the scanner's "work outlived the turn" rule trusts it | `test_session_state.py::test_known_defect_a_killed_claude_keeps_reading_running` |
 | STA-K5 | STA-12 E1, PQR-07 | Esc before any output takes no interrupt hold (Claude Code writes no "[Request interrupted by user]" marker for it, and the hold is taken only on that marker): once the status has settled and held still, the runner sends the next queued prompt — 66 s after the Esc in the probe — the draft swap keeping the user's restored prompt around the send; every other Esc parks the runner until the user's next message (the owner decides whether it is a defect) | `test_session_state.py::test_known_defect_esc_before_any_output_takes_no_interrupt_hold` |
 | PQR-K1 | PQR-06 | Send now with an empty compose box sends the SELECTED row whatever its status: a history row is typed into the session again (found by reading, 2026-10-21) | `test_prompt_queue_runner.py::test_known_defect_send_now_sends_a_selected_history_row_again` |

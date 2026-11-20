@@ -82,6 +82,12 @@
     <ClCompile Include="..\Persistence.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <!-- SESSIONS_STORE.md: Persistence.cpp's LoadSessions reads the fleet store (sessions.db, read-only) through FleetDb.cpp
+         - a LINK dependency. SQLite comes from vcpkg (the manifest's "terminal" feature), included and auto-linked by
+         common.build.pre.props / vcpkg's targets like nlohmann/json. -->
+    <ClCompile Include="..\FleetDb.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\ProcessInspect.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

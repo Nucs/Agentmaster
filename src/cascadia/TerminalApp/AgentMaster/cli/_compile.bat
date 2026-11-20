@@ -26,10 +26,18 @@ REM SessionScanner::Start constructs the watcher, even though the CLI never star
 REM SessionStore.cpp (SIDE_PANEL.md 2l) is the same kind of LINK dependency: Persistence.cpp saves and loads a
 REM window record's side panel filters through SidePanelFilters.h's inline helpers, which fold tag names with
 REM FoldTagName / NormalizeTagName, defined in SessionStore.cpp (LNK2019 / LNK1120 without it, 0d3ed3b02).
-cl /std:c++20 /EHsc /nologo /W3 /utf-8 /MP /DUNICODE /D_UNICODE /D AGENTMASTER_DEV /Fe:agentcli.exe agentcli.cpp ^
+REM FleetDb.cpp (SESSIONS_STORE.md) is the same kind of LINK dependency: Persistence.cpp's LoadSessions reads the fleet store
+REM (sessions.db, read-only) through it. It needs SQLite from the vcpkg tree a full msbuild installs (obj\x64\vcpkg, the
+REM manifest's "terminal" feature, static CRT like this /MT build): its include folder and sqlite3.lib.
+set "AM_VCPKG=K:\source\Agentmaster\obj\x64\vcpkg\x64-windows-static"
+if not exist "%AM_VCPKG%\lib\sqlite3.lib" (
+  echo [error] SQLite is missing from %AM_VCPKG%: run one msbuild of the solution first ^(vcpkg installs it^)
+  exit /b 2
+)
+cl /std:c++20 /EHsc /nologo /W3 /utf-8 /MP /DUNICODE /D_UNICODE /D AGENTMASTER_DEV /I"%AM_VCPKG%\include" /Fe:agentcli.exe agentcli.cpp ^
    ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\CommandWatch.cpp ^
-   ..\SessionScanner.cpp ..\TranscriptWatcher.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ..\ClaudeInvisibleChars.cpp ..\SessionDbClient.cpp ..\SessionStore.cpp ^
-   ole32.lib user32.lib oleaut32.lib icu.lib
+   ..\SessionScanner.cpp ..\TranscriptWatcher.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ..\ClaudeInvisibleChars.cpp ..\SessionDbClient.cpp ..\SessionStore.cpp ..\FleetDb.cpp ^
+   "%AM_VCPKG%\lib\sqlite3.lib" ole32.lib user32.lib oleaut32.lib icu.lib
 if errorlevel 1 (
   echo [error] compile failed
   exit /b 1

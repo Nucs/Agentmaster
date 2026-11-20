@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from amdriver import install
+from amdriver.sessions_store import load_fleet
 from amdriver.ui.taskdialog import TaskDialog
 from amdriver.waits import wait_until
 
@@ -105,8 +106,13 @@ def _plant_user_data(profile: Path) -> None:
 
 def _assert_user_data_kept(profile: Path, before: dict[str, str]) -> None:
     """Check that an install kept the user's data: every file that was in the profile is still there, the user's own
-    files byte for byte, and the sessions with their titles (the app may rewrite sessions.json when it starts, so its
-    sessions are checked by content, not by bytes).
+    files byte for byte, and the sessions with their titles (the app rewrites the fleet when it starts, so its sessions are
+    checked by content, not by bytes).
+
+    The fleet store (SESSIONS_STORE.md §4.9): the first start of a build that has it MOVES sessions.json into sessions.db —
+    the file is gone afterwards, by design, and kept byte for byte in backups\\<stamp> sessions.json to SQLite\\. So a
+    sessions.json that is gone counts as kept only when that backup holds exactly its bytes and the store holds its
+    sessions; anything else is a loss.
 
     Args:
         profile: The Default profile.
@@ -117,14 +123,21 @@ def _assert_user_data_kept(profile: Path, before: dict[str, str]) -> None:
         AssertionError: Naming every file that is gone or changed, with what the folder holds now.
     """
     after = _snapshot(profile)
-    gone = sorted(rel for rel in before if rel not in after)
+    migrated = "sessions.json" in before and "sessions.json" not in after and (profile / "sessions.db").exists()
+    gone = sorted(rel for rel in before if rel not in after and not (migrated and rel == "sessions.json"))
     assert not gone, (f"the install removed {len(gone)} of the {len(before)} files of {profile}: {gone[:40]}\n"
                       f"the folder now: {sorted(after)[:60]}")
+    if migrated:
+        kept = [rel for rel, digest in after.items()
+                if re.fullmatch(r"backups/[^/]+ sessions\.json to SQLite(-\d+)?/sessions\.json", rel) and digest == before["sessions.json"]]
+        assert kept, (f"sessions.json was moved into sessions.db, but no backup holds its exact bytes: "
+                      f"{sorted(rel for rel in after if rel.startswith('backups/'))[:20]}")
     for rel, data in OWN_FILES.items():
         assert (profile / rel).read_bytes() == data, f"the user's own file {rel} changed"
-    text = (profile / "sessions.json").read_text(encoding="utf-8")
+    fleet = load_fleet(profile)
     for s in SESSIONS:
-        assert s["id"] in text and s["title"] in text, f"sessions.json lost {s}: {text[:600]}"
+        assert any(r.get("id") == s["id"] and r.get("title") == s["title"] for r in fleet), \
+            f"the fleet lost {s}: {[(r.get('id'), r.get('title')) for r in fleet][:20]}"
     for s in SESSIONS:
         record = profile / "session-store" / f"{s['id']}.json"
         assert record.exists() and s["title"] in record.read_text(encoding="utf-8"), f"the title record {record} is gone"

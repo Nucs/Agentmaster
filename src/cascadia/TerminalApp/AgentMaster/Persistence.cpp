@@ -5,6 +5,7 @@
 #include "Persistence.h"
 
 #include "ClaudeSpawn.h" // AgentmasterStateDir, NewSessionId
+#include "FleetDb.h" // SESSIONS_STORE.md: the fleet store (sessions.db) behind LoadSessionsForStartupIn and LoadSessions
 #include "LaunchPresets.h" // PERSISTENCE.md §17: launch-presets.json's round trip (LaunchPresetsConfigFromJson / ...ToJson; pure, Json.h only)
 #include "ProcessInspect.h" // ReadGitBranchForDir — the configured DeriveSessionTitle's Branch* techniques
 #include "SidePanelPins.h" // SIDE_PANEL.md §2j: IsSidePanelPinStamp — which side panel pin stamps sessions.json writes and reads back
@@ -3682,7 +3683,12 @@ namespace Agentmaster
 
     void SaveSessions(const std::vector<SessionInfo>& sessions)
     {
-        const std::wstring path = AgentmasterStateDir() + L"\\sessions.json";
+        SaveSessionsIn(AgentmasterStateDir(), sessions);
+    }
+
+    void SaveSessionsIn(const std::wstring& profileDir, const std::vector<SessionInfo>& sessions)
+    {
+        const std::wstring path = profileDir + L"\\sessions.json";
         // Agentmaster (PERSISTENCE.md §17): the save goes through the compatibility layer like every state document — the
         // members a newer build wrote are kept, and the text carries this build's writer stamp — but by hand rather than
         // through WriteStateDocument, because the dedup below must compare the text that would actually be written. One
@@ -3706,12 +3712,14 @@ namespace Agentmaster
         // updated only after a SUCCESSFUL write, so a failed save ([persist-fail]) is retried next notify
         // rather than silently latched off. Thread-safe: SaveSessions fires from several engine threads.
         // (The compared text includes the kept residue and the stamp, both stable while nobody else writes
-        // the file, so an unchanged fleet still compares equal.)
+        // the file, so an unchanged fleet still compares equal.) The dedup also compares the PATH: a save
+        // into another profile folder (the harness's scratch profiles) is never skipped for matching text.
         static std::mutex s_lastMtx;
         static std::wstring s_last;
+        static std::wstring s_lastPath;
         {
             std::lock_guard lk{ s_lastMtx };
-            if (content == s_last)
+            if (path == s_lastPath && content == s_last)
             {
                 return; // nothing PERSISTED changed since the last save -> no forced disk write
             }
@@ -3721,11 +3729,14 @@ namespace Agentmaster
             NoteStateDocumentWritten(path, *prepared);
             std::lock_guard lk{ s_lastMtx };
             s_last = content;
+            s_lastPath = path;
         }
     }
     std::vector<SessionInfo> LoadSessions()
     {
-        return DeserializeSessions(ReadAllUtf8(AgentmasterStateDir() + L"\\sessions.json"));
+        // SESSIONS_STORE.md: the store when the profile has one (read-only: another process reads while the app writes),
+        // else sessions.json as before.
+        return LoadFleetReadOnlyIn(AgentmasterStateDir());
     }
 
     FleetLoad LoadSessionsForStartup()
@@ -3734,6 +3745,12 @@ namespace Agentmaster
     }
 
     FleetLoad LoadSessionsForStartupIn(const std::wstring& profileDir)
+    {
+        // SESSIONS_STORE.md: the fleet store's startup open (the migration of sessions.json included).
+        return OpenFleetForStartupIn(profileDir);
+    }
+
+    FleetLoad ReadSessionsJsonForStartupIn(const std::wstring& profileDir)
     {
         FleetLoad out;
         const std::wstring path = profileDir + L"\\sessions.json";
@@ -3835,6 +3852,12 @@ namespace Agentmaster
             };
             const std::wstring sessionsPath = profile + L"\\sessions.json";
             const bool sessionsKept = copyOne(sessionsPath, dir + L"\\sessions.json", L"sessions.json");
+            // SESSIONS_STORE.md: the fleet store and its WAL, copied as a PAIR (the WAL holds commits the file does not have
+            // yet). The store could not be used when this runs, so no connection holds it and the copy is consistent.
+            for (const wchar_t* leaf : { L"sessions.db", L"sessions.db-wal" })
+            {
+                copyOne(profile + L"\\" + leaf, dir + L"\\" + leaf, leaf);
+            }
             for (const wchar_t* leaf : { L"open-windows.json", L"settings.json", L"layout.json" })
             {
                 copyOne(profile + L"\\" + leaf, dir + L"\\" + leaf, leaf);
@@ -3860,11 +3883,12 @@ namespace Agentmaster
             // The note a user (or support) finds in the folder. Written directly, not through WriteAllUtf8: it is not a
             // JSON state file, and it is created once.
             const std::wstring readme =
-                L"Agentmaster could not use its list of saved sessions (sessions.json) when it started, at " + stamp + L":\r\n" +
-                std::wstring{ reason } + L".\r\n\r\n" +
+                L"Agentmaster could not use its list of saved sessions (sessions.db, or sessions.json before it) when it started, at " + stamp +
+                L":\r\n" + std::wstring{ reason } + L".\r\n\r\n" +
                 L"It started without them, so its windows came back without their Claude tabs, and its next saves replace\r\n"
                 L"these files. The files in this folder are copies of the workspace as it was BEFORE that start changed\r\n"
-                L"anything: sessions.json (the saved sessions), windows\\ (each window's tabs), open-windows.json (the windows\r\n"
+                L"anything: sessions.db + sessions.db-wal or sessions.json (the saved sessions; a sessions.db is never written\r\n"
+                L"over while it cannot be used), windows\\ (each window's tabs), open-windows.json (the windows\r\n"
                 L"that were open), settings.json and layout.json (Agentmaster's settings).\r\n\r\n"
                 L"To bring the workspace back: close Agentmaster, copy these files back into\r\n" +
                 profile + L"\r\n(replace the files there when asked), and start Agentmaster again.\r\n\r\n" +

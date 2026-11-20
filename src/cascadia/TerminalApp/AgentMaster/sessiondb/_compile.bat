@@ -33,6 +33,13 @@ if not exist "%VCPKG%\nlohmann\json.hpp" (
   echo [error] nlohmann/json is missing from %VCPKG%: run one msbuild of the solution first (vcpkg installs it^)
   exit /b 2
 )
+REM SESSIONS_STORE.md: Persistence.cpp's LoadSessions (RefreshFacts' /clear and /handover links) reads the fleet store through
+REM FleetDb.cpp, which needs SQLite from the same vcpkg tree (its header beside json.hpp, sqlite3.lib in the tree's lib folder).
+set "VCPKGLIB=%ROOT%\obj\%ARCH%\vcpkg\%ARCH%-windows-static\lib"
+if not exist "%VCPKGLIB%\sqlite3.lib" (
+  echo [error] SQLite is missing from %VCPKGLIB%: run one msbuild of the solution first (vcpkg installs it^)
+  exit /b 2
+)
 if not exist "%OUT%\obj" mkdir "%OUT%\obj"
 cl /std:c++20 /EHsc /nologo /W4 /WX /permissive- /sdl /utf-8 /MP2 /O2 /MT /Zc:__cplusplus /Zc:inline /Zc:throwingNew ^
    /wd4201 /wd4312 /wd4467 /wd5105 /DUNICODE /D_UNICODE /D AGENTMASTER_DEV /I"%DDB%" /I"%VCPKG%" ^
@@ -42,8 +49,8 @@ cl /std:c++20 /EHsc /nologo /W4 /WX /permissive- /sdl /utf-8 /MP2 /O2 /MT /Zc:__
    "%HERE%SessionDbSearch.cpp" "%HERE%SessionDbTools.cpp" "%HERE%SessionDbServer.cpp" "%HERE%SessionDbMcp.cpp" "%AM%\SessionDbClient.cpp" ^
    "%AM%\ClaudeSpawn.cpp" "%AM%\Persistence.cpp" "%AM%\ProcessInspect.cpp" "%AM%\ProcessInspect.Transcript.cpp" "%AM%\ProcessInspect.Content.cpp" ^
    "%AM%\ProcessInspect.Window.cpp" "%AM%\ProcessInspect.Summary.cpp" "%AM%\TranscriptStore.cpp" "%AM%\SessionStore.cpp" "%AM%\SessionSearch.cpp" ^
-   "%AM%\ClaudeInvisibleChars.cpp" ^
-   "%DDB%\duckdb.lib" ole32.lib user32.lib oleaut32.lib icu.lib shell32.lib advapi32.lib
+   "%AM%\ClaudeInvisibleChars.cpp" "%AM%\FleetDb.cpp" ^
+   "%DDB%\duckdb.lib" "%VCPKGLIB%\sqlite3.lib" ole32.lib user32.lib oleaut32.lib icu.lib shell32.lib advapi32.lib
 if errorlevel 1 (
   echo [error] compile failed
   exit /b 1

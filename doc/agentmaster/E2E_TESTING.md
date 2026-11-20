@@ -482,8 +482,8 @@ written timing-agnostic (waits, not sleeps), so the same test passes in both.
 
 Rules: **read-only** — no request changes anything (tests act through the UI); an explicit DACL (current
 user, `PIPE_REJECT_REMOTE_CLIENTS`), unlike the hook pipe's default security; never on the UI thread.
-`sessions.json` (≤ ~1 s behind, `Engine.cpp` `SessionAutosaver`) remains the fallback oracle for builds
-without the bridge.
+The fleet store `sessions.db` (≤ ~250 ms behind, the fleet writer `FleetWriter.cpp`; read through
+`amdriver/sessions_store.py`, read-only, which never blocks a save) remains the fallback oracle for builds without the bridge.
 
 ### 6.3 UI Automation: names, ids, accessible state
 

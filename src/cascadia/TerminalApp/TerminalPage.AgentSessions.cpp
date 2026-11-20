@@ -47,7 +47,8 @@
 #include "AgentMaster/Engine.h" // SharedEngine (AM_SESSION stamp; restoreMutex barrier)
 #include "AgentMaster/HooksBridge.h" // PipeName for the spawn spec
 #include "AgentMaster/LaunchPresetsOs.h" // PRESETS (HARNESSES.md): launch-target snapshot (launchArgs) + compile + the key read
-#include "AgentMaster/Persistence.h" // DeriveSessionTitle / Save-LoadSessions / LoadAppSettings / dir colors
+#include "AgentMaster/FleetDb.h" // PersistFleetNow / FleetBulkScope — the fleet store's critical commits and the restore's one batch (SESSIONS_STORE.md §4.4)
+#include "AgentMaster/Persistence.h" // DeriveSessionTitle / LoadSessionsForStartup / LoadAppSettings / dir colors
 #include "AgentMaster/ProcessInspect.h" // ProcessAlive / ProcessStartUnixMs / ResolveSessionId
 #include "AgentMaster/ProcessObserver.h" // External() — an Adopt takes the external's CURRENT (presence-resolved) conversation id
 #include "AgentMaster/SessionRegistry.h"
@@ -1541,8 +1542,13 @@ namespace winrt::TerminalApp::implementation
                 eng.startupFleetLoadUsable.store(load.usable);
                 auto saved = std::move(load.sessions);
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[restore] " + std::to_wstring(saved.size()) + L" session(s) loaded as archived" +
-                                                                (load.usable ? std::wstring{} : (L" (sessions.json could not be used: " + load.problem + L")")) + L"\n");
+                                                                (load.usable ? std::wstring{} : (L" (the saved fleet could not be used: " + load.problem + L")")) + L"\n");
 
+                // SESSIONS_STORE.md §4.4: every Upsert below marks its record for the fleet store, and the scope holds the
+                // commits until the loop ends — then the writer commits the whole restored fleet as ONE batch (the changed
+                // rows only), where each restored session used to rewrite the whole of sessions.json (2,186 rewrites,
+                // ~14 GB and 4.6 minutes on production's fleet, with a partial fleet on disk the whole time).
+                ::Agentmaster::FleetBulkScope restoreBatch;
                 for (auto& s : saved)
                 {
                     if (s.id.empty() || s.workingDir.empty())
@@ -1866,7 +1872,7 @@ namespace winrt::TerminalApp::implementation
             _sessionRegistry->SetInjector(id, nullptr);
             _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
             _sessionRegistry->SetEnterPresser(id, nullptr); // DELIVERY_PLAN.md R8 — same lifetime as the submitter
-            ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+            ::Agentmaster::PersistFleetNow(); // SESSIONS_STORE.md §4.4: critical — the changed records committed now, never the whole fleet
             if (leftWaiting)
             {
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[archive] " + id + L" in place, no tab (waiting for you -> idle)\n");
@@ -2050,7 +2056,7 @@ namespace winrt::TerminalApp::implementation
             _sessionRegistry->SetInjector(id, nullptr);
             _sessionRegistry->SetPromptSubmitter(id, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
             _sessionRegistry->SetEnterPresser(id, nullptr); // DELIVERY_PLAN.md R8 — same lifetime as the submitter
-            ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+            ::Agentmaster::PersistFleetNow(); // SESSIONS_STORE.md §4.4: critical — the changed records committed now, never the whole fleet
             if (leftWaiting)
             {
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[archive] " + id + L" in place, no tab (folder close; waiting for you -> idle)\n");
@@ -2093,7 +2099,7 @@ namespace winrt::TerminalApp::implementation
         if (_sessionRegistry)
         {
             _sessionRegistry->Remove(sessionId); // erases the record + its injector (releases the connection) + notifies
-            ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+            ::Agentmaster::PersistFleetNow(); // SESSIONS_STORE.md §4.4: critical — the changed records committed now, never the whole fleet
         }
         _claudeTabs.erase(sessionId);
         _claudeOverlays.erase(sessionId); // drop the per-tab overlay (detaches its registry observer)
@@ -2271,7 +2277,7 @@ namespace winrt::TerminalApp::implementation
             _sessionRegistry->SetInjector(sessionId, nullptr);
             _sessionRegistry->SetPromptSubmitter(sessionId, nullptr); // PENDING_INPUT.md §9 — same lifetime as the injector
             _sessionRegistry->SetEnterPresser(sessionId, nullptr); // DELIVERY_PLAN.md R8 — same lifetime as the submitter
-            ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+            ::Agentmaster::PersistFleetNow(); // SESSIONS_STORE.md §4.4: critical — the changed records committed now, never the whole fleet
         }
         _claudeTabs.erase(sessionId);
         _claudeOverlays.erase(sessionId); // drop the per-tab overlay (detaches its registry observer)
@@ -2337,7 +2343,7 @@ namespace winrt::TerminalApp::implementation
         }
         _claudeTabs.clear();
         _claudeOverlays.clear(); // releases the overlays' com_ptrs (detaches their registry observers)
-        ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+        ::Agentmaster::PersistFleetNow(); // SESSIONS_STORE.md §4.4: critical — the changed records committed now, never the whole fleet
     }
 
     // Agentmaster (FAVORITES.md §4a): would SELECTING `tab` start a process that isn't running yet?

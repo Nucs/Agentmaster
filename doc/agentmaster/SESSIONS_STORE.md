@@ -1,6 +1,7 @@
-# The session store moves from `sessions.json` to SQLite (designed 2026-11-20; NOT IMPLEMENTED)
+# The session store moves from `sessions.json` to SQLite (designed and implemented 2026-11-20)
 
-**What this is.** The plan that replaces `<profile>\sessions.json` with a SQLite database, `<profile>\sessions.db`.
+**What this is.** The plan that replaces `<profile>\sessions.json` with a SQLite database, `<profile>\sessions.db`, and
+(§8) what was built from it: `FleetDb.{h,cpp}` and `FleetWriter.cpp`, the places it differs from the plan, and its tests.
 Today every saved change rewrites the whole JSON file. In the new store a change writes about one kilobyte to a
 write-ahead log. The owner asked for a plan that (a) uses memory better and never rewrites the whole file, (b) has the
 highest performance and safety, and (c) survives a sudden shutdown.
@@ -405,3 +406,149 @@ snapshot (§17.5) has copied every state file. At every step exactly one complet
   - the session store's thousands of small files.
 
   Each is a candidate for its own table in the same database once this works.
+
+## 8. As built (2026-11-20)
+
+The plan above is unchanged; this section is what the code does, and where it differs.
+
+### 8.1 The files
+
+| File | What it holds |
+|---|---|
+| `AgentMaster/FleetDb.{h,cpp}` | The database (`FleetDb`: open, the schema, the load, the row writes, the import, the checks, the lock), the startup open with the migration (`OpenFleetForStartupIn`), the other processes' read (`LoadFleetReadOnlyIn`). The plan called it `SessionStoreDb`; `SessionStore` was taken (the per-session key-value store). |
+| `AgentMaster/FleetWriter.cpp` | The writer thread and the critical commits (`StartFleetWriter`, `NoteFleetRecordChanged`, `PersistFleetNow`, `PersistFleetNowDurable`, `FlushFleetAtAppClose`, `FleetBulkScope`). Separate because the CLI and the session database service link `FleetDb.cpp` without the registry's writer. |
+| `SessionRegistry` | `SetRecordChangeSink` + `_markChanged`: every `_notify` marks its record, and so do the two quiet setters (`SetPendingInput`'s text-only edit, `SetPendingPasteRefs`). `Ids()` gives the insertion order. |
+| `Persistence.{h,cpp}` | `LoadSessionsForStartupIn` = `OpenFleetForStartupIn`; the old body is `ReadSessionsJsonForStartupIn`; `LoadSessions` = `LoadFleetReadOnlyIn`; `SaveSessionsIn` writes a given profile's `sessions.json` (the Json mode). |
+| `Engine.cpp` | `SessionAutosaver` is gone; `StartFleetWriter(registry)` at engine init; a `!live` notify calls `PersistFleetNow`; the last window's close calls `FlushFleetAtAppClose`. |
+
+### 8.2 The schema as built
+
+```sql
+CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);          -- format, created, writer, migration
+CREATE TABLE sessions(id TEXT NOT NULL UNIQUE, ord INTEGER NOT NULL, has_queue INTEGER NOT NULL, doc TEXT NOT NULL);
+CREATE TABLE prompt_state(session_id TEXT NOT NULL, prompt_key TEXT NOT NULL, ord INTEGER NOT NULL, state TEXT NOT NULL);
+CREATE UNIQUE INDEX prompt_state_key ON prompt_state(session_id, prompt_key);
+CREATE TABLE prompt_text(session_id TEXT NOT NULL, prompt_key TEXT NOT NULL, text TEXT);
+CREATE UNIQUE INDEX prompt_text_key ON prompt_text(session_id, prompt_key);
+```
+
+- **`sessions.ord`** keeps the registry's insertion order (the next start restores in it); a new session takes the next
+  number, nothing renumbers. **`has_queue`** says whether the record had a `"queue"` array (a record without one comes back
+  without one).
+- **`prompt_key`** is the prompt's id, or — for an empty id or one repeated in the same queue — `<id>` U+001F `#<position>`,
+  so every prompt keeps its rows. A session row with an empty or repeated session id gets the same kind of key at import.
+- **`prompt_text.text` may be NULL:** a prompt with no `"text"` member comes back with none.
+- **No `prompt_state_order` index:** the load sorts each queue in memory, and an index would cost another page for every
+  moved prompt.
+- **The prompts' `ord` is spaced by 65,536** (`kFleetOrdGap`, `FleetPlanOrds`). The longest run of stored numbers that still
+  rises in the new order keeps its numbers; a new or moved prompt takes a number between its neighbours'. So the history
+  cap's trim (the oldest of 200 removed at every new prompt) rewrites no other prompt's row — with plain positions it would
+  have rewritten all 199. Only two neighbours left without room renumber the queue.
+- **Text is bound and read as UTF-8 that Windows converts**, never through SQLite's UTF-16 calls: SQLite's own UTF-16 →
+  UTF-8 translation joins a lone high surrogate (a title cut inside an emoji) with whatever unit follows — in a doc often the
+  closing quote, so the row would no longer parse. Windows writes U+FFFD for it, which is what `sessions.json` always stored.
+  A harness case pins it.
+
+### 8.3 Where the code differs from the plan
+
+- **A store that cannot be used (§4.6) is still never written, but the run is not lost:** the run saves `sessions.json`
+  beside it (`FleetMode::Json`, the legacy writer with its §15 guards) and loads the `sessions.json` such a run left, and
+  the next start that can use the store imports what that file holds and the store does not (§4.8's rule; the file then
+  goes aside as `sessions.json.after-sqlite-<stamp>`). The plan had the run save nothing, which would have lost every
+  session made in it.
+- **A row the load cannot read stays in the database**, as planned; a NEW record with its id moves it (and any prompt rows
+  whose session row is gone) under `<id>` U+001F `kept-<ms>-<n>` in the same transaction, so old rows never mix into the new
+  record. `[fleet] a new record found rows under its id that this run had not loaded; they are kept as "…"`.
+- **A fresh profile's empty store is built aside** (`sessions.db.migrating`, checkpointed, closed, renamed), like the
+  migration: a crash while it is created leaves only a temp file the next start deletes, never a `sessions.db` without its
+  schema (which every later start would read as unusable).
+- **Rule #4 has six seams, not three:** the scheduler's advance (`PersistFleetNowDurable`, FULL on its worker thread), the
+  Prompt Queue's Send now and the `/handover` paste pump (`PersistFleetNow` on the UI thread: NORMAL, then the writer's
+  fsync), Telegram's `/sendnow`, `/steer` and a ticket's ⚡ Steer (the service's thread, FULL). A commit that fails types
+  nothing: the prompt goes back to Pending (`[send-deferred] … the Sent mark could not be saved`). The typed-prompt capture
+  (`SessionRegistry.cpp`) needs none: it records a prompt the user already sent, and nothing is typed after it.
+- **The UI commit's fsync is tracked:** every NORMAL commit that wrote rows takes a sequence number, and a FULL commit or an
+  fsync of the WAL that started after it marks it on the disk. `PersistFleetNowDurable` fsyncs the WAL itself when it finds
+  its record already committed by a UI thread an instant earlier.
+- **Before the store is open** (`FleetMode::None`: only before the first window's restore, when no session is live, and in
+  the harness) the critical commit answers true and the marks wait for the open. Refusing would stall every send of a run
+  whose open never happened.
+- **The restore runs inside one `FleetBulkScope`:** its Upserts mark their records and nothing commits until the loop ends,
+  then the writer commits the restored fleet as one batch. On production 0.8.0.17 each restored session had made a
+  synchronous whole-file save (the autosaver's `!live` save): 2,186 rewrites of a growing file, ~14 GB and 277 s per start.
+- **The version-change snapshot copies `sessions.db` and `sessions.db-wal` as files** (`StateBackups.h` `kStateFiles`), not
+  through SQLite's backup API: the snapshot runs before this start opens the store, so no writer is active, and
+  `StateBackups.h` is shared with the EXE, which does not link SQLite. `PreserveWorkspaceForRecovery` copies the pair too.
+- **Logs:** `[fleet]` (the open, its mode, a minute's totals: commits, records, rows written and deleted, failures, the WAL's
+  size; a WAL over 64 MB once), `[fleet-migrate]` (the migration, an interrupted last step finished, a file written after the
+  move imported), `[fleet-fail]` (a failed commit, at most once per 30 s; its records stay marked and are retried after 2 s).
+- **The e2e evidence copies the store through SQLite's backup** (`evidence.py`), the one place a live store is copied.
+- **The startup load was made cheaper than planned** (the measurements are §8.6):
+  - **Memory-mapped reads** (`PRAGMA mmap_size`, every connection of the store): SQLite reads the 512-byte pages from the
+    mapping instead of a `ReadFile` each. The read went from ~300 to ~55-90 ms, and the quick check from ~260 to ~30-50 ms.
+    The trade-off: a disk that cannot page the file in raises an in-page error, not `SQLITE_IOERR`.
+  - **The quick check runs beside the load**, on a read-only connection of its own on another thread
+    (`FleetStartQuickCheck`): a start pays the longer of the two, not their sum. A store that fails it is not used (the
+    load is thrown away). The import of a `sessions.json` found beside the store writes, so it waits for the check.
+  - **The residue's fast path:** a stored record that equals this build's round trip of it (compared as values,
+    `FleetSameValue`) has no residue, so the lookups are not recorded and nothing is extracted. On production's migrated
+    fleet every session took the fast path (its `sessions.json` came from this build's own serializer).
+  - **Each prompt's text is read once:** one join (`prompt_state LEFT JOIN prompt_text`) instead of a map of every text,
+    moved (not copied) into the record, and fingerprinted word-wise for the cache.
+
+### 8.4 The readers
+
+- **The CLI and the session database service** link `FleetDb.cpp`: `LoadSessions` reads the store read-only (WAL: a
+  consistent snapshot while the app writes); a store that cannot be read falls back to `sessions.json`.
+- **The e2e driver:** `e2e/amdriver/sessions_store.py` (`load_fleet`, `read_store`) gives the dicts `sessions.json` gave;
+  `Profile.sessions()` reads through it. ROB-K1 (a reader holding `sessions.json` failed every save) is fixed by the store,
+  and its known-defect test became `test_a_reader_holding_the_fleet_store_never_loses_a_save`.
+- **The am-agentmaster-cli skill:** `am_inspect.py`'s `read_fleet_store`, the same join.
+
+### 8.5 The tests (`tests/tests_fleetdb.cpp`, in the m5 harness)
+
+- **`TestFleetDbRows`:** the row round trip (newlines, quotes, Hebrew, an emoji, an embedded NUL, lone surrogates, a
+  1.5-million-character prompt, duplicate and empty prompt ids); the diff with exact row counts (a status = 1 row, a title =
+  1, the oldest prompt trimmed = 2 deletes and nothing rewritten, an appended prompt = 2, a Move Up = 1, a capped queue's
+  send = 4); the order planner (pure, 400 fuzzed edits against a brute-force longest rising run); removals; the residue per
+  row (a newer build's session and prompt members kept through this build's write); the writer lock; the format guard; an
+  unreadable row and orphan prompt rows kept aside; a reader beside the writer (the WAL) and after it.
+- **`TestFleetStoreStartup`:** a fresh profile; the migration (the loaded fleet equals what the JSON reader makes of the
+  file, the backup byte for byte, the record's SHA-256 and counts, the pruner never removing the backup, the CLI's read, a
+  second start); a planted mismatch in a session doc and in a prompt text, each stopping the migration (the verification's
+  negative controls); the interrupted last step; a `sessions.json` written after the move; an unusable `sessions.json`; an
+  unusable store (never written, the run's session saved beside it, imported at the next good start); the format guard.
+- **`TestFleetWriter`:** the marks of every registry mutator that matters (Upsert, Update, both `SetPendingInput` paths,
+  `SetPendingPasteRefs`, a hook, a rollback, Remove); the commits; the UI and worker critical commits and their answers; the
+  bulk scope; a batch in insertion order; the app's close.
+- **`TestFleetKills`:** REAL kills of the harness exe run as a child (`--fleet-child`): 30 children killed mid-commit (every
+  acknowledged commit survives, at most the one in flight beyond it, and every commit is whole); a migration killed at each
+  of its seven step boundaries and at ten random moments (`sessions.json` is gone only once `sessions.db` holds the whole
+  fleet, and the next start always ends with the whole fleet in the store).
+- **Negative controls** (run 2026-11-20 on a scratch copy of the engine, never the repository; each undoes one guarantee and
+  rebuilds a runner of these tests): every one was caught by its check — the quiet setter's mark, the verification, the
+  delete-last order (`sessions.json` deleted before the store held it: the step kills failed), the format guard, the
+  residue, the UTF-8 binding (SQLite's UTF-16 binding broke the lone-surrogate row), the bulk scope, the spaced order
+  numbers, and a fresh store written over an unusable one. **Not observable without a power cut:** whether a commit
+  fsynced (FULL vs NORMAL, and the UI commit's fsync before a durable answer) — a kill never loses what reached the OS cache,
+  so those guarantees rest on SQLite's documented semantics and a code read, not on a test.
+- **A real fleet:** a copy of production's `sessions.json` (13.6 MB, 2,186 sessions, 9,450 prompts) migrated by the harness
+  exe — verified, `sessions.json` removed, its backup byte for byte — and read back by the e2e driver's and the skill's
+  readers: both equal the source, session by session.
+
+### 8.6 Measurements as built
+
+An optimized (`/O2`) build of the store on a copy of production's fleet (2,186 sessions, 9,450 prompts, 13.6 MB of JSON),
+2026-11-20, on this PC's C: with its usual background load:
+
+| | `sessions.json` (before) | `sessions.db` |
+|---|---|---|
+| The startup read / load | 153-242 ms | 172-293 ms (steady ~275 ms: the read ~55-90, the records ~150, the quick check ~30 beside them) |
+| The restore that follows (2,186 Upserts) | 277 s on production (a synchronous whole-file save per restored session) | one batch commit at the loop's end, on the writer thread |
+| The migration | – | ~2.1 s, once (backup, import, verification, rename, first load) |
+| A routine durable commit (one session, 78 prompts: a status + a stamp) | 323-589 ms (the whole file) | ~2.1-2.9 ms: 2 rows, ~1 KB of WAL |
+| An unchanged record (the rolling sweep's cost) | – | ~0.9 ms of serialization, no SQL |
+| The file | 13.6 MB | 19.3 MB |
+
+- The load itself stays ~0.1 s above the old read (the plan's target was "≤ today's"); the start as a whole is minutes
+  faster, because the restore no longer rewrites the fleet once per session.

@@ -27,7 +27,8 @@
 #include "AgentMaster/SessionRegistry.h" // _sessionRegistry->Get()
 #include "AgentMaster/ClaudeSpawn.h" // ClaudeConversationExists / AppendStateLog
 #include "AgentMaster/Engine.h" // EnsureClaudeAvailable (native-exe-only launch gate)
-#include "AgentMaster/Persistence.h" // DeriveSessionTitle / SaveSessions
+#include "AgentMaster/FleetDb.h" // PersistFleetNow — a pane close's archive is a critical commit (SESSIONS_STORE.md §4.4)
+#include "AgentMaster/Persistence.h" // DeriveSessionTitle
 #include "AgentMaster/SessionStore.h" // SetSessionFavorite (FAVORITES.md: "Favorite & Close All" batch branch)
 #include "AgentTabOverlay.h" // _claudeOverlays.erase needs the complete com_ptr<AgentTabOverlay> type
 #include "AgentManagerContent.h" // the Manager content type (its SetLensVisible call moved with the funnel's other Agentmaster steps into _ApplyAgentTabSelection, TerminalPage.AgentEngine.cpp)
@@ -1286,7 +1287,7 @@ namespace winrt::TerminalApp::implementation
             }
             if (!closing.empty())
             {
-                ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+                ::Agentmaster::PersistFleetNow(); // SESSIONS_STORE.md §4.4: critical — the archived records committed now
             }
         }
 

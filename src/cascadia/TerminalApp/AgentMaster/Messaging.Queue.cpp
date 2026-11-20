@@ -23,6 +23,7 @@
 #include <unordered_set>
 
 #include "ClaudeSpawn.h" // LogNav, ShortId, LogSwallowedException, NewSessionId
+#include "FleetDb.h" // PersistFleetNowDurable — a ticket's ⚡ Steer: the Sent mark is on the disk before the words are typed (Rule #4)
 #include "Scheduler.h" // Scheduler::RequestAdvance / GlobalPaused, kAnswersQuestionOk
 #include "SessionRegistry.h"
 
@@ -942,7 +943,10 @@ namespace Agentmaster::Msg
         {
             _react(id, kSteerSendingReaction);
         }
-        if (_registry->SubmitPrompt({ sessionId, promptId, text, false }))
+        // Rule #4 (SESSIONS_STORE.md §4.4): the Sent mark made above is on the disk before the words are typed (this service's
+        // own thread: the FULL commit); a commit that failed types nothing and takes the declined path below.
+        const bool saved = PersistFleetNowDurable();
+        if (saved && _registry->SubmitPrompt({ sessionId, promptId, text, false }))
         {
             // Accepted: the hosting window types it (its draft swap keeps the user's draft at the PC). Its echo turns the reaction
             // to 👨‍💻 and ends the ticket; a later decline puts it back first in the queue, and _sweepSteers says so.
@@ -963,9 +967,10 @@ namespace Agentmaster::Msg
         {
             _react(id, kSteerQueuedReaction);
         }
-        nav(L"queued:box-held");
+        nav(saved ? L"queued:box-held" : L"queued:not-saved");
         _syncTicketsOf(sessionId);
-        return L"Not sent now: another delivery is typing into the session's input box. It waits first in the queue.";
+        return saved ? std::wstring{ L"Not sent now: another delivery is typing into the session's input box. It waits first in the queue." } :
+                       std::wstring{ L"Not sent now: Agentmaster could not save the send to its session store. It waits first in the queue." };
     }
 
     std::wstring MessagingService::_removeQueuedPrompt(const std::wstring& sessionId, const std::wstring& promptId, const wchar_t* how)

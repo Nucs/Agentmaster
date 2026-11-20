@@ -11,7 +11,8 @@
         "jsoncpp",
         "cli11",
         "cmark",
-        "nlohmann-json"
+        "nlohmann-json",
+        "sqlite3"
       ]
     }
   },
@@ -40,6 +41,10 @@
       "name": "nlohmann-json",
       "version": "3.12.0",
       "port-version": 2
+    },
+    {
+      "name": "sqlite3",
+      "version": "3.51.2"
     }
   ],
   "builtin-baseline": "15e5f3820f0370f1ba7150853762cec0688cd396",

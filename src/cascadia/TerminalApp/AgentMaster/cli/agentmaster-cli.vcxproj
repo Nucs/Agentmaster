@@ -86,6 +86,13 @@
     <ClCompile Include="..\SessionStore.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <!-- SESSIONS_STORE.md: Persistence.cpp's LoadSessions reads the fleet store (sessions.db, read-only, a consistent
+         snapshot while the app writes) through FleetDb.cpp - the same kind of LINK dependency. SQLite comes from vcpkg
+         (the manifest's "terminal" feature): common.build.pre.props puts its include folder on this project's path and
+         vcpkg's targets auto-link sqlite3.lib, as they do cmark for TerminalApp.dll. -->
+    <ClCompile Include="..\FleetDb.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
   </ItemGroup>
 
   <Import Project="$(OpenConsoleDir)src\common.build.post.props" />

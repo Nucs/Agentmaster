@@ -195,6 +195,13 @@ the latest state: a save is never torn, and one that cannot complete at once is 
 ### ROB-K1 · A reader holding sessions.json makes the save fail, and nothing saves again until the next change
 > **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0 (`e2e/suites/test_robustness.py`
 > `test_known_defect_a_reader_holding_sessions_json_loses_the_save`)
+>
+> **Fixed by the fleet store (2026-11-20, SESSIONS_STORE.md; not in a release yet).** The sessions are no longer saved by
+> replacing a file: they are committed to `sessions.db`'s WAL, which no reader blocks — a plain `open()` of the database
+> and a SQLite read transaction over it included — and a commit that fails keeps its records marked and is retried. ROB-11
+> now runs as `test_a_reader_holding_the_fleet_store_never_loses_a_save`: both readers hold the store while a turn ends, and
+> the ended turn must be on disk within seconds, with no `[fleet-fail]` / `[persist-fail]` line. The other JSON files
+> written through `WriteAllUtf8` (window records, settings, …) keep the behavior below.
 
 While another process holds `sessions.json` open (with or without FILE_SHARE_DELETE), every save fails —
 `[persist-fail] …\sessions.json (atomic replace failed — state NOT saved)` — and once the reader lets go nothing

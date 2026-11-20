@@ -14,7 +14,10 @@ REM the msbuild app build so wide literals compile to the same constants; /MP pa
 REM Lockstep catch-up (DELIVERY.md 15): CommandWatch.cpp (SessionScanner.cpp calls into it) and
 REM ClaudeInvisibleChars.cpp + icu.lib (SessionRegistry/Scheduler compares call into it) - both LINK deps.
 REM TranscriptWatcher.cpp (HOOKS.md "Transcript watcher"): SessionScanner::Start constructs it - a LINK dep too.
-cl /std:c++20 /EHsc /nologo /W3 /utf-8 /MP /DUNICODE /D_UNICODE /Fe:uia_probe.exe uia_probe.cpp ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\SessionScanner.cpp ..\TranscriptWatcher.cpp ..\CommandWatch.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ..\SessionStore.cpp ..\Scheduler.cpp ..\Engine.cpp ..\SessionDbRefresher.cpp ..\SessionDbClient.cpp ..\ProcessObserver.cpp ..\ClaudeInvisibleChars.cpp ole32.lib user32.lib oleaut32.lib icu.lib
+REM FleetDb.cpp + FleetWriter.cpp (SESSIONS_STORE.md, the fleet store): Persistence and Scheduler link them; SQLite comes from
+REM the vcpkg tree a full msbuild installs (its include folder and sqlite3.lib).
+set "AM_VCPKG=K:\source\Agentmaster\obj\x64\vcpkg\x64-windows-static"
+cl /std:c++20 /EHsc /nologo /W3 /utf-8 /MP /DUNICODE /D_UNICODE /I"%AM_VCPKG%\include" /Fe:uia_probe.exe uia_probe.cpp ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\SessionScanner.cpp ..\TranscriptWatcher.cpp ..\CommandWatch.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ..\SessionStore.cpp ..\Scheduler.cpp ..\Engine.cpp ..\SessionDbRefresher.cpp ..\SessionDbClient.cpp ..\ProcessObserver.cpp ..\ClaudeInvisibleChars.cpp ..\FleetDb.cpp ..\FleetWriter.cpp "%AM_VCPKG%\lib\sqlite3.lib" ole32.lib user32.lib oleaut32.lib icu.lib
 if errorlevel 1 (
   echo [error] compile failed
   exit /b 1

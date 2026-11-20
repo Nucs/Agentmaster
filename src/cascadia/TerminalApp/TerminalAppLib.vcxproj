@@ -194,6 +194,7 @@
     <ClInclude Include="AgentMaster\Scheduler.h" />
     <ClInclude Include="AgentMaster\Json.h" />
     <ClInclude Include="AgentMaster\Persistence.h" />
+    <ClInclude Include="AgentMaster\FleetDb.h" />
     <ClInclude Include="AgentMaster\Engine.h" />
     <ClInclude Include="AgentMaster\UiLatency.h" />
     <ClInclude Include="AgentMaster\SessionScanner.h" />
@@ -569,6 +570,16 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\Persistence.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <!-- Agentmaster (SESSIONS_STORE.md): the fleet store - every saved session in <profile>\sessions.db (SQLite, WAL,
+         512-byte pages) instead of whole-file rewrites of sessions.json - and its writer thread. SQLite comes from vcpkg
+         (the manifest's "terminal" feature, a static library like cmark), on this project's include path and auto-linked
+         into TerminalApp.dll. -->
+    <ClCompile Include="AgentMaster\FleetDb.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\FleetWriter.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\Engine.cpp">

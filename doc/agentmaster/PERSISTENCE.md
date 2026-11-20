@@ -10,6 +10,10 @@
 > This document keeps the full design narrative (§1–§12 are the agreed-and-built plan; §13
 > is the as-built delivery record). The original **M9–M14** milestone ladder (§11) is
 > **superseded** by §13's Increments 1–5, all of which shipped and were live-verified.
+>
+> **The fleet's file:** since 2026-11-20 the sessions live in the fleet store `<profile>\sessions.db` (SQLite), not in
+> `sessions.json` (§19, [`SESSIONS_STORE.md`](SESSIONS_STORE.md)). The sections below were written for the JSON file;
+> where they say "sessions.json", read "the fleet's saved records" — the members of a session's record are the same.
 
 ## 1. Why
 
@@ -1265,3 +1269,29 @@ Live checks owed after the build:
 - the next start silent, with its `[reopen]` line;
 - the cog's STARTUP choice read and saved;
 - the e2e driver's and `Launch-AgentmasterDev.ps1`'s clicks on the task dialog (TAB-11).
+
+## 19. The fleet store replaces sessions.json (2026-11-20)
+
+The design, the measurements and what was built are [`SESSIONS_STORE.md`](SESSIONS_STORE.md) (§8: as built). What it
+changes in the rules of this document:
+
+- **The session layer's file** is `<profile>\sessions.db` (SQLite, WAL, 512-byte pages; `FleetDb.{h,cpp}`,
+  `FleetWriter.cpp`). A change writes only the rows it touched; the registry marks the record and the writer thread commits
+  it within 250 ms; a close, an archive, a bind, a teardown and every prompt marked Sent before it is typed are committed at
+  once (Rule #4: before the typing). The restore's Upserts commit as one batch.
+- **The first start of a build with the store migrates `sessions.json`** in one verified transaction and deletes it last;
+  the file is kept byte for byte in `backups\<stamp> sessions.json to SQLite\` for good (SESSIONS_STORE.md §4.9). Until a
+  start migrates it — `sessions.json` unusable, or the migration failed — the run keeps reading and saving `sessions.json`
+  exactly as before (`FleetMode::Json`).
+- **§15 for the store:** a `sessions.db` that cannot be used (it does not open, fails its quick check or its load) is never
+  written. The start copies it with its WAL into `recovery\<stamp>\` (`PreserveWorkspaceForRecovery`), the windows hold
+  their refs (§16), and the run saves `sessions.json` BESIDE the store; the next start that can use the store imports what
+  that file holds and the store does not, and keeps the file aside (`sessions.json.after-sqlite-<stamp>`). A row the load
+  cannot read stays in the database; a new record with its id moves it under a key of its own.
+- **§17 for the store:** the residue is kept per row (a newer build's members in a session's or a prompt's row survive this
+  build's writes); `meta.format` is the format guard (a newer format opens read-only and writes nothing); the version-change
+  snapshot copies `sessions.db` with `sessions.db-wal`. The shadows and the older-writer repair do not apply: no older build
+  writes the store — an older build finds no `sessions.json`, holds its windows' refs, and any `sessions.json` it writes is
+  imported at the next start of a newer one.
+- **Other processes** (the CLI, the session database service, the e2e driver, the am-agentmaster-cli skill) read the store
+  read-only, a consistent snapshot while the app writes (SESSIONS_STORE.md §8.4).

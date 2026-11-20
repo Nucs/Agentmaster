@@ -4,8 +4,8 @@ Collected the moment a test fails, BEFORE the app is ended, into the test's own 
     screen.png         the whole desktop
     uia.txt            every window of the app (main windows and popups), as `python -m amdriver dump` writes it
     terminal-<n>.txt   the text of each window's visible terminal
-    profile\\          hooks.log, autorunner.log, scanner.log, sessions.json, settings.json, windows\\*.json,
-                       open-windows.json, forwarder-errors.log
+    profile\\          hooks.log, autorunner.log, scanner.log, sessions.db (a consistent backup of the fleet store) or
+                       sessions.json, settings.json, windows\\*.json, open-windows.json, forwarder-errors.log
     mock.json          the mock's request log (the last 300 entries) and its expectation results
     processes.txt      the app's process tree (image, pid, command line)
 Every part is best effort: a part that fails writes its error into evidence-errors.txt and the rest go on, so
@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 import traceback
+import urllib.request
 from pathlib import Path
 from typing import Callable
 
@@ -97,6 +99,18 @@ def collect(app, out_dir: Path, mock=None, label: str = "") -> Path:
             src = app.profile.dir / name
             if src.exists():
                 shutil.copy2(src, dst / name)
+        # The fleet store (SESSIONS_STORE.md): a consistent copy through SQLite's online backup, never a raw copy of a
+        # file the app writes (the WAL holds commits the file has not taken in yet). Readable as sessions.json was:
+        # sessions_store.read_store(<copy>).
+        store = app.profile.dir / "sessions.db"
+        if store.exists():
+            source = sqlite3.connect("file:" + urllib.request.pathname2url(str(store)) + "?mode=ro", uri=True, timeout=5.0)
+            target = sqlite3.connect(str(dst / "sessions.db"))
+            try:
+                source.backup(target)
+            finally:
+                target.close()
+                source.close()
         windows = app.profile.dir / "windows"
         if windows.is_dir():
             shutil.copytree(windows, dst / "windows", dirs_exist_ok=True)

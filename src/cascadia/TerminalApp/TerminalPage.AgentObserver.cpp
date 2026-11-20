@@ -49,7 +49,8 @@
 #include "AgentMaster/PendingInput.h" // PickCurrentPromptText + the DRAFT SWAP ladder (DecideDraftClear / BuildInputKill / BuildInputYank / BuildBackspaces) — PENDING_INPUT.md §9
 #include "AgentMaster/PendingPaste.h" // FindPasteMarkers — the cheap pure pre-check before the off-thread resolve (PENDING_INPUT.md §2b)
 #include "AgentToastActivator.h" // ToastActivator::IsRegistered — is the COM activator live (wire the in-process click fallback only if not)?
-#include "AgentMaster/Persistence.h" // DeriveSessionTitle / SaveSessions (bind tail)
+#include "AgentMaster/FleetDb.h" // PersistFleetNow — the bind tail's, the liveness archive's and the draft belt's critical commits (SESSIONS_STORE.md §4.4)
+#include "AgentMaster/Persistence.h" // DeriveSessionTitle
 #include "AgentMaster/ProcessInspect.h" // ResolveClaudeTranscriptPath + AnalyzeSessionTranscript (prompt-nav)
 #include "AgentMaster/ProcessObserver.h" // roster publish + Correlation/Activity/External tables
 #include "AgentMaster/ProfileBootstrap.h" // Profiles:: profile-aware state paths (engine)
@@ -9140,7 +9141,7 @@ namespace winrt::TerminalApp::implementation
         _RefreshTabNote(id); // SESSION_NOTES.md §4b: the note glyph after the title (a re-home's carried note included)
         _UpdateTabAgentToolTip(hostTab, id, /* swapWhileOpen */ false, /* kickSummary */ false); // tab tooltip: replace any "○ … unlinked" observe tooltip with the rich managed HEADER card (the transcript analyze waits for a real hover — a restore binding many tabs must not burst parses)
         _ArmTabAgentToolTipHover(hostTab); // LAZY tooltip: from here on the card rebuilds on hover, not per tick/notify
-        ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+        ::Agentmaster::PersistFleetNow(); // SESSIONS_STORE.md §4.4: a bind / re-key is critical (both ids, one commit)
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" bound via " + origin + L"\n");
     }
 
@@ -9366,7 +9367,8 @@ namespace winrt::TerminalApp::implementation
             _pendingClearStreak.erase(id); // PENDING_INPUT.md: drop the debounce counter with the tab
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[liveness] dead -> archived " + id + L"\n");
         }
-        ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+        // SESSIONS_STORE.md §4.4: the archives above are critical — committed now (the changed records only).
+        ::Agentmaster::PersistFleetNow();
         co_return;
     }
 
@@ -9684,17 +9686,19 @@ namespace winrt::TerminalApp::implementation
             }
             if (textChanged && hasPending && !flipped)
             {
-                // A text-only edit is QUIET (no notify → no autosave), so the PERSISTED draft would
-                // otherwise freeze at its appear-flip snapshot — the staleness the [pending] log
-                // already exhibits must not leak into the on-disk memory (PENDING_INPUT.md §5). A
-                // throttled direct save keeps the durable copy within ~10s of the live box; the
-                // teardown/close archive persists once more, so a graceful exit always lands the
-                // final text (a crash loses at most the last throttle window).
+                // A text-only edit is QUIET (no notify), so the PERSISTED draft would otherwise freeze
+                // at its appear-flip snapshot — the staleness the [pending] log already exhibits must
+                // not leak into the on-disk memory (PENDING_INPUT.md §5). The registry marks such an
+                // edit for the fleet store anyway (SetPendingInput → the writer's 250-ms commit,
+                // SESSIONS_STORE.md §4.3); this throttled critical commit is the belt that keeps the
+                // durable copy within ~10s of the live box even when the writer thread is behind, and
+                // the teardown/close archive persists once more, so a graceful exit always lands the
+                // final text. It commits only the records marked dirty (never the whole fleet).
                 const int64_t nowMs = TtNowMs();
                 if (nowMs - _pendingDraftSaveMs >= 10000)
                 {
                     _pendingDraftSaveMs = nowMs;
-                    ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+                    ::Agentmaster::PersistFleetNow();
                 }
             }
             else if (flipped)
@@ -10187,6 +10191,9 @@ namespace winrt::TerminalApp::implementation
             // Agentmaster (PENDING_INPUT.md §9): the shared send seam. A successor is normally a fresh
             // tab with an empty box, so the swap is a no-op here — but a user who started typing into
             // the new tab during the pump's settle must not have their words folded into the briefing.
+            // Agentmaster (Rule #4 — SESSIONS_STORE.md §4.4): the Sent mark is committed BEFORE the paste
+            // (this UI thread's NORMAL commit: a kill loses nothing; the store's writer fsyncs it at once).
+            ::Agentmaster::PersistFleetNow();
             const bool delivered = _sessionRegistry->SubmitPrompt({ id, entry.promptId, text, false });
             if (delivered)
             {

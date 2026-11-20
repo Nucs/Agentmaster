@@ -30,7 +30,7 @@ Three facts decide the architecture:
    `WM_COPYDATA` then `TerminateProcess`es — there is **no response channel** back to the caller.
 3. **State is split.** The live `SessionRegistry` + `ProcessObserver` tables are in-process only —
    but the engine's primitives are **pure C++ and already standalone** (`ProcessInspect` reads PEBs,
-   `TranscriptStore` reads conversations, `Persistence` reads `sessions.json` / `windows/*.json`).
+   `TranscriptStore` reads conversations, `Persistence` reads the fleet store `sessions.db` (read-only; `FleetDb.cpp`) / `windows/*.json`).
    The test harness links them with no app. So most of "what's going on" is reconstructable
    **without** the app running.
 
@@ -309,7 +309,7 @@ already persists. It therefore depends on no live responder and **always works, 
 
 | The CLI reads… | from | freshness |
 |---|---|---|
-| sessions + queues + autorunner + titles | `sessions.json` (`Persistence::LoadSessions`) | on-change autosave |
+| sessions + queues + autorunner + titles | the fleet store `sessions.db`, read-only (`Persistence::LoadSessions` → `LoadFleetReadOnlyIn`; `sessions.json` on a profile the app has not migrated yet, SESSIONS_STORE.md) | ≤ 250 ms after a change; a close at once |
 | tabs: order, window↔session, selected, geometry, lens | `windows/<id>.json` (`LoadWindowRecords`) | ≤750 ms debounce |
 | conversation tail, last reply, prompts, branch | transcripts (`TranscriptStore` / `ProcessInspect`) | live to last flush |
 | live process facts, model, effort, alive, external census | PEB (`ProcessInspect`) | live |

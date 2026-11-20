@@ -30,7 +30,7 @@
 int g_failures = 0;
 int g_checks = 0;
 
-int wmain()
+int wmain(int argc, wchar_t** argv)
 {
     // Agentmaster (state isolation): unless the caller already pointed AGENTMASTER_PROFILE
     // somewhere (run-m5-tests.bat exports a WIPED %TEMP% scratch profile), default to that same
@@ -48,6 +48,15 @@ int wmain()
             const std::wstring scratch = std::wstring{ tmp } + L"agentmaster-m5-tests";
             ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", scratch.c_str());
         }
+    }
+
+    // SESSIONS_STORE.md §5: the fleet store's kill tests run THIS exe as a child ("--fleet-child <mode> ..."), which a test
+    // kills mid-commit or mid-migration. The child does its one job and never runs the suite. It comes AFTER the isolation
+    // above: started by a test it inherits the parent's AGENTMASTER_PROFILE (its logs go where the parent's go), and started
+    // by hand with none it gets the scratch profile too — never the live one, whose hooks.log its [fleet] lines would join.
+    if (argc >= 2 && std::wstring_view{ argv[1] } == L"--fleet-child")
+    {
+        return RunFleetTestChild(argc, argv);
     }
 
     std::wprintf(L"=== Agentmaster engine tests ===\n");
@@ -125,6 +134,10 @@ int wmain()
     TestUnreadableStateFiles(); // PERSISTENCE.md "Unreadable state files": a state file that cannot be read is never replaced without its bytes kept (tests_persistence.cpp)
     TestStateFileOverrides(); // PERSISTENCE.md §16: a failed read marks its file; the tag files' update read; the store's guarded delete (tests_persistence.cpp)
     TestStateCompat(); // PERSISTENCE.md §17: state files across versions - nothing a newer or an older build wrote is lost (tests_persistence.cpp)
+    TestFleetDbRows(); // SESSIONS_STORE.md: the fleet store's database - round trip, the diff, order numbers, residue, lock, format guard, damage (tests_fleetdb.cpp)
+    TestFleetStoreStartup(); // SESSIONS_STORE.md §4.8-4.9: the startup open - fresh, the migration and its verification, interrupted steps, older builds, unusable files (tests_fleetdb.cpp)
+    TestFleetWriter(); // SESSIONS_STORE.md §4.3-4.4: the writer - every mutator marks, the commits, the bulk scope, the critical commits (tests_fleetdb.cpp)
+    TestFleetKills(); // SESSIONS_STORE.md §5: REAL kills of child processes mid-commit and mid-migration (tests_fleetdb.cpp)
     TestProcessInspectTree();
     TestOrphanConsoleReaper();
     TestProcessInspectParse();

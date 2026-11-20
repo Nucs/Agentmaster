@@ -2,8 +2,9 @@
 
 These are the [ENG] and [LOG] oracles of the flow catalog (doc/agentmaster/flows/README.md) until the
 read-only test bridge exists (E2E_TESTING.md §6.2):
-- sessions.json — every session the engine knows; written ≤ ~1 s after a change (the debounced autosaver:
-  300 ms quiet or a 1 s cap; Engine.cpp), and at once for a close. `live` is NOT persisted.
+- sessions.db — every session the engine knows (the fleet store, SESSIONS_STORE.md; sessions.json before it, which the
+  app's first start migrates and removes); a change is committed ≤ ~250 ms after it happens (FleetWriter.cpp), and at
+  once for a close. `live` is NOT persisted. Read through sessions_store.load_fleet, read-only (it never blocks a commit).
 - windows\\<id>.json — per-window UI state: geometry, the Manager lens, the ordered tab refs.
 - settings.json — the Settings cog's values, inside a {"version", "settings": {...}} envelope.
 - hooks.log / autorunner.log / scanner.log — every line stamped [HH:MM:SS.mmm]; `[nav]` lines are the user's
@@ -21,12 +22,14 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .sessions_store import load_fleet
 from .waits import wait_until
 from .win32 import read_bytes_shared
 
@@ -254,13 +257,23 @@ class Profile:
         raise ValueError(f"{path} stays unreadable: {last}")
 
     def sessions(self) -> list[SessionRecord]:
-        """Every session in sessions.json.
+        """Every session the app saved: sessions.db (the fleet store, SESSIONS_STORE.md) read-only, else sessions.json (a
+        profile the app has not migrated yet). A read that fails (the database busy past its 5 s wait, a torn sessions.json)
+        is tried again for ~1 s, like the JSON files here.
 
         Returns:
             The records (empty before the first save).
+        Raises:
+            ValueError: When the fleet stays unreadable for ~1 s (a real corruption, which is a finding).
         """
-        data = self._read_json(self.dir / "sessions.json", {})
-        return [SessionRecord.from_json(s) for s in data.get("sessions", [])]
+        last: Optional[Exception] = None
+        for _ in range(10):
+            try:
+                return [SessionRecord.from_json(s) for s in load_fleet(self.dir)]
+            except (sqlite3.Error, ValueError, OSError) as error:
+                last = error
+                time.sleep(0.1)
+        raise ValueError(f"the fleet in {self.dir} stays unreadable: {last}")
 
     def session(self, id_or_prefix: str) -> Optional[SessionRecord]:
         """One session by its id or an id prefix (the logs' 8-character form).

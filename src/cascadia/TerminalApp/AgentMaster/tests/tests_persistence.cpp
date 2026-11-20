@@ -2641,8 +2641,11 @@ void TestUnreadableStateFiles()
         ResetStateFileGuardForTests();
     }
 
-    // ---- the startup fleet read and the recovery snapshot (on a scratch profile folder, through the `...In` seams; the
-    //      registry save that follows at startup is played by the guard sequence WriteAllUtf8 runs) ----
+    // ---- the startup read of sessions.json and the recovery snapshot (on a scratch profile folder, through the `...In`
+    //      seams; the registry save that follows at startup is played by the guard sequence WriteAllUtf8 runs). Since the
+    //      fleet store (SESSIONS_STORE.md), LoadSessionsForStartupIn opens sessions.db; the sessions.json read these rules
+    //      cover is ReadSessionsJsonForStartupIn: what the one-time migration decides on, and what a run that cannot use
+    //      the store (FleetMode::Json) loads and saves through. The store's own cases are in tests_fleetdb.cpp. ----
     {
         ScratchDir sp(L"am-unreadable-fleet-");
         const std::wstring sessionsPath = sp.dir + L"\\sessions.json";
@@ -2655,20 +2658,20 @@ void TestUnreadableStateFiles()
             MarkStateFileSafeToReplace(sessionsPath);
             return true;
         };
-        const auto fresh = LoadSessionsForStartupIn(sp.dir);
+        const auto fresh = ReadSessionsJsonForStartupIn(sp.dir);
         CHECK(fresh.usable && fresh.fileStatus == StateFileStatus::Missing && fresh.sessions.empty(), "fleet: a fresh profile is usable (nothing to lose)");
         CHECK(save({ MakeSession(L"5e55a0a0-0000-4000-8000-000000000001"), MakeSession(L"5e55a0a0-0000-4000-8000-000000000002") }), "fleet: (setup) a fleet of two");
         ResetStateFileGuardForTests();
-        const auto good = LoadSessionsForStartupIn(sp.dir);
+        const auto good = ReadSessionsJsonForStartupIn(sp.dir);
         CHECK(good.usable && good.fileStatus == StateFileStatus::Read && good.sessions.size() == 2 && good.sessions[1].id == L"5e55a0a0-0000-4000-8000-000000000002",
               "fleet: a good sessions.json loads whole");
         writeBytes(sessionsPath, "\xEF\xBB\xBF" + readBytes(sessionsPath));
-        CHECK(LoadSessionsForStartupIn(sp.dir).sessions.size() == 2, "fleet: a BOM'd sessions.json loads (it used to read as an empty fleet)");
+        CHECK(ReadSessionsJsonForStartupIn(sp.dir).sessions.size() == 2, "fleet: a BOM'd sessions.json loads (it used to read as an empty fleet)");
         writeBytes(sessionsPath, "{\"version\":1,\"sessions\":[]}");
-        const auto empty = LoadSessionsForStartupIn(sp.dir);
+        const auto empty = ReadSessionsJsonForStartupIn(sp.dir);
         CHECK(empty.usable && empty.sessions.empty(), "fleet: a fleet saved empty is usable (an empty list is a real answer)");
         writeBytes(sessionsPath, "{\"version\":1}");
-        CHECK(!LoadSessionsForStartupIn(sp.dir).usable, "fleet: a document with no \"sessions\" list is not usable");
+        CHECK(!ReadSessionsJsonForStartupIn(sp.dir).usable, "fleet: a document with no \"sessions\" list is not usable");
 
         // A damaged fleet beside a window record and the open-at-exit manifest.
         std::filesystem::create_directories(std::filesystem::path{ sp.dir + L"\\windows" });
@@ -2679,7 +2682,7 @@ void TestUnreadableStateFiles()
         const std::string damaged(4096, '\0');
         writeBytes(sessionsPath, damaged);
         ResetStateFileGuardForTests();
-        const auto bad = LoadSessionsForStartupIn(sp.dir);
+        const auto bad = ReadSessionsJsonForStartupIn(sp.dir);
         CHECK(!bad.usable && bad.sessions.empty() && bad.fileStatus == StateFileStatus::Read && bad.problem.find(L"not valid JSON") != std::wstring::npos,
               "fleet: a NUL-filled sessions.json is reported as unusable (not valid JSON), not read as an empty fleet");
         const std::wstring kept = PreserveWorkspaceForRecoveryIn(sp.dir, bad.problem);
@@ -2694,7 +2697,7 @@ void TestUnreadableStateFiles()
         // Without the snapshot (the load's keep mark alone), the save keeps the damaged bytes itself.
         writeBytes(sessionsPath, damaged);
         ResetStateFileGuardForTests();
-        CHECK(!LoadSessionsForStartupIn(sp.dir).usable && save({ MakeSession(L"5e55a0a0-0000-4000-8000-000000000007") }), "fleet: (an unusable load, then a save)");
+        CHECK(!ReadSessionsJsonForStartupIn(sp.dir).usable && save({ MakeSession(L"5e55a0a0-0000-4000-8000-000000000007") }), "fleet: (an unusable load, then a save)");
         const auto markCopies = keptCopies(sp.dir, L"sessions.json");
         CHECK(markCopies.size() == 1 && readBytes(markCopies[0]) == damaged, "fleet: an unusable sessions.json is kept aside by the first save even with no snapshot");
         for (const auto& c : markCopies)
@@ -2710,7 +2713,7 @@ void TestUnreadableStateFiles()
         ResetStateFileGuardForTests();
         const HANDLE lock = ::CreateFileW(sessionsPath.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         const uint64_t lockT0 = ::GetTickCount64();
-        const auto lockedLoad = LoadSessionsForStartupIn(sp.dir); // waits kStartupStateReadRetryBudgetMs
+        const auto lockedLoad = ReadSessionsJsonForStartupIn(sp.dir); // waits kStartupStateReadRetryBudgetMs
         CHECK(!lockedLoad.usable && lockedLoad.fileStatus == StateFileStatus::Unreadable && lockedLoad.problem.find(L"32") != std::wstring::npos,
               "fleet: a sessions.json locked through the startup read is Unreadable (error 32), not an empty fleet");
         CHECK(::GetTickCount64() - lockT0 >= kStartupStateReadRetryBudgetMs - 200, "fleet: the startup read waits its longer budget for a lock to clear");

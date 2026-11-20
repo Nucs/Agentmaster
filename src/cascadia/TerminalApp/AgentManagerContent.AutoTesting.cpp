@@ -28,6 +28,7 @@
 #include "AgentMaster/PendingInput.h" // PickCurrentPromptText — the live-vs-remembered draft rule ("pull in the unsent prompt")
 #include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor — the cog's "status flashing color" picker <-> AppSettings::flashRingColor
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
+#include "AgentMaster/FleetDb.h" // PersistFleetNow — Send now's Sent mark is committed before the prompt is typed (Rule #4)
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
 #include "AgentMaster/SessionRegistry.h"
@@ -925,6 +926,10 @@ namespace winrt::TerminalApp::implementation
             // autorunner — so a Send-now into a session that is holding an UNSENT draft swaps the draft
             // out and back instead of pasting this prompt on top of it. refundAutoSend is FALSE: a
             // Send-now never spent an autoSendsThisRun slot, so an aborted swap must not hand one back.
+            // Agentmaster (Rule #4 — SESSIONS_STORE.md §4.4): the Sent mark is committed BEFORE the prompt is typed, so a crash
+            // in between can never restore it as Pending and send it twice. This is the UI thread: the critical commit here is
+            // NORMAL (in the OS cache at return — a kill loses nothing — and the store's writer fsyncs it within milliseconds).
+            ::Agentmaster::PersistFleetNow();
             const bool delivered = _registry->SubmitPrompt({ _selectedId, sentPromptId, textToSend, false });
             // Nav audit: the user hit Send-now (the !) for this session — the prompt's first line +
             // whether it actually reached a bound injector (an unbound/observe-only target rolls back).

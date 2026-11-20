@@ -20,6 +20,7 @@
 
 #include "ApiErrorRewind.h" // HOOKS.md "Interrupted turns": PlanInterruptRewindForSession, AssessForkContinuation, AssessRestartContinuation (the restart and fork questions)
 #include "ClaudeSpawn.h" // LogNav, ShortId, ResolveClaudeTranscriptPath, NewSessionId, LogSwallowedException, ClaudeConversationExists
+#include "FleetDb.h" // PersistFleetNowDurable — /sendnow's and /steer's Sent mark is on the disk before the words are typed (Rule #4)
 #include "FolderProbe.h" // §21.17.4: SharedFolderProber — the poll thread's folder checks wait a bounded time
 #include "MessagingBtw.h" // §21.56: the /btw command words and the usage text (the session command dispatcher's belt)
 #include "MessagingVoice.h" // §21.43: IsVoiceNoteMessage (a just-bound thread's voice note goes to the voice path)
@@ -1423,7 +1424,10 @@ namespace Agentmaster::Msg
         if (sendNow)
         {
             _react(msgId, kSteerSendingReaction);
-            if (_registry->SubmitPrompt({ sessionId, p.id, p.text, false }))
+            // Rule #4 (SESSIONS_STORE.md §4.4): the prompt went into the queue already marked Sent, and that mark is on the disk
+            // before the words are typed; a commit that failed types nothing and takes the declined path below.
+            const bool saved = PersistFleetNowDurable();
+            if (saved && _registry->SubmitPrompt({ sessionId, p.id, p.text, false }))
             {
                 // Accepted: the hosting window types the words (its draft swap keeps the user's unsent draft, its verified
                 // placement reads the box first) and owns the outcome from here. Their echo turns the reaction to 👨‍💻
@@ -1443,7 +1447,8 @@ namespace Agentmaster::Msg
             _registry->RollbackPromptToPending(sessionId, p.id, false);
             _react(msgId, kSteerQueuedReaction);
             _reply(threadId, SteerDeclinedNoticeHtml(SteerDecline::BoxHeld), false, json::Value{}, msgId);
-            _log(L"[msg] " + ShortId(sessionId) + L" steer from topic (message " + std::to_wstring(msgId) + L") declined at once (the input box is held): queued first");
+            _log(L"[msg] " + ShortId(sessionId) + L" steer from topic (message " + std::to_wstring(msgId) + L") declined at once (" +
+                 (saved ? std::wstring{ L"the input box is held" } : std::wstring{ L"the Sent mark could not be saved" }) + L"): queued first");
             nav(L"queued:box-held");
         }
         else
@@ -3544,11 +3549,17 @@ namespace Agentmaster::Msg
             _reply(threadId, L"Nothing queued.", false);
             return;
         }
-        const bool delivered = _registry->SubmitPrompt({ sessionId, promptId, text, false });
+        // Rule #4 (SESSIONS_STORE.md §4.4): the Sent mark is on the disk before the prompt is typed (this service's own thread:
+        // the FULL commit, ~3 ms); a commit that failed types nothing and takes the not-sent path below.
+        const bool saved = PersistFleetNowDurable();
+        const bool delivered = saved && _registry->SubmitPrompt({ sessionId, promptId, text, false });
         if (!delivered)
         {
             _registry->RollbackPromptToPending(sessionId, promptId, false);
-            _reply(threadId, L"Not sent: the session's input is not reachable right now (dormant, or a delivery in flight). It stays queued.", false);
+            _reply(threadId,
+                   saved ? std::wstring{ L"Not sent: the session's input is not reachable right now (dormant, or a delivery in flight). It stays queued." } :
+                           std::wstring{ L"Not sent: Agentmaster could not save the send to its session store. It stays queued." },
+                   false);
         }
         else
         {

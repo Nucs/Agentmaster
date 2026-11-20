@@ -5,6 +5,7 @@
 #include "Scheduler.h"
 
 #include "ClaudeSpawn.h" // AppendStateLog, NewSessionId-not-needed here
+#include "FleetDb.h" // PersistFleetNowDurable — Rule #4: the Sent mark is on the disk before the prompt is typed (SESSIONS_STORE.md §4.4)
 #include "SessionRegistry.h"
 
 #include <chrono>
@@ -532,7 +533,12 @@ namespace Agentmaster
                     // none bound it IS the Inject(BuildPromptSubmission(...)) call this replaced. `true`
                     // here means "accepted": an asynchronous swap that later aborts rolls the prompt back
                     // itself (RollbackPromptToPending), so the queue stays honest either way.
-                    const bool delivered = _registry->SubmitPrompt({ id, promptId, text, true });
+                    // Agentmaster (Rule #4 — SESSIONS_STORE.md §4.4): the Sent mark above is ON THE DISK before
+                    // anything is typed (synchronous=FULL, this worker thread, ~3 ms), so a crash between the two
+                    // can never restore the prompt as Pending and send it a second time. A commit that failed types
+                    // nothing: the prompt takes the undelivered path below, back to Pending.
+                    const bool saved = PersistFleetNowDurable();
+                    const bool delivered = saved && _registry->SubmitPrompt({ id, promptId, text, true });
                     if (delivered)
                     {
                         AppendStateLog(L"autorunner.log", L"[send] " + id + L" #" + std::to_wstring(plan2.promptIndex) + L"\n");
@@ -542,9 +548,9 @@ namespace Agentmaster
                         // No stdin injector bound yet (a restored session's plan bootstrapping from
                         // Idle before its ConPTY is wired), OR the delivery gate declined a racing
                         // second submit (DELIVERY.md — a Send-now landed between our decide and the
-                        // seam). Roll the prompt back to Pending (Rule #4: never strand a phantom
-                        // Sent) so it re-fires on the injector bind / the gate's close notify —
-                        // BY ID, matching the mark above.
+                        // seam), OR the Sent mark could not be saved. Roll the prompt back to Pending
+                        // (Rule #4: never strand a phantom Sent) so it re-fires on the injector bind /
+                        // the gate's close notify / the next advance — BY ID, matching the mark above.
                         _registry->Update(id, [&](SessionInfo& ss) {
                             for (auto& p : ss.queue)
                             {
@@ -565,7 +571,9 @@ namespace Agentmaster
                                 }
                             }
                         });
-                        AppendStateLog(L"autorunner.log", L"[send-deferred] " + id + L" (not delivered: no injector, or the box is owned - rolled back to Pending)\n");
+                        AppendStateLog(L"autorunner.log", L"[send-deferred] " + id +
+                                                              (saved ? std::wstring{ L" (not delivered: no injector, or the box is owned - rolled back to Pending)\n" } :
+                                                                       std::wstring{ L" (the Sent mark could not be saved to the fleet store - nothing typed, rolled back to Pending)\n" }));
                     }
                 }
                 return;
