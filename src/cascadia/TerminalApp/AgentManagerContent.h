@@ -510,9 +510,62 @@ namespace winrt::TerminalApp::implementation
         void SetLaunchBoxText(const std::wstring& text);
         // Agentmaster (the launcher panel's footer, TAB_STRIP.md "The + button: the launcher"): open the settings cog's overlay
         // exactly as a click on ⚙ does (_ShowSettings: every control filled from the current settings, then shown). The
-        // caller shows the Agent Manager page first — the overlay lives on it. A no-op before the overlay is built. UI thread.
+        // caller shows the Agent Manager page first — the overlay lives on it (a cog last shown over the window's tab, closed
+        // since, is brought back onto the page first: SIDE_PANEL.md §2i). A no-op before the overlay is built. UI thread.
         //   throws — what the overlay's XAML writes throw (the page's caller is contained).
         void ShowSettingsOverlay();
+        // Agentmaster (SIDE_PANEL.md §2i "Settings over the tab"): open the cog over a panel of the HOSTING WINDOW instead of
+        // over this page — the side panel's ⋯ ▸ Settings, so the tab on screen stays where it is (the user's request of
+        // 2026-11-20: "this will open settings in the tab we are at"). It is THE cog, moved, never a copy: one per window,
+        // so its unsaved edits are the same wherever it shows. Its layer moves into `host` as host's LAST child (over
+        // everything there), and its own Row 0 / RowSpan 99 / ColumnSpan 99 make it cover the whole grid — given
+        // TerminalPage's ContentArea, the terminal, the splitter and the side panel. A cog left open on this page (the user
+        // left the page with it open, or a tab switch parked it: ParkSettingsOverlay) moves over with its edits; a closed
+        // one opens fresh, every control filled from the settings (_ShowSettings). The keyboard goes into it one dispatcher
+        // tick later (the active top tab's button), so no keystroke meant for the card reaches the terminal under the dim.
+        // It closes as on this page — Save, Cancel or a click on the dim (_HideSettings) — and `closed` is then called ONCE,
+        // right after the collapse, with whether the cog held the keyboard at that moment, so the window can give it back.
+        // A cog already shown over the window only gets the keyboard back: its first open's `closed` keeps owning the
+        // close, and this call's `closed` is dropped uncalled.
+        // ⚠ While it is over the window the cog lives in the WINDOW's tree, not under _root, so everything it opens finds
+        // the window through it: a confirm's XamlRoot (_DialogXamlRoot), the "Specify a model" prompt's layer
+        // (_PlaceSpecifyModelLayer), the overlay-opacity slider's drag (measured against its own track).
+        //   host   — the panel to show the cog in. Null, or a cog not built yet: nothing happens.
+        //   closed — called once when this stay over the window ends with a close (never on a park); its argument is true
+        //            when the cog held the keyboard as it closed. May be empty. What it throws is logged, never rethrown:
+        //            the close already happened.
+        //   throws — nothing: a failed open is logged (Rule #18) and the cog is put back on this page with no stay over the
+        //            window, so the terminal column's focus guard can never point at a cog that is not on screen.
+        // UI thread only.
+        void ShowSettingsOverlayIn(const winrt::Windows::UI::Xaml::Controls::Panel& host, std::function<void(bool heldKeyboard)> closed);
+        // Agentmaster (SIDE_PANEL.md §2i): is the cog open — on screen, or left open on this page while the page is hidden?
+        //   returns — true while its layer is Visible, wherever it is hosted; false before it is built, and when the read
+        //             fails (logged).
+        //   throws  — nothing. UI thread only.
+        bool IsSettingsOverlayOpen() const noexcept;
+        // Agentmaster (SIDE_PANEL.md §2i): where the window's terminal column sends the keyboard while the cog is shown over
+        // the window (ShowSettingsOverlayIn). TerminalPage's focus guard on the column redirects every focus arrival there
+        // to this control, so a tab switch's focus move, a command palette or a "Specify a model" prompt that closes, or a
+        // page that hands the focus back to "the current tab" never lets a keystroke — an Esc above all, which interrupts a
+        // running turn — reach the claude under the dim.
+        //   returns — the cog's active top-tab button; NULL while the cog is not shown over the window (closed, parked, or
+        //             open on this page) — the guard then lets the column take the keyboard as always — and when it cannot
+        //             tell (logged). Never a control that is off screen: a null answer is what keeps the keyboard from being
+        //             trapped behind a cog nobody can see.
+        //   throws  — nothing. UI thread only.
+        winrt::Windows::UI::Xaml::Controls::Control SettingsOverWindowFocusTarget() const noexcept;
+        // Agentmaster (SIDE_PANEL.md §2i): what is on screen changed under a cog shown over the window (a tab switch, a
+        // closed tab's successor, the Agent Manager page shown: TerminalPage::_ApplyAgentTabSelection). Put it back on this
+        // page STILL OPEN, its unsaved edits kept — the page shows it over itself, and ⋯ ▸ Settings brings it over a tab
+        // again. The stay over the window ends without a close, so its `closed` is dropped uncalled: the tab whose
+        // terminal it would give the keyboard back to has just left the screen.
+        //   heldKeyboard — receives whether the cog held the keyboard as it moved (the caller then hands it to what is on
+        //                  screen now); false when nothing was parked, or when it could not be read (logged).
+        //   returns      — true when a cog was over the window: moved back, or — when the move failed (logged) — left where
+        //                  it is, its stay forgotten (the focus guard stands down) and still closable by its own buttons;
+        //                  false when there was nothing to park (every tab switch pays only this test).
+        //   throws       — nothing. UI thread only.
+        bool ParkSettingsOverlay(bool& heldKeyboard) noexcept;
         // Agentmaster (SIDE PANEL "+" launcher): this window's recent-folders list — the ONE list the Manager's launch bar
         // reads and pushes to. The side panel's bar is built with the same pointer, so a folder launched from either is
         // at the top of both drop-downs and neither save can drop the other's push. Never null after construction.
@@ -952,9 +1005,48 @@ namespace winrt::TerminalApp::implementation
         // ContentDialog receives no keypresses in XAML Islands; see the _renameBox note). Built
         // into the main visual tree so its TextBoxes work; shown/hidden by toggling Visibility.
         void _BuildSettingsOverlay();
-        void _ShowSettings(); // populate controls from _appSettings, then reveal the overlay
-        void _HideSettings();
+        void _ShowSettings(); // populate controls from _appSettings, then reveal the overlay (an open on this page first brings a cog last shown over the window back into _root: _ReturnSettingsLayersHome)
+        void _HideSettings(); // collapse the overlay; a cog shown over the window (ShowSettingsOverlayIn) also ends that stay and calls its `closed`
         void _SaveSettings(); // read controls -> _appSettings -> _settingsSink, then hide
+        // --- The cog shown over the WINDOW (SIDE_PANEL.md §2i "Settings over the tab"; ShowSettingsOverlayIn) ---
+        // The window panel the cog is shown in, while it stays there.
+        //   returns — the panel; null while the cog belongs to this page (never shown over the window, closed, parked) or
+        //             when the panel is gone. A closed cog may still SIT in that panel (it moves back only when it is shown
+        //             again: _ShowSettings), so this — not the layer's parent — is what "over the window" means.
+        //   throws  — nothing.
+        winrt::Windows::UI::Xaml::Controls::Panel _SettingsForeignHost() const noexcept;
+        // Put one of the cog's layers (the overlay, the "Specify a model" prompt) into `target`, out of whatever Panel holds
+        // it now: an element has one parent, and appending one that has a parent throws.
+        //   layer  — the layer; null does nothing.
+        //   target — the panel it must be in; null does nothing.
+        //   index  — < 0: the layer must be target's LAST child (drawn over every sibling) — moved to the end even when target
+        //            already holds it elsewhere; >= 0: the layer must be IN target — inserted at `index` (clamped to the end)
+        //            when it is not, left where it is when it is.
+        //   throws — winrt::hresult_error from the collections, or E_UNEXPECTED (ours) when the current parent is not a
+        //            Panel — the layer is then left where it was. The callers contain it.
+        static void _MoveSettingsLayer(const winrt::Windows::UI::Xaml::UIElement& layer, const winrt::Windows::UI::Xaml::Controls::Panel& target, int32_t index);
+        // Bring the cog's layers back into _root at their own places: the overlay right BELOW the two modals that open over
+        // it (the "Claude not detected" gate, built after it, and the "Specify a model" prompt), the prompt last (its place
+        // since its first use). A layer already in _root stays where it is. No-op before the layout is built.
+        //   throws — what _MoveSettingsLayer throws; the callers contain it.
+        void _ReturnSettingsLayersHome();
+        // The XamlRoot a ContentDialog opened from this content must use: the cog's own while it is shown over the window
+        // (_root is then usually out of the live tree, and an element out of the tree has no XamlRoot — a confirm such as
+        // "Uninstall Agentmaster?" would fail to show), else _root's. Null when neither has one.
+        //   throws — what a XAML property read throws (never in practice); the dialog helpers contain it.
+        winrt::Windows::UI::Xaml::XamlRoot _DialogXamlRoot() const;
+        // Put the "Specify a model" prompt's layer where it must show: over the cog, in the window's panel, while the cog is
+        // shown over the window (its Commands tab's successor-model "Specify…" opened it); else in _root, where it lived.
+        //   throws — what _MoveSettingsLayer throws; _PromptForModel contains it.
+        void _PlaceSpecifyModelLayer();
+        // The cog's keyboard entry point: the active top tab's button (else the first one). Null before the overlay is built.
+        //   throws — nothing in practice (vector reads of handles); not noexcept only because it returns a projected type.
+        winrt::Windows::UI::Xaml::Controls::Control _SettingsKeyboardTarget() const;
+        // Give the keyboard to the cog shown over the window ONE dispatcher tick later (a same-tick Focus on a control not
+        // laid out yet does nothing; the menu that asked has handed the focus back by then). A close or a park faster than
+        // the tick wins: nothing is focused then. Never throws (a refused enqueue does nothing; a failure in the tick is
+        // logged). UI thread only.
+        void _QueueSettingsKeyboardIn();
         // BUNDLED_MODS.md: the bundled mods' off list the Claude tab's switches stand for: every switched-off mod, plus
         // each name of the stored list this build does not ship (a newer build's mod stays off). Throws std::bad_alloc only.
         std::vector<std::wstring> _BundledModsOffFromSwitches() const;
@@ -1553,7 +1645,16 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBlock _claudeMissingStatus{ nullptr }; // the live detection status line (updated by Browse / Re-check)
         winrt::Windows::UI::Xaml::Controls::Button _claudeMissingInstallBtn{ nullptr }; // one-click install: `claude install` (npm-legacy) or the claude.ai native bootstrap (none); label/visibility set in _ShowClaudeMissing from ClaudeInstallKind()
         // ---- Settings overlay (the cog dialog) ----
-        winrt::Windows::UI::Xaml::Controls::Grid _settingsOverlay{ nullptr }; // dimmed modal layer over _root
+        winrt::Windows::UI::Xaml::Controls::Grid _settingsOverlay{ nullptr }; // dimmed modal layer over _root — or over the window's content area while ShowSettingsOverlayIn hosts it there
+        // Agentmaster (SIDE_PANEL.md §2i "Settings over the tab"): the window panel (TerminalPage's ContentArea) the cog is
+        // shown in while the side panel's ⋯ ▸ Settings keeps it there; EMPTY while the cog belongs to this page. Set by
+        // ShowSettingsOverlayIn, cleared by the close (_HideSettings) and the park (ParkSettingsOverlay) — always before the
+        // keyboard moves, because the terminal column's focus guard reads it (SettingsOverWindowFocusTarget). Weak: the
+        // panel is the window's, and the window owns this content.
+        winrt::weak_ref<winrt::Windows::UI::Xaml::Controls::Panel> _settingsForeignHost;
+        // ShowSettingsOverlayIn's `closed`, called once by the close that ends the stay over the window (with whether the cog
+        // held the keyboard), dropped uncalled by a park. Empty otherwise. It holds the window weakly (the caller's capture).
+        std::function<void(bool)> _settingsForeignClosed;
         // Agentmaster (LocalTooltip, AgentLocalTooltip.h): the cog's hover-description panel — every
         // AgentSetTip text inside the card renders HERE (outside the card at its top-left: same top,
         // right edge glued to the card's left edge, growing only leftward) instead of as a floating

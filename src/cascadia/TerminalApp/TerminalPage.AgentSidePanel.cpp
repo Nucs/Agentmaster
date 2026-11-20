@@ -333,6 +333,12 @@ namespace
     constexpr const wchar_t* kSidePanelOrderGlyph = L"\x21C5"; // ⇅ — the card order
     constexpr const wchar_t* kSidePanelCollapseLeftGlyph = L"\x00AB"; // « — collapse toward a LEFT dock
     constexpr const wchar_t* kSidePanelCollapseRightGlyph = L"\x00BB"; // » — collapse toward a RIGHT dock
+    // The menu's last item, Settings (2026-11-20, the user's "Settings with cog icon like in agent manager tab"): the ICON
+    // font's Setting (U+E713 in Segoe Fluent Icons and Segoe MDL2 Assets alike) — the very glyph of the Agent Manager page's
+    // ⚙ button, the tab row ▾ menu's and the launcher footer's "Agentmaster settings" — NOT a Segoe UI Symbol text symbol like
+    // the items above (U+2699 ⚙ there is a different drawing, and can turn into a color emoji by font fallback). Drawn with
+    // SidePanelMenuIconGlyph, which names the icon font.
+    constexpr const wchar_t* kSidePanelSettingsGlyph = L"\xE713";
 
     // One entry of the ⋯ ▸ Card order submenu.
     struct SidePanelOrderChoice
@@ -590,6 +596,21 @@ namespace
         auto t = Text(glyph, size, false, opacity);
         t.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ kSidePanelFluentFont });
         return t;
+    }
+
+    // A ⋯ menu item's icon from the ICON font (Segoe Fluent Icons; Segoe MDL2 Assets on a Windows 10 without it) — the
+    // twin of SidePanelMenuGlyph for an item whose picture is an icon, not a text symbol: Settings' cog, drawn exactly
+    // like the Agent Manager page's ⚙. The family is named (rather than left to the FontIcon's theme default) so the
+    // cog never depends on what the theme resources resolve to.
+    //   glyph   - the icon font's code point (kSidePanelSettingsGlyph).
+    //   returns - a new FontIcon for MenuFlyoutItem::Icon (the item's 16 DIP icon box scales it to fit).
+    //   throws  - hresult_error / bad_alloc from creating the element; the menu's Opening handler contains it.
+    FontIcon SidePanelMenuIconGlyph(const wchar_t* glyph)
+    {
+        FontIcon icon{};
+        icon.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ kSidePanelFluentFont });
+        icon.Glyph(glyph);
+        return icon;
     }
 
     // The face of the header's two ICON buttons, the "+" launcher and the funnel — the user's report of 2026-11-10, "the
@@ -2230,7 +2251,7 @@ namespace winrt::TerminalApp::implementation
         _sidePanelMoreBtn.VerticalAlignment(VerticalAlignment::Center);
         _sidePanelMoreBtn.IsTabStop(false);
         _sidePanelMoreBtn.Content(winrt::box_value(kSidePanelMoreGlyph)); // ⋯
-        AgentSetTitledTip(_sidePanelMoreBtn, L"More options", winrt::hstring{ L"Scroll the cards to the selected tab's card, choose which sessions the cards list (Card scope) and their order (Card order), dock the panel on the other side, or collapse it to a thin strip." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        AgentSetTitledTip(_sidePanelMoreBtn, L"More options", winrt::hstring{ L"Scroll the cards to the selected tab's card, choose which sessions the cards list (Card scope) and their order (Card order), dock the panel on the other side, collapse it to a thin strip, or open Agentmaster's settings over this tab." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
         {
             MenuFlyout moreMenu{};
             // The docked-right placement; _SidePanelApplyHeaderOrder sets the one for the dock in effect before any open.
@@ -2775,6 +2796,52 @@ namespace winrt::TerminalApp::implementation
                     ::Agentmaster::AgentLogCaughtException(L"sidepanel focus handed back to the terminal");
                 }
             });
+            // --- The ⋯ menu's SETTINGS over the tab (SIDE_PANEL.md §2i "Settings over the tab"): THE TERMINAL COLUMN'S FOCUS
+            // GUARD. While the Agent Manager's cog is shown over this window's content (_SidePanelOpenSettings), nothing under
+            // its dim in this column takes the keyboard: every focus arrival here is sent into the card instead (its active
+            // top tab — AgentManagerContent::SettingsOverWindowFocusTarget). The card has the keyboard from its open, but
+            // other code hands it to "the current tab" on its own: a tab switch's _UpdatedSelectedTab, a command palette or
+            // the cog's own "Specify a model" prompt closing, the Sessions page closing over it. Any of those would leave
+            // the keyboard in the terminal under the card, where the next keystroke goes to claude — an Esc interrupts a
+            // running turn, Enter submits its draft (TCM-K2's class). A tab switch parks the cog right after
+            // (_ApplyAgentTabSelection -> _SidePanelParkSettings), which hands the keyboard to the new tab once the cog is
+            // gone. The answer is null — the column takes the keyboard as always — whenever the cog is not on screen over
+            // the window, so the guard can never trap the keyboard behind a card nobody sees. Pointer presses never reach
+            // the column then (the dim covers it), so this sees programmatic and keyboard moves only. handledEventsToo,
+            // like the peek's GettingFocus above (TermControl marks its own focus events handled). Registered ONCE, the
+            // page captured weakly (no revoke needed: TabContent is the page's own element). Cost while no cog is over the
+            // window: one weak-reference read per focus arrival in the column.
+            content.AddHandler(
+                UIElement::GettingFocusEvent(),
+                winrt::box_value(winrt::Windows::Foundation::TypedEventHandler<UIElement, GettingFocusEventArgs>{
+                    [weakThis](const UIElement&, const GettingFocusEventArgs& e) {
+                        const auto self = weakThis.get();
+                        if (!self || !self->_managerPage)
+                        {
+                            return;
+                        }
+                        try
+                        {
+                            const auto target = self->_managerPage->SettingsOverWindowFocusTarget(); // noexcept
+                            if (!target)
+                            {
+                                return; // no cog over the window: the column takes the keyboard as always
+                            }
+                            // Into the card; if the card refuses (never in practice: its tab buttons are always focusable while
+                            // it shows), keep the focus where it was rather than let the terminal under the dim have it.
+                            if (!e.TrySetNewFocusedElement(target))
+                            {
+                                e.TryCancel();
+                            }
+                        }
+                        catch (...)
+                        {
+                            // The focus move then proceeds as asked (into the terminal): the behavior without the guard.
+                            // Recorded (Rule #18).
+                            ::Agentmaster::AgentLogCaughtException(L"sidepanel settings: the terminal column's focus guard");
+                        }
+                    } }),
+                true /* handledEventsToo — TermControl marks its focus events handled */);
         }
 
         _sidePanelBuilt = true;
@@ -3640,9 +3707,14 @@ namespace winrt::TerminalApp::implementation
     //   ⇅ Card order: MOST ACTIVE ▸  — the five board orders, the current one checked, each with what it sorts by;
     //   ─────
     //   ⇄ Dock on the right / left   — the dock flip, worded as where the panel goes;
-    //   « Collapse the side panel    — the glyph points toward the docked edge, like the chevron it replaced.
-    // Above the separator: what the cards show (all three only change the list). Below it: where the panel itself goes
-    // (both move or shrink the whole panel, and the header this menu hangs from).
+    //   « Collapse the side panel    — the glyph points toward the docked edge, like the chevron it replaced;
+    //   ─────
+    //   ⚙ Settings                   — the Agent Manager's cog, over the tab on screen (2026-11-20, the user's request:
+    //                                  "put last a Settings with cog icon like in agent manager tab. this will open
+    //                                  settings in the tab we are at"); its icon is the ⚙ button's own glyph.
+    // Above the first separator: what the cards show (all three only change the list). Between the two: where the panel
+    // itself goes (both move or shrink the whole panel, and the header this menu hangs from). Below the second: the app's
+    // settings — not about the panel at all, so a group of its own, and last, where the user asked for it.
     // The submenu headers carry the current scope and order in their text, because the line no longer shows them. Every
     // item keeps the AutomationId of the button it replaced (am.side.dock / scrollToTab / scope / sort / collapse — ids
     // are added, never renamed: the e2e driver knows them), and the submenus' entries add am.side.scope.<local|global> and
@@ -3780,6 +3852,28 @@ namespace winrt::TerminalApp::implementation
             }
         });
         menu.Items().Append(collapse);
+
+        menu.Items().Append(MenuFlyoutSeparator{});
+
+        // ⚙ — Agentmaster's settings over the tab on screen (SIDE_PANEL.md §2i "Settings over the tab"). The LAST item, after a
+        // separator of its own: the user's place for it, and the one item that is about the app rather than this panel. Its
+        // icon is the Agent Manager page's ⚙ itself (the icon font's cog — SidePanelMenuIconGlyph), and its words are that
+        // button's own name, "Settings". It keeps no state, so it is the same at every open; the command re-checks nothing:
+        // _SidePanelOpenSettings decides at the tick from what is on screen then (a tab, or the Agent Manager page).
+        MenuFlyoutItem settings{};
+        settings.Text(L"Settings");
+        settings.Icon(SidePanelMenuIconGlyph(kSidePanelSettingsGlyph));
+        AgentSetTitledTip(settings, L"Settings", winrt::hstring{ L"Agentmaster's settings \x2014 the \x2699 of the Agent Manager page \x2014 open over this tab: the tab stays where it is, and Save, Cancel or a click outside the card brings you straight back to it, the keyboard in its terminal.\nSwitching to another tab sets the open settings aside on the Agent Manager page, unsaved changes kept: open them here again, or find them there.\nOn the Agent Manager page they open over the page, as its \x2699 does." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        AgentSetAutomationId(settings, L"am.side.settings");
+        settings.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
+            if (const auto self = weakThis.get())
+            {
+                // One tick later, like every item here: the menu is still closing inside this Click and hands the focus back
+                // as it goes — that hand-back is what _SidePanelOpenSettings reads as "where the keyboard was".
+                self->_SidePanelRunMenuCommand(L"settings", [](TerminalPage& page) { page._SidePanelOpenSettings(); });
+            }
+        });
+        menu.Items().Append(settings);
     }
 
     // Run one ⋯ menu command one dispatcher tick after its item's Click (SIDE_PANEL.md §2i). Inside the Click the menu is
@@ -3819,6 +3913,93 @@ namespace winrt::TerminalApp::implementation
         {
             // The dispatcher refused the hop (the window is tearing down): the click is lost. Recorded (Rule #18).
             ::Agentmaster::AgentLogCaughtException(L"side panel more menu: queue a command");
+        }
+    }
+
+    // The ⋯ menu's Settings (SIDE_PANEL.md §2i "Settings over the tab"): TerminalPage.h has the contract. One tick after the
+    // item's Click (_SidePanelRunMenuCommand), so the menu has closed and handed the focus back by now.
+    void TerminalPage::_SidePanelOpenSettings()
+    {
+        if (!_managerPage)
+        {
+            // The page's build failed (_CreateAgentManagerPage logged why): there is no cog in this window to show.
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[sidepanel] settings: this window has no Agent Manager page, so no settings to open\n");
+            return;
+        }
+        if (_managerPageVisible)
+        {
+            // The Agent Manager page IS the tab on screen: its own cog, in place over the page — what its ⚙ does (the side
+            // panel stays usable beside it, as with the ⚙). A cog already open there is on screen already, and opening it
+            // again would refill every control over the user's unsaved edits, so that click does nothing.
+            if (!_managerPage->IsSettingsOverlayOpen())
+            {
+                _managerPage->ShowSettingsOverlay();
+            }
+            ::Agentmaster::LogNav(L"sidepanel settings on the agent manager page");
+            return;
+        }
+        const auto area = ContentArea();
+        if (!area)
+        {
+            return; // no content area (never in practice: the side panel this menu belongs to lives in it)
+        }
+        // TCM-K2: where the keyboard is right before the cog takes it, read now — the ⋯ menu has handed the focus back as it
+        // closed (normally to the terminal: ⋯ is IsTabStop false). A tab header answers "the current tab"
+        // (AgentCaptureFocusReturn's rule), and so does a target that left the screen by the time the cog closes
+        // (_ReturnKeyboardAfterPanel). No panel to exclude: the cog is not on screen yet, so the focus cannot be inside it.
+        const auto returnTo = AgentCaptureFocusReturn(Root().XamlRoot(), nullptr, _tabView);
+        // The window's content area is the host: the cog's layer spans its three columns, so it dims the terminal, the
+        // splitter and this side panel alike (the tab row stays live), and its card sits in the middle of the window.
+        // `closed` holds the page weakly: the content keeps it until the stay ends, and must not keep the window alive.
+        _managerPage->ShowSettingsOverlayIn(area, [weakThis = get_weak(), returnTo](bool heldKeyboard) {
+            const auto self = weakThis.get();
+            if (!self)
+            {
+                return; // the window closed meanwhile
+            }
+            if (heldKeyboard)
+            {
+                // A close that left the keyboard in the card (Save, Cancel, a click on the dim — each leaves it there): it goes
+                // back where it came from — the terminal under the card — or to the current tab. When something outside the
+                // card held it at the close, the user put it there, and it stays.
+                self->_ReturnKeyboardAfterPanel(returnTo, L"Agentmaster settings over the tab"); // noexcept
+            }
+            ::Agentmaster::LogNav(L"sidepanel settings closed over the tab");
+        });
+        ::Agentmaster::LogNav(L"sidepanel settings open over the tab");
+    }
+
+    // The park of a cog shown over the tab, from every change of what is on screen (_ApplyAgentTabSelection): TerminalPage.h
+    // has the contract.
+    void TerminalPage::_SidePanelParkSettings(std::wstring_view reason) noexcept
+    {
+        try
+        {
+            if (!_managerPage)
+            {
+                return;
+            }
+            bool heldKeyboard = false;
+            if (!_managerPage->ParkSettingsOverlay(heldKeyboard)) // noexcept
+            {
+                return; // no cog over the window: the whole cost of a tab switch here
+            }
+            ::Agentmaster::LogNav(L"sidepanel settings parked on the agent manager page, still open (" + std::wstring{ reason } + L")");
+            if (heldKeyboard)
+            {
+                // The terminal column's guard kept the switch's own focus move out of the terminal while the cog was over it
+                // (the new tab's terminal was asked first), so the keyboard is still in the card that just left: hand it to
+                // what is on screen now — the new tab's terminal, or the Agent Manager page.
+                _FocusCurrentTab(true);
+                ::Agentmaster::AppendStateLog(L"hooks.log", std::wstring{ L"[focus] Agentmaster settings parked: the keyboard went to " } +
+                                                                (_managerPageVisible ? L"the Agent Manager page\n" : L"the current tab\n"));
+            }
+        }
+        catch (...)
+        {
+            // The cog keeps whatever state the throw left (still closable by its own buttons); the keyboard stays where the
+            // focus manager put it. Rule #18.
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelParkSettings");
         }
     }
 

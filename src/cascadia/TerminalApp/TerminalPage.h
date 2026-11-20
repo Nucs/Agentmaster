@@ -796,7 +796,8 @@ namespace winrt::TerminalApp::implementation
         // §2i): the rightmost docked right, the leftmost docked left (the line mirrors with the dock,
         // _SidePanelApplyHeaderOrder). Its MenuFlyout (held by the button's Flyout property) carries what the header's other
         // buttons did: Scroll to the selected tab (⌖, a check) · Card scope ▸ (LOCAL / GLOBAL) · Card order ▸ (the five
-        // board orders) · a separator · Dock on the left / right (⇄) · Collapse the side panel (« / »). The menu keeps no
+        // board orders) · a separator · Dock on the left / right (⇄) · Collapse the side panel (« / ») — then, after a second
+        // separator, Settings (the Agent Manager's cog over the tab on screen, 2026-11-20: _SidePanelOpenSettings). The menu keeps no
         // state: _SidePanelFillMoreMenu rebuilds its items from the live settings at every open; only its placement
         // (aligned on ⋯'s outer edge) is set ahead, by the dock apply. A member (not a local, like ⇄ was) so the one
         // AutomationId block names it with the panel's other controls.
@@ -4111,9 +4112,10 @@ namespace winrt::TerminalApp::implementation
         // Fill the ⋯ button's MenuFlyout from the live state, at every open (the caller emptied it): Scroll to the selected
         // tab (⌖, checked while on) · Card scope ▸ (LOCAL / GLOBAL, the current one checked) · Card order ▸ (MOST ACTIVE ·
         // MOST RECENT · NEWEST · OLDEST · A–Z, the current one checked) · a separator · Dock on the left / right (⇄) ·
-        // Collapse the side panel (« / », pointing toward the docked edge). Each icon is a Segoe UI Symbol glyph left of its
-        // text; each item carries the old button's AutomationId and tooltip (3 s, kSidePanelButtonTipDelay); every command
-        // runs through _SidePanelRunMenuCommand.
+        // Collapse the side panel (« / », pointing toward the docked edge) · a separator · Settings (the Agent Manager's
+        // cog, over the tab on screen: _SidePanelOpenSettings). Each icon is a Segoe UI Symbol glyph left of its text —
+        // Settings' is the icon font's cog, the ⚙ button's own; each item carries the old button's AutomationId (Settings:
+        // am.side.settings) and tooltip (3 s, kSidePanelButtonTipDelay); every command runs through _SidePanelRunMenuCommand.
         //   menu    - the ⋯ button's MenuFlyout, already emptied.
         //   returns - nothing.
         //   throws  - what building XAML elements throws (hresult_error, bad_alloc); the Opening handler contains and logs it,
@@ -4129,6 +4131,27 @@ namespace winrt::TerminalApp::implementation
         //   throws  - nothing: a refused enqueue (the window tearing down) and a throwing command are both logged
         //             (Rule #18) — the click is lost, nothing else changes.
         void _SidePanelRunMenuCommand(std::wstring_view what, std::function<void(TerminalPage&)> command);
+        // The ⋯ menu's Settings (SIDE_PANEL.md §2i "Settings over the tab"; the user's request of 2026-11-20: "put last a
+        // Settings with cog icon like in agent manager tab. this will open settings in the tab we are at"). On a tab: the
+        // Agent Manager's own cog shown over this window's content area (AgentManagerContent::ShowSettingsOverlayIn) — the
+        // tab stays selected under the dim, never the page; the keyboard goes into the card, and when it closes (Save,
+        // Cancel, a click on the dim) back to where it was before (the terminal: _ReturnKeyboardAfterPanel). On the Agent
+        // Manager page: the page's cog in place, what its ⚙ does — or nothing when it is open already, so the user's
+        // unsaved edits are never refilled. Run one tick after the click (_SidePanelRunMenuCommand), when the menu has
+        // handed the focus back.
+        //   returns - nothing.
+        //   throws  - what reading the focus or the content area throws (hresult_error); _SidePanelRunMenuCommand logs it.
+        //             The cog's own open never throws (ShowSettingsOverlayIn contains and logs its failures).
+        void _SidePanelOpenSettings();
+        // Part of every change of what is on screen (_ApplyAgentTabSelection: a tab switch, a closed tab's successor, the
+        // Agent Manager page shown): a cog that ⋯ ▸ Settings showed over the tab goes back onto the Agent Manager page,
+        // STILL OPEN with its unsaved edits (AgentManagerContent::ParkSettingsOverlay) — the user moved away from the tab
+        // it was over, and the page shows it whenever they come back to it (⋯ ▸ Settings brings it over a tab again). When
+        // the cog held the keyboard as it moved, the keyboard goes to what is on screen now (_FocusCurrentTab).
+        //   reason  - what changed the screen, for the [nav] line ("tab switch", "agent manager page").
+        //   returns - nothing. A cog not over the window: one weak-reference read, nothing else.
+        //   throws  - nothing (logged, Rule #18).
+        void _SidePanelParkSettings(std::wstring_view reason) noexcept;
         // --- The header's "+" LAUNCHER (SIDE_PANEL.md §2e) ---
         // The "+" Click: close the open card, else open it at the press point (or the button, for a Click without a
         // press). Consumes the recorded press. Never throws (the open and the close contain their own failures).

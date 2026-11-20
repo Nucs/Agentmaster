@@ -37,7 +37,10 @@ replaced: 'Scroll to the selected tab' (am.side.scrollToTab, a ToggleMenuFlyoutI
 entries am.side.sort.<active | recent | newest | oldest | alpha>, the settings.json tokens) · a separator (not reported) ·
 'Dock on the right' / 'Dock on the left' (am.side.dock) · 'Collapse the side panel' (am.side.collapse). The panel's own
 methods (scope, toggle_scope, set_scope, flip_dock, collapse) work on both header shapes: through the ⋯ menu when the
-build has it, through the old buttons otherwise.
+build has it, through the old buttons otherwise. A build of 2026-11-20 or later (NOT BUILT on that day) ends the menu with
+a second separator and 'Settings' (am.side.settings): the Agent Manager's settings card shown OVER the tab on screen
+(SIDE_PANEL.md §2i "Settings over the tab") — the tab stays selected, the card's controls join the window's content tree
+(its title text "Agentmaster Settings", its "Cancel" / "Save" buttons), and the keyboard goes into its first top tab.
 
 The line MIRRORS with the dock (the user's layout of 2026-11-04, a build of that day or later): ⋯ sits at the window's
 edge, so docked right the line reads '+' · 'Sum' · '⋯' (right-aligned) and docked left '⋯' · 'Sum' · '+' (left-aligned),
@@ -117,11 +120,20 @@ strip hides itself and shows while the pointer is near; the status is empty whil
 MORE_ID = "am.side.more"
 """The header's ⋯ button (a build with the ⋯ menu, SIDE_PANEL.md §2i) by AutomationId."""
 MORE_ITEM_IDS = {"dock": "am.side.dock", "scroll": "am.side.scrollToTab", "scope": "am.side.scope",
-                 "order": "am.side.sort", "collapse": "am.side.collapse"}
-"""The ⋯ menu's items by what they do -> their AutomationIds (the ids of the header buttons they replaced)."""
-MORE_ITEM_ORDER = ["scroll", "scope", "order", "dock", "collapse"]
+                 "order": "am.side.sort", "collapse": "am.side.collapse", "settings": "am.side.settings"}
+"""The ⋯ menu's items by what they do -> their AutomationIds (the ids of the header buttons they replaced; Settings' is new,
+2026-11-20)."""
+MORE_ITEM_ORDER = ["scroll", "scope", "order", "dock", "collapse", "settings"]
 """The ⋯ menu's items top to bottom (the user's order of 2026-11-04: the dock moved below the separator, before the
-collapse; the separator after the card order is not reported). The 2026-11-03 build listed the dock first."""
+collapse; Settings last, below a second separator, since 2026-11-20 — a build before that ends with the collapse; the
+separators are not reported). The 2026-11-03 build listed the dock first."""
+SETTINGS_CARD_TITLE = "Agentmaster Settings"
+"""The settings card's title text (a text element in the window's content tree while the card shows — over the Agent
+Manager page from its ⚙, or over the tab on screen from ⋯ ▸ Settings; a closed card is out of the tree)."""
+SETTINGS_TAB_NAMES = ("Sessions", "Presets", "Prompt Queue Runner", "Behavior", "Commands", "Notifications", "Messaging",
+                      "Tabs & Overlay", "Claude", "About")
+"""The settings card's top tabs (buttons named by their words), left to right: a fresh open shows the first and puts the
+keyboard on it when the card opens over a tab."""
 FUNNEL_ID = "am.side.funnel"
 """The header's filter button (the funnel, SIDE_PANEL.md §2l; a build of 2026-11-08 or later) by AutomationId."""
 FILTER_BOX_ID = "am.side.filter"
@@ -504,6 +516,45 @@ class SidePanel:
             self.button("⇄").click()
         return wait_until(lambda: (lambda s: s if s == want else None)(self.dock_side()), 5.0,
                           what=f"the panel docked {want}", describe=self.dock_side)
+
+    def settings_card(self) -> Optional[uia.Element]:
+        """The settings card's title text while the card is on screen in this window — over the tab (⋯ ▸ Settings) or
+        over the Agent Manager page (its ⚙) alike; a closed card, or one left open on a page that is not shown, is out
+        of the tree.
+
+        Returns:
+            The title element, or None.
+        """
+        return self.window.content().find(role="text", name=SETTINGS_CARD_TITLE)
+
+    def settings_button(self, name: str) -> uia.Element:
+        """One of the open settings card's buttons by its words ("Cancel", "Save", a top tab's name).
+
+        Args:
+            name: The button's name.
+        Returns:
+            The button.
+        Raises:
+            LookupError: When no such button is on screen, or more than one (another surface's button of that name would
+                make the click ambiguous).
+        """
+        found = self.window.content().find_all(role="button", name=name)
+        if len(found) != 1:
+            raise LookupError(f"{len(found)} buttons named {name!r} in the window (the settings card must show exactly one)")
+        return found[0]
+
+    def open_settings(self) -> uia.Element:
+        """⋯ ▸ Settings (a build of 2026-11-20 or later): the Agent Manager's settings card over the tab on screen — or,
+        on the Agent Manager page, the page's own card.
+
+        Returns:
+            The card's title element, once it shows.
+        Raises:
+            LookupError: As choose_more (a build without the item: no 'am.side.settings' in the menu).
+            WaitTimeout: When no card showed.
+        """
+        self.choose_more(MORE_ITEM_IDS["settings"])
+        return wait_until(self.settings_card, 10.0, what="the settings card")
 
     def sum_on(self) -> bool:
         """Whether Sum is on (the summary shows under the cards).

@@ -26,6 +26,7 @@
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
 #include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor — the cog's "status flashing color" picker <-> AppSettings::flashRingColor
 #include "AgentModelPrompt.h" // AgentBuildSpecifyModelCard — the shared "Specify a model..." prompt this content hosts
+#include "AgentPanelFocus.h" // AgentPanelHoldsKeyboard — the cog shown over the window's tab hands the keyboard back as it closes (SIDE_PANEL.md §2i)
 
 // Agentmaster (launch-model picker -> "Specify..."): the successor-model combos' sentinel id for
 // their "Specify..." row. A control character prefix keeps it disjoint from every real model id
@@ -796,6 +797,11 @@ namespace winrt::TerminalApp::implementation
         card.Tapped([](const IInspectable&, const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs& e) {
             e.Handled(true);
         });
+        // Agentmaster (SIDE_PANEL.md §2i "Settings over the tab"): Tab and Shift+Tab CYCLE inside the card — past Save they
+        // come back to the first top tab — instead of walking out of the modal into whatever its dim covers: the Agent
+        // Manager page's controls here, and over the window's tab (ShowSettingsOverlayIn) the side panel's filter box and the
+        // tab strip, where the keyboard would vanish from sight (the terminal itself is kept out by the column's focus guard).
+        card.TabFocusNavigation(KeyboardNavigationMode::Cycle);
 
         // Agentmaster: the cog is organized into TOP TABS — a horizontal button-tab strip swapping one
         // scrollable panel per settings group (the _SwitchEnvTab idiom; deliberately NOT a Pivot, which
@@ -2811,10 +2817,14 @@ namespace winrt::TerminalApp::implementation
                 dot.Stroke(SolidColorBrush{ ColorHelper::FromArgb(0xFF, 0x20, 0x20, 0x20) }); // dark ring -> visible on any part of the gradient
                 dot.StrokeThickness(1.5);
                 Canvas::SetTop(dot, (kOverlayTrackH - kOverlayThumb) / 2.0);
-                // Drag (the splitter idiom): pin the root-relative X + this dot's value at press, derive
+                // Drag (the splitter idiom): pin the track-relative X + this dot's value at press, derive
                 // the new value from the delta on move, clamp to [0,1] AND to the other dot (no crossing).
+                // Agentmaster (SIDE_PANEL.md §2i): measured against the dot's own TRACK, not _root — the cog
+                // can be shown over the window's tab, where _root (the hidden Agent Manager page) is out of
+                // the live tree, and a point relative to an element outside the pointer's tree is not one
+                // the drag can trust. The track never moves during a drag, so the delta is the same.
                 dot.PointerPressed([this, isRest](const IInspectable& s, const PointerRoutedEventArgs& e) {
-                    if (!_root)
+                    if (!_overlayOpacityTrack)
                     {
                         return;
                     }
@@ -2826,7 +2836,7 @@ namespace winrt::TerminalApp::implementation
                     {
                         _overlayDragHover = true;
                     }
-                    _overlayDragStartX = e.GetCurrentPoint(_root).Position().X;
+                    _overlayDragStartX = e.GetCurrentPoint(_overlayOpacityTrack).Position().X;
                     _overlayDragStartVal = isRest ? _overlayRestVal : _overlayHoverVal;
                     if (const auto el = s.try_as<UIElement>())
                     {
@@ -2835,11 +2845,11 @@ namespace winrt::TerminalApp::implementation
                     e.Handled(true);
                 });
                 dot.PointerMoved([this, isRest](const IInspectable&, const PointerRoutedEventArgs& e) {
-                    if ((isRest && !_overlayDragRest) || (!isRest && !_overlayDragHover) || !_root)
+                    if ((isRest && !_overlayDragRest) || (!isRest && !_overlayDragHover) || !_overlayOpacityTrack)
                     {
                         return;
                     }
-                    const double cur = e.GetCurrentPoint(_root).Position().X;
+                    const double cur = e.GetCurrentPoint(_overlayOpacityTrack).Position().X; // the press's reference element (above)
                     double v = _overlayDragStartVal + (cur - _overlayDragStartX) / (kOverlayTrackW - kOverlayThumb);
                     v = std::clamp(v, 0.0, 1.0);
                     if (isRest)
@@ -3264,6 +3274,24 @@ namespace winrt::TerminalApp::implementation
         if (!_settingsOverlay)
         {
             return;
+        }
+        // Agentmaster (SIDE_PANEL.md §2i "Settings over the tab"): an open on THIS page (its ⚙, ShowSettingsOverlay) shows the
+        // cog here, but a cog last shown over the window's tab may still sit in the window's panel, closed: its close leaves
+        // it there, because moving it out of the tree inside its own Save / Cancel Click or its dim's Tapped is the
+        // tree-change-in-a-pointer-handler this code avoids. ShowSettingsOverlayIn sets the window's panel BEFORE it calls
+        // here, so its own open is never pulled back. A layer already home stays where it is (no tree change at all).
+        if (!_SettingsForeignHost())
+        {
+            try
+            {
+                _ReturnSettingsLayersHome();
+            }
+            catch (...)
+            {
+                // Contained: this runs straight off the ⚙ Click, where an escaped exception ends the process. The cog then
+                // opens where it sits (over the window's content area: still usable, Save / Cancel close it). Rule #18.
+                AgentLogCaughtException(L"_ShowSettings: bringing the cog back onto the Agent Manager page");
+            }
         }
         // Populate every control from the current settings before revealing.
         if (_setSkipPermissions)
@@ -4187,6 +4215,31 @@ namespace winrt::TerminalApp::implementation
 
     void AgentManagerContent::_HideSettings()
     {
+        // Agentmaster (SIDE_PANEL.md §2i "Settings over the tab"): a close of the cog shown over the window's tab ends that
+        // stay. Two things must be read and done BEFORE the collapse:
+        //   - whether the cog holds the keyboard: the collapse moves the focus at once, to whatever the focus manager finds
+        //     next in the window (AgentPanelFocus.h, fact 3), and the answer is lost after it;
+        //   - forget the window's panel: the terminal column's focus guard reads it (SettingsOverWindowFocusTarget), and the
+        //     keyboard is about to go back to that column — a guard still up would send it into a collapsed card.
+        // The layer itself stays in the window's panel, collapsed: moving it now would take it out of the tree inside its
+        // own Save / Cancel Click or its dim's Tapped. The next open moves it (_ShowSettings, ShowSettingsOverlayIn).
+        std::function<void(bool)> closedOverWindow;
+        bool heldKeyboard = false;
+        if (_SettingsForeignHost())
+        {
+            try
+            {
+                heldKeyboard = _settingsOverlay && AgentPanelHoldsKeyboard(_settingsOverlay.XamlRoot(), _settingsOverlay);
+            }
+            catch (...)
+            {
+                // The XamlRoot read failed (never in practice): the keyboard is then left where the collapse puts it, the
+                // behavior before the keyboard was handed back at all. Rule #18.
+                AgentLogCaughtException(L"_HideSettings: does the cog over the window hold the keyboard");
+            }
+            closedOverWindow = std::exchange(_settingsForeignClosed, nullptr);
+            _settingsForeignHost = nullptr;
+        }
         if (_settingsOverlay)
         {
             _settingsOverlay.Visibility(Visibility::Collapsed);
@@ -4194,6 +4247,312 @@ namespace winrt::TerminalApp::implementation
         // Drop the sticky description (and its hover throttle) with the card — the next open
         // starts hidden-until-hover and re-hovering the same control re-renders.
         _settingsLocalTip.Hide();
+        if (closedOverWindow)
+        {
+            try
+            {
+                // The window gives the keyboard back to where it was before the cog took it (the terminal), when the cog
+                // still held it — a Save, a Cancel, a click on the dim.
+                closedOverWindow(heldKeyboard);
+            }
+            catch (...)
+            {
+                // The close already happened; only the keyboard's way back is lost (a click puts it anywhere). Rule #18.
+                AgentLogCaughtException(L"_HideSettings: the window's callback after the cog over its tab closed");
+            }
+        }
+    }
+
+    // ---- The cog shown over the WINDOW (SIDE_PANEL.md §2i "Settings over the tab") ----------------------------------------
+    // The side panel's ⋯ ▸ Settings (TerminalPage::_SidePanelOpenSettings) shows THIS cog over the tab on screen: its layer
+    // moves out of _root into the window's content area for the stay, and comes back to _root when it is shown on this page
+    // again (_ShowSettings) or parked (ParkSettingsOverlay). AgentManagerContent.h has each member's contract.
+
+    void AgentManagerContent::ShowSettingsOverlayIn(const Panel& host, std::function<void(bool)> closed)
+    {
+        if (!_settingsOverlay || !host || !_root)
+        {
+            return; // nothing built yet, or nowhere to show it: the click does nothing
+        }
+        if (_SettingsForeignHost() && IsSettingsOverlayOpen())
+        {
+            // Already over the window. A pointer cannot ask twice (the dim covers ⋯), but UI Automation's Invoke can: the
+            // keyboard goes back into the card, and the first open's `closed` — which knows where the keyboard came from
+            // before the cog took it — keeps owning the close; this call's would only know the cog itself.
+            _QueueSettingsKeyboardIn();
+            return;
+        }
+        // Open already = left open on this page (the user left the page with it open, or a tab switch parked it): it moves
+        // over with its unsaved edits and is NOT refilled — a refill would drop them.
+        const bool wasOpen = IsSettingsOverlayOpen();
+        try
+        {
+            // LAST child of the window's panel: over the terminal, the splitter, the side panel and its floating strip.
+            _MoveSettingsLayer(_settingsOverlay, host, -1);
+            // Set BEFORE _ShowSettings: an open with no window panel would pull the cog straight back onto this page.
+            _settingsForeignHost = winrt::make_weak(host);
+            _settingsForeignClosed = std::move(closed);
+            if (!wasOpen)
+            {
+                _ShowSettings(); // every control filled from the settings, the first top tab, then shown
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: no stay over the window — the column's focus guard must never point at a cog that is not on
+            // screen — and the cog back in _root (open on this page if it got that far, where its buttons still close it).
+            AgentLogCaughtException(L"ShowSettingsOverlayIn: the cog could not be shown over the window");
+            _settingsForeignHost = nullptr;
+            _settingsForeignClosed = nullptr;
+            try
+            {
+                _ReturnSettingsLayersHome();
+            }
+            catch (...)
+            {
+                AgentLogCaughtException(L"ShowSettingsOverlayIn: putting the cog back on its page after the failed open");
+            }
+            return;
+        }
+        _QueueSettingsKeyboardIn();
+    }
+
+    bool AgentManagerContent::IsSettingsOverlayOpen() const noexcept
+    {
+        try
+        {
+            return _settingsOverlay && _settingsOverlay.Visibility() == Visibility::Visible;
+        }
+        catch (...)
+        {
+            AgentLogCaughtException(L"IsSettingsOverlayOpen"); // a property read on the UI thread: never in practice. Rule #18.
+            return false;
+        }
+    }
+
+    Control AgentManagerContent::SettingsOverWindowFocusTarget() const noexcept
+    {
+        try
+        {
+            // Both conditions, so the guard can never send the keyboard to a card that is not on screen: a stay whose layer
+            // was collapsed by a path that did not end the stay (none today) answers null too.
+            if (!_SettingsForeignHost() || !IsSettingsOverlayOpen())
+            {
+                return nullptr;
+            }
+            return _SettingsKeyboardTarget();
+        }
+        catch (...)
+        {
+            AgentLogCaughtException(L"SettingsOverWindowFocusTarget"); // the guard then lets the column take the keyboard. Rule #18.
+            return nullptr;
+        }
+    }
+
+    bool AgentManagerContent::ParkSettingsOverlay(bool& heldKeyboard) noexcept
+    {
+        heldKeyboard = false;
+        if (!_SettingsForeignHost())
+        {
+            return false; // not over the window: the cost of every tab switch is this one weak-reference read
+        }
+        try
+        {
+            // Asked BEFORE the move: moving the layer that holds the focus out of the window's panel moves the focus at once.
+            // The cog, or the "Specify a model" prompt it opened over itself (a sibling layer in the same panel, moving home
+            // with it): either one holding the keyboard means the keyboard leaves with them.
+            if (_settingsOverlay)
+            {
+                const auto root = _settingsOverlay.XamlRoot();
+                heldKeyboard = AgentPanelHoldsKeyboard(root, _settingsOverlay) ||
+                               (_specifyModelOverlay && AgentPanelHoldsKeyboard(root, _specifyModelOverlay));
+            }
+        }
+        catch (...)
+        {
+            AgentLogCaughtException(L"ParkSettingsOverlay: does the cog hold the keyboard"); // answered "no". Rule #18.
+        }
+        // The stay ends first: the column's focus guard stands down (the caller hands the keyboard to what is on screen now),
+        // and `closed` is dropped uncalled — the cog did not close, it waits on this page with its edits.
+        _settingsForeignHost = nullptr;
+        _settingsForeignClosed = nullptr;
+        try
+        {
+            _ReturnSettingsLayersHome();
+        }
+        catch (...)
+        {
+            // The cog stays over the window, still open and closable by its own buttons; only the guard is gone. Rule #18.
+            AgentLogCaughtException(L"ParkSettingsOverlay: moving the cog back onto the Agent Manager page");
+        }
+        return true;
+    }
+
+    Panel AgentManagerContent::_SettingsForeignHost() const noexcept
+    {
+        return _settingsForeignHost.get(); // empty, or the panel gone with its window: null — "this page"
+    }
+
+    void AgentManagerContent::_MoveSettingsLayer(const UIElement& layer, const Panel& target, int32_t index)
+    {
+        if (!layer || !target)
+        {
+            return;
+        }
+        const auto children = target.Children();
+        uint32_t at = 0;
+        if (children.IndexOf(layer, at))
+        {
+            // Already there. Done, unless it must be on top and something was appended after it since (the "Specify a model"
+            // prompt it opened over itself on an earlier stay, still sitting there collapsed).
+            if (index >= 0 || at + 1 == children.Size())
+            {
+                return;
+            }
+            children.RemoveAt(at);
+            children.Append(layer);
+            return;
+        }
+        // In another panel (_root, or the window's): out of it first — XAML gives an element one parent, and Append of a
+        // parented element throws.
+        if (const auto parent = VisualTreeHelper::GetParent(layer))
+        {
+            const auto panel = parent.try_as<Panel>();
+            if (!panel)
+            {
+                // Never built that way (both layers are only ever Panel children); refuse rather than orphan the layer.
+                throw winrt::hresult_error(E_UNEXPECTED, L"a settings layer's parent is not a Panel");
+            }
+            uint32_t from = 0;
+            if (panel.Children().IndexOf(layer, from))
+            {
+                panel.Children().RemoveAt(from);
+            }
+        }
+        if (index >= 0 && static_cast<uint32_t>(index) < children.Size())
+        {
+            children.InsertAt(static_cast<uint32_t>(index), layer);
+        }
+        else
+        {
+            children.Append(layer);
+        }
+    }
+
+    void AgentManagerContent::_ReturnSettingsLayersHome()
+    {
+        if (!_root)
+        {
+            return;
+        }
+        const auto children = _root.Children();
+        uint32_t at = 0;
+        if (_settingsOverlay && !children.IndexOf(_settingsOverlay, at))
+        {
+            // Its place since _BuildLayout: BELOW the two modals that open over it — the "Claude not detected" gate (built
+            // right after it) and the "Specify a model" prompt (appended at its first use) — so either still draws on top.
+            // Appended last, it would cover them: the cog's Commands tab's "Specify…" would open UNDER the cog.
+            int32_t below = static_cast<int32_t>(children.Size()); // neither in _root: the end
+            for (const auto& over : { _claudeMissingOverlay, _specifyModelOverlay })
+            {
+                uint32_t overAt = 0;
+                if (over && children.IndexOf(over, overAt) && static_cast<int32_t>(overAt) < below)
+                {
+                    below = static_cast<int32_t>(overAt);
+                }
+            }
+            _MoveSettingsLayer(_settingsOverlay, _root, below);
+        }
+        if (_specifyModelOverlay && !children.IndexOf(_specifyModelOverlay, at))
+        {
+            // The prompt the cog opened over itself while it was over the window: back to its usual place, the end.
+            _MoveSettingsLayer(_specifyModelOverlay, _root, static_cast<int32_t>(children.Size()));
+        }
+    }
+
+    winrt::Windows::UI::Xaml::XamlRoot AgentManagerContent::_DialogXamlRoot() const
+    {
+        if (_settingsOverlay && _SettingsForeignHost())
+        {
+            if (const auto root = _settingsOverlay.XamlRoot())
+            {
+                return root; // the cog over the window is in the live tree; _root usually is not (the page is hidden)
+            }
+        }
+        return _root ? _root.XamlRoot() : nullptr;
+    }
+
+    void AgentManagerContent::_PlaceSpecifyModelLayer()
+    {
+        if (!_specifyModelOverlay)
+        {
+            return;
+        }
+        if (const auto host = _SettingsForeignHost())
+        {
+            _MoveSettingsLayer(_specifyModelOverlay, host, -1); // over the cog, in the window's panel
+            return;
+        }
+        if (_root)
+        {
+            uint32_t at = 0;
+            if (!_root.Children().IndexOf(_specifyModelOverlay, at))
+            {
+                // Left in the window's panel by an earlier stay over the window: home, at the end (over the page and the cog).
+                _MoveSettingsLayer(_specifyModelOverlay, _root, -1);
+            }
+        }
+    }
+
+    Control AgentManagerContent::_SettingsKeyboardTarget() const
+    {
+        const auto count = static_cast<int>(_settingsTabButtons.size());
+        if (_settingsActiveTab >= 0 && _settingsActiveTab < count && _settingsTabButtons[static_cast<size_t>(_settingsActiveTab)])
+        {
+            return _settingsTabButtons[static_cast<size_t>(_settingsActiveTab)];
+        }
+        for (const auto& button : _settingsTabButtons)
+        {
+            if (button)
+            {
+                return button;
+            }
+        }
+        return nullptr;
+    }
+
+    void AgentManagerContent::_QueueSettingsKeyboardIn()
+    {
+        if (!_dispatcher)
+        {
+            return;
+        }
+        // Weak: the tick may run after the window closed. TryEnqueue's refusal (a queue shutting down) just drops the focus move.
+        _dispatcher.TryEnqueue([weak = get_weak()]() {
+            const auto self = weak.get();
+            if (!self)
+            {
+                return;
+            }
+            try
+            {
+                // Asked again at the tick: a close or a park since the open ends the stay, and the keyboard then stays where
+                // those put it.
+                if (const auto target = self->SettingsOverWindowFocusTarget())
+                {
+                    if (!target.Focus(FocusState::Programmatic))
+                    {
+                        AppendStateLog(L"hooks.log", L"[focus] Agentmaster settings over the tab: its top tab refused the keyboard (the terminal column's guard still keeps it from the terminal)\n");
+                    }
+                }
+            }
+            catch (...)
+            {
+                // A throw escaping a dispatcher item is a crash: contained. The guard still keeps the terminal from taking
+                // the keyboard. Rule #18.
+                AgentLogCaughtException(L"_QueueSettingsKeyboardIn: the keyboard into the cog over the tab");
+            }
+        });
     }
 
     std::vector<std::wstring> AgentManagerContent::_BundledModsOffFromSwitches() const
@@ -7660,6 +8019,11 @@ namespace winrt::TerminalApp::implementation
                     });
                     _root.Children().Append(_specifyModelOverlay);
                 }
+                // Agentmaster (SIDE_PANEL.md §2i "Settings over the tab"): opened by the cog's Commands tab while the cog is
+                // shown over the window's tab, the prompt must show OVER the cog — in the window's panel; in _root it would
+                // open on the hidden Agent Manager page, and the click on "Specify…" would seem to do nothing. Opened from
+                // this page, it goes (back) into _root.
+                _PlaceSpecifyModelLayer();
                 auto built = AgentBuildSpecifyModelCard(seed, ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), [this, onPicked](winrt::hstring id) {
                     _HideSpecifyModel();
                     if (!id.empty())
@@ -7691,8 +8055,41 @@ namespace winrt::TerminalApp::implementation
     {
         if (_specifyModelOverlay)
         {
+            // Agentmaster (SIDE_PANEL.md §2i "Settings over the tab"): over the window's tab, the prompt sits on the cog, and
+            // the cog on a terminal. Closing the prompt with the keyboard in it drops the focus wherever the focus manager
+            // finds a next element (AgentPanelFocus.h, fact 3) — the side panel under the dim, the tab strip. So, asked
+            // BEFORE the collapse: when the prompt holds the keyboard, it goes back into the cog. On this page the focus
+            // manager's pick stays as it was (no terminal lies under the page).
+            bool keyboardBackToCog = false;
+            if (_SettingsForeignHost())
+            {
+                try
+                {
+                    keyboardBackToCog = AgentPanelHoldsKeyboard(_specifyModelOverlay.XamlRoot(), _specifyModelOverlay);
+                }
+                catch (...)
+                {
+                    AgentLogCaughtException(L"_HideSpecifyModel: does the prompt over the cog hold the keyboard"); // answered "no". Rule #18.
+                }
+            }
             _specifyModelOverlay.Visibility(Visibility::Collapsed);
             _specifyModelOverlay.Children().Clear(); // release the card (and its captured callback)
+            if (keyboardBackToCog)
+            {
+                try
+                {
+                    if (const auto target = SettingsOverWindowFocusTarget()) // null when the cog is gone meanwhile
+                    {
+                        target.Focus(FocusState::Programmatic);
+                    }
+                }
+                catch (...)
+                {
+                    // The keyboard stays where the collapse put it; the terminal column's guard still keeps it from the
+                    // terminal under the cog. Rule #18.
+                    AgentLogCaughtException(L"_HideSpecifyModel: the keyboard back into the cog over the tab");
+                }
+            }
         }
     }
 

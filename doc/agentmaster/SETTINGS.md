@@ -8,6 +8,10 @@ engine init (`SetSettings`) and saved by `SetSettingsHandler`.
 The ⚙ on the Agent Manager toolbar opens the editor: an in-content modal overlay over the page (a
 dimmed `Grid` over `_root`; a `ContentDialog`'s text boxes get no keys under XAML Islands). While it is
 open, the hovered control's tooltip renders in a fixed panel left of the card (`AgentLocalTooltip`).
+The side panel's `⋯` ▸ **Settings** opens the same editor over the tab on screen instead: the one overlay moves into the
+window's content area for that stay and comes back to the page afterwards (`ShowSettingsOverlayIn`; SIDE_PANEL.md §2i
+*Settings over the tab*). The tab row's `▾` and the `+` launcher's footer ("Agentmaster settings") show the page, then its
+editor. Tab and Shift+Tab cycle inside the card.
 
 ## The cog's tabs
 

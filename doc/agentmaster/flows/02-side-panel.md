@@ -19,7 +19,8 @@ menu hangs from ⋯'s outer edge, and the dock item sits below the separator, ju
 tip waits 3 s like the buttons'. 2026-11-07 (NOT BUILT): a card's Open New Session Here and Fork session open the new tab
 right after the card's tab, in that tab's window (SP-12). 2026-11-18 (NOT BUILT): a card's Rename opens a floating rename
 card under the card, and its rename reaches the tab, every window and the Telegram topic (SP-18; it did nothing visible
-before: SP-K4).
+before: SP-K4). 2026-11-20 (NOT BUILT): the ⋯ menu ends with **Settings**, the Agent Manager's settings card over the tab
+on screen — the tab stays, the keyboard goes into the card and back (SP-19).
 
 ## Lifecycle model
 
@@ -416,8 +417,8 @@ of its text and the current state in its text or its check; each item does exact
    named "More options" (`am.side.more`); its tip opens after 3 s.
 2. **The menu.** *Do:* click ⋯. *Expect:* below the button, its left edge on ⋯'s, inside the panel: `Scroll to the
    selected tab` (checked: ⌖ is on by default) · `Card scope: LOCAL ›` · `Card order: MOST ACTIVE ›` · a separator · `Dock
-   on the right` · `Collapse the side panel`. *Do:* Esc. *Expect:* the menu closes and nothing changed (no keystroke
-   reached the terminal).
+   on the right` · `Collapse the side panel` · (2026-11-20, NOT BUILT) a separator · `Settings` (SP-19). *Do:* Esc.
+   *Expect:* the menu closes and nothing changed (no keystroke reached the terminal).
 3. **Card scope.** *Do:* ⋯ ▸ Card scope ▸ GLOBAL. *Expect:* the count line `… across all windows`; the next open reads
    `Card scope: GLOBAL` with GLOBAL checked. LOCAL again restores the count line.
 4. **Card order.** *Do:* ⋯ ▸ Card order ▸ NEWEST, then OLDEST. *Expect:* the cards re-sort at once (t2 above t1, then t1
@@ -792,6 +793,48 @@ SP-K4 was the defect it replaces.
 - **E6 A second Rename** → Rename on another card while one is open renames the first (`another session's rename`), then opens
   the second.
 - **E7 The panel collapsed** while the card is open (⋯ ▸ Collapse) → the click on ⋯ renames and closes it.
+
+---
+
+### SP-19 · ⋯ ▸ Settings opens the settings over the tab
+
+> **Since** 2026-11-20 (NOT BUILT) · **P1** · **Needs** F-S2 · **Spec** SIDE_PANEL.md §2i *Settings over the tab*
+
+**Promise.** The ⋯ menu's last item, **Settings** (the Agent Manager's `⚙` glyph, after its own separator), opens
+Agentmaster's settings card OVER the tab on screen: everything below the tab row dims, the tab stays selected, the Agent
+Manager page never shows. The keyboard goes into the card, so nothing typed — an Esc above all — reaches the claude under
+it; Save, Cancel or a click on the dim close it and give the keyboard back to the terminal. A tab switch takes the card off
+the screen with its tab: it waits on the Agent Manager page, still open with its edits. On the page itself, the item is
+the page's own `⚙`.
+
+**Phases**
+1. **The item.** *Do:* open ⋯. *Expect:* the last item, after a separator, is `Settings` (`am.side.settings`) with the cog
+   icon left of it; its tip opens after 3 s.
+2. **Over the tab.** *Do:* with t1 shown and its turn held running, ⋯ ▸ Settings. *Expect:* the card ("Agentmaster
+   Settings") centered over a dimmed window — the terminal and the side panel; the tab row bright; t1 still selected, the
+   title t1's, Home not lit; the keyboard on the card's `Sessions` top tab; `[nav] sidepanel settings open over the tab`.
+3. **Nothing reaches claude.** *Do:* type `zz`, press Esc, Tab a few times. *Expect:* the held turn keeps running, Claude's
+   box has no `zz`, the card stays open, the focus never leaves the card (Tab cycles inside it).
+4. **Cancel.** *Do:* click Cancel (or the dim). *Expect:* the card is gone, t1 still on screen, the keyboard back in t1's
+   terminal (a typed letter lands in Claude's box); `[focus] Agentmaster settings over the tab closed: the keyboard went back
+   to the element it came from (…TermControl…)`; `[nav] sidepanel settings closed over the tab`.
+5. **A tab switch parks it.** *Do:* ⋯ ▸ Settings, change a field (do not save), click t2's tab. *Expect:* the card goes,
+   t2's terminal has the keyboard; `[nav] sidepanel settings parked on the agent manager page, still open (tab switch)`.
+   *Do:* Home. *Expect:* the card over the page, the change still in its field. *Do:* ⋯ ▸ Settings. *Expect:* nothing changes
+   (one card, the change kept). *Do:* Cancel.
+
+**Edge cases**
+- **E1 Save** → the settings are saved and applied (as from the page), the card goes, the keyboard back in the terminal.
+- **E2 What the card opens** → Commands ▸ a successor model's "Specify…" opens its prompt OVER the card, and its Esc / Cancel
+  gives the keyboard back to the card; About ▸ Uninstall and the handover definitions' Reinstall show their confirms; the
+  Tabs & Overlay opacity dots drag.
+- **E3 The Sessions page over it** (the tab row's ▾ ▸ Sessions…) → the page opens over the card; closing it shows the card
+  again, the keyboard in the card, not in the terminal.
+- **E4 Reopened over another tab** → after phase 5's tab switch (before Home), ⋯ ▸ Settings on t2 brings the same card back
+  over t2, the change still in it.
+- **E5 On the Agent Manager page** → ⋯ ▸ Settings is the page's `⚙`: the card over the page only (the side panel stays
+  bright and usable).
+- **E6 No hooks.log `[exc]` line** for any of it.
 
 ---
 

@@ -223,7 +223,9 @@ phase 5; SP-K1) · a Shift+Click on a tab starts its session in place and keeps 
 where it was (SP-02 phase 8; SP-K3) · a reopened window's sessions and a Resume here keep their own Prompt Queue Runner
 mode, an interrupt hold included (PQR-15 phase 2, PQR-07 E9, LIF-04 E1; PQR-K8) · the side panel's header is + · Sum · ⋯,
 mirrored with the dock (⋯ · Sum · + docked left, ⋯ always at the window's edge), the ⋯ menu hanging from ⋯'s outer edge
-and holding ⌖, the card scope, the card order, then the dock and the collapse (SP-10; SIDE_PANEL.md §2i) · Telegram's
+and holding ⌖, the card scope, the card order, then the dock and the collapse (SP-10; SIDE_PANEL.md §2i) · the ⋯ menu's
+last item, Settings, opens the Agent Manager's settings card over the tab on screen — the tab stays, the keyboard goes into
+the card and back to the terminal, a tab switch leaves the card open on the Agent Manager page (SP-19) · Telegram's
 `/enter` presses ONE Enter on the prompt waiting in the box, never into a menu, a dialog or an empty box (TGC-07;
 MESSAGING.md §21.47) · a new thread's ➕ message adds more folders to the session, each sent as `/add-dir` with its answer
 chosen before the session starts, and before its first prompt (TGS-06; MESSAGING.md §21.25.9) · a side-panel card's menu
@@ -415,7 +417,8 @@ stalled the app's UI thread) — reruns `pqr6`–`pqr8`.
 | SP-05 | phases 1, 3, 4, 5, E3 (phase 5: `needs_fix`, a build with the launcher panel — TAB-12; its SP-K1 test of the card's old hover menu was replaced 2026-11-14) | `…::test_plus_launcher_card`, `…::test_plus_card_launch_has_no_hover_menu_and_takes_one_click` |
 | TAB-12 | phases 1–6 (`needs_fix`: a build with the launcher, 2026-11-14; written then, never run) | `test_launcher.py::test_strip_plus_opens_the_launcher_on_the_focused_tab`, `…::test_ctrl_shift_t_opens_the_launcher`, `…::test_kind_chip_opens_a_shell_and_is_remembered` |
 | SP-06 | phases 3–5 (through the ⋯ menu on a build that has it, the 0.8.x buttons otherwise) | `…::test_collapse_and_dock`, `…::test_panel_state_survives_a_restart` |
-| SP-10 | phases 1–7, E4 (`needs_fix`: a build with the ⋯ menu's 2026-11-04 shape — the mirrored line, the menu on ⋯'s outer edge, the dock below the separator — SP-F1; a 2026-11-03 build fails phases 1, 2 and 6) | `…::test_more_menu_holds_the_header_controls` |
+| SP-10 | phases 1–7, E4 (`needs_fix`: a build with the ⋯ menu's 2026-11-04 shape — the mirrored line, the menu on ⋯'s outer edge, the dock below the separator — SP-F1; a 2026-11-03 build fails phases 1, 2 and 6; since 2026-11-20 phase 2's list ends with Settings, SP-F5, so a build before that fails phase 2) | `…::test_more_menu_holds_the_header_controls` |
+| SP-19 | phases 1–5 (`needs_fix`: a build with ⋯ ▸ Settings over the tab — SP-F5; written 2026-11-20, never run; phase 3's Tab cycling and phase 5's kept field edit are not automated) | `…::test_more_menu_settings_opens_over_the_tab` |
 | SP-11 | phases 1–5 (`needs_fix`: a build with Pin to Top — SP-F2; written 2026-11-06, never run) | `…::test_pin_to_top` |
 | SP-12 | phases 1–2 (`needs_fix`: a build where a card's Open New Session Here / Fork session open next to its tab — SP-F3; written 2026-11-07, never run) | `…::test_card_menu_opens_next_to_its_tab` |
 | SP-16 | phases 1–6 (`needs_fix`: a build with the self-hiding collapsed strip — SP-F4; written 2026-11-12, never run; phase 5 only when the window leaves room at its left) | `…::test_collapsed_strip_hides_itself` |

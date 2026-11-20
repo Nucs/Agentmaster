@@ -8,10 +8,10 @@ import time
 
 import pytest
 
-from amdriver import inputs
+from amdriver import inputs, uia
 from amdriver.session import wait_new_session
 from amdriver.ui.menus import Menu
-from amdriver.ui.sidepanel import HEADER_ORDER, MORE_ITEM_IDS, MORE_ITEM_ORDER, ORDER_TOKENS
+from amdriver.ui.sidepanel import HEADER_ORDER, MORE_ITEM_IDS, MORE_ITEM_ORDER, ORDER_TOKENS, SETTINGS_TAB_NAMES
 from amdriver.waits import hold_true, wait_until
 
 SHELL = "Administrator: Windows PowerShell"
@@ -372,8 +372,9 @@ def test_more_menu_holds_the_header_controls(am, s2):
     and a 2026-11-03 build fails phases 1, 2 and 6 by design: its line does not mirror and its menu lists the dock
     first): docked left the header line is ⋯, Sum and + from the window's edge, docked right its mirror +, Sum, ⋯; the
     ⋯ menu hangs from ⋯'s outer edge and lists ⌖, Card scope ▸, Card order ▸, the dock and the collapse, in that order,
-    each showing the current state in its text or its check; Esc closes it and changes nothing; each item does what its
-    button did — the scope (the count line), the order (the cards and settings.json), ⌖ (settings.json and the check),
+    then Settings last (a build of 2026-11-20 or later: SP-F5 — an older build fails phase 2 on it; SP-19 tests what it
+    does), each showing the current state in its text or its check; Esc closes it and changes nothing; each item does what
+    its button did — the scope (the count line), the order (the cards and settings.json), ⌖ (settings.json and the check),
     the dock (the panel's side, the line's mirror, the menu's edge and the item's words), the collapse (the strip).
 
     Args:
@@ -392,8 +393,8 @@ def test_more_menu_holds_the_header_controls(am, s2):
     #    above the filter box (the AI toggle sits inside the box).
     _assert_header_line(panel, "left")
 
-    # 2. The menu: below ⋯, hanging from its left edge over the panel; five items in the user's order, the state in their
-    #    texts and checks.
+    # 2. The menu: below ⋯, hanging from its left edge over the panel; six items in the user's order (Settings last since
+    #    2026-11-20), the state in their texts and checks.
     menu = panel.open_more_menu()
     _assert_menu_hangs_from_the_outer_edge(panel, menu, "left")
     items = menu.stable_items()
@@ -406,6 +407,7 @@ def test_more_menu_holds_the_header_controls(am, s2):
     assert by_id[MORE_ITEM_IDS["scope"]].is_sub and by_id[MORE_ITEM_IDS["scope"]].name == "Card scope: LOCAL"
     assert by_id[MORE_ITEM_IDS["order"]].is_sub and by_id[MORE_ITEM_IDS["order"]].name == f"Card order: {order_word}"
     assert by_id[MORE_ITEM_IDS["collapse"]].name == "Collapse the side panel"
+    assert by_id[MORE_ITEM_IDS["settings"]].name == "Settings"  # the Agent Manager's cog, last (SP-19)
     # 3. Card scope ▸: LOCAL checked, GLOBAL not; Esc on every level changes nothing.
     sub = menu.submenu(by_id[MORE_ITEM_IDS["scope"]].name)
     assert [(i.el.automation_id, i.el.toggle_state) for i in sub.stable_items()] == \
@@ -461,6 +463,100 @@ def test_more_menu_holds_the_header_controls(am, s2):
     _assert_header_line(panel, "left")
     panel.collapse()
     panel.expand()
+
+
+def _focus_is_terminal() -> bool:
+    """Whether the keyboard focus is in a terminal.
+
+    Returns:
+        True when the focused element is a TermControl.
+    """
+    focused = uia.focused()
+    return focused is not None and focused.class_name == "TermControl"
+
+
+def _focus_in_settings_card() -> bool:
+    """Whether the keyboard focus is on one of the settings card's top tabs (where the card puts it as it opens over a
+    tab; the Agent Manager page, which has a "Sessions" button of its own, is not on screen then).
+
+    Returns:
+        True when the focused element is a button named like a top tab.
+    """
+    focused = uia.focused()
+    return focused is not None and focused.role == "button" and focused.name in SETTINGS_TAB_NAMES
+
+
+@pytest.mark.p1
+@pytest.mark.flow("SP-19")
+@pytest.mark.needs_fix("SP-F5")
+def test_more_menu_settings_opens_over_the_tab(am, s2):
+    """SP-19 phases 1–5 (SP-F5, the user's request of 2026-11-20: "put last a Settings with cog icon like in agent manager
+    tab. this will open settings in the tab we are at"; SIDE_PANEL.md §2i "Settings over the tab"; written 2026-11-20,
+    never run): ⋯ ▸ Settings, the menu's last item, opens Agentmaster's settings card OVER the tab on screen — the tab stays
+    selected and the Agent Manager page never shows — with the keyboard in the card, so typed keys and an Esc reach
+    nothing behind it (a held turn goes on, nothing lands in Claude's box). Cancel closes it and the keyboard goes back to
+    the terminal. A tab switch with the card open takes it off the screen with its tab: it waits on the Agent Manager
+    page, still open; there, ⋯ ▸ Settings is the page's own card and changes nothing.
+
+    The turn is HELD at a mock gate while the card is up: an Esc that reached claude would abort its request and the gate
+    would lose its waiter (TCM-05 phase 5's proof).
+
+    Args:
+        am: The app.
+        s2: F-S2 (t1 and t2).
+    """
+    a, _b = s2
+    w = am.window
+    panel = w.side_panel
+    w.tabs.select("t1")
+
+    # 1. The item: the menu's last, named "Settings".
+    menu = panel.open_more_menu()
+    items = menu.stable_items()
+    assert items and items[-1].el.automation_id == MORE_ITEM_IDS["settings"] and items[-1].name == "Settings", \
+        [(i.name, i.el.automation_id) for i in items]
+    menu.close()
+
+    # 2. Over the tab: the card shows, t1 stays selected and the page never shows; the keyboard is on the card's first tab.
+    a.ask('hold for the settings [[mock say "working"; hold gs; reply "done"]]', wait="sent")
+    am.mock.wait_holding("gs", timeout_s=30)
+    a.wait_state("Running", timeout_s=15)
+    panel.open_settings()
+    assert not w.page_showing() and w.tabs.selected().title == "t1"
+    wait_until(_focus_in_settings_card, 5, what="the keyboard on the settings card's top tab", describe=uia.focused)
+
+    # 3. Keys reach nothing behind the card: the typed text is not in Claude's box, and Esc stops no turn (nor closes the
+    #    card: it never did, on the page either).
+    inputs.type_text("zz")
+    inputs.keys("esc")
+    hold_true(lambda: am.mock.gates().get("gs", {}).get("waiting", 0) > 0 and a.state == "Running", 2.0,
+              what="the held turn still running (no Esc reached claude)",
+              describe=lambda: (am.mock.gates().get("gs"), a.state))
+    box = w.terminal.input_box()
+    assert box is None or "zz" not in box.draft, box  # nothing reached Claude's input box
+    assert panel.settings_card() is not None
+
+    # 4. Cancel: the card goes, t1 is still on screen, and the keyboard is back in its terminal.
+    panel.settings_button("Cancel").invoke()
+    wait_until(lambda: panel.settings_card() is None, 5, what="Cancel closes the card")
+    assert not w.page_showing() and w.tabs.selected().title == "t1"
+    wait_until(_focus_is_terminal, 5, what="the keyboard back in the terminal", describe=uia.focused)
+    am.mock.release("gs")
+    a.wait_state("WaitingForInput", timeout_s=30)
+
+    # 5. A tab switch with the card open: the card leaves with t1 and the keyboard goes to t2's terminal; the Agent Manager
+    #    page then shows the card, still open; ⋯ ▸ Settings there keeps that one card; its Cancel closes it.
+    panel.open_settings()
+    w.tabs.select("t2")
+    wait_until(lambda: panel.settings_card() is None, 5, what="the card gone with t1")
+    wait_until(_focus_is_terminal, 5, what="the keyboard in t2's terminal", describe=uia.focused)
+    w.manager.open()
+    wait_until(panel.settings_card, 10, what="the card still open, on the Agent Manager page")
+    panel.choose_more(MORE_ITEM_IDS["settings"])
+    hold_true(lambda: panel.settings_card() is not None and w.page_showing(), 1.0, what="one card, on the page",
+              describe=lambda: (panel.settings_card(), w.page_showing()))
+    panel.settings_button("Cancel").invoke()
+    wait_until(lambda: panel.settings_card() is None, 5, what="Cancel closes it on the page")
 
 
 @pytest.mark.p1

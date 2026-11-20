@@ -16,7 +16,7 @@ symbols (the menu's `«` here and the collapsed strip's `»` — the collapse al
 ┌ tab row ────────────────────────────────────────────────────────────┐
 ├───────────────────────────────┬──┬──────────────────────────────────┤
 │ [⋯][Sum][+][⏷]                │ ▌│                                  │  ← header line 1 (at the window's edge, mirrored with the dock):
-│                               │ ▌│                                  │    ⋯ menu (§2i: ⌖, scope, order, dock, collapse) / summary area (§2d) / + launcher (§2e) / ⏷ filters (§2l)
+│                               │ ▌│                                  │    ⋯ menu (§2i: ⌖, scope, order, dock, collapse, settings) / summary area (§2d) / + launcher (§2e) / ⏷ filters (§2l)
 │ [filter sessions…]            │ ▌│                                  │  ← header line 2: the filter box, full width
 │ 3 of 12 [📁 x ✕][● Running ✕]  │ ▌│        terminal content          │  ← the chips row: ONLY while a filter narrows the list (§2l)
 │ ┌───────────────────────────┐ │ ▌│          (TabContent)            │
@@ -84,7 +84,8 @@ model's answer and its list of sessions instead of the session cards; the summar
   GLOBAL, §2), **Card order ▸** (§2), then below a separator **Dock on the right / left** (`⇄`) and
   **Collapse the side panel**, which gives the panel's whole column back to the terminal. What is left is a
   20 DIP expander strip that FLOATS over the terminal's docked edge and hides itself: it shows while the
-  pointer is within 40 DIPs of it, and its chevron brings the panel back (§2m).
+  pointer is within 40 DIPs of it, and its chevron brings the panel back (§2m). Last, below a second separator,
+  **Settings** (the Agent Manager's cog): Agentmaster's settings card over the tab on screen (§2i *Settings over the tab*).
 - The header is **two lines** (one 2-row grid): the buttons, at the panel's OUTER end (the window's
   edge) and in a line that mirrors with the dock — `⋯ Sum ⏷ +` left-aligned docked left, `+ ⏷ Sum ⋯`
   right-aligned docked right, so `⋯` is always outermost (§2i) and `+` innermost with the funnel beside it (the user's
@@ -1342,6 +1343,8 @@ Docked LEFT (the default):
  │ ───────────────────────────────── │
  │     ⇄  Dock on the right          │    Card order ›: ✓ MOST ACTIVE · MOST RECENT · NEWEST · OLDEST · A–Z
  │     «  Collapse the side panel    │
+ │ ───────────────────────────────── │
+ │     ⚙  Settings                   │    (2026-11-20, NOT BUILT: the Agent Manager's cog over this tab — below)
  └───────────────────────────────────┘
 ```
 
@@ -1356,6 +1359,8 @@ Docked RIGHT (the mirror; the menu hangs from `⋯`'s right edge):
  │ ───────────────────────────────── │
  │     ⇄  Dock on the left           │
  │     »  Collapse the side panel    │
+ │ ───────────────────────────────── │
+ │     ⚙  Settings                   │
  └───────────────────────────────────┘
 ```
 
@@ -1372,9 +1377,12 @@ Docked RIGHT (the mirror; the menu hangs from `⋯`'s right edge):
      worded as where the panel goes.
   5. **Collapse the side panel** (`«` docked left, `»` docked right — toward the docked edge, like the chevron it
      replaced); the strip's chevron brings the panel back.
+  6. a second separator, then **Settings** (`⚙`, 2026-11-20, NOT BUILT) — the Agent Manager's settings card over the tab
+     on screen (*Settings over the tab*, below). Its icon is the Agent Manager page's own `⚙` (the icon font's Setting,
+     U+E713, `SidePanelMenuIconGlyph` — not a Segoe UI Symbol text symbol like the five above).
 
-  Above the separator, the three items that change the card list; below it, the two that move or shrink the panel itself
-  (and the header the menu hangs from).
+  Above the first separator, the three items that change the card list; between the two, the two that move or shrink the
+  panel itself (and the header the menu hangs from); below the second, the app's settings — not about the panel at all.
 - **The line mirrors with the dock** (`_SidePanelApplyHeaderOrder`, run by every `_SidePanelApplyDock`: the panel's
   build — before its first frame, so a left-docked panel is never drawn with the build's docked-right seed —, a dock flip
   here and a settings broadcast that moved the dock): docked right `[ spacer * ][ + ][ Sum ][ ⋯ ]`, docked left
@@ -1407,17 +1415,21 @@ Docked RIGHT (the mirror; the menu hangs from `⋯`'s right edge):
 - **Tooltips:** `⋯` and every item wait `kSidePanelButtonTipDelay` (3 s), the panel buttons' rule (§1).
 - **UI Automation** (E2E_TESTING.md §6.3): `⋯` is `am.side.more`, named "More options"; the items keep the ids of the buttons
   they replaced (`am.side.dock`, `am.side.scrollToTab`, `am.side.scope`, `am.side.sort`, `am.side.collapse` — ids are added,
-  never renamed), and the entries add `am.side.scope.<local|global>` and `am.side.sort.<active|recent|newest|oldest|alpha>`
-  (the settings.json tokens). The e2e driver (`e2e/amdriver/ui/sidepanel.py`) drives both header shapes — the menu when
-  `am.side.more` exists, the 0.8.x buttons otherwise — and reads the line's order by screen position (`header_buttons`,
-  `HEADER_ORDER`), since the tree order does not mirror; the flow is SP-10, its test
-  `test_side_panel.py::test_more_menu_holds_the_header_controls` (`needs_fix("SP-F1")`: it checks the 2026-11-04 shape —
-  the mirrored line in both docks, the menu's outer edge, the new item order — so a 2026-11-03 build fails it by design).
+  never renamed), the entries add `am.side.scope.<local|global>` and `am.side.sort.<active|recent|newest|oldest|alpha>`
+  (the settings.json tokens), and Settings is `am.side.settings` (2026-11-20). The e2e driver
+  (`e2e/amdriver/ui/sidepanel.py`) drives both header shapes — the menu when `am.side.more` exists, the 0.8.x buttons
+  otherwise — and reads the line's order by screen position (`header_buttons`, `HEADER_ORDER`), since the tree order does
+  not mirror; the flow is SP-10, its test `test_side_panel.py::test_more_menu_holds_the_header_controls`
+  (`needs_fix("SP-F1")`: it checks the 2026-11-04 shape — the mirrored line in both docks, the menu's outer edge, the new
+  item order — so a 2026-11-03 build fails it by design; since 2026-11-20 its list ends with Settings, SP-F5, so a build
+  before that fails phase 2 too). Settings itself is SP-19 (below).
 - **Files:** `TerminalPage.AgentSidePanel.cpp` (the button, `_SidePanelFillMoreMenu`, `_SidePanelRunMenuCommand`,
   `_SidePanelApplyHeaderOrder`, `_SidePanelSetScope`, `_SidePanelSetSort`, the `kSidePanel*Glyph` symbols,
-  `kSidePanelOrderChoices`), `TerminalPage.h` (`_sidePanelMoreBtn` replaced four button members on 2026-11-03, and
-  `_sidePanelHeader` — the header grid, kept for the mirror — is new on 2026-11-04: TerminalPage layout changes, so the
-  next build must purge), `AgentManagerContent.{h,Tree.cpp}` (`SetBoardSort`).
+  `kSidePanelOrderChoices`; Settings: `_SidePanelOpenSettings`, `_SidePanelParkSettings`, the terminal column's focus
+  guard in `_InitAgentSidePanel`, `SidePanelMenuIconGlyph`), `TerminalPage.h` (`_sidePanelMoreBtn` replaced four button
+  members on 2026-11-03, and `_sidePanelHeader` — the header grid, kept for the mirror — is new on 2026-11-04: TerminalPage
+  layout changes, so the next build must purge), `AgentManagerContent.{h,Tree.cpp}` (`SetBoardSort`; Settings: the cog's
+  move, `AgentManagerContent.Settings.cpp`), `TerminalPage.AgentEngine.cpp` (the park, in `_ApplyAgentTabSelection`).
 
 **Check after the build** (a purged build: `TerminalPage.h`'s data members changed):
 - Docked left the line reads `⋯ Sum +` from the window's left edge; docked right `+ Sum ⋯` against its right edge; both stay
@@ -1437,6 +1449,111 @@ Docked RIGHT (the mirror; the menu hangs from `⋯`'s right edge):
 - Collapse the side panel: the 20px strip; its chevron restores the panel.
 - Esc closes the menu (and its submenu) without a change; no keystroke reaches the terminal; no
   `[exc] side panel more menu` line in hooks.log.
+
+#### Settings over the tab (2026-11-20, NOT BUILT)
+
+The user's request: "In sidemenu 3 dots, put last a Settings with cog icon like in agent manager tab. this will open
+settings in the tab we are at". The other two ways to Agentmaster's settings outside the Agent Manager page — the tab row
+`▾` menu's and the `+` launcher footer's "Agentmaster settings" — SWITCH to the page and open its cog there; this one keeps
+the tab on screen. Those two are unchanged.
+
+```
+┌ tab row (stays live) ──────────────────────────────────────────────────────┐
+├────────────────────────────────────────────────────────────────────────────┤
+│░░░░░░░░░░░░░░░ the dim: the side panel, the splitter, the terminal ░░░░░░░░░│
+│░░┌ the description panel ┐ ┌ Agentmaster Settings (920 DIP) ───────────┐░░░│
+│░░│ (the hovered control) │ │ [Sessions] Presets  Prompt Queue Runner … │░░░│  ← the keyboard on the first top tab
+│░░└───────────────────────┘ │  …                                        │░░░│
+│░░░░░░░░░░░░░░░░░░░░░░░░░░░░│                    [Reset] [Cancel] [Save]│░░░│
+│░░░░░░░░░░░░░░░░░░░░░░░░░░░░└───────────────────────────────────────────┘░░░│
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+- **It is THE cog, moved — never a copy** (one per window: AgentManagerContent owns it, with every control of its ten
+  tabs and their state). `AgentManagerContent::ShowSettingsOverlayIn(ContentArea(), closed)` moves its overlay layer out of the page's
+  `_root` into the window's `ContentArea` as its LAST child; the layer's own `Row 0 / RowSpan 99 / ColumnSpan 99` make it span
+  the area's three columns, so it dims the terminal, the splitter and the side panel (its collapsed strip included) and its
+  920-DIP card centers in the window — where the card and its description panel (140 DIP left of it) fit better than on the
+  page, whose column the side panel narrows. The tab row stays live: the tab stays selected, `_managerPageVisible` stays
+  false, and the window title stays the tab's.
+- **On the Agent Manager page** the item opens the page's own cog in place, exactly as its `⚙` does
+  (`ShowSettingsOverlay`) — or does nothing when it is open already, so the user's unsaved edits are never refilled.
+- **A fresh open fills every control from the settings** (`_ShowSettings`: the first top tab, the silent update check). A
+  cog left OPEN on the page — the user left the page with it open, or a tab switch parked it (below) — moves over with its
+  unsaved edits and is NOT refilled.
+- **The keyboard** (TCM-K2's class: a keystroke that reaches the terminal under the card goes to claude — an Esc interrupts
+  a running turn, Enter submits its draft):
+  - **into the card at the open** — its active top tab's button, one dispatcher tick after the open
+    (`_QueueSettingsKeyboardIn`); where it was is captured first (`AgentCaptureFocusReturn`; normally the terminal, since
+    `⋯` is `IsTabStop` false and its menu handed the focus back);
+  - **kept out of the terminal while the card shows** — the terminal column's FOCUS GUARD (a `GettingFocus` handler on
+    `TabContent`, handledEventsToo, registered in `_InitAgentSidePanel`): every focus arrival in the column goes into the
+    card instead (`AgentManagerContent::SettingsOverWindowFocusTarget`, null — the guard off — whenever the card is not on
+    screen over the window, so it can never trap the keyboard behind a card nobody sees). It catches what hands the focus
+    to "the current tab" on its own: a tab switch's `_UpdatedSelectedTab`, the command palette or the card's own "Specify a
+    model" prompt closing, the Sessions page closing over the card;
+  - **Tab and Shift+Tab cycle inside the card** (`TabFocusNavigation = Cycle` on the card — on the page too), so they never
+    walk out into what the dim covers;
+  - **back where it was at the close** — Save, Cancel or a click on the dim (`_HideSettings`): the stay ends (the guard
+    off) and the card collapses, then the window's `closed` callback gives the keyboard back when the card still held it
+    (`_ReturnKeyboardAfterPanel`: the terminal it came from, else the current tab; a `[focus] Agentmaster settings over the
+    tab closed: …` line in hooks.log).
+  - **Esc does nothing in the card** (as on the page: the cog has no Esc handling), and reaches nothing behind it.
+- **A change of what is on screen parks it** (`_ApplyAgentTabSelection` → `_SidePanelParkSettings` →
+  `AgentManagerContent::ParkSettingsOverlay`): a tab switch, a closed tab's successor, Home / the Agent Manager page shown,
+  a Deactivate that shows the page — the card goes back onto the Agent Manager page STILL OPEN with its unsaved edits (never
+  a Cancel: what was typed is never lost to a Ctrl+Tab; never a Save: a half-edited form is not committed by a switch).
+  On the page it shows over the page at once; from a tab, the page shows it whenever the user comes back to it, and `⋯` ▸
+  Settings brings it over a tab again. When the card held the keyboard as it moved (the guard kept the switch's own focus
+  move out of the terminal), the keyboard goes to what is on screen now (`_FocusCurrentTab`; `[focus] Agentmaster settings
+  parked: …`). The tab row's `▾` / the launcher footer's "Agentmaster settings" show the page first, which parks a card over
+  a tab, then refill it — their own behavior, unchanged. The Sessions page does NOT park it: it opens OVER the card (a Root
+  child above `ContentArea`), the card waits under it, and the guard keeps the keyboard out of the terminal when the page
+  closes.
+- **Where the layer lives:** while it is over the window, `_settingsForeignHost` (a weak reference to `ContentArea`) and
+  `_settingsForeignClosed` (the window's callback) say so — a close or a park clears both FIRST, before the keyboard moves.
+  A closed card STAYS in `ContentArea`, collapsed: moving it at its own close would take it out of the tree inside its own
+  Save / Cancel Click or its dim's Tapped (the tree-change-in-a-pointer-handler class). The next open moves it:
+  `ShowSettingsOverlayIn` to the window's area, `_ShowSettings` (the page's `⚙`, `ShowSettingsOverlay`) back into `_root` —
+  inserted right BELOW the "Claude not detected" gate and the "Specify a model" prompt (`_ReturnSettingsLayersHome`), its
+  place since `_BuildLayout`, so those two still open over it.
+- **What the card opens follows it** (the page's `_root` is out of the live tree while a tab shows, and an element out of
+  the tree has no `XamlRoot`):
+  - its confirms (`_Confirm` / `_ConfirmChoice`: "Uninstall Agentmaster?", "Enable nightly updates?", the handover
+    definitions' Reinstall) take the card's `XamlRoot` (`_DialogXamlRoot`); their bare `catch (...)` now logs (Rule #18);
+  - its "Specify a model" prompt (the Commands tab's successor-model "Specify…") opens in the window's area OVER the card
+    (`_PlaceSpecifyModelLayer`), and when it closes with the keyboard in it, the keyboard goes back into the card
+    (`_HideSpecifyModel`) — without it the focus manager could drop the keyboard on the side panel or the tab strip;
+  - the Tabs & Overlay tab's opacity slider measures its drag against its own track, not `_root`.
+- **Logs:** `[nav] sidepanel settings open over the tab` / `closed over the tab` / `on the agent manager page` /
+  `parked on the agent manager page, still open (<why>)`; the `[focus]` lines above; failures `[exc] side panel more menu:
+  settings`, `ShowSettingsOverlayIn: …`, `ParkSettingsOverlay: …`, `sidepanel settings: the terminal column's focus guard`.
+- **Purge:** AgentManagerContent gained two data members (`_settingsForeignHost`, `_settingsForeignClosed`): the next
+  build must purge (several commits before this one owe a purge anyway).
+- **Verified without a build:** `cl /Zs` of the 4 changed units and 10 more that include the two changed headers against the
+  release worktree's PCH (`Q:\tmp\am-release-wt`, ad89700e3), and 5 planted errors — one inside each new piece — each
+  failing at its line. The e2e test (SP-19, `needs_fix("SP-F5")`) is written and never run.
+
+**Check after the build** (a purged build):
+- `⋯` ends with a separator and **Settings**, its icon the Agent Manager's `⚙` (the same cog, not a text symbol); its tip
+  waits 3 s.
+- On a Claude tab: ⋯ ▸ Settings shows the card centered in the window, everything below the tab row dimmed (the side panel
+  too); the tab stays selected, the window title stays the tab's, the Home button does not light.
+- The keyboard is on the card's first top tab: typing does nothing, Esc does nothing, and a running turn goes on (nothing
+  reaches claude); Tab cycles inside the card.
+- Hover a control: its description shows in the panel left of the card.
+- Commands tab ▸ a successor model's "Specify…": the prompt opens OVER the card; Esc / Cancel closes it and the keyboard is
+  back in the card.
+- About ▸ Uninstall (Cancel at the confirm) / Claude ▸ the handover definitions' Reinstall: the confirm shows.
+- Tabs & Overlay ▸ drag both opacity dots: they move under the pointer.
+- Cancel, Save, a click on the dim: the card goes, the tab is still on screen, the keyboard back in its terminal (type a
+  letter: it lands in Claude's box); Save applied the change.
+- With the card open: click another tab → the card goes, that tab's terminal has the keyboard; Home → the card is there over
+  the page, the edits kept; ⋯ ▸ Settings there changes nothing; Cancel.
+- Open it over a tab, then ▾ ▸ Sessions…: the Sessions page opens over it; close the page → the card is back over the tab,
+  the keyboard in the card, not the terminal.
+- On the Agent Manager page: ⋯ ▸ Settings opens the page's own cog (the side panel undimmed), exactly as `⚙`.
+- No `[exc]` line for any of it in hooks.log.
 
 ### 2j. Pin to Top — a card's right-click pins it at the top of the list (2026-11-06, NOT BUILT yet)
 

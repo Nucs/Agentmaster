@@ -3273,6 +3273,13 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (the side panel's filters, SIDE_PANEL.md §2l): the funnel's panel and the folder card close with it, for the
         // same reason (the user moved away). A no-op while both are closed.
         _SidePanelCloseFilterSurfaces(L"tab switch");
+        // Agentmaster (the ⋯ menu's Settings, SIDE_PANEL.md §2i "Settings over the tab"): the Agent Manager's cog shown over the
+        // tab the user just left goes back onto the Agent Manager page, STILL OPEN with its unsaved edits — never a Cancel
+        // (what was typed is never lost to a Ctrl+Tab) and never a Save (a half-edited form is not committed by a switch).
+        // On the page (tab null) it shows over the page at once; ⋯ ▸ Settings brings it over a tab again. When it held the
+        // keyboard (the terminal column's guard kept the switch's focus move out of the terminal under it), the keyboard goes
+        // to what is on screen now. noexcept; one weak-reference read when no cog is over the window.
+        _SidePanelParkSettings(tab ? std::wstring_view{ L"tab switch" } : std::wstring_view{ L"agent manager page" });
         // Agentmaster (transcript overlay): "moving a tab closes the overlay" — any change of what is on
         // screen (a tab switch, a close successor, the Agent Manager page shown / left) closes it. A no-op
         // when it isn't open. It also hands focus back to the tab now on screen: the overlay's focus guard

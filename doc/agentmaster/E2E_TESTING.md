@@ -536,7 +536,8 @@ differs from the plan above, and why:
   `am.mgr.queue.{compose,jump,sendNow,add,templates,pullDraft,runner,templateName,templateList}`,
   `am.mgr.queue.row.<promptKey>`, `am.tab.<key>` (the `TabViewItem`; cleared when the tab stops hosting a session),
   `am.badge.<key>.{mode,up,down,folder,mail,copy,pencil}`,
-  `am.side.{launch,filter,sum,scope,sort,scrollToTab,dock,collapse,expand}`, `am.side.card.<key>` (the card's title);
+  `am.side.{launch,filter,sum,scope,sort,scrollToTab,dock,collapse,expand}`, `am.side.settings` (the `⋯` menu's last item,
+  2026-11-20, NOT BUILT), `am.side.card.<key>` (the card's title);
   the launcher (TAB_STRIP.md *The + button: the launcher*, 2026-11-14, NOT BUILT): `am.strip.new` (the tab strip's `+`),
   `am.launcher.kind` (the kind chip, named "What to launch: <kind>"), `am.launcher.{models,presets}` (the pill rows),
   `am.launcher.model.{default,specify,custom,<model id>}`, `am.launcher.preset.{add,<preset id>}` (the lit pill's ItemStatus
@@ -559,7 +560,10 @@ differs from the plan above, and why:
   settings.json tokens) — a menu item exists only while the menu is open. From 2026-11-04 (NOT BUILT) the header line
   mirrors with the dock by moving grid columns, never the header's children (appended `launch` · `sum` · `more`), so
   the tree order need not follow the screen: read the line's order from screen positions (the driver's
-  `header_buttons`);
+  `header_buttons`). From 2026-11-20 (NOT BUILT) the menu ends with a separator and `am.side.settings` ("Settings"): the
+  Agent Manager's settings card over the tab on screen (SIDE_PANEL.md §2i *Settings over the tab*) — its controls then sit
+  in the window's content tree (the title text "Agentmaster Settings", the "Cancel" / "Save" buttons, the top tabs named
+  by their words), the keyboard on its first top tab;
   the side panel's AI search (SIDE_PANEL.md §2h; in dev 0.0.1.42 and production 0.8.0.9): `am.side.ai` (the filter box's
   AI toggle, named by its "AI"; with its view off, its ItemStatus is the toggle's signal — "request running", "answer
   waiting", "failure waiting", none at rest — 2026-11-19, NOT BUILT; the Sessions page's AI toggle carries the same words),

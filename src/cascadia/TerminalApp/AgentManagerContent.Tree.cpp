@@ -2873,11 +2873,17 @@ namespace winrt::TerminalApp::implementation
         {
             try
             {
-                dialog.XamlRoot(_root.XamlRoot());
+                // Agentmaster (SIDE_PANEL.md §2i): the cog's own XamlRoot while it is shown over the window's tab — its
+                // "Uninstall Agentmaster?", "Enable nightly updates?" and Reinstall confirms come from there, and _root (the
+                // hidden page) is then out of the live tree.
+                dialog.XamlRoot(_DialogXamlRoot());
                 dialog.RequestedTheme(_root.ActualTheme());
             }
             catch (...)
             {
+                // The dialog then shows with no XamlRoot or theme of ours (or ShowAsync below refuses it, logged there).
+                // Rule #18: recorded, no longer silent.
+                AgentLogCaughtException(L"_Confirm: the dialog's XamlRoot / theme");
             }
         }
         auto cb = std::move(onYes);
@@ -2918,11 +2924,14 @@ namespace winrt::TerminalApp::implementation
         {
             try
             {
-                dialog.XamlRoot(_root.XamlRoot());
+                // Agentmaster (SIDE_PANEL.md §2i): _Confirm's rule — the cog's XamlRoot while it is shown over the window.
+                dialog.XamlRoot(_DialogXamlRoot());
                 dialog.RequestedTheme(_root.ActualTheme());
             }
             catch (...)
             {
+                // As in _Confirm: the dialog shows without our XamlRoot / theme, or ShowAsync refuses it (logged). Rule #18.
+                AgentLogCaughtException(L"_ConfirmChoice: the dialog's XamlRoot / theme");
             }
         }
         auto p = std::move(onPrimary);
