@@ -1171,29 +1171,17 @@ namespace winrt::TerminalApp::implementation
     // it deliberately excludes: a numbered message that happens to end with ':' (" 1. do this:" — a
     // leading space + digits, so a wrap-ON prompt whose continuation lines are markdown "* " bullets
     // keeps wrapping), "Recap: <text>" / "Tasks:  3 done …" / "Parent: <id>" (text after the colon), and
-    // a session-separator line (it opens with the kSessionSepMark control character, not a letter). The
-    // section a list header opens renders its "* " items single-line + clipped instead of wrapped (see
-    // _SetSummaryContent).
-    static bool IsSummaryListHeader(const std::wstring& line)
+    // a session-separator or compaction line (it opens with the kSessionSepMark / kCompactionMark control
+    // character, not a letter). The section a list header opens renders its "* " items single-line + clipped
+    // instead of wrapped (see _SetSummaryContent).
+    // Agentmaster (2026-11-20): the rule itself is ::Agentmaster::SummaryLineIsListHeader (SummaryConversation.h),
+    // shared with the rich hover card, which draws the same sections one line per item since the owner's pick
+    // that day — one rule, so a section can never be a list on one display and wrap on the other.
+    //   line — one rendered line of the box, without its '\n'.
+    // Returns true for a list header. Never throws.
+    static bool IsSummaryListHeader(const std::wstring& line) noexcept
     {
-        if (line.size() < 2 || line.back() != L':')
-        {
-            return false;
-        }
-        const wchar_t first = line.front();
-        if (!((first >= L'A' && first <= L'Z') || (first >= L'a' && first <= L'z')))
-        {
-            return false;
-        }
-        for (size_t k = 0; k + 1 < line.size(); ++k)
-        {
-            const wchar_t c = line[k];
-            if (!((c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') || c == L' '))
-            {
-                return false;
-            }
-        }
-        return true;
+        return ::Agentmaster::SummaryLineIsListHeader(line);
     }
 
     // Agentmaster (the summary's conversation chain): do two row lists describe the same render — every
@@ -1217,6 +1205,60 @@ namespace winrt::TerminalApp::implementation
             }
         }
         return true;
+    }
+
+    // Agentmaster (the summary's compaction lines, 2026-11-20): the dim labeled rule drawn where a /compact cut the
+    // conversation — [10-px dash][label][dash to the right edge], the session separator's own geometry, font and
+    // colors (_MakeSessionSeparator), so the two marks read as one family inside the Messages list. A plain Grid, not
+    // a Button: nothing on it can be clicked (a compaction has no id to copy and no prompt to jump to), so it shows no
+    // hover or press highlight that would promise one. Its hover text says what the mark means.
+    //   label — the line's text after its kCompactionMark sentinel: SummaryCompactionLabel's
+    //           "compacted · auto · 923k→27k" (or the merged "compacted · auto ×2 · …").
+    // Returns the line's root (the caller wires the summary's context menu onto it and appends it). Throws only
+    // what XAML element creation throws (the caller is on the UI thread).
+    static Grid MakeSummaryCompactionLine(const std::wstring& label)
+    {
+        Grid g{};
+        // A TRANSPARENT brush (not null): the whole width takes the hover tip and the right-click, not only the
+        // dashes and the glyphs.
+        g.Background(Fill(0, 0, 0, 0));
+        g.Margin(ThicknessHelper::FromLengths(0, 3, 0, 3)); // the session separator's spacing
+        {
+            ColumnDefinition lead{};
+            lead.Width(GridLengthHelper::FromPixels(10));
+            ColumnDefinition text{};
+            text.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            ColumnDefinition rest{};
+            rest.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            g.ColumnDefinitions().Append(lead);
+            g.ColumnDefinitions().Append(text);
+            g.ColumnDefinitions().Append(rest);
+        }
+        for (const int column : { 0, 2 })
+        {
+            Border dash{};
+            dash.Height(1);
+            dash.VerticalAlignment(VerticalAlignment::Center);
+            dash.Background(Fill(0x40, 0xFF, 0xFF, 0xFF)); // the section rules' color
+            Grid::SetColumn(dash, column);
+            g.Children().Append(dash);
+        }
+        TextBlock labelText{};
+        labelText.FontFamily(FontFamily{ L"Cascadia Mono" });
+        labelText.FontSize(10);
+        labelText.Foreground(Fill(0xFF, 0x9E, 0x9E, 0x9E)); // dim: a marker, not content
+        labelText.Margin(ThicknessHelper::FromLengths(4, 0, 4, 0));
+        labelText.VerticalAlignment(VerticalAlignment::Center);
+        // No trimming: an Auto column measures its content at infinite width, so a TextTrimming here would never
+        // fire. The label is short by construction instead (SummaryCompactionLabel spells out the numbers of at
+        // most kSummaryCompactionsListed compactions); a panel dragged narrower than it clips it at the edge, as it
+        // clips a session separator's id.
+        labelText.Text(winrt::hstring{ label });
+        Grid::SetColumn(labelText, 1);
+        g.Children().Append(labelText);
+        AgentSetTip(g, winrt::hstring{ L"Claude Code compacted the conversation here: it summarized everything above to free its context.\n"
+                                       L"auto = it ran by itself, manual = /compact; the numbers are the context's tokens before \x2192 after." });
+        return g;
     }
 
     void AgentTabOverlay::_SetSummaryContent(const std::wstring& text)
@@ -1426,6 +1468,8 @@ namespace winrt::TerminalApp::implementation
         //    like "2. foo" can never steal a row (and mis-map "Copy Prompt" / the ▸ jump).
         //  * sepCursor — the next separator row. A kSessionSepMark line is that separator only when it
         //    carries the row's id, so a prompt's own text can never pose as one.
+        // A kCompactionMark line (a compaction row) needs no cursor: it carries its whole label and takes no
+        // number, so the prompt numbering runs straight past it.
         int promptCursor = 0;
         size_t sepCursor = 0;
         // Agentmaster: the section's first line is a bare "<Label>:" LIST header (IsSummaryListHeader —
@@ -1465,6 +1509,16 @@ namespace winrt::TerminalApp::implementation
                 flushSeg(); // close the run above: the separator follows the earlier session's last prompt
                 _summaryStack.Children().Append(_MakeSessionSeparator(_summarySeparatorRows[sepCursor]));
                 ++sepCursor;
+            }
+            else if (!lineStr.empty() && lineStr[0] == kCompactionMark)
+            {
+                // A compaction line (the summary's compaction lines): drawn from its own text — the label rides
+                // the line, so unlike a separator it needs no row back. Only RenderSummaryBox writes the mark
+                // (a lone line it opens), and transcript text never holds \x1D, so a prompt cannot pose as one.
+                flushSeg(); // close the run above: the line follows the last prompt before the compaction
+                const Grid line = MakeSummaryCompactionLine(lineStr.substr(1));
+                _WireSummaryContextMenu(line, -1); // right-click => the shared menu (no "Copy Prompt": not a prompt)
+                _summaryStack.Children().Append(line);
             }
             else if (promptCursor < static_cast<int>(_summaryPromptRows.size()) && ParseSummaryMsgIndex(lineStr) == promptCursor)
             {
@@ -2321,6 +2375,15 @@ namespace winrt::TerminalApp::implementation
                         std::vector<SummaryConversationRow> sepRows;
                         for (const auto& row : rows)
                         {
+                            if (!row.compactions.empty())
+                            {
+                                // A compaction row (the summary's compaction lines) is in neither list: its line
+                                // carries its whole label and takes no number, so nothing is matched back to it —
+                                // and among the prompt rows its empty text would shift every later prompt's
+                                // "Copy Prompt" and ▸ jump onto its neighbor. A changed compaction changes `text`,
+                                // which the rebuild test below compares too.
+                                continue;
+                            }
                             (row.sessionId.empty() ? promptRows : sepRows).push_back(row);
                         }
                         sameRows = SameSummaryRows(promptRows, self->_summaryPromptRows) && SameSummaryRows(sepRows, self->_summarySeparatorRows);

@@ -1225,6 +1225,132 @@ void TestSummaryConversation()
                   classic.find(kSummarySessionSepMark) == std::wstring::npos && classic.find(L"parent one") == std::wstring::npos,
               "summary-box: with no conversation (null, the default) the box is the classic current-part list, unchanged");
     }
+
+    // ---- the summary's compaction lines (2026-11-20, the owner's pick for the summary panel and the hover card) ----
+    // The label pieces, spelled once: " · " between fields, " ×" before a count, "→" between the token counts.
+    const std::wstring dot = L" \x00B7 ";
+    const std::wstring times = L" \x00D7";
+    const std::wstring arrow = L"\x2192";
+    // A compaction's own label, the way SeFormatCompactionLabel writes it: "compacted[ · <trigger>][ · <pre>→<post>]".
+    const auto compactionLabel = [&](const std::wstring& trigger, const std::wstring& pre, const std::wstring& post) {
+        std::wstring l = L"compacted";
+        if (!trigger.empty())
+        {
+            l += dot + trigger;
+        }
+        if (!pre.empty())
+        {
+            l += dot + pre + arrow + post;
+        }
+        return l;
+    };
+    const std::wstring autoA = compactionLabel(L"auto", L"917k", L"23k");
+    const std::wstring autoB = compactionLabel(L"auto", L"920k", L"25k");
+    const std::wstring manualC = compactionLabel(L"manual", L"30k", L"5k");
+
+    // SummaryCompactionLabel: one label as it is; several merged into one line.
+    CHECK(SummaryCompactionLabel({}).empty() && SummaryCompactionLabel({ autoA }) == autoA,
+          "summary-compaction-label: no label reads empty; ONE compaction's line is its own label, unchanged");
+    CHECK(SummaryCompactionLabel({ autoA, autoB }) == L"compacted" + dot + L"auto" + times + L"2" + dot + L"917k" + arrow + L"23k, 920k" + arrow + L"25k",
+          "summary-compaction-label: two of one trigger merge as \"compacted · auto ×2 · 917k→23k, 920k→25k\" (the owner's mockup)");
+    CHECK(SummaryCompactionLabel({ autoA, manualC }) == L"compacted" + times + L"2" + dot + L"auto" + dot + L"917k" + arrow + L"23k, manual" + dot + L"30k" + arrow + L"5k",
+          "summary-compaction-label: mixed triggers keep each compaction's trigger beside its numbers");
+    {
+        const std::wstring noTrigger = compactionLabel(L"", L"917k", L"23k"); // "compacted · 917k→23k"
+        CHECK(SummaryCompactionLabel({ noTrigger, noTrigger }) == L"compacted" + times + L"2" + dot + L"917k" + arrow + L"23k, 917k" + arrow + L"23k",
+              "summary-compaction-label: a label with no trigger never reads its numbers as a trigger");
+        CHECK(SummaryCompactionLabel({ L"compacted", L"compacted" }) == L"compacted" + times + L"2",
+              "summary-compaction-label: bare labels (no metadata) merge to the count alone");
+    }
+    {
+        std::vector<std::wstring> three;
+        std::vector<std::wstring> five;
+        for (int k = 1; k <= 5; ++k)
+        {
+            const std::wstring l = compactionLabel(L"auto", std::to_wstring(900 + k) + L"k", std::to_wstring(20 + k) + L"k");
+            five.push_back(l);
+            if (k <= static_cast<int>(kSummaryCompactionsListed))
+            {
+                three.push_back(l);
+            }
+        }
+        CHECK(SummaryCompactionLabel(three) == L"compacted" + dot + L"auto" + times + L"3" + dot + L"901k" + arrow + L"21k, 902k" + arrow + L"22k, 903k" + arrow + L"23k",
+              "summary-compaction-label: up to kSummaryCompactionsListed compactions every number pair is listed");
+        CHECK(SummaryCompactionLabel(five) == L"compacted" + dot + L"auto" + times + L"5" + dot + L"901k" + arrow + L"21k, \x2026, 905k" + arrow + L"25k",
+              "summary-compaction-label: past it only the first and the last, around \"…\" — the line stays short (×5 keeps the count)");
+    }
+
+    // SummaryLineIsListHeader: the "<Label>:" lines whose "* " items draw one line each (the panel and the hover card).
+    CHECK(SummaryLineIsListHeader(L"Files Read:") && SummaryLineIsListHeader(L"Files Created:") && SummaryLineIsListHeader(L"Skills Loaded:"),
+          "summary-list-header: the box's list sections are list headers");
+    CHECK(!SummaryLineIsListHeader(L" 1. do this:") && !SummaryLineIsListHeader(L"Recap: where we are") &&
+              !SummaryLineIsListHeader(L"Tasks:  3 done / 0 pending") && !SummaryLineIsListHeader(L"Files2:") && !SummaryLineIsListHeader(L":") &&
+              !SummaryLineIsListHeader(L"") && !SummaryLineIsListHeader(std::wstring{ kSummaryCompactionMark } + L"compacted:") &&
+              !SummaryLineIsListHeader(std::wstring{ kSummarySessionSepMark } + L"abc:"),
+          "summary-list-header: a numbered prompt, text after the colon, a digit, a lone colon and a marked line are not");
+
+    // BuildSummaryConversation's COMPACTION rows: after a segment's prompts, before its session's separator; a boundary
+    // this session only COPIED (by uuid, in ConversationUpstream::uuids) is drawn once, in the earlier session's part.
+    {
+        SessionSummary c;
+        c.userMsgs = { L"now" };
+        c.userMsgUuids = { L"u-now" };
+        ConversationSegment own1; // this session's part before its first own /compact, then a copied boundary carried onto it
+        own1.userMsgs = { L"first" };
+        own1.uuids = { L"u-first" };
+        own1.compactions = { SegmentCompaction{ autoA, L"c-own" }, SegmentCompaction{ autoB, L"c-copied" } };
+        ConversationSegment own2; // a part of copies only, closed by a copied boundary: no row at all
+        own2.userMsgs = { L"parent prompt" };
+        own2.uuids = { L"u-pp" };
+        own2.compactions = { SegmentCompaction{ manualC, L"c-copied-2" } };
+        c.previousSegments = { own1, own2 };
+        ConversationUpstream cu;
+        {
+            ConversationSegment parent;
+            parent.sessionId = L"dddddddd-0000-4000-8000-000000000004";
+            parent.userMsgs = { L"parent prompt" };
+            parent.uuids = { L"u-pp" };
+            parent.compactions = { SegmentCompaction{ manualC, L"c-parent" } };
+            parent.continuedBy = L"fork";
+            cu.segments = { parent };
+            cu.uuids = { L"u-pp", L"c-parent", L"c-copied", L"c-copied-2" };
+        }
+        const auto rowsC = BuildSummaryConversation(c, cu, /*showHistory*/ true, {});
+        CHECK(rowsC.size() == 6, "summary-compaction-rows: 3 prompts + the parent's compaction + its separator + one own compaction");
+        if (rowsC.size() == 6)
+        {
+            CHECK(rowsC[0].text == L"parent prompt" && rowsC[1].compactions == std::vector<std::wstring>{ manualC } && rowsC[1].text.empty() &&
+                      rowsC[1].sessionId.empty() && rowsC[1].headIndex == -1 && rowsC[2].sessionId == L"dddddddd-0000-4000-8000-000000000004",
+                  "summary-compaction-rows: an earlier session's compaction follows its prompts and comes BEFORE its separator");
+            CHECK(rowsC[3].text == L"first" && rowsC[4].compactions == std::vector<std::wstring>{ autoA } && rowsC[5].text == L"now" && rowsC[5].headIndex == 0,
+                  "summary-compaction-rows: this session's own compaction follows its part; the copied ones are left out");
+        }
+        size_t compactionRows = 0;
+        for (const auto& row : rowsC)
+        {
+            compactionRows += row.compactions.empty() ? 0 : 1;
+        }
+        CHECK(compactionRows == 2, "summary-compaction-rows: a part with nothing but copies adds no compaction row");
+        const auto offC = BuildSummaryConversation(c, cu, /*showHistory*/ false, {});
+        CHECK(offC.size() == 1 && offC[0].text == L"now" && offC[0].compactions.empty(),
+              "summary-compaction-rows: the history toggle OFF lists no compaction (only the part after the last one)");
+
+        // The engine's renderer: a compaction row is a lone `kSummaryCompactionMark + <label>` line that takes NO
+        // number — the prompt after it continues the count.
+        if (rowsC.size() == 6)
+        {
+            const auto box = RenderSessionSummaryBox(c, L"", L"K:\\x", L"t.jsonl", L"", L"", L"", L"", /*full*/ false, false, true, &rowsC);
+            const std::wstring want = L" 1. parent prompt\n" + std::wstring{ kSummaryCompactionMark } + manualC + L"\n" + std::wstring{ kSummarySessionSepMark } +
+                                      L"dddddddd-0000-4000-8000-000000000004\n 2. first\n" + std::wstring{ kSummaryCompactionMark } + autoA + L"\n 3. now";
+            CHECK(box.find(want) != std::wstring::npos,
+                  "summary-box: each compaction is its own marked line between the prompts, and the numbers run straight past it");
+            auto merged = rowsC;
+            merged[4].compactions = { autoA, autoB };
+            const auto mergedBox = RenderSessionSummaryBox(c, L"", L"K:\\x", L"t.jsonl", L"", L"", L"", L"", /*full*/ false, false, true, &merged);
+            CHECK(mergedBox.find(std::wstring{ kSummaryCompactionMark } + SummaryCompactionLabel({ autoA, autoB }) + L"\n 3. now") != std::wstring::npos,
+                  "summary-box: a row of several compactions is ONE line with the merged label");
+        }
+    }
 }
 
 // Agentmaster (the summary's conversation chain — TranscriptTurns.h section 8): CollectConversationUpstream
@@ -1383,6 +1509,11 @@ void TestConversationUpstream()
         CHECK(s0.uuids == (std::vector<std::wstring>{ L"p-u1", L"p-u2" }) && s1.uuids == std::vector<std::wstring>{ L"p-u3" } &&
                   s2.uuids == std::vector<std::wstring>{ L"f-u1" },
               "upstream/fork: each prompt's transcript-line uuid, in lockstep");
+        // The summary's compaction lines: P's /compact is recorded on the part it ended, with the boundary's uuid —
+        // once, for P, although F and G each hold a copy of that line.
+        CHECK(s0.compactions.size() == 1 && s0.compactions[0].uuid == L"p-c1" && s0.compactions[0].label == s0.label &&
+                  s0.label == L"compacted \x00B7 manual \x00B7 409k\x2192" L"5k" && s1.compactions.empty() && s2.compactions.empty(),
+              "upstream/fork: P's compaction is on P's part it ended (label + uuid); F's copy of it adds none to F");
     }
     CHECK(upG.uuids.count(L"p-u1") == 1 && upG.uuids.count(L"p-c1") == 1 && upG.uuids.count(L"p-u3") == 1 && upG.uuids.count(L"f-u1") == 1 &&
               upG.uuids.count(L"g-u1") == 0 && upG.uuids.count(L"g-a1") == 0,
@@ -1415,28 +1546,109 @@ void TestConversationUpstream()
                   prevUuids == (std::vector<std::wstring>{ L"p-u1", L"p-u2" }),
               "upstream/analyzer: the pre-/compact segments carry their prompts' uuids in lockstep");
         CHECK(aP.userMsgUuids == (std::vector<std::wstring>{ L"p-u3", L"p-u4" }), "upstream/analyzer: the current part's uuids");
+        CHECK(aP.previousSegments.size() == 1 && aP.previousSegments[0].compactions.size() == 1 && aP.previousSegments[0].compactions[0].uuid == L"p-c1" &&
+                  aP.previousSegments[0].compactions[0].label == aP.previousSegments[0].label,
+              "upstream/analyzer: an in-file /compact is recorded on the part it ended, with its boundary's uuid");
+        // G's file OPENS with its copy of P's boundary: that empty first part is dropped and its compaction carried
+        // nowhere (nothing of G's comes before it) — P's part draws it.
+        CHECK(aG.compacted && aG.previousSegments.empty(), "upstream/analyzer: a fork's copied boundary at the top of its file adds no part of its own");
 
         // ---- the whole numbered list for G, end to end ----
         const auto titleOf = [&](const std::wstring& sid) { return sid == idP ? std::wstring{ L"Title of P" } : std::wstring{}; };
         const auto rows = BuildSummaryConversation(aG, upG, /*showHistory*/ true, titleOf);
-        CHECK(rows.size() == 7, "upstream/rows: G's conversation = 5 prompts + a separator after P and after F");
-        if (rows.size() == 7)
+        CHECK(rows.size() == 8, "upstream/rows: G's conversation = 5 prompts + P's compaction + a separator after P and after F");
+        if (rows.size() == 8)
         {
-            CHECK(rows[0].text == L"study the market data" && rows[1].text == L"backtest the strategy" && rows[2].text == L"try a stop loss" &&
-                      rows[4].text == L"fork: try MSFT" && rows[6].text == L"fork again: tune the stop",
+            CHECK(rows[0].text == L"study the market data" && rows[1].text == L"backtest the strategy" && rows[3].text == L"try a stop loss" &&
+                      rows[5].text == L"fork: try MSFT" && rows[7].text == L"fork again: tune the stop",
                   "upstream/rows: the prompts in conversation order (the renderer numbers them 1..5)");
-            CHECK(rows[3].sessionId == idP && rows[3].continuedBy == L"fork" && rows[3].sessionTitle == L"Title of P" &&
-                      rows[5].sessionId == idF && rows[5].continuedBy == L"fork",
+            CHECK(rows[2].compactions == std::vector<std::wstring>{ L"compacted \x00B7 manual \x00B7 409k\x2192" L"5k" } && rows[2].text.empty() &&
+                      rows[2].sessionId.empty(),
+                  "upstream/rows: P's /compact is a compaction row between the prompts it separated — ONE, though G's file holds a copy");
+            CHECK(rows[4].sessionId == idP && rows[4].continuedBy == L"fork" && rows[4].sessionTitle == L"Title of P" &&
+                      rows[6].sessionId == idF && rows[6].continuedBy == L"fork",
                   "upstream/rows: a separator closes P's part and F's part");
             // The label the panel draws on those separators, from the link the real chain walk found.
-            CHECK(SummarySeparatorLabel(rows[3], 8) == L"fork 11111111" && SummarySeparatorLabel(rows[5], 0) == L"fork " + idF,
+            CHECK(SummarySeparatorLabel(rows[4], 8) == L"fork 11111111" && SummarySeparatorLabel(rows[6], 0) == L"fork " + idF,
                   "upstream/rows: each separator of a fork family reads \"fork <id>\" (8 characters on the panel, the whole id in the copy)");
-            CHECK(rows[0].headIndex == -1 && rows[1].headIndex == -1 && rows[2].headIndex == 0 && rows[4].headIndex == 1 && rows[6].headIndex == 2,
+            CHECK(rows[0].headIndex == -1 && rows[1].headIndex == -1 && rows[3].headIndex == 0 && rows[5].headIndex == 1 && rows[7].headIndex == 2,
                   "upstream/rows: the prompts G's terminal holds keep their jump index; the rest have none");
         }
         const auto classic = BuildSummaryConversation(aG, upG, /*showHistory*/ false, titleOf);
         CHECK(classic.size() == 3 && classic[0].text == L"try a stop loss" && classic[2].text == L"fork again: tune the stop",
               "upstream/rows: the toggle OFF lists G's own file, as before the chain existed");
+    }
+
+    // ---- the summary's compaction lines, end to end (2026-11-20) ----
+    // The one label every boundary below carries (UpCompactionLines' metadata), and the merged label of two in a row.
+    const std::wstring manualLabel = L"compacted \x00B7 manual \x00B7 409k\x2192" L"5k";
+    const std::wstring twoManual = L"compacted \x00B7 manual \x00D7" L"2 \x00B7 409k\x2192" L"5k, 409k\x2192" L"5k";
+    CHECK(SummaryCompactionLabel({ manualLabel, manualLabel }) == twoManual, "upstream/compactions: the merged label of two manual compactions");
+    // N <- M: M compacts TWICE in a row, then a prompt, then N forks it (copying M's context from its LAST compaction
+    // on, that boundary included). The upstream walk carries the dropped empty part's compaction onto the part before
+    // it — ONE "×2" row — and N's own file, which opens with the copied boundary, adds no second one.
+    {
+        const std::wstring idM = L"66666666-0000-4000-8000-000000000001";
+        const std::wstring idN = L"66666666-0000-4000-8000-000000000002";
+        births[idM] = at(L"2026-01-13T08:00:00Z");
+        births[idN] = at(L"2026-01-13T10:00:00Z");
+        const std::string mCopied = UpCompactionLines("m-c2", "m-s1", "m-s2", "2026-01-13T09:00:00.000Z", "2026-01-13T09:00:01.000Z") +
+                                    UpUserLine("m-u2", "m-s2", "2026-01-13T09:10:00.000Z", "build the importer") +
+                                    UpAssistantLine("m-a2", "m-u2", "2026-01-13T09:10:05.000Z", "Built.");
+        bool ok = WriteUpstreamTranscript(pathOf(folder, idM),
+                                          UpUserLine("m-u1", "", "2026-01-13T08:00:00.000Z", "plan the importer") +
+                                              UpAssistantLine("m-a1", "m-u1", "2026-01-13T08:00:05.000Z", "Planned.") +
+                                              UpCompactionLines("m-c1", "m-a1", "m-s1", "2026-01-13T08:30:00.000Z", "2026-01-13T08:30:01.000Z") + mCopied);
+        ok = WriteUpstreamTranscript(pathOf(folder, idN),
+                                     mCopied + UpUserLine("n-u1", "m-a2", "2026-01-13T10:05:00.000Z", "fork: add a CSV mode") +
+                                         UpAssistantLine("n-a1", "n-u1", "2026-01-13T10:05:05.000Z", "CSV added.")) &&
+             ok;
+        CHECK(ok, "upstream/compactions: the M and N transcripts were written");
+        const auto upN = CollectConversationUpstream(pathOf(folder, idN), {}, born);
+        CHECK(upN.segments.size() == 2 && upN.segments[0].sessionId == idM && upN.segments[0].userMsgs == std::vector<std::wstring>{ L"plan the importer" } &&
+                  upN.segments[0].compactions.size() == 2 && upN.segments[0].compactions[0].uuid == L"m-c1" &&
+                  upN.segments[0].compactions[1].uuid == L"m-c2" && upN.segments[1].compactions.empty() &&
+                  upN.segments[1].userMsgs == std::vector<std::wstring>{ L"build the importer" } && upN.segments[1].continuedBy == L"fork",
+              "upstream/compactions: two compactions in a row are BOTH kept, on the part before them (the empty part between is dropped)");
+        const auto aN = AnalyzeSessionTranscript(pathOf(folder, idN).wstring(), 0);
+        CHECK(aN.previousSegments.empty() && aN.userMsgs == (std::vector<std::wstring>{ L"build the importer", L"fork: add a CSV mode" }),
+              "upstream/compactions: the fork's own file opens with the copied boundary and keeps no part before it");
+        const auto rowsN = BuildSummaryConversation(aN, upN, /*showHistory*/ true, {});
+        CHECK(rowsN.size() == 5, "upstream/compactions: N's conversation = 3 prompts + ONE compaction row + M's separator");
+        if (rowsN.size() == 5)
+        {
+            CHECK(rowsN[0].text == L"plan the importer" && rowsN[1].compactions == (std::vector<std::wstring>{ manualLabel, manualLabel }) &&
+                      rowsN[2].text == L"build the importer" && rowsN[2].headIndex == 0 && rowsN[3].sessionId == idM && rowsN[3].continuedBy == L"fork" &&
+                      rowsN[4].text == L"fork: add a CSV mode" && rowsN[4].headIndex == 1,
+                  "upstream/compactions: the two compactions are one row between the prompts they separated, before M's separator");
+            const auto boxN = RenderSessionSummaryBox(aN, L"", L"K:\\x", pathOf(folder, idN).wstring(), L"", L"", L"", L"", /*full*/ false, false, true, &rowsN);
+            CHECK(boxN.find(L" 1. plan the importer\n" + std::wstring{ kSummaryCompactionMark } + twoManual + L"\n 2. build the importer\n" +
+                            std::wstring{ kSummarySessionSepMark } + idM + L"\n 3. fork: add a CSV mode") != std::wstring::npos,
+                  "upstream/compactions: rendered as ONE \"×2\" line, the numbers running straight past it");
+        }
+    }
+    // The owner's shape (session 8da2a63d): compacted after a prompt, then TWICE after the last prompt — the current part
+    // is empty, and the last two compactions both follow the last prompt, as one merged line.
+    {
+        const fs::path compactFolder = root / L"projects" / L"K--am-upstream-compact";
+        const fs::path k = compactFolder / L"77777777-0000-4000-8000-000000000001.jsonl";
+        const bool ok = WriteUpstreamTranscript(k, UpUserLine("k-u1", "", "2026-01-14T08:00:00.000Z", "first") +
+                                                       UpAssistantLine("k-a1", "k-u1", "2026-01-14T08:00:05.000Z", "One.") +
+                                                       UpCompactionLines("k-c1", "k-a1", "k-s1", "2026-01-14T08:30:00.000Z", "2026-01-14T08:30:01.000Z") +
+                                                       UpUserLine("k-u2", "k-s1", "2026-01-14T09:00:00.000Z", "second") +
+                                                       UpAssistantLine("k-a2", "k-u2", "2026-01-14T09:00:05.000Z", "Two.") +
+                                                       UpCompactionLines("k-c2", "k-a2", "k-s2", "2026-01-14T09:30:00.000Z", "2026-01-14T09:30:01.000Z") +
+                                                       UpCompactionLines("k-c3", "k-s2", "k-s3", "2026-01-14T10:00:00.000Z", "2026-01-14T10:00:01.000Z"));
+        const auto aK = AnalyzeSessionTranscript(k.wstring(), 0);
+        CHECK(ok && aK.userMsgs.empty() && aK.previousSegments.size() == 2 && aK.previousSegments[0].compactions.size() == 1 &&
+                  aK.previousSegments[1].compactions.size() == 2 && aK.previousSegments[1].compactions[0].uuid == L"k-c2" &&
+                  aK.previousSegments[1].compactions[1].uuid == L"k-c3",
+              "summary-compactions/analyzer: the compactions after the last prompt are all carried onto its part");
+        const auto rowsK = BuildSummaryConversation(aK, ConversationUpstream{}, /*showHistory*/ true, {});
+        const auto boxK = RenderSessionSummaryBox(aK, L"", L"K:\\x", k.wstring(), L"", L"", L"", L"", /*full*/ false, false, true, &rowsK);
+        CHECK(rowsK.size() == 4 && boxK.find(L" 1. first\n" + std::wstring{ kSummaryCompactionMark } + manualLabel + L"\n 2. second\n" +
+                                             std::wstring{ kSummaryCompactionMark } + twoManual) != std::wstring::npos,
+              "summary-compactions/box: each prompt, then where the conversation was compacted — the last line says it happened twice");
     }
 
     // ---- a plan-mode restart: R <- Q ----

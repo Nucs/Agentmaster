@@ -441,15 +441,25 @@ namespace Agentmaster
             // (BuildSummaryConversation) — the per-tab summary panel's Messages, line for line: every prompt
             // numbered 1..N straight through (the numbers keep counting across /compact parts and across the
             // earlier sessions this one continues), each earlier session closed by a lone
-            // `kSummarySessionSepMark + <full id>` line. `a.userMsgs` alone is only the part after the LAST
-            // /compact (AnalyzeSessionTranscript restarts it at each boundary), so a session compacted since
-            // its last prompt would list nothing at all.
+            // `kSummarySessionSepMark + <full id>` line, and each point a /compact cut the conversation marked by
+            // a lone `kSummaryCompactionMark + <label>` line (the summary's compaction lines). `a.userMsgs` alone
+            // is only the part after the LAST /compact (AnalyzeSessionTranscript restarts it at each boundary), so
+            // a session compacted since its last prompt would list nothing at all.
             if (!conversation->empty())
             {
                 sep();
                 int n = 1;
                 for (const auto& row : *conversation)
                 {
+                    // A compaction row first: its text and sessionId are empty, so the prompt branch below would
+                    // number it as an empty prompt. It never takes a number — the count runs straight through.
+                    if (!row.compactions.empty())
+                    {
+                        o += kSummaryCompactionMark;
+                        o += SummaryCompactionLabel(row.compactions);
+                        o += L"\n";
+                        continue;
+                    }
                     if (!row.sessionId.empty())
                     {
                         o += kSummarySessionSepMark;

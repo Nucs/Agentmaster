@@ -488,9 +488,26 @@ namespace Agentmaster
     // CollectConversationUpstream: a fork's parent, a plan-restart parent, or a /clear predecessor or
     // /handover origin Agentmaster recorded). The summary panel lists every segment's prompts in ONE
     // continuous numbered conversation, with a session-id separator wherever the session changes.
+    // Agentmaster (the summary's compaction lines, 2026-11-20): ONE /compact boundary that ended a segment — what a
+    // "── compacted · auto · 923k→27k ──" line of the summary is drawn from.
+    struct SegmentCompaction
+    {
+        std::wstring label; // its human label, the same text ConversationSegment::label carries: "compacted · auto · 923k→27k"
+        // The compact_boundary line's transcript uuid ("" when it carried none). A FORK copies its parent's lines WITH their
+        // uuids, so a boundary the fork copied is recognized exactly — the summary draws it once, in the parent's part.
+        std::wstring uuid;
+    };
     struct ConversationSegment
     {
         std::wstring label; // the compaction that ENDED this segment, e.g. "compacted · manual · 409k→5k"; empty when the segment ended for any other reason (a cross-file join, or it is the session's last part)
+        // Agentmaster (the summary's compaction lines): EVERY /compact that ended this segment's part of the conversation,
+        // oldest first — the one `label` names, then each later one that came before the next prompt. A segment that holds
+        // no prompt is dropped from the lists (AnalyzeSessionTranscript's previousSegments, CollectConversationUpstream's
+        // segments), so its boundary is carried here, onto the segment kept before it — else two compactions in a row would
+        // show as one. Empty when no compaction ended the segment (the current part, a session's last part, a cross-file
+        // join), and on segments from a producer that does not fill it (the session database's summary). A compaction of a
+        // segment with no kept segment before it (a part that OPENS with a compaction) is not carried anywhere.
+        std::vector<SegmentCompaction> compactions;
         std::vector<std::wstring> userMsgs; // the segment's REAL user prompts, in order (SAME filter as SessionSummary.userMsgs — so it includes the messages typed mid-turn too)
         // Agentmaster (the summary's conversation chain): the transcript-line uuid of each prompt, in
         // lockstep with userMsgs (same length, same order; "" for a line that carried none). The uuid
@@ -751,6 +768,12 @@ namespace Agentmaster
     // own renderer (AgentTabOverlay.Internal.h kSessionSepMark), so one display convention serves both. \x1E
     // (ASCII Record Separator) never occurs in transcript content, and a session id never contains it.
     constexpr wchar_t kSummarySessionSepMark = L'\x1E';
+    // Agentmaster (the summary's compaction lines, 2026-11-20): the COMPACTION-line sentinel of a whole-conversation
+    // Messages list. A compaction row (SummaryConversationRow::compactions) is written as a line of its own — this mark,
+    // then the line's label (SummaryCompactionLabel: "compacted · auto · 923k→27k", "compacted · auto ×2 · …") — where
+    // a /compact cut the conversation. Every display draws it as a dim labeled rule (the summary panel, the rich hover
+    // card), the copied Summary as a plain-text rule. \x1D (ASCII Group Separator) never occurs in transcript content.
+    constexpr wchar_t kSummaryCompactionMark = L'\x1D';
     struct SummaryConversationRow; // SummaryConversation.h — one row of a whole-conversation Messages list
     // Agentmaster: `wrapNewlines` / `truncate` are the GLOBAL summary-panel toggles (AppSettings:
     // summaryPanelWrapNewlines / summaryPanelTruncate). The defaults reproduce the prior session-end.js
@@ -759,11 +782,12 @@ namespace Agentmaster
     // `conversation` (Agentmaster, the summary's conversation chain): when non-null, the Messages section
     // lists THESE rows instead of `a.userMsgs` — the WHOLE conversation BuildSummaryConversation built (the
     // earlier sessions it continues, its own parts before each /compact, then its current part): every
-    // prompt row numbered 1..N straight through, every separator row written as a lone
-    // `kSummarySessionSepMark + <full id>` line. Without it (null, the default) the list is `a.userMsgs`
-    // alone — only the part after the LAST /compact, so a session compacted since its last prompt lists no
-    // message at all. Each prompt honors `wrapNewlines` / `truncate` like a `userMsgs` one. The rows are
-    // only read here; the pointer is not kept.
+    // prompt row numbered 1..N straight through (a compaction row takes no number), every separator row
+    // written as a lone `kSummarySessionSepMark + <full id>` line, every compaction row as a lone
+    // `kSummaryCompactionMark + SummaryCompactionLabel(row.compactions)` line. Without it (null, the
+    // default) the list is `a.userMsgs` alone — only the part after the LAST /compact, so a session
+    // compacted since its last prompt lists no message at all. Each prompt honors `wrapNewlines` /
+    // `truncate` like a `userMsgs` one. The rows are only read here; the pointer is not kept.
     std::wstring RenderSessionSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines = false, bool truncate = true, const std::vector<SummaryConversationRow>* conversation = nullptr);
 
     // Port of session-end.js formatDuration: "2h 12m (20:21 -> 22:33)" from two ISO timestamps, the

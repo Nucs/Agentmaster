@@ -265,15 +265,21 @@ namespace
         return ::Agentmaster::GetStoredSessionTitle(sessionId);
     }
 
-    // Agentmaster (the rich card's whole conversation): one SESSION-SEPARATOR line of the card's body — a line
-    // `kSummarySessionSepMark + <label>` (the label already formatted: "358db618", or "fork 358db618" above a
-    // fork — SummarySeparatorLabel) — drawn the way the summary panel draws its separators
-    // (AgentTabOverlay::_MakeSessionSeparator): [a 10-px dash][the label][a dash to the edge], 1-px rules in the
-    // section rules' color, the label dim (a marker, not content). Inert, unlike the panel's: no button, no
-    // hover text — the card holds nothing that takes a click (the ToolTip only reads the wheel).
-    //   label — the text after the mark.
+    // Agentmaster (the rich card's whole conversation): one LABELED RULE of the card's body — drawn the way the
+    // summary panel draws its marks inside the Messages list: [a 10-px dash][the label][a dash to the edge], 1-px
+    // rules in the section rules' color, the label dim (a marker, not content). Two lines of the body take it:
+    //   * a SESSION SEPARATOR, `kSummarySessionSepMark + <label>` — where an earlier session of the conversation
+    //     ends (the label already formatted: "358db618", or "fork 358db618" above a fork — SummarySeparatorLabel;
+    //     the panel's twin is AgentTabOverlay::_MakeSessionSeparator);
+    //   * a COMPACTION LINE, `kSummaryCompactionMark + <label>` — where a /compact cut the conversation
+    //     ("compacted · auto · 923k→27k": SummaryCompactionLabel; the panel's twin is MakeSummaryCompactionLine).
+    // Inert, unlike the panel's: no button, no hover text — the card holds nothing that takes a click (the ToolTip
+    // only reads the wheel). Both labels are short by construction (an id's 8 characters; a merged compaction line
+    // spells out at most kSummaryCompactionsListed compactions' numbers) — the label sits in an Auto column, which
+    // measures it whole, so a label wider than the card would be clipped at its edge, never wrapped or trimmed.
+    //   label — the text after the line's mark.
     // Returns the element. Throws what a XAML constructor throws (the card build's callers contain it).
-    winrt::Windows::UI::Xaml::UIElement TtBuildSessionSeparator(const std::wstring& label)
+    winrt::Windows::UI::Xaml::UIElement TtBuildLabeledRule(const std::wstring& label)
     {
         using namespace winrt::Windows::UI::Xaml;
         using namespace winrt::Windows::UI::Xaml::Controls;
@@ -311,10 +317,15 @@ namespace
 
     // Render a Summary-box TEXT (RenderSessionSummaryBox output: a lone kSummarySepMark line = a section
     // divider, " N. " = a numbered user message, "* " = a file row, a `kSummarySessionSepMark + <label>` line =
-    // where an earlier session of the conversation ends) into the tooltip BODY: a vertical StackPanel of
-    // monospace (Cascadia Mono) TextBlocks, each section sentinel a full-width hairline rule and each session
-    // separator a labeled rule (the AgentTabOverlay::_SetSummaryContent display look, minus the jump buttons and
-    // the separators' click). Contiguous plain lines coalesce into one wrapping TextBlock.
+    // where an earlier session of the conversation ends, a `kSummaryCompactionMark + <label>` line = where a
+    // /compact cut it) into the tooltip BODY: a vertical StackPanel of monospace (Cascadia Mono) TextBlocks, each
+    // section sentinel a full-width hairline rule and each session separator or compaction line a labeled rule (the
+    // AgentTabOverlay::_SetSummaryContent display look, minus the jump buttons and the separators' click).
+    // Contiguous plain lines coalesce into one wrapping TextBlock — except the "* " items of a LIST section (Skills
+    // Loaded, Files Created / Edited / Read: SummaryLineIsListHeader, the panel's own rule), which coalesce into a
+    // NoWrap TextBlock whose every line is cut with "…" at the card's edge: ONE LINE PER ITEM (the owner's pick of
+    // 2026-11-20 — a long path wrapped over two or three lines and the lists ate the card's height). The whole path
+    // stays in the summary panel and in Copy ▸ Summary.
     //   text — the box text (the cached Summary body, line-truncated by TtBuildTooltipCard).
     // Returns the body panel. Throws what a XAML constructor throws (the card build's callers contain it).
     winrt::Windows::UI::Xaml::Controls::StackPanel TtBuildSummaryBody(const std::wstring& text)
@@ -324,6 +335,12 @@ namespace
         StackPanel stack;
         stack.Orientation(Orientation::Vertical);
         std::wstring seg;
+        // A run has ONE line mode (the summary panel's recipe): false = the classic WRAPPING run (headers, Tasks,
+        // Recap, prompts); true = a LIST run, the "* " items of a list section, drawn NoWrap with each line trimmed.
+        // The measure keeps that safe: the body's StackPanels pass their finite width down (the card's MaxWidth
+        // bounds it), so a NoWrap line's desired width is capped there and arrange trims it with the ellipsis —
+        // it never widens the card past what a wrapping line already reaches.
+        bool segNoWrap = false;
         const auto flush = [&]() {
             if (seg.empty())
             {
@@ -332,19 +349,53 @@ namespace
             TextBlock tb;
             tb.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
             tb.FontSize(11);
-            tb.TextWrapping(TextWrapping::Wrap);
+            if (segNoWrap)
+            {
+                tb.TextWrapping(TextWrapping::NoWrap);
+                tb.TextTrimming(TextTrimming::CharacterEllipsis); // per line: each item ends in "…" where the card ends
+            }
+            else
+            {
+                tb.TextWrapping(TextWrapping::Wrap);
+            }
             tb.Foreground(TtFill(0xFF, 0xDC, 0xDC, 0xDC));
             tb.Text(winrt::hstring{ seg });
             stack.Children().Append(tb);
             seg.clear();
+            segNoWrap = false;
         };
+        // Append a line to the run being accumulated, closing the run first when the line's mode differs from the
+        // run's (a list header — wrapping — is followed by its "* " items — NoWrap — so the two never share a block).
+        const auto appendLine = [&](const std::wstring& lineStr, bool noWrap) {
+            if (!seg.empty() && segNoWrap != noWrap)
+            {
+                flush();
+            }
+            if (!seg.empty())
+            {
+                seg += L'\n';
+            }
+            seg += lineStr;
+            segNoWrap = noWrap;
+        };
+        // The section's FIRST line after each rule names its kind (the panel's rule): a bare "<Label>:" header
+        // opens a list section, anything else a normal one — so a "* " bullet inside a wrapped prompt or the Recap
+        // is never mistaken for a list item.
+        bool sectionIsList = false;
+        bool sectionKindPending = true; // the box's first section starts at the top, with no rule above it
         size_t i = 0;
         while (i <= text.size())
         {
             const size_t nl = text.find(L'\n', i);
             const size_t end = (nl == std::wstring::npos) ? text.size() : nl;
             const std::wstring lineStr = text.substr(i, end - i);
-            if (lineStr.size() == 1 && lineStr[0] == ::Agentmaster::kSummarySepMark)
+            const bool isRule = (lineStr.size() == 1 && lineStr[0] == ::Agentmaster::kSummarySepMark);
+            if (!isRule && sectionKindPending)
+            {
+                sectionIsList = ::Agentmaster::SummaryLineIsListHeader(lineStr);
+                sectionKindPending = false;
+            }
+            if (isRule)
             {
                 flush();
                 Border rule;
@@ -353,21 +404,22 @@ namespace
                 rule.Background(TtFill(0x40, 0xFF, 0xFF, 0xFF));
                 rule.Margin(ThicknessHelper::FromLengths(0, 4, 0, 4));
                 stack.Children().Append(rule);
+                sectionIsList = false; // a new section opens below this rule; its first line names its kind
+                sectionKindPending = true;
             }
-            else if (!lineStr.empty() && lineStr[0] == ::Agentmaster::kSummarySessionSepMark)
+            else if (!lineStr.empty() && (lineStr[0] == ::Agentmaster::kSummarySessionSepMark || lineStr[0] == ::Agentmaster::kSummaryCompactionMark))
             {
-                // Where an earlier session of the conversation ends: a labeled rule of its own, never part of a
-                // text run (the mark would otherwise render as a box glyph inside the message list).
+                // Where an earlier session of the conversation ends, or where a /compact cut it: a labeled rule of
+                // its own, never part of a text run (the mark would otherwise render as a box glyph inside the
+                // message list).
                 flush();
-                stack.Children().Append(TtBuildSessionSeparator(lineStr.substr(1)));
+                stack.Children().Append(TtBuildLabeledRule(lineStr.substr(1)));
             }
             else
             {
-                if (!seg.empty())
-                {
-                    seg += L'\n';
-                }
-                seg += lineStr;
+                // A "* " item of a list section joins (or opens) a NoWrap run; every other line — the list header
+                // itself included — joins the classic wrapping run.
+                appendLine(lineStr, sectionIsList && lineStr.rfind(L"* ", 0) == 0);
             }
             if (nl == std::wstring::npos)
             {

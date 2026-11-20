@@ -6387,6 +6387,9 @@ namespace Agentmaster
                     }
                     if (std::wstring label = ::Agentmaster::SummaryCompactionLabelOfLine(*line); !label.empty())
                     {
+                        // Agentmaster (the summary's compaction lines): the boundary that ended this segment, with its
+                        // uuid. Only its ORIGIN session gets here (the origin check above), so a copy is never doubled.
+                        segs.back().compactions.push_back(::Agentmaster::SegmentCompaction{ label, uuid->str });
                         segs.back().label = std::move(label);
                         segs.emplace_back();
                         seenText[link].clear(); // dedup is per segment, like CollectConversationSegments
@@ -6403,13 +6406,20 @@ namespace Agentmaster
                     auto& segs = perLink[link];
                     // Empty segments between two compactions are noise (the in-file previous segments drop
                     // them too) — but the session's LAST segment always stays, empty or not: it carries
-                    // continuedBy, which is what draws the session's separator.
+                    // continuedBy, which is what draws the session's separator. A dropped segment's compaction
+                    // still happened: it is carried onto the segment kept before it (the summary's "×2" line),
+                    // as AnalyzeSessionTranscript carries its own.
                     std::vector<ConversationSegment> kept;
                     for (size_t i = 0; i < segs.size(); ++i)
                     {
                         if (!segs[i].userMsgs.empty() || i + 1 == segs.size())
                         {
                             kept.push_back(std::move(segs[i]));
+                        }
+                        else if (!kept.empty() && !segs[i].compactions.empty())
+                        {
+                            auto& carried = kept.back().compactions;
+                            carried.insert(carried.end(), segs[i].compactions.begin(), segs[i].compactions.end());
                         }
                     }
                     if (kept.empty())
@@ -6851,7 +6861,28 @@ namespace Agentmaster
                 headIndexOf.emplace(u, static_cast<int>(i));
             }
         }
-        // (1) The earlier sessions, oldest first; a separator closes each one (after its LAST segment).
+        // A prompt an earlier session owns (a fork's copy of its parent's line) is listed above already; the same
+        // set names the compaction boundaries a fork copied from its parent (they keep the parent's uuids too).
+        const auto ownedUpstream = [&up](const std::wstring& u) { return !u.empty() && up.uuids.count(u) != 0; };
+        // (the summary's compaction lines) One COMPACTION row for the compactions that ended a segment — after its
+        // prompts — leaving out those `skip` says are drawn elsewhere; none when nothing is left.
+        const auto addCompactions = [&rows](const ConversationSegment& seg, const std::function<bool(const std::wstring&)>& skip) {
+            SummaryConversationRow row;
+            for (const auto& c : seg.compactions)
+            {
+                if (!c.label.empty() && !(skip && skip(c.uuid)))
+                {
+                    row.compactions.push_back(c.label);
+                }
+            }
+            if (!row.compactions.empty())
+            {
+                rows.push_back(std::move(row));
+            }
+        };
+        // (1) The earlier sessions, oldest first; a separator closes each one (after its LAST segment). Each
+        // segment's compactions follow its prompts: the upstream walk attributes a boundary to the session that
+        // WROTE it (never to a session that only copied it), so none is skipped here.
         for (size_t s = 0; s < up.segments.size(); ++s)
         {
             const auto& seg = up.segments[s];
@@ -6861,6 +6892,7 @@ namespace Agentmaster
                 const auto hit = u.empty() ? headIndexOf.end() : headIndexOf.find(u);
                 addPrompt(seg.userMsgs[k], hit != headIndexOf.end() ? hit->second : -1);
             }
+            addCompactions(seg, {});
             const bool lastOfSession = (s + 1 == up.segments.size()) || (up.segments[s + 1].sessionId != seg.sessionId);
             if (lastOfSession && !seg.sessionId.empty())
             {
@@ -6875,10 +6907,10 @@ namespace Agentmaster
                 rows.push_back(std::move(sep));
             }
         }
-        // A prompt an earlier session owns (a fork's copy of its parent's line) is listed above already.
-        const auto ownedUpstream = [&up](const std::wstring& u) { return !u.empty() && up.uuids.count(u) != 0; };
         // (2) This session's own parts before its last /compact — no jump index: the analyzer's jump list
-        // (a.userMsgs) restarts at each compaction, so these were never in it.
+        // (a.userMsgs) restarts at each compaction, so these were never in it. Each part's compaction line follows
+        // it, minus a boundary this transcript only copied from an earlier session (a fork's copy of its parent's
+        // compaction: drawn once, in the parent's part above).
         for (const auto& seg : a.previousSegments)
         {
             for (size_t k = 0; k < seg.userMsgs.size(); ++k)
@@ -6888,6 +6920,7 @@ namespace Agentmaster
                     addPrompt(seg.userMsgs[k], -1);
                 }
             }
+            addCompactions(seg, ownedUpstream);
         }
         // (3) The current part (the jump list itself).
         for (size_t i = 0; i < a.userMsgs.size(); ++i)

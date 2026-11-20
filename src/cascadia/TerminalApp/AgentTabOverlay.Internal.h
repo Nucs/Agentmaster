@@ -48,6 +48,17 @@ namespace
     // itself carries only the id). \x1E (ASCII Record Separator) never occurs in transcript content, and a
     // session id never contains it.
     constexpr wchar_t kSessionSepMark = L'\x1E';
+    // Agentmaster (the summary's compaction lines, 2026-11-20): the COMPACTION-line sentinel. RenderSummaryBox
+    // emits it as `\x1D<label>` on a line of its own wherever a /compact cut the conversation (a compaction row,
+    // SummaryConversationRow::compactions; the label is SummaryCompactionLabel's: "compacted · auto · 923k→27k").
+    // The displayed panel turns each into a dim labeled rule (not clickable: there is nothing to copy or jump
+    // to), the copyable summary into a plain-text rule carrying the label. Unlike a session separator the line
+    // carries its whole text, so neither needs its row back. \x1D (ASCII Group Separator) never occurs in
+    // transcript content. The engine's renderer writes the same mark (ProcessInspect.h kSummaryCompactionMark),
+    // which the rich hover card reads — one convention for every summary.
+    constexpr wchar_t kCompactionMark = L'\x1D';
+    static_assert(kCompactionMark == ::Agentmaster::kSummaryCompactionMark,
+                  "the panel's compaction sentinel must be the engine renderer's: the hover card reads the engine's box with the same rule");
 
     // Summary-panel resize bounds (TAB_OVERLAY.md), as FRACTIONS of the pane. The panel is anchored
     // top-right: the left grip grows it leftward (width), the bottom grip downward (height). A 0 stored
@@ -714,13 +725,23 @@ namespace
         // display turns that line into a clickable rule naming the id's first 8 characters; the copy into a
         // plain rule with the full id (both led by "fork " after a fork's parent — the row's continuedBy,
         // not this line, carries the link). Every prompt honors the wrap/truncate toggles alike — an earlier
-        // session's prompt reads exactly like this session's.
+        // session's prompt reads exactly like this session's. Each point a /compact cut the conversation is a
+        // lone `kCompactionMark + <label>` line (the summary's compaction lines), which takes no number.
         if (!conversation.empty())
         {
             sep();
             int n = 1;
             for (const auto& row : conversation)
             {
+                // A compaction row first: its text and sessionId are empty, so the prompt branch below would
+                // number it as an empty prompt.
+                if (!row.compactions.empty())
+                {
+                    o += kCompactionMark;
+                    o += ::Agentmaster::SummaryCompactionLabel(row.compactions);
+                    o += L"\n";
+                    continue;
+                }
                 if (!row.sessionId.empty())
                 {
                     o += kSessionSepMark;
@@ -1018,6 +1039,18 @@ namespace
             }
             const std::wstring rule = std::wstring(4, L'\x2500') + L" " + name + L" " + std::wstring(4, L'\x2500'); // ──── <id> ──── or ──── fork <id> ────
             text.replace(p, idEnd - p, rule);
+            p += rule.size(); // resume after the replacement (the rule itself holds no sentinel)
+        }
+        // ...and each COMPACTION line (`\x1D<label>`, where a /compact cut the conversation) into a plain rule
+        // with its label, drawn like a session separator's so a pasted summary reads the same way the panel
+        // does: "──── compacted · auto · 923k→27k ────". The line carries its whole label, so no row is needed.
+        for (size_t p = text.find(kCompactionMark); p != std::wstring::npos; p = text.find(kCompactionMark, p))
+        {
+            const size_t eol = text.find(L'\n', p);
+            const size_t labelEnd = (eol == std::wstring::npos) ? text.size() : eol;
+            const std::wstring name = text.substr(p + 1, labelEnd - (p + 1));
+            const std::wstring rule = std::wstring(4, L'\x2500') + L" " + name + L" " + std::wstring(4, L'\x2500'); // ──── compacted · … ────
+            text.replace(p, labelEnd - p, rule);
             p += rule.size(); // resume after the replacement (the rule itself holds no sentinel)
         }
         disp.TryEnqueue([text]() { CopyTextToClipboard(text); });

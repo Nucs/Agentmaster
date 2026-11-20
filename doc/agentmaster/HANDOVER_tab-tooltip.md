@@ -88,6 +88,14 @@ load-bearing.
 > those rows (its new optional `conversation`): prompts numbered 1..N straight through, the same numbers as the panel,
 > an earlier session closed by a labeled rule (`kSummarySessionSepMark`). §6 `TtBuildSummaryBody`, §7.
 
+> **2026-11-20 — compaction lines and one line per file (NOT BUILT yet).** The owner: "in the sidemenu we have a line
+> with --fork ab123b--- or --compact ... Why don't we have these and similar capabilities in tooltip, we should." Of
+> four mockups (compaction lines, the times line, one line per file, click actions) the owner picked two: a dim
+> `── compacted · auto · 923k→27k ──` line wherever a `/compact` cut the conversation — on the card AND in the summary
+> panel, which had none either (several in a row = one `×N` line; the numbers run straight past it) — and the card's
+> Skills / Files lists one line per item, cut with `…`, instead of wrapping long paths. §6 `TtBuildSummaryBody`;
+> TAB_OVERLAY.md *Compaction lines*. The times line and clicks on the card were not picked.
+
 ---
 
 ## 0. Scope & what this is NOT
@@ -624,11 +632,21 @@ whole card out near half the screen:
   and never stretches.
 - `TtBuildSummaryBody(text)` → a `StackPanel` of Cascadia Mono `TextBlock`s; the sentinel line
   `\x1F` becomes a full-width `Border` rule (the same convention the overlay's summary panel uses), and a
-  `\x1E<label>` line (`kSummarySessionSepMark`) — where an earlier session of the conversation ends — a
-  labeled rule (`TtBuildSessionSeparator`: [10-px dash][label][dash to the edge], the panel's
-  `_MakeSessionSeparator` look, inert). The text is the `RenderSessionSummaryBox(..., full=false, …,
-  &rows)` output (numbered messages + files; no header, since the card already shows state/title/dir),
-  its Messages the WHOLE conversation (§7).
+  `\x1E<label>` line (`kSummarySessionSepMark`) — where an earlier session of the conversation ends — or a
+  `\x1D<label>` line (`kSummaryCompactionMark`, since 2026-11-20) — where a `/compact` cut it,
+  `compacted · auto · 923k→27k` (one line for several in a row: `compacted · auto ×2 · …`,
+  `SummaryCompactionLabel`) — a labeled rule (`TtBuildLabeledRule`, renamed from `TtBuildSessionSeparator`:
+  [10-px dash][label][dash to the edge], the panel's `_MakeSessionSeparator` / `MakeSummaryCompactionLine` look,
+  inert; the label sits in an Auto column, so it is short by construction — an id's 8 characters, at most
+  three compactions' numbers — and a card narrower than it would clip it, never trim it). The `* ` items of a
+  LIST section (Skills Loaded, Files Created / Edited / Read — `SummaryLineIsListHeader`, the panel's own rule)
+  draw **one line per item**, NoWrap with `TextTrimming::CharacterEllipsis` (each line ends in `…` at the
+  card's edge), since 2026-11-20 (the owner's pick: a long path wrapped over two or three lines and the lists
+  ate the card's height; the whole path stays in the summary panel and Copy ▸ Summary). The run logic is the
+  panel's: a section's first line after a rule decides whether it is a list, and a run holds ONE line mode
+  (wrapping or NoWrap). The text is the `RenderSessionSummaryBox(..., full=false, …, &rows)` output
+  (numbered messages + files; no header, since the card already shows state/title/dir), its Messages the
+  WHOLE conversation (§7).
 - `TtBuildObserveCard(kind, title)` → the `○ <kind> · unlinked` line over the (optional) tab title.
 - `accent` = `AgentStatusColorFor(state)` from `AgentStatusColors.h` (the ONE shared state→color table).
 
@@ -656,7 +674,9 @@ set as `Content` on two ToolTips would corrupt. Keep builders returning fresh tr
   `MakeRecordedPredecessorLookup`) → `BuildSummaryConversation(a, upstream, showHistory, TtSessionTitleOf)`
   → `RenderSessionSummaryBox(…, &rows)`: every prompt numbered 1..N straight through — the same numbers the
   panel shows — each earlier session closed by a `\x1E<label>` separator (the rows' ids replaced by their
-  `SummarySeparatorLabel(row, 8)`, "fork 358db618", before rendering: the card's rule is inert). It follows
+  `SummarySeparatorLabel(row, 8)`, "fork 358db618", before rendering: the card's rule is inert), and each
+  point a `/compact` cut the conversation marked by a `\x1D<label>` line (a compaction row; TAB_OVERLAY.md
+  *Compaction lines*). It follows
   the panel's ⏮ toggle (`summaryPanelShowHistory`, default ON; OFF = the part after the last /compact
   alone), as of the card's last load. Before, the card listed `a.userMsgs` only — the part after the LAST
   `/compact` (`AnalyzeSessionTranscript` restarts it at each boundary) — so a session auto-compacted since

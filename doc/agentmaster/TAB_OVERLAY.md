@@ -408,7 +408,8 @@ ephemeral size), with a **wrap-line toggle** (↵: literal `\n` vs real newlines
 toggle** (…: cap long messages, default ON) at the right of the times bar — both GLOBAL + persisted.
 Section separators fill border-to-border (a `StackPanel` of monospace `TextBlock`s interleaved with
 full-width `Border` rules driven by a `\x1F` sentinel). The `* item` LISTS (Files Created / Edited /
-Read, Skills Loaded — any section whose first line is a bare `<Label>:` header, `IsSummaryListHeader`)
+Read, Skills Loaded — any section whose first line is a bare `<Label>:` header, `IsSummaryListHeader`, which
+calls the rule the rich hover card shares, `SummaryLineIsListHeader` in `SummaryConversation.h`)
 render **NoWrap + clipped** at the panel edge (`TextTrimming::Clip`, no ellipsis) instead of wrapping: a
 long file name in a narrow panel used to break into `*` over `myfile.txt`, doubling the list's height;
 now each item keeps its single line and runs off the right edge (widen the panel to see more; the text
@@ -464,6 +465,29 @@ parts under `Previous session N` headers) held a stored `false` in every install
 after the last compaction. The copied `Summary` always carries the whole conversation, each separator as a
 plain `──── <full id> ────` rule (`──── fork <full id> ────` when the session below is a fork of it; the copy
 finds each line's row the way the panel does — the next separator row, only when it carries the line's id).
+
+**Compaction lines (2026-11-20, the owner's pick; NOT BUILT yet).** Wherever a `/compact` (manual or auto) cut
+the conversation, the Messages list shows a dim labeled rule between the prompts it separated —
+`─ compacted · auto · 923k→27k ─────`, the compaction's own label (`SeFormatCompactionLabel`: the trigger, the
+tokens before → after) in the session separator's geometry, font and colors (`MakeSummaryCompactionLine`; not
+clickable — no hover or press highlight — with a hover text saying what the mark means). The prompt numbers
+run straight past it (1..N as before). Several compactions with no prompt between them share ONE line,
+`compacted · auto ×2 · 917k→23k, 920k→25k` (past three, only the first and the last pairs around `…`:
+`SummaryCompactionLabel`, `kSummaryCompactionsListed`) — a long autonomous turn can compact ten times, and the
+owner's report session (8da2a63d) compacted twice after its last prompt. The pieces: a `compact_boundary`
+records itself, with its uuid, on the part it ENDED (`ConversationSegment::compactions`, `SegmentCompaction`);
+a part that holds no prompt is still dropped, but its compaction is CARRIED onto the part kept before it
+(`AnalyzeSessionTranscript`'s previous segments and `CollectConversationUpstream`'s segments alike) — so a
+compaction after the last prompt shows after it, though the current part is empty. `BuildSummaryConversation`
+adds a COMPACTION row (`SummaryConversationRow::compactions` non-empty — its discriminator) after each part's
+prompts and before its session's separator; a boundary the session only COPIED (a fork's copy of its
+parent's, matched by uuid in `ConversationUpstream::uuids`) is drawn once, in the parent's part. The toggle
+OFF lists none. `RenderSummaryBox` writes a compaction row as a lone `\x1D<label>` line (`kCompactionMark` ==
+the engine's `kSummaryCompactionMark`, checked by a `static_assert`); the line carries its whole label, so
+`_SetSummaryContent` draws it from its own text, and the publish keeps compaction rows out of
+`_summaryPromptRows` / `_summarySeparatorRows` (an empty-text row among the prompt rows would shift every later
+prompt's Copy Prompt and ▸ jump). The copied `Summary` turns each into a plain `──── compacted · … ────` rule.
+The rich hover card shows the same lines (HANDOVER_tab-tooltip.md §6).
 
 **A fork with no messages yet.** A `--fork-session` fork writes no transcript until its first message, so
 the panel summarizes its fork source's transcript (`SessionInfo::forkParentId`) — since 88cb5e415, and never

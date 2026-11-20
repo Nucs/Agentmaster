@@ -1382,6 +1382,9 @@ namespace Agentmaster
             if (type == L"system" && obj.StrAt(L"subtype") == L"compact_boundary")
             {
                 segs.back().label = SeFormatCompactionLabel(obj.Find(L"compactMetadata"));
+                // Agentmaster (the summary's compaction lines): the boundary that ended this segment, with its uuid —
+                // a fork's copy of its parent's boundary keeps the parent's uuid, so the summary can draw it once.
+                segs.back().compactions.push_back(SegmentCompaction{ segs.back().label, lineUuid });
                 segs.emplace_back();
                 seen.clear();
                 continue;
@@ -2255,6 +2258,10 @@ namespace Agentmaster
         // "previous session(s)" /compact summarized away — surfaced (oldest first) by the summary panel's
         // previous-sessions toggle. Skipped on a truncated head read (a boundary may be cut off). Only
         // non-empty previous segments are kept (an empty one — e.g. back-to-back compactions — is noise).
+        // Agentmaster (the summary's compaction lines): the boundary that ended a DROPPED empty segment still
+        // happened — it is carried onto the segment kept before it (ConversationSegment::compactions), so the
+        // summary's line there reads "×2" instead of losing it. That includes the empty segments right before the
+        // current part: a session compacted twice since its last prompt shows both after that prompt.
         if (!truncated)
         {
             std::vector<ConversationSegment> segs = CollectConversationSegments(wide);
@@ -2267,6 +2274,11 @@ namespace Agentmaster
                     if (!s.userMsgs.empty())
                     {
                         out.previousSegments.push_back(std::move(s));
+                    }
+                    else if (!out.previousSegments.empty() && !s.compactions.empty())
+                    {
+                        auto& kept = out.previousSegments.back().compactions;
+                        kept.insert(kept.end(), s.compactions.begin(), s.compactions.end());
                     }
                 }
             }

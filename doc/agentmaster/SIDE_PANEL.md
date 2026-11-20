@@ -2665,9 +2665,13 @@ sessions this one continues — a fork's parent, a plan-mode restart's parent, a
 predecessor, a `/handover` origin, followed **upstream only** — numbered 1..N straight through,
 with a thin separator naming each earlier session's id (first 8 characters) after its last
 prompt. Clicking a separator copies that full id and pops "Copied session id of up to here".
+Wherever a `/compact` cut the conversation, a dim, unclickable rule says so between the prompts
+it separated — `─ compacted · auto · 923k→27k ─────` (2026-11-20, NOT BUILT yet; several in a row
+share one `×N` line, and the numbers run straight past it). The Sum-off rich card (the tab's card,
+beside the panel) shows the same lines, and lists its Skills / Files one line per item.
 Because the side panel builds a NEW overlay at every selection, the chain walk is cached
 engine-side (`CollectConversationUpstream`'s process-wide cache), never per overlay — re-selecting
-a card re-reads nothing. TAB_OVERLAY.md §13e has the rules.
+a card re-reads nothing. TAB_OVERLAY.md §13e has the rules (*Compaction lines* for the new marks).
 
 ### Which session the summary shows — FOLLOW the terminal vs PEEK a card
 
