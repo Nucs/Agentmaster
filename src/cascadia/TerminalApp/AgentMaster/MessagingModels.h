@@ -3214,7 +3214,7 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// The TOPIC LIST's order (§21.8, the user's "ordered by MOST RECENT like the sidemenu does"): the side panel's
-    /// MOST RECENT order — `a` ranks ABOVE `b` when its key (MostRecentSortKeyMs, the session's newest turn boundary)
+    /// MOST RECENT order — `a` ranks ABOVE `b` when its key (MostRecentSortKeyMs, the session's newest turn boundary or needs-approval edge)
     /// is larger, equal keys by the title, case-insensitive. Telegram lists a chat's topics by their LAST message,
     /// newest on top, and a bot cannot reorder them; so the service places a topic by WHEN it posts in it: it creates
     /// topics — and posts into several topics in one pass — in the REVERSE of this order (the lowest-ranked first), so

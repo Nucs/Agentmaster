@@ -310,6 +310,7 @@ void TestPersistence()
         s.pendingPasteRefs = L"paste #1 (+273 lines) -> bf8eefafa3e80676.txt"; // the paste-cache resolution annotation
         s.turnStartUnixMs = 1784800001000; // MOST RECENT sort: the turn-boundary stamps survive restart (PERSISTED) — a dormant session keeps its place
         s.turnEndUnixMs = 1784800002000;
+        s.needsApprovalEdgeUnixMs = 1784800003000; // ...and so does the third instant it reads, the last needs-approval edge (2026-11-21)
         QueuedPrompt a;
         a.id = L"p1";
         a.label = L"add tests";
@@ -341,6 +342,8 @@ void TestPersistence()
             CHECK(r.state == SessionState::WaitingForInput, "session state");
             CHECK(r.lastMessageWasQuestion, "question-guard flag preserved (PERSISTED: a crash mustn't drop the guard and auto-answer a pending question)");
             CHECK(r.turnStartUnixMs == 1784800001000 && r.turnEndUnixMs == 1784800002000, "MOST RECENT turn-boundary stamps round-trip (PERSISTED: a dormant restored session keeps its order)");
+            CHECK(r.needsApprovalEdgeUnixMs == 1784800003000 && MostRecentSortKeyMs(r) == 1784800003000,
+                  "MOST RECENT needs-approval edge round-trips and still leads the key after the restore (PERSISTED: a card lifted by an approval keeps its place)");
             CHECK(r.external, "external flag preserved");
             CHECK(r.forkParentId == L"src-conv-7", "forkParentId preserved (PERSISTED: restores a never-messaged fork)");
             CHECK(r.tabColorHex == L"#61AFEF", "tabColorHex preserved (PERSISTED: an Individual-mode session keeps ITS color across restore)");

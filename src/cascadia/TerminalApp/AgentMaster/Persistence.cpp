@@ -755,6 +755,14 @@ namespace Agentmaster
         {
             o.Set(L"turnEndUnixMs", json::Value::MkNum(static_cast<double>(s.turnEndUnixMs)));
         }
+        // Agentmaster (MOST RECENT sort — the needs-approval edges, SessionInfo::needsApprovalEdgeUnixMs): the third instant the
+        // order reads, PERSISTED with the turn stamps for the same reason (a dormant restored session keeps its place). Omitted
+        // while 0 (a session never seen asking — every record from before the stamp), so an untouched record is byte-unchanged
+        // and the fleet store's load keeps its fast path (the stored record equals its round trip).
+        if (s.needsApprovalEdgeUnixMs != 0)
+        {
+            o.Set(L"needsApprovalEdgeUnixMs", json::Value::MkNum(static_cast<double>(s.needsApprovalEdgeUnixMs)));
+        }
         o.Set(L"external", json::Value::MkBool(s.external));
         // Agentmaster (MESSAGING.md §5.3): the PIN (never idle). Omitted when false, so an all-normal
         // sessions.json is byte-unchanged.
@@ -856,6 +864,7 @@ namespace Agentmaster
         s.aiTitlePendingFrom = v.StrAt(L"aiTitlePendingFrom"); // PERSISTED (AI_TITLES.md): absent => "" (no AI title owed)
         s.turnStartUnixMs = v.I64At(L"turnStartUnixMs"); // PERSISTED (MOST RECENT sort): absent => 0 (no turn evidence; the sort falls back to the decay anchor)
         s.turnEndUnixMs = v.I64At(L"turnEndUnixMs"); // ditto — the assistant's last turn END
+        s.needsApprovalEdgeUnixMs = v.I64At(L"needsApprovalEdgeUnixMs"); // ditto — the last time it started asking for an approval or was answered (absent => 0: never seen asking)
         s.external = v.BoolAt(L"external", false);
         s.pinned = v.BoolAt(L"pinned", false); // PERSISTED (MESSAGING.md §5.3): absent => not pinned
         {

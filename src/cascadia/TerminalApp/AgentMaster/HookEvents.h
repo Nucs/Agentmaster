@@ -296,6 +296,55 @@ namespace Agentmaster
         }
     }
 
+    // Agentmaster (MOST RECENT sort — the NEEDS-APPROVAL EDGES, SessionInfo::needsApprovalEdgeUnixMs; the user's request of
+    // 2026-11-21) — PURE + unit-tested (TestNeedsApprovalEdge). Did the state change that hook event `m` just made mark the
+    // session ASKING for an approval, or being ANSWERED? Those two moments count as the session's activity in the MOST
+    // RECENT order, like a turn's start and end: SessionRegistry::OnHookEvent stamps the edge when this answers true.
+    // TRUE when exactly one of `before` / `after.state` is NeedsApproval and the change is the live claude's own:
+    //   * an ENTRY — claude stopped to ask: a Notification(permission) hook, or the scanner's recon-block / its presence twin
+    //     (recon-block-presence, claude's own "waiting" heartbeat) — every one a permission-style Notification;
+    //   * an EXIT — the question went away: the answer let claude work on (recon-resume / recon-resume-presence ride a
+    //     PostToolUse), or the turn ended there (a real Stop, or the scanner's quiescent one — an Esc on the dialog included),
+    //     or a new prompt or an API error followed it.
+    // FALSE — no stamp — for:
+    //   * no crossing: Running -> Running, or NeedsApproval -> NeedsApproval (a duplicate ask, the late hook of a question a
+    //     belt already saw, a SessionStart that keeps it);
+    //   * an ARCHIVED record (!live): nothing of the user's is on screen there (a closed tab's dying SessionEnd lands here);
+    //   * a DORMANT one — a tab of ours whose claude is not started (a window-restored tab nobody entered, a Deactivate park):
+    //     the scanner's at-rest synths still refine its display state from the transcript, so a restored stale NeedsApproval
+    //     can be released there, but that is residue of a claude that is gone, not an answer; stamping it would lift every
+    //     such card to the top at every start. ScanSessionIsDormant's rule (SessionScanner.h — this header cannot include
+    //     it): live, not started, not adopted (an adopted session's `started` is never maintained, and its claude runs);
+    //   * SessionEnd: the claude exited while asking — an exit, not an answer (and a crash must not lift its card);
+    //   * a cut-off verdict (HookMessage::turnCutOff): the scanner's after-the-fact judgment that a turn never finished,
+    //     possibly hours after it died — the NeedsApproval a restart brought back over a dead turn turning Error.
+    // A triage move or a restore never reaches here (they are Update / Upsert, which stamp nothing): only the one state
+    // machine's changes are judged.
+    //   before — the record's state BEFORE the event (SettleFacts::state, captured before the ordered transition).
+    //   after  — the record AFTER the event: its state (the ordered transition, then the pin hold) and its live / started /
+    //            external flags.
+    //   m      — the event (a wire hook, or one the scanner synthesized).
+    // Returns true when the change is a needs-approval edge to stamp. Never throws.
+    inline bool IsNeedsApprovalEdge(SessionState before, const SessionInfo& after, const HookMessage& m) noexcept
+    {
+        const bool wasAsking = before == SessionState::NeedsApproval;
+        const bool isAsking = after.state == SessionState::NeedsApproval;
+        if (wasAsking == isAsking)
+        {
+            return false; // no crossing: neither a new question nor an answer
+        }
+        const bool dormant = after.live && !after.started && !after.external; // ScanSessionIsDormant (see above)
+        if (!after.live || dormant)
+        {
+            return false; // no claude of ours runs there: a correction of residue, not the session's activity
+        }
+        if (m.turnCutOff || m.event == HookEvent::SessionEnd)
+        {
+            return false; // an after-the-fact verdict, or the process ending: neither is an answer
+        }
+        return true;
+    }
+
     // The hook-driven state machine (DESIGN §7). PURE — depends only on the current
     // state and the incoming event. This encodes Correctness Rule #1: "waiting" is three
     // distinct states, and only a clean `Stop` (or a manual compaction's PostCompact, which

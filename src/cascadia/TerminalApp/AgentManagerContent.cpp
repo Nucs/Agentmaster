@@ -1472,7 +1472,7 @@ namespace winrt::TerminalApp::implementation
             // Agentmaster: the board's SORT toggle, right after the scope toggle (mirroring the Explorer
             // Tree's scope-then-sort layout). Cycles MOST ACTIVE -> MOST RECENT -> NEWEST -> OLDEST -> A-Z
             // (the tree's set minus BY PID — host/shell grouping is meaningless once cards split across
-            // state columns; MOST RECENT = the newest turn boundary only, see ExplorerSort::MostRecent).
+            // state columns; MOST RECENT = the newest turn boundary or needs-approval edge only, see ExplorerSort::MostRecent).
             // Default MOST ACTIVE. A SEPARATE global setting from the tree's sort (AppSettings::boardSort),
             // so each remembers its own; persisted + shared by every window (the changing window re-sorts
             // live; others adopt on next launch — the treeSort idiom). _CycleBoardSort advances + persists
@@ -1480,7 +1480,7 @@ namespace winrt::TerminalApp::implementation
             _boardSortBtn = Button{};
             _boardSortBtn.FontSize(11);
             _boardSortBtn.Padding(Thickness{ 8, 1, 8, 1 });
-            AgentSetTitledTip(_boardSortBtn, L"Card sort", L"Order the cards within each column. Click to cycle: MOST ACTIVE (most recent activity first, running sessions on top \x2014 the default) \xB7 MOST RECENT (by the last turn boundary only: when you last sent a turn or the assistant last finished one \x2014 tool calls and subagent work never move it) \xB7 NEWEST \xB7 OLDEST \xB7 A\x2013Z. Saved, and shared by every window and the side panel; separate from the Explorer Tree's own sort.");
+            AgentSetTitledTip(_boardSortBtn, L"Card sort", L"Order the cards within each column. Click to cycle: MOST ACTIVE (most recent activity first, running sessions on top \x2014 the default) \xB7 MOST RECENT (by the last turn boundary or approval only: when you last sent a turn, the assistant last finished one, or the session last asked for a permission or an answer or got yours \x2014 tool calls and subagent work never move it) \xB7 NEWEST \xB7 OLDEST \xB7 A\x2013Z. Saved, and shared by every window and the side panel; separate from the Explorer Tree's own sort.");
             _boardSortBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleBoardSort(); });
             header.Children().Append(_boardSortBtn);
             _UpdateBoardSortButton();
@@ -1629,14 +1629,14 @@ namespace winrt::TerminalApp::implementation
                 _UpdateTreeScopeButton();
 
                 // Agentmaster: a sort toggle AFTER the scope toggle — NEWEST / OLDEST / MOST ACTIVE
-                // (currently-running first) / MOST RECENT (the newest turn boundary only) / A-Z / BY PID.
+                // (currently-running first) / MOST RECENT (the newest turn boundary or needs-approval edge only) / A-Z / BY PID.
                 // Orders the directory groups AND the rows within
                 // each, in every scope (LOCAL/GLOBAL/EXTERNAL). GLOBAL setting: a click persists it
                 // (AppSettings::treeSort) so the choice survives restart and applies to new windows.
                 _treeSortBtn = Button{};
                 _treeSortBtn.FontSize(11);
                 _treeSortBtn.Padding(Thickness{ 8, 1, 8, 1 });
-                AgentSetTitledTip(_treeSortBtn, L"Sort order", L"Order both the directory groups and the sessions inside them. Click to cycle: NEWEST \xB7 OLDEST \xB7 MOST ACTIVE (running sessions first) \xB7 MOST RECENT (by the last turn boundary only: when you last sent a turn or the assistant last finished one \x2014 tool calls and subagent work never move it) \xB7 A\x2013Z \xB7 BY PID (group rows by the terminal window hosting them). Applies to every scope; saved, and shared by every window.");
+                AgentSetTitledTip(_treeSortBtn, L"Sort order", L"Order both the directory groups and the sessions inside them. Click to cycle: NEWEST \xB7 OLDEST \xB7 MOST ACTIVE (running sessions first) \xB7 MOST RECENT (by the last turn boundary or approval only: when you last sent a turn, the assistant last finished one, or the session last asked for a permission or an answer or got yours \x2014 tool calls and subagent work never move it) \xB7 A\x2013Z \xB7 BY PID (group rows by the terminal window hosting them). Applies to every scope; saved, and shared by every window.");
                 _treeSortBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleTreeSort(); });
                 hdrow.Children().Append(_treeSortBtn);
                 _UpdateTreeSortButton();

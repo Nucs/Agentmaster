@@ -1639,7 +1639,9 @@ recreation"*.
 - **One key.** `MostRecentSortKeyMs` (`SessionModels.h`) — the newer turn boundary (`turnStartUnixMs` /
   `turnEndUnixMs`), else the last activity (a new session's or fork's creation) — is the key of the side panel, the
   board and the tree (`MakeSortKey` now calls it) and of the topic list; ties go by the title, case-insensitive
-  (`TopicRanksAbove`, upper-casing like the side panel's `CompareStringOrdinal`).
+  (`TopicRanksAbove`, upper-casing like the side panel's `CompareStringOrdinal`). Since 2026-11-21 it also reads the
+  newest needs-approval edge (`needsApprovalEdgeUnixMs`: the session started asking for an approval, or was answered;
+  SIDE_PANEL.md §2 *Needs approval counts as activity*), so an approval lifts the topic in the list's order too.
 - **Creation order.** `PlanTopicSync` lists the creates in the REVERSE of the list's order (lowest-ranked first,
   `TabFact::mostRecentMs`); the service makes ~6 per tick in that order, so the topic that ranks highest is made —
   and its card posted — last, and lands on top. A single new tab is the most recent anyway: on top.
@@ -1668,7 +1670,9 @@ recreation"*.
   rises while it works and is back in line at the turn's end; (2) the card re-sent with sound for an exit, an Error or
   an approval (a notification needs a new message). Exact parity during a turn would mean posting nothing new
   mid-turn — remarks folded into one edited message per turn, or held until the turn ends — which is the user's
-  choice, not made here.
+  choice, not made here. (2026-11-21: an APPROVAL no longer differs — the key moves when the session asks and again
+  when it is answered, so the re-sent approval card and the list's order agree, and the quiet re-sort no longer
+  re-posts the cards above an asking topic to push it back down.)
 - **Tests** (`TestMessaging`): `MostRecentSortKeyMs` (boundaries, the activity fallback); `TopicRanksAbove` (keys, the
   case-insensitive title tie, the upper-casing); the creates' order (`adecb` — ties included); `NeedsTopicRecreation`;
   the round trip of `topicLayout` + `orphanThreads` and a file without them; `/recreate` a Search fleet command, never a
@@ -2894,13 +2898,15 @@ updated 5 minutes ago
   that opens nothing until its next turn. ⚠ A state added to `SessionState` later is listed until it is named in
   `DirectoryStateIsStationary`.
 - **The order — "recent activity"** (`PickDirectoryRecentTabs`): the side panel's MOST RECENT key (`MostRecentSortKeyMs`:
-  the newest turn boundary — a prompt sent, a turn finished —; for a session with no turn yet, its creation instant),
-  compared by the topic list's own rule (`TopicRanksAbove`, §21.8), so the section lists the tabs in the order their
-  threads stand in Telegram's thread list; equal keys by title case-insensitively, then by session id. Not the MOST ACTIVE
-  key (every hook and tool call): that one reorders the running tabs on every check, and the directory would be edited
-  every two minutes for nothing. The MOST RECENT key moves only when a turn starts or ends — when the state glyph and the
-  stats rows change anyway —, so the section costs no edit of its own. ⚠ A tab that has been running one long turn ranks by
-  that turn's START, below a tab whose turn ended a minute ago.
+  the newest turn boundary — a prompt sent, a turn finished — or needs-approval edge — the session started asking for an
+  approval, or was answered, since 2026-11-21 (SIDE_PANEL.md §2 *Needs approval counts as activity*) —; for a session with
+  none yet, its creation instant), compared by the topic list's own rule (`TopicRanksAbove`, §21.8), so the section lists
+  the tabs in the order their threads stand in Telegram's thread list; equal keys by title case-insensitively, then by
+  session id. Not the MOST ACTIVE key (every hook and tool call): that one reorders the running tabs on every check, and the
+  directory would be edited every two minutes for nothing. The MOST RECENT key moves only when a turn starts or ends or the
+  session enters or leaves Needs approval — when the state glyph and the stats rows change anyway —, so the section costs
+  no edit of its own. ⚠ A tab that has been running one long turn ranks by that turn's START (or its last approval), below
+  a tab whose turn ended a minute ago.
 - **The population:** every open Claude tab (live, in a tab) — the stats rows' and `/board`'s (a Codex tab has no topic,
   D23). A tab can be listed both under a tag and here.
 - **Its room in a full message:** the section is built BEFORE the tag sections, and their size checks count it (the rich

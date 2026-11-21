@@ -84,8 +84,9 @@ namespace Agentmaster
         int64_t lastActivityUnixMs{ 0 }; // the most recent activity of any kind (a turn's end, a tool call, a hook); 0 = none recorded
 
         // ---- the overview's columns (SESSIONS.md §9.16; filled with the session half, empty / 0 / false for a shell) ----
-        // The MOST RECENT key (SessionModels.h MostRecentSortKeyMs): the newer of its last turn start and end, else the
-        // decay anchor (a new session's creation instant). The overview's `age` and the order of its folder groups: the
+        // The MOST RECENT key (SessionModels.h MostRecentSortKeyMs): the newest of its last turn start, its last turn end and
+        // the last time it started asking for an approval or was answered, else the decay anchor (a new session's creation
+        // instant). The overview's `age` and the order of its folder groups: the
         // order the Manager's tree and board and the side panel show under MOST RECENT. 0 = nothing known.
         int64_t mostRecentUnixMs{ 0 };
         // Messages the user sent in its conversation (the transcript index's real prompts, which a fork shares with its

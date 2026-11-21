@@ -179,6 +179,32 @@ model's answer and its list of sessions instead of the session cards; the summar
   move it, and there is no Running pin (a running session ranks by when its turn was sent). A
   session with no turn evidence yet falls back to the hook decay anchor so it isn't stranded at
   the bottom. The pure extractor is `TurnBoundariesFromTranscriptChunk` (unit-tested).
+- **Needs approval counts as activity in MOST RECENT** (2026-11-21, the user's *"status 'needs
+  approval' is considered a refresh of the latest activity/active in the session. That also includes
+  AFTER answering the questions and status shifts aways from 'needs approval'"*). A third instant
+  joins the two boundaries: `SessionInfo::needsApprovalEdgeUnixMs`, the newest moment the session
+  ENTERED Needs approval (claude stopped to ask for a tool permission or a question's answer) or
+  LEFT it (answered: claude works on, or the turn ends there). `MostRecentSortKeyMs` takes the newest
+  of the three, so a card moves to the top when its session asks, and again when it is answered —
+  before, a session whose turn began an hour ago and asked a minute ago sat an hour deep, and the
+  card the user had just answered dropped back there.
+  - **Stamped in one place:** `SessionRegistry::OnHookEvent`, after the ordered transition — where
+    every state change of the one state machine lands: the permission hook, and the scanner's
+    recon-block, recon-resume, recon-stop and their presence twins (HOOKS.md *The pull reconcilers*).
+    The instant is the event's fire time (a synth's own detection time); a monotonic max, persisted
+    (`needsApprovalEdgeUnixMs` in `sessions.db` / `sessions.json`, omitted while 0).
+  - **Never stamped** (`IsNeedsApprovalEdge`, `HookEvents.h`): a restore (an `Upsert` of a persisted
+    Needs approval is no new question), a triage move (an `Update`: the order already ignores the
+    triage stamps), a dormant tab (a window-restored or parked tab: the scanner still releases a stale
+    Needs approval there off the old transcript, which must not lift every such card at every start),
+    an archived record, a `SessionEnd` (the claude exited while asking), a cut-off verdict (judged
+    after the fact). A duplicate ask (a belt and the hook seeing one question) crosses nothing.
+  - **Every MOST RECENT surface follows**, since they share the one key: the Triage Board, the tree,
+    this panel, the Telegram topic list and its directory's Recent activity (MESSAGING.md §21.8), the
+    AI search's `age` (SESSIONS.md §9.16). The ⋯ ▸ Card order tip and the board's and tree's sort
+    tips name the approvals. Tests: `TestNeedsApprovalEdge` (the rule, its dormant test against
+    `ScanSessionIsDormant` for all eight flag combinations, the registry end to end), the key's checks
+    in `TestMessaging`, the round trip in `TestPersistence`.
 - **A new session or fork starts at the TOP** (MOST ACTIVE and MOST RECENT). Both orders read the
   decay anchor `SessionInfo::lastActivityUnixMs` while a session has no transcript activity and no
   turn stamps — and a brand-new card has neither. So the launch seam (`_LaunchClaudeSession` /

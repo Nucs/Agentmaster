@@ -169,7 +169,9 @@ it), `AgentLaunchBar.{h,cpp}` (the launch row), `TabManagement.cpp` (closing tab
   absent = LOCAL).
 - **Sort** (`_CycleTreeSort` / `_UpdateTreeSortButton`; GLOBAL and persisted, `AppSettings::treeSort`):
   NEWEST · OLDEST (conversation ctime) · MOST ACTIVE (recency, a Running session pinned on top) ·
-  MOST RECENT (turn boundaries only: `SessionInfo::turnStartUnixMs` / `turnEndUnixMs`, persisted, so
+  MOST RECENT (turn boundaries and needs-approval edges only: `SessionInfo::turnStartUnixMs` /
+  `turnEndUnixMs` / `needsApprovalEdgeUnixMs` — a session moves up when it asks for an approval and
+  again when it is answered, SIDE_PANEL.md §2 *Needs approval counts as activity* —, persisted, so
   mid-turn tool calls and side-file writes never move it; no Running pin) · A–Z · BY PID (externals by
   their host shell's pid, managed sessions by the claude pid; then most active). It orders folders and
   rows in every scope (`SortKey` / `MakeSortKey` / `SortKeyLess`); the board and side panel share

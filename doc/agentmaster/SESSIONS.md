@@ -1591,7 +1591,8 @@ and the database mode; the server's order is now overview, status, list, resume,
 **Search rows say it too** (the user's "make sure search provides status of the agent, age since last active"):
 every row of `mcp__sessions__search` now carries `status` and `age` (`FormatSessionSearchResult`'s new `live` map,
 filled by one BRIEF facts read for the rows). A session open in a tab says its tab's status and its age since its
-newest turn started or ended (the MOST RECENT key); any other row says `closed` and its age since its newest message
+newest turn started or ended, or it last asked for an approval or was answered (the MOST RECENT key); any other row
+says `closed` and its age since its newest message
 (its `active` time); a session the catalog lists as open but no facts describe says `open`. In the database mode the
 service's rows get the same two fields, put in before their `active` (`AddLiveFactsToDatabaseRows`; a closed row
 gets only `status`, the database's own `active` being its time).
@@ -1610,9 +1611,13 @@ and the search rows):
 - `SessionStatusPhrase`: the state word; `" (dormant)"` added for a tab whose agent is not started (it starts when the
   tab is entered; an adopted tab is never dormant); `closed` for a session with no tab; `open` for a tab whose state
   is not known.
-- `age` = `MostRecentSortKeyMs` (SessionModels.h): the newer of the last turn start and end, else the decay anchor —
-  the order the Manager's tree and board and the side panel show under MOST RECENT. A running turn's age is therefore
-  the time since it STARTED, while the list tool's `active` moves with every tool call.
+- `age` = `MostRecentSortKeyMs` (SessionModels.h): the newest of the last turn start, the last turn end and the last
+  needs-approval edge (the session started asking for an approval, or was answered: SIDE_PANEL.md §2 *Needs approval
+  counts as activity*, 2026-11-21), else the decay anchor — the order the Manager's tree and board and the side panel
+  show under MOST RECENT. A running turn's age is therefore the time since it STARTED, or since it last asked or was
+  answered, while the list tool's `active` moves with every tool call. ⚠ The prompt still words the overview's `age`
+  as "since its newest turn started or ended" (`tools/ai-search-eval/pieces.txt`): rewording it needs the eval's run
+  (a scored prompt file), so it was left as it is.
 - `SessionLooksUnread`: Mark Unread, or a state that needs the user (waiting for you, needs approval, error) reached by
   activity newer than the user's last visit of its tab (`readUnixMs < lastActivityUnixMs`, the Waiting-for-you decay's
   test). `readUnixMs` is transient: after a restart every waiting session reads unread until its tab is visited. It is

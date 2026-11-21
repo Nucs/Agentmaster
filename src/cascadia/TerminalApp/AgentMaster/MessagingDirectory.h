@@ -105,7 +105,7 @@ namespace Agentmaster::Msg
         SessionState state{ SessionState::Idle }; // the glyph before its chip (StateGlyph, like the topic names)
         std::wstring colorHex; // the tab color (TabFact::colorHex; "" = none: no square, the plain look)
         int64_t threadId{ 0 }; // its topic (0 = none — an idle tab, a Codex tab: a chip that does nothing)
-        // The session's MOST RECENT key (TabFact::mostRecentMs = MostRecentSortKeyMs: its newest turn boundary, the key the topic
+        // The session's MOST RECENT key (TabFact::mostRecentMs = MostRecentSortKeyMs: its newest turn boundary or needs-approval edge, the key the topic
         // list and the side panel order by). Only the Recent activity section reads it (§21.16.8); 0 = unknown (it ranks last).
         int64_t recentMs{ 0 };
     };

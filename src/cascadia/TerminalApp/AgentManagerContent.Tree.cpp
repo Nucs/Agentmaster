@@ -185,7 +185,7 @@ namespace winrt::TerminalApp::implementation
                 int64_t maxCreated{ 0 };
                 int64_t minCreated{ INT64_MAX };
                 int64_t bestLast{ 0 };
-                int64_t bestTurn{ 0 }; // MOST RECENT: a dir's rank is its newest turn boundary (SortKey::turn) across its sessions
+                int64_t bestTurn{ 0 }; // MOST RECENT: a dir's rank is its newest turn boundary or needs-approval edge (SortKey::turn) across its sessions
                 uint32_t minPid{ UINT32_MAX }; // BY PID: a dir's rank is its lowest host/claude pid
             };
             std::vector<std::pair<std::wstring, DirAgg>> ranked;
@@ -201,7 +201,7 @@ namespace winrt::TerminalApp::implementation
                         agg.maxCreated = (std::max)(agg.maxCreated, k.created);
                         agg.minCreated = (std::min)(agg.minCreated, k.created);
                         agg.bestLast = (std::max)(agg.bestLast, k.active ? INT64_MAX : k.last);
-                        agg.bestTurn = (std::max)(agg.bestTurn, k.turn); // MOST RECENT: newest turn boundary in the dir (no Running pin)
+                        agg.bestTurn = (std::max)(agg.bestTurn, k.turn); // MOST RECENT: newest turn boundary or needs-approval edge in the dir (no Running pin)
                         agg.minPid = (std::min)(agg.minPid, k.pid);
                     }
                 }
@@ -1357,8 +1357,9 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster: advance the Triage Board sort MOST ACTIVE -> MOST RECENT -> NEWEST -> OLDEST -> A-Z ->
     // MOST ACTIVE (it never visits BY PID — pid grouping is meaningless once cards split across the state
-    // columns). MOST RECENT orders by the newest TURN BOUNDARY only (SessionInfo::turnStart/EndUnixMs —
-    // the user's last prompt SENT / the assistant's last turn FINISHED), never mid-turn tool or subagent
+    // columns). MOST RECENT orders by the newest TURN BOUNDARY or NEEDS-APPROVAL EDGE only
+    // (SessionInfo::turnStart/EndUnixMs — the user's last prompt SENT / the assistant's last turn FINISHED —
+    // and needsApprovalEdgeUnixMs — the session last asked for an approval or was answered), never mid-turn tool or subagent
     // activity and with no Running pin — the sharper twin of MOST ACTIVE. The side panel's ⋯ ▸ Card order
     // submenu shares this setting, picking an order by name (AgentManagerContent::SetBoardSort, below).
     // A SEPARATE global setting from the tree's sort (AppSettings::boardSort), so the board and tree

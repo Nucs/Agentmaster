@@ -148,6 +148,7 @@ void TestCloseAnswersWaiting(); // AGENT_MANAGER.md "Closing sessions" (DemoteWa
 void TestOrderedStateMachine();
 void TestWire();
 void TestRegistry();
+void TestNeedsApprovalEdge(); // MOST RECENT sort (SessionInfo::needsApprovalEdgeUnixMs, 2026-11-21): entering and leaving NeedsApproval refresh the key — the pure rule (IsNeedsApprovalEdge: crossings, exclusions, its dormant rule = ScanSessionIsDormant's for all 8 flag combinations), the registry's stamp through OnHookEvent (ask, duplicate ask, answer, late hook, the turn ending on the dialog, a ts-less line, an adopted session), what never stamps (restore Upsert, a dormant release, a triage Update, SessionEnd, a cut-off verdict, an archived record), the key's order, the JSON
 void TestRegistryFanout();
 void TestRegistrySnapshotLive();
 void TestRegistryLeanReads(); // UI_THREAD.md §10a #4 — the lean registry reads: GetWithoutQueue (no queue, everything else), GetTabToken, LiveTabBindings (the SnapshotLive set + order, three fields), ManagedCodexTabTokens (live + ours + tokened Codex only), SnapshotLiveForScan (open prompts only, the four display texts empty, the scanner predicates unchanged), SnapshotLiveForCards (SIDE_PANEL.md §2c: no queue, lastAssistantText / recap / pendingPasteRefs empty, pendingInput KEPT); every read leaves the stored record byte-for-byte intact

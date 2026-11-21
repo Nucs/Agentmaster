@@ -996,10 +996,11 @@ namespace
                          // prompted session has no transcript yet, so it is treated as just-created
                          // (== newest), floating to the top of NEWEST and the bottom of OLDEST.
         int64_t last; // last activity: the transcript's line-derived activity, else the decay anchor (lastActivityUnixMs — a NEW session/fork is stamped with its creation instant by the launch seam, so it starts at the top of MOST ACTIVE under the Running pin); 0 when unknown.
-        // MOST RECENT key: the newest TURN BOUNDARY — the newer of SessionInfo::turnStartUnixMs (the user
-        // last SENT a turn) and turnEndUnixMs (the assistant last FINISHED one). Never mid-turn tool or
-        // subagent activity (that is `last`), never the Running pin. Falls back to the hook decay anchor
-        // (lastActivityUnixMs) only when a session has NO turn evidence yet — a never-prompted / just-
+        // MOST RECENT key: the newest TURN BOUNDARY or NEEDS-APPROVAL EDGE — the newest of
+        // SessionInfo::turnStartUnixMs (the user last SENT a turn), turnEndUnixMs (the assistant last FINISHED
+        // one) and needsApprovalEdgeUnixMs (the session last started asking for a permission or an answer, or
+        // was answered). Never mid-turn tool or subagent activity (that is `last`), never the Running pin.
+        // Falls back to the hook decay anchor (lastActivityUnixMs) only when a session has NO turn evidence yet — a never-prompted / just-
         // launched session, or a record from before the stamps existed — so it isn't stranded at the
         // bottom until its first turn. For a just-created session or fork that anchor is its CREATION
         // instant (TerminalPage::_LaunchClaudeSession / _LaunchCodexSession stamp it), so a new card
@@ -1017,9 +1018,9 @@ namespace
         SortKey k{};
         k.created = s.convCreatedUnixMs > 0 ? s.convCreatedUnixMs : INT64_MAX;
         k.last = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
-        // MOST RECENT: the newer turn boundary (hook push / tail pull / persisted — all monotonic), else the decay
-        // anchor for a session with no turn evidence yet. ONE rule shared with the Telegram topic list (MESSAGING.md
-        // §21.8), so the two orders can never drift apart.
+        // MOST RECENT: the newest turn boundary or needs-approval edge (hook push / tail pull / persisted — all
+        // monotonic), else the decay anchor for a session with no turn evidence yet. ONE rule shared with the Telegram
+        // topic list (MESSAGING.md §21.8), so the two orders can never drift apart.
         k.turn = ::Agentmaster::MostRecentSortKeyMs(s);
         k.active = (s.state == ::Agentmaster::SessionState::Running);
         k.title = s.title;
@@ -1072,7 +1073,7 @@ namespace
             break;
         case ExplorerSort::MostRecent:
             if (a.turn != b.turn)
-                return a.turn > b.turn; // newest turn boundary first — no Running pin, no mid-turn activity (the MOST ACTIVE difference)
+                return a.turn > b.turn; // newest turn boundary / needs-approval edge first — no Running pin, no mid-turn tool or subagent activity (the MOST ACTIVE difference)
             break;
         case ExplorerSort::Alpha:
             break; // name is the primary key — handled by the tiebreak below

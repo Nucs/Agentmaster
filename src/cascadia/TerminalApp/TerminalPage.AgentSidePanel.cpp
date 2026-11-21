@@ -357,7 +357,10 @@ namespace
     // nothing once the board splits the cards across its state columns).
     constexpr SidePanelOrderChoice kSidePanelOrderChoices[] = {
         { ::Agentmaster::ExplorerSort::MostActive, L"MOST ACTIVE", L"Running sessions first, then the most recent activity of any kind \x2014 a tool call or a subagent's work moves a card up too." },
-        { ::Agentmaster::ExplorerSort::MostRecent, L"MOST RECENT", L"By the last turn boundary only: the prompt you last sent or the reply that last finished. Tool calls and subagent work never move a card, and a running session is not lifted." },
+        // MOST RECENT's words follow MostRecentSortKeyMs (SessionModels.h): the turn boundaries AND the needs-approval edges
+        // (2026-11-21) — a card moves up when its session asks for a permission or a question's answer, and again when it is
+        // answered.
+        { ::Agentmaster::ExplorerSort::MostRecent, L"MOST RECENT", L"By the last turn boundary or approval: the prompt you last sent, the reply that last finished, or a permission or question the session last asked or you last answered. Tool calls and subagent work never move a card, and a running session is not lifted." },
         { ::Agentmaster::ExplorerSort::Newest, L"NEWEST", L"Newest conversation first, by when it was created. A session with no transcript yet counts as just created." },
         { ::Agentmaster::ExplorerSort::Oldest, L"OLDEST", L"Oldest conversation first, by when it was created." },
         { ::Agentmaster::ExplorerSort::Alpha, L"A\x2013Z", L"By title, A to Z; case does not matter." },

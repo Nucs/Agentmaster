@@ -1099,6 +1099,23 @@ namespace Agentmaster
             {
                 s.turnEndUnixMs = msg.ts;
             }
+            // Agentmaster (MOST RECENT sort — the NEEDS-APPROVAL EDGES, SessionInfo::needsApprovalEdgeUnixMs; the user's request
+            // of 2026-11-21): the session started asking for an approval, or was answered, so it ranks as just active. Judged
+            // HERE, after the ordered transition and the pin hold, because this is the one place every state change of the
+            // machine lands — the push hooks and every scanner synth (recon-block, recon-resume and their presence twins,
+            // recon-stop) alike; an Upsert (a restore) or an Update (a triage move) never changes the state through it, so
+            // neither can stamp. IsNeedsApprovalEdge keeps out the changes that are no answer (a dormant or archived record,
+            // SessionEnd, a cut-off verdict). The instant is the event's fire time (a synth's ts is its own detection time),
+            // the arrival for an old forwarder's ts-less line; a monotonic MAX like the turn stamps, so a late hook never
+            // moves the key back. No notify of its own: the hook's notify below carries it (and the fleet store saves it).
+            if (IsNeedsApprovalEdge(settleBefore.state, s, msg))
+            {
+                const int64_t edgeAt = (msg.ts != 0) ? msg.ts : NowMs();
+                if (edgeAt > s.needsApprovalEdgeUnixMs)
+                {
+                    s.needsApprovalEdgeUnixMs = edgeAt;
+                }
+            }
             if (s.workingDir.empty() && !msg.cwd.empty())
             {
                 s.workingDir = msg.cwd;

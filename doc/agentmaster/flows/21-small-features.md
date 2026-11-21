@@ -51,7 +51,7 @@
 
 ---
 
-### MSC-03 · MOST RECENT sorts by turns; a new session starts at the top
+### MSC-03 · MOST RECENT sorts by turns and approvals; a new session starts at the top
 
 > **Since** 0.7.9 · **P1** · **Needs** mock, F-S2 + 3 sessions · **Spec** CLAUDE.md *C1 UI* (the sort toggle)
 
@@ -61,7 +61,14 @@
    (tool calls and side-file writes never move a card); when A's turn ends, A on top.
 2. **New session / fork.** *Do:* launch a session; fork one. *Expect:* each new card at the TOP in MOST RECENT (and under the
    Running pin in MOST ACTIVE) — in the tree, the board and the side panel; the side panel's ⌖ then keeps it in view.
-3. **The setting persists** (`boardSort`, `treeSort`) across a restart.
+3. **Needs approval counts as activity** (2026-11-21, SIDE_PANEL.md §2). *Do:* session A starts a long turn, then B's turn
+   starts and ends; then A asks for a tool permission (`[[mock bash "rm x"]]` under the default permission mode) or an
+   `AskUserQuestion`. *Expect:* A goes to the TOP the moment it reads Needs approval; B ends a turn after that (B on top);
+   answer A's dialog: A on top again the moment it leaves Needs approval (Running, or Waiting for you when the answer ended
+   the turn). *Never:* a window-restored tab whose stale Needs approval is released at a start moves (it keeps its place),
+   nor a triage "Move to Idle/Done" of a Needs-approval card.
+4. **The setting persists** (`boardSort`, `treeSort`) across a restart, and so does each card's place (the approval stamp
+   is saved with the turn stamps).
 
 ---
 

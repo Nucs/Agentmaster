@@ -773,7 +773,7 @@ namespace Agentmaster::Msg
         std::wstring dirKey; // NormDirKey of the session's launch folder
         std::wstring worksInKey; // NormDirKey of its INFERRED folder ("" = not inferred, or the launch folder)
         int64_t createdMs{ 0 }; // SessionInfo::createdUnixMs — when the session was created (0 = before the stamp existed)
-        int64_t recentMs{ 0 }; // MostRecentSortKeyMs — its newest turn, else its last activity (the side panel's MOST RECENT key)
+        int64_t recentMs{ 0 }; // MostRecentSortKeyMs — its newest turn boundary or needs-approval edge, else its last activity (the side panel's MOST RECENT key)
     };
 
     /// <summary>One window as the step shows it, numbered in creation order (the AI search's tab tools number them alike).</summary>

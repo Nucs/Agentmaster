@@ -76,6 +76,7 @@ int wmain(int argc, wchar_t** argv)
     TestOrderedStateMachine();
     TestWire();
     TestRegistry();
+    TestNeedsApprovalEdge(); // MOST RECENT: entering / leaving NeedsApproval refreshes the key (tests_state.cpp)
     TestRegistryFanout();
     TestRegistrySnapshotLive();
     TestRegistryLeanReads(); // UI_THREAD.md §10a #4 — the lean registry reads (tests_state.cpp)

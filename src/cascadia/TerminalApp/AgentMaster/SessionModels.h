@@ -200,11 +200,14 @@ namespace Agentmaster
         MostActive, // most recent activity first; a currently-running session ranks at the very top
         Alpha, // A->Z by title (case-insensitive)
         ByPid, // group by host window/shell pid (externals: ExternalClaudeRow::hostPid; managed: the claude pid), then by most active within each group
-        // Newest TURN BOUNDARY first — the newer of (when the user last SENT a turn, when the assistant
-        // last FINISHED one): SessionInfo::turnStartUnixMs / turnEndUnixMs. Sharper than MostActive by
-        // construction: mid-turn tool calls, subagent/teammate side-file writes, and the SessionStart /
-        // triage-move stamps that keep MostActive jumping never move it, and there is NO Running pin — a
-        // running session ranks by when its turn was sent. Token "recent" (Persistence.cpp).
+        // Newest TURN BOUNDARY or NEEDS-APPROVAL EDGE first — the newest of (when the user last SENT a turn,
+        // when the assistant last FINISHED one, when the session last started or stopped asking for an
+        // approval): SessionInfo::turnStartUnixMs / turnEndUnixMs / needsApprovalEdgeUnixMs, through
+        // MostRecentSortKeyMs. Sharper than MostActive by construction: mid-turn tool calls, subagent/
+        // teammate side-file writes, and the SessionStart / triage-move stamps that keep MostActive jumping
+        // never move it, and there is NO Running pin — a running session ranks by when its turn was sent,
+        // or by when it last asked for an approval or was answered, whichever came later. Token "recent"
+        // (Persistence.cpp).
         MostRecent
     };
 
@@ -1732,8 +1735,9 @@ namespace Agentmaster
         // re-derived from the transcript within one survey.
         int64_t lastTurnUnixMs{ 0 };
         // Agentmaster (MOST RECENT sort — ExplorerSort::MostRecent): the two TURN-BOUNDARY stamps — when
-        // the user last SENT a turn and when the assistant last FINISHED one — the only two instants
-        // that order reads (SortKey::turn = the newer of the two). Deliberately NOT lastActivityUnixMs
+        // the user last SENT a turn and when the assistant last FINISHED one — two of the three instants
+        // that order reads (SortKey::turn = MostRecentSortKeyMs = the newest of them and
+        // needsApprovalEdgeUnixMs below). Deliberately NOT lastActivityUnixMs
         // (SessionStart / the triage moves stamp it), NOT lastTurnUnixMs (every tool call stamps it), NOT
         // convLastActivityUnixMs (per-LINE, plus the subagent/teammate side-file fold): those are exactly
         // why MOST ACTIVE reads "not accurate" — a session grinding through tool calls, or hosting a
@@ -1755,6 +1759,29 @@ namespace Agentmaster
         // stranded at the bottom until its first turn.
         int64_t turnStartUnixMs{ 0 };
         int64_t turnEndUnixMs{ 0 };
+        // Agentmaster (MOST RECENT sort — the NEEDS-APPROVAL EDGES; the user's request of 2026-11-21: "status 'needs approval'
+        // is considered a refresh of the latest activity/active in the session. That also includes AFTER answering the questions
+        // and status shifts away from 'needs approval'"): the newest instant this session ENTERED NeedsApproval (claude stopped
+        // to ask for a tool permission or for a question's answer) or LEFT it (the question went away: the user answered and
+        // claude works on, or the turn ended there). The third instant MostRecentSortKeyMs reads, beside the two turn boundaries
+        // above. Without it a permission asked or answered mid-turn — the user dealing with that session as surely as a prompt
+        // — moved neither boundary, so a session whose turn began an hour ago and asked a minute ago sat an hour deep in the
+        // order, and the card the user had just answered dropped back there.
+        // Stamped ONLY by SessionRegistry::OnHookEvent, where every state change of the one state machine happens (a push hook
+        // or the scanner's synthesized one), and only for a change that crosses the NeedsApproval boundary while a claude of
+        // the session can be running (IsNeedsApprovalEdge, HookEvents.h, has the full rule). So it is never stamped by:
+        //   * a restore or any Upsert — a persisted NeedsApproval brought back at a start is not a new question;
+        //   * a triage move or any other Update — the order already ignores the triage stamps (the MOST ACTIVE difference);
+        //   * a dormant or archived record — what the scanner refines there is residue of a claude that is gone (a restored
+        //     tab's stale NeedsApproval released off its old transcript would otherwise jump every such card to the top at
+        //     every start);
+        //   * SessionEnd (the claude exited while asking) and a cut-off verdict (an after-the-fact judgment, possibly hours late).
+        // The instant is the event's wire ts — a hook's fire time, a synth's own detection time — else its arrival; a monotonic
+        // MAX, so a late or out-of-order event never moves it back. ⚠ A state that flips back and forth (a recon belt and a late
+        // hook disagreeing) stamps every crossing: harmless, it only keeps the card near the top while the session really is busy
+        // asking. PERSISTED like the two turn stamps, so a dormant restored session keeps its place in the order; never cleared
+        // once set (monotonic), so it is not on the older-writer repair's volatile list. 0 == never seen asking for an approval.
+        int64_t needsApprovalEdgeUnixMs{ 0 };
         // True for a session ADOPTED from a claude we did NOT launch (typed into a `+` tab,
         // not Launched by the Manager). It is observe-only until the app correlates it to its
         // ConPTY (via the WT_SESSION tabToken) and binds an injector. Cleared once it is
@@ -2142,20 +2169,31 @@ namespace Agentmaster
     };
 
     /// <summary>
-    /// The MOST RECENT sort key (ExplorerSort::MostRecent) of a session: its newest TURN BOUNDARY — the newer of
-    /// turnStartUnixMs (the user last sent a turn) and turnEndUnixMs (the assistant last finished one) — and, for a
-    /// session with no turn evidence yet (never prompted, or a record from before the stamps), the decay anchor
-    /// lastActivityUnixMs, which a NEW session or fork carries as its creation instant, so it ranks at the top until
-    /// another session's boundary overtakes it. ONE function for every surface that orders by it — the Manager's
-    /// tree and board and the side panel (MakeSortKey) and the Telegram topic list (MESSAGING.md §21.8) — so the
+    /// The MOST RECENT sort key (ExplorerSort::MostRecent) of a session: its newest TURN BOUNDARY or NEEDS-APPROVAL
+    /// EDGE — the newest of turnStartUnixMs (the user last sent a turn), turnEndUnixMs (the assistant last finished
+    /// one) and needsApprovalEdgeUnixMs (the session last started asking for an approval, or was answered: the user's
+    /// "needs approval is a refresh of the latest activity", 2026-11-21) — and, for a session with none of the three yet
+    /// (never prompted, or a record from before the stamps), the decay anchor lastActivityUnixMs, which a NEW session or
+    /// fork carries as its creation instant, so it ranks at the top until another session's boundary overtakes it. ONE
+    /// function for every surface that orders by it — the Manager's tree and board and the side panel (MakeSortKey), the
+    /// Telegram topic list (MESSAGING.md §21.8) and its directory's Recent activity, and the AI search's `age` — so the
     /// orders can never drift apart. A larger key ranks HIGHER; equal keys are broken by the title, case-insensitive.
     /// </summary>
+    /// <remarks>
+    /// The approval edge outranks a turn boundary only when it is newer, and the fallback is read only while all three are
+    /// 0: a session that has asked or been answered is never ranked by its decay anchor again. Every input is a persisted,
+    /// monotonic stamp, so the key never moves back and a dormant restored session keeps its place.
+    /// </remarks>
     /// <param name="s">The session.</param>
     /// <returns>Unix ms; 0 when nothing is known (it then ranks last).</returns>
     inline int64_t MostRecentSortKeyMs(const SessionInfo& s) noexcept
     {
-        const int64_t turn = s.turnStartUnixMs > s.turnEndUnixMs ? s.turnStartUnixMs : s.turnEndUnixMs;
-        return turn != 0 ? turn : s.lastActivityUnixMs;
+        int64_t key = s.turnStartUnixMs > s.turnEndUnixMs ? s.turnStartUnixMs : s.turnEndUnixMs;
+        if (s.needsApprovalEdgeUnixMs > key)
+        {
+            key = s.needsApprovalEdgeUnixMs; // the session asked (or was answered) after its newest turn boundary
+        }
+        return key != 0 ? key : s.lastActivityUnixMs;
     }
 
     // Agentmaster (the ⚡ "still server-cached" hint — the Triage-Board card AND the tab strip's SPARK

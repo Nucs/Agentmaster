@@ -935,6 +935,221 @@ void TestRegistry()
     CHECK(!reg.Inject(L"s1", L"x"), "inject false after remove");
 }
 
+// Agentmaster (MOST RECENT sort — the NEEDS-APPROVAL EDGES, SessionInfo::needsApprovalEdgeUnixMs; the user's request of
+// 2026-11-21: "status 'needs approval' is considered a refresh of the latest activity/active in the session. That also
+// includes AFTER answering the questions and status shifts aways from 'needs approval'"). Checked here:
+//   * the pure rule (IsNeedsApprovalEdge) crossing by crossing, every exclusion, and its dormant rule against the
+//     scanner's own ScanSessionIsDormant for every live / started / external combination (the two must never drift);
+//   * the registry stamping it through OnHookEvent the way the hooks and the scanner's synths arrive: the ask, the
+//     duplicate ask, the answer, a late hook, the turn ending on the dialog, a ts-less line, an adopted session;
+//   * what never stamps: a restore's Upsert, a dormant tab's release, a triage Update, SessionEnd, a cut-off verdict, an
+//     archived record;
+//   * the key (MostRecentSortKeyMs) and the order it makes, and the stamp's JSON (omitted while 0, read back once set).
+// Never throws (every failure is a CHECK).
+void TestNeedsApprovalEdge()
+{
+    std::wprintf(L"MOST RECENT: the needs-approval edges (IsNeedsApprovalEdge + OnHookEvent):\n");
+    // The pure rule.
+    {
+        SessionInfo asking = MakeSession(L"edge-pure", SessionState::NeedsApproval);
+        asking.live = true;
+        asking.started = true;
+        HookMessage perm = Msg(L"edge-pure", HookEvent::Notification);
+        perm.permissionRequest = true;
+        CHECK(IsNeedsApprovalEdge(SessionState::Running, asking, perm), "rule: Running -> NeedsApproval (claude stopped to ask) is an edge");
+        SessionInfo working = asking;
+        working.state = SessionState::Running;
+        CHECK(IsNeedsApprovalEdge(SessionState::NeedsApproval, working, Msg(L"edge-pure", HookEvent::PostToolUse)),
+              "rule: NeedsApproval -> Running (answered, claude works on: recon-resume's PostToolUse) is an edge");
+        SessionInfo waiting = asking;
+        waiting.state = SessionState::WaitingForInput;
+        HookMessage quietStop = Msg(L"edge-pure", HookEvent::Stop);
+        quietStop.quiescentStop = true;
+        CHECK(IsNeedsApprovalEdge(SessionState::NeedsApproval, waiting, quietStop), "rule: NeedsApproval -> Waiting (the turn ended on the dialog, a synthesized Stop) is an edge");
+        CHECK(!IsNeedsApprovalEdge(SessionState::NeedsApproval, asking, perm), "rule: NeedsApproval -> NeedsApproval (a duplicate ask) is no edge");
+        CHECK(!IsNeedsApprovalEdge(SessionState::Running, working, Msg(L"edge-pure", HookEvent::PostToolUse)), "rule: Running -> Running is no edge");
+        CHECK(!IsNeedsApprovalEdge(SessionState::Running, waiting, Msg(L"edge-pure", HookEvent::Stop)), "rule: a change that never touches NeedsApproval (an ordinary turn end) is no edge");
+        SessionInfo archived = waiting;
+        archived.live = false;
+        CHECK(!IsNeedsApprovalEdge(SessionState::NeedsApproval, archived, quietStop), "rule: an archived record never stamps");
+        SessionInfo dormant = waiting;
+        dormant.started = false;
+        CHECK(!IsNeedsApprovalEdge(SessionState::NeedsApproval, dormant, quietStop), "rule: a dormant tab (restored or parked, its claude not started) never stamps: its release is residue");
+        SessionInfo adopted = waiting;
+        adopted.started = false;
+        adopted.external = true;
+        CHECK(IsNeedsApprovalEdge(SessionState::NeedsApproval, adopted, quietStop), "rule: an adopted session is never dormant (its claude runs; `started` is not kept for it)");
+        SessionInfo done = asking;
+        done.state = SessionState::Done;
+        CHECK(!IsNeedsApprovalEdge(SessionState::NeedsApproval, done, Msg(L"edge-pure", HookEvent::SessionEnd)), "rule: SessionEnd (the claude exited while asking) is no answer");
+        SessionInfo error = asking;
+        error.state = SessionState::Error;
+        HookMessage cutOff = Msg(L"edge-pure", HookEvent::Notification);
+        cutOff.turnCutOff = true;
+        CHECK(!IsNeedsApprovalEdge(SessionState::NeedsApproval, error, cutOff), "rule: a cut-off verdict (judged after the fact, possibly hours late) is no answer");
+        HookMessage apiError = Msg(L"edge-pure", HookEvent::Notification);
+        apiError.apiError = true;
+        CHECK(IsNeedsApprovalEdge(SessionState::NeedsApproval, error, apiError), "rule: an API error after the answer (the answer's own request failed) is the session's activity: an edge");
+        // The rule's dormant test is the scanner's, restated (HookEvents.h cannot include SessionScanner.h): every combination.
+        bool agrees = true;
+        for (int bits = 0; bits < 8; ++bits)
+        {
+            SessionInfo r = working;
+            r.live = (bits & 1) != 0;
+            r.started = (bits & 2) != 0;
+            r.external = (bits & 4) != 0;
+            const bool expected = r.live && !ScanSessionIsDormant(r);
+            if (IsNeedsApprovalEdge(SessionState::NeedsApproval, r, Msg(L"edge-pure", HookEvent::PostToolUse)) != expected)
+            {
+                agrees = false;
+            }
+        }
+        CHECK(agrees, "rule: stamps exactly for a live record ScanSessionIsDormant calls awake (all 8 live / started / external combinations)");
+    }
+    // Through the registry: an ask and its answer, as the hooks and the scanner's synths deliver them.
+    {
+        SessionRegistry reg;
+        SessionInfo s = MakeSession(L"edge-reg", SessionState::Running);
+        s.live = true;
+        s.started = true;
+        s.turnStartUnixMs = 1000; // the turn began long before the question
+        reg.Upsert(s);
+        CHECK(reg.Get(L"edge-reg")->needsApprovalEdgeUnixMs == 0 && MostRecentSortKeyMs(*reg.Get(L"edge-reg")) == 1000,
+              "registry: before any question the key is the turn's start");
+
+        HookMessage ask = Msg(L"edge-reg", HookEvent::Notification); // the permission hook, or recon-block / recon-block-presence
+        ask.permissionRequest = true;
+        ask.ts = 5000;
+        reg.OnHookEvent(ask);
+        auto r = reg.Get(L"edge-reg");
+        CHECK(r->state == SessionState::NeedsApproval && r->needsApprovalEdgeUnixMs == 5000 && MostRecentSortKeyMs(*r) == 5000,
+              "registry: the ask stamps the edge with the event's fire time, and the key follows (the card moves up)");
+
+        HookMessage again = ask;
+        again.ts = 6000;
+        reg.OnHookEvent(again);
+        CHECK(reg.Get(L"edge-reg")->needsApprovalEdgeUnixMs == 5000, "registry: a second ask while asking (a belt and the hook seeing one question) does not restamp");
+
+        HookMessage resume = Msg(L"edge-reg", HookEvent::PostToolUse); // recon-resume / recon-resume-presence: the answer
+        resume.ts = 9000;
+        reg.OnHookEvent(resume);
+        r = reg.Get(L"edge-reg");
+        CHECK(r->state == SessionState::Running && r->needsApprovalEdgeUnixMs == 9000 && MostRecentSortKeyMs(*r) == 9000,
+              "registry: the answer (NeedsApproval -> Running) stamps the edge again: the card the user just answered stays up");
+
+        HookMessage late = ask; // a slow forwarder's ask, fired before the answer that already landed
+        late.ts = 7000;
+        reg.OnHookEvent(late);
+        r = reg.Get(L"edge-reg");
+        CHECK(r->state == SessionState::NeedsApproval && r->needsApprovalEdgeUnixMs == 9000, "registry: a late hook's older fire time never moves the edge back (monotonic MAX)");
+
+        HookMessage quietStop = Msg(L"edge-reg", HookEvent::Stop); // an Esc on the dialog, or a dropped Stop the scanner made up
+        quietStop.quiescentStop = true;
+        quietStop.ts = 12000;
+        reg.OnHookEvent(quietStop);
+        r = reg.Get(L"edge-reg");
+        CHECK(r->state == SessionState::WaitingForInput && r->needsApprovalEdgeUnixMs == 12000 && r->turnEndUnixMs == 0 && MostRecentSortKeyMs(*r) == 12000,
+              "registry: the turn ending on the dialog stamps the edge (a quiescent Stop stamps no turn end, so the edge is what lifts the card)");
+
+        reg.OnHookEvent(UPS(L"edge-reg", L"carry on")); // -> Running (a ts-less line stamps no turn start)
+        const int64_t beforeTsLess = NowMsTest();
+        HookMessage tsLess = Msg(L"edge-reg", HookEvent::Notification); // an old 9-field forwarder: ts 0
+        tsLess.permissionRequest = true;
+        reg.OnHookEvent(tsLess);
+        r = reg.Get(L"edge-reg");
+        CHECK(r->state == SessionState::NeedsApproval && r->needsApprovalEdgeUnixMs >= beforeTsLess && r->needsApprovalEdgeUnixMs <= NowMsTest(),
+              "registry: a ts-less line stamps its arrival");
+    }
+    // An adopted session (observe + control of a claude we did not launch): its questions count.
+    {
+        SessionRegistry reg;
+        SessionInfo ext = MakeSession(L"edge-ext", SessionState::Running);
+        ext.live = true;
+        ext.external = true; // `started` stays false: never maintained for an adopted session
+        reg.Upsert(ext);
+        HookMessage block = Msg(L"edge-ext", HookEvent::Notification);
+        block.permissionRequest = true;
+        block.ts = 4000;
+        reg.OnHookEvent(block);
+        CHECK(reg.Get(L"edge-ext")->needsApprovalEdgeUnixMs == 4000, "adopted: its claude's question stamps (an adopted session is never dormant)");
+    }
+    // What never stamps.
+    {
+        SessionRegistry reg;
+        // A restore brings a persisted NeedsApproval back through Upsert (a window-restored tab: live, not started).
+        SessionInfo restored = MakeSession(L"edge-restore", SessionState::NeedsApproval);
+        restored.live = true;
+        restored.turnStartUnixMs = 1000;
+        reg.Upsert(restored);
+        CHECK(reg.Get(L"edge-restore")->needsApprovalEdgeUnixMs == 0, "never: a restore's Upsert of a persisted NeedsApproval");
+        // The scanner's at-rest synths still run for a dormant tab: its stale question released off the old transcript.
+        HookMessage release = Msg(L"edge-restore", HookEvent::Stop);
+        release.quiescentStop = true;
+        release.ts = 50000;
+        reg.OnHookEvent(release);
+        const auto rel = reg.Get(L"edge-restore");
+        CHECK(rel->state == SessionState::WaitingForInput && rel->needsApprovalEdgeUnixMs == 0 && MostRecentSortKeyMs(*rel) == 1000,
+              "never: a dormant tab's release (residue of a claude that is gone): the card keeps its place at a start");
+        // A triage move out of NeedsApproval (the board's / tab menu's moves are Updates): the order ignores triage stamps.
+        SessionInfo triage = MakeSession(L"edge-triage", SessionState::NeedsApproval);
+        triage.live = true;
+        triage.started = true;
+        reg.Upsert(triage);
+        reg.Update(L"edge-triage", [](SessionInfo& x) { x.state = SessionState::Idle; });
+        CHECK(reg.Get(L"edge-triage")->state == SessionState::Idle && reg.Get(L"edge-triage")->needsApprovalEdgeUnixMs == 0, "never: a triage move (an Update)");
+        // The claude exits while asking.
+        SessionInfo ending = MakeSession(L"edge-end", SessionState::NeedsApproval);
+        ending.live = true;
+        ending.started = true;
+        reg.Upsert(ending);
+        HookMessage end = Msg(L"edge-end", HookEvent::SessionEnd);
+        end.ts = 60000;
+        reg.OnHookEvent(end);
+        CHECK(reg.Get(L"edge-end")->state == SessionState::Done && reg.Get(L"edge-end")->needsApprovalEdgeUnixMs == 0, "never: SessionEnd while asking (an exit, not an answer)");
+        // The scanner's cut-off verdict on a turn that died while asking.
+        SessionInfo cutRec = MakeSession(L"edge-cut", SessionState::NeedsApproval);
+        cutRec.live = true;
+        cutRec.started = true;
+        reg.Upsert(cutRec);
+        HookMessage cut = Msg(L"edge-cut", HookEvent::Notification);
+        cut.turnCutOff = true;
+        cut.ts = 70000;
+        reg.OnHookEvent(cut);
+        CHECK(reg.Get(L"edge-cut")->state == SessionState::Error && reg.Get(L"edge-cut")->needsApprovalEdgeUnixMs == 0, "never: a cut-off verdict");
+        // An archived record (a closed tab): its claude's last word changes the state, never the order.
+        SessionInfo closed = MakeSession(L"edge-closed", SessionState::NeedsApproval);
+        reg.Upsert(closed); // live = false
+        HookMessage lastWord = Msg(L"edge-closed", HookEvent::PostToolUse);
+        lastWord.ts = 80000;
+        reg.OnHookEvent(lastWord);
+        CHECK(reg.Get(L"edge-closed")->state == SessionState::Running && reg.Get(L"edge-closed")->needsApprovalEdgeUnixMs == 0, "never: an archived record");
+    }
+    // The key and the order it makes.
+    {
+        SessionInfo a = MakeSession(L"order-a");
+        a.turnStartUnixMs = 1000; // a long turn...
+        a.needsApprovalEdgeUnixMs = 3000; // ...that asked a moment ago
+        SessionInfo b = MakeSession(L"order-b");
+        b.turnStartUnixMs = 1500;
+        b.turnEndUnixMs = 2000; // a turn that ended after a's began
+        CHECK(MostRecentSortKeyMs(a) == 3000 && MostRecentSortKeyMs(a) > MostRecentSortKeyMs(b), "key: the session that asked after the other's turn ended ranks above it");
+        a.needsApprovalEdgeUnixMs = 500;
+        CHECK(MostRecentSortKeyMs(a) == 1000, "key: an edge older than the newest turn boundary changes nothing");
+        SessionInfo c = MakeSession(L"order-c");
+        c.lastActivityUnixMs = 9000;
+        c.needsApprovalEdgeUnixMs = 100;
+        CHECK(MostRecentSortKeyMs(c) == 100, "key: the decay anchor stands in only while all three instants are 0");
+    }
+    // The stamp's JSON (the fleet store's record and sessions.json share ToJson / SessionFromJson).
+    {
+        SessionInfo j = MakeSession(L"edge-json");
+        CHECK(ToJson(j).Find(L"needsApprovalEdgeUnixMs") == nullptr, "json: omitted while 0 (an untouched record is byte-unchanged)");
+        j.needsApprovalEdgeUnixMs = 1784800004000;
+        const auto doc = ToJson(j);
+        CHECK(doc.Find(L"needsApprovalEdgeUnixMs") != nullptr && SessionFromJson(doc).needsApprovalEdgeUnixMs == 1784800004000, "json: written once set, and read back");
+    }
+}
+
 // Agentmaster M9: the registry is a process-wide singleton with MANY observers/adopters — one
 // per window's Manager lens. Verify AddObserver returns a removable token (RemoveObserver
 // detaches exactly it, stale tokens no-op), and that adoption FANS OUT to every registered

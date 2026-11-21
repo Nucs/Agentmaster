@@ -1190,6 +1190,12 @@ void TestMessaging()
         CHECK(MostRecentSortKeyMs(k) == 300, "a turn boundary wins over the activity, even an older one (the side panel's rule)");
         k.turnEndUnixMs = 400;
         CHECK(MostRecentSortKeyMs(k) == 400, "the newer of the two boundaries");
+        // The third instant (2026-11-21): the session last started asking for an approval, or was answered.
+        k.needsApprovalEdgeUnixMs = 450;
+        CHECK(MostRecentSortKeyMs(k) == 450, "a newer needs-approval edge leads the key (an approval asked or answered lifts the topic like a turn boundary)");
+        k.needsApprovalEdgeUnixMs = 350;
+        CHECK(MostRecentSortKeyMs(k) == 400, "an older needs-approval edge leaves the newer turn boundary in charge");
+        k.needsApprovalEdgeUnixMs = 0;
 
         CHECK(TopicRanksAbove(2000, L"b", 1000, L"a") && !TopicRanksAbove(1000, L"a", 2000, L"b"), "the newer key ranks above");
         CHECK(TopicRanksAbove(1000, L"alpha", 1000, L"Beta") && !TopicRanksAbove(1000, L"Beta", 1000, L"alpha"), "equal keys: the title, case-insensitive (alpha above Beta)");
