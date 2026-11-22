@@ -46,7 +46,10 @@ with a local-time `[HH:MM:SS.mmm]` stamp (only at a line boundary, so a partial 
    `[transcript]`, `[cmd]`, `[cmd-fire]`, `[cmd-expire]`, `[persist-fail]`, `[persist-read-fail]`, `[persist-guard]`,
    `[persist-shadow]`, `[migrate]`, `[observer]`, `[activity]`,
    `[orphan]`, `[orphan-reap]`, `[close-successor]`, `[unread]`, `[taskbar-badge]`, `[tags]`, `[harness]`,
-   `[ai-search]`, `[sessdb]`, `[msg]`, `[render]`, `[tab-size]`, `[strip]`, `[deactivate]`,
+   `[ai-search]`, `[sessdb]`, `[msg]`, `[teams]` (the Teams connector, TEAMS_CHANNEL.md: its start and stop, every change
+   of who posts / edits / reads / reacts (`[teams] routing: …`), the sign-in code, a Graph refusal as `[teams] <purpose>
+   HTTP <status> <code>: <message>` — never a token or a URL —, a thread made, a history replayed, a write given up, a
+   reply written while closed), `[render]`, `[tab-size]`, `[strip]`, `[deactivate]`,
    `[retired-host]`, `[restore-wake]`, `[api-error-rewind]`, `[interrupt-rewind]`, `[fork-stop]`, `[auto-restart]` (the
    automatic restart after a cut-off response or a temporary API failure: its gates, a temporary failure's back-off, the
    restart, healed / not healed — HOOKS.md *Connection lost mid-response — the automatic restart*), `[notify-release]` (a
@@ -102,6 +105,23 @@ with a local-time `[HH:MM:SS.mmm]` stamp (only at a line boundary, so a partial 
     `unhide`, `sessions-page close (back)`, `sessions ai …`.
   - **Cross-cutting:** `activate` (local or the cross-window fan-out), `rename` (the Explorer and the
     tab-strip sync, the latter only on a real change).
+  - **Teams** (TEAMS_CHANNEL.md §7.5, §8): `remote teams queue <sid8> chars=N`, `remote teams /steer … -> sent | queued
+    first`, `remote teams esc | /enter | deactivate | screen | restart | wake <sid8> -> asked the hosting window`,
+    `remote teams emoji <sid8> -> <action>`, `remote teams <kind> <sid8> -> <action>` (a watched reply's emoji),
+    `remote teams unqueue <sid8> -> removed | not waiting`. A new session from a new post (§9.1): `remote teams new post
+    <post id> -> folder step (N folders) | not a folder: <folder> | the folder did not answer: <folder> | deleted: its step
+    ends | its step was deleted: the step ends`, then the launch's begin and end, `remote teams new session <sid8>
+    dir=<folder> -> asking a window` and `remote teams new session <sid8> -> opened; the post is its thread | opened; it has
+    a thread already | no window took it | <RemoteLaunchResultName>` (a begin without an end: the answer never reached the
+    tick). 📜 (§8): `remote teams allscreen <sid8> -> drawing <level>[+diffs][+last]`, and its `[teams] conversation pictures of
+    <sid8>: …` line (parts posted of drawn, rows and rows left out, KB, the drawing's time, a failure). 🔀 (§8): `remote teams
+    fork <sid8> -> not asked: <why> | asked (<situation>) | asking a window (<ForkTurnChoiceName>) | no window took it | opened
+    <new sid8> [(fresh)] | <RemoteLaunchResultName>`, and the answer to its question as `remote teams fork <sid8> -> pick | no`.
+    `/newsession`: `remote teams newsession <sid8> dir=<folder> [model=<id>] -> asking a window`, then `remote teams newsession
+    <sid8> -> opened <new sid8> | no window took it | <RemoteLaunchResultName>`. 🔎 Search (§9.3): `remote teams search -> asked
+    (turn N, M chars) | answered (N sessions) | failed | cleared`, `remote teams search pick <n> <sid8> -> open already | resume
+    asked | no window took it`, `remote teams search resume <sid8> -> <RemoteLaunchResultName>`, and `[teams] posting the
+    Search thread's root`.
   - **Prompt Queue:** `queue`, `queue-pop`, `send-now` (delivered or rolled back), `autorunner -> Off|Full`,
     `pause-all`, `template-save`, `template-apply` (one session, or every session in a folder with the
     count), `compose pull-draft`.

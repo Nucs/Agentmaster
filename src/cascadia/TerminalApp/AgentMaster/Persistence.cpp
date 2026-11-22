@@ -1145,6 +1145,15 @@ namespace Agentmaster
         o.Set(L"aiTitleTelegramSessions", json::Value::MkBool(s.aiTitleTelegramSessions));
         o.Set(L"aiTitleOtherSessions", json::Value::MkBool(s.aiTitleOtherSessions));
         o.Set(L"aiTitleModel", json::Value::MkStr(s.aiTitleModel));
+        // TEAMS_CHANNEL.md §10: the Teams connector (the app's refresh token is in Credential Manager, never here).
+        o.Set(L"teamsEnabled", json::Value::MkBool(s.teamsEnabled));
+        o.Set(L"teamsTeamId", json::Value::MkStr(s.teamsTeamId));
+        o.Set(L"teamsChannelId", json::Value::MkStr(s.teamsChannelId));
+        o.Set(L"teamsClientId", json::Value::MkStr(s.teamsClientId));
+        o.Set(L"teamsTenantId", json::Value::MkStr(s.teamsTenantId));
+        o.Set(L"teamsUseAzureCli", json::Value::MkBool(s.teamsUseAzureCli));
+        o.Set(L"teamsVerbose", json::Value::MkBool(s.teamsVerbose));
+        o.Set(L"teamsForeignMarkers", json::Value::MkStr(s.teamsForeignMarkers));
         return o;
     }
 
@@ -1552,6 +1561,16 @@ namespace Agentmaster
         s.aiTitleTelegramSessions = v.BoolAt(L"aiTitleTelegramSessions", true);
         s.aiTitleOtherSessions = v.BoolAt(L"aiTitleOtherSessions", false);
         s.aiTitleModel = v.StrAt(L"aiTitleModel", L"claude-sonnet-5-5");
+        // TEAMS_CHANNEL.md §10: absent => off, no channel, no app, the shared "organizations" tenant, the Azure CLI used, no tool
+        // lines, other tools' posts known by the robot emoji (each default reproduces a settings.json written before the connector).
+        s.teamsEnabled = v.BoolAt(L"teamsEnabled", false);
+        s.teamsTeamId = v.StrAt(L"teamsTeamId");
+        s.teamsChannelId = v.StrAt(L"teamsChannelId");
+        s.teamsClientId = v.StrAt(L"teamsClientId");
+        s.teamsTenantId = v.StrAt(L"teamsTenantId", L"organizations");
+        s.teamsUseAzureCli = v.BoolAt(L"teamsUseAzureCli", true);
+        s.teamsVerbose = v.BoolAt(L"teamsVerbose", false);
+        s.teamsForeignMarkers = v.StrAt(L"teamsForeignMarkers", L"\U0001F916");
         return s;
     }
 

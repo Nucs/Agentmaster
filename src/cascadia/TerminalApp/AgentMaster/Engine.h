@@ -54,6 +54,10 @@ namespace Agentmaster
     {
         class MessagingService; // MESSAGING.md — the fleet in Telegram (the bot runs inside this process, D1)
     }
+    namespace Teams
+    {
+        class TeamsService; // TEAMS_CHANNEL.md — the fleet in a Teams channel, posted as the owner (no bot, no administrator)
+    }
 
     // Agentmaster (cross-window tab DOCKING — the pointer-owned gesture's replacement for the OLE
     // docking that died with CanDragTabs(false); see Engine::DockTargetSink). What a dragging window
@@ -95,6 +99,11 @@ namespace Agentmaster
         // prompt. Runs while AppSettings::messagingEnabled with a stored token and a paired owner; the cog's Save
         // re-applies the settings to it (Apply). Never null after init.
         std::shared_ptr<Msg::MessagingService> messaging;
+        // Agentmaster (TEAMS_CHANNEL.md): the fleet in ONE Teams channel the owner picks, written AS THE OWNER through Microsoft
+        // Graph (a thread per session, emoji reactions as the buttons, an @mention of the owner as the alert) — no bot, no
+        // administrator. Runs beside the Telegram bot, with the same window-hosted seams, while AppSettings::teamsEnabled with a
+        // team and a channel; the cog's Save re-applies the settings to it (Apply). Never null after init.
+        std::shared_ptr<Teams::TeamsService> teams;
         // Agentmaster (INTERACTIVE_TOOLS.md §6, MESSAGING.md §21.30): Claude Code's AskUserQuestion dialogs, ANSWERED FROM
         // TELEGRAM. Every question hook (<profile>\agentmaster-ask.ps1, wired in hooks-settings.json while the bot is on) sends its
         // dialog over the question pipe (`askBridge`, `\\.\pipe\agentmaster.<pid>.ask`) into `asks`; the messaging service is its

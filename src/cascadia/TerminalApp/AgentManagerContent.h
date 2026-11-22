@@ -1780,6 +1780,28 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _setMsgSecretaryForget{ nullptr };
         bool _msgForgetSecretaryToken{ false }; // "Forget secretary token" was clicked: Save removes it
         void _CheckTelegramBot(); // the "Check bot" button: getMe with the typed (else stored) token on a worker thread; the result lands in _setMsgStatus
+        // TEAMS_CHANNEL.md §10 (M7): the TEAMS CHANNEL section of the Messaging tab — the bot-less Teams connector's eight
+        // settings (AppSettings::teams*; a Save applies them through the engine's TeamsService::Apply like Telegram's), the
+        // device-code sign-in's two buttons (they act on the RUNNING service at once, not on Save: the sign-in is the
+        // service's, and its code shows in the status line) and the service's status line, read when the cog opens and after
+        // each button. No secret is ever put into a control: the app's refresh token lives in Credential Manager.
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setTeamsEnabled{ nullptr }; // teamsEnabled
+        winrt::Windows::UI::Xaml::Controls::TextBox _setTeamsTeamId{ nullptr }; // teamsTeamId (trimmed by the service)
+        winrt::Windows::UI::Xaml::Controls::TextBox _setTeamsChannelId{ nullptr }; // teamsChannelId (trimmed by the service)
+        winrt::Windows::UI::Xaml::Controls::TextBox _setTeamsClientId{ nullptr }; // teamsClientId ("" = no app: the Azure CLI alone)
+        winrt::Windows::UI::Xaml::Controls::TextBox _setTeamsTenantId{ nullptr }; // teamsTenantId ("" saves "organizations")
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setTeamsUseAzureCli{ nullptr }; // teamsUseAzureCli
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setTeamsVerbose{ nullptr }; // teamsVerbose
+        winrt::Windows::UI::Xaml::Controls::TextBox _setTeamsMarkers{ nullptr }; // teamsForeignMarkers
+        winrt::Windows::UI::Xaml::Controls::Button _setTeamsSignIn{ nullptr }; // TeamsService::RequestSignIn on the running service
+        winrt::Windows::UI::Xaml::Controls::Button _setTeamsSignOut{ nullptr }; // TeamsService::SignOut on the running service
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setTeamsStatus{ nullptr }; // TeamsService::StatusText, read on open and after a button
+        /// <summary>
+        /// Reads the engine's TeamsService::StatusText into _setTeamsStatus: where the connector stands (off, the sign-in code to
+        /// enter, running, a problem). UI thread; the read takes only the service's short lock. A failure is logged (Rule #18)
+        /// and leaves the line as it was.
+        /// </summary>
+        void _RefreshTeamsStatus() noexcept;
         // MESSAGING.md §21.32.4: the FILE LINKS section — how Claude's links to files on this PC reach the phone: Off, a LAN
         // address of this PC (the dropdown lists them), or through the hosted address (a public route of the user's own: a
         // tunnel or a reverse proxy -> this install's server; §21.32.5's "Copy AI Impl Instructions" has an AI agent build one).

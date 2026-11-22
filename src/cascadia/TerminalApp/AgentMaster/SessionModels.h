@@ -3743,6 +3743,28 @@ namespace Agentmaster
         bool aiTitleTelegramSessions{ true };
         bool aiTitleOtherSessions{ false };
         std::wstring aiTitleModel{ L"claude-sonnet-5-5" };
+
+        // Agentmaster (TEAMS_CHANNEL.md §10 — the fleet in a Teams CHANNEL, posted as the owner through Microsoft Graph, with no
+        // bot and no administrator). Nothing connects, posts or reads while teamsEnabled is false.
+        //  - teamsEnabled: the master switch (default OFF).
+        //  - teamsTeamId / teamsChannelId: the channel Agentmaster writes into — a private channel whose only member is the
+        //    owner, since every post reads as the owner's own words ("" = not set: the service does not start).
+        //  - teamsClientId / teamsTenantId: an app the tenant ALREADY allows, for the device-code sign-in (its token reads,
+        //    reacts, posts and uploads); "" = no app, and the Azure CLI alone posts and edits (a mirror with no inbound). The
+        //    tenant defaults to "organizations". The app's refresh token lives in Windows Credential Manager (target
+        //    Agentmaster:messaging:teams:<profile leaf>, TeamsAuth.h), never in this file.
+        //  - teamsUseAzureCli: the Azure CLI's token is used too — the only one of the two that can EDIT a post (default ON).
+        //  - teamsVerbose: tool lines are mirrored as well as prompts and replies (default OFF).
+        //  - teamsForeignMarkers: space-separated prefixes of OTHER tools' posts in the same channel; a new post that starts with
+        //    one never opens a session (default the robot emoji, U+1F916).
+        bool teamsEnabled{ false };
+        std::wstring teamsTeamId{};
+        std::wstring teamsChannelId{};
+        std::wstring teamsClientId{};
+        std::wstring teamsTenantId{ L"organizations" };
+        bool teamsUseAzureCli{ true };
+        bool teamsVerbose{ false };
+        std::wstring teamsForeignMarkers{ L"\U0001F916" };
     };
 
     // Agentmaster (MESSAGING.md D25): clamp the idle grace into 0..1440 minutes (a day); garbage falls back

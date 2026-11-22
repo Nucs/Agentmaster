@@ -48,6 +48,7 @@
 #include "AgentMaster/Engine.h" // SharedEngine / ClaimWindowRecord / Register-UnregisterLiveWindow
 #include "AgentMaster/SessionDbRefresher.h" // SESSIONS_DB.md §7.6 — the cog Save re-applies the session database settings
 #include "AgentMaster/Messaging.h" // MESSAGING.md — the Telegram bot: the cog Save re-applies its settings; its Search factory + version word are set here
+#include "AgentMaster/TeamsService.h" // TEAMS_CHANNEL.md — the Teams connector: the cog Save re-applies its settings
 #include "MessagingSearchBridge.h" // MESSAGING.md §5.4 — the Search topic's agent (a SessionSearchAgent of its own)
 #include "AgentMaster/VoiceTranscriber.h" // MESSAGING.md §21.43, VOICE.md §6 — the voice notes' transcriber (the bot's voice factory)
 #include "AgentMaster/LaunchPresetsOs.h" // MESSAGING.md §21.25 — LaunchMenuEntries / ShouldOfferAddPresets: the bot wizard's model step
@@ -1449,6 +1450,28 @@ namespace winrt::TerminalApp::implementation
                 catch (...)
                 {
                     ::Agentmaster::AgentLogCaughtException(L"messaging: set the Search factory");
+                }
+            });
+        }
+
+        // Agentmaster (TEAMS_CHANNEL.md §9.3): the Teams connector's 🔎 Search thread agent, for the same reason as the Telegram
+        // bot's (a SessionSearchAgent needs the SDK unity file Engine.cpp never builds) — a conversation of its OWN
+        // ("teams-search"), never Telegram's: the agent hands every event to every listener. Once per process, as above.
+        {
+            static std::once_flag teamsWiredOnce;
+            std::call_once(teamsWiredOnce, [&engine] {
+                try
+                {
+                    if (engine.teams)
+                    {
+                        engine.teams->SetSearchFactory([](std::function<void(const ::Agentmaster::Msg::SearchBridgeEvent&)> sink, std::wstring thinkingWord) {
+                            return ::Agentmaster::Msg::MakeTeamsSearchBridge(std::move(sink), std::move(thinkingWord));
+                        });
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"teams: set the Search factory");
                 }
             });
         }
@@ -2914,6 +2937,13 @@ namespace winrt::TerminalApp::implementation
                 if (const auto& msg = ::Agentmaster::SharedEngine().messaging)
                 {
                     msg->Apply(s);
+                }
+                // TEAMS_CHANNEL.md §10: the Teams connector's switch, channel, app and Azure CLI switch apply at once (a changed
+                // channel or app restarts it; its stop never waits for the network), and a Save offers a new sign-in code when the
+                // app needs one.
+                if (const auto& teams = ::Agentmaster::SharedEngine().teams)
+                {
+                    teams->Apply(s);
                 }
                 // Side panel: adopt the (possibly changed) globals — the shared boardSort label,
                 // the dock side, the summary content flags (its fill-hosted overlay sits outside

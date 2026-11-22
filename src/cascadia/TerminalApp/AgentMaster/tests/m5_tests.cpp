@@ -243,6 +243,7 @@ int wmain(int argc, wchar_t** argv)
     TestBackgroundPresenceFacts(); // OBSERVER.md §21 - the presence rows' background fields and the parent's process facts (tests_background.cpp)
     TestBackgroundAttachSpawn(); // OBSERVER.md §21 - `claude attach <job>` and the spawn builders' background-job lookup (tests_background.cpp)
     TestBackgroundRegistry(); // OBSERVER.md §21 - detached jobs, the kept tab title, spares, the end of a tab-less record, /branch (tests_background.cpp)
+    TestTeams(); // TEAMS_CHANNEL.md — the bot-less Teams connector's pure core (tests_teams.cpp)
 
     BenchPromptAnchor();
     BenchPromptAnchorRealSession(); // SUMMARY_JUMP.md §4: full batch resolve on a real heavy session (AM_BENCH_SESSION)

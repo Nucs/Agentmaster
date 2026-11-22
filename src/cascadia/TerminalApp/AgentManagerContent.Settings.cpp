@@ -47,6 +47,7 @@ static constexpr std::wstring_view kSpecifyModelSentinel = L"" "specify-model";
 #include "AgentMaster/MessagingFileLinksGuide.h" // MESSAGING.md §21.32.5 — FILE LINKS' "Copy AI Impl Instructions" brief
 #include "AgentClipboard.h" // RobustCopyTextToClipboard — the retry-looped clipboard writer the brief's copy goes through
 #include "AgentMaster/TelegramApi.h" // MaskToken — the token box's "stored: 7221…bZ8" placeholder
+#include "AgentMaster/TeamsService.h" // TEAMS_CHANNEL.md §10 — the TEAMS CHANNEL section: Sign in / Sign out and the status line
 #include "AgentMaster/VoiceHttp.h" // MESSAGING.md §21.43 — the VOICE NOTES endpoint's API key in Credential Manager (read, store, forget)
 #include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Auto Testing of an external) + BringClaudeWindowToFront (EXTERNAL menu)
 #include "AgentMaster/TranscriptStore.h" // ReadTranscriptQuickFacts — resolve a launch-box session id's cwd
@@ -1506,6 +1507,123 @@ namespace winrt::TerminalApp::implementation
             }
         });
         panel.Children().Append(_setMsgSecretaryForget);
+
+        // TEAMS_CHANNEL.md §10 (M7): the bot-less Teams connector, in the Messaging tab beside the Telegram bot. Eight plain
+        // settings (nothing secret: the app's sign-in is the service's device-code flow, kept in Credential Manager) applied
+        // by a Save like the bot's (TerminalPage's settings sink calls TeamsService::Apply); the two sign-in buttons act on the
+        // RUNNING service at once.
+        panel.Children().Append(SettingsSeparator(L"TEAMS CHANNEL (NO BOT)"));
+        {
+            auto steps = Text(L"Mirrors the fleet into ONE Teams channel, posted as you through Microsoft Graph: no bot and no administrator. Each session gets a thread whose first post is its card; your replies in a thread are queued prompts; emoji on a card are its buttons (a legend post lists them: pin it); a NEW post opens a session; the \U0001F50E Search thread finds old ones. Use a private channel whose only member is you: every post reads as your own words. Setup: in Teams, the channel's \x22\x2026\x22 \x2192 Get link to channel: groupId= is the team id, the 19:\x2026@thread.tacv2 part is the channel id. Sign in to the Azure CLI (az login) for the edits; to read your replies, give the app id of an app your tenant already allows. Save, then Sign in and enter the code the line below shows at the page it names.", 11, false, 0.75);
+            steps.TextWrapping(TextWrapping::Wrap);
+            panel.Children().Append(steps);
+        }
+        _setTeamsEnabled = ToggleSwitch{};
+        _setTeamsEnabled.Header(winrt::box_value(L"Mirror the fleet into a Teams channel"));
+        AgentSetTip(_setTeamsEnabled, L"The master switch (default off): nothing connects, posts or reads while it is off. It runs beside the Telegram bot, each with its own state; Telegram's idle grace (above) decides which sessions get a thread in both.");
+        panel.Children().Append(_setTeamsEnabled);
+        _setTeamsTeamId = TextBox{};
+        _setTeamsTeamId.Header(winrt::box_value(L"Team id"));
+        _setTeamsTeamId.PlaceholderText(L"the groupId= of the channel's link (a GUID)");
+        AgentSetTip(_setTeamsTeamId, L"The team that holds the channel. Spaces and line breaks around it are dropped. With the team or the channel empty, the connector does not start. Another team or channel starts it again with that channel's own state.");
+        panel.Children().Append(_setTeamsTeamId);
+        _setTeamsChannelId = TextBox{};
+        _setTeamsChannelId.Header(winrt::box_value(L"Channel id"));
+        _setTeamsChannelId.PlaceholderText(L"19:\x2026@thread.tacv2");
+        AgentSetTip(_setTeamsChannelId, L"The channel Agentmaster writes into: a PRIVATE channel whose only member is you, since every post reads as yours. Copy it from the channel's link (Get link to channel), decoded or not.");
+        panel.Children().Append(_setTeamsChannelId);
+        _setTeamsClientId = TextBox{};
+        _setTeamsClientId.Header(winrt::box_value(L"App id for reading (optional)"));
+        _setTeamsClientId.PlaceholderText(L"the application (client) id of an app your tenant already allows");
+        AgentSetTip(_setTeamsClientId, L"An app your tenant ALREADY allows, signed in with a device code (Sign in, below): its token reads the channel (your replies, your emoji), reacts and posts. Empty: the Azure CLI alone posts and edits, and nothing is read back. Its refresh token is kept in Windows Credential Manager, never in a file.");
+        panel.Children().Append(_setTeamsClientId);
+        _setTeamsTenantId = TextBox{};
+        _setTeamsTenantId.Header(winrt::box_value(L"Tenant (optional)"));
+        _setTeamsTenantId.PlaceholderText(L"organizations (the default)");
+        AgentSetTip(_setTeamsTenantId, L"The app's tenant: its id or domain. Empty: organizations, which finds your tenant from your sign-in.");
+        panel.Children().Append(_setTeamsTenantId);
+        _setTeamsUseAzureCli = ToggleSwitch{};
+        _setTeamsUseAzureCli.Header(winrt::box_value(L"Use the Azure CLI's sign-in too (az login)"));
+        AgentSetTip(_setTeamsUseAzureCli, L"On (the default): the Azure CLI's token is used as well \x2014 the only one of the two that can EDIT a post, so the cards and the legend follow the sessions. Off: no edit; a card's change is told as a short reply. A CLI signed in to another account than the app's is never used.");
+        panel.Children().Append(_setTeamsUseAzureCli);
+        _setTeamsVerbose = ToggleSwitch{};
+        _setTeamsVerbose.Header(winrt::box_value(L"Threads show the work (verbose)"));
+        AgentSetTip(_setTeamsVerbose, L"On: Claude's remarks and its tool lines are mirrored too, in one narrative post per stop. Off (the default): your prompts, the final replies, questions, plans and errors. Applies at once.");
+        panel.Children().Append(_setTeamsVerbose);
+        _setTeamsMarkers = TextBox{};
+        _setTeamsMarkers.Header(winrt::box_value(L"Other tools' markers"));
+        _setTeamsMarkers.PlaceholderText(L"\U0001F916 (space-separated)");
+        AgentSetTip(_setTeamsMarkers, L"Space-separated prefixes of OTHER tools' posts in the same channel: a new post that starts with one never opens a session. Applies at once.");
+        panel.Children().Append(_setTeamsMarkers);
+        {
+            auto row = StackPanel{};
+            row.Orientation(Orientation::Horizontal);
+            row.Spacing(8);
+            _setTeamsSignIn = Button{};
+            _setTeamsSignIn.Content(winrt::box_value(L"Sign in"));
+            AgentSetTip(_setTeamsSignIn, L"Starts the app's device-code sign-in on the RUNNING connector (Save first): the line below shows the code and the page to enter it at, within a few seconds. Needs the app id above.");
+            _setTeamsSignIn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                if (const auto& svc = ::Agentmaster::SharedEngine().teams)
+                {
+                    svc->RequestSignIn();
+                }
+                ::Agentmaster::LogNav(L"teams-sign-in (cog)");
+                _RefreshTeamsStatus();
+                // The code comes from the token endpoint on the service's own thread a moment later: the line is read again
+                // twice (2.5 s, then 8 s) on this window's dispatcher, through a weak reference (the cog may close first).
+                auto weak = get_weak();
+                auto disp = _dispatcher;
+                if (!disp)
+                {
+                    return;
+                }
+                try
+                {
+                    std::thread([weak, disp]() noexcept {
+                        try
+                        {
+                            for (const int waitMs : { 2500, 5500 })
+                            {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
+                                disp.TryEnqueue([weak]() {
+                                    if (auto self = weak.get())
+                                    {
+                                        self->_RefreshTeamsStatus();
+                                    }
+                                });
+                            }
+                        }
+                        catch (...)
+                        {
+                            // Rule #18: an exception escaping a std::thread would end the process. Recovery: no later refresh.
+                            ::Agentmaster::AgentLogCaughtException(L"teams sign-in (refresh)");
+                        }
+                    }).detach();
+                }
+                catch (...)
+                {
+                    // Rule #18: no later refresh (the thread did not start); the line shows the code when the cog opens again.
+                    ::Agentmaster::AgentLogCaughtException(L"teams sign-in (refresh thread)");
+                }
+            });
+            row.Children().Append(_setTeamsSignIn);
+            _setTeamsSignOut = Button{};
+            _setTeamsSignOut.Content(winrt::box_value(L"Sign out"));
+            AgentSetTip(_setTeamsSignOut, L"Forgets the app's sign-in at once: its refresh token leaves Credential Manager, and the connector reads nothing until you sign in again. The Azure CLI's own sign-in is not touched (az logout).");
+            _setTeamsSignOut.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                if (const auto& svc = ::Agentmaster::SharedEngine().teams)
+                {
+                    svc->SignOut();
+                }
+                ::Agentmaster::LogNav(L"teams-sign-out (cog)");
+                _RefreshTeamsStatus();
+            });
+            row.Children().Append(_setTeamsSignOut);
+            panel.Children().Append(row);
+        }
+        _setTeamsStatus = Text(L"", 11, false, 0.75);
+        _setTeamsStatus.TextWrapping(TextWrapping::Wrap);
+        panel.Children().Append(_setTeamsStatus);
 
         // === CLAUDE tab ===
         panel = claudePanel;
@@ -3617,6 +3735,21 @@ namespace winrt::TerminalApp::implementation
             }
             _setMsgStatus.Text(winrt::hstring{ status });
         }
+        if (_setTeamsEnabled)
+        {
+            // TEAMS_CHANNEL.md §10: the form's copy of the eight settings, and the running service's status line (no secret is
+            // ever put into a control: the app's sign-in lives in Credential Manager).
+            _setTeamsEnabled.IsOn(_appSettings.teamsEnabled);
+            _setTeamsTeamId.Text(winrt::hstring{ _appSettings.teamsTeamId });
+            _setTeamsChannelId.Text(winrt::hstring{ _appSettings.teamsChannelId });
+            _setTeamsClientId.Text(winrt::hstring{ _appSettings.teamsClientId });
+            // The default tenant is the box's placeholder: an empty box saves it again.
+            _setTeamsTenantId.Text(_appSettings.teamsTenantId == L"organizations" ? winrt::hstring{} : winrt::hstring{ _appSettings.teamsTenantId });
+            _setTeamsUseAzureCli.IsOn(_appSettings.teamsUseAzureCli);
+            _setTeamsVerbose.IsOn(_appSettings.teamsVerbose);
+            _setTeamsMarkers.Text(winrt::hstring{ _appSettings.teamsForeignMarkers });
+            _RefreshTeamsStatus();
+        }
         if (_setMsgFilesMode)
         {
             // §21.32.4: the FILE LINKS boxes as stored (an empty station or port box shows the install's default as its
@@ -4954,6 +5087,26 @@ namespace winrt::TerminalApp::implementation
                                                            std::wstring{ ::Agentmaster::Msg::kAllScreenLevels[row].word } :
                                                            std::wstring{ ::Agentmaster::Msg::AllScreenLevelWord(::Agentmaster::Msg::kAllScreenDefaultLevel) };
             }
+        }
+        if (_setTeamsEnabled)
+        {
+            // TEAMS_CHANNEL.md §10: the fields as typed; the service trims the ids and decodes a channel id copied from a link
+            // (TeamsConfigFrom), so a hand-written settings.json is read the same way. A Save restarts the connector only when
+            // the channel, the app, the tenant or the Azure CLI switch changed (RestartNeeded).
+            _appSettings.teamsEnabled = _setTeamsEnabled.IsOn();
+            _appSettings.teamsTeamId = std::wstring{ _setTeamsTeamId.Text() };
+            _appSettings.teamsChannelId = std::wstring{ _setTeamsChannelId.Text() };
+            _appSettings.teamsClientId = std::wstring{ _setTeamsClientId.Text() };
+            // An empty tenant box saves the default, so the file always names one.
+            std::wstring tenant{ _setTeamsTenantId.Text() };
+            if (tenant.find_first_not_of(L" \t\r\n") == std::wstring::npos)
+            {
+                tenant = L"organizations";
+            }
+            _appSettings.teamsTenantId = tenant;
+            _appSettings.teamsUseAzureCli = _setTeamsUseAzureCli.IsOn();
+            _appSettings.teamsVerbose = _setTeamsVerbose.IsOn();
+            _appSettings.teamsForeignMarkers = std::wstring{ _setTeamsMarkers.Text() };
         }
         if (_setMsgFilesMode)
         {
@@ -7549,6 +7702,28 @@ namespace winrt::TerminalApp::implementation
     // MESSAGING.md: the cog's "Check bot" — one getMe round trip with the typed token (else the stored one), on a
     // worker thread (a bounded WinHTTP call must never run on the UI thread), the answer hopped back through the
     // dispatcher into the status line. The token itself is never logged or shown.
+    void AgentManagerContent::_RefreshTeamsStatus() noexcept
+    {
+        try
+        {
+            if (!_setTeamsStatus)
+            {
+                return;
+            }
+            std::wstring status = L"Teams: not part of this build.";
+            if (const auto& svc = ::Agentmaster::SharedEngine().teams)
+            {
+                status = svc->StatusText(); // the service's short lock only: never a network call
+            }
+            _setTeamsStatus.Text(winrt::hstring{ status });
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the line keeps its last text.
+            ::Agentmaster::AgentLogCaughtException(L"_RefreshTeamsStatus");
+        }
+    }
+
     void AgentManagerContent::_CheckTelegramBot()
     {
         if (!_setMsgStatus || !_dispatcher)

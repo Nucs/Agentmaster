@@ -20,6 +20,7 @@
 #include "SessionScanner.h"
 #include "SessionDbRefresher.h" // SESSIONS_DB.md §7.6 — the session database refresh tick
 #include "Messaging.h" // MESSAGING.md — the Telegram bot inside this process (D1)
+#include "TeamsService.h" // TEAMS_CHANNEL.md — the fleet in a Teams channel, posted as the owner (beside the Telegram bot)
 #include "SessionStore.h"
 #include "SessionTitler.h" // AI_TITLES.md — a new session's AI title at its first real prompt (the bridge sink's tap)
 #include "StartupTiming.h" // [startup] phase timing — find where launch spends its time
@@ -489,12 +490,18 @@ namespace Agentmaster
                 // runs (a path changed in the cog applies to the next report). The path's writer is the UI thread
                 // (RefreshClaudeExe); a report's worker copies it, as the Telegram search bridge's claudeExe does.
                 hooks.claudeExe = []() { return SharedEngine().claudeExePath; };
+                // TEAMS_CHANNEL.md §11: the Teams connector acts through the SAME window-hosted seams (a copy: the Telegram bot
+                // takes its own by move below). Off until the settings say otherwise (Apply starts nothing while teamsEnabled is
+                // false or no channel is set).
+                Msg::ServiceHooks teamsHooks = hooks;
                 e->messaging = std::make_shared<Msg::MessagingService>(e->registry, e->scheduler, AgentmasterStateDir(), std::move(hooks));
                 // INTERACTIVE_TOOLS.md §6: the question registry, BEFORE Apply — the service becomes its acceptor when its bot runs,
                 // so a question hook that connects the moment the pipe opens (below) is already judged by it.
                 e->asks = std::make_shared<AskRegistry>();
                 e->messaging->SetAskRegistry(e->asks);
                 e->messaging->Apply(LoadAppSettings());
+                e->teams = std::make_shared<Teams::TeamsService>(e->registry, e->scheduler, AgentmasterStateDir(), std::move(teamsHooks));
+                e->teams->Apply(LoadAppSettings());
             }
             // Keep the scanner ticking even with nothing live, so each window's liveness probe — which
             // also drives the Fleet Observer's per-window roster publish — keeps running (a hand-typed
@@ -1622,15 +1629,24 @@ namespace Agentmaster
         {
             SaveOpenWindows({ e.liveWindowIds.begin(), e.liveWindowIds.end() });
         }
-        else if (e.messaging)
+        else
         {
-            // MESSAGING.md §21.18: the LAST window just closed — the app is quitting, and it ends with TerminateProcess right
-            // after, so nothing later can record a clean end. The Telegram bot stamps run.closed, and its next start note says
-            // this run CLOSED rather than "did not close normally". A window set that is empty only for a moment (the last tab
-            // torn out into a new window) stamps too; the bot's next marker write outdates such a stamp
-            // (StartNoteRunClosedCleanly). Under the window mutex like the manifest write above: NoteAppClosing takes none of
-            // the engine's locks and never throws.
-            e.messaging->NoteAppClosing();
+            if (e.messaging)
+            {
+                // MESSAGING.md §21.18: the LAST window just closed — the app is quitting, and it ends with TerminateProcess right
+                // after, so nothing later can record a clean end. The Telegram bot stamps run.closed, and its next start note says
+                // this run CLOSED rather than "did not close normally". A window set that is empty only for a moment (the last tab
+                // torn out into a new window) stamps too; the bot's next marker write outdates such a stamp
+                // (StartNoteRunClosedCleanly). Under the window mutex like the manifest write above: NoteAppClosing takes none of
+                // the engine's locks and never throws.
+                e.messaging->NoteAppClosing();
+            }
+            if (e.teams)
+            {
+                // TEAMS_CHANNEL.md §5: the Teams connector's state file gets its last save for the same reason (no Stop runs at a
+                // quit). It takes only the service's short locks and never throws.
+                e.teams->NoteAppClosing();
+            }
         }
         // Agentmaster (PERSISTENCE.md §17): the LAST window just closed — the app is quitting, and TerminateProcess follows.
         // Bring every state file's shadow up to this run's last save of it (the shadows are throttled to one write a minute,

@@ -238,6 +238,30 @@ editor. Tab and Shift+Tab cycle inside the card.
   correction offers `claude-haiku-5-5` and `off`; another model id is passed to `--model` as is; each note is one model call
   on the PC's Claude Code login, and its text reaches Anthropic). Applied at the next note.
 
+## Teams ([TEAMS_CHANNEL.md](TEAMS_CHANNEL.md) §10)
+
+The bot-less Teams connector's settings, in the cog's **Messaging** tab, section **TEAMS CHANNEL (NO BOT)** (under the
+Telegram bot's sections), saved and applied by the cog's Save like the bot's. The section also has **Sign in** and **Sign
+out** (they act on the RUNNING connector at once: Save first) and the connector's status line (the sign-in code to enter
+shows there; it is read again 2.5 s and 8 s after Sign in).
+
+- `teamsEnabled` (false): the master switch; nothing connects, posts or reads while it is off.
+- `teamsTeamId`, `teamsChannelId` (""): the channel Agentmaster writes into — a private channel whose only member is the
+  owner, since every post reads as the owner's own words. The ids are trimmed, and a channel id copied from a channel's
+  link (`19%3a…%40thread.tacv2`) is decoded; with either empty the service does not start.
+- `teamsClientId` ("") and `teamsTenantId` (`organizations`): an app the tenant already allows, for the device-code
+  sign-in (its token reads, reacts, posts and uploads). Empty = no app: the Azure CLI alone posts and edits, with no
+  inbound. The sign-in code shows in the status line and in hooks.log (`[teams] sign in: open … and enter …`); each Apply
+  (a start, a Save) offers a new one while the app needs it. The refresh token is in Windows Credential Manager
+  (`Agentmaster:messaging:teams:<profile leaf>`, `#2`… for the parts past 2,560 bytes), never in a file.
+- `teamsUseAzureCli` (true): the Azure CLI's token is used too — the only one that can EDIT a post (cards, the legend).
+- `teamsVerbose` (false): remarks and tool lines are mirrored too, in one narrative post per stop.
+- `teamsForeignMarkers` (the robot emoji): space-separated prefixes of OTHER tools' posts in the same channel; a new post
+  that starts with one never opens a session.
+- A session gets a thread by Telegram's rule, with Telegram's `messagingIdleGraceMinutes` (one setting for both).
+- Another channel, app, tenant or Azure CLI switch restarts the service; `teamsVerbose` and `teamsForeignMarkers` apply
+  while it runs.
+
 ## Tabs & Overlay
 
 - **The strip:** `showTabCloseButton` (true), `closeTabOnMiddleClick` (true), `showTabIcon` (false: tab

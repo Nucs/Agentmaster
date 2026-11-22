@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Agentmaster — MessagingSearchBridge: the Telegram bot's "Search" topic agent (MESSAGING.md §5.4, D24, §21.7).
+// Agentmaster — MessagingSearchBridge: the Telegram bot's "Search" topic agent (MESSAGING.md §5.4, D24, §21.7), and its twin
+// for the Teams connector's 🔎 Search thread (TEAMS_CHANNEL.md §9.3, MakeTeamsSearchBridge: a conversation of its own).
 // The process's ONE telegram-search conversation — the Sessions page's search agent (Sonnet 5.5, its two tool servers,
 // its system prompt) in a conversation of its own, so a search from the phone never changes the list on the PC's
 // Sessions page — and the bridges that attach the messaging service to it, behind the plain Msg::SearchBridge seam.
@@ -35,4 +36,18 @@ namespace Agentmaster::Msg
     /// <exception cref="std::bad_alloc">If the bridge or (on the first call) the conversation cannot be allocated.</exception>
     /// <exception cref="std::system_error">If the conversation's worker thread cannot start (first call only).</exception>
     std::unique_ptr<SearchBridge> MakeTelegramSearchBridge(std::function<void(const SearchBridgeEvent&)> sink, std::wstring thinkingWord);
+
+    /// <summary>
+    /// Makes a bridge to the Teams connector's 🔎 Search thread conversation (TEAMS_CHANNEL.md §9.3): MakeTelegramSearchBridge's
+    /// twin over a conversation of its OWN ("teams-search": its record, its log), because the agent hands every event to
+    /// every listener — a shared conversation would answer a Teams request in Telegram's Search topic too.
+    /// </summary>
+    /// <param name="sink">Where the conversation's events go, on the conversation's threads (never a window's); the connector
+    /// must not block in it.</param>
+    /// <param name="thinkingWord">The thinking level ("low" … "max"; AppSettings::messagingSearchThinking, one setting for
+    /// both connectors; an unknown word reads as high).</param>
+    /// <returns>The bridge; never null.</returns>
+    /// <exception cref="std::bad_alloc">If the bridge or (on the first call) the conversation cannot be allocated.</exception>
+    /// <exception cref="std::system_error">If the conversation's worker thread cannot start (first call only).</exception>
+    std::unique_ptr<SearchBridge> MakeTeamsSearchBridge(std::function<void(const SearchBridgeEvent&)> sink, std::wstring thinkingWord);
 }

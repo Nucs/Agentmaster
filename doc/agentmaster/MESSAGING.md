@@ -218,6 +218,9 @@ A prompt with an image keeps the typed path (a plugin's submit carries text only
 
 ### 3.2 Microsoft Teams
 
+> Facts as read on 2026-10-16. [`TEAMS.md`](TEAMS.md) §2 has them as of 2026-11-18 (socket mode, threads in 1:1 agent
+> chats, reactions, extended Markdown, plans, slash commands, streams that close after 10 minutes, not 2).
+
 | Fact | Detail |
 |---|---|
 | Bot SDKs | Bot Framework SDK out of support 2025-12-31, archived 2026-01-05; successors: Microsoft 365 Agents SDK, Teams SDK 2.1 (2026-09-28) — the REST protocol is enough here |
@@ -988,6 +991,12 @@ queued message's status; `disable_notification` on everything but a turn's final
 | The topic map lost | the old topics are orphans the bot cannot find; new ones are created; the previous copy of `state.json` is tried first — for a LOCKED, torn or unrecognized `state.json` alike, which is also kept aside before the first save replaces it (`LoadMessagingStateFile`, PERSISTENCE.md §16; NOT BUILT) |
 
 ## 11. Microsoft Teams
+
+> **Replaced by [`TEAMS.md`](TEAMS.md) (2026-11-18, design only).** Four platform changes made the plan below out of
+> date: socket mode (no public endpoint, no tunnel), threads in 1:1 agent chats (a topic model in the bot's own chat),
+> agent reactions and extended Markdown, and plans with a native Stop button. TEAMS.md translates every Telegram feature
+> (SPEC.md §6–§26), records a locked-down tenant's limits (users cannot register applications or create teams) and
+> lists the test-bot measurements P0-T1 – P0-T17. The text below is the 2026-10-16 plan, kept for its reasoning.
 
 - **Teams Lite (P5):** a Workflows webhook ("Post to a chat when a webhook request is received"; the URL
   is a credential) — one-way **alerts**: each listed session's final messages (§6.4), as Adaptive Cards

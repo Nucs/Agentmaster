@@ -246,6 +246,12 @@
          what it does with a message, /note's reading, the composed note, the texts, the PC-change and expiry verdicts
          (header-only, pure). -->
     <ClInclude Include="AgentMaster\MessagingNote.h" />
+    <!-- Agentmaster (TEAMS_CHANNEL.md): the bot-less Teams connector's pure core (header-only, tested by the m5 harness), its
+         Graph client, its two token sources (the Azure CLI, an allowed app's device-code sign-in) and the service. -->
+    <ClInclude Include="AgentMaster\TeamsModels.h" />
+    <ClInclude Include="AgentMaster\GraphClient.h" />
+    <ClInclude Include="AgentMaster\TeamsAuth.h" />
+    <ClInclude Include="AgentMaster\TeamsService.h" />
     <!-- Agentmaster (MESSAGING.md section 21.43, VOICE.md): VOICE NOTES - the session vocabulary and the dictionary pass
          (VoiceVocabulary.h, pure), the voice worker protocol (VoiceProtocol.h, pure), the transcriber seam (VoiceBridge.h),
          the worker process, the endpoint client, the spell checker word test, the correction layer (VoiceCorrect.h: its
@@ -768,6 +774,18 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\TelegramApi.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <!-- Agentmaster (TEAMS_CHANNEL.md section 11): the Teams connector - WinHTTP to Microsoft Graph and the sign-in endpoints
+         (GraphClient.cpp, winhttp by #pragma), the token sources (TeamsAuth.cpp: the Azure CLI in a hidden child, Credential
+         Manager, advapi32 by #pragma) and the service (TeamsService.cpp, created by Engine.cpp). Plain C++ + Win32, no PCH. -->
+    <ClCompile Include="AgentMaster\GraphClient.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\TeamsAuth.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\TeamsService.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <!-- Agentmaster (MESSAGING.md section 21.50): the durable outbox's files - the journal (one WriteFile per line, compacted by

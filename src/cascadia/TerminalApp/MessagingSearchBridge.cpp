@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Agentmaster — MessagingSearchBridge (see the header): the process's ONE telegram-search conversation, and the bridges
-// that attach the messaging service to it.
+// Agentmaster — MessagingSearchBridge (see the header): the process's ONE telegram-search conversation and ONE teams-search
+// conversation, and the bridges that attach the messaging service and the Teams connector to them.
 
 #include "MessagingSearchBridge.h"
 
@@ -76,21 +76,22 @@ namespace Agentmaster::Msg
         }
 
         /// <summary>
-        /// The process's ONE telegram-search conversation (§21.7), made on the first call and never destroyed — the
-        /// Sessions page's SharedSessionSearchAgent() twin. Leaked on purpose for the same reason: the app ends with
-        /// TerminateProcess, and its claude.exe child is ended by the harness's kill-on-close job; a static destructor
-        /// would join threads at a moment the process may no longer run them. It persists its record and its last shown
-        /// list (<profile>\harness\telegram-search*.json), so it carries on after a stop of the bot, a park and an app
-        /// restart; Reset is the user's way to clear it.
+        /// Makes a remote surface's search conversation: the Sessions page's agent (its model, tools and prompt) in a
+        /// conversation of its own, named `name` — the Telegram bot's "telegram-search" (§21.7) or the Teams connector's
+        /// "teams-search" (TEAMS_CHANNEL.md §9.3). Each persists its record and its last shown list
+        /// (<profile>\harness\<name>*.json), so it carries on after a stop of its connector, a park and an app restart; Reset
+        /// is the user's way to clear it. Two connectors never share one: the agent hands every event to every listener, so a
+        /// shared conversation would answer one connector's request in the other's chat too.
         /// </summary>
-        /// <returns>The conversation.</returns>
-        /// <exception cref="std::bad_alloc">If it cannot be allocated (first call only; a later call tries again).</exception>
-        /// <exception cref="std::system_error">If its worker thread cannot start (first call only; a later call tries again).</exception>
-        SessionSearchAgent& TelegramSearchAgent()
+        /// <param name="name">The conversation's name: its record's, its log's and its database profile's (a static string).</param>
+        /// <returns>The conversation, never destroyed (see TelegramSearchAgent).</returns>
+        /// <exception cref="std::bad_alloc">If it cannot be allocated.</exception>
+        /// <exception cref="std::system_error">If its worker thread cannot start.</exception>
+        SessionSearchAgent* MakeRemoteSearchConversation(const wchar_t* name)
         {
-            static SessionSearchAgent* const agent = [] {
+            return [name] {
                 SessionSearchAgentOptions options;
-                options.name = L"telegram-search"; // its own conversation, never the page's (D24)
+                options.name = name; // its own conversation, never the page's (D24) nor another connector's
                 options.persist = true;
                 options.thinkingLevel = HarnessThinkingLevel::High; // the user's rule for the Search topic
                 try
@@ -101,22 +102,23 @@ namespace Agentmaster::Msg
                     // duckdb.dll keeps the page search, SearchDatabaseProfileIfUsable).
                     const AppSettings settings = LoadAppSettings();
                     options.thinkingLevel = ThinkingLevelFromWord(settings.messagingSearchThinking);
-                    options.sessionDbProfile = SearchDatabaseProfileIfUsable(settings.sessionDbMode == SessionDbMode::On, L"telegram-search");
+                    options.sessionDbProfile = SearchDatabaseProfileIfUsable(settings.sessionDbMode == SessionDbMode::On, name);
                 }
                 catch (...)
                 {
-                    // Rule #18. Recovery: the conversation starts at high thinking on the page search.
-                    LogSwallowedException(L"telegram-search: read the settings");
+                    // Rule #18. Recovery: the conversation starts at high thinking on the page search. (A fixed context: a
+                    // string built here could throw out of the catch.)
+                    LogSwallowedException(L"remote search conversation: read the settings");
                 }
                 // SESSIONS.md §9.17: the conversation log, in debug mode only — the page's agent's own rule, so a request
-                // from the phone can be reviewed like one from the PC (its own files: telegram-search-<date>.jsonl).
+                // from the phone can be reviewed like one from the PC (its own files: <name>-<date>.jsonl).
                 try
                 {
                     options.conversationLogDir = SessionSearchLogDirIfDebug();
                 }
                 catch (...)
                 {
-                    LogSwallowedException(L"telegram-search: the conversation log's folder"); // Rule #18: no log this run
+                    LogSwallowedException(L"remote search conversation: the conversation log's folder"); // Rule #18: no log this run
                 }
                 // SESSIONS.md §9.14: the window and tab tools over the app's windows — the same as the page's agent. From a
                 // phone no request has an origin window, so with several windows open the model must ask which one.
@@ -145,6 +147,33 @@ namespace Agentmaster::Msg
                 };
                 return new SessionSearchAgent{ std::move(options) };
             }();
+        }
+
+        /// <summary>
+        /// The process's ONE telegram-search conversation (§21.7), made on the first call and never destroyed — the
+        /// Sessions page's SharedSessionSearchAgent() twin. Leaked on purpose for the same reason: the app ends with
+        /// TerminateProcess, and its claude.exe child is ended by the harness's kill-on-close job; a static destructor
+        /// would join threads at a moment the process may no longer run them.
+        /// </summary>
+        /// <returns>The conversation.</returns>
+        /// <exception cref="std::bad_alloc">If it cannot be allocated (first call only; a later call tries again).</exception>
+        /// <exception cref="std::system_error">If its worker thread cannot start (first call only; a later call tries again).</exception>
+        SessionSearchAgent& TelegramSearchAgent()
+        {
+            static SessionSearchAgent* const agent = MakeRemoteSearchConversation(L"telegram-search");
+            return *agent;
+        }
+
+        /// <summary>
+        /// The process's ONE teams-search conversation (TEAMS_CHANNEL.md §9.3): TelegramSearchAgent's twin for the Teams
+        /// connector's 🔎 Search thread, its own record and log ("teams-search"), made on the first call, never destroyed.
+        /// </summary>
+        /// <returns>The conversation.</returns>
+        /// <exception cref="std::bad_alloc">If it cannot be allocated (first call only; a later call tries again).</exception>
+        /// <exception cref="std::system_error">If its worker thread cannot start (first call only; a later call tries again).</exception>
+        SessionSearchAgent& TeamsSearchAgent()
+        {
+            static SessionSearchAgent* const agent = MakeRemoteSearchConversation(L"teams-search");
             return *agent;
         }
 
@@ -216,28 +245,28 @@ namespace Agentmaster::Msg
             }
             catch (...)
             {
-                LogSwallowedException(L"telegram-search: an agent event");
+                LogSwallowedException(L"remote search: an agent event");
             }
         }
 
-        // A bridge: this start of the bot's attachment to the process's conversation (see the header).
+        // A bridge: this start of a connector's attachment to its process-wide conversation (see the header). It keeps the
+        // conversation it attached to (TelegramSearchAgent or TeamsSearchAgent), made before it by its maker.
         class Bridge final : public SearchBridge
         {
         public:
-            Bridge(std::function<void(const SearchBridgeEvent&)> sink, std::wstring thinkingWord) :
-                _state(std::make_shared<BridgeState>())
+            Bridge(SessionSearchAgent& agent, std::function<void(const SearchBridgeEvent&)> sink, std::wstring thinkingWord) :
+                _agent(agent), _state(std::make_shared<BridgeState>())
             {
                 _state->sink = std::move(sink);
-                SessionSearchAgent& agent = TelegramSearchAgent();
-                // The bot is up for the whole run: read the session index now, in the background, so the first search
+                // The connector is up for the whole run: read the session index now, in the background, so the first search
                 // finds it complete. Every session (0): the search tool's default period (kSessionSearchDefaultDays == 0).
                 static_assert(kSessionSearchDefaultDays == 0, "the index read at the bot's start covers the search's default period");
                 SharedSessionCatalogKeeper()->Ensure(0);
-                // The level the cog holds NOW: an earlier start of the bot may have made the conversation with another one.
-                // Before the listener, so the StateChanged event this raises reaches nobody.
-                agent.SetThinkingLevel(ThinkingLevelFromWord(thinkingWord));
+                // The level the cog holds NOW: an earlier start of the connector may have made the conversation with another
+                // one. Before the listener, so the StateChanged event this raises reaches nobody.
+                _agent.SetThinkingLevel(ThinkingLevelFromWord(thinkingWord));
                 std::weak_ptr<BridgeState> weak = _state;
-                _token = agent.AddListener([weak](const SessionSearchEvent& e) {
+                _token = _agent.AddListener([weak](const SessionSearchEvent& e) {
                     if (const auto st = weak.lock())
                     {
                         ForwardAgentEvent(*st, e);
@@ -249,25 +278,24 @@ namespace Agentmaster::Msg
             {
                 try
                 {
-                    // Detach only: the conversation is the process's, and the next start of the bot attaches to it again.
-                    TelegramSearchAgent().RemoveListener(_token);
+                    // Detach only: the conversation is the process's, and the next start of the connector attaches to it again.
+                    _agent.RemoveListener(_token);
                 }
                 catch (...)
                 {
-                    LogSwallowedException(L"telegram-search: detach a bridge");
+                    LogSwallowedException(L"remote search: detach a bridge");
                 }
             }
 
             uint64_t Ask(std::wstring text) override
             {
-                SessionSearchAgent& agent = TelegramSearchAgent();
-                agent.Prewarm(true); // the index and the process, if a park ended them
-                return agent.Ask(std::move(text));
+                _agent.Prewarm(true); // the index and the process, if a park ended them
+                return _agent.Ask(std::move(text));
             }
 
             void Reset() override
             {
-                TelegramSearchAgent().Reset();
+                _agent.Reset();
                 std::lock_guard lk{ _state->mtx };
                 _state->lastRows.clear();
             }
@@ -275,19 +303,19 @@ namespace Agentmaster::Msg
             void Park(int64_t delayMs) override
             {
                 // Only the idle claude.exe ends: the session index is the process's (SharedSessionCatalogKeeper), kept for
-                // the next search of either conversation (ReleaseCatalog frees nothing with a shared index).
-                SessionSearchAgent& agent = TelegramSearchAgent();
-                agent.ReleaseCatalog();
-                agent.ParkProcessAfter(delayMs);
+                // the next search of any conversation (ReleaseCatalog frees nothing with a shared index).
+                _agent.ReleaseCatalog();
+                _agent.ParkProcessAfter(delayMs);
             }
 
             void SetThinkingLevel(std::wstring word) noexcept override
             {
-                // TelegramSearchAgent() cannot throw here: this bridge's constructor made the conversation.
-                TelegramSearchAgent().SetThinkingLevel(ThinkingLevelFromWord(word));
+                _agent.SetThinkingLevel(ThinkingLevelFromWord(word));
             }
 
         private:
+            // The conversation this bridge attached to: process-wide and never destroyed, so the reference never dangles.
+            SessionSearchAgent& _agent;
             std::shared_ptr<BridgeState> _state;
             uint64_t _token{ 0 };
         };
@@ -295,6 +323,11 @@ namespace Agentmaster::Msg
 
     std::unique_ptr<SearchBridge> MakeTelegramSearchBridge(std::function<void(const SearchBridgeEvent&)> sink, std::wstring thinkingWord)
     {
-        return std::make_unique<Bridge>(std::move(sink), std::move(thinkingWord));
+        return std::make_unique<Bridge>(TelegramSearchAgent(), std::move(sink), std::move(thinkingWord));
+    }
+
+    std::unique_ptr<SearchBridge> MakeTeamsSearchBridge(std::function<void(const SearchBridgeEvent&)> sink, std::wstring thinkingWord)
+    {
+        return std::make_unique<Bridge>(TeamsSearchAgent(), std::move(sink), std::move(thinkingWord));
     }
 }
